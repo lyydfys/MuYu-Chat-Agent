@@ -1,9 +1,35 @@
-﻿plugins {
+import java.util.Properties
+
+plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
 }
+
+val releaseSigningProperties = Properties()
+val releaseSigningPropertiesFile = rootProject.file("signing.properties")
+if (releaseSigningPropertiesFile.isFile) {
+    releaseSigningPropertiesFile.inputStream().use(releaseSigningProperties::load)
+}
+
+fun releaseSigningProperty(name: String): String? =
+    releaseSigningProperties.getProperty(name)
+        ?: System.getenv(
+            "MCA_RELEASE_" + name
+                .replace(Regex("([a-z])([A-Z])"), "$1_$2")
+                .uppercase()
+        )
+
+val releaseSigningEnabled = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+    .all { !releaseSigningProperty(it).isNullOrBlank() }
+
+val mcaAbiFilters = providers.gradleProperty("mca.abis")
+    .orElse("arm64-v8a,x86_64")
+    .get()
+    .split(",")
+    .map { it.trim() }
+    .filter { it.isNotBlank() }
 
 android {
     namespace = "com.muyuchat.mca"
@@ -14,10 +40,30 @@ android {
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.1.0-alpha.1"
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += mcaAbiFilters
+        }
+    }
+
+    signingConfigs {
+        if (releaseSigningEnabled) {
+            create("release") {
+                storeFile = rootProject.file(requireNotNull(releaseSigningProperty("storeFile")))
+                storePassword = requireNotNull(releaseSigningProperty("storePassword"))
+                keyAlias = requireNotNull(releaseSigningProperty("keyAlias"))
+                keyPassword = requireNotNull(releaseSigningProperty("keyPassword"))
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            if (releaseSigningEnabled) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -85,4 +131,3 @@ dependencies {
     implementation(libs.androidx.compose.material.icons)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
-

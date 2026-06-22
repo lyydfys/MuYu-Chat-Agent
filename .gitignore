@@ -7,6 +7,9 @@ build/
 local.properties
 .env
 .env.*
+.signing/
+.release/
+signing.properties
 *.keystore
 *.jks
 *.p12

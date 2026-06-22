@@ -1,0 +1,7 @@
+# Copy this file to signing.properties and fill local release signing values.
+# Do not commit signing.properties or keystore files.
+
+storeFile=.signing/mca-release.jks
+storePassword=replace-with-local-keystore-password
+keyAlias=mca-release
+keyPassword=replace-with-local-key-password
