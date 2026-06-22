@@ -1,5 +1,12 @@
 # MCA - MuYu Chat Agent
 
+Android local-first AI workspace: local GGUF chat, user-configured cloud APIs,
+model management, and image-generation engines under user control.
+
+[![Android CI](https://github.com/lyydfys/MCA/actions/workflows/android-ci.yml/badge.svg)](https://github.com/lyydfys/MCA/actions/workflows/android-ci.yml)
+[![Release](https://img.shields.io/github/v/release/lyydfys/MCA?include_prereleases&label=release)](https://github.com/lyydfys/MCA/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 MCA is an Android-native, local-first AI workspace for people who want direct
 control over models, inference backends, and cloud API connections.
 
@@ -15,16 +22,27 @@ The project currently focuses on:
 MCA does not include model weights or API keys. Users bring their own local
 models, cloud endpoints, and provider credentials.
 
+## Screenshots
+
+Real-device screenshots from the Android app:
+
+| Chat | Workspace | Images | Model management |
+|---|---|---|---|
+| ![Chat screen](docs/assets/screenshots/01-home.png) | ![Workspace navigation](docs/assets/screenshots/02-workspace-nav.png) | ![Image generation screen](docs/assets/screenshots/03-images.png) | ![Model management](docs/assets/screenshots/04-model-management.png) |
+
 ## Status
 
 This repository is an active Android app workspace. The chat and model
 management surfaces are usable, while local image generation is still
 experimental and should be tested per device and model bundle.
 
-Recommended public positioning:
+Current release status:
 
-> Android local-first AI workspace: local GGUF, cloud APIs, model management,
-> and image-generation engines under user control.
+- Alpha APKs are published through
+  [GitHub Releases](https://github.com/lyydfys/MCA/releases).
+- The first public package target is `arm64-v8a` Android devices.
+- Local chat is the primary stable local path.
+- Local image generation is experimental and requires complete model bundles.
 
 ## Features
 
@@ -41,6 +59,22 @@ Recommended public positioning:
 - **Agent diagnostics**: local device profiling, model recommendations,
   benchmark-based tuning, and explainable parameter plans.
 - **Local API**: loopback OpenAI-style API scaffolding for local integrations.
+
+## Install
+
+Download the latest alpha APK from
+[GitHub Releases](https://github.com/lyydfys/MCA/releases). Android may ask you
+to allow installation from your browser or file manager.
+
+The APK does not include model weights or cloud credentials. After installing:
+
+1. Add a local GGUF chat model or configure a cloud chat engine.
+2. Configure an image engine if you want cloud or local image generation.
+3. Check [docs/PERMISSIONS.md](docs/PERMISSIONS.md) before enabling network or
+   local API workflows.
+
+Release APKs are signed by the project maintainer. Debug APKs are not intended
+for public installation.
 
 ## Repository Layout
 
@@ -149,7 +183,19 @@ engine directory.
 - Cloud API keys are stored locally with Android Keystore-backed encryption.
 - The repository does not contain API keys, model weights, or private user data.
 
-See [PRIVACY.md](PRIVACY.md) for more detail.
+See [PRIVACY.md](PRIVACY.md) and [docs/PERMISSIONS.md](docs/PERMISSIONS.md) for
+more detail.
+
+## Roadmap
+
+- **v0.1 alpha**: local chat, cloud chat, cloud image engines, image workspace,
+  model management, ModelScope-oriented downloads, and release packaging.
+- **v0.2**: stabilize local image bundles, improve device compatibility
+  reporting, and refine image generation progress/cancel behavior.
+- **v0.3**: expand mobile agent diagnostics and local API workflows.
+
+MCA intentionally avoids bundling model weights. Model recommendations and
+download sources must respect each upstream model's license.
 
 ## Third-Party Code
 

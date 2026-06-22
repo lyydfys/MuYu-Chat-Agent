@@ -1,0 +1,42 @@
+name: Model compatibility
+description: Report a local or cloud model compatibility issue.
+title: "[Model]: "
+labels: ["model-compatibility"]
+body:
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine type
+      options:
+        - Local chat GGUF
+        - Local image bundle
+        - Cloud chat
+        - Cloud image
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model name and quantization
+      placeholder: Qwen3.5-4B Q4_K_M, SD-Turbo 512, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: components
+    attributes:
+      label: Bundle components or provider configuration
+      description: For image bundles, list diffusion, VAE/AE, text encoder/LLM, and optional files. Do not include API keys.
+  - type: input
+    id: device
+    attributes:
+      label: Device and SoC
+      placeholder: Snapdragon 8 Gen 2 / 8 Elite / other
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      description: Include load time, generation speed, error text, and whether the app crashed.
+    validations:
+      required: true
