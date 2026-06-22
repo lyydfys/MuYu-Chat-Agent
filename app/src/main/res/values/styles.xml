@@ -1,0 +1,9 @@
+﻿<resources>
+    <style name="Theme.MuYuChatAgent" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">#FAFAFA</item>
+        <item name="android:statusBarColor">#FAFAFA</item>
+    </style>
+</resources>
+

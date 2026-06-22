@@ -1,0 +1,33 @@
+package com.muyuchat.core.telemetry
+
+data class RuntimeMetrics(
+    val time: Long = System.currentTimeMillis(),
+    val model: String = "",
+    val backend: String = "cpu",
+    val soc: String = "",
+    val promptTokens: Int = 0,
+    val genTokens: Int = 0,
+    val loadMs: Long = 0,
+    val ttftMs: Long = 0,
+    val prefillMs: Long = 0,
+    val decodeMs: Long = 0,
+    val decodeTps: Double = 0.0,
+    val e2eTps: Double = 0.0,
+    val nativePssKb: Long = 0,
+    val processRssKb: Long = 0,
+    val nativeHeapKb: Long = 0,
+    val nativeHeapSizeKb: Long = 0,
+    val javaHeapKb: Long = 0,
+    val availMemKb: Long = 0,
+    val totalMemKb: Long = 0,
+    val advertisedMemKb: Long = 0,
+    val memoryThresholdKb: Long = 0,
+    val isLowMemory: Boolean = false,
+    val procMemAvailableKb: Long = 0,
+    val procMemFreeKb: Long = 0,
+    val cachedKb: Long = 0,
+    val reclaimableKb: Long = 0,
+    val modelMemoryBudgetKb: Long = 0,
+    val params: String = "{}",
+    val error: String? = null
+)

@@ -1,0 +1,30 @@
+.gradle/
+.kotlin/
+.local-history-backups/
+build/
+**/build/
+**/.cxx/
+local.properties
+.env
+.env.*
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+
+# Android Studio
+.idea/
+*.iml
+
+# Local SDK/download artifacts
+android-sdk/
+android-sdk-cmdline*.zip
+android-sdk-cmdline-extract/
+
+# Generated APKs and binaries are reproducible from Gradle
+*.apk
+*.aab
+
+# Logs
+*.log

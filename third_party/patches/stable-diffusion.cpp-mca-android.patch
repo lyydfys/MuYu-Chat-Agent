@@ -1,0 +1,281 @@
+﻿diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
+index e15f1aa..fc102ac 100644
+--- a/include/stable-diffusion.h
++++ b/include/stable-diffusion.h
+@@ -401,10 +401,12 @@ typedef struct sd_ctx_t sd_ctx_t;
+ 
+ typedef void (*sd_log_cb_t)(enum sd_log_level_t level, const char* text, void* data);
+ typedef void (*sd_progress_cb_t)(int step, int steps, float time, void* data);
++typedef bool (*sd_cancel_cb_t)(void* data);
+ typedef void (*sd_preview_cb_t)(int step, int frame_count, sd_image_t* frames, bool is_noisy, void* data);
+ 
+ SD_API void sd_set_log_callback(sd_log_cb_t sd_log_cb, void* data);
+ SD_API void sd_set_progress_callback(sd_progress_cb_t cb, void* data);
++SD_API void sd_set_cancel_callback(sd_cancel_cb_t cb, void* data);
+ SD_API void sd_set_preview_callback(sd_preview_cb_t cb, enum preview_t mode, int interval, bool denoised, bool noisy, void* data);
+ SD_API int32_t sd_get_num_physical_cores();
+ SD_API const char* sd_get_system_info();
+diff --git a/src/stable-diffusion.cpp b/src/stable-diffusion.cpp
+index 28598eb..b1b98e6 100644
+--- a/src/stable-diffusion.cpp
++++ b/src/stable-diffusion.cpp
+@@ -1990,6 +1990,10 @@ public:
+         SamplePreviewContext preview = prepare_sample_preview_context();
+ 
+         auto denoise = [&](const sd::Tensor<float>& x, float sigma, int step) -> sd::guidance::GuiderOutput {
++            if (sd_should_cancel()) {
++                LOG_WARN("sampling cancelled before step %d", step);
++                return {};
++            }
+             if (step == 1 || step == -1) {
+                 pretty_progress(0, (int)steps, 0);
+             }
+@@ -2103,7 +2107,15 @@ public:
+                     return std::move(cached_output);
+                 }
+ 
++                if (sd_should_cancel()) {
++                    LOG_WARN("sampling cancelled before diffusion compute at step %d", step);
++                    return sd::Tensor<float>();
++                }
+                 auto output_opt = work_diffusion_model->compute(n_threads, diffusion_params);
++                if (sd_should_cancel()) {
++                    LOG_WARN("sampling cancelled after diffusion compute at step %d", step);
++                    return sd::Tensor<float>();
++                }
+                 if (output_opt.empty()) {
+                     LOG_ERROR("diffusion model compute failed");
+                     return sd::Tensor<float>();
+@@ -2197,13 +2209,21 @@ public:
+                 preview_image(step, denoised, version, preview.mode, preview.callback, preview.data, false);
+             }
+             report_sample_progress(step, steps, t0);
++            if (sd_should_cancel()) {
++                LOG_WARN("sampling cancelled after step %d", step);
++                return {};
++            }
+             output.pred = denoised;
+             return output;
+         };
+ 
+         auto x0_opt = sample_k_diffusion(method, denoise, x_t, sigmas, sampler_rng, eta, is_flow_denoiser, extra_sample_args);
+         if (x0_opt.empty()) {
+-            LOG_ERROR("Diffusion model sampling failed");
++            if (sd_should_cancel()) {
++                LOG_WARN("Diffusion model sampling cancelled");
++            } else {
++                LOG_ERROR("Diffusion model sampling failed");
++            }
+             if (control_net) {
+                 control_net->free_control_ctx();
+                 control_net->free_compute_buffer();
+@@ -4382,6 +4402,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+                                                         sd_img_gen_params,
+                                                         &request,
+                                                         &plan);
++    if (sd_should_cancel()) {
++        LOG_WARN("image generation cancelled after latent preparation");
++        return nullptr;
++    }
+     if (!latents_opt.has_value()) {
+         return nullptr;
+     }
+@@ -4392,6 +4416,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+                                                       &request,
+                                                       &plan,
+                                                       &latents);
++    if (sd_should_cancel()) {
++        LOG_WARN("image generation cancelled after embedding preparation");
++        return nullptr;
++    }
+     if (!embeds_opt.has_value()) {
+         return nullptr;
+     }
+@@ -4403,6 +4431,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+         int64_t sampling_start = ggml_time_ms();
+         int64_t cur_seed       = request.seed + b;
+         LOG_INFO("generating image: %i/%i - seed %" PRId64, b + 1, request.batch_count, cur_seed);
++        if (sd_should_cancel()) {
++            LOG_WARN("image generation cancelled before sampling batch %d", b + 1);
++            return nullptr;
++        }
+ 
+         sd_ctx->sd->rng->manual_seed(cur_seed);
+         sd_ctx->sd->sampler_rng->manual_seed(cur_seed);
+@@ -4583,6 +4615,16 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+     }
+ 
+     auto result = decode_image_outputs(sd_ctx, request, final_latents);
++    if (sd_should_cancel()) {
++        LOG_WARN("image generation cancelled after decode");
++        if (result != nullptr) {
++            for (int i = 0; i < request.batch_count; i++) {
++                free(result[i].data);
++            }
++            free(result);
++        }
++        return nullptr;
++    }
+     if (result == nullptr) {
+         return nullptr;
+     }
+diff --git a/src/tokenizers/vocab/vocab.cpp b/src/tokenizers/vocab/vocab.cpp
+index 4d2a9b8..7763fb6 100644
+--- a/src/tokenizers/vocab/vocab.cpp
++++ b/src/tokenizers/vocab/vocab.cpp
+@@ -1,5 +1,9 @@
+ #include "vocab.h"
+ #include "clip_merges.hpp"
++#include "qwen_merges.hpp"
++#include "t5.hpp"
++
++#if !defined(__ANDROID__)
+ #include "gemma2_merges.hpp"
+ #include "gemma2_vocab.hpp"
+ #include "gemma_merges.hpp"
+@@ -8,9 +12,8 @@
+ #include "gpt_oss_vocab.hpp"
+ #include "mistral_merges.hpp"
+ #include "mistral_vocab.hpp"
+-#include "qwen_merges.hpp"
+-#include "t5.hpp"
+ #include "umt5.hpp"
++#endif
+ 
+ std::string load_clip_merges() {
+     std::string merges_utf8_str(reinterpret_cast<const char*>(clip_merges_utf8_c_str), sizeof(clip_merges_utf8_c_str));
+@@ -23,13 +26,21 @@ std::string load_qwen2_merges() {
+ }
+ 
+ std::string load_mistral_merges() {
++#if defined(__ANDROID__)
++    return {};
++#else
+     std::string merges_utf8_str(reinterpret_cast<const char*>(mistral_merges_utf8_c_str), sizeof(mistral_merges_utf8_c_str));
+     return merges_utf8_str;
++#endif
+ }
+ 
+ std::string load_mistral_vocab_json() {
++#if defined(__ANDROID__)
++    return {};
++#else
+     std::string json_str(reinterpret_cast<const char*>(mistral_vocab_json_utf8_c_str), sizeof(mistral_vocab_json_utf8_c_str));
+     return json_str;
++#endif
+ }
+ 
+ std::string load_t5_tokenizer_json() {
+@@ -38,36 +49,64 @@ std::string load_t5_tokenizer_json() {
+ }
+ 
+ std::string load_umt5_tokenizer_json() {
++#if defined(__ANDROID__)
++    return {};
++#else
+     std::string json_str(reinterpret_cast<const char*>(umt5_tokenizer_json_str), sizeof(umt5_tokenizer_json_str));
+     return json_str;
++#endif
+ }
+ 
+ std::string load_gemma_merges() {
++#if defined(__ANDROID__)
++    return {};
++#else
+     std::string merges_utf8_str(reinterpret_cast<const char*>(gemma_merges_utf8_c_str), sizeof(gemma_merges_utf8_c_str));
+     return merges_utf8_str;
++#endif
+ }
+ 
+ std::string load_gemma_vocab_json() {
++#if defined(__ANDROID__)
++    return {};
++#else
+     std::string json_str(reinterpret_cast<const char*>(gemma_vocab_json_utf8_c_str), sizeof(gemma_vocab_json_utf8_c_str));
+     return json_str;
++#endif
+ }
+ 
+ std::string load_gemma2_merges() {
++#if defined(__ANDROID__)
++    return {};
++#else
+     std::string merges_utf8_str(reinterpret_cast<const char*>(gemma2_merges_utf8_c_str), sizeof(gemma2_merges_utf8_c_str));
+     return merges_utf8_str;
++#endif
+ }
+ 
+ std::string load_gemma2_vocab_json() {
++#if defined(__ANDROID__)
++    return {};
++#else
+     std::string json_str(reinterpret_cast<const char*>(gemma2_vocab_json_utf8_c_str), sizeof(gemma2_vocab_json_utf8_c_str));
+     return json_str;
++#endif
+ }
+ 
+ std::string load_gpt_oss_merges() {
++#if defined(__ANDROID__)
++    return {};
++#else
+     std::string merges_utf8_str(reinterpret_cast<const char*>(gpt_oss_merges_utf8_c_str), sizeof(gpt_oss_merges_utf8_c_str));
+     return merges_utf8_str;
++#endif
+ }
+ 
+ std::string load_gpt_oss_vocab_json() {
++#if defined(__ANDROID__)
++    return {};
++#else
+     std::string json_str(reinterpret_cast<const char*>(gpt_oss_vocab_json_utf8_c_str), sizeof(gpt_oss_vocab_json_utf8_c_str));
+     return json_str;
+-}
+\ No newline at end of file
++#endif
++}
+diff --git a/src/util.cpp b/src/util.cpp
+index 77fc542..05399d3 100644
+--- a/src/util.cpp
++++ b/src/util.cpp
+@@ -340,6 +340,8 @@ int32_t sd_get_num_physical_cores() {
+ 
+ static sd_progress_cb_t sd_progress_cb = nullptr;
+ void* sd_progress_cb_data              = nullptr;
++static sd_cancel_cb_t sd_cancel_cb = nullptr;
++static void* sd_cancel_cb_data     = nullptr;
+ 
+ static sd_preview_cb_t sd_preview_cb = nullptr;
+ static void* sd_preview_cb_data      = nullptr;
+@@ -613,6 +615,10 @@ void sd_set_progress_callback(sd_progress_cb_t cb, void* data) {
+     sd_progress_cb      = cb;
+     sd_progress_cb_data = data;
+ }
++void sd_set_cancel_callback(sd_cancel_cb_t cb, void* data) {
++    sd_cancel_cb      = cb;
++    sd_cancel_cb_data = data;
++}
+ void sd_set_preview_callback(sd_preview_cb_t cb, preview_t mode, int interval, bool denoised, bool noisy, void* data) {
+     sd_preview_cb       = cb;
+     sd_preview_cb_data  = data;
+@@ -648,6 +654,9 @@ sd_progress_cb_t sd_get_progress_callback() {
+ void* sd_get_progress_callback_data() {
+     return sd_progress_cb_data;
+ }
++bool sd_should_cancel() {
++    return sd_cancel_cb != nullptr && sd_cancel_cb(sd_cancel_cb_data);
++}
+ 
+ sd_image_t tensor_to_sd_image(const sd::Tensor<float>& tensor, int frame_index) {
+     const auto& shape = tensor.shape();
+diff --git a/src/util.h b/src/util.h
+index c3b06b1..e89d511 100644
+--- a/src/util.h
++++ b/src/util.h
+@@ -88,6 +88,7 @@ std::vector<std::pair<std::string, float>> split_quotation_attention(
+ 
+ sd_progress_cb_t sd_get_progress_callback();
+ void* sd_get_progress_callback_data();
++bool sd_should_cancel();
+ 
+ sd_preview_cb_t sd_get_preview_callback();
+ void* sd_get_preview_callback_data();
