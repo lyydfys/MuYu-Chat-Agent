@@ -30,6 +30,11 @@ Real-device screenshots from the Android app:
 |---|---|---|---|
 | ![Chat screen](docs/assets/screenshots/01-home.png) | ![Workspace navigation](docs/assets/screenshots/02-workspace-nav.png) | ![Image generation screen](docs/assets/screenshots/03-images.png) | ![Model management](docs/assets/screenshots/04-model-management.png) |
 
+![MCA demo walkthrough](docs/assets/demo/mca-demo.gif)
+
+The lightweight GIF above is generated from real-device screenshots. A higher
+quality MP4 is available at [docs/assets/demo/mca-demo.mp4](docs/assets/demo/mca-demo.mp4).
+
 ## Status
 
 This repository is an active Android app workspace. The chat and model
@@ -43,6 +48,7 @@ Current release status:
 - The first public package target is `arm64-v8a` Android devices.
 - Local chat is the primary stable local path.
 - Local image generation is experimental and requires complete model bundles.
+  Do not treat phone-side image generation as a guaranteed stable feature yet.
 
 ## Features
 
@@ -72,6 +78,8 @@ The APK does not include model weights or cloud credentials. After installing:
 2. Configure an image engine if you want cloud or local image generation.
 3. Check [docs/PERMISSIONS.md](docs/PERMISSIONS.md) before enabling network or
    local API workflows.
+4. Check [docs/MODEL_COMPATIBILITY.md](docs/MODEL_COMPATIBILITY.md) before
+   choosing local image bundles or cloud provider protocols.
 
 Release APKs are signed by the project maintainer. Debug APKs are not intended
 for public installation.
@@ -173,7 +181,15 @@ Gradle applies this patch when needed before the native CMake build.
 
 Local image generation is model-bundle sensitive. Some newer image models need
 a diffusion model plus VAE/AE and text encoder/LLM components in the same
-engine directory.
+engine directory. It is currently an experimental capability and should be
+validated on each target device before being promoted as stable.
+
+## Model and API Compatibility
+
+See [docs/MODEL_COMPATIBILITY.md](docs/MODEL_COMPATIBILITY.md) for the current
+compatibility matrix covering local GGUF chat, OpenAI-compatible chat,
+Anthropic Messages, OpenAI Images, DashScope Image, custom image paths, and
+experimental local image bundles.
 
 ## Privacy
 

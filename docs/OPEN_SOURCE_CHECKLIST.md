@@ -9,6 +9,7 @@ Use this before making the repository public.
 - [ ] No model weights are committed.
 - [ ] Submodules are initialized and pinned intentionally.
 - [ ] `README.md`, `LICENSE`, `PRIVACY.md`, `SECURITY.md`, and `THIRD_PARTY_NOTICES.md` are present.
+- [ ] `docs/MODEL_COMPATIBILITY.md` and `docs/PERMISSIONS.md` are linked from the README.
 
 ## Sensitive Information
 
@@ -21,11 +22,13 @@ Use this before making the repository public.
 - [ ] Local chat is described as the primary stable local path.
 - [ ] Local image generation is clearly marked experimental.
 - [ ] Cloud features are described as user-configured provider integrations.
+- [ ] Local image generation is described as experimental in README and release notes.
 - [ ] Model licenses are left to the user/provider and are not implied by MCA.
 
 ## Build Verification
 
 - [ ] `:core:download:testDebugUnitTest`
+- [ ] `testDebugUnitTest`
 - [ ] `:app:assembleDebug`
 - [ ] Real-device smoke test for local chat.
 - [ ] Optional real-device smoke test for local image generation with a complete bundle.
