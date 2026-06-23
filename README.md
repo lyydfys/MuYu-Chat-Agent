@@ -26,9 +26,19 @@ models, cloud endpoints, and provider credentials.
 
 Real-device screenshots from the Android app:
 
-| Chat | Workspace | Images | Model management |
+| Chat | Workspace | Images | Model recommendations |
 |---|---|---|---|
-| ![Chat screen](docs/assets/screenshots/01-home.png) | ![Workspace navigation](docs/assets/screenshots/02-workspace-nav.png) | ![Image generation screen](docs/assets/screenshots/03-images.png) | ![Model management](docs/assets/screenshots/04-model-management.png) |
+| ![Chat screen](docs/assets/screenshots/01-home.png) | ![Workspace navigation](docs/assets/screenshots/02-workspace-nav.png) | ![Image generation screen](docs/assets/screenshots/03-images.png) | ![Model recommendations](docs/assets/screenshots/04-model-management.png) |
+
+| Settings | Cloud engines | Local engines | Model market |
+|---|---|---|---|
+| ![Settings screen](docs/assets/screenshots/05-settings.png) | ![Cloud model engines](docs/assets/screenshots/06-model-cloud.png) | ![Local model engines](docs/assets/screenshots/07-model-local.png) | ![Model market](docs/assets/screenshots/08-model-market.png) |
+
+| Model picker | Local API |
+|---|---|
+| ![Model picker](docs/assets/screenshots/09-model-picker.png) | ![Local API redacted](docs/assets/screenshots/10-local-api.png) |
+
+The Local API screenshot is redacted before publishing.
 
 ![MCA demo walkthrough](docs/assets/demo/mca-demo.gif)
 
