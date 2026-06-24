@@ -4,31 +4,33 @@ Use this before making the repository public.
 
 ## Repository Hygiene
 
-- [ ] `git status --short --ignored` shows no unexpected tracked or ignored files.
-- [ ] `local.properties`, APKs, build folders, and `.cxx` folders are ignored.
-- [ ] No model weights are committed.
-- [ ] Submodules are initialized and pinned intentionally.
-- [ ] `README.md`, `LICENSE`, `PRIVACY.md`, `SECURITY.md`, and `THIRD_PARTY_NOTICES.md` are present.
-- [ ] `docs/MODEL_COMPATIBILITY.md` and `docs/PERMISSIONS.md` are linked from the README.
+- [x] `git status --short --ignored` shows no unexpected tracked or ignored files.
+- [x] `local.properties`, APKs, build folders, and `.cxx` folders are ignored.
+- [x] No model weights are committed.
+- [x] Top-level submodules are initialized and pinned intentionally.
+- [x] `README.md`, `LICENSE`, `PRIVACY.md`, `SECURITY.md`, and `THIRD_PARTY_NOTICES.md` are present.
+- [x] `docs/MODEL_COMPATIBILITY.md` and `docs/PERMISSIONS.md` are linked from the README.
 
 ## Sensitive Information
 
-- [ ] No API keys, tokens, passwords, or provider credentials are committed.
-- [ ] No private email addresses, local account paths, or device-specific secrets are present in docs.
-- [ ] Logs and screenshots do not expose prompts, API keys, account IDs, or private file paths.
+- [x] No API keys, tokens, passwords, or provider credentials are committed.
+- [x] No private local paths or device-specific secrets are present in docs.
+- [x] Logs and screenshots do not expose prompts, API keys, account IDs, or private file paths.
 
 ## Product Claims
 
-- [ ] Local chat is described as the primary stable local path.
-- [ ] Local image generation is clearly marked experimental.
-- [ ] Cloud features are described as user-configured provider integrations.
-- [ ] Local image generation is described as experimental in README and release notes.
-- [ ] Model licenses are left to the user/provider and are not implied by MCA.
+- [x] Local chat is described as the primary stable local path.
+- [x] Local image generation is clearly marked experimental.
+- [x] Cloud features are described as user-configured provider integrations.
+- [x] Local image generation is described as experimental in README and release notes.
+- [x] Model licenses are left to the user/provider and are not implied by MCA.
 
 ## Build Verification
 
-- [ ] `:core:download:testDebugUnitTest`
-- [ ] `testDebugUnitTest`
-- [ ] `:app:assembleDebug`
-- [ ] Real-device smoke test for local chat.
+- [x] `:core:download:testDebugUnitTest`
+- [x] `testDebugUnitTest`
+- [x] `:app:assembleDebug`
+- [x] Real-device smoke test for local chat.
 - [ ] Optional real-device smoke test for local image generation with a complete bundle.
+
+Last public-readiness check: 2026-06-24.
