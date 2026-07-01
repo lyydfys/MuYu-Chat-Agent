@@ -159,7 +159,11 @@ internal fun CloudApiConfig.normalizedForImageRequest(): CloudApiConfig {
 
 private fun String.isDashScopeBaseUrl(): Boolean =
     contains("dashscope.aliyuncs.com", ignoreCase = true) ||
-        contains("dashscope-intl.aliyuncs.com", ignoreCase = true)
+            contains("dashscope-intl.aliyuncs.com", ignoreCase = true)
+
+private fun String.isMiMoBaseUrl(): Boolean =
+    contains("xiaomimimo.com", ignoreCase = true) ||
+            contains("mimo.mi.com", ignoreCase = true)
 
 private fun String.isOpenAiImagesEndpointPath(): Boolean =
     trim('/').endsWith(CloudImageApiFormat.OPENAI_IMAGES.defaultEndpointPath, ignoreCase = true)
@@ -565,6 +569,9 @@ class CloudImageProvider(
             .addHeader("Accept", "application/json")
         if (config.apiKey.isNotBlank()) {
             builder.addHeader("Authorization", "Bearer ${config.apiKey}")
+            if (config.baseUrl.isMiMoBaseUrl()) {
+                builder.addHeader("api-key", config.apiKey)
+            }
         }
         return builder.post(root.toString().toRequestBody(JSON_MEDIA_TYPE)).build()
     }
@@ -608,6 +615,9 @@ class CloudImageProvider(
             .addHeader("Accept", "application/json")
         if (config.apiKey.isNotBlank()) {
             builder.addHeader("Authorization", "Bearer ${config.apiKey}")
+            if (config.baseUrl.isMiMoBaseUrl()) {
+                builder.addHeader("api-key", config.apiKey)
+            }
         }
         return builder.post(root.toString().toRequestBody(JSON_MEDIA_TYPE)).build()
     }
@@ -1048,7 +1058,7 @@ class OpenAiCompatibleChatProvider(
         val params = request.params
         return JSONObject()
             .put("model", config.chatModel.trim())
-            .put("messages", JSONArray(request.messagesJson()))
+            .put("messages", JSONArray(request.messagesJson(multimodal = true)))
             .put("stream", true)
             .put("temperature", params.temperature.toDouble())
             .put("top_p", params.topP.toDouble())
@@ -1198,22 +1208,14 @@ class OpenAiCompatibleChatProvider(
         takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
 
     private fun splitSystemMessages(request: ChatRequest): SplitMessages {
-        val all = JSONArray(request.messagesJson())
         val system = StringBuilder()
         val messages = mutableListOf<ChatMessage>()
-        for (index in 0 until all.length()) {
-            val item = all.optJSONObject(index) ?: continue
-            val role = when (item.optString("role").lowercase()) {
-                "system" -> Role.SYSTEM
-                "assistant", "model" -> Role.ASSISTANT
-                else -> Role.USER
-            }
-            val content = item.optString("content")
-            if (role == Role.SYSTEM) {
+        for (message in request.messages) {
+            if (message.role == Role.SYSTEM) {
                 if (system.isNotBlank()) system.append("\n\n")
-                system.append(content)
+                system.append(message.content)
             } else {
-                messages.add(ChatMessage(role, content))
+                messages.add(message)
             }
         }
         if (messages.isEmpty() || messages.first().role != Role.USER) {
@@ -1241,10 +1243,34 @@ class OpenAiCompatibleChatProvider(
             array.put(
                 JSONObject()
                     .put("role", if (message.role == Role.ASSISTANT) "assistant" else "user")
-                    .put("content", message.content)
+                    .put("content", message.toAnthropicContent())
             )
         }
         return array
+    }
+
+    private fun ChatMessage.toAnthropicContent(): Any {
+        if (imageAttachments.isEmpty()) return content
+        val parts = JSONArray()
+        imageAttachments
+            .filter { it.hasInlineData }
+            .forEach { attachment ->
+                parts.put(
+                    JSONObject()
+                        .put("type", "image")
+                        .put(
+                            "source",
+                            JSONObject()
+                                .put("type", "base64")
+                                .put("media_type", attachment.mimeType.ifBlank { "image/jpeg" })
+                                .put("data", attachment.plainBase64())
+                        )
+                )
+            }
+        if (content.isNotBlank()) {
+            parts.put(JSONObject().put("type", "text").put("text", content))
+        }
+        return if (parts.length() == 0) content else parts
     }
 
     private fun parseErrorMessage(body: String): String {

@@ -4,11 +4,15 @@ import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.GenerateEvent
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.RuntimeStats
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -17,6 +21,9 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.UUID
 
 class McaLoopbackServer(
@@ -24,36 +31,71 @@ class McaLoopbackServer(
     private val bindHost: String = "0.0.0.0",
     private val apiKey: String = ""
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var dispatcher: ExecutorCoroutineDispatcher = newDispatcher()
+    private var scope = CoroutineScope(SupervisorJob() + dispatcher)
     private var serverSocket: ServerSocket? = null
+    private var acceptJob: Job? = null
 
     val isRunning: Boolean
         get() = serverSocket?.isClosed == false
 
     fun start() {
         if (isRunning) return
+        if (!scope.isActive) {
+            dispatcher.close()
+            dispatcher = newDispatcher()
+            scope = CoroutineScope(SupervisorJob() + dispatcher)
+        }
         val socket = ServerSocket()
         socket.reuseAddress = true
-        socket.bind(InetSocketAddress(InetAddress.getByName(bindHost), port))
+        socket.bind(InetSocketAddress(InetAddress.getByName(bindHost), port), SERVER_BACKLOG)
         serverSocket = socket
-        scope.launch {
+        logInfo("Local API listening on $bindHost:$port")
+        acceptJob = scope.launch {
             while (!socket.isClosed) {
-                runCatching {
+                try {
                     val client = socket.accept()
-                    launch { handle(client) }
+                    client.soTimeout = CLIENT_READ_TIMEOUT_MS
+                    client.tcpNoDelay = true
+                    logDebug("Accepted ${client.inetAddress?.hostAddress}:${client.port}")
+                    launch {
+                        runCatching { handle(client) }
+                            .onFailure { error ->
+                                logWarning("Request failed: ${error.message}", error)
+                                runCatching {
+                                    if (!client.isClosed) {
+                                        writeError(
+                                            client,
+                                            "500 Internal Server Error",
+                                            "request_failed",
+                                            error.message ?: "Local API request failed."
+                                        )
+                                    }
+                                }
+                                runCatching { client.close() }
+                            }
+                    }
+                } catch (error: SocketException) {
+                    if (!socket.isClosed) logWarning("Accept failed: ${error.message}", error)
+                } catch (error: Throwable) {
+                    logWarning("Accept loop failed: ${error.message}", error)
                 }
             }
         }
     }
 
     fun stop() {
+        acceptJob?.cancel()
+        acceptJob = null
         runCatching { serverSocket?.close() }
         serverSocket = null
+        logInfo("Local API stopped")
     }
 
     fun shutdown() {
         stop()
         scope.cancel()
+        dispatcher.close()
     }
 
     private suspend fun handle(socket: Socket) {
@@ -64,6 +106,7 @@ class McaLoopbackServer(
             val parts = request.requestLine.split(" ")
             val method = parts.getOrNull(0).orEmpty().uppercase()
             val path = parts.getOrNull(1).orEmpty().substringBefore("?")
+            logDebug("$method $path")
             if (method == "OPTIONS") {
                 writeNoContent(client)
                 return
@@ -72,7 +115,7 @@ class McaLoopbackServer(
                 writeHtml(client, chatPageHtml())
                 return
             }
-            if (path != "/health" && !isAuthorized(headers)) {
+            if (!isPublicRoute(method, path) && !isAuthorized(headers)) {
                 writeError(client, "401 Unauthorized", "unauthorized", "API Key 不正确或缺失。")
                 return
             }
@@ -89,7 +132,8 @@ class McaLoopbackServer(
                     writeJson(client, """{"stopped":true}""")
                 }
                 method == "POST" && path in GENERATION_PATHS -> {
-                    if (body.isStreamingRequest()) {
+                    val streaming = body.isStreamingRequest(headers)
+                    if (streaming) {
                         streamChat(client, body)
                     } else {
                         completeChat(client, body)
@@ -236,6 +280,16 @@ class McaLoopbackServer(
         writeJson(socket, response.toString())
     }
 
+    private fun isPublicRoute(method: String, path: String): Boolean =
+        method == "HEAD" && path == "/health" ||
+            method == "GET" && (
+                path == "/health" ||
+                    path == "/" ||
+                    path == "/index.html" ||
+                    path == "/v1/models" ||
+                    path == "/models"
+                )
+
     private fun writeJson(socket: Socket, body: String, status: String = "200 OK") {
         writeText(socket, body, status, "application/json; charset=utf-8")
     }
@@ -297,8 +351,12 @@ class McaLoopbackServer(
         return OpenAiApiCompat.parseChatRequest(body)
     }
 
-    private fun String.isStreamingRequest(): Boolean =
-        OpenAiApiCompat.isStreamingRequest(this)
+    private fun String.isStreamingRequest(headers: Map<String, String>): Boolean {
+        val accept = headers["accept"].orEmpty()
+        return OpenAiApiCompat.isStreamingRequest(this) ||
+            STREAM_TRUE_PATTERN.containsMatchIn(this) ||
+            accept.contains("text/event-stream", ignoreCase = true)
+    }
 
     private fun String.toSseJson(requestId: String, created: Long, reasoning: Boolean = false): String = JSONObject()
         .put("id", requestId)
@@ -475,6 +533,30 @@ class McaLoopbackServer(
         private val LFLF = byteArrayOf('\n'.code.toByte(), '\n'.code.toByte())
         private const val MAX_HEADER_BYTES = 64 * 1024
         private const val STREAM_HIDDEN_REASONING_HINT_TOKENS = 128
+        private const val CLIENT_READ_TIMEOUT_MS = 15_000
+        private const val SERVER_BACKLOG = 128
+        private const val TAG = "McaLoopbackServer"
+        private val STREAM_TRUE_PATTERN = Regex(""""stream"\s*:\s*(true|1|"true")""", RegexOption.IGNORE_CASE)
+        private val threadIds = AtomicInteger(1)
+
+        private fun newDispatcher(): ExecutorCoroutineDispatcher =
+            Executors.newCachedThreadPool { runnable ->
+                Thread(runnable, "MCA-Local-API-${threadIds.getAndIncrement()}").apply {
+                    isDaemon = true
+                }
+            }.asCoroutineDispatcher()
+
+        private fun logInfo(message: String) {
+            runCatching { Log.i(TAG, message) }
+        }
+
+        private fun logDebug(message: String) {
+            runCatching { Log.d(TAG, message) }
+        }
+
+        private fun logWarning(message: String, error: Throwable) {
+            runCatching { Log.w(TAG, message, error) }
+        }
     }
 
     private fun chatPageHtml(): String = """

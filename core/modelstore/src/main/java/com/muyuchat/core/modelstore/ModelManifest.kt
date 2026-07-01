@@ -16,9 +16,16 @@ data class ModelManifest(
     val quant: String? = null,
     val architecture: String? = null,
     val license: String? = null,
+    val visionProjectorPath: String? = null,
+    val visionProjectorFileName: String? = null,
+    val visionProjectorSizeBytes: Long = 0L,
+    val visionProjectorSha256: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val lastLoadedAt: Long? = null
 ) {
+    val hasVisionProjector: Boolean
+        get() = !visionProjectorPath.isNullOrBlank()
+
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
         .put("displayName", displayName)
@@ -33,6 +40,10 @@ data class ModelManifest(
         .put("quant", quant)
         .put("architecture", architecture)
         .put("license", license)
+        .put("visionProjectorPath", visionProjectorPath)
+        .put("visionProjectorFileName", visionProjectorFileName)
+        .put("visionProjectorSizeBytes", visionProjectorSizeBytes)
+        .put("visionProjectorSha256", visionProjectorSha256)
         .put("createdAt", createdAt)
         .put("lastLoadedAt", lastLoadedAt)
 
@@ -51,6 +62,10 @@ data class ModelManifest(
             quant = json.optString("quant").takeIf { it.isNotBlank() && it != "null" },
             architecture = json.optString("architecture").takeIf { it.isNotBlank() && it != "null" },
             license = json.optString("license").takeIf { it.isNotBlank() && it != "null" },
+            visionProjectorPath = json.optString("visionProjectorPath").takeIf { it.isNotBlank() && it != "null" },
+            visionProjectorFileName = json.optString("visionProjectorFileName").takeIf { it.isNotBlank() && it != "null" },
+            visionProjectorSizeBytes = json.optLong("visionProjectorSizeBytes"),
+            visionProjectorSha256 = json.optString("visionProjectorSha256").takeIf { it.isNotBlank() && it != "null" },
             createdAt = json.optLong("createdAt"),
             lastLoadedAt = json.optLong("lastLoadedAt").takeIf { json.has("lastLoadedAt") && !json.isNull("lastLoadedAt") }
         )

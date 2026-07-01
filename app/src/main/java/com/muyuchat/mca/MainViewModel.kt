@@ -13,6 +13,7 @@ import android.graphics.Shader
 import android.graphics.Typeface
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.muyuchat.api.local.LocalApiRuntime
@@ -40,6 +41,7 @@ import com.muyuchat.core.download.DownloadTaskSnapshot
 import com.muyuchat.core.download.ResumableDownloader
 import com.muyuchat.core.download.isImageModelCandidate
 import com.muyuchat.core.download.kindLabel
+import com.muyuchat.core.engine.ChatImageAttachment
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.GenerateEvent
@@ -62,6 +64,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -109,6 +112,16 @@ data class ImageAssetRecord(
         append(uriString)
     }
 
+    fun toChatAttachment(mimeType: String = "image/jpeg"): ChatImageAttachment =
+        ChatImageAttachment(
+            name = name,
+            uriString = uriString,
+            mimeType = mimeType,
+            width = width,
+            height = height,
+            sizeBytes = sizeBytes
+        )
+
     fun deleteLocalCopy() {
         runCatching {
             val uri = Uri.parse(uriString)
@@ -141,6 +154,21 @@ private data class AttachmentImportResult(
     val truncated: Boolean,
     val imageAsset: ImageAssetRecord? = null
 )
+
+private data class PreparedChatInput(
+    val text: String,
+    val imageAttachments: List<ChatImageAttachment>
+)
+
+private data class LocalApiPreferences(
+    val apiEnabled: Boolean,
+    val restEnabled: Boolean
+)
+
+private val imageAttachmentRegex = Regex("""\u3010上传图片：([^\u3011]+)\u3011(?:\s*\n描述：[^\n]+)?\s*\n(\S+)""")
+private val oldImagePlaceholderRegex = Regex("""\s*（当前文本模型会收到图片占位信息；完整识图能力后续接入多模态模型。）""")
+private const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
+private const val MAX_VISION_IMAGE_EDGE = 1280
 
 data class MainUiState(
     val tab: AppTab = AppTab.CHAT,
@@ -219,7 +247,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val downloader = ResumableDownloader()
     private val engine = McaInferenceService(application)
     private val apiKey = loadOrCreateApiKey(application)
-    private val restServer = McaLoopbackServer(port = REST_PORT, bindHost = "0.0.0.0", apiKey = apiKey)
+    private val initialApiPreferences = loadApiPreferences(application)
+    private var apiServer: McaLoopbackServer? = null
+    private var activeApiBindHost: String? = null
     private val chatSessionStore = ChatSessionStore(application)
     private val cloudApiStore = CloudApiStore(application)
     private val cloudChatProvider = OpenAiCompatibleChatProvider()
@@ -281,6 +311,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             agentLogs = agentLogger.recent(),
             benchmarkHistory = benchmarkHistoryLogger.recent(),
             deviceProfile = initialDeviceProfile,
+            apiEnabled = initialApiPreferences.apiEnabled,
+            restEnabled = initialApiPreferences.restEnabled,
             apiKey = apiKey,
             localApiAddress = apiUrl("127.0.0.1"),
             openApiAddress = currentOpenApiAddress()
@@ -302,6 +334,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             benchmarkRunner.runCurrentParamsBenchmark(_uiState.value.params)
                 .toJson()
                 .toString()
+        }
+
+        if (initialApiPreferences.apiEnabled) {
+            runCatching {
+                startApiServer(if (initialApiPreferences.restEnabled) "0.0.0.0" else "127.0.0.1")
+                updateLocalApiForegroundService(true, initialApiPreferences.restEnabled)
+            }.onFailure { error ->
+                persistApiPreferences(apiEnabled = false, restEnabled = false)
+                _uiState.update {
+                    it.copy(
+                        apiEnabled = false,
+                        restEnabled = false,
+                        statusMessage = "本机 API 自动恢复失败：${error.message}"
+                    )
+                }
+            }
         }
 
         viewModelScope.launch {
@@ -353,7 +401,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         if (state.input.isNotBlank()) append("\n\n")
                         if (imported.imageAsset != null) {
                             append(imported.text.trim())
-                            append("\n（当前文本模型会收到图片占位信息；完整识图能力后续接入多模态模型。）")
                         } else {
                             append("【上传文件：").append(imported.name).append("】\n")
                             append(imported.text.trim())
@@ -382,8 +429,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { state ->
             val separator = if (state.input.isBlank()) "" else "\n\n"
             state.copy(
-                input = state.input + separator + image.toInputAttachment() +
-                    "\n（当前文本模型会收到图片占位信息；完整识图能力后续接入多模态模型。）",
+                input = state.input + separator + image.toInputAttachment(),
                 statusMessage = "已插入图片：${image.name}"
             )
         }
@@ -1217,6 +1263,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun attachVisionProjector(modelId: String, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            busy("正在绑定本地视觉投影器...")
+            val shouldReload = _uiState.value.loadedModelId == modelId &&
+                _uiState.value.selectedChatBackend == ChatBackend.LOCAL
+            runCatching {
+                modelStore.attachVisionProjector(modelId, uri)
+            }.onSuccess { model ->
+                _uiState.update {
+                    it.copy(
+                        models = modelStore.listModels(),
+                        busy = false,
+                        statusMessage = if (shouldReload) {
+                            "已绑定视觉投影器：${model.visionProjectorFileName ?: "mmproj"}，正在重新加载模型以启用本地识图。"
+                        } else {
+                            "已绑定视觉投影器：${model.visionProjectorFileName ?: "mmproj"}，下次加载该模型后可本地识图。"
+                        }
+                    )
+                }
+                if (shouldReload) {
+                    loadModel(model)
+                }
+            }.onFailure { error ->
+                fail("视觉文件绑定失败：${error.message}")
+            }
+        }
+    }
+
     private fun downloadRecommendedImageBundle(model: ModelScopeRecommendedModel) {
         viewModelScope.launch(Dispatchers.IO) {
             val bundle = model.imageEngineBundle ?: return@launch
@@ -1525,9 +1599,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
             val params = _uiState.value.params
+            val visionProjectorPath = model.visionProjectorPath
+                ?.takeIf { it.isNotBlank() }
+                ?.takeIf { File(it).isFile }
             engine.loadModel(
                 modelPath = model.path,
-                params = LoadParams(nCtx = params.nCtx, nThreads = params.nThreads)
+                params = LoadParams(
+                    nCtx = params.nCtx,
+                    nThreads = params.nThreads,
+                    visionProjectorPath = visionProjectorPath
+                )
             ).onSuccess {
                 modelStore.markLoaded(model.id)
                 val device = currentDeviceProfile()
@@ -1552,7 +1633,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         agentRecommendation = recommendation ?: state.agentRecommendation,
                         logs = engine.recentLogs(),
                         nativeStatsJson = engine.nativeStatsJson(),
-                        statusMessage = "已加载：${model.displayName}。已使用当前参数，可直接聊天；需要优化时到 Agent 页手动运行智能调试。",
+                        statusMessage = buildString {
+                            append("已加载：").append(model.displayName)
+                            if (visionProjectorPath != null) append("，本地识图已启用")
+                            append("。已使用当前参数，可直接聊天；需要优化时到 Agent 页手动运行智能调试。")
+                        },
                         tab = AppTab.CHAT
                     )
                 }
@@ -1587,9 +1672,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendMessage() {
         val state = _uiState.value
-        val text = state.input.trim()
-        if (text.isBlank() || state.isGenerating) return
-        val user = ChatMessage(Role.USER, text)
+        val preparedInput = state.prepareChatInput()
+        if ((preparedInput.text.isBlank() && preparedInput.imageAttachments.isEmpty()) || state.isGenerating) return
+        val user = ChatMessage(
+            role = Role.USER,
+            content = preparedInput.text.ifBlank {
+                if (preparedInput.imageAttachments.isNotEmpty()) "请描述这张图片。" else ""
+            },
+            imageAttachments = preparedInput.imageAttachments
+        )
         val assistant = ChatMessage(Role.ASSISTANT, "")
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         _uiState.update {
@@ -1679,6 +1770,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(params = params) }
             }
             val state = _uiState.value
+            val hasImageAttachments = requestMessages.any { it.imageAttachments.isNotEmpty() }
             val stream = if (state.selectedChatBackend == ChatBackend.CLOUD) {
                 val cloudConfig = state.selectedChatCloudConfig()?.normalized()
                 if (cloudConfig == null) {
@@ -1687,9 +1779,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     persistChatSessions()
                     return@launch
                 }
-                cloudChatProvider.streamChat(cloudConfig, ChatRequest(requestMessages, params))
+                val cloudMessages = runCatching {
+                    requestMessages.withInlineImageDataForCloud()
+                }.getOrElse { error ->
+                    appendAssistant("\n图片读取失败：${error.message ?: "无法读取图片"}")
+                    _uiState.update { it.copy(isGenerating = false, statusMessage = "图片读取失败") }
+                    persistChatSessions()
+                    return@launch
+                }
+                cloudChatProvider.streamChat(cloudConfig, ChatRequest(cloudMessages, params))
             } else {
-                engine.streamChat(ChatRequest(requestMessages, params))
+                if (hasImageAttachments && !localVisionRunnerAvailable()) {
+                    appendAssistant(
+                        "\n当前本地聊天模型未启用视觉识图。请加载本地多模态模型包（主 GGUF + 对应 mmproj/视觉投影器）后再试，或先切换到 MiMo v2.5 等云端多模态模型。"
+                    )
+                    _uiState.update { it.copy(isGenerating = false, statusMessage = "本地视觉 runner 未启用") }
+                    persistChatSessions()
+                    return@launch
+                }
+                val localMessages = if (hasImageAttachments) {
+                    runCatching { requestMessages.withLocalImageFilesForVision() }
+                        .getOrElse { error ->
+                            appendAssistant("\n本地图片预处理失败：${error.message ?: "无法读取图片"}")
+                            _uiState.update { it.copy(isGenerating = false, statusMessage = "本地图片预处理失败") }
+                            persistChatSessions()
+                            return@launch
+                        }
+                } else {
+                    requestMessages
+                }
+                engine.streamChat(ChatRequest(localMessages, params))
             }
             stream.collect { event ->
                 when (event) {
@@ -2183,29 +2302,88 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleApi(enabled: Boolean) {
-        _uiState.update { it.copy(apiEnabled = enabled) }
-    }
-
-    fun toggleRest(enabled: Boolean) {
+        val restEnabled = if (enabled) _uiState.value.restEnabled else false
         runCatching {
-            if (enabled) restServer.start() else restServer.stop()
+            if (enabled) {
+                startApiServer(if (restEnabled) "0.0.0.0" else "127.0.0.1")
+            } else {
+                stopApiServer()
+            }
         }.onSuccess {
+            persistApiPreferences(apiEnabled = enabled, restEnabled = restEnabled)
             _uiState.update {
                 it.copy(
-                    restEnabled = restServer.isRunning,
+                    apiEnabled = enabled,
+                    restEnabled = restEnabled,
                     localApiAddress = apiUrl("127.0.0.1"),
                     openApiAddress = currentOpenApiAddress()
                 )
             }
+            updateLocalApiForegroundService(enabled, restEnabled)
+        }.onFailure { error ->
+            fail("本机 API 启动失败：${error.message}")
+        }
+    }
+
+    fun toggleRest(enabled: Boolean) {
+        val apiEnabled = enabled || _uiState.value.apiEnabled
+        runCatching {
+            if (enabled) {
+                startApiServer("0.0.0.0")
+            } else if (_uiState.value.apiEnabled) {
+                startApiServer("127.0.0.1")
+            } else {
+                stopApiServer()
+            }
+        }.onSuccess {
+            persistApiPreferences(apiEnabled = apiEnabled, restEnabled = enabled)
+            _uiState.update {
+                it.copy(
+                    apiEnabled = apiEnabled,
+                    restEnabled = enabled,
+                    localApiAddress = apiUrl("127.0.0.1"),
+                    openApiAddress = currentOpenApiAddress()
+                )
+            }
+            updateLocalApiForegroundService(apiEnabled, enabled)
         }.onFailure { error ->
             fail("REST 启动失败：${error.message}")
         }
     }
 
     override fun onCleared() {
-        restServer.shutdown()
+        stopApiServer()
+        LocalApiForegroundService.stop(getApplication())
         LocalApiRuntime.engine = null
         super.onCleared()
+    }
+
+    private fun updateLocalApiForegroundService(enabled: Boolean, restEnabled: Boolean) {
+        runCatching {
+            if (enabled) {
+                LocalApiForegroundService.start(getApplication(), restEnabled)
+            } else {
+                LocalApiForegroundService.stop(getApplication())
+            }
+        }.onFailure { error ->
+            _uiState.update { it.copy(statusMessage = "本地 API 保活服务启动失败：${error.message}") }
+        }
+    }
+
+    private fun startApiServer(bindHost: String) {
+        val current = apiServer
+        if (current?.isRunning == true && activeApiBindHost == bindHost) return
+        current?.shutdown()
+        val next = McaLoopbackServer(port = REST_PORT, bindHost = bindHost, apiKey = apiKey)
+        next.start()
+        apiServer = next
+        activeApiBindHost = bindHost
+    }
+
+    private fun stopApiServer() {
+        runCatching { apiServer?.shutdown() }
+        apiServer = null
+        activeApiBindHost = null
     }
 
     private fun appendAssistant(
@@ -2763,8 +2941,171 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return created
     }
 
+    private fun loadApiPreferences(application: Application): LocalApiPreferences {
+        val prefs = application.getSharedPreferences("mca_api", Context.MODE_PRIVATE)
+        val apiEnabled = prefs.getBoolean("api_enabled", false)
+        return LocalApiPreferences(
+            apiEnabled = apiEnabled,
+            restEnabled = apiEnabled && prefs.getBoolean("rest_enabled", false)
+        )
+    }
+
+    private fun persistApiPreferences(apiEnabled: Boolean, restEnabled: Boolean) {
+        getApplication<Application>()
+            .getSharedPreferences("mca_api", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("api_enabled", apiEnabled)
+            .putBoolean("rest_enabled", apiEnabled && restEnabled)
+            .apply()
+    }
+
     private fun apiUrl(host: String): String =
         "http://$host:$REST_PORT/v1/chat/completions"
+
+    private fun MainUiState.prepareChatInput(): PreparedChatInput {
+        val matches = imageAttachmentRegex.findAll(input).toList()
+        val attachments = matches.mapNotNull { match ->
+            val name = match.groupValues.getOrNull(1).orEmpty().trim()
+            val uriString = match.groupValues.getOrNull(2).orEmpty().trim()
+            if (uriString.isBlank()) return@mapNotNull null
+            val asset = images.firstOrNull { it.uriString == uriString || it.name == name }
+            asset?.toChatAttachment(mimeTypeForUri(uriString))
+                ?: ChatImageAttachment(
+                    name = name,
+                    uriString = uriString,
+                    mimeType = mimeTypeForUri(uriString)
+                )
+        }
+        val textWithoutAttachments = imageAttachmentRegex
+            .replace(input, "")
+            .replace(oldImagePlaceholderRegex, "")
+            .trim()
+        return PreparedChatInput(
+            text = textWithoutAttachments,
+            imageAttachments = attachments
+        )
+    }
+
+    private fun mimeTypeForUri(uriString: String): String {
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return "image/jpeg"
+        return runCatching { getApplication<Application>().contentResolver.getType(uri) }
+            .getOrNull()
+            ?.takeIf { it.startsWith("image/", ignoreCase = true) }
+            ?: when (uriString.substringAfterLast('.', "").lowercase()) {
+                "png" -> "image/png"
+                "webp" -> "image/webp"
+                "gif" -> "image/gif"
+                else -> "image/jpeg"
+            }
+    }
+
+    private suspend fun List<ChatMessage>.withInlineImageDataForCloud(): List<ChatMessage> =
+        withContext(Dispatchers.IO) {
+            map { message ->
+                if (message.imageAttachments.isEmpty()) {
+                    message
+                } else {
+                    message.copy(
+                        imageAttachments = message.imageAttachments
+                            .take(MAX_CHAT_IMAGES_PER_MESSAGE)
+                            .map { attachment ->
+                                if (attachment.hasInlineData) attachment else attachment.withCompressedInlineData()
+                            }
+                    )
+                }
+            }
+        }
+
+    private suspend fun List<ChatMessage>.withLocalImageFilesForVision(): List<ChatMessage> =
+        withContext(Dispatchers.IO) {
+            map { message ->
+                if (message.imageAttachments.isEmpty()) {
+                    message
+                } else {
+                    message.copy(
+                        imageAttachments = message.imageAttachments
+                            .take(MAX_CHAT_IMAGES_PER_MESSAGE)
+                            .map { it.withCompressedFileForLocalVision() }
+                    )
+                }
+            }
+        }
+
+    private fun ChatImageAttachment.withCompressedFileForLocalVision(): ChatImageAttachment {
+        val uri = Uri.parse(uriString)
+        val resolver = getApplication<Application>().contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
+        val bitmap = resolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, BitmapFactory.Options().apply { inSampleSize = sampleSize })
+        } ?: error("无法读取图片：${name.ifBlank { uriString }}")
+        val prepared = bitmap.scaledToMaxEdge(MAX_VISION_IMAGE_EDGE)
+        val visionDir = File(getApplication<Application>().cacheDir, "vision_inputs").apply { mkdirs() }
+        val outputFile = File(visionDir, "vision-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(8)}.jpg")
+        outputFile.outputStream().use { output ->
+            prepared.compress(Bitmap.CompressFormat.JPEG, 88, output)
+        }
+        if (prepared !== bitmap) bitmap.recycle()
+        return copy(
+            uriString = Uri.fromFile(outputFile).toString(),
+            mimeType = "image/jpeg",
+            dataBase64 = "",
+            width = prepared.width,
+            height = prepared.height,
+            sizeBytes = outputFile.length()
+        )
+    }
+
+    private fun ChatImageAttachment.withCompressedInlineData(): ChatImageAttachment {
+        val uri = Uri.parse(uriString)
+        val resolver = getApplication<Application>().contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
+        val bitmap = resolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, BitmapFactory.Options().apply { inSampleSize = sampleSize })
+        } ?: error("无法读取图片：${name.ifBlank { uriString }}")
+        val prepared = bitmap.scaledToMaxEdge(MAX_VISION_IMAGE_EDGE)
+        val bytes = ByteArrayOutputStream().use { output ->
+            prepared.compress(Bitmap.CompressFormat.JPEG, 86, output)
+            output.toByteArray()
+        }
+        if (prepared !== bitmap) bitmap.recycle()
+        return copy(
+            mimeType = "image/jpeg",
+            dataBase64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
+            width = prepared.width,
+            height = prepared.height,
+            sizeBytes = bytes.size.toLong()
+        )
+    }
+
+    private fun Bitmap.scaledToMaxEdge(maxEdge: Int): Bitmap {
+        val currentMax = maxOf(width, height)
+        if (currentMax <= maxEdge) return this
+        val scale = maxEdge.toFloat() / currentMax.toFloat()
+        return Bitmap.createScaledBitmap(
+            this,
+            (width * scale).toInt().coerceAtLeast(1),
+            (height * scale).toInt().coerceAtLeast(1),
+            true
+        )
+    }
+
+    private fun calculateImageSampleSize(width: Int, height: Int, maxEdge: Int): Int {
+        if (width <= 0 || height <= 0) return 1
+        var sample = 1
+        while (maxOf(width / sample, height / sample) > maxEdge * 2) {
+            sample *= 2
+        }
+        return sample.coerceAtLeast(1)
+    }
+
+    private fun localVisionRunnerAvailable(): Boolean =
+        runCatching {
+            JSONObject(engine.nativeStatsJson()).optBoolean("visionReady", false)
+        }.getOrDefault(false)
 
     private fun currentOpenApiAddress(): String =
         apiUrl(detectLanIpAddress() ?: "本机局域网IP")

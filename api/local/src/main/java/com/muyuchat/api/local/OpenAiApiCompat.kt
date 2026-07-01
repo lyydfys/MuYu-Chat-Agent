@@ -1,6 +1,7 @@
 package com.muyuchat.api.local
 
 import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.ChatImageAttachment
 import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
@@ -28,13 +29,23 @@ internal object OpenAiApiCompat {
                     .put("code", code)
             )
 
-    fun isStreamingRequest(body: String): Boolean =
-        runCatching { JSONObject(body).optBoolean("stream", false) }.getOrDefault(false)
+    fun isStreamingRequest(body: String): Boolean {
+        val parsed = runCatching {
+            val value = JSONObject(body).opt("stream")
+            when (value) {
+                is Boolean -> value
+                is String -> value.equals("true", ignoreCase = true) || value == "1"
+                is Number -> value.toInt() == 1
+                else -> false
+            }
+        }.getOrDefault(false)
+        return parsed || STREAM_TRUE_PATTERN.containsMatchIn(body)
+    }
 
     fun parseChatRequest(body: String): ChatRequest {
         val root = runCatching { JSONObject(body) }.getOrNull()
             ?: return ChatRequest(listOf(ChatMessage(Role.USER, body)))
-        val messages = root.optJSONArray("messages")?.toMessages()
+        val messages = root.optJSONArray("messages")?.toMessages()?.normalizeForLocalTemplate()
             ?: listOf(ChatMessage(Role.USER, root.promptText().ifBlank { body }))
         return ChatRequest(messages = messages, params = root.toGenerationParams())
     }
@@ -80,8 +91,29 @@ internal object OpenAiApiCompat {
                 "assistant" -> Role.ASSISTANT
                 else -> Role.USER
             }
-            add(ChatMessage(role = role, content = item.chatContent()))
+            add(
+                ChatMessage(
+                    role = role,
+                    content = item.chatContent(),
+                    imageAttachments = item.chatImageAttachments()
+                )
+            )
         }
+    }
+
+    private fun List<ChatMessage>.normalizeForLocalTemplate(): List<ChatMessage> {
+        val systemPrompt = filter { it.role == Role.SYSTEM }
+            .map { it.content.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+        val nonSystem = filterNot { it.role == Role.SYSTEM }
+        val normalized = if (systemPrompt.isBlank()) {
+            nonSystem
+        } else {
+            listOf(ChatMessage(Role.SYSTEM, systemPrompt)) + nonSystem
+        }
+        if (normalized.any { it.role == Role.USER }) return normalized
+        return normalized + ChatMessage(Role.USER, "Continue.")
     }
 
     private fun JSONObject.optReasoningMode(default: ReasoningMode): ReasoningMode {
@@ -110,6 +142,36 @@ internal object OpenAiApiCompat {
             }
             is JSONObject -> value.optString("text")
             else -> optString("content")
+        }
+    }
+
+    private fun JSONObject.chatImageAttachments(): List<ChatImageAttachment> {
+        val value = opt("content") as? JSONArray ?: return emptyList()
+        return buildList {
+            for (index in 0 until value.length()) {
+                val part = value.optJSONObject(index) ?: continue
+                val type = part.optString("type")
+                if (type != "image_url" && type != "input_image") continue
+                val imageUrl = part.opt("image_url")
+                val url = when (imageUrl) {
+                    is JSONObject -> imageUrl.optString("url")
+                    is String -> imageUrl
+                    else -> part.optString("url")
+                }.trim()
+                if (url.isBlank()) continue
+                add(
+                    ChatImageAttachment(
+                        name = "api-image-${index + 1}",
+                        uriString = url,
+                        mimeType = when {
+                            url.endsWith(".png", ignoreCase = true) -> "image/png"
+                            url.endsWith(".webp", ignoreCase = true) -> "image/webp"
+                            else -> "image/jpeg"
+                        },
+                        dataBase64 = if (url.startsWith("data:", ignoreCase = true)) url else ""
+                    )
+                )
+            }
         }
     }
 
@@ -149,4 +211,5 @@ internal object OpenAiApiCompat {
     }
 
     private const val MAX_API_PREDICT_TOKENS = 65536
+    private val STREAM_TRUE_PATTERN = Regex(""""stream"\s*:\s*(true|1|"true")""", RegexOption.IGNORE_CASE)
 }

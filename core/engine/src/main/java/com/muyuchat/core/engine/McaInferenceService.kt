@@ -111,8 +111,12 @@ class McaInferenceService(
             val activeRequest = protected.request
 
             val started = System.currentTimeMillis()
+            val hasImageAttachments = activeRequest.messages.any { it.imageAttachments.isNotEmpty() }
             val beginRc = withContext(io) {
-                bridge.beginCompletion(activeRequest.messagesJson(), activeRequest.params.toJson())
+                bridge.beginCompletion(
+                    activeRequest.messagesJson(multimodal = hasImageAttachments),
+                    activeRequest.params.toJson()
+                )
             }
             if (beginRc != 0) {
                 val nativeError = runCatching {

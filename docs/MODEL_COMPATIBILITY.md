@@ -14,7 +14,7 @@ not include model weights, provider accounts, or API keys.
 | Cloud images | DashScope Image | Supported | For Qwen-Image-style DashScope image generation. Use the provider's documented image endpoint and model name. |
 | Cloud images | Custom image path | Experimental | Useful when a provider is mostly OpenAI-compatible but uses a non-standard image path. |
 | Local images | `stable-diffusion.cpp` bundle | Experimental | Requires a complete bundle: diffusion model plus required VAE/AE and text encoder/LLM components. |
-| Local API | Loopback OpenAI-style API | Experimental | Intended for trusted local-network workflows and development integration. |
+| Local API | OpenAI-compatible local server | Supported alpha | Intended for trusted same-device, browser, desktop, and same-LAN workflows. Supports `/v1/models`, `/v1/chat/completions`, JSON replies, and SSE streaming. |
 
 ## Cloud Engine Configuration
 
@@ -40,6 +40,40 @@ Cloud engines are saved separately for chat and image generation.
 | Model | Exact image model identifier. |
 | Image path | Optional provider-specific image generation path. |
 | Size | Provider-supported image size or ratio, for example `1024x1024` or `1:1`. |
+
+## Local API Configuration
+
+MCA can expose the loaded local chat model through an OpenAI-compatible API.
+This is designed for trusted local integrations and third-party clients that
+support custom OpenAI-compatible endpoints.
+
+| Field | Recommended value |
+|---|---|
+| Protocol | `OpenAI-compatible` or custom OpenAI-compatible endpoint. |
+| Same-device Base URL | `http://127.0.0.1:11435/v1`. |
+| Same-LAN Base URL | `http://<phone-lan-ip>:11435/v1`; requires enabling open port in MCA. |
+| API key | The key generated in MCA Settings -> Local API. |
+| Model | Select from `/v1/models`; if manual entry is required, use the returned `id`. |
+
+Supported endpoints:
+
+- `GET /health`
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+- `GET /` for the built-in web chat page
+
+`POST /v1/chat/completions` accepts common OpenAI Chat Completions fields,
+including `messages`, `model`, `max_tokens`, `temperature`, and `stream`.
+`stream=true` returns Server-Sent Events with `data: {...}` chunks and a final
+`data: [DONE]`. The compatibility layer also tolerates common connection-test
+requests such as multiple `system` messages or probes without a `user` turn.
+
+Security notes:
+
+- Same-LAN access should only be enabled on trusted Wi-Fi or hotspot networks.
+- Do not publish the API key, phone LAN IP, or private prompts in issues.
+- If same-device `127.0.0.1` access fails in an Android client, try the
+  same-LAN address with open port enabled, then disable open port after use.
 
 ## Local Chat Recommendations
 

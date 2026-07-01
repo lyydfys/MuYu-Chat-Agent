@@ -102,8 +102,41 @@ class ModelStoreRepository(private val context: Context) {
             val file = File(target.path)
             if (file.isDirectory) file.deleteRecursively() else file.delete()
         }
+        runCatching {
+            val projector = target.visionProjectorPath?.let(::File)
+            if (projector != null && projector.parentFile?.absolutePath == managedModelDir.absolutePath) {
+                projector.delete()
+            }
+        }
         save(models.filterNot { it.id == id })
         return true
+    }
+
+    fun attachVisionProjector(modelId: String, uri: Uri, displayNameOverride: String? = null): ModelManifest {
+        val models = listModels()
+        val model = models.firstOrNull { it.id == modelId } ?: error("未找到要绑定视觉文件的本地模型。")
+        val fileName = displayNameOverride?.takeIf { it.isNotBlank() } ?: queryDisplayName(uri) ?: "mmproj.gguf"
+        require(fileName.endsWith(".gguf", ignoreCase = true)) { "请选择 .gguf 视觉投影器文件（通常文件名包含 mmproj）。" }
+        val metadata = GgufMetadataReader.read(appContext.contentResolver, uri, fileName)
+        require(metadata.isGguf) { "文件头不是 GGUF，可能不是 llama.cpp 可加载的视觉投影器。" }
+        require(isVisionProjectorCandidate(fileName, metadata)) {
+            "这个 GGUF 不像视觉投影器。请选择与主模型匹配的 mmproj / projector 文件。"
+        }
+
+        managedModelDir.mkdirs()
+        val target = uniqueTarget(fileName)
+        appContext.contentResolver.openInputStream(uri).use { input ->
+            requireNotNull(input) { "无法读取所选视觉文件。" }
+            target.outputStream().use { output -> input.copyTo(output) }
+        }
+        val updated = model.copy(
+            visionProjectorPath = target.absolutePath,
+            visionProjectorFileName = target.name,
+            visionProjectorSizeBytes = target.length(),
+            visionProjectorSha256 = sha256(target)
+        )
+        save(models.map { if (it.id == modelId) updated else it })
+        return updated
     }
 
     fun markLoaded(id: String) {
@@ -144,8 +177,22 @@ class ModelStoreRepository(private val context: Context) {
         val hashOk = runCatching {
             file.length() == model.sizeBytes && sha256(file).equals(model.sha256, ignoreCase = true)
         }.getOrDefault(false)
+        val projectorOk = model.visionProjectorPath?.let { path ->
+            val projector = File(path)
+            projector.exists() &&
+                projector.length() == model.visionProjectorSizeBytes &&
+                model.visionProjectorSha256?.let { sha256(projector).equals(it, ignoreCase = true) } != false
+        } ?: true
         return if (hashOk) {
-            compatibility
+            if (projectorOk) {
+                compatibility
+            } else {
+                ModelCompatibilityResult(
+                    canLoad = false,
+                    title = "视觉投影器校验失败",
+                    details = "绑定的 mmproj 文件不存在、大小变化或 SHA-256 不一致，请重新绑定视觉文件"
+                )
+            }
         } else {
             ModelCompatibilityResult(
                 canLoad = false,
@@ -190,6 +237,15 @@ class ModelStoreRepository(private val context: Context) {
             index += 1
         }
         return target
+    }
+
+    private fun isVisionProjectorCandidate(fileName: String, metadata: GgufMetadata): Boolean {
+        val lower = fileName.lowercase()
+        val architecture = metadata.architecture?.lowercase().orEmpty()
+        return "mmproj" in lower ||
+            "projector" in lower ||
+            lower.startsWith("clip") ||
+            architecture == "clip"
     }
 
     private fun sha256(file: File): String {

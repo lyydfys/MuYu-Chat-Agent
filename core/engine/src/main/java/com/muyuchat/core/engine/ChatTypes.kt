@@ -21,20 +21,50 @@ data class ChatMessage(
     val createdAt: Long = System.currentTimeMillis(),
     val tokenCount: Int? = null,
     val reasoningContent: String = "",
-    val reasoningDurationMs: Long = 0L
+    val reasoningDurationMs: Long = 0L,
+    val imageAttachments: List<ChatImageAttachment> = emptyList()
 )
+
+data class ChatImageAttachment(
+    val name: String = "",
+    val uriString: String = "",
+    val mimeType: String = "image/jpeg",
+    val dataBase64: String = "",
+    val width: Int = 0,
+    val height: Int = 0,
+    val sizeBytes: Long = 0L
+) {
+    val hasInlineData: Boolean
+        get() = dataBase64.isNotBlank()
+
+    fun dataUrl(): String =
+        if (dataBase64.startsWith("data:", ignoreCase = true)) {
+            dataBase64
+        } else {
+            "data:${mimeType.ifBlank { "image/jpeg" }};base64,$dataBase64"
+        }
+
+    fun plainBase64(): String =
+        dataBase64.substringAfter("base64,", dataBase64)
+}
 
 data class LoadParams(
     val nCtx: Int = 8192,
     val nThreads: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(2) - 1,
     val mmap: Boolean = true,
-    val mlock: Boolean = false
+    val mlock: Boolean = false,
+    val visionProjectorPath: String? = null
 ) {
     fun toJson(): String = JSONObject()
         .put("n_ctx", nCtx)
         .put("n_threads", nThreads)
         .put("mmap", mmap)
         .put("mlock", mlock)
+        .apply {
+            if (!visionProjectorPath.isNullOrBlank()) {
+                put("mmproj_path", visionProjectorPath)
+            }
+        }
         .toString()
 }
 
@@ -102,18 +132,45 @@ data class ChatRequest(
     val messages: List<ChatMessage>,
     val params: GenerationParams = GenerationParams()
 ) {
-    fun messagesJson(): String {
+    fun messagesJson(multimodal: Boolean = false): String {
         val array = JSONArray()
         val effectiveMessages = withSystemPrompt(messages)
         effectiveMessages.forEach { message ->
             array.put(
                 JSONObject()
                     .put("role", message.role.name.lowercase())
-                    .put("content", message.content)
+                    .put("content", message.toJsonContent(multimodal))
                     .put("created_at", message.createdAt)
             )
         }
         return array.toString()
+    }
+
+    private fun ChatMessage.toJsonContent(multimodal: Boolean): Any {
+        if (!multimodal || imageAttachments.isEmpty()) return content
+        val parts = JSONArray()
+        if (content.isNotBlank()) {
+            parts.put(JSONObject().put("type", "text").put("text", content))
+        }
+        imageAttachments
+            .filter { it.hasInlineData || it.uriString.isNotBlank() }
+            .forEach { attachment ->
+                parts.put(
+                    JSONObject()
+                        .put("type", "image_url")
+                        .put(
+                            "image_url",
+                            JSONObject()
+                                .put(
+                                    "url",
+                                    if (attachment.hasInlineData) attachment.dataUrl() else attachment.uriString
+                                )
+                                .put("detail", "auto")
+                        )
+                )
+            }
+        if (parts.length() == 0) return content
+        return parts
     }
 
     private fun withSystemPrompt(input: List<ChatMessage>): List<ChatMessage> {

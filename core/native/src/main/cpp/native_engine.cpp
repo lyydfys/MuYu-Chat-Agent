@@ -13,6 +13,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if MCA_WITH_LLAMA_CPP
@@ -21,6 +22,8 @@
 #include "common.h"
 #include "ggml-backend.h"
 #include "llama.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 #include "sampling.h"
 #endif
 
@@ -56,6 +59,8 @@ float g_sampling_frequency_penalty = 0.2f;
 int g_sampling_repeat_last_n = 0;
 bool g_last_use_jinja = true;
 bool g_last_enable_thinking = true;
+bool g_vision_ready = false;
+std::string g_mmproj_path;
 
 void set_last_error(const std::string &message) {
     g_last_error = message;
@@ -175,7 +180,108 @@ std::string parse_string(const std::string &json, const std::string &key, const 
 struct ParsedMessage {
     std::string role;
     std::string content;
+    std::vector<std::string> image_paths;
 };
+
+bool starts_with(const std::string &value, const std::string &prefix) {
+    return value.rfind(prefix, 0) == 0;
+}
+
+int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+std::string url_decode(const std::string &value) {
+    std::string out;
+    out.reserve(value.size());
+    for (size_t i = 0; i < value.size(); i++) {
+        if (value[i] == '%' && i + 2 < value.size()) {
+            const int high = hex_value(value[i + 1]);
+            const int low = hex_value(value[i + 2]);
+            if (high >= 0 && low >= 0) {
+                out.push_back((char) ((high << 4) | low));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(value[i]);
+    }
+    return out;
+}
+
+std::string local_image_path_from_url(const std::string &url) {
+    if (starts_with(url, "file://")) {
+        return url_decode(url.substr(7));
+    }
+    return url;
+}
+
+size_t find_object_end(const std::string &json, size_t start) {
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (size_t i = start; i < json.size(); i++) {
+        const char c = json[i];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '{') {
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0) return i + 1;
+        }
+    }
+    return json.size();
+}
+
+size_t value_start_after_key(const std::string &json, const std::string &key, size_t start) {
+    const auto key_pos = json.find("\"" + key + "\"", start);
+    if (key_pos == std::string::npos) return std::string::npos;
+    const auto colon = json.find(':', key_pos);
+    if (colon == std::string::npos) return std::string::npos;
+    auto pos = colon + 1;
+    while (pos < json.size() && std::isspace((unsigned char) json[pos])) pos++;
+    return pos;
+}
+
+void parse_content_parts(const std::string &segment, ParsedMessage &message) {
+    size_t pos = 0;
+    while (true) {
+        const auto type_pos = segment.find("\"type\"", pos);
+        if (type_pos == std::string::npos) break;
+        const auto part_start = segment.rfind('{', type_pos);
+        if (part_start == std::string::npos) break;
+        const auto part_end = find_object_end(segment, part_start);
+        const auto part = segment.substr(part_start, part_end - part_start);
+        const auto type = parse_json_string_after(part, "type", 0);
+        if (type == "text") {
+            const auto text = parse_json_string_after(part, "text", 0);
+            if (!text.empty()) {
+                if (!message.content.empty()) message.content += "\n";
+                message.content += text;
+            }
+        } else if (type == "image_url") {
+            const auto url = parse_json_string_after(part, "url", 0);
+            if (!url.empty() && !starts_with(url, "data:")) {
+                message.image_paths.push_back(local_image_path_from_url(url));
+            }
+        }
+        pos = part_end;
+    }
+}
 
 std::vector<ParsedMessage> parse_messages(const std::string &messages_json) {
     std::vector<ParsedMessage> messages;
@@ -183,12 +289,23 @@ std::vector<ParsedMessage> parse_messages(const std::string &messages_json) {
     while (true) {
         const auto role_pos = messages_json.find("\"role\"", pos);
         if (role_pos == std::string::npos) break;
+        const auto object_start = messages_json.rfind('{', role_pos);
+        const auto object_end = find_object_end(messages_json, object_start == std::string::npos ? role_pos : object_start);
+        const auto segment = messages_json.substr(role_pos, object_end - role_pos);
         const auto role = parse_json_string_after(messages_json, "role", role_pos);
-        const auto content = parse_json_string_after(messages_json, "content", role_pos);
-        if (!content.empty()) {
-            messages.push_back({role.empty() ? "user" : role, content});
+        ParsedMessage message{role.empty() ? "user" : role, ""};
+        const auto content_start = value_start_after_key(segment, "content", 0);
+        if (content_start != std::string::npos) {
+            if (content_start < segment.size() && segment[content_start] == '"') {
+                message.content = parse_json_string_after(segment, "content", 0);
+            } else if (content_start < segment.size() && segment[content_start] == '[') {
+                parse_content_parts(segment.substr(content_start), message);
+            }
         }
-        pos = role_pos + 6;
+        if (!message.content.empty() || !message.image_paths.empty()) {
+            messages.push_back(message);
+        }
+        pos = object_end;
     }
     if (messages.empty()) messages.push_back({"user", messages_json});
     return messages;
@@ -282,6 +399,8 @@ std::string stats_json(const char *backend) {
         << "\"repeatLastN\":" << g_sampling_repeat_last_n << ","
         << "\"useJinja\":" << (g_last_use_jinja ? "true" : "false") << ","
         << "\"enableThinking\":" << (g_last_enable_thinking ? "true" : "false") << ","
+        << "\"visionReady\":" << (g_vision_ready ? "true" : "false") << ","
+        << "\"mmprojPath\":\"" << json_escape(g_mmproj_path) << "\","
         << "\"backendReady\":" << (g_backend_device_count > 0 ? "true" : "false") << ","
         << "\"backendDeviceCount\":" << g_backend_device_count << ","
         << "\"backendDevices\":" << backend_devices_json_array() << ","
@@ -301,6 +420,7 @@ llama_batch g_batch{};
 bool g_batch_ready = false;
 common_chat_templates_ptr g_chat_templates;
 common_sampler *g_sampler = nullptr;
+mtmd_context *g_mtmd_context = nullptr;
 std::vector<common_chat_msg> g_chat_messages;
 llama_pos g_current_position = 0;
 int g_n_ctx = 4096;
@@ -434,6 +554,10 @@ void android_llama_log(ggml_log_level level, const char *text, void *) {
 }
 
 void free_llama_locked() {
+    if (g_mtmd_context != nullptr) {
+        mtmd_free(g_mtmd_context);
+        g_mtmd_context = nullptr;
+    }
     if (g_sampler != nullptr) {
         common_sampler_free(g_sampler);
         g_sampler = nullptr;
@@ -468,6 +592,8 @@ void free_llama_locked() {
     g_sampling_repeat_last_n = 0;
     g_last_use_jinja = true;
     g_last_enable_thinking = true;
+    g_vision_ready = false;
+    g_mmproj_path.clear();
     g_context_shifts = 0;
     g_n_keep = 128;
 }
@@ -590,6 +716,101 @@ std::string format_messages(const std::vector<ParsedMessage> &messages, const Ch
     formatted += "assistant: ";
     return formatted;
 }
+
+bool messages_have_images(const std::vector<ParsedMessage> &messages) {
+    for (const auto &message: messages) {
+        if (!message.image_paths.empty()) return true;
+    }
+    return false;
+}
+
+std::vector<ParsedMessage> with_media_markers(const std::vector<ParsedMessage> &messages) {
+    std::vector<ParsedMessage> out;
+    out.reserve(messages.size());
+    const char *marker = mtmd_default_marker();
+    for (auto message: messages) {
+        if (!message.image_paths.empty()) {
+            std::string prefix;
+            for (size_t i = 0; i < message.image_paths.size(); i++) {
+                prefix += marker;
+            }
+            message.content = prefix + (message.content.empty() ? "请描述这张图片。" : message.content);
+        }
+        out.push_back(std::move(message));
+    }
+    return out;
+}
+
+int prefill_multimodal_locked(
+        const std::vector<ParsedMessage> &messages,
+        const ChatTemplateOptions &chat_options
+) {
+    if (g_mtmd_context == nullptr || !g_vision_ready) {
+        g_last_error = "Local vision is not ready. Attach a matching mmproj projector and reload the model.";
+        return -4;
+    }
+
+    std::vector<mtmd_bitmap *> owned_bitmaps;
+    std::vector<const mtmd_bitmap *> bitmap_ptrs;
+    for (const auto &message: messages) {
+        for (const auto &path: message.image_paths) {
+            mtmd_bitmap *bitmap = mtmd_helper_bitmap_init_from_file(g_mtmd_context, path.c_str());
+            if (bitmap == nullptr) {
+                for (auto *owned: owned_bitmaps) mtmd_bitmap_free(owned);
+                g_last_error = "Failed to load local vision image: " + path;
+                return -5;
+            }
+            owned_bitmaps.push_back(bitmap);
+            bitmap_ptrs.push_back(bitmap);
+        }
+    }
+
+    mtmd_input_chunks *chunks = mtmd_input_chunks_init();
+    if (chunks == nullptr) {
+        for (auto *owned: owned_bitmaps) mtmd_bitmap_free(owned);
+        g_last_error = "mtmd_input_chunks_init returned null.";
+        return -6;
+    }
+
+    const auto marked_messages = with_media_markers(messages);
+    const auto formatted = format_messages(marked_messages, chat_options);
+    mtmd_input_text text{};
+    text.text = formatted.c_str();
+    text.add_special = true;
+    text.parse_special = true;
+
+    int tokenize_rc = mtmd_tokenize(
+            g_mtmd_context,
+            chunks,
+            &text,
+            bitmap_ptrs.empty() ? nullptr : bitmap_ptrs.data(),
+            bitmap_ptrs.size());
+    for (auto *owned: owned_bitmaps) mtmd_bitmap_free(owned);
+    if (tokenize_rc != 0) {
+        mtmd_input_chunks_free(chunks);
+        g_last_error = "mtmd_tokenize failed: " + std::to_string(tokenize_rc);
+        return -7;
+    }
+
+    llama_pos new_position = 0;
+    const int eval_rc = mtmd_helper_eval_chunks(
+            g_mtmd_context,
+            g_context,
+            chunks,
+            0,
+            0,
+            BATCH_SIZE,
+            true,
+            &new_position);
+    g_prompt_tokens = (long long) mtmd_helper_get_n_tokens(chunks);
+    mtmd_input_chunks_free(chunks);
+    if (eval_rc != 0) {
+        g_last_error = "mtmd_helper_eval_chunks failed: " + std::to_string(eval_rc);
+        return -8;
+    }
+    g_current_position = new_position;
+    return 0;
+}
 #else
 std::vector<std::string> g_stub_chunks;
 size_t g_stub_chunk_index = 0;
@@ -605,6 +826,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_initBackends(
 ) {
 #if MCA_WITH_LLAMA_CPP
     llama_log_set(android_llama_log, nullptr);
+    mtmd_helper_log_set(android_llama_log, nullptr);
     const auto path = jstring_to_string(env, nativeLibDir);
     std::lock_guard<std::mutex> lock(g_mutex);
     g_native_lib_dir = path;
@@ -714,6 +936,36 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         free_llama_locked();
         return 3;
     }
+
+    const std::string mmproj_path = parse_string(params, "mmproj_path", "");
+    if (!mmproj_path.empty()) {
+        std::ifstream projector_input(mmproj_path, std::ios::binary);
+        if (!projector_input.good()) {
+            g_last_error = "Vision projector file is not readable: " + mmproj_path;
+            free_llama_locked();
+            return 5;
+        }
+        mtmd_context_params vision_params = mtmd_context_params_default();
+        vision_params.use_gpu = false;
+        vision_params.print_timings = false;
+        vision_params.n_threads = n_threads;
+        vision_params.warmup = false;
+        g_mtmd_context = mtmd_init_from_file(mmproj_path.c_str(), g_model, vision_params);
+        if (g_mtmd_context == nullptr) {
+            if (g_last_error.empty()) {
+                g_last_error = "mtmd_init_from_file returned null. The mmproj may not match this main model.";
+            }
+            free_llama_locked();
+            return 6;
+        }
+        if (!mtmd_support_vision(g_mtmd_context)) {
+            g_last_error = "The attached mtmd projector does not report vision support.";
+            free_llama_locked();
+            return 7;
+        }
+        g_vision_ready = true;
+        g_mmproj_path = mmproj_path;
+    }
     g_load_ms = now_ms() - started;
     g_loaded = true;
     g_stop_requested.store(false, std::memory_order_relaxed);
@@ -784,13 +1036,19 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         chat_options.thinking_budget = thinking_budget_for_mode(params_json);
         g_last_use_jinja = chat_options.use_jinja;
         g_last_enable_thinking = chat_options.enable_thinking;
-        const auto formatted = format_messages(parse_messages(messages_json), chat_options);
-        auto tokens = common_tokenize(g_context, formatted, true, true);
-        g_prompt_tokens = (long long) tokens.size();
+        const auto messages = parse_messages(messages_json);
+        int rc = 0;
+        if (messages_have_images(messages)) {
+            rc = prefill_multimodal_locked(messages, chat_options);
+        } else {
+            const auto formatted = format_messages(messages, chat_options);
+            auto tokens = common_tokenize(g_context, formatted, true, true);
+            g_prompt_tokens = (long long) tokens.size();
+            rc = decode_tokens(tokens, true);
+        }
         g_n_keep = std::min(
                 std::max(64, (int) (g_prompt_tokens / 4)),
                 std::max(64, g_n_ctx / 2));
-        const int rc = decode_tokens(tokens, true);
         g_prefill_finished_ms = now_ms();
         return rc;
 #else

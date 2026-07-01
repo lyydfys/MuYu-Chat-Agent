@@ -14,6 +14,7 @@ import androidx.room.RoomDatabase
 import androidx.room.Transaction
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.muyuchat.core.engine.ChatImageAttachment
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.Role
 import kotlinx.coroutines.Dispatchers
@@ -96,7 +97,8 @@ class ChatSessionStore(context: Context) {
                 createdAt = json.optLong("createdAt", System.currentTimeMillis()),
                 tokenCount = if (json.isNull("tokenCount")) null else json.optInt("tokenCount"),
                 reasoningContent = json.optString("reasoningContent"),
-                reasoningDurationMs = json.optLong("reasoningDurationMs", 0L)
+                reasoningDurationMs = json.optLong("reasoningDurationMs", 0L),
+                imageAttachments = json.optJSONArray("imageAttachments").toImageAttachments()
             )
         }
     }
@@ -108,7 +110,7 @@ class ChatSessionStore(context: Context) {
 
 @Database(
     entities = [ChatSessionEntity::class, ChatMessageEntity::class, ImageAssetEntity::class],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class McaRoomDatabase : RoomDatabase() {
@@ -126,6 +128,7 @@ abstract class McaRoomDatabase : RoomDatabase() {
                     "mca.db"
                 )
                     .addMigrations(MIGRATION_1_2, MIGRATION_2_6, MIGRATION_3_6, MIGRATION_4_6, MIGRATION_5_6)
+                    .addMigrations(MIGRATION_6_7)
                     .build()
                     .also { instance = it }
             }
@@ -165,9 +168,21 @@ abstract class McaRoomDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addMessageAttachmentsColumnIfMissing(db)
+            }
+        }
+
         private fun addProjectIdColumnIfMissing(db: SupportSQLiteDatabase) {
             runCatching {
                 db.execSQL("ALTER TABLE chat_sessions ADD COLUMN projectId TEXT")
+            }
+        }
+
+        private fun addMessageAttachmentsColumnIfMissing(db: SupportSQLiteDatabase) {
+            runCatching {
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN imageAttachmentsJson TEXT NOT NULL DEFAULT '[]'")
             }
         }
 
@@ -354,7 +369,8 @@ data class ChatMessageEntity(
     val createdAt: Long,
     val tokenCount: Int?,
     val reasoningContent: String = "",
-    val reasoningDurationMs: Long = 0L
+    val reasoningDurationMs: Long = 0L,
+    val imageAttachmentsJson: String = "[]"
 )
 
 private fun ChatSessionRecord.toEntity(): ChatSessionEntity =
@@ -391,7 +407,8 @@ private fun ChatMessage.toEntity(sessionId: String, position: Int): ChatMessageE
         createdAt = createdAt,
         tokenCount = tokenCount,
         reasoningContent = reasoningContent,
-        reasoningDurationMs = reasoningDurationMs
+        reasoningDurationMs = reasoningDurationMs,
+        imageAttachmentsJson = imageAttachments.toJsonArrayString(includeInlineData = false)
     )
 
 private fun ChatMessageEntity.toChatMessage(): ChatMessage =
@@ -401,7 +418,8 @@ private fun ChatMessageEntity.toChatMessage(): ChatMessage =
         createdAt = createdAt,
         tokenCount = tokenCount,
         reasoningContent = reasoningContent,
-        reasoningDurationMs = reasoningDurationMs
+        reasoningDurationMs = reasoningDurationMs,
+        imageAttachments = runCatching { JSONArray(imageAttachmentsJson).toImageAttachments() }.getOrDefault(emptyList())
     )
 
 private fun ImageAssetEntity.toImageAssetRecord(): ImageAssetRecord =
@@ -426,3 +444,36 @@ private suspend fun List<ChatSessionRecord>.sortedForHistory(): List<ChatSession
                 .thenByDescending { it.updatedAt }
         )
     }
+
+private fun JSONArray?.toImageAttachments(): List<ChatImageAttachment> {
+    if (this == null) return emptyList()
+    return List(length()) { index ->
+        val json = optJSONObject(index) ?: JSONObject()
+        ChatImageAttachment(
+            name = json.optString("name"),
+            uriString = json.optString("uriString"),
+            mimeType = json.optString("mimeType", "image/jpeg"),
+            dataBase64 = json.optString("dataBase64"),
+            width = json.optInt("width", 0),
+            height = json.optInt("height", 0),
+            sizeBytes = json.optLong("sizeBytes", 0L)
+        )
+    }.filter { it.uriString.isNotBlank() || it.dataBase64.isNotBlank() }
+}
+
+private fun List<ChatImageAttachment>.toJsonArrayString(includeInlineData: Boolean): String {
+    val array = JSONArray()
+    forEach { attachment ->
+        array.put(
+            JSONObject()
+                .put("name", attachment.name)
+                .put("uriString", attachment.uriString)
+                .put("mimeType", attachment.mimeType)
+                .put("dataBase64", if (includeInlineData) attachment.dataBase64 else "")
+                .put("width", attachment.width)
+                .put("height", attachment.height)
+                .put("sizeBytes", attachment.sizeBytes)
+        )
+    }
+    return array.toString()
+}

@@ -36,6 +36,8 @@ class OpenAiApiCompatTest {
         assertEquals(Role.SYSTEM, request.messages[0].role)
         assertEquals(Role.USER, request.messages[1].role)
         assertEquals("你好，介绍一下", request.messages[1].content)
+        assertEquals(1, request.messages[1].imageAttachments.size)
+        assertEquals("ignored", request.messages[1].imageAttachments.single().uriString)
         assertEquals(1024, request.params.nPredict)
         assertEquals(0.3f, request.params.temperature)
         assertEquals(20, request.params.topK)
@@ -61,6 +63,15 @@ class OpenAiApiCompatTest {
     }
 
     @Test
+    fun detectsStreamingFlagAcrossCommonClientEncodings() {
+        assertTrue(OpenAiApiCompat.isStreamingRequest("""{"stream":true}"""))
+        assertTrue(OpenAiApiCompat.isStreamingRequest("""{"stream":"true"}"""))
+        assertTrue(OpenAiApiCompat.isStreamingRequest("""{"stream":1}"""))
+        assertFalse(OpenAiApiCompat.isStreamingRequest("""{"stream":"false"}"""))
+        assertFalse(OpenAiApiCompat.isStreamingRequest("""{"messages":[]}"""))
+    }
+
+    @Test
     fun parsesResponsesStyleInputArray() {
         val request = OpenAiApiCompat.parseChatRequest(
             """{"input":["第一段",{"content":[{"type":"input_text","text":"第二段"}]}],"reasoning_mode":"advanced"}"""
@@ -75,6 +86,48 @@ class OpenAiApiCompatTest {
         val request = OpenAiApiCompat.parseChatRequest("plain prompt")
 
         assertEquals("plain prompt", request.messages.single().content)
+    }
+
+    @Test
+    fun addsUserTurnForThirdPartyConnectionTestMessages() {
+        val request = OpenAiApiCompat.parseChatRequest(
+            """
+            {
+              "messages": [
+                {"role": "system", "content": "Connection test"},
+                {"role": "assistant", "content": "Welcome"}
+              ],
+              "stream": true
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(Role.SYSTEM, request.messages[0].role)
+        assertEquals(Role.ASSISTANT, request.messages[1].role)
+        assertEquals(Role.USER, request.messages[2].role)
+        assertEquals("Continue.", request.messages[2].content)
+    }
+
+    @Test
+    fun coalescesMultipleSystemMessagesForLocalChatTemplates() {
+        val request = OpenAiApiCompat.parseChatRequest(
+            """
+            {
+              "messages": [
+                {"role": "system", "content": "Write Assistant's next reply."},
+                {"role": "system", "content": "[Start a new Chat]"},
+                {"role": "user", "content": "Reply in Chinese"}
+              ],
+              "stream": true
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(2, request.messages.size)
+        assertEquals(Role.SYSTEM, request.messages[0].role)
+        assertEquals("Write Assistant's next reply.\n\n[Start a new Chat]", request.messages[0].content)
+        assertEquals(Role.USER, request.messages[1].role)
+        assertEquals("Reply in Chinese", request.messages[1].content)
     }
 
     @Test

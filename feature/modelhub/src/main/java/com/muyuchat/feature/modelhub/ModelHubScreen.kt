@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -190,6 +191,7 @@ fun ModelHubScreen(
     onLoad: (ModelManifest) -> Unit,
     onVerify: (ModelManifest) -> Unit,
     onDelete: (ModelManifest) -> Unit,
+    onAttachVisionProjector: (ModelManifest) -> Unit,
     onImportLocalImageModel: () -> Unit,
     onSelectLocalImageModel: (String) -> Unit,
     onVerifyLocalImageModel: (String) -> Unit,
@@ -240,6 +242,7 @@ fun ModelHubScreen(
                 onLoad = onLoad,
                 onVerify = onVerify,
                 onDelete = onDelete,
+                onAttachVisionProjector = onAttachVisionProjector,
                 onImportLocalImageModel = onImportLocalImageModel,
                 onSelectLocalImageModel = onSelectLocalImageModel,
                 onVerifyLocalImageModel = onVerifyLocalImageModel,
@@ -395,6 +398,7 @@ private fun LocalModelsSection(
     onLoad: (ModelManifest) -> Unit,
     onVerify: (ModelManifest) -> Unit,
     onDelete: (ModelManifest) -> Unit,
+    onAttachVisionProjector: (ModelManifest) -> Unit,
     onImportLocalImageModel: () -> Unit,
     onSelectLocalImageModel: (String) -> Unit,
     onVerifyLocalImageModel: (String) -> Unit,
@@ -417,7 +421,8 @@ private fun LocalModelsSection(
                             enabled = !state.isBusy,
                             onLoad = { onLoad(model) },
                             onVerify = { onVerify(model) },
-                            onDelete = { onDelete(model) }
+                            onDelete = { onDelete(model) },
+                            onAttachVisionProjector = { onAttachVisionProjector(model) }
                         )
                     }
                 }
@@ -1367,7 +1372,8 @@ private fun LegacyLocalModelCard(
     enabled: Boolean,
     onLoad: () -> Unit,
     onVerify: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onAttachVisionProjector: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1412,7 +1418,8 @@ private fun LocalModelCard(
     enabled: Boolean,
     onLoad: () -> Unit,
     onVerify: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onAttachVisionProjector: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1454,6 +1461,21 @@ private fun LocalModelCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Text(
+                if (model.hasVisionProjector) {
+                    "本地识图：已绑定 ${model.visionProjectorFileName ?: "mmproj"}"
+                } else {
+                    "本地识图：未绑定 mmproj 视觉投影器"
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (model.hasVisionProjector) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Button(onClick = onLoad, enabled = enabled && !isLoaded, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1464,6 +1486,11 @@ private fun LocalModelCard(
                     Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("校验")
+                }
+                OutlinedButton(onClick = onAttachVisionProjector, enabled = enabled, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
+                    Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("视觉文件", maxLines = 1)
                 }
                 IconButton(onClick = onDelete, enabled = enabled) {
                     Icon(Icons.Default.Delete, contentDescription = "删除")

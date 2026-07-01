@@ -3719,7 +3719,7 @@ private fun MessageBubble(
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
         if (isUser) {
-            UserMessageBubble(message.content)
+            UserMessageBubble(message)
         } else {
             AssistantMessageBlock(
                 modifier = Modifier.fillMaxWidth(),
@@ -3742,7 +3742,8 @@ private fun MessageBubble(
 }
 
 @Composable
-private fun UserMessageBubble(content: String) {
+private fun UserMessageBubble(message: ChatMessage) {
+    val context = LocalContext.current
     Surface(
         color = Color(0xFFEEF4FF),
         shape = RoundedCornerShape(
@@ -3753,15 +3754,58 @@ private fun UserMessageBubble(content: String) {
         ),
         modifier = Modifier.widthIn(max = 280.dp)
     ) {
-        Text(
-            text = wrapForDisplay(content),
-            color = Color(0xFF202124),
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 17.dp, vertical = 13.dp),
-            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 24.sp),
-            softWrap = true
-        )
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (message.imageAttachments.isNotEmpty()) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
+                    message.imageAttachments.forEach { attachment ->
+                        val bitmap = remember(attachment.uriString) {
+                            loadImageBitmap(context, attachment.uriString)
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color.White.copy(alpha = 0.72f),
+                            modifier = Modifier.size(104.dp)
+                        ) {
+                            if (bitmap != null) {
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = attachment.name.ifBlank { "上传图片" },
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Default.Image,
+                                        contentDescription = null,
+                                        tint = GeminiPrimaryBlue.copy(alpha = 0.72f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (message.content.isNotBlank()) {
+                Text(
+                    text = wrapForDisplay(message.content),
+                    color = Color(0xFF202124),
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 24.sp),
+                    softWrap = true
+                )
+            }
+        }
     }
 }
 

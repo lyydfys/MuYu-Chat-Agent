@@ -44,4 +44,43 @@ class GenerationParamsTest {
         assertFalse(system.contains("/think"))
         assertFalse(system.contains("/no_think"))
     }
+
+    @Test
+    fun multimodalMessagesUseOpenAiImageUrlPartsOnlyWhenRequested() {
+        val message = ChatMessage(
+            role = Role.USER,
+            content = "Describe it",
+            imageAttachments = listOf(
+                ChatImageAttachment(
+                    name = "photo.jpg",
+                    mimeType = "image/jpeg",
+                    dataBase64 = "abc123"
+                )
+            )
+        )
+        val request = ChatRequest(messages = listOf(message), params = GenerationParams(systemPrompt = ""))
+
+        val textOnly = JSONArray(request.messagesJson())
+            .userMessage()
+            .get("content")
+        val multimodal = JSONArray(request.messagesJson(multimodal = true))
+            .userMessage()
+            .getJSONArray("content")
+
+        assertEquals("Describe it", textOnly)
+        assertEquals("text", multimodal.getJSONObject(0).getString("type"))
+        assertEquals("image_url", multimodal.getJSONObject(1).getString("type"))
+        assertTrue(
+            multimodal.getJSONObject(1)
+                .getJSONObject("image_url")
+                .getString("url")
+                .startsWith("data:image/jpeg;base64,abc123")
+        )
+    }
+
+    private fun JSONArray.userMessage(): JSONObject =
+        (0 until length())
+            .asSequence()
+            .map { getJSONObject(it) }
+            .first { it.getString("role") == "user" }
 }

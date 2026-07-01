@@ -36,7 +36,7 @@ class McaLoopbackServerTest {
     @Test
     fun protectedRoutesReturnOpenAiStyleErrorJsonWithoutKey() {
         withServer(apiKey = "secret") { port ->
-            val response = rawHttp(port, "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            val response = rawHttp(port, "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
 
             assertTrue(response.startsWith("HTTP/1.1 401 Unauthorized"))
             assertTrue(response.contains("\"type\":\"mca_error\""))
@@ -45,15 +45,27 @@ class McaLoopbackServerTest {
     }
 
     @Test
-    fun protectedRoutesAcceptXApiKeyHeader() {
+    fun modelsRouteDoesNotRequireApiKey() {
         withServer(apiKey = "secret") { port ->
             val response = rawHttp(
                 port,
-                "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nX-API-Key: secret\r\n\r\n"
+                "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
             )
 
             assertTrue(response.startsWith("HTTP/1.1 200 OK"))
             assertTrue(response.contains("\"object\":\"list\""))
+        }
+    }
+
+    @Test
+    fun protectedRoutesAcceptXApiKeyHeader() {
+        withServer(apiKey = "secret") { port ->
+            val response = rawHttp(
+                port,
+                "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nX-API-Key: secret\r\n\r\n"
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
         }
     }
 

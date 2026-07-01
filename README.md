@@ -79,7 +79,9 @@ Current release status:
   downloads, file classification, and engine grouping.
 - **Agent diagnostics**: local device profiling, model recommendations,
   benchmark-based tuning, and explainable parameter plans.
-- **Local API**: loopback OpenAI-style API scaffolding for local integrations.
+- **Local API**: OpenAI-compatible local server for trusted same-device and
+  same-LAN clients, including `/v1/models`, `/v1/chat/completions`, JSON
+  replies, and SSE streaming.
 
 ## Install
 
@@ -205,6 +207,35 @@ See [docs/MODEL_COMPATIBILITY.md](docs/MODEL_COMPATIBILITY.md) for the current
 compatibility matrix covering local GGUF chat, OpenAI-compatible chat,
 Anthropic Messages, OpenAI Images, DashScope Image, custom image paths, and
 experimental local image bundles.
+
+## Local API
+
+MCA can expose the currently loaded local chat model through an
+OpenAI-compatible API for trusted clients.
+
+Use this when you want another app, browser, desktop client, or local tool to
+talk to the model running on the phone.
+
+Recommended client settings:
+
+| Field | Value |
+|---|---|
+| Protocol | OpenAI-compatible |
+| Same-device Base URL | `http://127.0.0.1:11435/v1` |
+| Same-LAN Base URL | `http://<phone-lan-ip>:11435/v1` |
+| API key | Generated inside MCA Settings -> Local API |
+| Model | Pick from `/v1/models`, or enter the returned model `id` manually |
+
+Supported paths:
+
+- `GET /health`
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+- `GET /` for the built-in web chat page
+
+`/v1/chat/completions` supports standard JSON responses and `stream=true`
+Server-Sent Events. Same-LAN access requires enabling the in-app "open port"
+switch and should only be used on trusted networks.
 
 ## Privacy
 

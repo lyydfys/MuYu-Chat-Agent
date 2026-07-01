@@ -69,6 +69,7 @@ import kotlin.math.roundToInt
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     private var pendingChatExportSessionId: String? = null
+    private var pendingVisionProjectorModelId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,6 +85,11 @@ class MainActivity : ComponentActivity() {
         }
         val localImageModelImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) viewModel.importLocalImageModel(uri)
+        }
+        val visionProjectorImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            val modelId = pendingVisionProjectorModelId
+            pendingVisionProjectorModelId = null
+            if (uri != null && modelId != null) viewModel.attachVisionProjector(modelId, uri)
         }
         val diagnosticExportLauncher = registerForActivityResult(
             ActivityResultContracts.CreateDocument("application/json")
@@ -126,6 +132,15 @@ class MainActivity : ComponentActivity() {
                             )
                         )
                     },
+                    onAttachVisionProjector = { modelId ->
+                        pendingVisionProjectorModelId = modelId
+                        visionProjectorImportLauncher.launch(
+                            arrayOf(
+                                "application/octet-stream",
+                                "*/*"
+                            )
+                        )
+                    },
                     onExportDiagnostics = {
                         diagnosticExportLauncher.launch("mca-diagnostic-${System.currentTimeMillis()}.json")
                     },
@@ -145,6 +160,7 @@ private fun McaApp(
     onTab: (AppTab) -> Unit,
     onImport: () -> Unit,
     onImportLocalImageModel: () -> Unit,
+    onAttachVisionProjector: (String) -> Unit,
     onExportDiagnostics: () -> Unit,
     onExportChatSession: (String) -> Unit,
     viewModel: MainViewModel
@@ -496,6 +512,7 @@ private fun McaApp(
                 onLoad = viewModel::loadModel,
                 onVerify = viewModel::verifyModel,
                 onDelete = viewModel::deleteModel,
+                onAttachVisionProjector = { model -> onAttachVisionProjector(model.id) },
                 onImportLocalImageModel = onImportLocalImageModel,
                 onSelectLocalImageModel = viewModel::selectLocalImageModel,
                 onVerifyLocalImageModel = viewModel::verifyLocalImageModel,
