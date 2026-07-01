@@ -348,7 +348,7 @@ class McaLoopbackServer(
     }
 
     private fun parseChatRequest(body: String): ChatRequest {
-        return OpenAiApiCompat.parseChatRequest(body)
+        return OpenAiApiCompat.parseChatRequest(body, LocalApiRuntime.generationParamsProvider())
     }
 
     private fun String.isStreamingRequest(headers: Map<String, String>): Boolean {

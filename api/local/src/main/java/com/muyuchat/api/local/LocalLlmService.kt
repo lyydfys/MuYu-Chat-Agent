@@ -3,19 +3,13 @@
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
-import com.muyuchat.core.engine.ChatMessage
-import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.GenerateEvent
-import com.muyuchat.core.engine.GenerationParams
-import com.muyuchat.core.engine.Role
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
 
 class LocalLlmService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -40,7 +34,9 @@ class LocalLlmService : Service() {
             }
             scope.launch {
                 runCatching {
-                    engine.streamChat(parseChatRequest(requestJson)).collect { event ->
+                    engine.streamChat(
+                        OpenAiApiCompat.parseChatRequest(requestJson, LocalApiRuntime.generationParamsProvider())
+                    ).collect { event ->
                         when (event) {
                             is GenerateEvent.Chunk -> callback.onChunk(sessionId, event.text)
                             is GenerateEvent.Done -> callback.onDone(sessionId)
@@ -70,26 +66,6 @@ class LocalLlmService : Service() {
     override fun onDestroy() {
         scope.cancel()
         super.onDestroy()
-    }
-
-    private fun parseChatRequest(json: String): ChatRequest {
-        val root = runCatching { JSONObject(json) }.getOrNull()
-            ?: return ChatRequest(listOf(ChatMessage(Role.USER, json)))
-        val messages = root.optJSONArray("messages")?.toMessages()
-            ?: listOf(ChatMessage(Role.USER, root.optString("prompt", json)))
-        return ChatRequest(messages = messages, params = GenerationParams())
-    }
-
-    private fun JSONArray.toMessages(): List<ChatMessage> = buildList {
-        for (index in 0 until length()) {
-            val item = optJSONObject(index) ?: continue
-            val role = when (item.optString("role").lowercase()) {
-                "system" -> Role.SYSTEM
-                "assistant" -> Role.ASSISTANT
-                else -> Role.USER
-            }
-            add(ChatMessage(role = role, content = item.optString("content")))
-        }
     }
 }
 

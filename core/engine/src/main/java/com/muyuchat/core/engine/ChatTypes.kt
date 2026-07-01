@@ -87,6 +87,67 @@ data class GenerationParams(
     val reasoningMode: ReasoningMode = ReasoningMode.OFF,
     val hideReasoning: Boolean = false
 ) {
+    companion object {
+        fun fromJson(json: String, defaults: GenerationParams = GenerationParams()): GenerationParams {
+            val root = runCatching { JSONObject(json) }.getOrNull() ?: return defaults
+            return fromJson(root, defaults)
+        }
+
+        fun fromJson(root: JSONObject, defaults: GenerationParams = GenerationParams()): GenerationParams =
+            GenerationParams(
+                nCtx = root.optInt("n_ctx", defaults.nCtx),
+                nPredict = root.optInt("n_predict", root.optInt("max_tokens", defaults.nPredict)).takeIf { it > 0 } ?: defaults.nPredict,
+                nThreads = root.optInt("n_threads", defaults.nThreads),
+                temperature = root.optDouble("temperature", defaults.temperature.toDouble()).toFloat(),
+                topK = root.optInt("top_k", defaults.topK),
+                topP = root.optDouble("top_p", defaults.topP.toDouble()).toFloat(),
+                minP = root.optDouble("min_p", defaults.minP.toDouble()).toFloat(),
+                repeatPenalty = root.optDouble(
+                    "repeat_penalty",
+                    root.optDouble("repetition_penalty", defaults.repeatPenalty.toDouble())
+                ).toFloat(),
+                presencePenalty = root.optDouble("presence_penalty", defaults.presencePenalty.toDouble()).toFloat(),
+                frequencyPenalty = root.optDouble("frequency_penalty", defaults.frequencyPenalty.toDouble()).toFloat(),
+                seed = if (root.has("seed") && !root.isNull("seed")) root.optInt("seed") else defaults.seed,
+                systemPrompt = root.optString("system_prompt", defaults.systemPrompt),
+                stopWords = root.optJSONArray("stop_words")?.toStringList()
+                    ?: root.optJSONArray("stop")?.toStringList()
+                    ?: defaults.stopWords,
+                chatTemplateMode = root.optString("chat_template_mode", defaults.chatTemplateMode),
+                advancedJson = when (val advanced = root.opt("advanced_json")) {
+                    is JSONObject -> advanced.toString()
+                    is String -> advanced.ifBlank { defaults.advancedJson }
+                    else -> defaults.advancedJson
+                },
+                reasoningMode = root.optReasoningMode(defaults.reasoningMode),
+                hideReasoning = root.optBoolean("hide_reasoning", defaults.hideReasoning)
+            )
+
+        private fun JSONObject.optReasoningMode(default: ReasoningMode): ReasoningMode {
+            val raw = optString("reasoning_mode", optString("thinking_mode", "")).trim()
+            if (raw.isBlank()) {
+                return if (has("enable_thinking")) {
+                    if (optBoolean("enable_thinking", default != ReasoningMode.OFF)) ReasoningMode.STANDARD else ReasoningMode.OFF
+                } else {
+                    default
+                }
+            }
+            return when (raw.lowercase()) {
+                "off", "none", "disable", "disabled", "false", "关闭" -> ReasoningMode.OFF
+                "advanced", "deep", "high", "进阶", "深度" -> ReasoningMode.ADVANCED
+                "standard", "normal", "default", "true", "标准" -> ReasoningMode.STANDARD
+                else -> ReasoningMode.entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: default
+            }
+        }
+
+        private fun JSONArray.toStringList(): List<String> = buildList {
+            for (index in 0 until length()) {
+                val value = optString(index)
+                if (value.isNotBlank()) add(value)
+            }
+        }
+    }
+
     fun effectiveNPredict(): Int {
         val reasoningFloor = when (reasoningMode) {
             ReasoningMode.OFF -> nPredict

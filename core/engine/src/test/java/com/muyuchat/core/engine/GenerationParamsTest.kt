@@ -78,6 +78,49 @@ class GenerationParamsTest {
         )
     }
 
+    @Test
+    fun generationParamsRoundTripKeepsPersonaAndSamplingSettings() {
+        val original = GenerationParams(
+            nCtx = 4096,
+            nPredict = 2048,
+            nThreads = 6,
+            temperature = 0.42f,
+            topK = 32,
+            topP = 0.88f,
+            minP = 0.03f,
+            repeatPenalty = 1.12f,
+            presencePenalty = 0.15f,
+            frequencyPenalty = 0.25f,
+            seed = 123,
+            systemPrompt = "你是一张长期保存的角色卡。",
+            stopWords = listOf("</s>", "<|end|>"),
+            chatTemplateMode = "auto",
+            advancedJson = """{"mirostat":0}""",
+            reasoningMode = ReasoningMode.STANDARD,
+            hideReasoning = false
+        )
+
+        val restored = GenerationParams.fromJson(original.toJson())
+
+        assertEquals(original.nCtx, restored.nCtx)
+        assertEquals(original.nPredict, restored.nPredict)
+        assertEquals(original.nThreads, restored.nThreads)
+        assertEquals(original.temperature, restored.temperature)
+        assertEquals(original.topK, restored.topK)
+        assertEquals(original.topP, restored.topP)
+        assertEquals(original.minP, restored.minP)
+        assertEquals(original.repeatPenalty, restored.repeatPenalty)
+        assertEquals(original.presencePenalty, restored.presencePenalty)
+        assertEquals(original.frequencyPenalty, restored.frequencyPenalty)
+        assertEquals(original.seed, restored.seed)
+        assertEquals(original.systemPrompt, restored.systemPrompt)
+        assertEquals(original.stopWords, restored.stopWords)
+        assertEquals(original.chatTemplateMode, restored.chatTemplateMode)
+        assertEquals(original.advancedJson, restored.advancedJson)
+        assertEquals(original.reasoningMode, restored.reasoningMode)
+        assertEquals(original.hideReasoning, restored.hideReasoning)
+    }
+
     private fun JSONArray.userMessage(): JSONObject =
         (0 until length())
             .asSequence()

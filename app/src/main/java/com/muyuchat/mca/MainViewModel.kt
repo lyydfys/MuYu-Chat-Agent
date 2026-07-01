@@ -275,6 +275,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val initialSelectedCloudImageModelId = cloudApiStore.loadSelectedCloudImageModelId()
         ?.takeIf { id -> initialCloudModels.any { it.id == id && it.kind == CloudModelKind.IMAGE } }
         ?: initialCloudModels.firstOrNull { it.kind == CloudModelKind.IMAGE }?.id
+    private val initialParams = loadGenerationParams(application)
     private val initialCloudConfig = initialCloudModels
         .firstOrNull { it.id == initialSelectedCloudChatModelId && it.kind == CloudModelKind.CHAT }
         ?.toChatConfig()
@@ -308,6 +309,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             },
             models = modelStore.listModels(),
             recommendedRemoteModels = sortRecommendedModels(modelScopeClient.recommendedModels(), initialDeviceProfile),
+            params = initialParams,
             agentLogs = agentLogger.recent(),
             benchmarkHistory = benchmarkHistoryLogger.recent(),
             deviceProfile = initialDeviceProfile,
@@ -324,6 +326,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         LocalApiRuntime.engine = engine
         LocalApiRuntime.loadedModelJsonProvider = { loadedModelJson() }
         LocalApiRuntime.paramsJsonProvider = { _uiState.value.params.toJson() }
+        LocalApiRuntime.generationParamsProvider = { _uiState.value.params }
         LocalApiRuntime.modelsJsonProvider = { modelsJson() }
         LocalApiRuntime.deviceProfileJsonProvider = { currentDeviceProfile().toJson().toString() }
         LocalApiRuntime.agentRecommendationJsonProvider = { requestJson ->
@@ -768,23 +771,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateParams(params: GenerationParams) {
+        persistGenerationParams(params)
         _uiState.update { it.copy(params = params) }
     }
 
     fun updateReasoningMode(mode: ReasoningMode) {
-        _uiState.update { state ->
-            if (state.selectedChatBackend == ChatBackend.CLOUD) {
-                return@update state.copy(
-                    statusMessage = CLOUD_REASONING_LOCKED_MESSAGE
-                )
-            }
-            val updatedParams = state.params.copy(
-                reasoningMode = mode,
-                hideReasoning = mode == ReasoningMode.OFF
-            ).let { params ->
-                params.copy(nPredict = params.effectiveNPredict())
-            }
-            state.copy(
+        val state = _uiState.value
+        if (state.selectedChatBackend == ChatBackend.CLOUD) {
+            _uiState.update { it.copy(statusMessage = CLOUD_REASONING_LOCKED_MESSAGE) }
+            return
+        }
+        val updatedParams = state.params.copy(
+            reasoningMode = mode,
+            hideReasoning = mode == ReasoningMode.OFF
+        ).let { params ->
+            params.copy(nPredict = params.effectiveNPredict())
+        }
+        persistGenerationParams(updatedParams)
+        _uiState.update {
+            it.copy(
                 params = updatedParams,
                 statusMessage = "思考模式已切换为：${mode.label}"
             )
@@ -1168,6 +1173,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             reasoningMode = state.params.reasoningMode,
             hideReasoning = state.params.hideReasoning
         )
+        if (updatedParams != null) persistGenerationParams(updatedParams)
         _uiState.update {
             it.copy(
                 preference = preference,
@@ -1767,6 +1773,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 backendParams.copy(nPredict = backendParams.effectiveNPredict())
             }
             if (initialState.selectedChatBackend == ChatBackend.LOCAL && params != initialState.params) {
+                persistGenerationParams(params)
                 _uiState.update { it.copy(params = params) }
             }
             val state = _uiState.value
@@ -2104,6 +2111,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appliedPlan = recommendation.tuningPlan,
             userConfirmed = true
         )
+        persistGenerationParams(updatedParams)
         _uiState.update {
             it.copy(
                 params = updatedParams,
@@ -2116,6 +2124,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun rollbackAgentParams() {
         val previous = _uiState.value.rollbackParams ?: return
+        persistGenerationParams(previous)
         _uiState.update {
             it.copy(
                 params = previous,
@@ -2213,6 +2222,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     appliedPlan = recommendation.tuningPlan,
                     userConfirmed = true
                 )
+                persistGenerationParams(updatedParams)
                 _uiState.update {
                     it.copy(
                         deviceProfile = device,
@@ -2269,6 +2279,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 appliedPlan = recommendation.tuningPlan,
                 userConfirmed = false
             )
+            persistGenerationParams(updatedParams)
             _uiState.update {
                 it.copy(
                     params = updatedParams,
@@ -2956,6 +2967,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .edit()
             .putBoolean("api_enabled", apiEnabled)
             .putBoolean("rest_enabled", apiEnabled && restEnabled)
+            .apply()
+    }
+
+    private fun loadGenerationParams(application: Application): GenerationParams {
+        val prefs = application.getSharedPreferences("mca_generation_params", Context.MODE_PRIVATE)
+        val json = prefs.getString("params_json", null) ?: return GenerationParams()
+        return GenerationParams.fromJson(json)
+    }
+
+    private fun persistGenerationParams(params: GenerationParams) {
+        getApplication<Application>()
+            .getSharedPreferences("mca_generation_params", Context.MODE_PRIVATE)
+            .edit()
+            .putString("params_json", params.toJson())
             .apply()
     }
 

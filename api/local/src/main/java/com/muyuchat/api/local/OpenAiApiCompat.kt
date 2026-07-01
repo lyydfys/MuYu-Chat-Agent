@@ -42,20 +42,25 @@ internal object OpenAiApiCompat {
         return parsed || STREAM_TRUE_PATTERN.containsMatchIn(body)
     }
 
-    fun parseChatRequest(body: String): ChatRequest {
+    fun parseChatRequest(body: String, baseParams: GenerationParams = GenerationParams()): ChatRequest {
         val root = runCatching { JSONObject(body) }.getOrNull()
-            ?: return ChatRequest(listOf(ChatMessage(Role.USER, body)))
+            ?: return ChatRequest(listOf(ChatMessage(Role.USER, body)), params = baseParams)
         val messages = root.optJSONArray("messages")?.toMessages()?.normalizeForLocalTemplate()
             ?: listOf(ChatMessage(Role.USER, root.promptText().ifBlank { body }))
-        return ChatRequest(messages = messages, params = root.toGenerationParams())
+        return ChatRequest(messages = messages, params = root.toGenerationParams(baseParams))
     }
 
-    private fun JSONObject.toGenerationParams(): GenerationParams {
-        val showReasoning = optBoolean("show_reasoning", false)
-        val defaults = GenerationParams(
-            reasoningMode = if (showReasoning) ReasoningMode.STANDARD else ReasoningMode.OFF,
-            hideReasoning = !showReasoning
-        )
+    private fun JSONObject.toGenerationParams(baseParams: GenerationParams): GenerationParams {
+        val hasShowReasoning = has("show_reasoning") && !isNull("show_reasoning")
+        val showReasoning = optBoolean("show_reasoning", baseParams.reasoningMode != ReasoningMode.OFF && !baseParams.hideReasoning)
+        val defaults = if (hasShowReasoning) {
+            baseParams.copy(
+                reasoningMode = if (showReasoning) ReasoningMode.STANDARD else ReasoningMode.OFF,
+                hideReasoning = !showReasoning
+            )
+        } else {
+            baseParams
+        }
         return GenerationParams(
             nCtx = optInt("n_ctx", defaults.nCtx),
             nPredict = requestedPredict(defaults.nPredict),
@@ -75,11 +80,7 @@ internal object OpenAiApiCompat {
             chatTemplateMode = optString("chat_template_mode", defaults.chatTemplateMode),
             advancedJson = optJSONObject("advanced_json")?.toString() ?: defaults.advancedJson,
             reasoningMode = optReasoningMode(defaults.reasoningMode),
-            hideReasoning = if (showReasoning) {
-                false
-            } else {
-                optBoolean("hide_reasoning", defaults.hideReasoning)
-            }
+            hideReasoning = if (hasShowReasoning) !showReasoning else optBoolean("hide_reasoning", defaults.hideReasoning)
         )
     }
 

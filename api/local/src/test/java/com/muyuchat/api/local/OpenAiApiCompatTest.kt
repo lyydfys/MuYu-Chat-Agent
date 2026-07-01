@@ -1,7 +1,9 @@
 package com.muyuchat.api.local
 
+import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
+import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -128,6 +130,44 @@ class OpenAiApiCompatTest {
         assertEquals("Write Assistant's next reply.\n\n[Start a new Chat]", request.messages[0].content)
         assertEquals(Role.USER, request.messages[1].role)
         assertEquals("Reply in Chinese", request.messages[1].content)
+    }
+
+    @Test
+    fun inheritsCurrentMcaPersonaWhenClientDoesNotSendSystemMessage() {
+        val request = OpenAiApiCompat.parseChatRequest(
+            """{"messages":[{"role":"user","content":"你好"}]}""",
+            baseParams = GenerationParams(
+                systemPrompt = "你是用户在 MCA 中保存的角色设定。",
+                temperature = 0.25f,
+                nPredict = 1234
+            )
+        )
+        val rendered = JSONArray(request.messagesJson())
+
+        assertEquals("你是用户在 MCA 中保存的角色设定。\n\n请直接回答，不展示思考过程。", rendered.getJSONObject(0).getString("content"))
+        assertEquals(0.25f, request.params.temperature)
+        assertEquals(1234, request.params.nPredict)
+    }
+
+    @Test
+    fun keepsThirdPartyCharacterCardSystemMessageAheadOfMcaPersona() {
+        val request = OpenAiApiCompat.parseChatRequest(
+            """
+            {
+              "messages": [
+                {"role": "system", "content": "你是第三方客户端发送的角色卡。"},
+                {"role": "user", "content": "自我介绍"}
+              ]
+            }
+            """.trimIndent(),
+            baseParams = GenerationParams(systemPrompt = "MCA 当前默认角色设定不应覆盖客户端角色卡。")
+        )
+        val renderedSystem = JSONArray(request.messagesJson())
+            .getJSONObject(0)
+            .getString("content")
+
+        assertTrue(renderedSystem.contains("你是第三方客户端发送的角色卡。"))
+        assertFalse(renderedSystem.contains("MCA 当前默认角色设定不应覆盖客户端角色卡。"))
     }
 
     @Test

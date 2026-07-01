@@ -1,6 +1,7 @@
 ﻿package com.muyuchat.api.local
 
 import com.muyuchat.core.engine.McaInferenceService
+import com.muyuchat.core.engine.GenerationParams
 
 object LocalApiRuntime {
     @Volatile
@@ -11,6 +12,9 @@ object LocalApiRuntime {
 
     @Volatile
     var paramsJsonProvider: () -> String = { "{}" }
+
+    @Volatile
+    var generationParamsProvider: () -> GenerationParams = { GenerationParams() }
 
     @Volatile
     var modelsJsonProvider: () -> String = { "[]" }
