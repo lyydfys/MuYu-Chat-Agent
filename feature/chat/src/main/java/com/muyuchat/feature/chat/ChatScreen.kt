@@ -3,6 +3,7 @@ package com.muyuchat.feature.chat
 import android.content.ClipData
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -36,6 +37,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -110,8 +112,8 @@ import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
@@ -134,6 +136,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -165,6 +168,9 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.ChatSourceReference
+import com.muyuchat.core.engine.ChatWebSearchTrace
+import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
@@ -190,7 +196,10 @@ data class ChatUiState(
     val history: List<ChatHistoryItem> = emptyList(),
     val localModels: List<ChatModelChoice> = emptyList(),
     val imageModels: List<ChatModelChoice> = emptyList(),
+    val assistants: List<AssistantUiItem> = emptyList(),
+    val selectedAssistantId: String = "default",
     val images: List<ImageAssetUiItem> = emptyList(),
+    val files: List<FileAssetUiItem> = emptyList(),
     val imageJobs: List<ImageGenerationUiJob> = emptyList(),
     val activeConversationId: String? = null,
     val input: String = "",
@@ -204,7 +213,54 @@ data class ChatUiState(
     val stats: RuntimeStats = RuntimeStats(),
     val apiEnabled: Boolean = false,
     val restEnabled: Boolean = false,
-    val reasoningMode: ReasoningMode = ReasoningMode.OFF
+    val reasoningMode: ReasoningMode = ReasoningMode.OFF,
+    val webSearchEnabled: Boolean = false,
+    val webSearchConfigured: Boolean = false,
+    val webSearchEnabledForTurn: Boolean = false,
+    val webSearchStatusMessage: String? = null,
+    val webSearchTurnModeLabel: String = "",
+    val webSearchResearchModeLabel: String = "",
+    val webSearchResearchOverridden: Boolean = false,
+    val webSearchProviderLabel: String = ""
+)
+
+data class AssistantUiItem(
+    val id: String,
+    val name: String,
+    val avatar: String,
+    val tag: String,
+    val systemPrompt: String,
+    val modelSummary: String,
+    val defaultModelMode: String,
+    val defaultModelId: String?,
+    val temperature: Float,
+    val topP: Float,
+    val nCtx: Int,
+    val nPredict: Int,
+    val reasoningMode: ReasoningMode,
+    val memoryEnabled: Boolean,
+    val webSearchEnabled: Boolean,
+    val fileContextEnabled: Boolean,
+    val selected: Boolean,
+    val exportJson: String
+)
+
+data class AssistantEditorDraft(
+    val id: String?,
+    val name: String,
+    val avatar: String,
+    val tag: String,
+    val systemPrompt: String,
+    val defaultModelMode: String,
+    val defaultModelId: String?,
+    val temperature: Float,
+    val topP: Float,
+    val nCtx: Int,
+    val nPredict: Int,
+    val reasoningMode: ReasoningMode,
+    val memoryEnabled: Boolean,
+    val webSearchEnabled: Boolean,
+    val fileContextEnabled: Boolean
 )
 
 data class ImageAssetUiItem(
@@ -217,6 +273,16 @@ data class ImageAssetUiItem(
     val sizeText: String,
     val width: Int,
     val height: Int
+)
+
+data class FileAssetUiItem(
+    val id: String,
+    val name: String,
+    val mimeType: String,
+    val preview: String,
+    val createdAtText: String,
+    val sizeText: String,
+    val truncated: Boolean
 )
 
 data class ImageGenerationUiJob(
@@ -267,16 +333,25 @@ fun ChatScreen(
     onUploadFile: (String) -> Unit,
     onUseImageAsset: (String) -> Unit = {},
     onDeleteImageAsset: (String) -> Unit = {},
+    onUseFileAsset: (String) -> Unit = {},
+    onDeleteFileAsset: (String) -> Unit = {},
     onGenerateImagePrompt: (String) -> Unit = {},
     onCancelImageGeneration: () -> Unit = {},
     onSelectImageModel: (String) -> Unit = {},
     onReasoningModeChange: (ReasoningMode) -> Unit,
     onCloudReasoningModeLocked: () -> Unit = {},
+    onToggleWebSearchForTurn: () -> Unit = {},
+    onCycleWebSearchResearchMode: () -> Unit = {},
+    onOpenWebSearchSettings: () -> Unit = {},
     onLoadModel: (String) -> Unit = {},
     onOpenAgent: () -> Unit,
     onOpenModels: () -> Unit,
     onOpenApi: () -> Unit,
     onOpenSettings: () -> Unit,
+    onSaveAssistant: (AssistantEditorDraft) -> Unit = {},
+    onSelectAssistant: (String) -> Unit = {},
+    onDeleteAssistant: (String) -> Unit = {},
+    onImportAssistantCard: (String) -> Unit = {},
     appMenuOpen: Boolean = false,
     onAppMenuOpenChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
@@ -286,6 +361,8 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var showImages by rememberSaveable { mutableStateOf(false) }
+    var showAssistants by rememberSaveable { mutableStateOf(false) }
+    var showFileLibrary by rememberSaveable { mutableStateOf(false) }
     var imagePrompt by rememberSaveable { mutableStateOf("") }
     fun enqueueImagePrompt(prompt: String) {
         val cleanPrompt = prompt.trim()
@@ -320,10 +397,6 @@ fun ChatScreen(
     BackHandler(enabled = historyBackEnabled) {
         scope.launch { drawerState.close() }
     }
-    BackHandler(enabled = showImages && !historyBackEnabled) {
-        showImages = false
-    }
-
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -360,31 +433,7 @@ fun ChatScreen(
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
         ) {
-            if (showImages) {
-                ImagesWorkspaceScreen(
-                    images = state.images,
-                    jobs = state.imageJobs,
-                    imageModels = state.imageModels,
-                    selectedImageModelId = state.selectedImageModelId,
-                    selectedImageModelName = state.selectedImageModelName,
-                    selectedImageModelIsCloud = state.selectedImageModelIsCloud,
-                    prompt = imagePrompt,
-                    onPromptChange = { imagePrompt = it },
-                    onSubmitPrompt = { enqueueImagePrompt(imagePrompt) },
-                    onCancelGeneration = onCancelImageGeneration,
-                    onRetryJob = { job -> enqueueImagePrompt(job.prompt) },
-                    onBack = { showImages = false },
-                    onOpenPhoto = { photoPicker.launch("image/*") },
-                    onSelectImageModel = onSelectImageModel,
-                    onUseImageAsset = {
-                        onUseImageAsset(it)
-                        showImages = false
-                    },
-                    onDeleteImageAsset = onDeleteImageAsset,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                Column(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize()) {
                 ChatStatusBar(
                     state = state,
                     onOpenHistory = { scope.launch { drawerState.open() } },
@@ -437,10 +486,87 @@ fun ChatScreen(
                 onOpenFile = {
                     filePicker.launch(arrayOf("text/*", "application/json", "application/xml"))
                 },
+                onOpenFileLibrary = {
+                    showFileLibrary = true
+                },
                 reasoningMode = state.reasoningMode,
                 onReasoningModeChange = onReasoningModeChange,
+                webSearchEnabled = state.webSearchEnabled,
+                webSearchConfigured = state.webSearchConfigured,
+                webSearchEnabledForTurn = state.webSearchEnabledForTurn,
+                webSearchStatusMessage = state.webSearchStatusMessage,
+                webSearchTurnModeLabel = state.webSearchTurnModeLabel,
+                webSearchResearchModeLabel = state.webSearchResearchModeLabel,
+                webSearchResearchOverridden = state.webSearchResearchOverridden,
+                webSearchProviderLabel = state.webSearchProviderLabel,
+                onToggleWebSearchForTurn = onToggleWebSearchForTurn,
+                onCycleWebSearchResearchMode = onCycleWebSearchResearchMode,
+                onOpenWebSearchSettings = onOpenWebSearchSettings,
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
+
+            SmoothRightToLeftPage(
+                visible = showAssistants,
+                onDismiss = { showAssistants = false }
+            ) { pageModifier, closePage ->
+                AssistantRoleScreen(
+                    assistants = state.assistants,
+                    selectedAssistantId = state.selectedAssistantId,
+                    selectedModelName = state.selectedModelName,
+                    selectedModelId = state.selectedModelId,
+                    selectedModelIsCloud = state.selectedModelIsCloud,
+                    onSaveAssistant = onSaveAssistant,
+                    onSelectAssistant = onSelectAssistant,
+                    onDeleteAssistant = onDeleteAssistant,
+                    onImportAssistantCard = onImportAssistantCard,
+                    onBack = closePage,
+                    modifier = pageModifier
+                )
+            }
+
+            SmoothRightToLeftPage(
+                visible = showImages,
+                onDismiss = { showImages = false }
+            ) { pageModifier, closePage ->
+                ImagesWorkspaceScreen(
+                    images = state.images,
+                    jobs = state.imageJobs,
+                    imageModels = state.imageModels,
+                    selectedImageModelId = state.selectedImageModelId,
+                    selectedImageModelName = state.selectedImageModelName,
+                    selectedImageModelIsCloud = state.selectedImageModelIsCloud,
+                    prompt = imagePrompt,
+                    onPromptChange = { imagePrompt = it },
+                    onSubmitPrompt = { enqueueImagePrompt(imagePrompt) },
+                    onCancelGeneration = onCancelImageGeneration,
+                    onRetryJob = { job -> enqueueImagePrompt(job.prompt) },
+                    onBack = closePage,
+                    onOpenPhoto = { photoPicker.launch("image/*") },
+                    onSelectImageModel = onSelectImageModel,
+                    onUseImageAsset = {
+                        onUseImageAsset(it)
+                        closePage()
+                    },
+                    onDeleteImageAsset = onDeleteImageAsset,
+                    modifier = pageModifier
+                )
+            }
+
+            SmoothRightToLeftPage(
+                visible = showFileLibrary,
+                onDismiss = { showFileLibrary = false }
+            ) { pageModifier, closePage ->
+                FileLibraryPage(
+                    files = state.files,
+                    onInsert = { id ->
+                        onUseFileAsset(id)
+                        closePage()
+                    },
+                    onDelete = onDeleteFileAsset,
+                    onBack = closePage,
+                    modifier = pageModifier
+                )
+            }
 
             PredictiveAppMenuPage(
                 visible = appMenuOpen,
@@ -461,15 +587,669 @@ fun ChatScreen(
                     onOpenSettings = {
                         onOpenSettings()
                     },
+                    onOpenImages = {
+                        closeMenu()
+                        showImages = true
+                    },
+                    onOpenAssistants = {
+                        closeMenu()
+                        showAssistants = true
+                    },
                     onClearHistory = onClearHistory,
                     modifier = menuModifier
                 )
-            }
             }
 
         }
     }
 }
+
+@Composable
+private fun AssistantRoleScreen(
+    assistants: List<AssistantUiItem>,
+    selectedAssistantId: String,
+    selectedModelName: String?,
+    selectedModelId: String?,
+    selectedModelIsCloud: Boolean,
+    onSaveAssistant: (AssistantEditorDraft) -> Unit,
+    onSelectAssistant: (String) -> Unit,
+    onDeleteAssistant: (String) -> Unit,
+    onImportAssistantCard: (String) -> Unit,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var editing by remember { mutableStateOf<AssistantUiItem?>(null) }
+    var creating by remember { mutableStateOf(false) }
+    var importing by remember { mutableStateOf(false) }
+    val selected = assistants.firstOrNull { it.id == selectedAssistantId } ?: assistants.firstOrNull()
+    val editingAssistant = editing
+    fun closeAssistantSubPage() {
+        creating = false
+        editing = null
+        importing = false
+    }
+
+    Box(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 18.dp, vertical = 14.dp)
+                .navigationBarsPadding()
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "关闭")
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("助手与角色", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "当前助手、角色卡、提示词与能力",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                TextButton(onClick = { creating = true }) {
+                    Text("新建")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            AssistantCurrentCard(
+                assistant = selected,
+                selectedModelName = selectedModelName,
+                onEdit = { selected?.let { editing = it } },
+                onExport = {
+                    selected?.let { item ->
+                        scope.launch {
+                            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("MCA assistant", item.exportJson)))
+                            Toast.makeText(context, "已复制角色卡 JSON", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                "助手列表",
+                modifier = Modifier.padding(start = 8.dp, bottom = 8.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(bottom = 14.dp)
+            ) {
+                items(assistants) { assistant ->
+                    AssistantListCard(
+                        assistant = assistant,
+                        onSelect = { onSelectAssistant(assistant.id) },
+                        onEdit = { editing = assistant },
+                        onDelete = { onDeleteAssistant(assistant.id) }
+                    )
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = { importing = true }, modifier = Modifier.weight(1f)) {
+                    Text("导入角色卡")
+                }
+                Button(
+                    onClick = {
+                        selected?.let { item ->
+                            scope.launch {
+                                clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("MCA assistant", item.exportJson)))
+                                Toast.makeText(context, "已复制当前助手角色卡", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("导出当前助手")
+                }
+            }
+        }
+
+        SmoothRightToLeftPage(
+            visible = creating || editingAssistant != null || importing,
+            onDismiss = ::closeAssistantSubPage
+        ) { pageModifier, closePage ->
+            when {
+                creating -> AssistantEditorPage(
+                    assistant = null,
+                    onBack = closePage,
+                    selectedModelName = selectedModelName,
+                    selectedModelId = selectedModelId,
+                    selectedModelIsCloud = selectedModelIsCloud,
+                    onDelete = onDeleteAssistant,
+                    onSave = {
+                        onSaveAssistant(it)
+                        closePage()
+                    },
+                    modifier = pageModifier
+                )
+                editingAssistant != null -> AssistantEditorPage(
+                    assistant = editingAssistant,
+                    onBack = closePage,
+                    selectedModelName = selectedModelName,
+                    selectedModelId = selectedModelId,
+                    selectedModelIsCloud = selectedModelIsCloud,
+                    onDelete = { id ->
+                        onDeleteAssistant(id)
+                        closePage()
+                    },
+                    onSave = {
+                        onSaveAssistant(it)
+                        closePage()
+                    },
+                    modifier = pageModifier
+                )
+                importing -> AssistantImportPage(
+                    onBack = closePage,
+                    onImport = {
+                        onImportAssistantCard(it)
+                        closePage()
+                    },
+                    modifier = pageModifier
+                )
+                else -> Unit
+            }
+        }
+    }
+}
+
+@Composable
+private fun AssistantCurrentCard(
+    assistant: AssistantUiItem?,
+    selectedModelName: String?,
+    onEdit: () -> Unit,
+    onExport: () -> Unit
+) {
+    val assistantTag = assistant?.tag.orEmpty()
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(24.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("当前助手", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AssistantAvatar(assistant?.name ?: "MCA", assistant?.avatar.orEmpty(), selected = true)
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        assistant?.name ?: "默认助手",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (assistantTag.isNotBlank()) {
+                        Text(
+                            assistantTag,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Text(
+                        assistant?.modelSummary?.takeIf { it.isNotBlank() } ?: selectedModelName ?: "跟随当前模型",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistantCapabilityChip("记忆", assistant?.memoryEnabled == true)
+                AssistantCapabilityChip("联网检索", assistant?.webSearchEnabled == true)
+                AssistantCapabilityChip("文件上下文", assistant?.fileContextEnabled != false)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onEdit) { Text("编辑") }
+                TextButton(onClick = onExport) { Text("导出") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AssistantListCard(
+    assistant: AssistantUiItem,
+    onSelect: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val darkTheme = isSystemInDarkTheme()
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = if (assistant.selected) {
+            if (darkTheme) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f) else Color(0xFFEAF1FF)
+        } else {
+            if (darkTheme) MaterialTheme.colorScheme.surface else Color(0xFFF8F9FA)
+        },
+        shape = RoundedCornerShape(20.dp),
+        border = if (assistant.selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)) else null
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AssistantAvatar(assistant.name, assistant.avatar, selected = assistant.selected)
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        assistant.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        assistant.tag.ifBlank { assistant.systemPrompt.ifBlank { "未设置提示词" } },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (assistant.selected) {
+                    Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = onSelect, enabled = !assistant.selected) { Text(if (assistant.selected) "使用中" else "切换") }
+                TextButton(onClick = onEdit) { Text("编辑") }
+                TextButton(onClick = onDelete, enabled = assistant.id != "default") {
+                    Text("删除", color = if (assistant.id == "default") MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AssistantEditorPage(
+    assistant: AssistantUiItem?,
+    onBack: () -> Unit,
+    selectedModelName: String?,
+    selectedModelId: String?,
+    selectedModelIsCloud: Boolean,
+    onDelete: (String) -> Unit,
+    onSave: (AssistantEditorDraft) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var name by remember(assistant?.id) { mutableStateOf(assistant?.name ?: "") }
+    var avatar by remember(assistant?.id) { mutableStateOf(assistant?.avatar ?: "") }
+    var tag by remember(assistant?.id) { mutableStateOf(assistant?.tag ?: "") }
+    var prompt by remember(assistant?.id) { mutableStateOf(assistant?.systemPrompt ?: "") }
+    var defaultModelMode by remember(assistant?.id) { mutableStateOf(assistant?.defaultModelMode ?: "follow_current") }
+    var defaultModelId by remember(assistant?.id) { mutableStateOf(assistant?.defaultModelId) }
+    var temperatureText by remember(assistant?.id) { mutableStateOf((assistant?.temperature ?: GenerationParams().temperature).cleanParamText()) }
+    var topPText by remember(assistant?.id) { mutableStateOf((assistant?.topP ?: GenerationParams().topP).cleanParamText()) }
+    var nCtxText by remember(assistant?.id) { mutableStateOf((assistant?.nCtx ?: GenerationParams().nCtx).toString()) }
+    var nPredictText by remember(assistant?.id) { mutableStateOf((assistant?.nPredict ?: GenerationParams().nPredict).toString()) }
+    var reasoningMode by remember(assistant?.id) { mutableStateOf(assistant?.reasoningMode ?: GenerationParams().reasoningMode) }
+    var memoryEnabled by remember(assistant?.id) { mutableStateOf(assistant?.memoryEnabled ?: false) }
+    var webSearchEnabled by remember(assistant?.id) { mutableStateOf(assistant?.webSearchEnabled ?: false) }
+    var fileContextEnabled by remember(assistant?.id) { mutableStateOf(assistant?.fileContextEnabled ?: true) }
+    fun buildDraft(id: String?, draftName: String = name): AssistantEditorDraft =
+        AssistantEditorDraft(
+            id = id,
+            name = draftName,
+            avatar = avatar,
+            tag = tag,
+            systemPrompt = prompt,
+            defaultModelMode = defaultModelMode,
+            defaultModelId = defaultModelId,
+            temperature = temperatureText.toAssistantFloat(assistant?.temperature ?: GenerationParams().temperature, 0f, 2f),
+            topP = topPText.toAssistantFloat(assistant?.topP ?: GenerationParams().topP, 0f, 1f),
+            nCtx = nCtxText.toAssistantInt(assistant?.nCtx ?: GenerationParams().nCtx, 512, 262_144),
+            nPredict = nPredictText.toAssistantInt(assistant?.nPredict ?: GenerationParams().nPredict, 128, 65_536),
+            reasoningMode = reasoningMode,
+            memoryEnabled = memoryEnabled,
+            webSearchEnabled = webSearchEnabled,
+            fileContextEnabled = fileContextEnabled
+        )
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(horizontal = 18.dp, vertical = 14.dp)
+            .navigationBarsPadding(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回助手列表")
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(if (assistant == null) "新建助手" else "编辑助手", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("角色卡、提示词、默认模型与生成参数", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(bottom = 88.dp)
+        ) {
+                item {
+                    Text("基础信息", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = avatar,
+                            onValueChange = { avatar = it.take(4) },
+                            label = { Text("头像") },
+                            singleLine = true,
+                            modifier = Modifier.weight(0.72f)
+                        )
+                        OutlinedTextField(
+                            value = name,
+                            onValueChange = { name = it },
+                            label = { Text("助手名称") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1.28f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = tag,
+                        onValueChange = { tag = it.take(24) },
+                        label = { Text("标签") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                item {
+                    OutlinedTextField(
+                        value = prompt,
+                        onValueChange = { prompt = it },
+                        label = { Text("系统提示词") },
+                        minLines = 6,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    TextButton(onClick = { prompt = GenerationParams().systemPrompt }) {
+                        Text("恢复默认提示词")
+                    }
+                }
+                item {
+                    Text("默认模型", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        FilterChip(
+                            selected = defaultModelMode == "follow_current",
+                            onClick = {
+                                defaultModelMode = "follow_current"
+                                defaultModelId = null
+                            },
+                            label = { Text("跟随当前") }
+                        )
+                        FilterChip(
+                            selected = defaultModelMode != "follow_current",
+                            enabled = selectedModelId != null,
+                            onClick = {
+                                defaultModelMode = if (selectedModelIsCloud) "cloud" else "local"
+                                defaultModelId = selectedModelId
+                            },
+                            label = {
+                                Text(
+                                    when (defaultModelMode) {
+                                        "cloud" -> "已绑定云端"
+                                        "local" -> "已绑定本地"
+                                        else -> if (selectedModelIsCloud) "绑定当前云端" else "绑定当前本地"
+                                    }
+                                )
+                            }
+                        )
+                    }
+                    Text(
+                        when {
+                            defaultModelMode == "follow_current" -> "切换到该助手时继续使用聊天页当前模型。"
+                            defaultModelId.isNullOrBlank() -> "当前绑定缺少模型，请先在聊天页选择可用模型。"
+                            else -> "切换到该助手时优先使用：${assistant?.modelSummary ?: selectedModelName ?: "已绑定模型"}"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                item {
+                    Text("能力", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        FilterChip(selected = memoryEnabled, onClick = { memoryEnabled = !memoryEnabled }, label = { Text("记忆") })
+                        FilterChip(selected = webSearchEnabled, onClick = { webSearchEnabled = !webSearchEnabled }, label = { Text("联网检索") })
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        FilterChip(selected = fileContextEnabled, onClick = { fileContextEnabled = !fileContextEnabled }, label = { Text("文件上下文") })
+                        FilterChip(selected = false, onClick = {}, enabled = false, label = { Text("本地工具预留") })
+                    }
+                }
+                item {
+                    Text("参数", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = temperatureText,
+                            onValueChange = { temperatureText = it },
+                            label = { Text("温度") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = topPText,
+                            onValueChange = { topPText = it },
+                            label = { Text("top_p") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = nCtxText,
+                            onValueChange = { nCtxText = it },
+                            label = { Text("上下文") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = nPredictText,
+                            onValueChange = { nPredictText = it },
+                            label = { Text("输出长度") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        ReasoningMode.entries.forEach { mode ->
+                            FilterChip(
+                                selected = reasoningMode == mode,
+                                onClick = { reasoningMode = mode },
+                                label = { Text(mode.label) }
+                            )
+                        }
+                    }
+                    Text(
+                        "保存后作为该助手的默认参数；聊天页和智能调参仍可继续调整当前会话。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                item {
+                    Text("角色卡", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        TextButton(
+                            onClick = {
+                                val copyName = name.trim().ifBlank { assistant?.name ?: "未命名助手" }.let { "$it 副本" }
+                                onSave(buildDraft(null, copyName))
+                            },
+                            enabled = assistant != null,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("复制为新助手")
+                        }
+                        TextButton(
+                            onClick = { assistant?.id?.let(onDelete) },
+                            enabled = assistant != null && assistant.id != "default",
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                "删除助手",
+                                color = if (assistant != null && assistant.id != "default") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Row(
+                modifier = Modifier.padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    onClick = onBack,
+                    modifier = Modifier.weight(1f).height(48.dp)
+                ) {
+                    Text("取消")
+                }
+                Button(
+                    onClick = { onSave(buildDraft(assistant?.id)) },
+                    modifier = Modifier.weight(1.45f).height(48.dp),
+                    shape = RoundedCornerShape(999.dp)
+                ) {
+                    Text("保存")
+                }
+            }
+        }
+}
+
+@Composable
+private fun AssistantImportPage(
+    onBack: () -> Unit,
+    onImport: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var rawJson by remember { mutableStateOf("") }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(horizontal = 18.dp, vertical = 14.dp)
+            .navigationBarsPadding(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回助手列表")
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text("导入角色卡", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("粘贴 MCA 角色卡 JSON", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Surface(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            OutlinedTextField(
+                value = rawJson,
+                onValueChange = { rawJson = it },
+                label = { Text("角色卡 JSON") },
+                minLines = 8,
+                modifier = Modifier.fillMaxSize().padding(12.dp)
+            )
+        }
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Row(
+                modifier = Modifier.padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onBack, modifier = Modifier.weight(1f).height(48.dp)) {
+                    Text("取消")
+                }
+                Button(
+                    onClick = { onImport(rawJson) },
+                    enabled = rawJson.isNotBlank(),
+                    modifier = Modifier.weight(1.45f).height(48.dp),
+                    shape = RoundedCornerShape(999.dp)
+                ) {
+                    Text("导入")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AssistantAvatar(name: String, avatar: String, selected: Boolean) {
+    val label = avatar.trim().ifBlank { name.trim() }.firstOrNull()?.toString() ?: "M"
+    Surface(
+        modifier = Modifier.size(42.dp),
+        color = if (selected) GeminiPrimaryBlue else MaterialTheme.colorScheme.surfaceVariant,
+        shape = CircleShape
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                label,
+                color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
+private fun AssistantCapabilityChip(label: String, enabled: Boolean) {
+    val darkTheme = isSystemInDarkTheme()
+    Surface(
+        color = when {
+            enabled && darkTheme -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f)
+            enabled -> Color(0xFFE6F4EA)
+            else -> MaterialTheme.colorScheme.surfaceVariant
+        },
+        shape = RoundedCornerShape(999.dp)
+    ) {
+        Text(
+            "$label${if (enabled) "开" else "关"}",
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = when {
+                enabled && darkTheme -> MaterialTheme.colorScheme.onPrimaryContainer
+                enabled -> Color(0xFF137333)
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            }
+        )
+    }
+}
+
+private fun Float.cleanParamText(): String =
+    if (this % 1f == 0f) toInt().toString() else "%.2f".format(java.util.Locale.US, this).trimEnd('0').trimEnd('.')
+
+private fun String.toAssistantFloat(default: Float, min: Float, max: Float): Float =
+    trim().toFloatOrNull()?.coerceIn(min, max) ?: default.coerceIn(min, max)
+
+private fun String.toAssistantInt(default: Int, min: Int, max: Int): Int =
+    trim().toIntOrNull()?.coerceIn(min, max) ?: default.coerceIn(min, max)
 
 @Composable
 private fun ImagesWorkspaceScreen(
@@ -492,6 +1272,7 @@ private fun ImagesWorkspaceScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val darkTheme = isSystemInDarkTheme()
     var showGenerationCanvas by rememberSaveable { mutableStateOf(false) }
     var pendingConversationPrompt by rememberSaveable { mutableStateOf("") }
     var previewImageId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -523,7 +1304,7 @@ private fun ImagesWorkspaceScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.White)
+            .background(if (darkTheme) MaterialTheme.colorScheme.background else Color.White)
             .navigationBarsPadding()
     ) {
         if (showGenerationCanvas) {
@@ -538,6 +1319,7 @@ private fun ImagesWorkspaceScreen(
                 onBackToGallery = { showGenerationCanvas = false },
                 onSelectImageModel = onSelectImageModel,
                 onRetry = { activeJob?.let(onRetryJob) },
+                onCancelGeneration = onCancelGeneration,
                 onUseImageAsset = onUseImageAsset
             )
         } else {
@@ -571,6 +1353,16 @@ private fun ImagesWorkspaceScreen(
                 ImageAssetPreviewOverlay(
                     image = image,
                     onDismiss = { previewImageId = null },
+                    onShare = {
+                        shareImageAsset(context, image)
+                            .onFailure { error ->
+                                Toast.makeText(context, error.message ?: "图片分享失败", Toast.LENGTH_SHORT).show()
+                            }
+                    },
+                    onDelete = {
+                        onDeleteImageAsset(image.id)
+                        previewImageId = null
+                    },
                     modifier = Modifier.align(Alignment.Center)
                 )
             }
@@ -594,6 +1386,9 @@ private fun ImageGalleryHome(
     onOpenImagePreview: (String) -> Unit,
     onDeleteImageAsset: (String) -> Unit
 ) {
+    val darkTheme = isSystemInDarkTheme()
+    val titleColor = if (darkTheme) MaterialTheme.colorScheme.onBackground else Color(0xFF202124)
+    val emptyTileColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1)
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -616,7 +1411,7 @@ private fun ImageGalleryHome(
                 "生成图片",
                 style = MaterialTheme.typography.titleMedium.copy(fontSize = 18.sp),
                 fontWeight = FontWeight.Bold,
-                color = Color(0xFF202124)
+                color = titleColor
             )
         }
         item {
@@ -644,7 +1439,7 @@ private fun ImageGalleryHome(
                 "我的图片",
                 style = MaterialTheme.typography.titleMedium.copy(fontSize = 18.sp),
                 fontWeight = FontWeight.Bold,
-                color = Color(0xFF202124)
+                color = titleColor
             )
         }
         if (images.isEmpty()) {
@@ -655,7 +1450,7 @@ private fun ImageGalleryHome(
                             modifier = Modifier
                                 .weight(1f)
                                 .height(112.dp)
-                                .background(Color(0xFFEDEFF1))
+                                .background(emptyTileColor)
                         )
                     }
                 }
@@ -688,13 +1483,14 @@ private fun ImageGalleryHome(
 
 @Composable
 private fun ImageGalleryTitleBar(onBack: () -> Unit) {
+    val darkTheme = isSystemInDarkTheme()
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Surface(
             modifier = Modifier.size(48.dp),
-            color = Color.White,
+            color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
             shape = CircleShape,
             shadowElevation = 7.dp
         ) {
@@ -708,7 +1504,7 @@ private fun ImageGalleryTitleBar(onBack: () -> Unit) {
             textAlign = TextAlign.Center,
             style = MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp),
             fontWeight = FontWeight.Bold,
-            color = Color(0xFF202124)
+            color = if (darkTheme) MaterialTheme.colorScheme.onBackground else Color(0xFF202124)
         )
         Spacer(modifier = Modifier.size(48.dp))
     }
@@ -726,8 +1522,10 @@ private fun ImageGenerationCanvas(
     onBackToGallery: () -> Unit,
     onSelectImageModel: (String) -> Unit,
     onRetry: () -> Unit,
+    onCancelGeneration: () -> Unit,
     onUseImageAsset: (String) -> Unit
 ) {
+    val darkTheme = isSystemInDarkTheme()
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -742,7 +1540,7 @@ private fun ImageGenerationCanvas(
             ) {
                 Surface(
                     onClick = onBackToGallery,
-                    color = Color.White,
+                    color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
                     shape = CircleShape,
                     shadowElevation = 7.dp
                 ) {
@@ -752,12 +1550,12 @@ private fun ImageGenerationCanvas(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回图片", modifier = Modifier.size(24.dp))
-                        Text("图片", fontSize = 17.sp, color = Color(0xFF202124))
+                        Text("图片", fontSize = 17.sp, color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124))
                     }
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 Surface(
-                    color = Color.White,
+                    color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
                     shape = CircleShape,
                     shadowElevation = 7.dp
                 ) {
@@ -792,6 +1590,7 @@ private fun ImageGenerationCanvas(
                 job = job,
                 image = image,
                 onRetry = onRetry,
+                onCancelGeneration = onCancelGeneration,
                 onUseImageAsset = onUseImageAsset
             )
         }
@@ -800,16 +1599,17 @@ private fun ImageGenerationCanvas(
 
 @Composable
 private fun UserImagePromptBubble(prompt: String) {
+    val darkTheme = isSystemInDarkTheme()
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Surface(
             modifier = Modifier.widthIn(max = 310.dp),
-            color = Color(0xFFF1F1F1),
+            color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF1F1F1),
             shape = RoundedCornerShape(24.dp)
         ) {
             Text(
                 prompt.ifBlank { "正在准备图片请求" },
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 15.dp),
-                color = Color(0xFF202124),
+                color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124),
                 lineHeight = 23.sp,
                 fontSize = 17.sp
             )
@@ -822,8 +1622,10 @@ private fun ImageAssistantResultCard(
     job: ImageGenerationUiJob?,
     image: ImageAssetUiItem?,
     onRetry: () -> Unit,
+    onCancelGeneration: () -> Unit,
     onUseImageAsset: (String) -> Unit
 ) {
+    val actionTint = MaterialTheme.colorScheme.onSurfaceVariant
     Column(horizontalAlignment = Alignment.Start, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         when {
             job?.failed == true -> ImageGenerationFailureCard(job = job, onRetry = onRetry)
@@ -831,25 +1633,40 @@ private fun ImageAssistantResultCard(
             else -> ImageCreatingPlaceholder(
                 statusText = job?.statusLabel ?: "正在创建图片",
                 statusMessage = job?.message.orEmpty(),
-                startedAtMillis = job?.startedAtMillis ?: System.currentTimeMillis()
+                startedAtMillis = job?.startedAtMillis ?: System.currentTimeMillis(),
+                onCancel = onCancelGeneration
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = {}, modifier = Modifier.size(34.dp)) {
-                Icon(Icons.Default.ThumbUp, contentDescription = "喜欢", tint = Color(0xFF5F6368), modifier = Modifier.size(20.dp))
+                Icon(Icons.Default.ThumbUp, contentDescription = "喜欢", tint = actionTint, modifier = Modifier.size(20.dp))
             }
             IconButton(onClick = {}, modifier = Modifier.size(34.dp)) {
-                Icon(Icons.Default.ThumbDown, contentDescription = "不喜欢", tint = Color(0xFF5F6368), modifier = Modifier.size(20.dp))
+                Icon(Icons.Default.ThumbDown, contentDescription = "不喜欢", tint = actionTint, modifier = Modifier.size(20.dp))
             }
             IconButton(onClick = {}, modifier = Modifier.size(34.dp)) {
-                Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = Color(0xFF5F6368), modifier = Modifier.size(22.dp))
+                Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = actionTint, modifier = Modifier.size(22.dp))
             }
         }
     }
 }
 
 @Composable
-private fun ImageCreatingPlaceholder(statusText: String, statusMessage: String, startedAtMillis: Long) {
+private fun ImageCreatingPlaceholder(
+    statusText: String,
+    statusMessage: String,
+    startedAtMillis: Long,
+    onCancel: () -> Unit
+) {
+    val darkTheme = isSystemInDarkTheme()
+    val cardColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF5F8FF)
+    val titleColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF31415F)
+    val bodyColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF66748A)
+    val progressTrackColor = if (darkTheme) {
+        MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+    } else {
+        Color.White.copy(alpha = 0.92f)
+    }
     val transition = rememberInfiniteTransition(label = "image-create")
     val phase by transition.animateFloat(
         initialValue = 0f,
@@ -881,25 +1698,26 @@ private fun ImageCreatingPlaceholder(statusText: String, statusMessage: String, 
         modifier = Modifier
             .width(292.dp)
             .height(292.dp),
-        color = Color(0xFFF5F8FF),
+        color = cardColor,
         shape = RoundedCornerShape(26.dp)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             Column(
                 modifier = Modifier
                     .align(Alignment.TopStart)
+                    .zIndex(1f)
                     .padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
                     if (statusText == "完成") "正在整理图片" else "正在创建图片",
-                    color = Color(0xFF31415F),
+                    color = titleColor,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
                     statusMessage.ifBlank { "MCA 正在等待图像引擎返回结果" },
-                    color = Color(0xFF66748A),
+                    color = bodyColor,
                     fontSize = 13.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -911,6 +1729,9 @@ private fun ImageCreatingPlaceholder(statusText: String, statusMessage: String, 
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold
                 )
+                TextButton(onClick = onCancel) {
+                    Text("取消生成")
+                }
             }
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val dot = 1.7.dp.toPx()
@@ -937,7 +1758,7 @@ private fun ImageCreatingPlaceholder(statusText: String, statusMessage: String, 
                 val trackLeft = size.width * 0.18f
                 val trackTop = size.height - 48.dp.toPx()
                 drawRoundRect(
-                    color = Color.White.copy(alpha = 0.92f),
+                    color = progressTrackColor,
                     topLeft = Offset(trackLeft, trackTop),
                     size = Size(trackWidth, trackHeight),
                     cornerRadius = CornerRadius(trackHeight / 2f, trackHeight / 2f)
@@ -957,9 +1778,10 @@ private fun ImageCreatingPlaceholder(statusText: String, statusMessage: String, 
 
 @Composable
 private fun ImageGenerationFailureCard(job: ImageGenerationUiJob, onRetry: () -> Unit) {
+    val darkTheme = isSystemInDarkTheme()
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Color(0xFFF4F6F9),
+        color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF4F6F9),
         shape = RoundedCornerShape(22.dp)
     ) {
         Row(
@@ -969,8 +1791,8 @@ private fun ImageGenerationFailureCard(job: ImageGenerationUiJob, onRetry: () ->
         ) {
             Text("失败", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
             Column(modifier = Modifier.weight(1f)) {
-                Text(job.prompt, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color(0xFF202124))
-                Text(job.message.ifBlank { "图片生成失败" }, maxLines = 2, color = Color(0xFF5F6368), fontSize = 13.sp)
+                Text(job.prompt, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124))
+                Text(job.message.ifBlank { "图片生成失败" }, maxLines = 2, color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF5F6368), fontSize = 13.sp)
             }
             TextButton(onClick = onRetry) { Text("重试") }
         }
@@ -980,6 +1802,7 @@ private fun ImageGenerationFailureCard(job: ImageGenerationUiJob, onRetry: () ->
 @Composable
 private fun ImageGenerationResultImage(image: ImageAssetUiItem, onUseImageAsset: (String) -> Unit) {
     val context = LocalContext.current
+    val darkTheme = isSystemInDarkTheme()
     val bitmap = remember(image.uriString) { loadImageBitmap(context, image.uriString) }
     val ratio = remember(image.width, image.height) {
         if (image.width > 0 && image.height > 0) {
@@ -994,7 +1817,7 @@ private fun ImageGenerationResultImage(image: ImageAssetUiItem, onUseImageAsset:
             .fillMaxWidth(0.86f)
             .aspectRatio(ratio)
             .clip(RoundedCornerShape(22.dp))
-            .background(Color(0xFFEDEFF1))
+            .background(if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1))
     ) {
         if (bitmap != null) {
             Image(
@@ -1007,7 +1830,7 @@ private fun ImageGenerationResultImage(image: ImageAssetUiItem, onUseImageAsset:
             Icon(
                 imageVector = Icons.Default.Image,
                 contentDescription = null,
-                tint = Color(0xFF9AA0A6),
+                tint = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF9AA0A6),
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(34.dp)
@@ -1056,6 +1879,12 @@ private fun ImageEngineSwitcher(
     selectedModelIsCloud: Boolean,
     onSelectModel: (String) -> Unit
 ) {
+    val darkTheme = isSystemInDarkTheme()
+    val chipColor = if (darkTheme) MaterialTheme.colorScheme.surface else Color(0xFFF4F6F9)
+    val modelChipColor = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White
+    val chipBorder = if (darkTheme) MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f) else Color(0xFFE0E3E7)
+    val chipTextColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124)
+    val chipMutedColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF5F6368)
     var sourceMenuExpanded by rememberSaveable { mutableStateOf(false) }
     var modelMenuSource by rememberSaveable { mutableStateOf<ImageEngineSource?>(null) }
     val selectedSource = if (selectedModelIsCloud) ImageEngineSource.CLOUD else ImageEngineSource.LOCAL
@@ -1070,18 +1899,18 @@ private fun ImageEngineSwitcher(
         Box {
             Surface(
                 onClick = { sourceMenuExpanded = true },
-                color = Color(0xFFF4F6F9),
+                color = chipColor,
                 shape = CircleShape,
-                border = BorderStroke(1.dp, Color(0xFFE0E3E7))
+                border = BorderStroke(1.dp, chipBorder)
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(7.dp)
                 ) {
-                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color(0xFF202124))
-                    Text(selectedSource.title, fontWeight = FontWeight.Bold, color = Color(0xFF202124))
-                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color(0xFF5F6368))
+                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp), tint = chipTextColor)
+                    Text(selectedSource.title, fontWeight = FontWeight.Bold, color = chipTextColor)
+                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = chipMutedColor)
                 }
             }
             DropdownMenu(
@@ -1111,9 +1940,9 @@ private fun ImageEngineSwitcher(
             Box {
                 Surface(
                     onClick = { modelMenuSource = source },
-                    color = Color.White,
+                    color = modelChipColor,
                     shape = CircleShape,
-                    border = BorderStroke(1.dp, Color(0xFFE0E3E7)),
+                    border = BorderStroke(1.dp, chipBorder),
                     shadowElevation = 2.dp
                 ) {
                     Row(
@@ -1127,11 +1956,11 @@ private fun ImageEngineSwitcher(
                             if (source == selectedSource) selectedModelName ?: "选择模型" else source.title,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            color = Color(0xFF202124),
+                            color = chipTextColor,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.weight(1f, fill = false)
                         )
-                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color(0xFF5F6368))
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = chipMutedColor)
                     }
                 }
                 DropdownMenu(
@@ -1235,6 +2064,7 @@ private fun ImageTemplateCard(
     cardWidth: Dp,
     onClick: () -> Unit
 ) {
+    val darkTheme = isSystemInDarkTheme()
     Column(
         modifier = Modifier
             .width(cardWidth)
@@ -1246,7 +2076,7 @@ private fun ImageTemplateCard(
             modifier = Modifier
                 .width(cardWidth)
                 .height(cardWidth * 1.42f),
-            color = Color.White,
+            color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
             shape = RoundedCornerShape(18.dp),
             shadowElevation = 2.dp,
             border = BorderStroke(1.dp, template.accent.copy(alpha = 0.18f))
@@ -1262,7 +2092,7 @@ private fun ImageTemplateCard(
             template.title,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            color = Color(0xFF858C98),
+            color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF858C98),
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold
         )
@@ -1271,9 +2101,10 @@ private fun ImageTemplateCard(
 
 @Composable
 private fun ImageJobRow(job: ImageGenerationUiJob, onRetry: () -> Unit) {
+    val darkTheme = isSystemInDarkTheme()
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Color(0xFFF4F6F9),
+        color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF4F6F9),
         shape = RoundedCornerShape(18.dp)
     ) {
         Row(
@@ -1284,7 +2115,7 @@ private fun ImageJobRow(job: ImageGenerationUiJob, onRetry: () -> Unit) {
                 job.statusLabel,
                 modifier = Modifier.width(58.dp),
                 style = MaterialTheme.typography.labelMedium,
-                color = if (job.failed) MaterialTheme.colorScheme.error else Color(0xFF1A73E8),
+                color = if (job.failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.Bold
             )
             Column(modifier = Modifier.weight(1f)) {
@@ -1293,14 +2124,14 @@ private fun ImageJobRow(job: ImageGenerationUiJob, onRetry: () -> Unit) {
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF202124)
+                    color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124)
                 )
                 if (job.message.isNotBlank()) {
                     Text(
                         job.message,
                         maxLines = 1,
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF5F6368)
+                        color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF5F6368)
                     )
                 }
             }
@@ -1319,11 +2150,12 @@ private fun ImageAssetTile(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val darkTheme = isSystemInDarkTheme()
     val bitmap = remember(image.uriString) { loadImageBitmap(context, image.uriString) }
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(2.dp))
-            .background(Color(0xFFEDEFF1))
+            .background(if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1))
             .clickable(onClick = onOpen)
     ) {
         if (bitmap != null) {
@@ -1337,7 +2169,7 @@ private fun ImageAssetTile(
             Icon(
                 imageVector = Icons.Default.Image,
                 contentDescription = null,
-                tint = Color(0xFF9AA0A6),
+                tint = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF9AA0A6),
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(28.dp)
@@ -1348,11 +2180,11 @@ private fun ImageAssetTile(
                 .align(Alignment.TopEnd)
                 .padding(4.dp)
                 .size(28.dp),
-            color = Color.White.copy(alpha = 0.88f),
+            color = if (darkTheme) MaterialTheme.colorScheme.surface.copy(alpha = 0.88f) else Color.White.copy(alpha = 0.88f),
             shape = CircleShape
         ) {
             IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "删除图片", modifier = Modifier.size(16.dp), tint = Color(0xFF202124))
+                Icon(Icons.Default.Close, contentDescription = "删除图片", modifier = Modifier.size(16.dp), tint = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124))
             }
         }
     }
@@ -1362,6 +2194,8 @@ private fun ImageAssetTile(
 private fun ImageAssetPreviewOverlay(
     image: ImageAssetUiItem,
     onDismiss: () -> Unit,
+    onShare: () -> Unit,
+    onDelete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -1394,6 +2228,12 @@ private fun ImageAssetPreviewOverlay(
                 fontWeight = FontWeight.SemiBold
             )
             Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
+                IconButton(onClick = onShare) {
+                    Icon(Icons.Default.Share, contentDescription = "分享图片", tint = Color.White)
+                }
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
                 IconButton(
                     onClick = {
                         downloadImageAssetToGallery(context, image)
@@ -1406,6 +2246,12 @@ private fun ImageAssetPreviewOverlay(
                     }
                 ) {
                     Icon(Icons.Default.Download, contentDescription = "下载图片", tint = Color.White)
+                }
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
+                IconButton(onClick = onDelete) {
+                    Icon(Icons.Default.Delete, contentDescription = "删除图片", tint = Color.White)
                 }
             }
         }
@@ -1430,7 +2276,7 @@ private fun ImageAssetPreviewOverlay(
                 Text("无法读取图片", color = Color.White.copy(alpha = 0.82f))
             }
         }
-        if (image.prompt.isNotBlank()) {
+        if (image.prompt.isNotBlank() || image.createdAtText.isNotBlank()) {
             Surface(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1439,14 +2285,27 @@ private fun ImageAssetPreviewOverlay(
                 color = Color.White.copy(alpha = 0.12f),
                 shape = RoundedCornerShape(18.dp)
             ) {
-                Text(
-                    image.prompt,
+                Column(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    color = Color.White.copy(alpha = 0.86f),
-                    fontSize = 13.sp
-                )
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        "${image.source.displayImageSource()} · ${image.createdAtText} · ${image.sizeText}",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = Color.White.copy(alpha = 0.72f),
+                        fontSize = 12.sp
+                    )
+                    if (image.prompt.isNotBlank()) {
+                        Text(
+                            image.prompt,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            color = Color.White.copy(alpha = 0.86f),
+                            fontSize = 13.sp
+                        )
+                    }
+                }
             }
         }
     }
@@ -1463,11 +2322,17 @@ private fun ImagePromptBar(
     onStop: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val darkTheme = isSystemInDarkTheme()
+    val inputShellColor = if (darkTheme) MaterialTheme.colorScheme.surface else GeminiInputShell
+    val inputFieldColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputField
+    val inputIconSurfaceColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputIconSurface
+    val inputTextColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else GeminiInputText
+    val inputPlaceholderColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else GeminiInputPlaceholder
     Surface(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 12.dp),
-        color = GeminiInputShell,
+        color = inputShellColor,
         shape = RoundedCornerShape(36.dp),
         shadowElevation = 14.dp
     ) {
@@ -1479,7 +2344,7 @@ private fun ImagePromptBar(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(GeminiInputIconSurface)
+                    .background(inputIconSurfaceColor)
                     .clickable(onClick = onOpenPhoto),
                 contentAlignment = Alignment.Center
             ) {
@@ -1490,7 +2355,7 @@ private fun ImagePromptBar(
                 modifier = Modifier
                     .weight(1f)
                     .heightIn(min = 38.dp),
-                color = GeminiInputField,
+                color = inputFieldColor,
                 shape = CircleShape
             ) {
                 Box(
@@ -1502,7 +2367,7 @@ private fun ImagePromptBar(
                     if (prompt.isBlank()) {
                         Text(
                             placeholder,
-                            color = GeminiInputPlaceholder,
+                            color = inputPlaceholderColor,
                             style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp)
                         )
                     }
@@ -1511,7 +2376,7 @@ private fun ImagePromptBar(
                         onValueChange = onPromptChange,
                         maxLines = 3,
                         textStyle = TextStyle(
-                            color = GeminiInputText,
+                            color = inputTextColor,
                             fontSize = 15.sp,
                             lineHeight = 20.sp
                         ),
@@ -1525,7 +2390,7 @@ private fun ImagePromptBar(
                 onClick = if (isGenerating) onStop else onSubmit,
                 containerColor = when {
                     isGenerating -> GeminiPrimaryBlue
-                    prompt.isBlank() -> Color(0xFFE5ECF8)
+                    prompt.isBlank() -> if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFE5ECF8)
                     else -> GeminiPrimaryBlue
                 },
                 elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp),
@@ -1535,7 +2400,7 @@ private fun ImagePromptBar(
                 if (isGenerating) {
                     Icon(Icons.Default.Stop, contentDescription = "停止生成", tint = Color.White)
                 } else {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "生成图片", tint = if (prompt.isBlank()) GeminiInputPlaceholder else Color.White)
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "生成图片", tint = if (prompt.isBlank()) inputPlaceholderColor else Color.White)
                 }
             }
         }
@@ -1553,6 +2418,30 @@ private fun loadImageBitmap(context: Context, uriString: String): Bitmap? =
     }.getOrNull()
 
 private fun downloadImageAssetToGallery(context: Context, image: ImageAssetUiItem): Result<String> =
+    runCatching { copyImageAssetToGallery(context, image).displayPath }
+
+private fun shareImageAsset(context: Context, image: ImageAssetUiItem): Result<Unit> =
+    runCatching {
+        val saved = copyImageAssetToGallery(context, image)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = saved.mimeType
+            putExtra(Intent.EXTRA_STREAM, saved.uri)
+            if (image.prompt.isNotBlank()) {
+                putExtra(Intent.EXTRA_TEXT, image.prompt)
+            }
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            clipData = ClipData.newUri(context.contentResolver, image.name, saved.uri)
+        }
+        context.startActivity(Intent.createChooser(intent, "分享图片"))
+    }
+
+private data class SavedImageCopy(
+    val uri: Uri,
+    val displayPath: String,
+    val mimeType: String
+)
+
+private fun copyImageAssetToGallery(context: Context, image: ImageAssetUiItem): SavedImageCopy =
     runCatching {
         val fileName = image.downloadFileName()
         val mimeType = fileName.imageMimeType()
@@ -1582,8 +2471,12 @@ private fun downloadImageAssetToGallery(context: Context, image: ImageAssetUiIte
             resolver.delete(outputUri, null, null)
             throw error
         }
-        "${Environment.DIRECTORY_PICTURES}/MCA/$fileName"
-    }
+        SavedImageCopy(
+            uri = outputUri,
+            displayPath = "${Environment.DIRECTORY_PICTURES}/MCA/$fileName",
+            mimeType = mimeType
+        )
+    }.getOrThrow()
 
 private fun openImageAssetInputStream(context: Context, uriString: String): InputStream {
     val uri = Uri.parse(uriString)
@@ -1619,6 +2512,18 @@ private fun String.imageMimeType(): String =
         else -> "image/png"
     }
 
+private fun String.displayImageSource(): String =
+    when {
+        startsWith("generated:", ignoreCase = true) -> removePrefix("generated:")
+            .replace('-', ' ')
+            .replace('_', ' ')
+            .ifBlank { "生成图片" }
+        equals("generated", ignoreCase = true) -> "生成图片"
+        equals("uploaded", ignoreCase = true) -> "上传图片"
+        isBlank() -> "图片"
+        else -> this
+    }
+
 private fun Long.formatElapsed(): String {
     val minutes = this / 60L
     val seconds = this % 60L
@@ -1627,6 +2532,19 @@ private fun Long.formatElapsed(): String {
 
 @Composable
 private fun PredictiveAppMenuPage(
+    visible: Boolean,
+    onDismiss: () -> Unit,
+    content: @Composable (Modifier, () -> Unit) -> Unit
+) {
+    SmoothRightToLeftPage(
+        visible = visible,
+        onDismiss = onDismiss,
+        content = content
+    )
+}
+
+@Composable
+private fun SmoothRightToLeftPage(
     visible: Boolean,
     onDismiss: () -> Unit,
     content: @Composable (Modifier, () -> Unit) -> Unit
@@ -1696,7 +2614,7 @@ private fun PredictiveAppMenuPage(
 
 private fun appMenuPageEnter() = slideInHorizontally(
     animationSpec = tween(durationMillis = 240),
-    initialOffsetX = { -it }
+    initialOffsetX = { it }
 ) + fadeIn(animationSpec = tween(durationMillis = 140))
 
 private fun appMenuPageExit() = slideOutHorizontally(
@@ -1757,6 +2675,8 @@ private fun McaAppMenuPage(
     onOpenAgent: () -> Unit,
     onOpenApi: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenImages: () -> Unit,
+    onOpenAssistants: () -> Unit,
     onClearHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1764,7 +2684,7 @@ private fun McaAppMenuPage(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.White)
+            .background(MaterialTheme.colorScheme.background)
             .padding(horizontal = 18.dp, vertical = 16.dp)
             .navigationBarsPadding()
     ) {
@@ -1793,10 +2713,16 @@ private fun McaAppMenuPage(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         AppMenuCard {
+            AppMenuRow(
+                icon = { Icon(Icons.Default.Psychology, null) },
+                title = "助手与角色",
+                subtitle = state.assistants.firstOrNull { it.selected }?.let { "${it.name} · 角色卡与能力" } ?: "当前助手、角色卡、提示词与能力",
+                onClick = onOpenAssistants
+            )
             AppMenuRow(icon = { Icon(Icons.Default.Folder, null) }, title = "模型管理", subtitle = "本地 GGUF 与魔塔下载", onClick = onOpenModels)
             AppMenuRow(icon = { McaLogoMark(size = 22.dp, cornerRadius = 7.dp) }, title = "智能调参", subtitle = "测速、推荐与高级参数", onClick = onOpenAgent)
-            AppMenuRow(icon = { Icon(Icons.Default.NetworkWifi, null) }, title = "本地 API", subtitle = "接口地址、Key 与网页对话", onClick = onOpenApi)
-            AppMenuRow(icon = { Icon(Icons.Default.Settings, null) }, title = "系统设置", subtitle = "运行、日志与诊断", onClick = onOpenSettings)
+            AppMenuRow(icon = { Icon(Icons.Default.NetworkWifi, null) }, title = "本地 API", subtitle = "接口地址、Key、API 使用文档", onClick = onOpenApi)
+            AppMenuRow(icon = { Icon(Icons.Default.Settings, null) }, title = "系统设置", subtitle = "运行、日志、诊断与实验功能", onClick = onOpenSettings)
         }
 
         Spacer(modifier = Modifier.height(18.dp))
@@ -1825,6 +2751,20 @@ private fun McaAppMenuPage(
                 title = "本地 API",
                 subtitle = if (state.apiEnabled || state.restEnabled) "已启用" else "未启用",
                 onClick = onOpenApi
+            )
+            AppMenuRow(
+                icon = { Icon(Icons.Default.Image, null) },
+                title = "图像任务",
+                subtitle = state.imageTaskSummary(),
+                onClick = onOpenImages
+            )
+            AppMenuRow(
+                icon = { Icon(Icons.Default.Psychology, null) },
+                title = state.assistants.firstOrNull { it.selected }?.name ?: "默认助手",
+                subtitle = state.assistants.firstOrNull { it.selected }?.let {
+                    "记忆${if (it.memoryEnabled) "开" else "关"} · 检索${if (it.webSearchEnabled) "开" else "关"}"
+                } ?: "助手能力状态",
+                onClick = onOpenAssistants
             )
         }
 
@@ -1874,7 +2814,7 @@ private fun McaAppMenuPage(
 private fun AppMenuCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Color(0xFFF1F3F4),
+        color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(20.dp)
     ) {
         Column(content = content)
@@ -1886,9 +2826,10 @@ private fun AppMenuRow(
     icon: @Composable () -> Unit,
     title: String,
     subtitle: String,
-    contentColor: Color = Color(0xFF202124),
+    contentColor: Color? = null,
     onClick: () -> Unit
 ) {
+    val rowContentColor = contentColor ?: MaterialTheme.colorScheme.onSurface
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1904,7 +2845,7 @@ private fun AppMenuRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 title,
-                color = contentColor,
+                color = rowContentColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 18.sp),
@@ -1915,7 +2856,7 @@ private fun AppMenuRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp, lineHeight = 13.sp),
-                color = if (contentColor == MaterialTheme.colorScheme.error) {
+                color = if (rowContentColor == MaterialTheme.colorScheme.error) {
                     MaterialTheme.colorScheme.error.copy(alpha = 0.72f)
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
@@ -1932,13 +2873,14 @@ private fun McaLogoMark(
     cornerRadius: Dp = 10.dp,
     modifier: Modifier = Modifier
 ) {
+    val markBackground = if (isSystemInDarkTheme()) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF8F9FA)
     Canvas(modifier = modifier.size(size)) {
         val side = this.size.minDimension
         val scale = side / 108f
         fun s(value: Float) = value * scale
 
         drawRoundRect(
-            color = Color(0xFFF8F9FA),
+            color = markBackground,
             topLeft = Offset.Zero,
             size = Size(side, side),
             cornerRadius = CornerRadius(cornerRadius.toPx(), cornerRadius.toPx())
@@ -2049,19 +2991,6 @@ private fun AnimatedMcaAssistantMark(
             }
         }
         McaLogoMark(size = 22.dp, cornerRadius = 8.dp)
-    }
-}
-
-/*
- * Legacy block replaced by GPT/Gemini layout.
- */
-@Composable
-private fun LegacyChatScreenBlock() {
-    if (false) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize()
-        ) {
-        }
     }
 }
 
@@ -2194,16 +3123,17 @@ private fun ChatStatusBar(
 ) {
     val apiActive = state.selectedModelIsCloud || state.apiEnabled || state.restEnabled
     var modelMenuExpanded by rememberSaveable { mutableStateOf(false) }
+    val assistantName = state.assistants.firstOrNull { it.selected }?.name ?: "默认助手"
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color.White)
+            .background(MaterialTheme.colorScheme.surface)
             .padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Surface(
             modifier = Modifier.size(44.dp),
-            color = Color.White,
+            color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
             shadowElevation = 6.dp
         ) {
@@ -2217,7 +3147,7 @@ private fun ChatStatusBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { modelMenuExpanded = true },
-                color = Color.White,
+                color = MaterialTheme.colorScheme.surface,
                 shape = CircleShape,
                 shadowElevation = 5.dp
             ) {
@@ -2233,31 +3163,31 @@ private fun ChatStatusBar(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp, lineHeight = 15.sp),
-                            color = Color(0xFF202124),
+                            color = MaterialTheme.colorScheme.onSurface,
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = if (state.selectedModelName == null) "未加载" else "${"%.1f".format(state.stats.decodeTps)} token/s",
+                            text = if (state.selectedModelName == null) "$assistantName · 未加载" else "$assistantName · ${"%.1f".format(state.stats.decodeTps)} token/s",
                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 13.sp),
-                            color = Color(0xFF5F6368)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     Surface(
-                        color = if (apiActive) Color(0xFFE8F0FE) else Color(0xFFF1F3F4),
+                        color = if (apiActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                         shape = CircleShape
                     ) {
                         Text(
                             text = "API",
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                            color = if (apiActive) Color(0xFF1A73E8) else Color(0xFF9AA0A6),
+                            color = if (apiActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
                             fontWeight = FontWeight.Bold
                         )
                     }
                     Icon(
                         imageVector = Icons.Default.KeyboardArrowDown,
                         contentDescription = null,
-                        tint = Color(0xFF9AA0A6),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier
                             .padding(start = 4.dp)
                             .size(15.dp)
@@ -2285,7 +3215,7 @@ private fun ChatStatusBar(
         }
         Spacer(modifier = Modifier.width(12.dp))
         Surface(
-            color = Color.White,
+            color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
             shadowElevation = 6.dp
         ) {
@@ -2331,7 +3261,7 @@ private fun ModelSwitcherDropdown(
         expanded = expanded,
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(30.dp),
-        containerColor = Color.White,
+        containerColor = MaterialTheme.colorScheme.surface,
         tonalElevation = 0.dp,
         shadowElevation = 18.dp,
         modifier = Modifier
@@ -2348,7 +3278,7 @@ private fun ModelSwitcherDropdown(
                     text = "推理来源",
                     modifier = Modifier.padding(horizontal = 18.dp, vertical = 7.dp),
                     style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp),
-                    color = Color(0xFF80868B),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = FontWeight.Medium
                 )
                 InferenceSourceMenuRow(
@@ -2376,7 +3306,7 @@ private fun ModelSwitcherDropdown(
                         text = "暂无可用推理模型",
                         modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp),
                         style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp, lineHeight = 13.sp),
-                        color = Color(0xFF9AA0A6)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 if (isGenerating) {
@@ -2384,12 +3314,12 @@ private fun ModelSwitcherDropdown(
                         text = "生成中请先停止，再切换模型。",
                         modifier = Modifier.padding(horizontal = 18.dp, vertical = 5.dp),
                         style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp, lineHeight = 13.sp),
-                        color = Color(0xFF9AA0A6)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 HorizontalDivider(
                     modifier = Modifier.padding(horizontal = 18.dp, vertical = 7.dp),
-                    color = Color(0xFFE8EAED)
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.58f)
                 )
                 CapsuleMenuRow(
                     leading = {
@@ -2414,13 +3344,13 @@ private fun ModelSwitcherDropdown(
                         Text(
                             text = "思考模式",
                             style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 19.sp),
-                            color = Color(0xFF202124),
+                            color = MaterialTheme.colorScheme.onSurface,
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier.weight(1f)
                         )
                         Text(
                             text = if (selectedModelIsCloud) "默认开启" else reasoningMode.shortLabel(),
-                            color = if (activeReasoningMode == ReasoningMode.OFF) Color(0xFF80868B) else Color(0xFF1A73E8),
+                            color = if (activeReasoningMode == ReasoningMode.OFF) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                             fontWeight = FontWeight.Bold
                         )
@@ -2428,7 +3358,7 @@ private fun ModelSwitcherDropdown(
                             Icon(
                                 imageVector = Icons.Default.KeyboardArrowDown,
                                 contentDescription = null,
-                                tint = Color(0xFF9AA0A6),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier
                                     .rotate(if (reasoningExpanded) -90f else 0f)
                                     .size(18.dp)
@@ -2438,14 +3368,14 @@ private fun ModelSwitcherDropdown(
                 }
                 CapsuleMenuRow(
                     leading = {
-                        Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(21.dp), tint = Color(0xFF202124))
+                        Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurface)
                     },
                     onClick = onOpenModels
                 ) {
                     Text(
                         text = "更多模型",
                         style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp),
-                        color = Color(0xFF202124),
+                        color = MaterialTheme.colorScheme.onSurface,
                         fontWeight = FontWeight.Medium
                     )
                 }
@@ -2505,12 +3435,13 @@ private fun InferenceSourceMenuRow(
     count: Int,
     onClick: () -> Unit
 ) {
+    val selectedColor = if (isSystemInDarkTheme()) MaterialTheme.colorScheme.primary else Color(0xFF1A73E8)
     CapsuleMenuRow(
         leading = {
             if (selected) {
-                Icon(Icons.Default.Check, contentDescription = null, tint = Color(0xFF202124), modifier = Modifier.size(21.dp))
+                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(21.dp))
             } else if (source == InferenceSource.CLOUD) {
-                Icon(Icons.Default.NetworkWifi, contentDescription = null, tint = Color(0xFF1A73E8), modifier = Modifier.size(21.dp))
+                Icon(Icons.Default.NetworkWifi, contentDescription = null, tint = selectedColor, modifier = Modifier.size(21.dp))
             } else {
                 McaLogoMark(size = 22.dp, cornerRadius = 7.dp)
             }
@@ -2522,7 +3453,7 @@ private fun InferenceSourceMenuRow(
                 Text(
                     text = source.title,
                     style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 19.sp),
-                    color = Color(0xFF202124),
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
                 )
                 Text(
@@ -2534,14 +3465,14 @@ private fun InferenceSourceMenuRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp, lineHeight = 13.sp),
-                    color = if (selected) Color(0xFF1A73E8) else Color(0xFF80868B),
+                    color = if (selected) selectedColor else MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal
                 )
             }
             Icon(
                 imageVector = Icons.Default.KeyboardArrowDown,
                 contentDescription = null,
-                tint = Color(0xFF9AA0A6),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
                     .rotate(if (expanded) -90f else 0f)
                     .size(18.dp)
@@ -2559,9 +3490,10 @@ private fun ModelSourceInlineCapsule(
     onOpenModels: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val darkTheme = isSystemInDarkTheme()
     Surface(
         modifier = modifier,
-        color = Color.White,
+        color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
         shape = RoundedCornerShape(28.dp),
         shadowElevation = 14.dp
     ) {
@@ -2573,7 +3505,7 @@ private fun ModelSourceInlineCapsule(
                 text = source.title,
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
                 style = MaterialTheme.typography.labelMedium.copy(fontSize = 11.5.sp),
-                color = Color(0xFF80868B),
+                color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF80868B),
                 fontWeight = FontWeight.Medium
             )
             if (models.isEmpty()) {
@@ -2581,7 +3513,7 @@ private fun ModelSourceInlineCapsule(
                     text = if (source == InferenceSource.CLOUD) "暂无云端模型" else "暂无本地模型",
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 14.sp),
-                    color = Color(0xFF9AA0A6)
+                    color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF9AA0A6)
                 )
                 ReasoningModePill(
                     label = "模型管理",
@@ -2609,12 +3541,18 @@ private fun ModelChoicePill(
     enabled: Boolean,
     onClick: () -> Unit
 ) {
+    val darkTheme = isSystemInDarkTheme()
+    val selectedColor = if (darkTheme) MaterialTheme.colorScheme.primary else Color(0xFF1A73E8)
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 44.dp)
             .clickable(enabled = enabled, onClick = onClick),
-        color = if (model.loaded) Color(0xFFE8F0FE) else Color.Transparent,
+        color = if (model.loaded) {
+            if (darkTheme) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f) else Color(0xFFE8F0FE)
+        } else {
+            Color.Transparent
+        },
         shape = RoundedCornerShape(22.dp)
     ) {
         Row(
@@ -2622,7 +3560,7 @@ private fun ModelChoicePill(
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (model.loaded) {
-                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(17.dp), tint = Color(0xFF1A73E8))
+                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(17.dp), tint = selectedColor)
             } else {
                 Spacer(modifier = Modifier.size(17.dp))
             }
@@ -2632,7 +3570,7 @@ private fun ModelChoicePill(
                     text = displayModelName(model.displayName) ?: model.displayName,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    color = if (model.loaded) Color(0xFF1A73E8) else Color(0xFF202124),
+                    color = if (model.loaded) selectedColor else MaterialTheme.colorScheme.onSurface,
                     style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.5.sp, lineHeight = 16.sp),
                     fontWeight = if (model.loaded) FontWeight.SemiBold else FontWeight.Medium
                 )
@@ -2648,7 +3586,7 @@ private fun ModelChoicePill(
                     }.joinToString(" · ").ifBlank { if (model.cloud) "云端模型" else "本地 GGUF" },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    color = if (model.loaded) Color(0xFF1A73E8) else Color(0xFF80868B),
+                    color = if (model.loaded) selectedColor else MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
                     fontWeight = if (model.loaded) FontWeight.Medium else FontWeight.Normal
                 )
@@ -2663,16 +3601,22 @@ private fun ThinkingModeMark(
     selected: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val darkTheme = isSystemInDarkTheme()
+    val selectedColor = if (darkTheme) MaterialTheme.colorScheme.primary else Color(0xFF1A73E8)
     Surface(
         modifier = modifier,
-        color = if (selected) Color(0xFFE8F0FE) else Color(0xFFF1F3F4),
+        color = if (selected) {
+            if (darkTheme) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f) else Color(0xFFE8F0FE)
+        } else {
+            if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF1F3F4)
+        },
         shape = CircleShape
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(
                 imageVector = Icons.Default.Psychology,
                 contentDescription = null,
-                tint = if (selected) Color(0xFF1A73E8) else Color(0xFF5F6368),
+                tint = if (selected) selectedColor else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(20.dp)
             )
             if (mode == ReasoningMode.ADVANCED) {
@@ -2681,7 +3625,7 @@ private fun ThinkingModeMark(
                         .align(Alignment.TopEnd)
                         .padding(top = 5.dp, end = 5.dp)
                         .size(5.dp)
-                        .background(Color(0xFF1A73E8), CircleShape)
+                        .background(selectedColor, CircleShape)
                 )
             }
         }
@@ -2694,9 +3638,10 @@ private fun ReasoningModeInlineCapsule(
     onSelect: (ReasoningMode) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val darkTheme = isSystemInDarkTheme()
     Surface(
         modifier = modifier,
-        color = Color.White,
+        color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
         shape = RoundedCornerShape(28.dp),
         shadowElevation = 14.dp
     ) {
@@ -2708,7 +3653,7 @@ private fun ReasoningModeInlineCapsule(
                 text = "思考模式",
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
                 style = MaterialTheme.typography.labelMedium.copy(fontSize = 11.5.sp),
-                color = Color(0xFF80868B),
+                color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF80868B),
                 fontWeight = FontWeight.Medium
             )
             ReasoningMode.entries.forEach { mode ->
@@ -2774,7 +3719,7 @@ private fun ReasoningModeCapsuleDrawer(
                     .padding(top = 82.dp, end = 18.dp)
                     .width(152.dp)
                     .clickable(enabled = false) {},
-                color = Color.White,
+                color = if (isSystemInDarkTheme()) MaterialTheme.colorScheme.surface else Color.White,
                 shape = RoundedCornerShape(28.dp),
                 shadowElevation = 14.dp
             ) {
@@ -2786,7 +3731,7 @@ private fun ReasoningModeCapsuleDrawer(
                         text = "思考模式",
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                         style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp),
-                        color = Color(0xFF80868B),
+                        color = if (isSystemInDarkTheme()) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF80868B),
                         fontWeight = FontWeight.Medium
                     )
                     ReasoningMode.entries.forEach { mode ->
@@ -2808,12 +3753,18 @@ private fun ReasoningModePill(
     selected: Boolean,
     onClick: () -> Unit
 ) {
+    val darkTheme = isSystemInDarkTheme()
+    val selectedColor = if (darkTheme) MaterialTheme.colorScheme.primary else Color(0xFF1A73E8)
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .height(38.dp)
             .clickable(onClick = onClick),
-        color = if (selected) Color(0xFFE8F0FE) else Color.Transparent,
+        color = if (selected) {
+            if (darkTheme) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f) else Color(0xFFE8F0FE)
+        } else {
+            Color.Transparent
+        },
         shape = CircleShape
     ) {
         Row(
@@ -2821,14 +3772,14 @@ private fun ReasoningModePill(
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (selected) {
-                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(17.dp), tint = Color(0xFF1A73E8))
+                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(17.dp), tint = selectedColor)
             } else {
                 Spacer(modifier = Modifier.size(17.dp))
             }
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = label,
-                color = if (selected) Color(0xFF1A73E8) else Color(0xFF202124),
+                color = if (selected) selectedColor else MaterialTheme.colorScheme.onSurface,
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
             )
@@ -2875,13 +3826,13 @@ private fun ChatHistoryDrawer(
 
     ModalDrawerSheet(
         modifier = Modifier.fillMaxSize(),
-        drawerContainerColor = Color.White
+        drawerContainerColor = MaterialTheme.colorScheme.background
     ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .edgeSwipeBack(onClose)
-                .background(Color.White)
+                .background(MaterialTheme.colorScheme.background)
                 .navigationBarsPadding()
         ) {
             Column(
@@ -2897,7 +3848,7 @@ private fun ChatHistoryDrawer(
                         modifier = Modifier.weight(1f)
                     )
                     Surface(
-                        color = Color.White,
+                        color = MaterialTheme.colorScheme.surface,
                         shape = CircleShape,
                         shadowElevation = 8.dp
                     ) {
@@ -2963,7 +3914,7 @@ private fun ChatHistoryDrawer(
                     .padding(end = 24.dp, bottom = 24.dp)
                     .height(44.dp)
                     .clickable(onClick = onNewConversation),
-                color = Color(0xFF202124),
+                color = MaterialTheme.colorScheme.onBackground,
                 shape = CircleShape,
                 shadowElevation = 12.dp
             ) {
@@ -2971,11 +3922,11 @@ private fun ChatHistoryDrawer(
                     modifier = Modifier.padding(horizontal = 18.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.Edit, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Default.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.background, modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         "聊天",
-                        color = Color.White,
+                        color = MaterialTheme.colorScheme.background,
                         style = MaterialTheme.typography.titleSmall.copy(fontSize = 14.sp),
                         fontWeight = FontWeight.Bold
                     )
@@ -3112,7 +4063,7 @@ private fun AppFeatureButton(icon: @Composable () -> Unit, text: String, onClick
         Text(
             text,
             style = MaterialTheme.typography.titleMedium.copy(fontSize = 16.sp, lineHeight = 20.sp),
-            color = Color(0xFF202124),
+            color = MaterialTheme.colorScheme.onSurface,
             fontWeight = FontWeight.Medium
         )
     }
@@ -3157,7 +4108,7 @@ private fun HistoryRow(
     var menuExpanded by remember { mutableStateOf(false) }
     Surface(
         color = if (item.selected) {
-            Color.White
+            MaterialTheme.colorScheme.surface
         } else {
             Color.Transparent
         },
@@ -3228,13 +4179,13 @@ private fun HistoryRow(
                     onDismissRequest = { menuExpanded = false },
                     modifier = Modifier.width(216.dp),
                     shape = RoundedCornerShape(20.dp),
-                    containerColor = Color.White,
+                    containerColor = MaterialTheme.colorScheme.surface,
                     tonalElevation = 0.dp,
                     shadowElevation = 18.dp
                 ) {
                     Column(
                         modifier = Modifier
-                            .background(Color.White)
+                            .background(MaterialTheme.colorScheme.surface)
                             .padding(vertical = 7.dp),
                         verticalArrangement = Arrangement.spacedBy(1.dp)
                     ) {
@@ -3256,7 +4207,7 @@ private fun HistoryRow(
                         )
                         HorizontalDivider(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                            color = Color(0xFFE8EAED)
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
                         )
                         HistoryMenuItem(
                             text = "删除",
@@ -3286,10 +4237,12 @@ private fun HistoryRow(
 private fun HistoryMenuItem(
     text: String,
     icon: @Composable () -> Unit,
-    contentColor: Color = Color(0xFF202124),
-    iconContainerColor: Color = Color(0xFFF1F3F4),
+    contentColor: Color? = null,
+    iconContainerColor: Color? = null,
     onClick: () -> Unit
 ) {
+    val itemContentColor = contentColor ?: MaterialTheme.colorScheme.onSurface
+    val itemIconContainerColor = iconContainerColor ?: MaterialTheme.colorScheme.surfaceVariant
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -3300,7 +4253,7 @@ private fun HistoryMenuItem(
     ) {
         Surface(
             modifier = Modifier.size(30.dp),
-            color = iconContainerColor,
+            color = itemIconContainerColor,
             shape = RoundedCornerShape(10.dp)
         ) {
             Box(contentAlignment = Alignment.Center) {
@@ -3310,7 +4263,7 @@ private fun HistoryMenuItem(
         Spacer(modifier = Modifier.width(12.dp))
         Text(
             text,
-            color = contentColor,
+            color = itemContentColor,
             style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 19.sp),
             fontWeight = FontWeight.Medium,
             modifier = Modifier.weight(1f)
@@ -3449,11 +4402,30 @@ private fun ChatInputBar(
     onOpenCamera: () -> Unit,
     onOpenPhoto: () -> Unit,
     onOpenFile: () -> Unit,
+    onOpenFileLibrary: () -> Unit,
     reasoningMode: ReasoningMode,
     onReasoningModeChange: (ReasoningMode) -> Unit,
+    webSearchEnabled: Boolean,
+    webSearchConfigured: Boolean,
+    webSearchEnabledForTurn: Boolean,
+    webSearchStatusMessage: String?,
+    webSearchTurnModeLabel: String,
+    webSearchResearchModeLabel: String,
+    webSearchResearchOverridden: Boolean,
+    webSearchProviderLabel: String,
+    onToggleWebSearchForTurn: () -> Unit,
+    onCycleWebSearchResearchMode: () -> Unit,
+    onOpenWebSearchSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showActionSheet by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    val darkTheme = isSystemInDarkTheme()
+    val inputShellColor = if (darkTheme) MaterialTheme.colorScheme.surface else GeminiInputShell
+    val inputFieldColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputField
+    val inputIconSurfaceColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputIconSurface
+    val inputTextColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else GeminiInputText
+    val inputPlaceholderColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else GeminiInputPlaceholder
     if (showActionSheet) {
         CompactInputActionMenu(
             onDismiss = { showActionSheet = false },
@@ -3469,6 +4441,29 @@ private fun ChatInputBar(
                 showActionSheet = false
                 onOpenFile()
             },
+            onLibrary = {
+                showActionSheet = false
+                onOpenFileLibrary()
+            },
+            onWebSearch = {
+                showActionSheet = false
+                onToggleWebSearchForTurn()
+            },
+            onResearchMode = {
+                showActionSheet = false
+                onCycleWebSearchResearchMode()
+            },
+            onOpenWebSearchSettings = {
+                showActionSheet = false
+                onOpenWebSearchSettings()
+            },
+            webSearchEnabled = webSearchEnabled,
+            webSearchConfigured = webSearchConfigured,
+            webSearchEnabledForTurn = webSearchEnabledForTurn,
+            webSearchTurnModeLabel = webSearchTurnModeLabel,
+            webSearchResearchModeLabel = webSearchResearchModeLabel,
+            webSearchResearchOverridden = webSearchResearchOverridden,
+            webSearchProviderLabel = webSearchProviderLabel,
             modifier = modifier
         )
     }
@@ -3476,7 +4471,7 @@ private fun ChatInputBar(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 10.dp),
-        color = GeminiInputShell,
+        color = inputShellColor,
         shape = RoundedCornerShape(36.dp),
         shadowElevation = 14.dp
     ) {
@@ -3485,6 +4480,13 @@ private fun ChatInputBar(
                 .padding(7.dp)
                 .navigationBarsPadding()
         ) {
+            if (!webSearchStatusMessage.isNullOrBlank()) {
+                WebSearchStatusChip(
+                    message = webSearchStatusMessage,
+                    active = webSearchEnabledForTurn,
+                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 6.dp)
+                )
+            }
             AttachmentPreview(
                 input = input,
                 onRemove = { onInputChange(removeAttachmentFromInput(input)) }
@@ -3494,11 +4496,11 @@ private fun ChatInputBar(
                     modifier = Modifier
                         .size(40.dp)
                         .clip(CircleShape)
-                        .background(if (isGenerating) Color(0xFFE9EDF5) else GeminiInputIconSurface)
+                        .background(if (isGenerating) MaterialTheme.colorScheme.surfaceVariant else inputIconSurfaceColor)
                         .clickable(enabled = !isGenerating) { showActionSheet = true },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "上传文件", modifier = Modifier.size(24.dp), tint = if (isGenerating) GeminiInputPlaceholder else GeminiPrimaryBlue)
+                    Icon(Icons.Default.Add, contentDescription = "更多操作", modifier = Modifier.size(24.dp), tint = if (isGenerating) inputPlaceholderColor else GeminiPrimaryBlue)
                 }
                 Spacer(modifier = Modifier.width(10.dp))
                 val visibleInput = displayInputWithoutAttachment(input)
@@ -3506,7 +4508,7 @@ private fun ChatInputBar(
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 40.dp),
-                    color = GeminiInputField,
+                    color = inputFieldColor,
                     shape = CircleShape
                 ) {
                     Box(
@@ -3518,7 +4520,7 @@ private fun ChatInputBar(
                         if (visibleInput.isBlank()) {
                             Text(
                                 "问问 MCA",
-                                color = GeminiInputPlaceholder,
+                                color = inputPlaceholderColor,
                                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp)
                             )
                         }
@@ -3530,7 +4532,7 @@ private fun ChatInputBar(
                             enabled = !isGenerating,
                             maxLines = 4,
                             textStyle = TextStyle(
-                                color = GeminiInputText,
+                                color = inputTextColor,
                                 fontSize = 15.sp,
                                 lineHeight = 20.sp
                             ),
@@ -3561,13 +4563,59 @@ private fun ChatInputBar(
 }
 
 @Composable
+private fun WebSearchStatusChip(
+    message: String,
+    active: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val darkTheme = isSystemInDarkTheme()
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = if (active && !darkTheme) Color(0xFFEAF1FF) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+        shape = CircleShape
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Search,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = if (active) GeminiPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
 private fun CompactInputActionMenu(
     onDismiss: () -> Unit,
     onCamera: () -> Unit,
     onPhoto: () -> Unit,
     onFile: () -> Unit,
+    onLibrary: () -> Unit,
+    onWebSearch: () -> Unit,
+    onResearchMode: () -> Unit,
+    onOpenWebSearchSettings: () -> Unit,
+    webSearchEnabled: Boolean,
+    webSearchConfigured: Boolean,
+    webSearchEnabledForTurn: Boolean,
+    webSearchTurnModeLabel: String,
+    webSearchResearchModeLabel: String,
+    webSearchResearchOverridden: Boolean,
+    webSearchProviderLabel: String,
     modifier: Modifier = Modifier
 ) {
+    val darkTheme = isSystemInDarkTheme()
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -3589,11 +4637,11 @@ private fun CompactInputActionMenu(
             exit = fadeOut(tween(100)),
             modifier = Modifier
                 .padding(bottom = 86.dp)
-                .width(206.dp)
+                .width(238.dp)
         ) {
             Surface(
                 modifier = Modifier.clickable(enabled = false) {},
-                color = Color.White,
+                color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
                 shape = RoundedCornerShape(30.dp),
                 shadowElevation = 18.dp
             ) {
@@ -3616,6 +4664,53 @@ private fun CompactInputActionMenu(
                         label = "文件",
                         onClick = onFile
                     )
+                    CompactInputActionRow(
+                        icon = { Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                        label = "从文件库添加",
+                        onClick = onLibrary
+                    )
+                    CompactInputActionRow(
+                        icon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                        label = when {
+                            !webSearchEnabled -> "联网检索：去启用"
+                            !webSearchConfigured && webSearchProviderLabel.contains("协议自检源") -> "联网检索：协议自检"
+                            !webSearchConfigured -> "联网检索：网页直读"
+                            webSearchTurnModeLabel.isNotBlank() -> "联网检索：$webSearchTurnModeLabel"
+                            webSearchProviderLabel.contains("智能") -> "联网检索：智能判断"
+                            webSearchProviderLabel.contains("始终") -> "联网检索：始终开启"
+                            webSearchEnabledForTurn -> "联网检索：本轮开启"
+                            else -> "联网检索：手动开启"
+                        },
+                        subtitle = when {
+                            !webSearchEnabled -> "设置中开启"
+                            !webSearchConfigured && webSearchProviderLabel.contains("协议自检源") -> "可直读链接 · 关键词搜索未接入"
+                            !webSearchConfigured -> "可读取链接 · 搜索未配置"
+                            else -> webSearchProviderLabel.takeIf { it.isNotBlank() }
+                        },
+                        onClick = onWebSearch
+                    )
+                    if (!webSearchConfigured) {
+                        CompactInputActionRow(
+                            icon = { Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            label = if (webSearchEnabled) "配置真实搜索源" else "打开联网检索设置",
+                            subtitle = if (webSearchEnabled) {
+                                "接入 SearxNG / Brave / Tavily / Jina"
+                            } else {
+                                "启用后可直读链接并接入搜索服务"
+                            },
+                            onClick = onOpenWebSearchSettings
+                        )
+                    }
+                    CompactInputActionRow(
+                        icon = { Icon(Icons.Default.Psychology, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                        label = "研究模式：${webSearchResearchModeLabel.ifBlank { "自动" }}",
+                        subtitle = when {
+                            !webSearchEnabled -> "先启用联网检索"
+                            webSearchResearchOverridden -> "仅影响下一轮发送"
+                            else -> "跟随联网检索默认设置"
+                        },
+                        onClick = onResearchMode
+                    )
                 }
             }
         }
@@ -3626,8 +4721,10 @@ private fun CompactInputActionMenu(
 private fun CompactInputActionRow(
     icon: @Composable () -> Unit,
     label: String,
+    subtitle: String? = null,
     onClick: () -> Unit
 ) {
+    val darkTheme = isSystemInDarkTheme()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -3639,7 +4736,7 @@ private fun CompactInputActionRow(
     ) {
         Surface(
             modifier = Modifier.size(34.dp),
-            color = Color(0xFFF1F3F4),
+            color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF1F3F4),
             shape = CircleShape
         ) {
             Box(contentAlignment = Alignment.Center) {
@@ -3647,13 +4744,257 @@ private fun CompactInputActionRow(
             }
         }
         Spacer(modifier = Modifier.width(14.dp))
-        Text(
-            text = label,
-            color = Color(0xFF202124),
-            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 19.sp),
-            fontWeight = FontWeight.Medium
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124),
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 19.sp),
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    text = subtitle,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
     }
+}
+
+private enum class FileLibraryFilter(val label: String) {
+    ALL("全部"),
+    TEXT("文本"),
+    CODE("代码"),
+    DATA("数据")
+}
+
+@Composable
+private fun FileLibraryPage(
+    files: List<FileAssetUiItem>,
+    onInsert: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var query by rememberSaveable { mutableStateOf("") }
+    var filter by rememberSaveable { mutableStateOf(FileLibraryFilter.ALL) }
+    val darkTheme = isSystemInDarkTheme()
+    val libraryInputFieldColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputField
+    val filtered = remember(files, query, filter) {
+        files.filter { file ->
+            val queryMatched = query.isBlank() ||
+                file.name.contains(query, ignoreCase = true) ||
+                file.preview.contains(query, ignoreCase = true)
+            queryMatched && file.matchesFilter(filter)
+        }
+    }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(horizontal = 18.dp, vertical = 14.dp)
+            .navigationBarsPadding(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("文件库", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "${files.size} 个本机文件索引",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Default.Close, contentDescription = "关闭文件库")
+                }
+            }
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = { Text("搜索文件名或内容预览") },
+                shape = RoundedCornerShape(20.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = libraryInputFieldColor,
+                    unfocusedContainerColor = libraryInputFieldColor,
+                    focusedBorderColor = GeminiPrimaryBlue.copy(alpha = 0.42f),
+                    unfocusedBorderColor = Color.Transparent
+                )
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState())
+            ) {
+                FileLibraryFilter.entries.forEach { item ->
+                    FilterChip(
+                        selected = filter == item,
+                        onClick = { filter = item },
+                        label = { Text(item.label) }
+                    )
+                }
+            }
+            if (filtered.isEmpty()) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 22.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            if (files.isEmpty()) "文件库为空" else "没有匹配文件",
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            if (files.isEmpty()) "从输入框上传文本、Markdown、JSON、代码文件后，会自动出现在这里。"
+                            else "换个关键词或切换筛选类型试试。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(bottom = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(filtered, key = { it.id }) { file ->
+                        FileLibraryRow(
+                            file = file,
+                            onInsert = { onInsert(file.id) },
+                            onDelete = { onDelete(file.id) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+@Composable
+private fun FileLibraryRow(
+    file: FileAssetUiItem,
+    onInsert: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val darkTheme = isSystemInDarkTheme()
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f),
+        shape = RoundedCornerShape(18.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    modifier = Modifier.size(36.dp),
+                    color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputIconSurface,
+                    shape = CircleShape
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Default.Folder,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = GeminiPrimaryBlue
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        file.name,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "${file.sizeText} · ${file.createdAtText}${if (file.truncated) " · 已截取" else ""}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Text(
+                file.preview,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = onDelete) {
+                    Text("删除")
+                }
+                Button(onClick = onInsert) {
+                    Text("插入当前聊天")
+                }
+            }
+        }
+    }
+}
+
+private fun FileAssetUiItem.matchesFilter(filter: FileLibraryFilter): Boolean {
+    if (filter == FileLibraryFilter.ALL) return true
+    val lowerName = name.lowercase()
+    val lowerMime = mimeType.lowercase()
+    return when (filter) {
+        FileLibraryFilter.ALL -> true
+        FileLibraryFilter.TEXT -> lowerMime.startsWith("text/") &&
+            !lowerName.endsWith(".kt") &&
+            !lowerName.endsWith(".java") &&
+            !lowerName.endsWith(".py") &&
+            !lowerName.endsWith(".js") &&
+            !lowerName.endsWith(".ts")
+        FileLibraryFilter.CODE -> lowerMime.contains("code") ||
+            lowerName.endsWith(".kt") ||
+            lowerName.endsWith(".java") ||
+            lowerName.endsWith(".py") ||
+            lowerName.endsWith(".js") ||
+            lowerName.endsWith(".ts")
+        FileLibraryFilter.DATA -> lowerMime.contains("json") ||
+            lowerMime.contains("xml") ||
+            lowerName.endsWith(".json") ||
+            lowerName.endsWith(".jsonl") ||
+            lowerName.endsWith(".xml") ||
+            lowerName.endsWith(".csv")
+    }
+}
+
+private fun ChatUiState.imageTaskSummary(): String {
+    val running = imageJobs.firstOrNull { job ->
+        !job.failed && job.imageAssetId == null && (job.statusLabel == "排队" || job.statusLabel == "生成中")
+    }
+    if (running != null) {
+        return "${running.statusLabel} · ${running.prompt.take(18)}"
+    }
+    val failedJob = imageJobs.firstOrNull { it.failed }
+    if (failedJob != null) {
+        return "失败，可进入图片页重试"
+    }
+    val completed = imageJobs.firstOrNull { it.imageAssetId != null || it.statusLabel == "完成" }
+    return if (completed != null) "最近完成 · 可查看图片库" else "空闲 · 可进入图片页"
 }
 
 @Composable
@@ -3876,6 +5217,12 @@ private fun AssistantMessageBlock(
                     AssistantRichText(message.content)
                 }
             }
+            if (message.sourceReferences.isNotEmpty() || message.webSearchTrace?.hasContent == true) {
+                WebSearchSourcesRow(
+                    sources = message.sourceReferences,
+                    trace = message.webSearchTrace
+                )
+            }
             if (showActions) {
                 AssistantActionRow(
                     canRegenerate = canRegenerate,
@@ -3887,6 +5234,495 @@ private fun AssistantMessageBlock(
         }
     }
 }
+
+@Composable
+private fun WebSearchSourcesRow(
+    sources: List<ChatSourceReference>,
+    trace: ChatWebSearchTrace?
+) {
+    val context = LocalContext.current
+    var selectedUrl by remember(sources) { mutableStateOf<String?>(null) }
+    val selectedSource = sources.firstOrNull { it.url == selectedUrl }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (trace?.hasContent == true) {
+            WebSearchTraceCard(trace = trace)
+        }
+        if (sources.isEmpty()) return@Column
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Default.Search,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = GeminiPrimaryBlue
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                sources.webSearchSourceSummaryLabel(),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(sources.take(8)) { source ->
+                val trustLabel = source.displayTrustLabel()
+                val hostLabel = source.displayHostLabel()
+                val selected = source.url == selectedUrl
+                Surface(
+                    modifier = Modifier
+                        .widthIn(min = 188.dp, max = 256.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .clickable {
+                            selectedUrl = if (selected) null else source.url
+                        },
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f),
+                    shape = RoundedCornerShape(18.dp),
+                    border = if (selected) BorderStroke(1.dp, GeminiPrimaryBlue.copy(alpha = 0.46f)) else null
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Surface(
+                                color = source.webSearchTrustColor().copy(alpha = 0.14f),
+                                shape = CircleShape
+                            ) {
+                                Text(
+                                    trustLabel,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = source.webSearchTrustColor(),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Text(
+                                hostLabel,
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Text(
+                            source.title.ifBlank { source.url },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (source.snippet.isNotBlank()) {
+                            Text(
+                                source.snippet,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        val providerLine = listOf(source.provider, source.displayTrustReason())
+                            .filter { it.isNotBlank() }
+                            .distinct()
+                            .joinToString(" · ")
+                        if (providerLine.isNotBlank()) {
+                            Text(
+                                providerLine,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        AnimatedVisibility(
+            visible = selectedSource != null,
+            enter = fadeIn(tween(120)) + expandVertically(animationSpec = tween(180)),
+            exit = fadeOut(tween(90)) + shrinkVertically(animationSpec = tween(140))
+        ) {
+            selectedSource?.let { source ->
+                WebSearchSourceDetailCard(
+                    source = source,
+                    onOpen = {
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(source.url)))
+                        }
+                    },
+                    onClose = { selectedUrl = null }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WebSearchTraceCard(trace: ChatWebSearchTrace) {
+    var expanded by rememberSaveable(trace.query, trace.message, trace.elapsedMs, trace.running) { mutableStateOf(false) }
+    val statusColor = trace.webSearchTraceColor()
+    val runningRotation = if (trace.running) {
+        val transition = rememberInfiniteTransition(label = "web-search-running")
+        val angle by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1200, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "web-search-running-angle"
+        )
+        angle
+    } else {
+        0f
+    }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .clickable { expanded = !expanded },
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.16f))
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    modifier = Modifier.size(34.dp),
+                    color = statusColor.copy(alpha = 0.13f),
+                    shape = CircleShape
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Default.Search,
+                            contentDescription = null,
+                            modifier = Modifier
+                                .size(18.dp)
+                                .rotate(runningRotation),
+                            tint = statusColor
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        if (trace.running) trace.stageLabel.ifBlank { "正在检索" } else "检索过程",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        trace.summaryLine(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = if (expanded) "收起检索过程" else "展开检索过程",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (trace.running) {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(99.dp)),
+                    color = statusColor,
+                    trackColor = statusColor.copy(alpha = 0.10f)
+                )
+            }
+            if (trace.message.isNotBlank()) {
+                Text(
+                    trace.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = statusColor,
+                    maxLines = if (expanded) 3 else 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn(tween(120)) + expandVertically(animationSpec = tween(180)),
+                exit = fadeOut(tween(90)) + shrinkVertically(animationSpec = tween(140))
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    WebSearchTraceSection(
+                        title = "检索目标",
+                        values = (trace.searchedQueries + trace.directUrls)
+                            .distinct()
+                            .take(6)
+                    )
+                    WebSearchTraceSection(
+                        title = "触发依据",
+                        values = trace.triggerReasons.take(4)
+                    )
+                    WebSearchTraceSection(
+                        title = "证据分组",
+                        values = trace.evidenceGroups.take(5)
+                    )
+                    WebSearchTraceSection(
+                        title = "不确定性",
+                        values = (trace.conflictWarnings + trace.warnings)
+                            .distinct()
+                            .take(5),
+                        error = true
+                    )
+                    WebSearchTraceSection(
+                        title = "闭环检查",
+                        values = trace.closedLoopChecks.take(6)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WebSearchTraceSection(
+    title: String,
+    values: List<String>,
+    error: Boolean = false
+) {
+    if (values.isEmpty()) return
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            title,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.SemiBold
+        )
+        values.forEach { value ->
+            Text(
+                "• $value",
+                style = MaterialTheme.typography.labelSmall.copy(lineHeight = 17.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChatWebSearchTrace.webSearchTraceColor(): Color =
+    when {
+        running -> GeminiPrimaryBlue
+        success && qualityScore >= 72 -> GeminiPrimaryBlue
+        success -> Color(0xFF0F9D58)
+        warnings.isNotEmpty() || conflictWarnings.isNotEmpty() -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+private fun ChatWebSearchTrace.summaryLine(): String {
+    val targetCount = (searchedQueries.size + directUrls.size).coerceAtLeast(sourceCount)
+    return buildList {
+        if (providerLabel.isNotBlank()) add(providerLabel)
+        if (targetCount > 0) add(if (running) "计划 ${targetCount} 个目标" else "${targetCount} 个目标")
+        if (sourceCount > 0) add("${sourceCount} 个来源")
+        if (elapsedMs > 0) add(formatWebSearchElapsed(elapsedMs))
+        if (qualityLabel.isNotBlank()) add("质量 $qualityLabel ${qualityScore}/100")
+        if (researchConfidenceLabel.isNotBlank()) add("置信度 $researchConfidenceLabel ${researchConfidenceScore}/100")
+    }.ifEmpty {
+        listOf(message.ifBlank { query.ifBlank { "已记录本轮联网检索" } })
+    }.joinToString(" · ")
+}
+
+private fun formatWebSearchElapsed(elapsedMs: Long): String =
+    if (elapsedMs >= 1000L) {
+        "${"%.1f".format(elapsedMs / 1000.0)}s"
+    } else {
+        "${elapsedMs}ms"
+    }
+
+@Composable
+private fun WebSearchSourceDetailCard(
+    source: ChatSourceReference,
+    onOpen: () -> Unit,
+    onClose: () -> Unit
+) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    color = source.webSearchTrustColor().copy(alpha = 0.14f),
+                    shape = CircleShape
+                ) {
+                    Text(
+                        source.displayTrustLabel(),
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = source.webSearchTrustColor(),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    source.displayHostLabel(),
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                IconButton(onClick = onClose, modifier = Modifier.size(30.dp)) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "收起来源详情",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Text(
+                source.title.ifBlank { source.url },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+            val reason = source.displayTrustReason()
+            if (reason.isNotBlank() || source.provider.isNotBlank()) {
+                Text(
+                    listOf(source.provider, reason)
+                        .filter { it.isNotBlank() }
+                        .distinct()
+                        .joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (source.snippet.isNotBlank()) {
+                Text(
+                    source.snippet,
+                    style = MaterialTheme.typography.bodySmall.copy(lineHeight = 18.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 5,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Text(
+                source.url,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            clipboard.setClipEntry(
+                                ClipEntry(ClipData.newPlainText("MCA 来源链接", source.url))
+                            )
+                            Toast.makeText(context, "已复制来源链接", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Text("复制链接")
+                }
+                Button(onClick = onOpen) {
+                    Text("打开网页")
+                }
+            }
+        }
+    }
+}
+
+private fun List<ChatSourceReference>.webSearchSourceSummaryLabel(): String {
+    if (isEmpty()) return "联网来源"
+    val summary = map { it.displayTrustLabel() }
+        .filter { it.isNotBlank() }
+        .groupingBy { it }
+        .eachCount()
+        .entries
+        .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+        .take(2)
+        .joinToString(" · ") { "${it.key} ${it.value}" }
+    return buildString {
+        append("联网来源")
+        append(" · ")
+        append(size)
+        append(" 个")
+        if (summary.isNotBlank()) {
+            append(" · ")
+            append(summary)
+        }
+    }
+}
+
+private fun ChatSourceReference.displayHostLabel(): String =
+    hostLabel.ifBlank {
+        runCatching { Uri.parse(url).host?.removePrefix("www.").orEmpty() }
+            .getOrDefault("")
+            .ifBlank { url.removePrefix("https://").removePrefix("http://").substringBefore("/") }
+    }
+
+private fun ChatSourceReference.displayTrustLabel(): String =
+    trustLabel.ifBlank {
+        val host = displayHostLabel().lowercase()
+        when {
+            provider == "安全拦截" -> "安全拦截"
+            host == "github.com" || host.endsWith(".github.com") -> "代码仓库"
+            host == "huggingface.co" || host == "modelscope.cn" -> "模型社区"
+            host == "arxiv.org" || host.endsWith(".arxiv.org") -> "学术论文"
+            host.contains("docs") || url.contains("/docs", ignoreCase = true) || url.contains("/developer", ignoreCase = true) -> "开发者文档"
+            host.contains("reddit") || host.contains("stackoverflow") || host.contains("zhihu") -> "社区讨论"
+            else -> "普通网页"
+        }
+    }
+
+private fun ChatSourceReference.displayTrustReason(): String =
+    trustReason.ifBlank {
+        when (displayTrustLabel()) {
+            "安全拦截" -> "受限地址未读取"
+            "代码仓库" -> "开发者仓库"
+            "模型社区" -> "模型托管与下载站点"
+            "学术论文" -> "论文或预印本来源"
+            "开发者文档" -> "文档、指南或开发者资料"
+            "社区讨论" -> "论坛、问答或社交讨论"
+            else -> ""
+        }
+    }
+
+@Composable
+private fun ChatSourceReference.webSearchTrustColor(): Color =
+    when (displayTrustLabel()) {
+        "官方/一手", "开发者文档", "模型社区", "代码仓库" -> GeminiPrimaryBlue
+        "学术论文" -> Color(0xFF5E6AD2)
+        "社区讨论", "媒体报道" -> Color(0xFF0F9D58)
+        "安全拦截" -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
 
 @Composable
 private fun AssistantActionRow(

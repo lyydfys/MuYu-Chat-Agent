@@ -31,3 +31,7 @@ android-sdk-cmdline-extract/
 
 # Logs
 *.log
+
+# Local verification scratch files
+.tmp-*
+.external/

@@ -11,8 +11,11 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -44,6 +47,8 @@ import com.muyuchat.core.download.kindLabel
 import com.muyuchat.core.engine.ChatImageAttachment
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
+import com.muyuchat.core.engine.ChatSourceReference
+import com.muyuchat.core.engine.ChatWebSearchTrace
 import com.muyuchat.core.engine.GenerateEvent
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LoadParams
@@ -88,7 +93,19 @@ data class ChatSessionRecord(
     val pinned: Boolean = false,
     val manualTitle: Boolean = false,
     val updatedAt: Long = System.currentTimeMillis(),
-    val projectId: String? = null
+    val projectId: String? = null,
+    val assistantId: String? = null,
+    val modelMode: String? = null,
+    val modelId: String? = null
+)
+
+data class MemoryRecord(
+    val id: String = UUID.randomUUID().toString(),
+    val assistantId: String = AssistantRecord.DEFAULT_ID,
+    val scope: String = "assistant",
+    val content: String,
+    val source: String = "manual",
+    val createdAt: Long = System.currentTimeMillis()
 )
 
 data class ImageAssetRecord(
@@ -132,6 +149,26 @@ data class ImageAssetRecord(
     }
 }
 
+data class FileAssetRecord(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val mimeType: String = "text/plain",
+    val text: String,
+    val preview: String = text.toFilePreview(),
+    val truncated: Boolean = false,
+    val source: String = "uploaded",
+    val createdAt: Long = System.currentTimeMillis(),
+    val sizeBytes: Long = text.toByteArray(Charsets.UTF_8).size.toLong(),
+    val chatSessionId: String? = null,
+    val projectId: String? = null
+) {
+    fun toInputAttachment(): String = buildString {
+        append("【上传文件：").append(name).append("】\n")
+        append(text.trim())
+        if (truncated) append("\n\n（文件较大，已截取前 64KB）")
+    }
+}
+
 enum class ImageGenerationStatusRecord(val label: String, val failed: Boolean = false) {
     QUEUED("排队"),
     GENERATING("生成中"),
@@ -152,7 +189,8 @@ private data class AttachmentImportResult(
     val name: String,
     val text: String,
     val truncated: Boolean,
-    val imageAsset: ImageAssetRecord? = null
+    val imageAsset: ImageAssetRecord? = null,
+    val fileAsset: FileAssetRecord? = null
 )
 
 private data class PreparedChatInput(
@@ -176,6 +214,7 @@ data class MainUiState(
     val chatSessions: List<ChatSessionRecord> = emptyList(),
     val activeChatSessionId: String? = null,
     val images: List<ImageAssetRecord> = emptyList(),
+    val files: List<FileAssetRecord> = emptyList(),
     val imageJobs: List<ImageGenerationJobRecord> = emptyList(),
     val localImageModels: List<LocalImageModelRecord> = emptyList(),
     val selectedLocalImageModelId: String? = null,
@@ -186,6 +225,8 @@ data class MainUiState(
     val selectedCloudImageModelId: String? = null,
     val editingCloudModelId: String? = null,
     val selectedChatBackend: ChatBackend = ChatBackend.LOCAL,
+    val assistants: List<AssistantRecord> = emptyList(),
+    val selectedAssistantId: String = AssistantRecord.DEFAULT_ID,
     val input: String = "",
     val isGenerating: Boolean = false,
     val models: List<ModelManifest> = emptyList(),
@@ -224,7 +265,13 @@ data class MainUiState(
     val apiKey: String = "",
     val localApiAddress: String = "",
     val openApiAddress: String = "",
-    val nativeStatsJson: String = "{}"
+    val nativeStatsJson: String = "{}",
+    val webSearchConfig: WebSearchConfig = WebSearchConfig(),
+    val webSearchTurnMode: WebSearchTurnMode = WebSearchTurnMode.FOLLOW,
+    val webSearchResearchModeOverride: WebSearchResearchMode? = null,
+    val webSearchOneShotEnabled: Boolean = false,
+    val webSearchStatusMessage: String? = null,
+    val webSearchDiagnostics: List<WebSearchDiagnosticRecord> = emptyList()
 )
 
 private sealed interface DownloadedModelRegistration {
@@ -237,6 +284,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val REST_PORT = 11435
         private const val CLOUD_REASONING_LOCKED_MESSAGE = "云端模型的思考模式由服务商和具体模型决定，MCA 会默认按开启处理；如需关闭或调整，请在云端模型配置中设置相关参数。"
         private const val LOCAL_IMAGE_GENERATION_WATCHDOG_MS = 8 * 60 * 1000L
+        private const val ASSISTANT_MODEL_MODE_FOLLOW_CURRENT = "follow_current"
+        private const val ASSISTANT_MODEL_MODE_LOCAL = "local"
+        private const val ASSISTANT_MODEL_MODE_CLOUD = "cloud"
         const val CLOUD_MODEL_CHOICE_PREFIX = "cloudmodel:"
         const val CLOUD_IMAGE_MODEL_CHOICE_PREFIX = "cloudimagemodel:"
         const val LOCAL_IMAGE_MODEL_CHOICE_PREFIX = "localimagemodel:"
@@ -251,9 +301,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var apiServer: McaLoopbackServer? = null
     private var activeApiBindHost: String? = null
     private val chatSessionStore = ChatSessionStore(application)
+    private val assistantStore = AssistantStore(application)
     private val cloudApiStore = CloudApiStore(application)
     private val cloudChatProvider = OpenAiCompatibleChatProvider()
     private val cloudImageProvider = CloudImageProvider()
+    private val webSearchStore = WebSearchStore(application)
+    private val webSearchDiagnosticStore = WebSearchDiagnosticStore(application)
+    private val webSearchProvider = WebSearchProvider()
     private val localImageModelStore = LocalImageModelStore(application)
     private val localImageProvider = LocalImageProvider(application)
     private val deviceProfileReader = DeviceProfileReader(application)
@@ -264,23 +318,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val initialDeviceProfile = deviceProfileReader.read()
     private val initialChatSessions = chatSessionStore.load()
     private val initialImages = chatSessionStore.loadImages()
+    private val initialFiles = chatSessionStore.loadFiles()
+    private val initialParams = loadGenerationParams(application)
+    private val initialAssistants = assistantStore.loadAssistants(initialParams)
+    private val initialStoredSelectedAssistantId = assistantStore.loadSelectedAssistantId(initialAssistants)
+    private val initialSelectedAssistantId = initialChatSessions.firstOrNull()
+        ?.assistantId
+        ?.takeIf { assistantId -> initialAssistants.any { it.id == assistantId } }
+        ?: initialStoredSelectedAssistantId
+    private val initialSelectedAssistant = initialAssistants.firstOrNull { it.id == initialSelectedAssistantId }
+    private val initialEffectiveParams = initialSelectedAssistant?.toGenerationParams(initialParams) ?: initialParams
     private val initialLocalImageModels = localImageModelStore.loadModels()
     private val initialSelectedLocalImageModelId = localImageModelStore.loadSelectedModelId()
         ?.takeIf { id -> initialLocalImageModels.any { it.id == id && it.isReadyForLocalImageGeneration() } }
         ?: initialLocalImageModels.firstOrNull { it.isReadyForLocalImageGeneration() }?.id
     private val initialCloudModels = cloudApiStore.loadModels()
-    private val initialSelectedCloudChatModelId = cloudApiStore.loadSelectedCloudChatModelId()
+    private val initialSessionCloudChatModelId = initialChatSessions.firstOrNull()
+        ?.takeIf { it.modelMode.equals("cloud", ignoreCase = true) }
+        ?.modelId
+        ?.takeIf { id -> initialCloudModels.any { it.id == id && it.kind == CloudModelKind.CHAT } }
+    private val initialSelectedCloudChatModelId = initialSessionCloudChatModelId
+        ?: cloudApiStore.loadSelectedCloudChatModelId()
         ?.takeIf { id -> initialCloudModels.any { it.id == id && it.kind == CloudModelKind.CHAT } }
         ?: initialCloudModels.firstOrNull { it.kind == CloudModelKind.CHAT }?.id
     private val initialSelectedCloudImageModelId = cloudApiStore.loadSelectedCloudImageModelId()
         ?.takeIf { id -> initialCloudModels.any { it.id == id && it.kind == CloudModelKind.IMAGE } }
         ?: initialCloudModels.firstOrNull { it.kind == CloudModelKind.IMAGE }?.id
-    private val initialParams = loadGenerationParams(application)
     private val initialCloudConfig = initialCloudModels
         .firstOrNull { it.id == initialSelectedCloudChatModelId && it.kind == CloudModelKind.CHAT }
         ?.toChatConfig()
         ?: cloudApiStore.load()
-    private val initialSelectedBackend = cloudApiStore.loadSelectedBackend()
+    private val initialWebSearchConfig = webSearchStore.load()
+    private val initialWebSearchDiagnostics = webSearchDiagnosticStore.load()
+    private val initialSelectedBackend = initialChatSessions.firstOrNull()
+        ?.modelMode
+        ?.toChatBackendOrNull()
+        ?: cloudApiStore.loadSelectedBackend()
     private val initialSelectedImageBackend = localImageModelStore.loadSelectedBackend()
     private var generationJob: Job? = null
     private var imageGenerationJob: Job? = null
@@ -292,6 +365,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             chatSessions = initialChatSessions,
             activeChatSessionId = initialChatSessions.firstOrNull()?.id,
             images = initialImages,
+            files = initialFiles,
             localImageModels = initialLocalImageModels,
             selectedLocalImageModelId = initialSelectedLocalImageModelId,
             selectedImageBackend = when (initialSelectedImageBackend) {
@@ -302,6 +376,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             cloudModels = initialCloudModels,
             selectedCloudChatModelId = initialSelectedCloudChatModelId,
             selectedCloudImageModelId = initialSelectedCloudImageModelId,
+            assistants = initialAssistants,
+            selectedAssistantId = initialSelectedAssistantId,
             selectedChatBackend = if (initialSelectedBackend == ChatBackend.CLOUD && initialCloudConfig.configured) {
                 ChatBackend.CLOUD
             } else {
@@ -309,7 +385,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             },
             models = modelStore.listModels(),
             recommendedRemoteModels = sortRecommendedModels(modelScopeClient.recommendedModels(), initialDeviceProfile),
-            params = initialParams,
+            params = initialEffectiveParams,
             agentLogs = agentLogger.recent(),
             benchmarkHistory = benchmarkHistoryLogger.recent(),
             deviceProfile = initialDeviceProfile,
@@ -317,7 +393,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             restEnabled = initialApiPreferences.restEnabled,
             apiKey = apiKey,
             localApiAddress = apiUrl("127.0.0.1"),
-            openApiAddress = currentOpenApiAddress()
+            openApiAddress = currentOpenApiAddress(),
+            webSearchConfig = initialWebSearchConfig,
+            webSearchDiagnostics = initialWebSearchDiagnostics
         )
     )
     val uiState = _uiState.asStateFlow()
@@ -395,15 +473,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val (text, truncated) = readAttachmentText(uri)
                 if (text.isBlank()) error("文件内容为空或无法作为文本读取")
-                AttachmentImportResult(name, text, truncated)
+                val file = createFileAsset(
+                    uri = uri,
+                    displayName = name,
+                    text = text,
+                    truncated = truncated,
+                    source = "uploaded",
+                    chatSessionId = _uiState.value.activeChatSessionId
+                )
+                AttachmentImportResult(name, file.text, file.truncated, fileAsset = file)
             }
             result.onSuccess { imported ->
                 var imagesToPersist: List<ImageAssetRecord>? = null
+                var filesToPersist: List<FileAssetRecord>? = null
                 _uiState.update { state ->
                     val attachment = buildString {
                         if (state.input.isNotBlank()) append("\n\n")
                         if (imported.imageAsset != null) {
                             append(imported.text.trim())
+                        } else if (imported.fileAsset != null) {
+                            append(imported.fileAsset.toInputAttachment())
                         } else {
                             append("【上传文件：").append(imported.name).append("】\n")
                             append(imported.text.trim())
@@ -413,14 +502,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val updatedImages = imported.imageAsset?.let { image ->
                         (listOf(image) + state.images.filterNot { it.id == image.id }).sortedImagesForLibrary()
                     }
+                    val updatedFiles = imported.fileAsset?.let { file ->
+                        (listOf(file) + state.files.filterNot { it.id == file.id }).sortedFilesForLibrary()
+                    }
                     if (updatedImages != null) imagesToPersist = updatedImages
+                    if (updatedFiles != null) filesToPersist = updatedFiles
                     state.copy(
                         input = state.input + attachment,
                         images = updatedImages ?: state.images,
+                        files = updatedFiles ?: state.files,
                         statusMessage = if (imported.imageAsset != null) "已添加图片：${imported.name}" else "已添加文件：${imported.name}"
                     )
                 }
                 imagesToPersist?.let { persistImages(it) }
+                filesToPersist?.let { persistFiles(it) }
             }.onFailure { error ->
                 _uiState.update { it.copy(statusMessage = error.message ?: "文件上传失败") }
             }
@@ -436,6 +531,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 statusMessage = "已插入图片：${image.name}"
             )
         }
+    }
+
+    fun useFileAsset(fileId: String) {
+        val file = _uiState.value.files.firstOrNull { it.id == fileId } ?: return
+        _uiState.update { state ->
+            val separator = if (state.input.isBlank()) "" else "\n\n"
+            state.copy(
+                input = state.input + separator + file.toInputAttachment(),
+                statusMessage = "已插入文件：${file.name}"
+            )
+        }
+    }
+
+    fun deleteFileAsset(fileId: String) {
+        var removed: FileAssetRecord? = null
+        var filesToPersist: List<FileAssetRecord> = emptyList()
+        _uiState.update { state ->
+            removed = state.files.firstOrNull { it.id == fileId }
+            filesToPersist = state.files.filterNot { it.id == fileId }
+            state.copy(files = filesToPersist, statusMessage = "已从文件库移除：${removed?.name ?: "文件"}")
+        }
+        persistFiles(filesToPersist)
+    }
+
+    fun clearFileLibrary() {
+        val filesToRemove = _uiState.value.files
+        if (filesToRemove.isEmpty()) {
+            _uiState.update { it.copy(statusMessage = "文件库已经为空") }
+            return
+        }
+        _uiState.update {
+            it.copy(
+                files = emptyList(),
+                statusMessage = "已清空文件库：${filesToRemove.size} 个文件"
+            )
+        }
+        persistFiles(emptyList())
     }
 
     fun generateImageAsset(prompt: String) {
@@ -648,6 +780,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         persistImages(imagesToPersist)
     }
 
+    fun clearImageLibrary() {
+        val imagesToRemove = _uiState.value.images
+        if (imagesToRemove.isEmpty()) {
+            _uiState.update { it.copy(statusMessage = "图片库已为空") }
+            return
+        }
+        imagesToRemove.forEach { it.deleteLocalCopy() }
+        _uiState.update {
+            it.copy(
+                images = emptyList(),
+                imageJobs = it.imageJobs.filter { job -> job.status == ImageGenerationStatusRecord.GENERATING },
+                statusMessage = "已清空图片库：${imagesToRemove.size} 张图片"
+            )
+        }
+        persistImages(emptyList())
+    }
+
     fun importLocalImageModel(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             busy("正在导入本地图像生成引擎...")
@@ -772,7 +921,709 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateParams(params: GenerationParams) {
         persistGenerationParams(params)
-        _uiState.update { it.copy(params = params) }
+        val updatedAssistants = updatedAssistantsWithParams(params)
+        assistantStore.saveAssistants(updatedAssistants)
+        _uiState.update { it.copy(params = params, assistants = updatedAssistants) }
+    }
+
+    fun saveAssistantProfile(
+        id: String?,
+        name: String,
+        avatar: String,
+        tag: String,
+        systemPrompt: String,
+        defaultModelMode: String,
+        defaultModelId: String?,
+        temperature: Float,
+        topP: Float,
+        nCtx: Int,
+        nPredict: Int,
+        reasoningMode: ReasoningMode,
+        memoryEnabled: Boolean,
+        webSearchEnabled: Boolean,
+        fileContextEnabled: Boolean
+    ) {
+        val cleanName = name.trim().take(36).ifBlank { "未命名助手" }
+        val cleanAvatar = avatar.trim().take(4)
+        val cleanTag = tag.trim().take(24)
+        val cleanPrompt = systemPrompt.trim().ifBlank { GenerationParams().systemPrompt }
+        val cleanDefaultModelMode = defaultModelMode.normalizedAssistantModelMode()
+        val cleanDefaultModelId = defaultModelId
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && cleanDefaultModelMode != ASSISTANT_MODEL_MODE_FOLLOW_CURRENT }
+        val state = _uiState.value
+        val now = System.currentTimeMillis()
+        val existing = id?.let { assistantId -> state.assistants.firstOrNull { it.id == assistantId } }
+        val assistant = (existing ?: AssistantRecord(name = cleanName, createdAt = now)).copy(
+            name = cleanName,
+            avatar = cleanAvatar,
+            tag = cleanTag,
+            systemPrompt = cleanPrompt,
+            defaultModelMode = cleanDefaultModelMode,
+            defaultModelId = cleanDefaultModelId,
+            paramsJson = state.params.copy(
+                systemPrompt = cleanPrompt,
+                temperature = temperature.coerceIn(0f, 2f),
+                topP = topP.coerceIn(0f, 1f),
+                nCtx = nCtx.coerceIn(512, 262_144),
+                nPredict = nPredict.coerceIn(128, 65_536),
+                reasoningMode = reasoningMode,
+                hideReasoning = reasoningMode == ReasoningMode.OFF
+            ).toJson(),
+            memoryEnabled = memoryEnabled,
+            webSearchEnabled = webSearchEnabled,
+            fileContextEnabled = fileContextEnabled,
+            updatedAt = now
+        )
+        val updatedAssistants = if (existing == null) {
+            (state.assistants + assistant).distinctBy { it.id }
+        } else {
+            state.assistants.map { if (it.id == assistant.id) assistant else it }
+        }
+        assistantStore.saveAssistants(updatedAssistants)
+        assistantStore.saveSelectedAssistantId(assistant.id)
+        val updatedParams = assistant.toGenerationParams(state.params)
+        persistGenerationParams(updatedParams)
+        val updatedSessions = state.chatSessions.bindSession(
+            sessionId = state.activeChatSessionId,
+            assistantId = assistant.id,
+            modelMode = state.selectedChatBackend.bindingValue(),
+            modelId = state.currentChatModelId()
+        )
+        _uiState.update {
+            it.copy(
+                assistants = updatedAssistants,
+                selectedAssistantId = assistant.id,
+                params = updatedParams,
+                chatSessions = updatedSessions,
+                statusMessage = if (existing == null) "已创建助手：${assistant.name}" else "已更新助手：${assistant.name}"
+            )
+        }
+        persistChatSessions(updatedSessions)
+        applyAssistantDefaultModel(assistant)
+    }
+
+    fun saveWebSearchConfig(
+        enabled: Boolean,
+        provider: String,
+        endpoint: String,
+        apiKey: String,
+        maxResults: Int,
+        fetchPageContent: Boolean,
+        triggerMode: String,
+        researchMode: String,
+        backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
+    ) {
+        val config = buildWebSearchConfig(
+            enabled = enabled,
+            provider = provider,
+            endpoint = endpoint,
+            apiKey = apiKey,
+            maxResults = maxResults,
+            fetchPageContent = fetchPageContent,
+            triggerMode = triggerMode,
+            researchMode = researchMode,
+            backupProviders = backupProviders
+        )
+        webSearchStore.save(config)
+        _uiState.update {
+            val nextTurnMode = if (config.enabled) it.webSearchTurnMode else WebSearchTurnMode.FOLLOW
+            it.copy(
+                webSearchConfig = config,
+                webSearchTurnMode = nextTurnMode,
+                webSearchResearchModeOverride = it.webSearchResearchModeOverride?.takeIf { config.enabled },
+                webSearchOneShotEnabled = nextTurnMode == WebSearchTurnMode.ON && config.enabled,
+                webSearchStatusMessage = null,
+                statusMessage = if (config.realSearchConfigured) {
+                    "联网检索已保存：${config.realSearchProviderLabel.ifBlank { config.providerLabel }}"
+                } else if (config.isPublicCheckSource) {
+                    "已保存协议自检源：可在设置页测试，聊天页关键词搜索请配置真实搜索源"
+                } else if (config.enabled) {
+                    "联网检索已启用：可直读网页链接；关键词搜索还需要补齐地址或 Key"
+                } else {
+                    "联网检索已关闭"
+                }
+            )
+        }
+    }
+
+    fun testWebSearchConfig(query: String) {
+        testWebSearchConfig(query, _uiState.value.webSearchConfig)
+    }
+
+    fun testWebSearchConfig(
+        query: String,
+        enabled: Boolean,
+        provider: String,
+        endpoint: String,
+        apiKey: String,
+        maxResults: Int,
+        fetchPageContent: Boolean,
+        triggerMode: String,
+        researchMode: String,
+        backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
+    ) {
+        testWebSearchConfig(
+            query = query,
+            config = buildWebSearchConfig(
+                enabled = enabled,
+                provider = provider,
+                endpoint = endpoint,
+                apiKey = apiKey,
+                maxResults = maxResults,
+                fetchPageContent = fetchPageContent,
+                triggerMode = triggerMode,
+                researchMode = researchMode,
+                backupProviders = backupProviders
+            )
+        )
+    }
+
+    fun preflightWebSearchConfig(
+        enabled: Boolean,
+        provider: String,
+        endpoint: String,
+        apiKey: String,
+        maxResults: Int,
+        fetchPageContent: Boolean,
+        triggerMode: String,
+        researchMode: String,
+        backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
+    ) {
+        val config = buildWebSearchConfig(
+            enabled = enabled,
+            provider = provider,
+            endpoint = endpoint,
+            apiKey = apiKey,
+            maxResults = maxResults,
+            fetchPageContent = fetchPageContent,
+            triggerMode = triggerMode,
+            researchMode = researchMode,
+            backupProviders = backupProviders
+        )
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    busy = true,
+                    webSearchStatusMessage = "正在进行联网网络预检...",
+                    statusMessage = "正在进行联网网络预检..."
+                )
+            }
+            val started = System.currentTimeMillis()
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    buildWebSearchPreflightReport(
+                        config = config,
+                        environmentChecks = buildAndroidWebSearchNetworkChecks()
+                    )
+                }
+            }
+            _uiState.update { state ->
+                val elapsedMs = System.currentTimeMillis() - started
+                result.fold(
+                    onSuccess = { report ->
+                        val warningChecks = report.checks.filter { it.startsWith("需检查") }
+                        val diagnostics = appendWebSearchDiagnostic(
+                            WebSearchDiagnosticRecord(
+                                providerLabel = config.providerLabel,
+                                triggerModeLabel = config.triggerMode.label,
+                                query = "网络预检",
+                                searchedQueries = listOf(config.endpointForRequest()).filter { it.isNotBlank() },
+                                elapsedMs = elapsedMs,
+                                success = report.ok,
+                                message = report.message,
+                                healthScore = if (report.ok) 86 else 35,
+                                healthLabel = if (report.ok) "健康" else "需检查",
+                                healthReasons = report.checks,
+                                qualityScore = if (report.ok) 80 else 20,
+                                qualityLabel = if (report.ok) "配置可用" else "配置需检查",
+                                qualityReasons = report.checks,
+                                warnings = warningChecks,
+                                closedLoopChecks = report.checks
+                            )
+                        )
+                        state.copy(
+                            busy = false,
+                            webSearchStatusMessage = report.message,
+                            webSearchDiagnostics = diagnostics,
+                            statusMessage = if (report.ok) "联网网络预检通过" else "联网网络预检需检查"
+                        )
+                    },
+                    onFailure = { error ->
+                        val message = "网络预检失败：${error.message ?: "未知错误"}"
+                        val diagnostics = appendWebSearchDiagnostic(
+                            WebSearchDiagnosticRecord(
+                                providerLabel = config.providerLabel,
+                                triggerModeLabel = config.triggerMode.label,
+                                query = "网络预检",
+                                searchedQueries = listOf(config.endpointForRequest()).filter { it.isNotBlank() },
+                                elapsedMs = elapsedMs,
+                                success = false,
+                                message = message,
+                                healthScore = 0,
+                                healthLabel = "失败",
+                                healthReasons = listOf(message),
+                                qualityScore = 0,
+                                qualityLabel = "预检失败",
+                                qualityReasons = listOf(message),
+                                warnings = listOf(message),
+                                closedLoopChecks = listOf(message)
+                            )
+                        )
+                        state.copy(
+                            busy = false,
+                            webSearchStatusMessage = message,
+                            webSearchDiagnostics = diagnostics,
+                            statusMessage = "联网网络预检失败"
+                        )
+                    }
+                )
+            }
+        }
+    }
+
+    private fun buildAndroidWebSearchNetworkChecks(): List<String> {
+        val app = getApplication<Application>()
+        val checks = mutableListOf<String>()
+        val connectivity = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (connectivity == null) {
+            return listOf("需检查：系统网络状态服务不可用，无法确认当前手机联网环境。")
+        }
+        when (connectivity.restrictBackgroundStatus) {
+            ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED -> {
+                checks += "需检查：系统流量节省正在限制后台联网；请允许 MCA 使用网络后再测试。"
+            }
+            ConnectivityManager.RESTRICT_BACKGROUND_STATUS_WHITELISTED -> {
+                checks += "通过：系统流量节省未限制 MCA 联网。"
+            }
+        }
+        val activeNetwork = connectivity.activeNetwork
+        if (activeNetwork == null) {
+            checks += "需检查：手机当前没有活动网络，请先连接 Wi-Fi 或移动数据。"
+            checks += "需检查：如果系统浏览器可以联网，请检查系统设置或安全中心是否禁止 MCA 使用 WLAN/移动数据，并排查 VPN、私人 DNS、代理或省电策略。"
+            return checks
+        }
+        val capabilities = connectivity.getNetworkCapabilities(activeNetwork)
+        if (capabilities == null) {
+            checks += "需检查：无法读取当前网络能力，请检查系统网络权限或重新连接网络。"
+            return checks
+        }
+        val transports = buildList {
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) add("Wi-Fi")
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) add("移动数据")
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) add("以太网")
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) add("VPN")
+        }.ifEmpty { listOf("未知网络") }
+        checks += "通过：当前活动网络：${transports.joinToString(" / ")}。"
+        if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+            checks += "通过：系统报告当前网络具备 Internet 能力。"
+        } else {
+            checks += "需检查：系统报告当前网络不具备 Internet 能力，搜索请求可能无法发出。"
+        }
+        if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+            checks += "通过：系统已验证当前网络可访问公网。"
+        } else {
+            checks += "需检查：系统尚未验证当前网络可访问公网，可能是未登录 Wi-Fi、DNS 异常、网络受限或代理/VPN 问题。"
+        }
+        if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) ||
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        ) {
+            checks += "提示：当前网络可能经过 VPN；如果 DNS 失败，请优先检查 VPN 或代理规则。"
+        }
+        val proxyHost = listOfNotNull(
+            System.getProperty("http.proxyHost")?.takeIf { it.isNotBlank() },
+            System.getProperty("https.proxyHost")?.takeIf { it.isNotBlank() }
+        ).distinct()
+        if (proxyHost.isNotEmpty()) {
+            checks += "提示：检测到系统代理 ${proxyHost.joinToString(" / ")}；搜索接口会受代理可达性影响。"
+        }
+        runCatching {
+            val resolver = app.contentResolver
+            val privateDnsMode = Settings.Global.getString(resolver, "private_dns_mode").orEmpty()
+            val privateDnsHost = Settings.Global.getString(resolver, "private_dns_specifier").orEmpty()
+            if (privateDnsMode.isNotBlank() && privateDnsMode != "off") {
+                checks += buildString {
+                    append("提示：私人 DNS 模式为 ")
+                    append(privateDnsMode)
+                    if (privateDnsHost.isNotBlank()) append("（$privateDnsHost）")
+                    append("；如域名解析失败，请检查该 DNS 服务。")
+                }
+            }
+        }
+        return checks
+    }
+
+    private fun testWebSearchConfig(query: String, config: WebSearchConfig) {
+        val cleanQuery = query.trim().ifBlank { "MCA 本地 AI" }
+        val plan = buildWebSearchPlan(cleanQuery, config.researchMode)
+        if (!config.configured && !(config.canReadDirectUrls && plan.directUrls.isNotEmpty())) {
+            _uiState.update {
+                it.copy(
+                    webSearchStatusMessage = if (plan.directUrls.isNotEmpty()) {
+                        "请先启用联网检索，再测试网页链接读取"
+                    } else {
+                        "请先保存可用的联网检索配置"
+                    },
+                    statusMessage = if (plan.directUrls.isNotEmpty()) {
+                        "请先启用联网检索"
+                    } else {
+                        "请先保存可用的联网检索配置"
+                    }
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    busy = true,
+                    webSearchStatusMessage = "正在测试联网检索：$cleanQuery",
+                    statusMessage = "正在测试联网检索..."
+                )
+            }
+            val started = System.currentTimeMillis()
+            val result = runCatching { webSearchProvider.search(plan, config) }
+            _uiState.update { state ->
+                result.fold(
+                    onSuccess = { searchResult ->
+                        val success = searchResult.documents.isNotEmpty()
+                        val message = if (success) {
+                            "测试成功：${searchResult.documents.size} 个来源 · ${searchResult.elapsedMs}ms"
+                        } else {
+                            "测试完成：没有找到可靠来源"
+                        }
+                        val diagnostics = appendWebSearchDiagnostic(
+                            searchResult.toDiagnosticRecord(
+                                config = config,
+                                success = success,
+                                message = message
+                            )
+                        )
+                        state.copy(
+                            busy = false,
+                            webSearchStatusMessage = message,
+                            webSearchDiagnostics = diagnostics,
+                            statusMessage = if (success) "联网检索测试成功" else "联网检索无结果"
+                        )
+                    },
+                    onFailure = { error ->
+                        val message = "测试失败：${error.message ?: "未知错误"}"
+                        val diagnostics = appendWebSearchDiagnostic(
+                            plan.toFailedDiagnosticRecord(
+                                config = config,
+                                elapsedMs = System.currentTimeMillis() - started,
+                                message = message
+                            )
+                        )
+                        state.copy(
+                            busy = false,
+                            webSearchStatusMessage = message,
+                            webSearchDiagnostics = diagnostics,
+                            statusMessage = "联网检索测试失败"
+                        )
+                    }
+                )
+            }
+        }
+    }
+
+    fun testWebSearchTurn(
+        query: String,
+        enabled: Boolean,
+        provider: String,
+        endpoint: String,
+        apiKey: String,
+        maxResults: Int,
+        fetchPageContent: Boolean,
+        triggerMode: String,
+        researchMode: String,
+        backupProviders: List<WebSearchBackupProviderConfig> = emptyList(),
+        allowPublicCheckSourceForProtocolTest: Boolean = false
+    ) {
+        testWebSearchTurn(
+            query = query,
+            config = buildWebSearchConfig(
+                enabled = enabled,
+                provider = provider,
+                endpoint = endpoint,
+                apiKey = apiKey,
+                maxResults = maxResults,
+                fetchPageContent = fetchPageContent,
+                triggerMode = triggerMode,
+                researchMode = researchMode,
+                backupProviders = backupProviders
+            ),
+            allowPublicCheckSourceForProtocolTest = allowPublicCheckSourceForProtocolTest
+        )
+    }
+
+    private fun testWebSearchTurn(
+        query: String,
+        config: WebSearchConfig,
+        allowPublicCheckSourceForProtocolTest: Boolean = false
+    ) {
+        val cleanQuery = query.trim().ifBlank { "MCA 本地 AI 最新说明" }
+        val plan = buildWebSearchPlan(cleanQuery, config.researchMode)
+        if (!config.configured && !(config.canReadDirectUrls && plan.directUrls.isNotEmpty())) {
+            _uiState.update {
+                it.copy(
+                    webSearchStatusMessage = if (plan.directUrls.isNotEmpty()) {
+                        "请先启用联网检索，再进行闭环自检"
+                    } else {
+                        "请先填写可用搜索服务，再进行闭环自检"
+                    },
+                    statusMessage = "联网闭环自检未开始"
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    busy = true,
+                    webSearchStatusMessage = "正在闭环自检：$cleanQuery",
+                    statusMessage = "正在验证联网检索闭环..."
+                )
+            }
+            val outcome = executeWebSearchForChatTurn(
+                messages = listOf(ChatMessage(role = Role.USER, content = cleanQuery)),
+                config = config,
+                oneShotEnabled = true,
+                assistantWebSearchEnabled = false,
+                allowPublicCheckSourceForProtocolTest = allowPublicCheckSourceForProtocolTest,
+                search = { turnPlan, turnConfig -> webSearchProvider.search(turnPlan, turnConfig) }
+            )
+            val diagnostics = outcome.diagnostic?.let(::appendWebSearchDiagnostic)
+            val passed = outcome.success &&
+                outcome.promptContext.isNotBlank() &&
+                outcome.sourceReferences.isNotEmpty()
+            val message = when {
+                passed -> "闭环自检通过：${outcome.sourceReferences.size} 个来源 · 已生成上下文和来源卡片数据"
+                !outcome.webSearchStatusMessage.isNullOrBlank() -> "闭环自检未通过：${outcome.webSearchStatusMessage}"
+                else -> "闭环自检未通过：没有生成可用联网来源"
+            }
+            _uiState.update {
+                it.copy(
+                    busy = false,
+                    webSearchStatusMessage = message,
+                    webSearchDiagnostics = diagnostics ?: it.webSearchDiagnostics,
+                    statusMessage = if (passed) "联网闭环自检通过" else "联网闭环自检未通过"
+                )
+            }
+        }
+    }
+
+    private fun buildWebSearchConfig(
+        enabled: Boolean,
+        provider: String,
+        endpoint: String,
+        apiKey: String,
+        maxResults: Int,
+        fetchPageContent: Boolean,
+        triggerMode: String,
+        researchMode: String,
+        backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
+    ): WebSearchConfig =
+        WebSearchConfig(
+            enabled = enabled,
+            provider = WebSearchProviderType.from(provider),
+            endpoint = endpoint.trim(),
+            apiKey = apiKey.trim(),
+            maxResults = maxResults.coerceIn(1, 8),
+            fetchPageContent = fetchPageContent,
+            triggerMode = WebSearchTriggerMode.from(triggerMode),
+            researchMode = WebSearchResearchMode.from(researchMode),
+            backupProviders = backupProviders.take(3)
+        )
+
+    fun toggleWebSearchForNextTurn() {
+        val state = _uiState.value
+        val assistantDefault = state.selectedAssistant()?.webSearchEnabled == true
+        if (!state.webSearchConfig.enabled) {
+            _uiState.update {
+                it.copy(
+                    webSearchTurnMode = WebSearchTurnMode.FOLLOW,
+                    webSearchOneShotEnabled = false,
+                    webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
+                    statusMessage = "请先启用联网检索"
+                )
+            }
+            return
+        }
+        _uiState.update {
+            val nextMode = when (it.webSearchTurnMode) {
+                WebSearchTurnMode.FOLLOW -> if (assistantDefault) WebSearchTurnMode.OFF else WebSearchTurnMode.ON
+                WebSearchTurnMode.ON -> WebSearchTurnMode.OFF
+                WebSearchTurnMode.OFF -> WebSearchTurnMode.FOLLOW
+            }
+            it.copy(
+                webSearchTurnMode = nextMode,
+                webSearchOneShotEnabled = nextMode == WebSearchTurnMode.ON,
+                webSearchStatusMessage = when (nextMode) {
+                    WebSearchTurnMode.ON -> when {
+                        it.webSearchConfig.realSearchConfigured -> "本轮将联网检索"
+                        it.webSearchConfig.isPublicCheckSource -> "当前是协议自检源；本轮仅可读取网页链接"
+                        else -> "本轮仅可读取网页链接"
+                    }
+                    WebSearchTurnMode.OFF -> "本轮不使用联网检索"
+                    WebSearchTurnMode.FOLLOW -> if (assistantDefault) "跟随助手默认联网" else "跟随智能联网策略"
+                },
+                statusMessage = when (nextMode) {
+                    WebSearchTurnMode.ON -> "本轮已开启联网检索"
+                    WebSearchTurnMode.OFF -> "本轮已关闭联网检索"
+                    WebSearchTurnMode.FOLLOW -> "联网检索跟随默认策略"
+                }
+            )
+        }
+    }
+
+    fun cycleWebSearchResearchModeForNextTurn() {
+        val state = _uiState.value
+        if (!state.webSearchConfig.enabled) {
+            _uiState.update {
+                it.copy(
+                    webSearchResearchModeOverride = null,
+                    webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
+                    statusMessage = "请先启用联网检索"
+                )
+            }
+            return
+        }
+        _uiState.update {
+            val current = it.webSearchResearchModeOverride ?: it.webSearchConfig.researchMode
+            val next = when (current) {
+                WebSearchResearchMode.AUTO -> WebSearchResearchMode.DEEP
+                WebSearchResearchMode.DEEP -> WebSearchResearchMode.OFF
+                WebSearchResearchMode.OFF -> WebSearchResearchMode.AUTO
+            }
+            it.copy(
+                webSearchResearchModeOverride = next.takeUnless { mode -> mode == it.webSearchConfig.researchMode },
+                webSearchStatusMessage = "本轮研究模式：${next.label}",
+                statusMessage = "本轮研究模式：${next.label}"
+            )
+        }
+    }
+
+    fun clearWebSearchDiagnostics() {
+        val records = webSearchDiagnosticStore.clear()
+        _uiState.update {
+            it.copy(
+                webSearchDiagnostics = records,
+                webSearchStatusMessage = null,
+                statusMessage = "已清空联网检索记录"
+            )
+        }
+    }
+
+    private fun appendWebSearchDiagnostic(record: WebSearchDiagnosticRecord): List<WebSearchDiagnosticRecord> =
+        webSearchDiagnosticStore.add(record)
+
+    fun selectAssistant(assistantId: String) {
+        val state = _uiState.value
+        val assistant = state.assistants.firstOrNull { it.id == assistantId } ?: return
+        assistantStore.saveSelectedAssistantId(assistant.id)
+        val updatedParams = assistant.toGenerationParams(state.params)
+        persistGenerationParams(updatedParams)
+        val updatedSessions = state.chatSessions.bindSession(
+            sessionId = state.activeChatSessionId,
+            assistantId = assistant.id,
+            modelMode = state.selectedChatBackend.bindingValue(),
+            modelId = state.currentChatModelId()
+        )
+        _uiState.update {
+            it.copy(
+                selectedAssistantId = assistant.id,
+                params = updatedParams,
+                chatSessions = updatedSessions,
+                statusMessage = "已切换助手：${assistant.name}"
+            )
+        }
+        persistChatSessions(updatedSessions)
+        applyAssistantDefaultModel(assistant)
+    }
+
+    fun deleteAssistant(assistantId: String) {
+        val state = _uiState.value
+        if (assistantId == AssistantRecord.DEFAULT_ID || state.assistants.size <= 1) {
+            _uiState.update { it.copy(statusMessage = "默认助手不能删除") }
+            return
+        }
+        val removed = state.assistants.firstOrNull { it.id == assistantId } ?: return
+        val remaining = state.assistants.filterNot { it.id == assistantId }
+        val next = if (state.selectedAssistantId == assistantId) {
+            remaining.firstOrNull { it.id == AssistantRecord.DEFAULT_ID } ?: remaining.first()
+        } else {
+            remaining.firstOrNull { it.id == state.selectedAssistantId } ?: remaining.first()
+        }
+        assistantStore.saveAssistants(remaining)
+        assistantStore.saveSelectedAssistantId(next.id)
+        val updatedParams = next.toGenerationParams(state.params)
+        persistGenerationParams(updatedParams)
+        val updatedSessions = state.chatSessions
+            .map { session ->
+                if (session.assistantId == assistantId) {
+                    session.copy(assistantId = next.id)
+                } else {
+                    session
+                }
+            }
+            .bindSession(
+                sessionId = state.activeChatSessionId,
+                assistantId = next.id,
+                modelMode = state.selectedChatBackend.bindingValue(),
+                modelId = state.currentChatModelId()
+            )
+        _uiState.update {
+            it.copy(
+                assistants = remaining,
+                selectedAssistantId = next.id,
+                params = updatedParams,
+                chatSessions = updatedSessions,
+                statusMessage = "已删除助手：${removed.name}"
+            )
+        }
+        persistChatSessions(updatedSessions)
+        applyAssistantDefaultModel(next)
+    }
+
+    fun importAssistantCard(rawJson: String) {
+        val imported = runCatching {
+            AssistantRecord.fromJson(JSONObject(rawJson), AssistantRecord.default(_uiState.value.params.systemPrompt, _uiState.value.params))
+        }.getOrElse { error ->
+            _uiState.update { it.copy(statusMessage = "角色卡导入失败：${error.message ?: "JSON 格式不正确"}") }
+            return
+        }
+        val state = _uiState.value
+        val now = System.currentTimeMillis()
+        val assistant = imported.copy(
+            id = UUID.randomUUID().toString(),
+            name = imported.name.ifBlank { "导入助手" }.take(36),
+            systemPrompt = imported.systemPrompt.ifBlank { GenerationParams().systemPrompt },
+            createdAt = now,
+            updatedAt = now
+        )
+        val updatedAssistants = state.assistants + assistant
+        assistantStore.saveAssistants(updatedAssistants)
+        assistantStore.saveSelectedAssistantId(assistant.id)
+        val updatedParams = assistant.toGenerationParams(state.params)
+        persistGenerationParams(updatedParams)
+        val updatedSessions = state.chatSessions.bindSession(
+            sessionId = state.activeChatSessionId,
+            assistantId = assistant.id,
+            modelMode = state.selectedChatBackend.bindingValue(),
+            modelId = state.currentChatModelId()
+        )
+        _uiState.update {
+            it.copy(
+                assistants = updatedAssistants,
+                selectedAssistantId = assistant.id,
+                params = updatedParams,
+                chatSessions = updatedSessions,
+                statusMessage = "已导入角色卡：${assistant.name}"
+            )
+        }
+        persistChatSessions(updatedSessions)
+        applyAssistantDefaultModel(assistant)
     }
 
     fun updateReasoningMode(mode: ReasoningMode) {
@@ -992,16 +1843,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cloudApiStore.saveModels(models)
         cloudApiStore.saveSelectedCloudChatModelId(selectedChatId)
         cloudApiStore.saveSelectedBackend(ChatBackend.CLOUD)
+        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         _uiState.update { state ->
+            sessionsToPersist = state.chatSessions.bindSession(
+                sessionId = state.activeChatSessionId,
+                assistantId = state.selectedAssistantId,
+                modelMode = ChatBackend.CLOUD.bindingValue(),
+                modelId = selectedChatId
+            )
             state.copy(
                 cloudApiConfig = config,
                 cloudModels = models,
                 selectedCloudChatModelId = selectedChatId,
                 selectedChatBackend = ChatBackend.CLOUD,
                 editingCloudModelId = null,
+                chatSessions = sessionsToPersist,
                 statusMessage = "已保存并加载云端推理模型：${record.displayName}"
             )
         }
+        persistChatSessions(sessionsToPersist)
     }
 
     fun saveCloudImageModel() {
@@ -1578,16 +2438,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             engine.stopGeneration()
         }
+        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         _uiState.update {
+            sessionsToPersist = it.chatSessions.bindSession(
+                sessionId = it.activeChatSessionId,
+                assistantId = it.selectedAssistantId,
+                modelMode = ChatBackend.CLOUD.bindingValue(),
+                modelId = model.id
+            )
             it.copy(
                 cloudApiConfig = config,
                 selectedCloudChatModelId = model.id,
                 selectedChatBackend = ChatBackend.CLOUD,
+                chatSessions = sessionsToPersist,
                 busy = false,
                 statusMessage = "已切换到云端模型：${config.safeDisplayName()}",
                 tab = AppTab.CHAT
             )
         }
+        persistChatSessions(sessionsToPersist)
     }
 
     fun loadModel(model: ModelManifest) {
@@ -1626,13 +2495,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         preference = _uiState.value.preference
                     )
                 }.getOrNull()
+                var sessionsToPersist: List<ChatSessionRecord> = emptyList()
                 _uiState.update { state ->
                     cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
+                    sessionsToPersist = state.chatSessions.bindSession(
+                        sessionId = state.activeChatSessionId,
+                        assistantId = state.selectedAssistantId,
+                        modelMode = ChatBackend.LOCAL.bindingValue(),
+                        modelId = model.id
+                    )
                     state.copy(
                         loadedModelId = model.id,
                         loadedModelName = model.displayName,
                         selectedChatBackend = ChatBackend.LOCAL,
                         models = modelStore.listModels(),
+                        chatSessions = sessionsToPersist,
                         busy = false,
                         autoTuningInProgress = false,
                         deviceProfile = device,
@@ -1647,6 +2524,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         tab = AppTab.CHAT
                     )
                 }
+                persistChatSessions(sessionsToPersist)
             }.onFailure { error ->
                 val nativeStats = engine.nativeStatsJson()
                 fail("加载失败：${loadFailureAdvice(error.message, nativeStats)}；Native stats=$nativeStats")
@@ -1692,7 +2570,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             val sessionId = it.activeChatSessionId ?: UUID.randomUUID().toString()
             val messages = it.messages + user + assistant
-            sessionsToPersist = it.chatSessions.upsertSession(sessionId, messages)
+            sessionsToPersist = it.chatSessions.upsertSession(
+                sessionId = sessionId,
+                messages = messages,
+                assistantId = it.selectedAssistantId,
+                modelMode = it.selectedChatBackend.bindingValue(),
+                modelId = it.currentChatModelId()
+            )
             it.copy(
                 input = "",
                 messages = messages,
@@ -1718,7 +2602,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         _uiState.update {
             val sessionId = it.activeChatSessionId ?: UUID.randomUUID().toString()
-            sessionsToPersist = it.chatSessions.upsertSession(sessionId, kept)
+            sessionsToPersist = it.chatSessions.upsertSession(
+                sessionId = sessionId,
+                messages = kept,
+                assistantId = it.selectedAssistantId,
+                modelMode = it.selectedChatBackend.bindingValue(),
+                modelId = it.currentChatModelId()
+            )
             it.copy(
                 messages = kept,
                 activeChatSessionId = sessionId,
@@ -1745,7 +2635,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             updatedSessions = if (updatedMessages.isEmpty()) {
                 it.chatSessions.filterNot { session -> session.id == sessionId }
             } else {
-                it.chatSessions.upsertSession(sessionId, updatedMessages)
+                it.chatSessions.upsertSession(
+                    sessionId = sessionId,
+                    messages = updatedMessages,
+                    assistantId = it.selectedAssistantId,
+                    modelMode = it.selectedChatBackend.bindingValue(),
+                    modelId = it.currentChatModelId()
+                )
             }
             it.copy(
                 messages = updatedMessages,
@@ -1761,7 +2657,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         generationJob?.cancel()
         generationJob = viewModelScope.launch {
             val initialState = _uiState.value
-            val params = initialState.params.let { current ->
+            val baseParams = initialState.params.let { current ->
                 val backendParams = if (initialState.selectedChatBackend == ChatBackend.CLOUD) {
                     current.copy(
                         reasoningMode = ReasoningMode.STANDARD,
@@ -1772,9 +2668,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 backendParams.copy(nPredict = backendParams.effectiveNPredict())
             }
-            if (initialState.selectedChatBackend == ChatBackend.LOCAL && params != initialState.params) {
-                persistGenerationParams(params)
-                _uiState.update { it.copy(params = params) }
+            if (initialState.selectedChatBackend == ChatBackend.LOCAL && baseParams != initialState.params) {
+                persistGenerationParams(baseParams)
+                _uiState.update { it.copy(params = baseParams) }
+            }
+            var requestParams = baseParams
+            val webSearchTurnMode = if (initialState.webSearchOneShotEnabled) {
+                WebSearchTurnMode.ON
+            } else {
+                initialState.webSearchTurnMode
+            }
+            val webSearchConfigForTurn = initialState.webSearchResearchModeOverride?.let { researchMode ->
+                initialState.webSearchConfig.copy(researchMode = researchMode)
+            } ?: initialState.webSearchConfig
+            if (
+                initialState.webSearchOneShotEnabled ||
+                initialState.webSearchTurnMode != WebSearchTurnMode.FOLLOW ||
+                initialState.webSearchResearchModeOverride != null
+            ) {
+                _uiState.update {
+                    it.copy(
+                        webSearchTurnMode = WebSearchTurnMode.FOLLOW,
+                        webSearchResearchModeOverride = null,
+                        webSearchOneShotEnabled = false
+                    )
+                }
+            }
+            val webSearchTurn = executeWebSearchForChatTurn(
+                messages = requestMessages,
+                config = webSearchConfigForTurn,
+                oneShotEnabled = webSearchTurnMode == WebSearchTurnMode.ON,
+                assistantWebSearchEnabled = initialState.selectedAssistant()?.webSearchEnabled == true,
+                turnMode = webSearchTurnMode,
+                search = { plan, config -> webSearchProvider.search(plan, config) },
+                beforeSearch = { plan, triggerReasons ->
+                    attachWebSearchEvidenceToPendingAssistant(
+                        sources = emptyList(),
+                        trace = plan.toPendingChatWebSearchTrace(
+                            config = webSearchConfigForTurn,
+                            triggerReasons = triggerReasons
+                        )
+                    )
+                    _uiState.update {
+                        it.copy(
+                            webSearchStatusMessage = "正在联网检索：${plan.displayQuery.take(42)}",
+                            statusMessage = "正在联网检索..."
+                        )
+                    }
+                }
+            )
+            if (webSearchTurn.promptContext.isNotBlank()) {
+                requestParams = requestParams.copy(
+                    systemPrompt = listOf(requestParams.systemPrompt, webSearchTurn.promptContext)
+                        .filter { it.isNotBlank() }
+                        .joinToString("\n\n")
+                )
+            }
+            attachWebSearchEvidenceToPendingAssistant(
+                sources = webSearchTurn.sourceReferences,
+                trace = webSearchTurn.diagnostic?.toChatWebSearchTrace()
+            )
+            if (webSearchTurn.requested) {
+                val diagnostics = webSearchTurn.diagnostic?.let(::appendWebSearchDiagnostic)
+                _uiState.update {
+                    it.copy(
+                        webSearchStatusMessage = webSearchTurn.webSearchStatusMessage ?: it.webSearchStatusMessage,
+                        webSearchDiagnostics = diagnostics ?: it.webSearchDiagnostics,
+                        statusMessage = webSearchTurn.statusMessage ?: it.statusMessage
+                    )
+                }
             }
             val state = _uiState.value
             val hasImageAttachments = requestMessages.any { it.imageAttachments.isNotEmpty() }
@@ -1794,7 +2756,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     persistChatSessions()
                     return@launch
                 }
-                cloudChatProvider.streamChat(cloudConfig, ChatRequest(cloudMessages, params))
+                cloudChatProvider.streamChat(cloudConfig, ChatRequest(cloudMessages, requestParams))
             } else {
                 if (hasImageAttachments && !localVisionRunnerAvailable()) {
                     appendAssistant(
@@ -1815,7 +2777,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     requestMessages
                 }
-                engine.streamChat(ChatRequest(localMessages, params))
+                engine.streamChat(ChatRequest(localMessages, requestParams))
             }
             stream.collect { event ->
                 when (event) {
@@ -1828,6 +2790,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _uiState.update { it.copy(stats = event.stats) }
                     }
                     is GenerateEvent.Done -> {
+                        val citationAudit = applyWebSearchAnswerGuardsToLastAssistant()
+                        if (citationAudit != null) {
+                            recordWebSearchCitationAudit(webSearchTurn.diagnostic?.id, citationAudit)
+                        }
                         _uiState.update {
                             it.copy(
                                 isGenerating = false,
@@ -1879,12 +2845,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val session = state.chatSessions.firstOrNull { it.id == sessionId } ?: return
+        val assistant = session.assistantId
+            ?.let { id -> state.assistants.firstOrNull { it.id == id } }
+            ?: state.assistants.firstOrNull { it.id == state.selectedAssistantId }
+        val updatedParams = assistant?.toGenerationParams(state.params) ?: state.params
+        if (assistant != null && assistant.id != state.selectedAssistantId) {
+            assistantStore.saveSelectedAssistantId(assistant.id)
+            persistGenerationParams(updatedParams)
+        }
+        val sessionBackend = session.modelMode.toChatBackendOrNull()
+        val sessionCloudModel = if (sessionBackend == ChatBackend.CLOUD) {
+            state.cloudModels.firstOrNull { it.id == session.modelId && it.kind == CloudModelKind.CHAT && it.configured }
+        } else {
+            null
+        }
+        val restoreCloud = sessionCloudModel != null
+        val restoreLoadedLocal = sessionBackend == ChatBackend.LOCAL &&
+            (session.modelId.isNullOrBlank() || session.modelId == state.loadedModelId)
+        if (sessionCloudModel != null) {
+            cloudApiStore.saveSelectedBackend(ChatBackend.CLOUD)
+            cloudApiStore.saveSelectedCloudChatModelId(sessionCloudModel.id)
+            cloudApiStore.save(sessionCloudModel.toChatConfig().normalized())
+        } else if (restoreLoadedLocal) {
+            cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
+        }
+        val status = when {
+            sessionBackend == ChatBackend.LOCAL &&
+                !session.modelId.isNullOrBlank() &&
+                session.modelId != state.loadedModelId ->
+                "已打开对话；该会话原本使用的本地模型尚未加载，可在顶部模型胶囊中重新加载。"
+            sessionBackend == ChatBackend.CLOUD && session.modelId != null && !restoreCloud ->
+                "已打开对话；该会话原本使用的云端模型已不可用，请重新选择云端推理引擎。"
+            else -> null
+        }
         _uiState.update {
             it.copy(
                 messages = session.messages,
                 input = "",
                 activeChatSessionId = session.id,
-                statusMessage = null
+                selectedAssistantId = assistant?.id ?: it.selectedAssistantId,
+                params = updatedParams,
+                selectedChatBackend = when {
+                    restoreCloud -> ChatBackend.CLOUD
+                    restoreLoadedLocal -> ChatBackend.LOCAL
+                    else -> it.selectedChatBackend
+                },
+                selectedCloudChatModelId = sessionCloudModel?.id ?: it.selectedCloudChatModelId,
+                cloudApiConfig = sessionCloudModel?.toChatConfig()?.normalized() ?: it.cloudApiConfig,
+                statusMessage = status
             )
         }
     }
@@ -2397,6 +3405,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         activeApiBindHost = null
     }
 
+    private fun applyWebSearchAnswerGuardsToLastAssistant(): WebSearchCitationAudit? {
+        var citationAudit: WebSearchCitationAudit? = null
+        _uiState.update { state ->
+            val updated = state.messages.toMutableList()
+            val index = updated.indexOfLast { it.role == Role.ASSISTANT }
+            if (index < 0) return@update state
+            val guardResult = updated[index].withWebSearchAnswerGuards()
+            citationAudit = guardResult.citationAudit
+            if (guardResult.message == updated[index]) return@update state
+            updated[index] = guardResult.message
+            val sessionId = state.activeChatSessionId
+            state.copy(
+                messages = updated,
+                chatSessions = if (sessionId == null) {
+                    state.chatSessions
+                } else {
+                    state.chatSessions.upsertSession(
+                        sessionId = sessionId,
+                        messages = updated,
+                        assistantId = state.selectedAssistantId,
+                        modelMode = state.selectedChatBackend.bindingValue(),
+                        modelId = state.currentChatModelId()
+                    )
+                }
+            )
+        }
+        return citationAudit
+    }
+
+    private fun recordWebSearchCitationAudit(recordId: String?, audit: WebSearchCitationAudit) {
+        if (recordId.isNullOrBlank()) return
+        val current = _uiState.value.webSearchDiagnostics.firstOrNull { it.id == recordId } ?: return
+        val updatedRecord = current.copy(
+            message = current.message + if (audit.repaired) " · 引用已修正" else " · 引用已审计",
+            warnings = (current.warnings + audit.warnings).distinct(),
+            closedLoopChecks = (current.closedLoopChecks + audit.closedLoopChecks).distinct()
+        )
+        val records = webSearchDiagnosticStore.replace(updatedRecord)
+        _uiState.update {
+            it.copy(
+                webSearchDiagnostics = records,
+                webSearchStatusMessage = audit.statusMessage,
+                statusMessage = audit.statusMessage
+            )
+        }
+    }
+
     private fun appendAssistant(
         delta: String,
         reasoningDelta: String = "",
@@ -2417,7 +3472,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             state.copy(
                 messages = updated,
                 activeChatSessionId = sessionId,
-                chatSessions = state.chatSessions.upsertSession(sessionId, updated)
+                chatSessions = state.chatSessions.upsertSession(
+                    sessionId = sessionId,
+                    messages = updated,
+                    assistantId = state.selectedAssistantId,
+                    modelMode = state.selectedChatBackend.bindingValue(),
+                    modelId = state.currentChatModelId()
+                )
+            )
+        }
+    }
+
+    private fun attachWebSearchEvidenceToPendingAssistant(
+        sources: List<ChatSourceReference>,
+        trace: ChatWebSearchTrace?
+    ) {
+        if (sources.isEmpty() && trace?.hasContent != true) return
+        _uiState.update { state ->
+            val updated = state.messages.toMutableList()
+            val index = updated.indexOfLast { it.role == Role.ASSISTANT }
+            if (index >= 0) {
+                val current = updated[index]
+                updated[index] = current.copy(
+                    sourceReferences = sources.ifEmpty { current.sourceReferences },
+                    webSearchTrace = trace ?: current.webSearchTrace
+                )
+            } else {
+                updated += ChatMessage(
+                    role = Role.ASSISTANT,
+                    content = "",
+                    sourceReferences = sources,
+                    webSearchTrace = trace
+                )
+            }
+            val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
+            state.copy(
+                messages = updated,
+                activeChatSessionId = sessionId,
+                chatSessions = state.chatSessions.upsertSession(
+                    sessionId = sessionId,
+                    messages = updated,
+                    assistantId = state.selectedAssistantId,
+                    modelMode = state.selectedChatBackend.bindingValue(),
+                    modelId = state.currentChatModelId()
+                )
             )
         }
     }
@@ -2439,6 +3537,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { error ->
                     _uiState.update {
                         it.copy(statusMessage = "图片库保存失败：${error.message}")
+                    }
+                }
+        }
+    }
+
+    private fun persistFiles(files: List<FileAssetRecord> = _uiState.value.files) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { chatSessionStore.saveFiles(files) }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(statusMessage = "文件库保存失败：${error.message}")
                     }
                 }
         }
@@ -2515,7 +3624,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun List<ChatSessionRecord>.upsertSession(
         sessionId: String,
-        messages: List<ChatMessage>
+        messages: List<ChatMessage>,
+        assistantId: String? = null,
+        modelMode: String? = null,
+        modelId: String? = null
     ): List<ChatSessionRecord> {
         if (messages.isEmpty()) return this
         val existing = firstOrNull { it.id == sessionId }
@@ -2526,10 +3638,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             pinned = existing?.pinned ?: false,
             manualTitle = existing?.manualTitle ?: false,
             updatedAt = System.currentTimeMillis(),
-            projectId = existing?.projectId
+            projectId = existing?.projectId,
+            assistantId = assistantId ?: existing?.assistantId,
+            modelMode = modelMode ?: existing?.modelMode,
+            modelId = if (modelMode != null) modelId else existing?.modelId
         )
         return (listOf(record) + filterNot { it.id == sessionId }).sortedForHistory()
     }
+
+    private fun List<ChatSessionRecord>.bindSession(
+        sessionId: String?,
+        assistantId: String? = null,
+        modelMode: String? = null,
+        modelId: String? = null
+    ): List<ChatSessionRecord> {
+        if (sessionId == null) return this
+        var changed = false
+        val updated = map { session ->
+            if (session.id != sessionId) {
+                session
+            } else {
+                val next = session.copy(
+                    assistantId = assistantId ?: session.assistantId,
+                    modelMode = modelMode ?: session.modelMode,
+                    modelId = if (modelMode != null) modelId else session.modelId
+                )
+                if (next != session) changed = true
+                next
+            }
+        }
+        return if (changed) updated else this
+    }
+
+    private fun MainUiState.currentChatModelId(): String? =
+        when (selectedChatBackend) {
+            ChatBackend.LOCAL -> loadedModelId
+            ChatBackend.CLOUD -> selectedCloudChatModelId
+        }
+
+    private fun ChatBackend.bindingValue(): String =
+        name.lowercase()
+
+    private fun String?.toChatBackendOrNull(): ChatBackend? =
+        when (this?.trim()?.lowercase()) {
+            "local" -> ChatBackend.LOCAL
+            "cloud" -> ChatBackend.CLOUD
+            else -> null
+        }
 
     private fun List<ChatMessage>.chatTitle(): String {
         val userText = firstOrNull { it.role == Role.USER }?.content.orEmpty()
@@ -2561,6 +3716,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
 
     private fun List<ImageAssetRecord>.sortedImagesForLibrary(): List<ImageAssetRecord> =
+        sortedByDescending { it.createdAt }
+
+    private fun List<FileAssetRecord>.sortedFilesForLibrary(): List<FileAssetRecord> =
         sortedByDescending { it.createdAt }
 
     private fun List<CloudModelRecord>.matchingCloudModel(
@@ -2739,6 +3897,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         } ?: error("无法读取文件")
         return output.toByteArray().toString(Charsets.UTF_8) to truncated
+    }
+
+    private fun createFileAsset(
+        uri: Uri,
+        displayName: String,
+        text: String,
+        truncated: Boolean,
+        source: String,
+        chatSessionId: String? = null
+    ): FileAssetRecord =
+        FileAssetRecord(
+            id = UUID.randomUUID().toString(),
+            name = displayName.ifBlank { "文件" },
+            mimeType = mimeTypeForTextAttachment(uri, displayName),
+            text = text.trim(),
+            preview = text.toFilePreview(),
+            truncated = truncated,
+            source = source,
+            sizeBytes = sizeForUri(uri).takeIf { it > 0L } ?: text.toByteArray(Charsets.UTF_8).size.toLong(),
+            chatSessionId = chatSessionId
+        )
+
+    private fun mimeTypeForTextAttachment(uri: Uri, name: String): String {
+        val resolver = getApplication<Application>().contentResolver
+        resolver.getType(uri)?.takeIf { it.isNotBlank() }?.let { return it }
+        return when (name.substringAfterLast('.', "").lowercase()) {
+            "md", "markdown" -> "text/markdown"
+            "json", "jsonl" -> "application/json"
+            "xml" -> "application/xml"
+            "csv" -> "text/csv"
+            "kt", "java", "py", "js", "ts" -> "text/x-code"
+            else -> "text/plain"
+        }
+    }
+
+    private fun sizeForUri(uri: Uri): Long {
+        val app = getApplication<Application>()
+        if (uri.scheme.equals("file", ignoreCase = true)) {
+            return uri.path?.let { File(it).length() } ?: 0L
+        }
+        return runCatching {
+            app.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (index >= 0 && cursor.moveToFirst() && !cursor.isNull(index)) cursor.getLong(index) else 0L
+            } ?: 0L
+        }.getOrDefault(0L)
     }
 
     private fun importImageAsset(
@@ -2984,8 +4188,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .apply()
     }
 
+    private fun updatedAssistantsWithParams(params: GenerationParams): List<AssistantRecord> {
+        val state = _uiState.value
+        val selectedId = state.selectedAssistantId
+        return state.assistants.map { assistant ->
+            if (assistant.id == selectedId) {
+                assistant.copy(
+                    systemPrompt = params.systemPrompt,
+                    paramsJson = params.toJson(),
+                    updatedAt = System.currentTimeMillis()
+                )
+            } else {
+                assistant
+            }
+        }
+    }
+
+    private fun applyAssistantDefaultModel(assistant: AssistantRecord) {
+        val modelId = assistant.defaultModelId?.trim().orEmpty()
+        when (assistant.defaultModelMode.normalizedAssistantModelMode()) {
+            ASSISTANT_MODEL_MODE_CLOUD -> {
+                if (modelId.isBlank()) {
+                    _uiState.update { it.copy(statusMessage = "已切换助手：${assistant.name}，但该助手未绑定云端模型。") }
+                    return
+                }
+                val model = _uiState.value.cloudModels.firstOrNull { it.id == modelId && it.kind == CloudModelKind.CHAT }
+                if (model == null) {
+                    _uiState.update { it.copy(statusMessage = "已切换助手：${assistant.name}，但绑定的云端模型已不可用。") }
+                    return
+                }
+                selectCloudChatModel(model.id)
+            }
+            ASSISTANT_MODEL_MODE_LOCAL -> {
+                if (modelId.isBlank()) {
+                    _uiState.update { it.copy(statusMessage = "已切换助手：${assistant.name}，但该助手未绑定本地模型。") }
+                    return
+                }
+                val model = _uiState.value.models.firstOrNull { it.id == modelId }
+                if (model == null) {
+                    _uiState.update { it.copy(statusMessage = "已切换助手：${assistant.name}，但绑定的本地模型已不可用。") }
+                    return
+                }
+                if (_uiState.value.selectedChatBackend != ChatBackend.LOCAL || _uiState.value.loadedModelId != model.id) {
+                    loadModel(model)
+                }
+            }
+        }
+    }
+
+    private fun String.normalizedAssistantModelMode(): String =
+        when (trim().lowercase()) {
+            ASSISTANT_MODEL_MODE_LOCAL -> ASSISTANT_MODEL_MODE_LOCAL
+            ASSISTANT_MODEL_MODE_CLOUD -> ASSISTANT_MODEL_MODE_CLOUD
+            else -> ASSISTANT_MODEL_MODE_FOLLOW_CURRENT
+        }
+
+    private fun AssistantRecord.toGenerationParams(defaults: GenerationParams): GenerationParams =
+        GenerationParams.fromJson(paramsJson, defaults).copy(systemPrompt = systemPrompt)
+
+    private fun MainUiState.selectedAssistant(): AssistantRecord? =
+        assistants.firstOrNull { it.id == selectedAssistantId } ?: assistants.firstOrNull()
+
+    private fun MainUiState.shouldUseWebSearchForTurn(plan: WebSearchPlan): Boolean =
+        when {
+            webSearchOneShotEnabled || webSearchTurnMode == WebSearchTurnMode.ON ->
+                webSearchConfig.realSearchConfigured || (webSearchConfig.canReadDirectUrls && plan.directUrls.isNotEmpty())
+            webSearchTurnMode == WebSearchTurnMode.OFF -> false
+            selectedAssistant()?.webSearchEnabled == true ->
+                webSearchConfig.realSearchConfigured || (webSearchConfig.canReadDirectUrls && plan.directUrls.isNotEmpty())
+            else -> (webSearchConfig.realSearchConfigured || (webSearchConfig.canReadDirectUrls && plan.directUrls.isNotEmpty())) &&
+                plan.shouldUseWebSearchAutomatically(webSearchConfig.triggerMode)
+        }
+
     private fun apiUrl(host: String): String =
-        "http://$host:$REST_PORT/v1/chat/completions"
+        "http://$host:$REST_PORT/v1"
 
     private fun MainUiState.prepareChatInput(): PreparedChatInput {
         val matches = imageAttachmentRegex.findAll(input).toList()
@@ -3426,3 +4702,13 @@ private fun ModelRepositoryProvider.toModelSource(): ModelSource =
         ModelRepositoryProvider.MODELSCOPE -> ModelSource.MODELSCOPE
         ModelRepositoryProvider.HUGGING_FACE -> ModelSource.HUGGING_FACE
     }
+
+private fun String.toFilePreview(): String =
+    lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .take(4)
+        .joinToString(" ")
+        .replace(Regex("""\s+"""), " ")
+        .take(180)
+        .ifBlank { "无可预览文本" }

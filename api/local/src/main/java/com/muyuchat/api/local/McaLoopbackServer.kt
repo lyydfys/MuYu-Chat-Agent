@@ -236,7 +236,8 @@ class McaLoopbackServer(
             }
         }
         if (errorMessage != null) {
-            writeError(socket, "500 Internal Server Error", "generation_failed", errorMessage.orEmpty())
+            val message = errorMessage.orEmpty()
+            writeError(socket, generationErrorStatus(message), "generation_failed", message)
             return
         }
         val response = JSONObject()
@@ -426,6 +427,20 @@ class McaLoopbackServer(
 
     private fun RuntimeStats?.generatedSomething(): Boolean =
         (this?.completionTokens ?: 0) > 0
+
+    private fun generationErrorStatus(message: String): String {
+        val normalized = message.lowercase()
+        return if (
+            "请先在模型页加载" in message ||
+            "no gguf model is loaded" in normalized ||
+            "engine is not attached" in normalized ||
+            "no backends are loaded" in normalized
+        ) {
+            "503 Service Unavailable"
+        } else {
+            "500 Internal Server Error"
+        }
+    }
 
     private fun emptyVisibleContentHint(stats: RuntimeStats?, params: GenerationParams): String {
         val generated = stats?.completionTokens?.takeIf { it > 0 }

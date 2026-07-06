@@ -22,8 +22,57 @@ data class ChatMessage(
     val tokenCount: Int? = null,
     val reasoningContent: String = "",
     val reasoningDurationMs: Long = 0L,
-    val imageAttachments: List<ChatImageAttachment> = emptyList()
+    val imageAttachments: List<ChatImageAttachment> = emptyList(),
+    val sourceReferences: List<ChatSourceReference> = emptyList(),
+    val webSearchTrace: ChatWebSearchTrace? = null
 )
+
+data class ChatSourceReference(
+    val title: String = "",
+    val url: String = "",
+    val snippet: String = "",
+    val provider: String = "",
+    val hostLabel: String = "",
+    val trustLabel: String = "",
+    val trustReason: String = ""
+)
+
+data class ChatWebSearchTrace(
+    val query: String = "",
+    val providerLabel: String = "",
+    val triggerModeLabel: String = "",
+    val running: Boolean = false,
+    val stageLabel: String = "",
+    val searchedQueries: List<String> = emptyList(),
+    val directUrls: List<String> = emptyList(),
+    val sourceCount: Int = 0,
+    val elapsedMs: Long = 0L,
+    val success: Boolean = false,
+    val message: String = "",
+    val healthScore: Int = 0,
+    val healthLabel: String = "",
+    val qualityScore: Int = 0,
+    val qualityLabel: String = "",
+    val researchConfidenceScore: Int = 0,
+    val researchConfidenceLabel: String = "",
+    val evidenceGroups: List<String> = emptyList(),
+    val conflictWarnings: List<String> = emptyList(),
+    val synthesisGuidance: List<String> = emptyList(),
+    val triggerReasons: List<String> = emptyList(),
+    val warnings: List<String> = emptyList(),
+    val cacheStatus: String = "",
+    val closedLoopChecks: List<String> = emptyList()
+) {
+    val hasContent: Boolean
+        get() = query.isNotBlank() ||
+            running ||
+            stageLabel.isNotBlank() ||
+            searchedQueries.isNotEmpty() ||
+            directUrls.isNotEmpty() ||
+            sourceCount > 0 ||
+            message.isNotBlank() ||
+            warnings.isNotEmpty()
+}
 
 data class ChatImageAttachment(
     val name: String = "",

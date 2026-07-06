@@ -1,7 +1,16 @@
 ﻿package com.muyuchat.feature.agent
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -9,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -17,6 +27,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Close
@@ -27,7 +38,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -45,14 +55,19 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.advisor.AgentCandidate
 import com.muyuchat.core.advisor.AgentRecommendation
@@ -61,6 +76,8 @@ import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 private const val MAX_VISIBLE_BENCHMARK_HISTORY = 10
 
@@ -126,14 +143,163 @@ fun AgentScreen(
 ) {
     var infoDialog by rememberSaveable { mutableStateOf<AgentInfoDialog?>(null) }
 
-    infoDialog?.let { dialog ->
-        AgentInfoDialog(
-            type = dialog,
-            state = state,
-            onDismiss = { infoDialog = null }
-        )
-    }
+    Box(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            item {
+                AgentHeader(
+                    isBusy = state.isBusy,
+                    statusMessage = state.statusMessage,
+                    onBack = onBack,
+                    onScan = onScan,
+                    onBenchmark = onBenchmark
+                )
+            }
 
+            state.deviceProfile?.let { profile ->
+                item { HardwareOverview(profile) }
+            }
+
+            item {
+                SmartDebugCard(
+                    state = state,
+                    onPreferenceChange = onPreferenceChange,
+                    onQuickDebug = onQuickDebug,
+                    onDeepDebug = onDeepDebug,
+                    onPowerDebug = onPowerDebug,
+                    onAgentInfo = {
+                        onAgentInfo()
+                        infoDialog = if (state.benchmark == null || state.recommendation == null) {
+                            AgentInfoDialog.GUIDE
+                        } else {
+                            AgentInfoDialog.RESULT
+                        }
+                    }
+                )
+            }
+
+            item { CurrentModelReportCard(state) }
+
+            state.recommendation?.let { recommendation ->
+                item {
+                    RecommendationCard(
+                        recommendation = recommendation,
+                        onApplyRecommendation = onApplyRecommendation
+                    )
+                }
+            }
+
+            state.benchmark?.let { benchmark ->
+                item { DebugSummaryCard(state, benchmark) }
+                item { DebugDetailsCard(state, benchmark) }
+            }
+
+            state.recommendation?.let { recommendation ->
+                if (recommendation.candidates.isNotEmpty()) {
+                    item { SectionTitle("候选模型") }
+                    items(recommendation.candidates.take(5)) { candidate ->
+                        CandidateCard(candidate)
+                    }
+                }
+            }
+
+            if (state.benchmarkHistory.isNotEmpty()) {
+                item {
+                    BenchmarkHistoryCard(
+                        history = state.benchmarkHistory.take(MAX_VISIBLE_BENCHMARK_HISTORY),
+                        totalCount = state.benchmarkHistory.size
+                    )
+                }
+            }
+
+            if (state.agentDecisionHistory.isNotEmpty()) {
+                item {
+                    AgentDecisionHistoryCard(state.agentDecisionHistory.take(10))
+                }
+            }
+
+            item {
+                AdvancedParamsCard(
+                    params = state.params,
+                    onParamsChange = onParamsChange
+                )
+            }
+        }
+
+        SmoothRightToLeftPage(
+            visible = infoDialog != null,
+            onDismiss = { infoDialog = null }
+        ) { pageModifier, closePage ->
+            AgentInfoPage(
+                type = infoDialog ?: AgentInfoDialog.GUIDE,
+                state = state,
+                onBack = closePage,
+                modifier = pageModifier
+            )
+        }
+    }
+}
+
+@Composable
+private fun SmoothRightToLeftPage(
+    visible: Boolean,
+    onDismiss: () -> Unit,
+    content: @Composable (Modifier, () -> Unit) -> Unit
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = slideInHorizontally(
+            animationSpec = tween(durationMillis = 240),
+            initialOffsetX = { it }
+        ) + fadeIn(animationSpec = tween(durationMillis = 140)),
+        exit = ExitTransition.None
+    ) {
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val density = LocalDensity.current
+            val widthPx = with(density) { maxWidth.toPx() }
+            val scope = rememberCoroutineScope()
+            val offsetX = remember { Animatable(0f) }
+
+            LaunchedEffect(visible) {
+                if (visible) offsetX.snapTo(0f)
+            }
+
+            fun closeWithMotion() {
+                scope.launch {
+                    offsetX.animateTo(
+                        targetValue = -widthPx,
+                        animationSpec = tween(durationMillis = 180)
+                    )
+                    onDismiss()
+                }
+            }
+
+            BackHandler(enabled = visible) {
+                closeWithMotion()
+            }
+
+            val pageModifier = Modifier
+                .fillMaxSize()
+                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+
+            content(pageModifier, ::closeWithMotion)
+        }
+    }
+}
+
+@Composable
+private fun AgentInfoPage(
+    type: AgentInfoDialog,
+    state: AgentUiState,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isGuide = type == AgentInfoDialog.GUIDE
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -142,131 +308,53 @@ fun AgentScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            AgentHeader(
-                isBusy = state.isBusy,
-                statusMessage = state.statusMessage,
-                onBack = onBack,
-                onScan = onScan,
-                onBenchmark = onBenchmark
-            )
-        }
-
-        state.deviceProfile?.let { profile ->
-            item { HardwareOverview(profile) }
-        }
-
-        item {
-            SmartDebugCard(
-                state = state,
-                onPreferenceChange = onPreferenceChange,
-                onQuickDebug = onQuickDebug,
-                onDeepDebug = onDeepDebug,
-                onPowerDebug = onPowerDebug,
-                onAgentInfo = {
-                    onAgentInfo()
-                    infoDialog = if (state.benchmark == null || state.recommendation == null) {
-                        AgentInfoDialog.GUIDE
-                    } else {
-                        AgentInfoDialog.RESULT
-                    }
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack, modifier = Modifier.size(46.dp)) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回智能调参")
                 }
-            )
-        }
-
-        item { CurrentModelReportCard(state) }
-
-        state.recommendation?.let { recommendation ->
-            item {
-                RecommendationCard(
-                    recommendation = recommendation,
-                    onApplyRecommendation = onApplyRecommendation
-                )
-            }
-        }
-
-        state.benchmark?.let { benchmark ->
-            item { DebugSummaryCard(state, benchmark) }
-            item { DebugDetailsCard(state, benchmark) }
-        }
-
-        state.recommendation?.let { recommendation ->
-            if (recommendation.candidates.isNotEmpty()) {
-                item { SectionTitle("候选模型") }
-                items(recommendation.candidates.take(5)) { candidate ->
-                    CandidateCard(candidate)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(if (isGuide) "调参说明" else "调试解释", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("智能调参的工作方式与本次结果说明", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
-
-        if (state.benchmarkHistory.isNotEmpty()) {
-            item {
-                BenchmarkHistoryCard(
-                    history = state.benchmarkHistory.take(MAX_VISIBLE_BENCHMARK_HISTORY),
-                    totalCount = state.benchmarkHistory.size
-                )
-            }
-        }
-
-        if (state.agentDecisionHistory.isNotEmpty()) {
-            item {
-                AgentDecisionHistoryCard(state.agentDecisionHistory.take(10))
-            }
-        }
-
         item {
-            AdvancedParamsCard(
-                params = state.params,
-                onParamsChange = onParamsChange
-            )
-        }
-    }
-}
-
-@Composable
-private fun AgentInfoDialog(
-    type: AgentInfoDialog,
-    state: AgentUiState,
-    onDismiss: () -> Unit
-) {
-    val isGuide = type == AgentInfoDialog.GUIDE
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                if (isGuide) "调参说明" else "调试解释",
-                fontWeight = FontWeight.Bold
-            )
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (isGuide) {
-                    Text("智能调参会根据本机 SoC、核心数、内存、温控、当前模型和实测 token/s 推荐参数。")
-                    Text("智能调试只有一个入口：规则包负责参数搜索和安全阈值，当前已加载模型负责解释调试结果。")
-                    Text("没有加载模型时，可以先查看体检和推荐；加载模型后才能运行快速、深度或省电调试。")
-                } else {
-                    val benchmark = state.benchmark
-                    val recommendation = state.recommendation
-                    if (benchmark == null || recommendation == null) {
-                        Text("当前还没有可解释的调试结果。请先运行快速调试、深度调试或省电调试。")
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (isGuide) {
+                        Text("智能调参会根据本机 SoC、核心数、内存、温控、当前模型和实测 token/s 推荐参数。")
+                        Text("智能调试只有一个入口：规则包负责参数搜索和安全阈值，当前已加载模型负责解释调试结果。")
+                        Text("没有加载模型时，可以先查看体检和推荐；加载模型后才能运行快速、深度或省电调试。")
                     } else {
-                        Text("本次实测速度 ${"%.2f".format(benchmark.decodeTps)} token/s，TTFT ${benchmark.ttftMs}ms。")
-                        Text("推荐线程 ${recommendation.tuningPlan.nThreads}，上下文 ${recommendation.tuningPlan.nCtx}，回复长度 ${recommendation.tuningPlan.nPredict}。")
-                        Text(recommendation.tuningPlan.reason.ifBlank { recommendation.explanation })
-                        Text("深度调试会做多轮验证，并采用较优稳定速度；省电调试会明显偏向低线程和低发热。")
+                        val benchmark = state.benchmark
+                        val recommendation = state.recommendation
+                        if (benchmark == null || recommendation == null) {
+                            Text("当前还没有可解释的调试结果。请先运行快速调试、深度调试或省电调试。")
+                        } else {
+                            Text("本次实测速度 ${"%.2f".format(benchmark.decodeTps)} token/s，TTFT ${benchmark.ttftMs}ms。")
+                            Text("推荐线程 ${recommendation.tuningPlan.nThreads}，上下文 ${recommendation.tuningPlan.nCtx}，回复长度 ${recommendation.tuningPlan.nPredict}。")
+                            Text(recommendation.tuningPlan.reason.ifBlank { recommendation.explanation })
+                            Text("深度调试会做多轮验证，并采用较优稳定速度；省电调试会明显偏向低线程和低发热。")
+                        }
                     }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    onDismiss()
-                }
+        }
+        item {
+            Button(
+                onClick = onBack,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(999.dp)
             ) {
                 Text("知道了")
             }
         }
-    )
+    }
 }
 
 @Composable

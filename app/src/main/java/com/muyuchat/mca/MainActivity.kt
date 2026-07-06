@@ -47,7 +47,10 @@ import com.muyuchat.feature.agent.BenchmarkHistoryItem
 import com.muyuchat.feature.agent.AgentUiState
 import com.muyuchat.feature.agent.TuningTrialItem
 import com.muyuchat.feature.chat.ChatScreen
+import com.muyuchat.feature.chat.AssistantEditorDraft
+import com.muyuchat.feature.chat.AssistantUiItem
 import com.muyuchat.feature.chat.ChatHistoryItem
+import com.muyuchat.feature.chat.FileAssetUiItem
 import com.muyuchat.feature.chat.ImageAssetUiItem
 import com.muyuchat.feature.chat.ImageGenerationUiJob
 import com.muyuchat.feature.chat.ChatModelChoice
@@ -61,8 +64,15 @@ import com.muyuchat.feature.modelhub.ModelHubUiState
 import com.muyuchat.feature.settings.LocalApiToolScreen
 import com.muyuchat.feature.settings.SettingsHubScreen
 import com.muyuchat.feature.settings.SettingsUiState
+import com.muyuchat.feature.settings.WebSearchBackupProviderDraft
+import com.muyuchat.feature.settings.WebSearchBackupProviderUiState
+import com.muyuchat.feature.settings.WebSearchDiagnosticSourceUiItem
+import com.muyuchat.feature.settings.WebSearchDiagnosticUiItem
+import com.muyuchat.feature.settings.WebSearchSettingsDraft
+import com.muyuchat.feature.settings.WebSearchSettingsUiState
 import com.muyuchat.mca.ui.McaTheme
 import com.muyuchat.core.benchmark.BenchmarkResult
+import com.muyuchat.core.engine.GenerationParams
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -166,6 +176,7 @@ private fun McaApp(
     viewModel: MainViewModel
 ) {
     var appMenuOpen by rememberSaveable { mutableStateOf(false) }
+    var startSettingsInWebSearch by rememberSaveable { mutableStateOf(false) }
     fun preparePageReturn() {
         if (appMenuOpen) {
             appMenuOpen = true
@@ -269,9 +280,39 @@ private fun McaApp(
                                         subtitle = model.protocolLabel,
                                         cloud = true
                                     )
-                                }
+                            }
                         )
                     },
+                    assistants = state.assistants.map { assistant ->
+                        val assistantParams = GenerationParams.fromJson(assistant.paramsJson, state.params)
+                        AssistantUiItem(
+                            id = assistant.id,
+                            name = assistant.name,
+                            avatar = assistant.avatar,
+                            tag = assistant.tag,
+                            systemPrompt = assistant.systemPrompt,
+                            modelSummary = when (assistant.defaultModelMode) {
+                                "local" -> state.models.firstOrNull { it.id == assistant.defaultModelId }?.displayName ?: "指定本地模型"
+                                "cloud" -> state.cloudModels.firstOrNull {
+                                    it.id == assistant.defaultModelId && it.kind == CloudModelKind.CHAT
+                                }?.modelName ?: "指定云端模型"
+                                else -> "跟随当前模型"
+                            },
+                            defaultModelMode = assistant.defaultModelMode,
+                            defaultModelId = assistant.defaultModelId,
+                            temperature = assistantParams.temperature,
+                            topP = assistantParams.topP,
+                            nCtx = assistantParams.nCtx,
+                            nPredict = assistantParams.nPredict,
+                            reasoningMode = assistantParams.reasoningMode,
+                            memoryEnabled = assistant.memoryEnabled,
+                            webSearchEnabled = assistant.webSearchEnabled,
+                            fileContextEnabled = assistant.fileContextEnabled,
+                            selected = assistant.id == state.selectedAssistantId,
+                            exportJson = assistant.toJson().toString(2)
+                        )
+                    },
+                    selectedAssistantId = state.selectedAssistantId,
                     images = state.images.map { image ->
                         ImageAssetUiItem(
                             id = image.id,
@@ -284,6 +325,18 @@ private fun McaApp(
                             sizeText = formatAssetBytes(image.sizeBytes),
                             width = image.width,
                             height = image.height
+                        )
+                    },
+                    files = state.files.map { file ->
+                        FileAssetUiItem(
+                            id = file.id,
+                            name = file.name,
+                            mimeType = file.mimeType,
+                            preview = file.preview,
+                            createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+                                .format(java.util.Date(file.createdAt)),
+                            sizeText = formatAssetBytes(file.sizeBytes),
+                            truncated = file.truncated
                         )
                     },
                     imageJobs = state.imageJobs.map { job ->
@@ -325,7 +378,30 @@ private fun McaApp(
                     stats = state.stats,
                     apiEnabled = state.apiEnabled,
                     restEnabled = state.restEnabled,
-                    reasoningMode = state.params.reasoningMode
+                    reasoningMode = state.params.reasoningMode,
+                    webSearchEnabled = state.webSearchConfig.enabled,
+                    webSearchConfigured = state.webSearchConfig.realSearchConfigured,
+                    webSearchEnabledForTurn = state.webSearchTurnMode == WebSearchTurnMode.ON ||
+                        (state.webSearchTurnMode == WebSearchTurnMode.FOLLOW &&
+                            state.assistants.firstOrNull { it.id == state.selectedAssistantId }?.webSearchEnabled == true),
+                    webSearchStatusMessage = state.webSearchStatusMessage,
+                    webSearchTurnModeLabel = state.toWebSearchTurnModeLabel(),
+                    webSearchResearchModeLabel = (state.webSearchResearchModeOverride ?: state.webSearchConfig.researchMode).label,
+                    webSearchResearchOverridden = state.webSearchResearchModeOverride != null,
+                    webSearchProviderLabel = buildString {
+                        if (state.webSearchConfig.realSearchConfigured) {
+                            append(state.webSearchConfig.realSearchProviderLabel.ifBlank { state.webSearchConfig.providerLabel })
+                            append(" · ")
+                            append(state.webSearchConfig.triggerMode.label)
+                        } else if (state.webSearchConfig.isPublicCheckSource) {
+                            append("协议自检源 · 网页直读")
+                        } else if (state.webSearchConfig.enabled) {
+                            append("网页直读 · ")
+                            append(state.webSearchConfig.triggerMode.label)
+                        } else {
+                            append(state.webSearchConfig.providerLabel)
+                        }
+                    }
                 ),
                 onInputChange = viewModel::onInputChange,
                 onSend = viewModel::sendMessage,
@@ -342,16 +418,49 @@ private fun McaApp(
                 onUploadFile = viewModel::attachFile,
                 onUseImageAsset = viewModel::useImageAsset,
                 onDeleteImageAsset = viewModel::deleteImageAsset,
+                onUseFileAsset = viewModel::useFileAsset,
+                onDeleteFileAsset = viewModel::deleteFileAsset,
                 onGenerateImagePrompt = viewModel::generateImageAsset,
                 onCancelImageGeneration = viewModel::cancelImageGeneration,
                 onSelectImageModel = viewModel::selectImageGenerationModel,
                 onReasoningModeChange = viewModel::updateReasoningMode,
                 onCloudReasoningModeLocked = viewModel::showCloudReasoningModeLocked,
+                onToggleWebSearchForTurn = viewModel::toggleWebSearchForNextTurn,
+                onCycleWebSearchResearchMode = viewModel::cycleWebSearchResearchModeForNextTurn,
                 onLoadModel = viewModel::selectChatModel,
                 onOpenAgent = { onTab(AppTab.AGENT) },
                 onOpenModels = { onTab(AppTab.MODELS) },
                 onOpenApi = { onTab(AppTab.API) },
-                onOpenSettings = { onTab(AppTab.SETTINGS) },
+                onOpenSettings = {
+                    startSettingsInWebSearch = false
+                    onTab(AppTab.SETTINGS)
+                },
+                onOpenWebSearchSettings = {
+                    startSettingsInWebSearch = true
+                    onTab(AppTab.SETTINGS)
+                },
+                onSaveAssistant = { draft: AssistantEditorDraft ->
+                    viewModel.saveAssistantProfile(
+                        id = draft.id,
+                        name = draft.name,
+                        avatar = draft.avatar,
+                        tag = draft.tag,
+                        systemPrompt = draft.systemPrompt,
+                        defaultModelMode = draft.defaultModelMode,
+                        defaultModelId = draft.defaultModelId?.removePrefix(MainViewModel.CLOUD_MODEL_CHOICE_PREFIX),
+                        temperature = draft.temperature,
+                        topP = draft.topP,
+                        nCtx = draft.nCtx,
+                        nPredict = draft.nPredict,
+                        reasoningMode = draft.reasoningMode,
+                        memoryEnabled = draft.memoryEnabled,
+                        webSearchEnabled = draft.webSearchEnabled,
+                        fileContextEnabled = draft.fileContextEnabled
+                    )
+                },
+                onSelectAssistant = viewModel::selectAssistant,
+                onDeleteAssistant = viewModel::deleteAssistant,
+                onImportAssistantCard = viewModel::importAssistantCard,
                 appMenuOpen = appMenuOpen,
                 onAppMenuOpenChange = { appMenuOpen = it },
                 modifier = Modifier.fillMaxSize()
@@ -566,7 +675,67 @@ private fun McaApp(
                 onRefreshLogs = viewModel::refreshLogs,
                 onRefreshDiagnostics = viewModel::refreshDiagnostics,
                 onExportDiagnostics = onExportDiagnostics,
+                onClearChatHistory = viewModel::clearChatHistory,
+                onClearImageLibrary = viewModel::clearImageLibrary,
+                onClearFileLibrary = viewModel::clearFileLibrary,
+                onSaveWebSearchSettings = { draft: WebSearchSettingsDraft ->
+                    viewModel.saveWebSearchConfig(
+                        enabled = draft.enabled,
+                        provider = draft.provider,
+                        endpoint = draft.endpoint,
+                        apiKey = draft.apiKey,
+                        maxResults = draft.maxResults,
+                        fetchPageContent = draft.fetchPageContent,
+                        triggerMode = draft.triggerMode,
+                        researchMode = draft.researchMode,
+                        backupProviders = draft.backupProviders.toWebSearchBackupConfigs()
+                    )
+                },
+                onPreflightWebSearch = { draft: WebSearchSettingsDraft ->
+                    viewModel.preflightWebSearchConfig(
+                        enabled = draft.enabled,
+                        provider = draft.provider,
+                        endpoint = draft.endpoint,
+                        apiKey = draft.apiKey,
+                        maxResults = draft.maxResults,
+                        fetchPageContent = draft.fetchPageContent,
+                        triggerMode = draft.triggerMode,
+                        researchMode = draft.researchMode,
+                        backupProviders = draft.backupProviders.toWebSearchBackupConfigs()
+                    )
+                },
+                onTestWebSearch = { query: String, draft: WebSearchSettingsDraft ->
+                    viewModel.testWebSearchConfig(
+                        query = query,
+                        enabled = draft.enabled,
+                        provider = draft.provider,
+                        endpoint = draft.endpoint,
+                        apiKey = draft.apiKey,
+                        maxResults = draft.maxResults,
+                        fetchPageContent = draft.fetchPageContent,
+                        triggerMode = draft.triggerMode,
+                        researchMode = draft.researchMode,
+                        backupProviders = draft.backupProviders.toWebSearchBackupConfigs()
+                    )
+                },
+                onTestWebSearchTurn = { query: String, draft: WebSearchSettingsDraft, allowPublicCheckSourceForProtocolTest: Boolean ->
+                    viewModel.testWebSearchTurn(
+                        query = query,
+                        enabled = draft.enabled,
+                        provider = draft.provider,
+                        endpoint = draft.endpoint,
+                        apiKey = draft.apiKey,
+                        maxResults = draft.maxResults,
+                        fetchPageContent = draft.fetchPageContent,
+                        triggerMode = draft.triggerMode,
+                        researchMode = draft.researchMode,
+                        backupProviders = draft.backupProviders.toWebSearchBackupConfigs(),
+                        allowPublicCheckSourceForProtocolTest = allowPublicCheckSourceForProtocolTest
+                    )
+                },
+                onClearWebSearchDiagnostics = viewModel::clearWebSearchDiagnostics,
                 onBack = closePage,
+                startInWebSearch = startSettingsInWebSearch,
                 modifier = pageModifier
             )
             }
@@ -752,8 +921,108 @@ private fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
     localApiAddress = localApiAddress,
     openApiAddress = openApiAddress,
     nativeStatsJson = nativeStatsJson,
-    diagnosticReport = diagnosticReport
+    diagnosticReport = diagnosticReport,
+    chatSessionCount = chatSessions.size,
+    imageAssetCount = images.size,
+    imageAssetBytes = images.sumOf { it.sizeBytes },
+    fileAssetCount = files.size,
+    fileAssetBytes = files.sumOf { it.sizeBytes },
+    statusMessage = statusMessage,
+    webSearch = WebSearchSettingsUiState(
+        enabled = webSearchConfig.enabled,
+        provider = webSearchConfig.provider.name,
+        providerLabel = webSearchConfig.providerLabel,
+        endpoint = webSearchConfig.endpoint,
+        apiKey = webSearchConfig.apiKey,
+        maxResults = webSearchConfig.maxResults,
+        fetchPageContent = webSearchConfig.fetchPageContent,
+        triggerMode = webSearchConfig.triggerMode.name,
+        triggerModeLabel = webSearchConfig.triggerMode.label,
+        researchMode = webSearchConfig.researchMode.name,
+        researchModeLabel = webSearchConfig.researchMode.label,
+        configured = webSearchConfig.configured,
+        realSearchConfigured = webSearchConfig.realSearchConfigured,
+        realSearchProviderLabel = webSearchConfig.realSearchProviderLabel,
+        backupProviders = webSearchConfig.backupProviders.take(3).map { backup ->
+            WebSearchBackupProviderUiState(
+                enabled = backup.enabled,
+                provider = backup.provider.name,
+                providerLabel = backup.providerLabel,
+                endpoint = backup.endpoint,
+                apiKey = backup.apiKey,
+                configured = backup.configured
+            )
+        },
+        statusMessage = webSearchStatusMessage ?: statusMessage,
+        diagnostics = webSearchDiagnostics.map { record ->
+            WebSearchDiagnosticUiItem(
+                createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.getDefault())
+                    .format(java.util.Date(record.createdAt)),
+                providerLabel = record.providerLabel,
+                triggerModeLabel = record.triggerModeLabel,
+                query = record.query,
+                success = record.success,
+                message = record.message,
+                sourceCount = record.sourceCount,
+                elapsedMs = record.elapsedMs,
+                searchedQueries = record.searchedQueries,
+                directUrls = record.directUrls,
+                healthScore = record.healthScore,
+                healthLabel = record.healthLabel,
+                healthReasons = record.healthReasons,
+                qualityScore = record.qualityScore,
+                qualityLabel = record.qualityLabel,
+                qualityReasons = record.qualityReasons,
+                sourceTrustSummary = record.sourceTrustSummary,
+                researchConfidenceScore = record.researchConfidenceScore,
+                researchConfidenceLabel = record.researchConfidenceLabel,
+                researchEvidenceGroups = record.researchEvidenceGroups,
+                researchConflictWarnings = record.researchConflictWarnings,
+                researchSynthesisGuidance = record.researchSynthesisGuidance,
+                triggerReasons = record.triggerReasons,
+                warnings = record.warnings,
+                cacheStatus = record.cacheStatus,
+                closedLoopChecks = record.closedLoopChecks,
+                topSources = record.topSources.map { source ->
+                    val trustClass = source.webSearchSourceTrustClass()
+                    WebSearchDiagnosticSourceUiItem(
+                        title = source.title.ifBlank { source.url },
+                        url = source.url,
+                        snippet = source.snippet,
+                        provider = source.provider,
+                        trustLabel = trustClass.label,
+                        hostLabel = source.webSearchHostLabel()
+                    )
+                }
+            )
+        }
+    )
 )
+
+private fun List<WebSearchBackupProviderDraft>.toWebSearchBackupConfigs(): List<WebSearchBackupProviderConfig> =
+    take(3).map { draft ->
+        WebSearchBackupProviderConfig(
+            enabled = draft.enabled,
+            provider = WebSearchProviderType.from(draft.provider),
+            endpoint = draft.endpoint.trim(),
+            apiKey = draft.apiKey.trim()
+        )
+    }
+
+private fun MainUiState.toWebSearchTurnModeLabel(): String {
+    if (!webSearchConfig.enabled) return "未启用"
+    val assistantDefault = assistants.firstOrNull { it.id == selectedAssistantId }?.webSearchEnabled == true
+    return when (webSearchTurnMode) {
+        WebSearchTurnMode.ON -> "本轮开启"
+        WebSearchTurnMode.OFF -> "本轮关闭"
+        WebSearchTurnMode.FOLLOW -> when {
+            assistantDefault -> "助手默认"
+            webSearchConfig.triggerMode == WebSearchTriggerMode.ALWAYS -> "始终"
+            webSearchConfig.triggerMode == WebSearchTriggerMode.SMART -> "智能"
+            else -> "手动"
+        }
+    }
+}
 
 private fun formatAssetBytes(bytes: Long): String {
     if (bytes <= 0L) return "0 B"

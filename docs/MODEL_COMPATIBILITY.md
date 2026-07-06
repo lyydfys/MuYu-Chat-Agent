@@ -15,6 +15,11 @@ not include model weights, provider accounts, or API keys.
 | Cloud images | Custom image path | Experimental | Useful when a provider is mostly OpenAI-compatible but uses a non-standard image path. |
 | Local images | `stable-diffusion.cpp` bundle | Experimental | Requires a complete bundle: diffusion model plus required VAE/AE and text encoder/LLM components. |
 | Local API | OpenAI-compatible local server | Supported alpha | Intended for trusted same-device, browser, desktop, and same-LAN workflows. Supports `/v1/models`, `/v1/chat/completions`, JSON replies, and SSE streaming. |
+| Web search | Direct public URL reading | Supported alpha | Enabled from Settings. Blocks localhost, private LAN, link-local, and reserved addresses by default. |
+| Web search | SearxNG / Brave / Tavily / Jina | Supported alpha | User provides endpoint and any required key. Public SearxNG instances can be unstable; self-hosted or provider keys are recommended. |
+| Web search | Custom JSON search gateway | Supported alpha | Supports URL templates such as `/search?q={query}&limit={max_results}` and common result fields including nested `source.url/title`. |
+| Assistants | MCA role cards | Supported alpha | Local JSON import/export with `mca.assistant.card` schema metadata, system prompt, model preference, and generation settings. |
+| Assistants | Common nested character cards | Compatible import | Nested `data.name`, `description`, `personality`, `scenario`, `first_mes`, and `mes_example` are converted into an MCA system prompt. |
 
 ## Cloud Engine Configuration
 
@@ -74,6 +79,24 @@ Security notes:
 - Do not publish the API key, phone LAN IP, or private prompts in issues.
 - If same-device `127.0.0.1` access fails in an Android client, try the
   same-LAN address with open port enabled, then disable open port after use.
+
+## Web Search Configuration
+
+Web search is a user-configured retrieval layer. The local or cloud model does
+not browse by itself; MCA fetches sources first, then injects a shortened source
+context into the current turn and shows source cards under the answer.
+
+| Provider | Endpoint shape | Auth | Notes |
+|---|---|---|---|
+| SearxNG | Instance root, MCA calls `/search?format=json` | Usually none | Prefer self-hosted or trusted instances for stable JSON responses. |
+| Brave Search | `https://api.search.brave.com` or `/res/v1/web/search` | `X-Subscription-Token` | Official root is normalized to Web Search. `/res/v1/llm/context` is also accepted for grounding snippets. |
+| Tavily Search | `https://api.tavily.com` or `/search` | `Authorization: Bearer <key>` | Official root is normalized to `/search`; MCA uses POST JSON. |
+| Jina Search | `https://s.jina.ai` | `Authorization: Bearer <key>` | Jina Reader may be used to improve public page body extraction when configured. |
+| Custom JSON | Any trusted HTTPS search gateway | Optional Bearer key | May return top-level arrays or `results/items/data/hits/organic_results`, including nested `source.url/title`. |
+
+Recent search diagnostics are stored locally and can be cleared. They include
+queries, trigger reasons, provider labels, source URLs/snippets, latency,
+quality score, and closed-loop evidence, but not API keys.
 
 ## Local Chat Recommendations
 

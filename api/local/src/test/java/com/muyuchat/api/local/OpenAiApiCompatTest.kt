@@ -53,6 +53,31 @@ class OpenAiApiCompatTest {
     }
 
     @Test
+    fun keepsInlineImageDataUrlUsableForMultimodalForwarding() {
+        val dataUrl = "data:image/png;base64,abc123"
+        val request = OpenAiApiCompat.parseChatRequest(
+            """
+            {
+              "messages": [
+                {"role": "user", "content": [
+                  {"type": "text", "text": "识别这张图"},
+                  {"type": "image_url", "image_url": {"url": "$dataUrl"}}
+                ]}
+              ]
+            }
+            """.trimIndent()
+        )
+        val rendered = JSONArray(request.messagesJson(multimodal = true))
+        val content = (0 until rendered.length())
+            .asSequence()
+            .map { rendered.getJSONObject(it) }
+            .first { it.getString("role") == "user" }
+            .getJSONArray("content")
+
+        assertEquals(dataUrl, content.getJSONObject(1).getJSONObject("image_url").getString("url"))
+    }
+
+    @Test
     fun parsesCompletionsPromptAndClampsMaxTokens() {
         val request = OpenAiApiCompat.parseChatRequest(
             """{"prompt":"写一句中文问候","max_tokens":99999,"stream":false}"""
@@ -168,6 +193,29 @@ class OpenAiApiCompatTest {
 
         assertTrue(renderedSystem.contains("你是第三方客户端发送的角色卡。"))
         assertFalse(renderedSystem.contains("MCA 当前默认角色设定不应覆盖客户端角色卡。"))
+    }
+
+    @Test
+    fun usesTopLevelSystemPromptWhenClientProvidesOne() {
+        val request = OpenAiApiCompat.parseChatRequest(
+            """
+            {
+              "system_prompt": "顶层角色设定",
+              "messages": [
+                {"role": "user", "content": "你好"}
+              ]
+            }
+            """.trimIndent(),
+            baseParams = GenerationParams(
+                systemPrompt = "MCA 当前默认角色设定不应覆盖客户端顶层设定。",
+                reasoningMode = ReasoningMode.STANDARD
+            )
+        )
+        val rendered = JSONArray(request.messagesJson())
+
+        assertEquals("顶层角色设定", request.params.systemPrompt)
+        assertEquals("顶层角色设定", rendered.getJSONObject(0).getString("content"))
+        assertFalse(rendered.getJSONObject(0).getString("content").contains("MCA 当前默认角色设定"))
     }
 
     @Test

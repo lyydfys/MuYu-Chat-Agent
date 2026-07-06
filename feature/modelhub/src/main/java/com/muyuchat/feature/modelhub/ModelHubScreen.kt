@@ -1,13 +1,21 @@
 package com.muyuchat.feature.modelhub
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,12 +24,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -52,16 +62,21 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.download.DownloadStatus
@@ -76,6 +91,8 @@ import com.muyuchat.core.download.isChatModelCandidate
 import com.muyuchat.core.download.isImageModelCandidate
 import com.muyuchat.core.download.kindLabel
 import com.muyuchat.core.modelstore.ModelManifest
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 data class ModelHubUiState(
     val localModels: List<ModelManifest> = emptyList(),
@@ -219,88 +236,163 @@ fun ModelHubScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var section by rememberSaveable { mutableStateOf(ModelHubSection.CLOUD) }
+    var section by rememberSaveable { mutableStateOf(ModelHubSection.LOCAL) }
+    var cloudEditorKind by rememberSaveable { mutableStateOf<String?>(null) }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+    Box(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            ModelHubHeader(
+                state = state,
+                selected = section,
+                onSection = { section = it },
+                onBack = onBack,
+                onRefreshLocal = onRefreshLocal
+            )
+
+            when (section) {
+                ModelHubSection.LOCAL -> LocalModelsSection(
+                    state = state,
+                    onLoad = onLoad,
+                    onVerify = onVerify,
+                    onDelete = onDelete,
+                    onAttachVisionProjector = onAttachVisionProjector,
+                    onImportLocalImageModel = onImportLocalImageModel,
+                    onSelectLocalImageModel = onSelectLocalImageModel,
+                    onVerifyLocalImageModel = onVerifyLocalImageModel,
+                    onDeleteLocalImageModel = onDeleteLocalImageModel,
+                    modifier = Modifier.weight(1f)
+                )
+                ModelHubSection.CLOUD -> CloudModelsSection(
+                    state = state,
+                    onBeginAddCloudModel = { kind ->
+                        onBeginAddCloudModel(kind)
+                        cloudEditorKind = kind
+                    },
+                    onEditCloudModel = { modelId ->
+                        onEditCloudModel(modelId)
+                        cloudEditorKind = state.cloudApi.connectedModels.firstOrNull { it.id == modelId }?.kind ?: "CHAT"
+                    },
+                    onSelectCloudChat = onSelectCloudChat,
+                    onSelectCloudImage = onSelectCloudImage,
+                    onDeleteCloudModel = onDeleteCloudModel,
+                    modifier = Modifier.weight(1f)
+                )
+                ModelHubSection.RECOMMENDED -> RecommendedModelsSection(
+                    state = state,
+                    onShowFiles = { model ->
+                        section = ModelHubSection.FILES
+                        onShowRecommendedFiles(model)
+                    },
+                    onDownload = onDownloadRecommended,
+                    onOpenPage = onOpenModelPage,
+                    modifier = Modifier.weight(1f)
+                )
+                ModelHubSection.MARKET -> MarketSection(
+                    state = state,
+                    onHubQueryChange = onHubQueryChange,
+                    onSearchHubModels = onSearchHubModels,
+                    onShowFiles = { model ->
+                        section = ModelHubSection.FILES
+                        onFetchHubModelFiles(model)
+                    },
+                    onOpenPage = onOpenModelPage,
+                    modifier = Modifier.weight(1f)
+                )
+                ModelHubSection.FILES -> RemoteFilesSection(
+                    state = state,
+                    onImportClick = onImportClick,
+                    onRepoInputChange = onRepoInputChange,
+                    onFetchRemoteFiles = onFetchRemoteFiles,
+                    onDownload = onDownload,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        SmoothRightToLeftPage(
+            visible = cloudEditorKind != null,
+            onDismiss = { cloudEditorKind = null }
+        ) { pageModifier, closePage ->
+            CloudModelEditorPage(
+                kind = cloudEditorKind ?: "CHAT",
+                cloud = state.cloudApi,
+                enabled = !state.isBusy,
+                statusMessage = state.statusMessage,
+                onBack = closePage,
+                onEnabledChange = onCloudEnabledChange,
+                onFormatChange = onCloudFormatChange,
+                onImageFormatChange = onCloudImageFormatChange,
+                onBaseUrlChange = onCloudBaseUrlChange,
+                onApiKeyChange = onCloudApiKeyChange,
+                onChatModelChange = onCloudChatModelChange,
+                onImageModelChange = onCloudImageModelChange,
+                onImageSizeChange = onCloudImageSizeChange,
+                onImageEndpointPathChange = onCloudImageEndpointPathChange,
+                onDisplayNameChange = onCloudDisplayNameChange,
+                onSaveChat = {
+                    onSaveCloudChatModel()
+                    closePage()
+                },
+                onSaveImage = {
+                    onSaveCloudImageModel()
+                    closePage()
+                },
+                onTest = onTestCloudApi,
+                modifier = pageModifier
+            )
+        }
+    }
+}
+
+@Composable
+private fun SmoothRightToLeftPage(
+    visible: Boolean,
+    onDismiss: () -> Unit,
+    content: @Composable (Modifier, () -> Unit) -> Unit
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = slideInHorizontally(
+            animationSpec = tween(durationMillis = 240),
+            initialOffsetX = { it }
+        ) + fadeIn(animationSpec = tween(durationMillis = 140)),
+        exit = ExitTransition.None
     ) {
-        ModelHubHeader(
-            state = state,
-            selected = section,
-            onSection = { section = it },
-            onBack = onBack,
-            onRefreshLocal = onRefreshLocal
-        )
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val density = LocalDensity.current
+            val widthPx = with(density) { maxWidth.toPx() }
+            val scope = rememberCoroutineScope()
+            val offsetX = remember { Animatable(0f) }
 
-        when (section) {
-            ModelHubSection.LOCAL -> LocalModelsSection(
-                state = state,
-                onLoad = onLoad,
-                onVerify = onVerify,
-                onDelete = onDelete,
-                onAttachVisionProjector = onAttachVisionProjector,
-                onImportLocalImageModel = onImportLocalImageModel,
-                onSelectLocalImageModel = onSelectLocalImageModel,
-                onVerifyLocalImageModel = onVerifyLocalImageModel,
-                onDeleteLocalImageModel = onDeleteLocalImageModel,
-                modifier = Modifier.weight(1f)
-            )
-            ModelHubSection.CLOUD -> CloudModelsSection(
-                state = state,
-                onCloudEnabledChange = onCloudEnabledChange,
-                onBeginAddCloudModel = onBeginAddCloudModel,
-                onEditCloudModel = onEditCloudModel,
-                onCloudProviderPreset = onCloudProviderPreset,
-                onCloudFormatChange = onCloudFormatChange,
-                onCloudBaseUrlChange = onCloudBaseUrlChange,
-                onCloudApiKeyChange = onCloudApiKeyChange,
-                onCloudChatModelChange = onCloudChatModelChange,
-                onCloudImageFormatChange = onCloudImageFormatChange,
-                onCloudImageModelChange = onCloudImageModelChange,
-                onCloudImageSizeChange = onCloudImageSizeChange,
-                onCloudImageEndpointPathChange = onCloudImageEndpointPathChange,
-                onCloudDisplayNameChange = onCloudDisplayNameChange,
-                onSaveCloudChatModel = onSaveCloudChatModel,
-                onSaveCloudImageModel = onSaveCloudImageModel,
-                onTestCloudApi = onTestCloudApi,
-                onSelectCloudChat = onSelectCloudChat,
-                onSelectCloudImage = onSelectCloudImage,
-                onDeleteCloudModel = onDeleteCloudModel,
-                modifier = Modifier.weight(1f)
-            )
-            ModelHubSection.RECOMMENDED -> RecommendedModelsSection(
-                state = state,
-                onShowFiles = { model ->
-                    section = ModelHubSection.FILES
-                    onShowRecommendedFiles(model)
-                },
-                onDownload = onDownloadRecommended,
-                onOpenPage = onOpenModelPage,
-                modifier = Modifier.weight(1f)
-            )
-            ModelHubSection.MARKET -> MarketSection(
-                state = state,
-                onHubQueryChange = onHubQueryChange,
-                onSearchHubModels = onSearchHubModels,
-                onShowFiles = { model ->
-                    section = ModelHubSection.FILES
-                    onFetchHubModelFiles(model)
-                },
-                onOpenPage = onOpenModelPage,
-                modifier = Modifier.weight(1f)
-            )
-            ModelHubSection.FILES -> RemoteFilesSection(
-                state = state,
-                onImportClick = onImportClick,
-                onRepoInputChange = onRepoInputChange,
-                onFetchRemoteFiles = onFetchRemoteFiles,
-                onDownload = onDownload,
-                modifier = Modifier.weight(1f)
-            )
+            LaunchedEffect(visible) {
+                if (visible) offsetX.snapTo(0f)
+            }
+
+            fun closeWithMotion() {
+                scope.launch {
+                    offsetX.animateTo(
+                        targetValue = -widthPx,
+                        animationSpec = tween(durationMillis = 180)
+                    )
+                    onDismiss()
+                }
+            }
+
+            BackHandler(enabled = visible) {
+                closeWithMotion()
+            }
+
+            val pageModifier = Modifier
+                .fillMaxSize()
+                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+
+            content(pageModifier, ::closeWithMotion)
         }
     }
 }
@@ -464,28 +556,13 @@ private fun LocalModelsSection(
 @Composable
 private fun CloudModelsSection(
     state: ModelHubUiState,
-    onCloudEnabledChange: (Boolean) -> Unit,
     onBeginAddCloudModel: (String) -> Unit,
     onEditCloudModel: (String) -> Unit,
-    onCloudProviderPreset: (String) -> Unit,
-    onCloudFormatChange: (String) -> Unit,
-    onCloudBaseUrlChange: (String) -> Unit,
-    onCloudApiKeyChange: (String) -> Unit,
-    onCloudChatModelChange: (String) -> Unit,
-    onCloudImageFormatChange: (String) -> Unit,
-    onCloudImageModelChange: (String) -> Unit,
-    onCloudImageSizeChange: (String) -> Unit,
-    onCloudImageEndpointPathChange: (String) -> Unit,
-    onCloudDisplayNameChange: (String) -> Unit,
-    onSaveCloudChatModel: () -> Unit,
-    onSaveCloudImageModel: () -> Unit,
-    onTestCloudApi: () -> Unit,
     onSelectCloudChat: (String) -> Unit,
     onSelectCloudImage: (String) -> Unit,
     onDeleteCloudModel: (String) -> Unit,
     modifier: Modifier
 ) {
-    var dialogKind by rememberSaveable { mutableStateOf<String?>(null) }
     val chatModels = state.cloudApi.connectedModels.filter { it.kind == "CHAT" }
     val imageModels = state.cloudApi.connectedModels.filter { it.kind == "IMAGE" }
     LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -498,15 +575,9 @@ private fun CloudModelsSection(
                 models = chatModels,
                 primaryAction = "加载",
                 addAction = "+ 接入更多推理引擎",
-                onAdd = {
-                    onBeginAddCloudModel("CHAT")
-                    dialogKind = "CHAT"
-                },
+                onAdd = { onBeginAddCloudModel("CHAT") },
                 onPrimaryAction = onSelectCloudChat,
-                onEdit = {
-                    onEditCloudModel(it)
-                    dialogKind = "CHAT"
-                },
+                onEdit = onEditCloudModel,
                 onDelete = onDeleteCloudModel
             )
         }
@@ -519,56 +590,280 @@ private fun CloudModelsSection(
                 models = imageModels,
                 primaryAction = "设为当前",
                 addAction = "+ 接入更多图像生成引擎",
-                onAdd = {
-                    onBeginAddCloudModel("IMAGE")
-                    dialogKind = "IMAGE"
-                },
+                onAdd = { onBeginAddCloudModel("IMAGE") },
                 onPrimaryAction = onSelectCloudImage,
-                onEdit = {
-                    onEditCloudModel(it)
-                    dialogKind = "IMAGE"
-                },
+                onEdit = onEditCloudModel,
                 onDelete = onDeleteCloudModel
             )
         }
     }
-    dialogKind?.let { kind ->
-        if (kind == "IMAGE") {
-            CloudImageModelEditorDialog(
-                cloud = state.cloudApi,
-                enabled = !state.isBusy,
-                onDismiss = { dialogKind = null },
-                onEnabledChange = onCloudEnabledChange,
-                onImageFormatChange = onCloudImageFormatChange,
-                onBaseUrlChange = onCloudBaseUrlChange,
-                onApiKeyChange = onCloudApiKeyChange,
-                onImageModelChange = onCloudImageModelChange,
-                onImageSizeChange = onCloudImageSizeChange,
-                onImageEndpointPathChange = onCloudImageEndpointPathChange,
-                onDisplayNameChange = onCloudDisplayNameChange,
-                onSave = {
-                    onSaveCloudImageModel()
-                    dialogKind = null
+}
+
+@Composable
+private fun CloudModelEditorPage(
+    kind: String,
+    cloud: CloudApiUiState,
+    enabled: Boolean,
+    statusMessage: String?,
+    onBack: () -> Unit,
+    onEnabledChange: (Boolean) -> Unit,
+    onFormatChange: (String) -> Unit,
+    onImageFormatChange: (String) -> Unit,
+    onBaseUrlChange: (String) -> Unit,
+    onApiKeyChange: (String) -> Unit,
+    onChatModelChange: (String) -> Unit,
+    onImageModelChange: (String) -> Unit,
+    onImageSizeChange: (String) -> Unit,
+    onImageEndpointPathChange: (String) -> Unit,
+    onDisplayNameChange: (String) -> Unit,
+    onSaveChat: () -> Unit,
+    onSaveImage: () -> Unit,
+    onTest: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isImage = kind == "IMAGE"
+    val title = if (isImage) "接入图像生成引擎" else "接入云端推理引擎"
+    val subtitle = if (isImage) {
+        "图像生成引擎独立保存，用于图片页。"
+    } else {
+        "云端推理引擎用于普通聊天页。"
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回云端模型")
                 }
-            )
-        } else {
-            CloudChatModelEditorDialog(
-                cloud = state.cloudApi,
-                enabled = !state.isBusy,
-                statusMessage = state.statusMessage,
-                onDismiss = { dialogKind = null },
-                onEnabledChange = onCloudEnabledChange,
-                onFormatChange = onCloudFormatChange,
-                onBaseUrlChange = onCloudBaseUrlChange,
-                onApiKeyChange = onCloudApiKeyChange,
-                onChatModelChange = onCloudChatModelChange,
-                onDisplayNameChange = onCloudDisplayNameChange,
-                onSave = {
-                    onSaveCloudChatModel()
-                    dialogKind = null
-                },
-                onTest = onTestCloudApi
-            )
+                Column {
+                    Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+
+        if (!enabled) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
+
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            item {
+                CardBox {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("基本信息", fontWeight = FontWeight.Bold)
+                            Text(
+                                if (isImage) "填写图像模型名和可选显示名。" else "填写聊天模型名和可选显示名。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(checked = cloud.enabled, onCheckedChange = onEnabledChange, enabled = enabled)
+                    }
+                    OutlinedTextField(
+                        value = cloud.displayName,
+                        onValueChange = onDisplayNameChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = enabled,
+                        label = { Text("显示名称") },
+                        placeholder = { Text("可选，不填则使用模型名") }
+                    )
+                    OutlinedTextField(
+                        value = if (isImage) cloud.imageModel else cloud.chatModel,
+                        onValueChange = if (isImage) onImageModelChange else onChatModelChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = enabled && (!isImage || cloud.imageSupported),
+                        label = { Text(if (isImage) "图像模型名" else "推理模型名") },
+                        placeholder = {
+                            Text(
+                                if (isImage) {
+                                    imageModelPlaceholder(cloud.imageApiFormat)
+                                } else {
+                                    chatModelPlaceholder(cloud.apiFormat)
+                                }
+                            )
+                        }
+                    )
+                }
+            }
+
+            item {
+                CardBox {
+                    Text("协议", fontWeight = FontWeight.Bold)
+                    Text(
+                        if (isImage) "选择图像生成接口协议。" else "选择聊天推理接口协议。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (isImage) {
+                            items(cloud.availableImageFormats, key = { it.first }) { format ->
+                                FilterChip(
+                                    selected = cloud.imageApiFormat == format.first,
+                                    onClick = { onImageFormatChange(format.first) },
+                                    label = { Text(format.second) },
+                                    enabled = enabled
+                                )
+                            }
+                        } else {
+                            items(cloud.availableFormats, key = { it.first }) { format ->
+                                FilterChip(
+                                    selected = cloud.apiFormat == format.first,
+                                    onClick = { onFormatChange(format.first) },
+                                    label = { Text(format.second) },
+                                    enabled = enabled
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                CardBox {
+                    Text("接口信息", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Base URL、API Key 和路径信息会保存在本机。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = cloud.baseUrl,
+                        onValueChange = onBaseUrlChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = enabled,
+                        label = { Text("Base URL") },
+                        placeholder = {
+                            Text(
+                                if (isImage) imageBaseUrlPlaceholder(cloud.imageApiFormat) else chatBaseUrlPlaceholder(cloud.apiFormat)
+                            )
+                        }
+                    )
+                    if (isImage) {
+                        OutlinedTextField(
+                            value = cloud.imageEndpointPath,
+                            onValueChange = onImageEndpointPathChange,
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            enabled = enabled && cloud.imageSupported,
+                            label = { Text("图像路径") },
+                            placeholder = { Text(imageEndpointPlaceholder(cloud.imageApiFormat)) },
+                            supportingText = { Text("可以留空，MCA 会按当前协议补齐默认路径。") }
+                        )
+                        OutlinedTextField(
+                            value = cloud.imageSize,
+                            onValueChange = onImageSizeChange,
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            enabled = enabled && cloud.imageSupported,
+                            label = { Text("图片尺寸") },
+                            placeholder = { Text(imageSizePlaceholder(cloud.imageApiFormat)) },
+                            supportingText = { Text("可以留空，默认使用 1024x1024。") }
+                        )
+                    }
+                    OutlinedTextField(
+                        value = cloud.apiKey,
+                        onValueChange = onApiKeyChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = enabled,
+                        visualTransformation = PasswordVisualTransformation(),
+                        label = { Text("API Key") },
+                        placeholder = { Text("不需要密钥的本地转发服务可以留空") }
+                    )
+                }
+            }
+
+            item {
+                val status = cloudDialogStatusMessage(statusMessage)
+                if (status != null) {
+                    CloudDialogStatusCard(message = status)
+                } else {
+                    CardBox {
+                        Text("状态反馈", fontWeight = FontWeight.Bold)
+                        Text(
+                            if (isImage) {
+                                "保存后可在图片页用短提示词验证真实生图。图像生成会产生实际请求和费用，当前不做静默测试。"
+                            } else {
+                                "保存前建议先测试连接。测试结果会显示在这里，不再被弹窗遮挡。"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+            item {
+                Spacer(Modifier.height(78.dp))
+            }
+        }
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Row(
+                modifier = Modifier.padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (isImage) {
+                    OutlinedButton(
+                        onClick = onBack,
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        shape = RoundedCornerShape(999.dp)
+                    ) {
+                        Text("取消")
+                    }
+                    Button(
+                        onClick = onSaveImage,
+                        enabled = enabled && cloud.imageConfigured,
+                        modifier = Modifier.weight(1.45f).height(48.dp),
+                        shape = RoundedCornerShape(999.dp)
+                    ) {
+                        Text("保存并设为当前", maxLines = 1)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = onTest,
+                        enabled = enabled && cloud.configured,
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        shape = RoundedCornerShape(999.dp)
+                    ) {
+                        Text("测试")
+                    }
+                    Button(
+                        onClick = onSaveChat,
+                        enabled = enabled && cloud.configured,
+                        modifier = Modifier.weight(1.45f).height(48.dp),
+                        shape = RoundedCornerShape(999.dp)
+                    ) {
+                        Text("保存并加载", maxLines = 1)
+                    }
+                }
+            }
         }
     }
 }
@@ -720,141 +1015,9 @@ private fun CloudModelRow(
 }
 
 @Composable
-private fun CloudChatModelEditorDialog(
-    cloud: CloudApiUiState,
-    enabled: Boolean,
-    statusMessage: String?,
-    onDismiss: () -> Unit,
-    onEnabledChange: (Boolean) -> Unit,
-    onFormatChange: (String) -> Unit,
-    onBaseUrlChange: (String) -> Unit,
-    onApiKeyChange: (String) -> Unit,
-    onChatModelChange: (String) -> Unit,
-    onDisplayNameChange: (String) -> Unit,
-    onSave: () -> Unit,
-    onTest: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("接入云端推理引擎", fontWeight = FontWeight.Bold) },
-        text = {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(430.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("启用云端接口", fontWeight = FontWeight.SemiBold)
-                            Text("选择协议后填写自定义端点和模型名。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(checked = cloud.enabled, onCheckedChange = onEnabledChange, enabled = enabled)
-                    }
-                }
-                item {
-                    Text("协议", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(cloud.availableFormats, key = { it.first }) { format ->
-                            FilterChip(
-                                selected = cloud.apiFormat == format.first,
-                                onClick = { onFormatChange(format.first) },
-                                label = { Text(format.second) },
-                                enabled = enabled
-                            )
-                        }
-                    }
-                }
-                item {
-                    OutlinedTextField(
-                        value = cloud.displayName,
-                        onValueChange = onDisplayNameChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = enabled,
-                        label = { Text("显示名称") },
-                        placeholder = { Text("可选，例如：我的云端推理") }
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = cloud.baseUrl,
-                        onValueChange = onBaseUrlChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = enabled,
-                        label = { Text("Base URL") },
-                        placeholder = { Text(chatBaseUrlPlaceholder(cloud.apiFormat)) }
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = cloud.chatModel,
-                        onValueChange = onChatModelChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = enabled,
-                        label = { Text("推理模型") },
-                        placeholder = { Text(chatModelPlaceholder(cloud.apiFormat)) }
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = cloud.apiKey,
-                        onValueChange = onApiKeyChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = enabled,
-                        visualTransformation = PasswordVisualTransformation(),
-                        label = { Text("API Key") },
-                        placeholder = { Text("可留空，仅当服务端不要求密钥时") }
-                    )
-                }
-                cloudDialogStatusMessage(statusMessage)?.let { message ->
-                    item {
-                        CloudDialogStatusCard(message = message)
-                    }
-                }
-                item {
-                    Text(
-                        "API Key 会加密保存在本机。快测只请求 1 个 token，用来快速验证 Base URL、密钥和模型名。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = onSave,
-                enabled = enabled && cloud.configured,
-                shape = RoundedCornerShape(999.dp)
-            ) {
-                Text("保存并加载")
-            }
-        },
-        dismissButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onTest, enabled = enabled && cloud.configured) {
-                    Text("测试推理")
-                }
-                TextButton(onClick = onDismiss) {
-                    Text("取消")
-                }
-            }
-        }
-    )
-}
-
-@Composable
 private fun CloudDialogStatusCard(message: String) {
-    val isError = message.contains("失败") || message.contains("错误")
-    val isSuccess = message.contains("成功")
+    val isError = message.contains("失败") || message.contains("错误") || message.contains("error", ignoreCase = true)
+    val isSuccess = message.contains("成功") || message.contains("success", ignoreCase = true)
     val background = when {
         isError -> MaterialTheme.colorScheme.errorContainer
         isSuccess -> MaterialTheme.colorScheme.primaryContainer
@@ -885,155 +1048,13 @@ private fun cloudDialogStatusMessage(message: String?): String? {
     return clean.takeIf {
         it.contains("云端 API") ||
             it.contains("快速测试") ||
+            it.contains("请先") ||
+            it.contains("失败") ||
+            it.contains("错误") ||
+            it.contains("成功") ||
             it.contains("Base URL", ignoreCase = true) ||
             it.contains("API Key", ignoreCase = true)
     }
-}
-
-@Composable
-private fun CloudImageModelEditorDialog(
-    cloud: CloudApiUiState,
-    enabled: Boolean,
-    onDismiss: () -> Unit,
-    onEnabledChange: (Boolean) -> Unit,
-    onImageFormatChange: (String) -> Unit,
-    onBaseUrlChange: (String) -> Unit,
-    onApiKeyChange: (String) -> Unit,
-    onImageModelChange: (String) -> Unit,
-    onImageSizeChange: (String) -> Unit,
-    onImageEndpointPathChange: (String) -> Unit,
-    onDisplayNameChange: (String) -> Unit,
-    onSave: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("接入图像生成引擎", fontWeight = FontWeight.Bold) },
-        text = {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(520.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("启用云端生图", fontWeight = FontWeight.SemiBold)
-                            Text("只填写图像生成所需字段，不混入推理模型配置。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(checked = cloud.enabled, onCheckedChange = onEnabledChange, enabled = enabled)
-                    }
-                }
-                item {
-                    Text("协议", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(cloud.availableImageFormats, key = { it.first }) { format ->
-                            FilterChip(
-                                selected = cloud.imageApiFormat == format.first,
-                                onClick = { onImageFormatChange(format.first) },
-                                label = { Text(format.second) },
-                                enabled = enabled
-                            )
-                        }
-                    }
-                }
-                item {
-                    OutlinedTextField(
-                        value = cloud.displayName,
-                        onValueChange = onDisplayNameChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = enabled,
-                        label = { Text("显示名称") },
-                        placeholder = { Text("可选，例如：我的生图接口") }
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = cloud.baseUrl,
-                        onValueChange = onBaseUrlChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = enabled,
-                        label = { Text("Base URL") },
-                        placeholder = { Text(imageBaseUrlPlaceholder(cloud.imageApiFormat)) }
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = cloud.imageEndpointPath,
-                        onValueChange = onImageEndpointPathChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = enabled && cloud.imageSupported,
-                        label = { Text("图像路径") },
-                        placeholder = { Text(imageEndpointPlaceholder(cloud.imageApiFormat)) },
-                        supportingText = { Text("可留空，保存时会按当前协议使用默认路径。") }
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = cloud.imageModel,
-                        onValueChange = onImageModelChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = enabled && cloud.imageSupported,
-                        label = { Text("生图模型名") },
-                        placeholder = { Text(imageModelPlaceholder(cloud.imageApiFormat)) }
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = cloud.imageSize,
-                        onValueChange = onImageSizeChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = enabled && cloud.imageSupported,
-                        label = { Text("图片尺寸 / 比例") },
-                        placeholder = { Text(imageSizePlaceholder(cloud.imageApiFormat)) },
-                        supportingText = { Text("可留空，默认使用 1024x1024。") }
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = cloud.apiKey,
-                        onValueChange = onApiKeyChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = enabled,
-                        visualTransformation = PasswordVisualTransformation(),
-                        label = { Text("API Key") },
-                        placeholder = { Text("可留空，仅当服务端不要求密钥时") }
-                    )
-                }
-                item {
-                    Text(
-                        "图像路径和图片尺寸只显示占位提示；点击输入时为空表单。保存后 MCA 会按协议补齐默认请求路径和默认尺寸。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = onSave,
-                enabled = enabled && cloud.imageConfigured,
-                shape = RoundedCornerShape(999.dp)
-            ) {
-                Text("保存并设为当前")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("取消")
-            }
-        }
-    )
 }
 
 private fun chatBaseUrlPlaceholder(format: String): String =
@@ -1392,18 +1413,30 @@ private fun LegacyLocalModelCard(
         }
         Text("${model.architecture ?: "未知架构"} · ${model.quant ?: "未知量化"} · ${formatBytes(model.sizeBytes)} · ${sourceLabel(model.source.name)}", style = MaterialTheme.typography.bodySmall)
         Text("已保存到 MCA 的本机模型目录", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button(onClick = onLoad, enabled = enabled && !isLoaded, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Button(
+                onClick = onLoad,
+                enabled = enabled && !isLoaded,
+                modifier = Modifier.weight(1f).height(44.dp),
+                shape = RoundedCornerShape(999.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+            ) {
                 Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(if (isLoaded) "已加载" else "加载")
+                Spacer(Modifier.width(4.dp))
+                Text(if (isLoaded) "已加载" else "加载", maxLines = 1, softWrap = false)
             }
-            OutlinedButton(onClick = onVerify, enabled = enabled, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
+            OutlinedButton(
+                onClick = onVerify,
+                enabled = enabled,
+                modifier = Modifier.weight(1f).height(44.dp),
+                shape = RoundedCornerShape(999.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+            ) {
                 Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("校验")
+                Spacer(Modifier.width(4.dp))
+                Text("校验", maxLines = 1, softWrap = false)
             }
-            IconButton(onClick = onDelete, enabled = enabled) {
+            IconButton(onClick = onDelete, enabled = enabled, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Default.Delete, contentDescription = "删除")
             }
         }
@@ -1476,23 +1509,41 @@ private fun LocalModelCard(
                     MaterialTheme.colorScheme.onSurfaceVariant
                 }
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = onLoad, enabled = enabled && !isLoaded, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = onLoad,
+                    enabled = enabled && !isLoaded,
+                    modifier = Modifier.weight(1f).height(44.dp),
+                    shape = RoundedCornerShape(999.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (isLoaded) "已加载" else "加载")
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (isLoaded) "已加载" else "加载", maxLines = 1, softWrap = false)
                 }
-                OutlinedButton(onClick = onVerify, enabled = enabled, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
+                OutlinedButton(
+                    onClick = onVerify,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f).height(44.dp),
+                    shape = RoundedCornerShape(999.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                ) {
                     Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("校验")
+                    Spacer(Modifier.width(4.dp))
+                    Text("校验", maxLines = 1, softWrap = false)
                 }
-                OutlinedButton(onClick = onAttachVisionProjector, enabled = enabled, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
+                OutlinedButton(
+                    onClick = onAttachVisionProjector,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f).height(44.dp),
+                    shape = RoundedCornerShape(999.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                ) {
                     Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("视觉文件", maxLines = 1)
+                    Spacer(Modifier.width(4.dp))
+                    Text("识图", maxLines = 1, softWrap = false)
                 }
-                IconButton(onClick = onDelete, enabled = enabled) {
+                IconButton(onClick = onDelete, enabled = enabled, modifier = Modifier.size(44.dp)) {
                     Icon(Icons.Default.Delete, contentDescription = "删除")
                 }
             }

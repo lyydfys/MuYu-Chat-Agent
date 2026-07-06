@@ -14,6 +14,7 @@ The project currently focuses on:
 
 - Local GGUF chat inference through `llama.cpp`.
 - Cloud chat engines through OpenAI-compatible and Anthropic Messages protocols.
+- User-configured web search with source cards and per-turn context injection.
 - Local and cloud image-generation engine management.
 - ModelScope-oriented model discovery and resumable downloads.
 - A Compose mobile UI for chat, model management, image generation, agent
@@ -62,6 +63,9 @@ Current release status:
   [GitHub Releases](https://github.com/lyydfys/MCA/releases).
 - The first public package target is `arm64-v8a` Android devices.
 - Local chat is the primary stable local path.
+- Web search is available after the user configures a search provider in
+  Settings. MCA supports manual, smart-auto, and always-on trigger modes for
+  SearxNG, Brave Search, Tavily, Jina Search, and custom JSON search endpoints.
 - Local image generation is experimental and requires complete model bundles.
   Do not treat phone-side image generation as a guaranteed stable feature yet.
 
@@ -71,12 +75,64 @@ Current release status:
   token speed labels, reasoning-content filtering, and local benchmark support.
 - **Cloud chat**: user-configured OpenAI-compatible or Anthropic Messages
   endpoints with locally encrypted API key storage.
-- **Image page**: GPT-like image workspace with local/cloud engine switching,
+- **Smart web search**: user-configured SearxNG, Brave Search, Tavily, Jina
+  Search, or custom JSON search providers. MCA can identify URLs, detect
+  explicit search intent, expand time-sensitive or documentation-style queries,
+  rank/deduplicate sources, summarize results into the current turn only, and
+  display source cards under the assistant reply. Trigger modes are manual,
+  smart-auto, and always-on; the Settings page keeps recent local search
+  diagnostics for trigger reasons, closed-loop evidence, provider errors,
+  partial expanded-query warnings, expanded queries, source counts, latency,
+  clickable source URLs, provider labels, source snippets, and a local source
+  quality score based on usable sources, readable content length, independent
+  hosts, and safety blocks. Direct URL
+  reading works after web search is enabled even before a search API is
+  configured; keyword search still requires SearxNG, Brave, Tavily, Jina, or a
+  custom JSON endpoint. Custom JSON endpoints can use URL templates such as
+  `/search?q={query}&limit={max_results}` or common `q/query/max_results`
+  parameters. Provider endpoints may be self-hosted, but readable page fetching
+  and direct URL reading block localhost, private LAN, link-local, and reserved
+  addresses by default for safety. When Jina Search is selected with a
+  key, MCA can fall back to Jina Reader for public pages whose direct readable
+  content is too weak, while keeping the same private-network guard. MCA reads multiple
+  direct URLs, expanded search queries, and fetched page bodies concurrently to
+  keep live search responsive on mobile networks. Keyword search successes use
+  a short in-memory local cache to avoid repeating the same provider call within
+  a brief window; direct URL reads are not cached and API keys are never stored
+  in cache entries. The search test in Settings
+  uses the fields currently typed into the form, so users can verify an endpoint
+  before saving it. The closed-loop self-test records whether MCA produced
+  provider results, prompt context, source-card data, quality scoring, and local
+  diagnostics. Settings also includes a no-key public JSON self-check filler so
+  users can verify the integration path before entering their own provider. MCA
+  labels this source as `公开 JSON 自检源` in the app because it is only a protocol
+  check with limited coverage, not a general web-search engine; production use
+  should rely on a trusted or self-hosted search service. Custom JSON endpoints may return a top-level array, an
+  object containing `results`, `items`, `data`, `hits`, or `organic_results`, or nested
+  variants such as `data.results` and `response.items`. It accepts common URL/title fields such as
+  `url`, `link`, `href`, `html_url`, `story_url`, `canonical_url`, `displayLink`,
+  `formattedUrl`, `source.url`, `title`, `full_name`, `story_title`, and
+  `source.title`, plus summary/body fields such as `summary`, `excerpt`, and
+  `pageContent`. When smart query expansion creates multiple
+  searches, MCA keeps successful sources even if one expanded query fails.
+  Tavily and Jina use `Authorization: Bearer <key>`; Brave uses
+  `X-Subscription-Token` and supports both the Web Search endpoint and the
+  LLM Context endpoint for AI grounding/RAG-style snippets. Public SearxNG
+  instances often rate-limit or disable JSON responses, so a self-hosted or
+  explicitly approved endpoint is recommended for reliable search.
+  Brave and Tavily official API root URLs are accepted and normalized to their
+  search paths during preflight and request execution.
+- **Image page**: Gemini-style MCA image workspace with local/cloud engine switching,
   prompt composer, generation states, template cards, and image library.
 - **Local image engines**: `stable-diffusion.cpp` bridge with progress/cancel
   hooks and bundle-aware model registration.
 - **Model hub**: local/imported models, ModelScope recommendations, resumable
   downloads, file classification, and engine grouping.
+- **Assistants and role cards**: multiple local assistants with system prompts,
+  default model preference, generation parameters, memory/search toggles, and
+  JSON role-card import/export. MCA exports its own `mca.assistant.card` schema
+  and can import common nested character-card `data` fields into a usable
+  system prompt.
 - **Agent diagnostics**: local device profiling, model recommendations,
   benchmark-based tuning, and explainable parameter plans.
 - **Local API**: OpenAI-compatible local server for trusted same-device and
@@ -93,13 +149,46 @@ The APK does not include model weights or cloud credentials. After installing:
 
 1. Add a local GGUF chat model or configure a cloud chat engine.
 2. Configure an image engine if you want cloud or local image generation.
-3. Check [docs/PERMISSIONS.md](docs/PERMISSIONS.md) before enabling network or
+3. Configure web search in Settings if you want live search. You can use a
+   self-hosted SearxNG endpoint, Brave Search, Tavily, Jina Search, or a
+   compatible custom JSON endpoint, test the current form values, then choose
+   manual, smart-auto, or always-on triggering. Brave can use either
+   `/res/v1/web/search` for normal search or `/res/v1/llm/context` for
+   grounding-oriented snippets; Brave/Tavily official root URLs are auto-filled
+   to the normal search paths. Direct page reading will refuse
+   localhost, LAN, link-local, and reserved addresses unless a development build
+   explicitly enables private-network fetching. See
+   [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md) for the full configuration,
+   trigger-mode, source-card, and troubleshooting guide.
+4. Check [docs/PERMISSIONS.md](docs/PERMISSIONS.md) before enabling network or
    local API workflows.
-4. Check [docs/MODEL_COMPATIBILITY.md](docs/MODEL_COMPATIBILITY.md) before
+5. Check [docs/MODEL_COMPATIBILITY.md](docs/MODEL_COMPATIBILITY.md) before
    choosing local image bundles or cloud provider protocols.
 
 Release APKs are signed by the project maintainer. Debug APKs are not intended
 for public installation.
+
+Optional live web-search smoke tests for maintainers:
+
+```powershell
+$env:MCA_LIVE_WEB_SEARCH_TEST='true'
+.\gradlew :app:testDebugUnitTest --tests com.muyuchat.mca.WebSearchProviderTest.liveDirectUrlSmokeReadsRealWebPageWhenEnabled
+
+$env:MCA_LIVE_SEARXNG_ENDPOINT='https://your-searxng.example'
+.\gradlew :app:testDebugUnitTest --tests com.muyuchat.mca.WebSearchProviderTest.liveSearxngSmokeUsesConfiguredEndpointWhenProvided
+
+$env:MCA_LIVE_BRAVE_API_KEY='<key>'
+.\gradlew :app:testDebugUnitTest --tests com.muyuchat.mca.WebSearchProviderTest.liveBraveSmokeUsesConfiguredKeyWhenProvided
+
+$env:MCA_LIVE_TAVILY_API_KEY='<key>'
+.\gradlew :app:testDebugUnitTest --tests com.muyuchat.mca.WebSearchProviderTest.liveTavilySmokeUsesConfiguredKeyWhenProvided
+
+$env:MCA_LIVE_JINA_API_KEY='<key>'
+.\gradlew :app:testDebugUnitTest --tests com.muyuchat.mca.WebSearchProviderTest.liveJinaSmokeUsesConfiguredKeyWhenProvided
+
+$env:MCA_LIVE_CUSTOM_JSON_ENDPOINT='https://hn.algolia.com/api/v1/search'
+.\gradlew :app:testDebugUnitTest --tests com.muyuchat.mca.WebSearchProviderTest.liveCustomJsonClosedLoopBuildsPromptSourcesAndDiagnosticsWhenProvided
+```
 
 ## Repository Layout
 
@@ -252,9 +341,11 @@ more detail.
 
 - **v0.1 alpha**: local chat, cloud chat, cloud image engines, image workspace,
   model management, ModelScope-oriented downloads, and release packaging.
-- **v0.2**: stabilize local image bundles, improve device compatibility
+- **v0.2 alpha**: smart web search, source cards, role-card assistants, local
+  API compatibility fixes, web-search diagnostics, and release-grade
+  compatibility documentation.
+- **v0.3**: stabilize local image bundles, improve device compatibility
   reporting, and refine image generation progress/cancel behavior.
-- **v0.3**: expand mobile agent diagnostics and local API workflows.
 
 MCA intentionally avoids bundling model weights. Model recommendations and
 download sources must respect each upstream model's license.
