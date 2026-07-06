@@ -1504,6 +1504,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun selectWebSearchResearchModeForNextTurn(mode: String) {
+        val state = _uiState.value
+        if (!state.webSearchConfig.enabled) {
+            _uiState.update {
+                it.copy(
+                    webSearchResearchModeOverride = null,
+                    webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
+                    statusMessage = "请先启用联网检索"
+                )
+            }
+            return
+        }
+        val selected = WebSearchResearchMode.from(mode)
+        _uiState.update {
+            it.copy(
+                webSearchResearchModeOverride = selected.takeUnless { next -> next == it.webSearchConfig.researchMode },
+                webSearchStatusMessage = "本轮研究模式：${selected.label}",
+                statusMessage = "本轮研究模式：${selected.label}"
+            )
+        }
+    }
+
     fun clearWebSearchDiagnostics() {
         val records = webSearchDiagnosticStore.clear()
         _uiState.update {

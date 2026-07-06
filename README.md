@@ -122,7 +122,7 @@ Current release status:
   explicitly approved endpoint is recommended for reliable search.
   Brave and Tavily official API root URLs are accepted and normalized to their
   search paths during preflight and request execution.
-- **Image page**: Gemini-style MCA image workspace with local/cloud engine switching,
+- **Image page**: MCA image workspace with local/cloud engine switching,
   prompt composer, generation states, template cards, and image library.
 - **Local image engines**: `stable-diffusion.cpp` bridge with progress/cancel
   hooks and bundle-aware model registration.
@@ -160,6 +160,10 @@ The APK does not include model weights or cloud credentials. After installing:
    explicitly enables private-network fetching. See
    [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md) for the full configuration,
    trigger-mode, source-card, and troubleshooting guide.
+   Quick source guide: choose Tavily or Brave for the fastest API-key setup,
+   choose self-hosted SearxNG when privacy and control matter most, choose Jina
+   when page-body extraction needs help, or choose custom JSON when you operate
+   your own search gateway.
 4. Check [docs/PERMISSIONS.md](docs/PERMISSIONS.md) before enabling network or
    local API workflows.
 5. Check [docs/MODEL_COMPATIBILITY.md](docs/MODEL_COMPATIBILITY.md) before

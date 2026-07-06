@@ -30,6 +30,27 @@ MCA 的联网检索不是让本地模型自己访问互联网，而是由 App �
 6. 真实搜索源点击 `闭环自检`；公开 JSON 自检源点击 `协议自检`，确认最近检索里出现来源、质量分和闭环检查。
 7. 回到聊天页，在输入框左下角 `+` 菜单里切换 `联网检索` 或 `研究模式`。
 
+## 如何获取搜索源
+
+如果你只是想读取一个公开网页链接，只需要开启联网检索并在聊天里粘贴完整 URL，不一定需要搜索 API。只有“关键词搜索”“最新资料”“调研对比”这类需要全网检索的问题，才需要配置下面任意一种搜索源。
+
+| 适合谁 | 推荐搜索源 | 获取方式 | 在 MCA 里怎么填 |
+|---|---|---|---|
+| 想最快跑通的普通用户 | Tavily Search | 打开 [Tavily Quickstart](https://docs.tavily.com/documentation/quickstart)，注册或登录 Tavily Platform，在 Dashboard 里复制 API Key。 | 选择 `Tavily`；搜索接口地址填 `https://api.tavily.com` 或 `https://api.tavily.com/search`；API Key 填 Tavily Key。 |
+| 想用独立搜索索引的用户 | Brave Search API | 打开 [Brave Search API](https://brave.com/search/api/) 或 [Brave API Quickstart](https://api-dashboard.search.brave.com/documentation/quickstart)，创建账号、订阅可用计划，然后在 Dashboard 获取 Search API Key。 | 选择 `Brave`；搜索接口地址填 `https://api.search.brave.com` 或 `https://api.search.brave.com/res/v1/web/search`；API Key 填 Brave Search API Key。 |
+| 想增强网页正文读取的用户 | Jina Search | 打开 [Jina API Dashboard](https://jina.ai/api-dashboard/) 创建或管理 API Key。Jina 官方提供 `s.jina.ai` 做搜索，`r.jina.ai` 做网页读取。 | 选择 `Jina`；搜索接口地址填 `https://s.jina.ai`；API Key 填 Jina Key。 |
+| 想隐私和可控优先的用户 | 自建 SearxNG | 按 [SearXNG Installation](https://docs.searxng.org/admin/installation.html) 或 [Docker 安装文档](https://docs.searxng.org/admin/installation-docker.html) 部署自己的实例；也可以临时试用 [searx.space](https://searx.space/) 上的公开实例，但公共实例可能限流、关闭 JSON 或不可用。 | 选择 `SearxNG`；地址填你的实例根地址，例如 `https://search.example.com`。多数实例不需要 API Key。 |
+| 有自己后端或聚合服务的用户 | 自定义 JSON | 自己搭一个搜索网关，后端可以转发 Brave、Tavily、Jina、SearxNG 或其它搜索服务，并统一返回 JSON。 | 选择 `自定义`；地址填你的网关 URL，可使用 `/search?q={query}&limit={max_results}` 这类模板；如需鉴权，API Key 会按 Bearer 发送。 |
+
+推荐选择：
+
+- **最快上手**：先用 Tavily 或 Brave，拿到 Key 后填入 MCA，点击 `网络预检` 和 `闭环自检`。
+- **更重视隐私**：自建 SearxNG，再把实例地址填入 MCA。不要长期依赖陌生公共实例。
+- **网页正文经常读不全**：配置 Jina，MCA 会在正文抓取不足时尝试 Reader 增强。
+- **团队或高级用户**：做一个自定义 JSON 网关，统一管理 Key、限流、缓存和搜索源。
+
+`公开 JSON 自检源` 只用于验证 MCA 的请求、JSON 解析、上下文注入和来源卡片链路，不是正式搜索源；如果设置页显示它，说明当前还不能做可靠的全网关键词搜索。
+
 ## 搜索服务地址填写
 
 设置页会对不同服务做路径预检。DNS 和 Key 通过不代表协议路径一定正确，下面这些地址是推荐起点：

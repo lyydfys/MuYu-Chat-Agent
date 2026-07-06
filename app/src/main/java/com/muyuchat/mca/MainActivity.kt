@@ -386,6 +386,7 @@ private fun McaApp(
                             state.assistants.firstOrNull { it.id == state.selectedAssistantId }?.webSearchEnabled == true),
                     webSearchStatusMessage = state.webSearchStatusMessage,
                     webSearchTurnModeLabel = state.toWebSearchTurnModeLabel(),
+                    webSearchResearchMode = (state.webSearchResearchModeOverride ?: state.webSearchConfig.researchMode).name,
                     webSearchResearchModeLabel = (state.webSearchResearchModeOverride ?: state.webSearchConfig.researchMode).label,
                     webSearchResearchOverridden = state.webSearchResearchModeOverride != null,
                     webSearchProviderLabel = buildString {
@@ -426,7 +427,7 @@ private fun McaApp(
                 onReasoningModeChange = viewModel::updateReasoningMode,
                 onCloudReasoningModeLocked = viewModel::showCloudReasoningModeLocked,
                 onToggleWebSearchForTurn = viewModel::toggleWebSearchForNextTurn,
-                onCycleWebSearchResearchMode = viewModel::cycleWebSearchResearchModeForNextTurn,
+                onSelectWebSearchResearchMode = viewModel::selectWebSearchResearchModeForNextTurn,
                 onLoadModel = viewModel::selectChatModel,
                 onOpenAgent = { onTab(AppTab.AGENT) },
                 onOpenModels = { onTab(AppTab.MODELS) },
@@ -768,7 +769,7 @@ private fun SwipeBackPage(
             suspend fun closeAnimated() {
                 onDismissStart()
                 offsetX.animateTo(
-                    targetValue = -widthPx,
+                    targetValue = widthPx,
                     animationSpec = tween(durationMillis = 180)
                 )
                 onDismiss()
@@ -784,7 +785,7 @@ private fun SwipeBackPage(
                 enabled = visible,
                 onProgress = { progress ->
                     scope.launch {
-                        offsetX.snapTo(-widthPx * progress.coerceIn(0f, 1f))
+                        offsetX.snapTo(widthPx * progress.coerceIn(0f, 1f))
                     }
                 },
                 onCancel = {
@@ -797,8 +798,8 @@ private fun SwipeBackPage(
                 },
                 onBack = {
                     scope.launch {
-                        if (offsetX.value > -widthPx * 0.08f) {
-                            offsetX.snapTo(-widthPx * 0.08f)
+                        if (offsetX.value < widthPx * 0.08f) {
+                            offsetX.snapTo(widthPx * 0.08f)
                         }
                         closeAnimated()
                     }
@@ -866,7 +867,7 @@ private fun drawerPageEnter() = slideInHorizontally(
 
 private fun drawerPageExit() = slideOutHorizontally(
     animationSpec = tween(durationMillis = 260),
-    targetOffsetX = { -it }
+    targetOffsetX = { it }
 ) + fadeOut(animationSpec = tween(durationMillis = 180))
 
 @Composable

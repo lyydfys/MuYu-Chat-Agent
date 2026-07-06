@@ -184,12 +184,12 @@ import java.util.Calendar
 import kotlin.math.roundToInt
 
 private const val CLOUD_REASONING_LOCKED_TIP = "云端思考由模型服务商控制，MCA 已默认启用，暂不支持切换。"
-private val GeminiPrimaryBlue = Color(0xFF3F7DE8)
-private val GeminiInputShell = Color(0xFFFEFEFF)
-private val GeminiInputField = Color(0xFFF3F7FF)
-private val GeminiInputIconSurface = Color(0xFFEAF1FF)
-private val GeminiInputText = Color(0xFF1F2937)
-private val GeminiInputPlaceholder = Color(0xFF8A93A3)
+private val McaPrimaryBlue = Color(0xFF3F7DE8)
+private val McaInputShell = Color(0xFFFEFEFF)
+private val McaInputField = Color(0xFFF3F7FF)
+private val McaInputIconSurface = Color(0xFFEAF1FF)
+private val McaInputText = Color(0xFF1F2937)
+private val McaInputPlaceholder = Color(0xFF8A93A3)
 
 data class ChatUiState(
     val messages: List<ChatMessage> = emptyList(),
@@ -219,6 +219,7 @@ data class ChatUiState(
     val webSearchEnabledForTurn: Boolean = false,
     val webSearchStatusMessage: String? = null,
     val webSearchTurnModeLabel: String = "",
+    val webSearchResearchMode: String = "AUTO",
     val webSearchResearchModeLabel: String = "",
     val webSearchResearchOverridden: Boolean = false,
     val webSearchProviderLabel: String = ""
@@ -341,7 +342,7 @@ fun ChatScreen(
     onReasoningModeChange: (ReasoningMode) -> Unit,
     onCloudReasoningModeLocked: () -> Unit = {},
     onToggleWebSearchForTurn: () -> Unit = {},
-    onCycleWebSearchResearchMode: () -> Unit = {},
+    onSelectWebSearchResearchMode: (String) -> Unit = {},
     onOpenWebSearchSettings: () -> Unit = {},
     onLoadModel: (String) -> Unit = {},
     onOpenAgent: () -> Unit,
@@ -496,11 +497,12 @@ fun ChatScreen(
                 webSearchEnabledForTurn = state.webSearchEnabledForTurn,
                 webSearchStatusMessage = state.webSearchStatusMessage,
                 webSearchTurnModeLabel = state.webSearchTurnModeLabel,
+                webSearchResearchMode = state.webSearchResearchMode,
                 webSearchResearchModeLabel = state.webSearchResearchModeLabel,
                 webSearchResearchOverridden = state.webSearchResearchOverridden,
                 webSearchProviderLabel = state.webSearchProviderLabel,
                 onToggleWebSearchForTurn = onToggleWebSearchForTurn,
-                onCycleWebSearchResearchMode = onCycleWebSearchResearchMode,
+                onSelectWebSearchResearchMode = onSelectWebSearchResearchMode,
                 onOpenWebSearchSettings = onOpenWebSearchSettings,
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
@@ -1205,7 +1207,7 @@ private fun AssistantAvatar(name: String, avatar: String, selected: Boolean) {
     val label = avatar.trim().ifBlank { name.trim() }.firstOrNull()?.toString() ?: "M"
     Surface(
         modifier = Modifier.size(42.dp),
-        color = if (selected) GeminiPrimaryBlue else MaterialTheme.colorScheme.surfaceVariant,
+        color = if (selected) McaPrimaryBlue else MaterialTheme.colorScheme.surfaceVariant,
         shape = CircleShape
     ) {
         Box(contentAlignment = Alignment.Center) {
@@ -1725,7 +1727,7 @@ private fun ImageCreatingPlaceholder(
                 )
                 Text(
                     waitingText,
-                    color = GeminiPrimaryBlue,
+                    color = McaPrimaryBlue,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -1746,7 +1748,7 @@ private fun ImageCreatingPlaceholder(
                             val wave = ((x + y + groupIndex * 2) / 12f + phase) % 1f
                             val alpha = (0.18f + (1f - kotlin.math.abs(wave - 0.5f) * 2f) * 0.50f) * pulse
                             drawCircle(
-                                color = GeminiPrimaryBlue.copy(alpha = alpha.coerceIn(0.12f, 0.62f)),
+                                color = McaPrimaryBlue.copy(alpha = alpha.coerceIn(0.12f, 0.62f)),
                                 radius = dot,
                                 center = Offset(origin.x + x * gap, origin.y + y * gap)
                             )
@@ -1766,7 +1768,7 @@ private fun ImageCreatingPlaceholder(
                 val highlightWidth = trackWidth * 0.34f
                 val highlightLeft = trackLeft + (trackWidth + highlightWidth) * phase - highlightWidth
                 drawRoundRect(
-                    color = GeminiPrimaryBlue.copy(alpha = 0.55f),
+                    color = McaPrimaryBlue.copy(alpha = 0.55f),
                     topLeft = Offset(highlightLeft.coerceIn(trackLeft - highlightWidth, trackLeft + trackWidth), trackTop),
                     size = Size(highlightWidth, trackHeight),
                     cornerRadius = CornerRadius(trackHeight / 2f, trackHeight / 2f)
@@ -1920,10 +1922,7 @@ private fun ImageEngineSwitcher(
                 ImageEngineSource.entries.forEach { source ->
                     DropdownMenuItem(
                         text = {
-                            Column {
-                                Text(source.title, fontWeight = FontWeight.Bold)
-                                Text(source.subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+                            Text(source.title, fontWeight = FontWeight.Bold)
                         },
                         onClick = {
                             sourceMenuExpanded = false
@@ -2323,11 +2322,11 @@ private fun ImagePromptBar(
     modifier: Modifier = Modifier
 ) {
     val darkTheme = isSystemInDarkTheme()
-    val inputShellColor = if (darkTheme) MaterialTheme.colorScheme.surface else GeminiInputShell
-    val inputFieldColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputField
-    val inputIconSurfaceColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputIconSurface
-    val inputTextColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else GeminiInputText
-    val inputPlaceholderColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else GeminiInputPlaceholder
+    val inputShellColor = if (darkTheme) MaterialTheme.colorScheme.surface else McaInputShell
+    val inputFieldColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else McaInputField
+    val inputIconSurfaceColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else McaInputIconSurface
+    val inputTextColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else McaInputText
+    val inputPlaceholderColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else McaInputPlaceholder
     Surface(
         modifier = modifier
             .fillMaxWidth()
@@ -2348,7 +2347,7 @@ private fun ImagePromptBar(
                     .clickable(onClick = onOpenPhoto),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.Image, contentDescription = "添加图片", modifier = Modifier.size(22.dp), tint = GeminiPrimaryBlue)
+                Icon(Icons.Default.Image, contentDescription = "添加图片", modifier = Modifier.size(22.dp), tint = McaPrimaryBlue)
             }
             Spacer(modifier = Modifier.width(10.dp))
             Surface(
@@ -2380,7 +2379,7 @@ private fun ImagePromptBar(
                             fontSize = 15.sp,
                             lineHeight = 20.sp
                         ),
-                        cursorBrush = SolidColor(GeminiPrimaryBlue),
+                        cursorBrush = SolidColor(McaPrimaryBlue),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -2389,9 +2388,9 @@ private fun ImagePromptBar(
             FloatingActionButton(
                 onClick = if (isGenerating) onStop else onSubmit,
                 containerColor = when {
-                    isGenerating -> GeminiPrimaryBlue
+                    isGenerating -> McaPrimaryBlue
                     prompt.isBlank() -> if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFE5ECF8)
-                    else -> GeminiPrimaryBlue
+                    else -> McaPrimaryBlue
                 },
                 elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp),
                 shape = CircleShape,
@@ -2566,7 +2565,7 @@ private fun SmoothRightToLeftPage(
 
             suspend fun closeAnimated() {
                 offsetX.animateTo(
-                    targetValue = -widthPx,
+                    targetValue = widthPx,
                     animationSpec = tween(durationMillis = 180)
                 )
                 onDismiss()
@@ -2582,7 +2581,7 @@ private fun SmoothRightToLeftPage(
                 enabled = visible,
                 onProgress = { progress ->
                     scope.launch {
-                        offsetX.snapTo(-widthPx * progress.coerceIn(0f, 1f))
+                        offsetX.snapTo(widthPx * progress.coerceIn(0f, 1f))
                     }
                 },
                 onCancel = {
@@ -2595,8 +2594,8 @@ private fun SmoothRightToLeftPage(
                 },
                 onBack = {
                     scope.launch {
-                        if (offsetX.value > -widthPx * 0.08f) {
-                            offsetX.snapTo(-widthPx * 0.08f)
+                        if (offsetX.value < widthPx * 0.08f) {
+                            offsetX.snapTo(widthPx * 0.08f)
                         }
                         closeAnimated()
                     }
@@ -2619,7 +2618,7 @@ private fun appMenuPageEnter() = slideInHorizontally(
 
 private fun appMenuPageExit() = slideOutHorizontally(
     animationSpec = tween(durationMillis = 240),
-    targetOffsetX = { -it }
+    targetOffsetX = { it }
 ) + fadeOut(animationSpec = tween(durationMillis = 140))
 
 @Composable
@@ -2842,27 +2841,15 @@ private fun AppMenuRow(
             icon()
         }
         Spacer(modifier = Modifier.width(10.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                title,
-                color = rowContentColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 18.sp),
-                fontWeight = FontWeight.Medium
-            )
-            Text(
-                subtitle,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp, lineHeight = 13.sp),
-                color = if (rowContentColor == MaterialTheme.colorScheme.error) {
-                    MaterialTheme.colorScheme.error.copy(alpha = 0.72f)
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
-                }
-            )
-        }
+        Text(
+            title,
+            color = rowContentColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 18.sp),
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f)
+        )
         Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -3449,26 +3436,13 @@ private fun InferenceSourceMenuRow(
         onClick = onClick
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                Text(
-                    text = source.title,
-                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 19.sp),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
-                )
-                Text(
-                    text = buildList {
-                        if (selected) add("当前")
-                        add("${count.coerceAtMost(3)} 个常用模型")
-                        add(source.subtitle)
-                    }.joinToString(" · "),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp, lineHeight = 13.sp),
-                    color = if (selected) selectedColor else MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal
-                )
-            }
+            Text(
+                text = source.title,
+                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 19.sp),
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                modifier = Modifier.weight(1f)
+            )
             Icon(
                 imageVector = Icons.Default.KeyboardArrowDown,
                 contentDescription = null,
@@ -4410,25 +4384,30 @@ private fun ChatInputBar(
     webSearchEnabledForTurn: Boolean,
     webSearchStatusMessage: String?,
     webSearchTurnModeLabel: String,
+    webSearchResearchMode: String,
     webSearchResearchModeLabel: String,
     webSearchResearchOverridden: Boolean,
     webSearchProviderLabel: String,
     onToggleWebSearchForTurn: () -> Unit,
-    onCycleWebSearchResearchMode: () -> Unit,
+    onSelectWebSearchResearchMode: (String) -> Unit,
     onOpenWebSearchSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showActionSheet by rememberSaveable { mutableStateOf(false) }
+    var researchModeExpanded by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
-    val inputShellColor = if (darkTheme) MaterialTheme.colorScheme.surface else GeminiInputShell
-    val inputFieldColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputField
-    val inputIconSurfaceColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputIconSurface
-    val inputTextColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else GeminiInputText
-    val inputPlaceholderColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else GeminiInputPlaceholder
+    val inputShellColor = if (darkTheme) MaterialTheme.colorScheme.surface else McaInputShell
+    val inputFieldColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else McaInputField
+    val inputIconSurfaceColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else McaInputIconSurface
+    val inputTextColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else McaInputText
+    val inputPlaceholderColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else McaInputPlaceholder
     if (showActionSheet) {
         CompactInputActionMenu(
-            onDismiss = { showActionSheet = false },
+            onDismiss = {
+                researchModeExpanded = false
+                showActionSheet = false
+            },
             onCamera = {
                 showActionSheet = false
                 onOpenCamera()
@@ -4446,14 +4425,21 @@ private fun ChatInputBar(
                 onOpenFileLibrary()
             },
             onWebSearch = {
+                researchModeExpanded = false
                 showActionSheet = false
                 onToggleWebSearchForTurn()
             },
             onResearchMode = {
-                showActionSheet = false
-                onCycleWebSearchResearchMode()
+                if (webSearchEnabled) {
+                    researchModeExpanded = !researchModeExpanded
+                } else {
+                    researchModeExpanded = false
+                    showActionSheet = false
+                    onSelectWebSearchResearchMode(webSearchResearchMode)
+                }
             },
             onOpenWebSearchSettings = {
+                researchModeExpanded = false
                 showActionSheet = false
                 onOpenWebSearchSettings()
             },
@@ -4461,9 +4447,23 @@ private fun ChatInputBar(
             webSearchConfigured = webSearchConfigured,
             webSearchEnabledForTurn = webSearchEnabledForTurn,
             webSearchTurnModeLabel = webSearchTurnModeLabel,
+            webSearchResearchMode = webSearchResearchMode,
             webSearchResearchModeLabel = webSearchResearchModeLabel,
             webSearchResearchOverridden = webSearchResearchOverridden,
             webSearchProviderLabel = webSearchProviderLabel,
+            modifier = modifier
+        )
+    }
+    if (showActionSheet && researchModeExpanded) {
+        ResearchModeFloatingCapsule(
+            selected = webSearchResearchMode,
+            overridden = webSearchResearchOverridden,
+            onDismiss = { researchModeExpanded = false },
+            onSelect = { mode ->
+                researchModeExpanded = false
+                showActionSheet = false
+                onSelectWebSearchResearchMode(mode)
+            },
             modifier = modifier
         )
     }
@@ -4500,7 +4500,7 @@ private fun ChatInputBar(
                         .clickable(enabled = !isGenerating) { showActionSheet = true },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "更多操作", modifier = Modifier.size(24.dp), tint = if (isGenerating) inputPlaceholderColor else GeminiPrimaryBlue)
+                    Icon(Icons.Default.Add, contentDescription = "更多操作", modifier = Modifier.size(24.dp), tint = if (isGenerating) inputPlaceholderColor else McaPrimaryBlue)
                 }
                 Spacer(modifier = Modifier.width(10.dp))
                 val visibleInput = displayInputWithoutAttachment(input)
@@ -4536,7 +4536,7 @@ private fun ChatInputBar(
                                 fontSize = 15.sp,
                                 lineHeight = 20.sp
                             ),
-                            cursorBrush = SolidColor(GeminiPrimaryBlue),
+                            cursorBrush = SolidColor(McaPrimaryBlue),
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
@@ -4546,7 +4546,7 @@ private fun ChatInputBar(
                     onClick = {
                     if (isGenerating) onStop() else onSend()
                 },
-                    containerColor = GeminiPrimaryBlue,
+                    containerColor = McaPrimaryBlue,
                     elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp),
                     shape = CircleShape,
                     modifier = Modifier.size(40.dp)
@@ -4582,7 +4582,7 @@ private fun WebSearchStatusChip(
                 Icons.Default.Search,
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
-                tint = if (active) GeminiPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                tint = if (active) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
@@ -4592,6 +4592,87 @@ private fun WebSearchStatusChip(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+    }
+}
+
+private enum class ResearchModeChoice(val key: String, val label: String) {
+    OFF("OFF", "普通"),
+    AUTO("AUTO", "自动"),
+    DEEP("DEEP", "深度");
+
+    companion object {
+        fun selectedKey(value: String): String =
+            entries.firstOrNull { it.key.equals(value, ignoreCase = true) }?.key ?: AUTO.key
+    }
+}
+
+@Composable
+private fun ResearchModeFloatingCapsule(
+    selected: String,
+    overridden: Boolean,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(bottom = 86.dp)
+            .navigationBarsPadding(),
+        contentAlignment = Alignment.BottomStart
+    ) {
+        val capsuleWidth = 128.dp
+        val startPadding = minOf(252.dp, maxWidth - capsuleWidth - 12.dp).coerceAtLeast(12.dp)
+        AnimatedVisibility(
+            visible = true,
+            enter = fadeIn(tween(120)) + slideInHorizontally(tween(160), initialOffsetX = { -it / 4 }),
+            exit = fadeOut(tween(100)),
+            modifier = Modifier
+                .padding(start = startPadding)
+                .width(capsuleWidth)
+        ) {
+            val darkTheme = isSystemInDarkTheme()
+            Surface(
+                modifier = Modifier.clickable(enabled = false) {},
+                color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
+                shape = RoundedCornerShape(28.dp),
+                shadowElevation = 14.dp
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (overridden) "本轮研究" else "研究模式",
+                            style = MaterialTheme.typography.labelMedium.copy(fontSize = 11.5.sp),
+                            color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF80868B),
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "关闭研究模式选择",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .size(16.dp)
+                                .clickable(onClick = onDismiss)
+                        )
+                    }
+                    val selectedKey = ResearchModeChoice.selectedKey(selected)
+                    ResearchModeChoice.entries.forEach { mode ->
+                        ReasoningModePill(
+                            label = mode.label,
+                            selected = selectedKey == mode.key,
+                            onClick = { onSelect(mode.key) }
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -4610,6 +4691,7 @@ private fun CompactInputActionMenu(
     webSearchConfigured: Boolean,
     webSearchEnabledForTurn: Boolean,
     webSearchTurnModeLabel: String,
+    webSearchResearchMode: String,
     webSearchResearchModeLabel: String,
     webSearchResearchOverridden: Boolean,
     webSearchProviderLabel: String,
@@ -4689,18 +4771,6 @@ private fun CompactInputActionMenu(
                         },
                         onClick = onWebSearch
                     )
-                    if (!webSearchConfigured) {
-                        CompactInputActionRow(
-                            icon = { Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                            label = if (webSearchEnabled) "配置真实搜索源" else "打开联网检索设置",
-                            subtitle = if (webSearchEnabled) {
-                                "接入 SearxNG / Brave / Tavily / Jina"
-                            } else {
-                                "启用后可直读链接并接入搜索服务"
-                            },
-                            onClick = onOpenWebSearchSettings
-                        )
-                    }
                     CompactInputActionRow(
                         icon = { Icon(Icons.Default.Psychology, contentDescription = null, modifier = Modifier.size(20.dp)) },
                         label = "研究模式：${webSearchResearchModeLabel.ifBlank { "自动" }}",
@@ -4744,25 +4814,15 @@ private fun CompactInputActionRow(
             }
         }
         Spacer(modifier = Modifier.width(14.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = label,
-                color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124),
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 19.sp),
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (!subtitle.isNullOrBlank()) {
-                Text(
-                    text = subtitle,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
+        Text(
+            text = label,
+            color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124),
+            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 19.sp),
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
@@ -4784,7 +4844,7 @@ private fun FileLibraryPage(
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf(FileLibraryFilter.ALL) }
     val darkTheme = isSystemInDarkTheme()
-    val libraryInputFieldColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputField
+    val libraryInputFieldColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else McaInputField
     val filtered = remember(files, query, filter) {
         files.filter { file ->
             val queryMatched = query.isBlank() ||
@@ -4828,7 +4888,7 @@ private fun FileLibraryPage(
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = libraryInputFieldColor,
                     unfocusedContainerColor = libraryInputFieldColor,
-                    focusedBorderColor = GeminiPrimaryBlue.copy(alpha = 0.42f),
+                    focusedBorderColor = McaPrimaryBlue.copy(alpha = 0.42f),
                     unfocusedBorderColor = Color.Transparent
                 )
             )
@@ -4906,7 +4966,7 @@ private fun FileLibraryRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(
                     modifier = Modifier.size(36.dp),
-                    color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else GeminiInputIconSurface,
+                    color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else McaInputIconSurface,
                     shape = CircleShape
                 ) {
                     Box(contentAlignment = Alignment.Center) {
@@ -4914,7 +4974,7 @@ private fun FileLibraryRow(
                             Icons.Default.Folder,
                             contentDescription = null,
                             modifier = Modifier.size(20.dp),
-                            tint = GeminiPrimaryBlue
+                            tint = McaPrimaryBlue
                         )
                     }
                 }
@@ -5130,7 +5190,7 @@ private fun UserMessageBubble(message: ChatMessage) {
                                     Icon(
                                         Icons.Default.Image,
                                         contentDescription = null,
-                                        tint = GeminiPrimaryBlue.copy(alpha = 0.72f)
+                                        tint = McaPrimaryBlue.copy(alpha = 0.72f)
                                     )
                                 }
                             }
@@ -5253,7 +5313,7 @@ private fun WebSearchSourcesRow(
                 Icons.Default.Search,
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
-                tint = GeminiPrimaryBlue
+                tint = McaPrimaryBlue
             )
             Spacer(modifier = Modifier.width(6.dp))
             Text(
@@ -5277,7 +5337,7 @@ private fun WebSearchSourcesRow(
                         },
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f),
                     shape = RoundedCornerShape(18.dp),
-                    border = if (selected) BorderStroke(1.dp, GeminiPrimaryBlue.copy(alpha = 0.46f)) else null
+                    border = if (selected) BorderStroke(1.dp, McaPrimaryBlue.copy(alpha = 0.46f)) else null
                 ) {
                     Column(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -5519,8 +5579,8 @@ private fun WebSearchTraceSection(
 @Composable
 private fun ChatWebSearchTrace.webSearchTraceColor(): Color =
     when {
-        running -> GeminiPrimaryBlue
-        success && qualityScore >= 72 -> GeminiPrimaryBlue
+        running -> McaPrimaryBlue
+        success && qualityScore >= 72 -> McaPrimaryBlue
         success -> Color(0xFF0F9D58)
         warnings.isNotEmpty() || conflictWarnings.isNotEmpty() -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -5717,7 +5777,7 @@ private fun ChatSourceReference.displayTrustReason(): String =
 @Composable
 private fun ChatSourceReference.webSearchTrustColor(): Color =
     when (displayTrustLabel()) {
-        "官方/一手", "开发者文档", "模型社区", "代码仓库" -> GeminiPrimaryBlue
+        "官方/一手", "开发者文档", "模型社区", "代码仓库" -> McaPrimaryBlue
         "学术论文" -> Color(0xFF5E6AD2)
         "社区讨论", "媒体报道" -> Color(0xFF0F9D58)
         "安全拦截" -> MaterialTheme.colorScheme.error

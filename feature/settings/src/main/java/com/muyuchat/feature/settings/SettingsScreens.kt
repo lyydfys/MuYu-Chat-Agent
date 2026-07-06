@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings as AndroidSettings
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
@@ -43,6 +45,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
@@ -582,6 +585,11 @@ fun SearchSettingsScreen(
     var triggerMode by rememberSaveable(state.triggerMode) { mutableStateOf(state.triggerMode) }
     var researchMode by rememberSaveable(state.researchMode) { mutableStateOf(state.researchMode) }
     var testQuery by rememberSaveable { mutableStateOf("MCA 本地 AI") }
+    var advancedExpanded by rememberSaveable { mutableStateOf(false) }
+    var backupExpanded by rememberSaveable { mutableStateOf(false) }
+    var testExpanded by rememberSaveable { mutableStateOf(false) }
+    var diagnosticsExpanded by rememberSaveable { mutableStateOf(false) }
+    var helpExpanded by rememberSaveable { mutableStateOf(false) }
     val backup0 = state.backupProviders.getOrNull(0)
     val backup1 = state.backupProviders.getOrNull(1)
     val backup2 = state.backupProviders.getOrNull(2)
@@ -687,31 +695,44 @@ fun SearchSettingsScreen(
                     state.enabled -> "已启用：可读取网页链接"
                     else -> "需要启用或配置搜索服务"
                 },
-                secondary = "MCA 会先生成智能检索计划，识别网页链接并扩展关键检索词，再把来源摘要作为本轮上下文注入模型。回复下方会显示来源卡片；网页内容中的指令不会被当作系统指令执行。诊断记录会显示触发依据、资料质量和质量依据。当前触发方式：${state.triggerModeLabel}；研究模式：${state.researchModeLabel}。"
+                secondary = "触发：${state.triggerModeLabel} · 研究：${state.researchModeLabel}"
             )
         }
-        if (state.isPublicWebSearchCheckSource()) {
-            item {
-                InfoCard(
-                    title = "覆盖范围提示",
-                    primary = "当前使用的是公开 JSON 协议自检源",
-                    secondary = "它只用于验证联网链路、上下文注入和来源卡片，不是通用搜索服务。正式使用请配置自己的 SearxNG、Brave、Tavily、Jina 或可信自建搜索源。"
+        item {
+            ExpandableSettingsCard(
+                title = "使用说明",
+                summary = "搜索源配置、测试步骤、隐私边界",
+                expanded = helpExpanded,
+                onExpandedChange = { helpExpanded = it }
+            ) {
+                if (state.isPublicWebSearchCheckSource()) {
+                    HelpTextBlock(
+                        title = "覆盖范围提示",
+                        primary = "当前使用的是公开 JSON 协议自检源。",
+                        secondary = "它只用于验证联网链路、上下文注入和来源卡片，不是通用搜索服务。正式使用请配置自己的 SearxNG、Brave、Tavily、Jina 或可信自建搜索源。"
+                    )
+                }
+                HelpTextBlock(
+                    title = "推荐校验流程",
+                    primary = "先测试完整 URL 直读，再测试关键词搜索，最后回到聊天页确认来源卡片。",
+                    secondary = "公共 SearxNG 可能限流，稳定使用建议自建或使用带 Key 的搜索服务。Jina 配置 Key 后可在普通网页抓取内容不足时用 Reader 增强正文读取。"
+                )
+                HelpTextBlock(
+                    title = "如何获取搜索源",
+                    primary = "快速可用选 Tavily 或 Brave：到服务商官网注册并创建 Search API Key。",
+                    secondary = "隐私可控选自建 SearxNG；网页正文增强选 Jina；团队或高级用户可接自建 JSON 网关。公开 JSON 自检源只验证链路，不能当正式搜索源。"
+                )
+                HelpTextBlock(
+                    title = providerSetupGuidance.title,
+                    primary = providerSetupGuidance.primary,
+                    secondary = providerSetupGuidance.secondary
+                )
+                HelpTextBlock(
+                    title = "安全边界",
+                    primary = "本地模型不会直接联网，MCA 只把搜索摘要注入当前轮对话。",
+                    secondary = "网页内容中的指令不会被当作系统指令执行；本机、局域网、链路本地和保留地址默认会被拦截。API Key 只保存在本机。"
                 )
             }
-        }
-        item {
-            InfoCard(
-                title = "配置校验",
-                primary = "推荐按 3 步确认：网页直读、搜索服务、聊天来源卡片",
-                secondary = "先用完整 URL 测试网页读取；再填写 SearxNG / Brave / Tavily / Jina / 自定义 JSON 并测试关键词；最后回到聊天页提一个实时问题，确认回复下方出现来源卡片。公共 SearxNG 可能限流，稳定使用建议自建或使用带 Key 的搜索服务。Jina 配置 Key 后还可在普通网页抓取内容不足时用 Reader 增强正文读取。"
-            )
-        }
-        item {
-            InfoCard(
-                title = providerSetupGuidance.title,
-                primary = providerSetupGuidance.primary,
-                secondary = providerSetupGuidance.secondary
-            )
         }
         item {
             Card(
@@ -745,39 +766,46 @@ fun SearchSettingsScreen(
                             )
                         }
                     }
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("触发方式", fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
-                            triggerModes.forEach { item ->
-                                FilterChip(
-                                    selected = triggerMode == item.first,
-                                    onClick = { triggerMode = item.first },
-                                    label = { Text(item.second) }
-                                )
+                    ExpandableSettingsInlineSection(
+                        title = "高级设置",
+                        summary = "触发：${triggerModes.firstOrNull { it.first == triggerMode }?.second.orEmpty()} · 研究：${researchModes.firstOrNull { it.first == researchMode }?.second.orEmpty()}",
+                        expanded = advancedExpanded,
+                        onExpandedChange = { advancedExpanded = it }
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("触发方式", fontWeight = FontWeight.Bold)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                                triggerModes.forEach { item ->
+                                    FilterChip(
+                                        selected = triggerMode == item.first,
+                                        onClick = { triggerMode = item.first },
+                                        label = { Text(item.second) }
+                                    )
+                                }
                             }
+                            Text(
+                                triggerModes.firstOrNull { it.first == triggerMode }?.third.orEmpty(),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-                        Text(
-                            triggerModes.firstOrNull { it.first == triggerMode }?.third.orEmpty(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("研究模式", fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
-                            researchModes.forEach { item ->
-                                FilterChip(
-                                    selected = researchMode == item.first,
-                                    onClick = { researchMode = item.first },
-                                    label = { Text(item.second) }
-                                )
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("研究模式", fontWeight = FontWeight.Bold)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                                researchModes.forEach { item ->
+                                    FilterChip(
+                                        selected = researchMode == item.first,
+                                        onClick = { researchMode = item.first },
+                                        label = { Text(item.second) }
+                                    )
+                                }
                             }
+                            Text(
+                                researchModes.firstOrNull { it.first == researchMode }?.third.orEmpty(),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-                        Text(
-                            researchModes.firstOrNull { it.first == researchMode }?.third.orEmpty(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
                     OutlinedTextField(
                         value = endpoint,
@@ -809,9 +837,12 @@ fun SearchSettingsScreen(
                             color = MaterialTheme.colorScheme.error
                         )
                     }
-                    HorizontalDivider()
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("备用搜索源", fontWeight = FontWeight.Bold)
+                    ExpandableSettingsInlineSection(
+                        title = "备用搜索源",
+                        summary = "已启用 ${listOf(backup0Enabled, backup1Enabled, backup2Enabled).count { it }} 个",
+                        expanded = backupExpanded,
+                        onExpandedChange = { backupExpanded = it }
+                    ) {
                         Text(
                             "主搜索源限流、鉴权失败或没有可用结果时，MCA 只会按这里显式配置过的服务接力，不会调用未授权服务。",
                             style = MaterialTheme.typography.bodySmall,
@@ -901,7 +932,7 @@ fun SearchSettingsScreen(
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("测试检索", fontWeight = FontWeight.Bold)
                     Text(
-                        "这里会按当前填写的地址和 Key 直接测试，不需要先保存；完整闭环自检会模拟聊天本轮联网，并在最近检索里写入上下文、来源卡片、质量和缓存证据。",
+                        "测试会使用当前表单内容，不需要先保存。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -931,49 +962,54 @@ fun SearchSettingsScreen(
                             Text("闭环自检")
                         }
                     }
-                    Button(
-                        onClick = {
-                            testQuery = WEB_SEARCH_RESEARCH_CHECK_QUERY
-                            onTestTurn(WEB_SEARCH_RESEARCH_CHECK_QUERY, currentDraft().copy(researchMode = "DEEP"), false)
-                        },
-                        modifier = Modifier.fillMaxWidth()
+                    ExpandableSettingsInlineSection(
+                        title = "更多测试",
+                        summary = "协议自检、研究闭环、清空记录",
+                        expanded = testExpanded,
+                        onExpandedChange = { testExpanded = it }
                     ) {
-                        Text("研究闭环自检")
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         Button(
+                            onClick = {
+                                testQuery = WEB_SEARCH_RESEARCH_CHECK_QUERY
+                                onTestTurn(WEB_SEARCH_RESEARCH_CHECK_QUERY, currentDraft().copy(researchMode = "DEEP"), false)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("研究闭环自检")
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Button(
+                                onClick = {
+                                    applyPublicCheckDraft(WEB_SEARCH_PUBLIC_CHECK_QUERY, deepResearch = false)
+                                    onTestTurn(WEB_SEARCH_PUBLIC_CHECK_QUERY, publicCheckDraft(deepResearch = false), true)
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("协议自检")
+                            }
+                            Button(
+                                onClick = {
+                                    applyPublicCheckDraft(WEB_SEARCH_RESEARCH_CHECK_QUERY, deepResearch = true)
+                                    onTestTurn(WEB_SEARCH_RESEARCH_CHECK_QUERY, publicCheckDraft(deepResearch = true), true)
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("研究协议自检")
+                            }
+                        }
+                        TextButton(
+                            modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 applyPublicCheckDraft(WEB_SEARCH_PUBLIC_CHECK_QUERY, deepResearch = false)
-                                onTestTurn(WEB_SEARCH_PUBLIC_CHECK_QUERY, publicCheckDraft(deepResearch = false), true)
-                            },
-                            modifier = Modifier.weight(1f)
+                            }
                         ) {
-                            Text("协议自检")
+                            Text("填入公开 JSON 协议自检源")
                         }
-                        Button(
-                            onClick = {
-                                applyPublicCheckDraft(WEB_SEARCH_RESEARCH_CHECK_QUERY, deepResearch = true)
-                                onTestTurn(WEB_SEARCH_RESEARCH_CHECK_QUERY, publicCheckDraft(deepResearch = true), true)
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("研究协议自检")
-                        }
-                    }
-                    TextButton(
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = {
-                            applyPublicCheckDraft(WEB_SEARCH_PUBLIC_CHECK_QUERY, deepResearch = false)
-                        }
-                    ) {
-                        Text("填入公开 JSON 协议自检源")
-                    }
-                    Text(
-                        "公开协议自检无需 Key，用于验证 JSON 接入、上下文注入、来源卡片和诊断链路；它不是通用搜索服务。正式使用建议配置自己的 SearxNG、Brave、Tavily、Jina 或可信 JSON 服务。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            "公开协议自检无需 Key，用于验证 JSON 接入、上下文注入、来源卡片和诊断链路；它不是通用搜索服务。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         TextButton(
                             onClick = onClearDiagnostics,
                             enabled = state.diagnostics.isNotEmpty(),
@@ -986,28 +1022,132 @@ fun SearchSettingsScreen(
             }
         }
         item {
-            Text("最近检索", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        }
-        if (state.diagnostics.isEmpty()) {
-            item {
-                InfoCard(
-                    title = "暂无记录",
-                    primary = "完成一次测试或聊天联网后会显示在这里",
-                    secondary = "记录只保存在本机，包含检索词、来源数、耗时和失败摘要，不保存 API Key。"
-                )
+            ExpandableSettingsCard(
+                title = "最近检索",
+                summary = if (state.diagnostics.isEmpty()) "暂无记录" else "${state.diagnostics.size} 条本机诊断记录",
+                expanded = diagnosticsExpanded,
+                onExpandedChange = { diagnosticsExpanded = it }
+            ) {
+                if (state.diagnostics.isEmpty()) {
+                    HelpTextBlock(
+                        title = "暂无记录",
+                        primary = "完成一次测试或聊天联网后会显示在这里。",
+                        secondary = "记录只保存在本机，包含检索词、来源数、耗时和失败摘要，不保存 API Key。"
+                    )
+                } else {
+                    state.diagnostics.take(8).forEach { diagnostic ->
+                        WebSearchDiagnosticCard(diagnostic)
+                    }
+                }
             }
-        } else {
-            items(state.diagnostics.take(8)) { diagnostic ->
-                WebSearchDiagnosticCard(diagnostic)
+        }
+    }
+}
+
+@Composable
+private fun ExpandableSettingsCard(
+    title: String,
+    summary: String,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    content: @Composable () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            ExpandableSettingsHeader(
+                title = title,
+                summary = summary,
+                expanded = expanded,
+                onClick = { onExpandedChange(!expanded) }
+            )
+            AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    HorizontalDivider()
+                    content()
+                }
             }
         }
-        item {
-            InfoCard(
-                title = "隐私说明",
-                primary = "搜索请求会发送到你配置的搜索服务",
-                secondary = "读取网页链接时会直接访问该 URL；关键词搜索会发送到你配置的搜索服务。本地模型不会直接联网，MCA 只把摘要注入当前轮对话。API Key 仅保存在本机设置中；短缓存只在内存里保留搜索结果摘要。"
+    }
+}
+
+@Composable
+private fun ExpandableSettingsInlineSection(
+    title: String,
+    summary: String,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    content: @Composable () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f), RoundedCornerShape(8.dp))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        ExpandableSettingsHeader(
+            title = title,
+            summary = summary,
+            expanded = expanded,
+            onClick = { onExpandedChange(!expanded) }
+        )
+        AnimatedVisibility(visible = expanded) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                content()
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExpandableSettingsHeader(
+    title: String,
+    summary: String,
+    expanded: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.Bold)
+            Text(
+                summary,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        Icon(
+            imageVector = Icons.Default.KeyboardArrowDown,
+            contentDescription = if (expanded) "收起" else "展开",
+            modifier = Modifier.rotate(if (expanded) 180f else 0f)
+        )
+    }
+}
+
+@Composable
+private fun HelpTextBlock(
+    title: String,
+    primary: String,
+    secondary: String
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, fontWeight = FontWeight.Bold)
+        Text(primary, style = MaterialTheme.typography.bodySmall)
+        Text(
+            secondary,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 

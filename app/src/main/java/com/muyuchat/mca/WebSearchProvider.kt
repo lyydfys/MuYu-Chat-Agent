@@ -3041,7 +3041,6 @@ private val knownSearchNameTerms = setOf(
     "DashScope",
     "MiMo",
     "Qwen",
-    "Gemini",
     "Claude",
     "Anthropic",
     "Android",

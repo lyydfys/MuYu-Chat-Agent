@@ -377,7 +377,7 @@ private fun SmoothRightToLeftPage(
             fun closeWithMotion() {
                 scope.launch {
                     offsetX.animateTo(
-                        targetValue = -widthPx,
+                        targetValue = widthPx,
                         animationSpec = tween(durationMillis = 180)
                     )
                     onDismiss()
