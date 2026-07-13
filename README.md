@@ -194,6 +194,18 @@ $env:MCA_LIVE_CUSTOM_JSON_ENDPOINT='https://hn.algolia.com/api/v1/search'
 .\gradlew :app:testDebugUnitTest --tests com.muyuchat.mca.WebSearchProviderTest.liveCustomJsonClosedLoopBuildsPromptSourcesAndDiagnosticsWhenProvided
 ```
 
+## Community and Feedback / 社区与反馈
+
+欢迎加入 **MCA 交流群**，获取使用教程、模型配置建议，交流本地推理体验，并参与不同设备的真机测试。
+
+- QQ 群号：`1062951314`
+- [点击链接加入 MCA 交流群](https://qm.qq.com/q/QpooZX8f0O)
+- 可复现的 Bug 和功能建议请同时提交到 [GitHub Issues](https://github.com/lyydfys/MCA/issues)，方便长期跟踪和修复。
+
+<img src="docs/assets/community/mca-qq-group.jpg" alt="MCA 交流群二维码，群号 1062951314" width="360">
+
+反馈问题时建议附上 MCA 版本、手机型号、芯片、Android 版本、模型名称、运行后端和错误截图。请勿公开 API Key、访问令牌或包含个人隐私的日志。
+
 ## Repository Layout
 
 - `:app` - Android application, navigation, ViewModel, cloud/local providers.
