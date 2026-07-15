@@ -101,7 +101,7 @@ class ParameterFieldPolicyRegistry(
     )
 
     companion object {
-        const val BUILTIN_POLICY_VERSION = "runtime-parameters-v1"
+        const val BUILTIN_POLICY_VERSION = "runtime-parameters-v2-sparse-moe-mmap"
 
         private fun unsupportedPolicy(field: String) = ParameterFieldPolicy(
             field = field,
@@ -558,6 +558,14 @@ class LlamaCppRuntimeParameterAdapter(
         warnings: MutableList<String>,
         sourceByField: MutableMap<String, String>
     ) {
+        fun normalizeLoad(field: String, safeValue: Any?, reason: String) {
+            if (requestedLoad[field] != safeValue) {
+                warnings += "$field normalized to $safeValue because $reason"
+            }
+            requestedLoad[field] = safeValue
+            sourceByField[field] = "runtime-safety"
+        }
+
         if ("gpu_offload" !in identity.capabilities) {
             mapOf(
                 "n_gpu_layers" to 0,
@@ -572,12 +580,38 @@ class LlamaCppRuntimeParameterAdapter(
                 sourceByField[field] = "runtime-safety"
             }
         }
+
+        if ("sparse_moe" in identity.capabilities) {
+            normalizeLoad("mmap", true, "sparse MoE weights must remain file-backed")
+            normalizeLoad("mlock", false, "sparse MoE file pages must stay reclaimable")
+        }
+        if ("sparse_moe_16gb_tier" in identity.capabilities) {
+            val requestedCtx = (requestedLoad["n_ctx"] as? Number)?.toInt() ?: 4096
+            val requestedBatch = (requestedLoad["n_batch"] as? Number)?.toInt() ?: 512
+            val requestedUbatch = (requestedLoad["n_ubatch"] as? Number)?.toInt() ?: 512
+            normalizeLoad("n_ctx", requestedCtx.coerceIn(512, 4096), "this sparse MoE is running in the <=16GB memory tier")
+            normalizeLoad("n_batch", requestedBatch.coerceIn(1, 2048), "this sparse MoE is running in the <=16GB memory tier")
+            normalizeLoad("n_ubatch", requestedUbatch.coerceIn(1, 256), "this sparse MoE is running in the <=16GB memory tier")
+            normalizeLoad("n_parallel", 1, "the <=16GB sparse-MoE tier keeps one sequence")
+        }
+        if ("verified_q4_kv_cache" in identity.capabilities) {
+            normalizeLoad("cache_type_k", "q4_0", "this exact model/runtime has a verified low-memory KV profile")
+            normalizeLoad("cache_type_v", "q4_0", "this exact model/runtime has a verified low-memory KV profile")
+            normalizeLoad("flash_attn", "on", "quantized V cache requires flash attention")
+        }
+
         val nBatch = (requestedLoad["n_batch"] as? Number)?.toInt() ?: 512
         val nUbatch = (requestedLoad["n_ubatch"] as? Number)?.toInt() ?: 512
         if (nUbatch > nBatch || nBatch % nUbatch != 0) {
-            requestedLoad["n_ubatch"] = nBatch
+            val upper = if ("sparse_moe_16gb_tier" in identity.capabilities) {
+                minOf(nBatch, 256)
+            } else {
+                nBatch
+            }
+            val divisor = (upper downTo 1).first { nBatch % it == 0 }
+            requestedLoad["n_ubatch"] = divisor
             sourceByField["n_ubatch"] = "dependency-normalization"
-            warnings += "n_ubatch normalized to n_batch because the requested batch relationship was invalid"
+            warnings += "n_ubatch normalized to $divisor because it must divide n_batch=$nBatch"
         }
         val specType = requestedLoad["spec_type"]?.toString() ?: "none"
         if (specType == "none") requestedLoad["spec_draft_n_max"] = 0

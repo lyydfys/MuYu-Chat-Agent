@@ -115,6 +115,96 @@ class RuntimeParametersTest {
     }
 
     @Test
+    fun sparseMoeForcesFileBackedReclaimableWeights() {
+        val identity = identity(
+            LocalChatRuntime.LLAMA_CPP,
+            capabilities = setOf("sparse_moe")
+        )
+        val resolution = LlamaCppRuntimeParameterAdapter().resolveLoadProfile(
+            identity,
+            """{"n_ctx":8192,"mmap":false,"mlock":true}"""
+        )
+
+        assertEquals(true, resolution.resolved.values.value("mmap"))
+        assertEquals(false, resolution.resolved.values.value("mlock"))
+        assertEquals("runtime-safety", resolution.sourceByField["mmap"])
+        assertEquals("runtime-safety", resolution.sourceByField["mlock"])
+    }
+
+    @Test
+    fun lowMemorySparseMoeUsesBoundedContextBatchAndQuantizedKv() {
+        val identity = identity(
+            LocalChatRuntime.LLAMA_CPP,
+            capabilities = setOf(
+                "sparse_moe",
+                "sparse_moe_16gb_tier",
+                "verified_q4_kv_cache",
+                "draft_mtp"
+            )
+        )
+        val resolution = LlamaCppRuntimeParameterAdapter().resolveLoadProfile(
+            identity,
+            """{
+              "n_ctx":32768,
+              "advanced_json":{
+                "n_batch":4096,
+                "n_ubatch":1000,
+                "cache_type_k":"f16",
+                "cache_type_v":"f16",
+                "flash_attn":"off",
+                "n_parallel":4,
+                "spec_type":"draft-mtp",
+                "spec_draft_n_max":2,
+                "mmap":false,
+                "mlock":true
+              }
+            }""".trimIndent()
+        )
+        val resolved = resolution.resolved.values.toJsonObject()
+
+        assertEquals(4096, resolved.getInt("n_ctx"))
+        assertEquals(2048, resolved.getInt("n_batch"))
+        assertEquals(256, resolved.getInt("n_ubatch"))
+        assertEquals("q4_0", resolved.getString("cache_type_k"))
+        assertEquals("q4_0", resolved.getString("cache_type_v"))
+        assertEquals("on", resolved.getString("flash_attn"))
+        assertEquals(1, resolved.getInt("n_parallel"))
+        assertEquals("draft-mtp", resolved.getString("spec_type"))
+        assertEquals(2, resolved.getInt("spec_draft_n_max"))
+        assertTrue(resolved.getBoolean("mmap"))
+        assertFalse(resolved.getBoolean("mlock"))
+    }
+
+    @Test
+    fun genericSparseMoeTierKeepsQualityKvDefaultsWhileBoundingWorkingSet() {
+        val identity = identity(
+            LocalChatRuntime.LLAMA_CPP,
+            capabilities = setOf("sparse_moe", "sparse_moe_16gb_tier")
+        )
+        val resolution = LlamaCppRuntimeParameterAdapter().resolveLoadProfile(
+            identity,
+            """{
+              "n_ctx":32768,
+              "advanced_json":{
+                "n_batch":4096,
+                "n_ubatch":1000,
+                "cache_type_k":"f16",
+                "cache_type_v":"f16",
+                "flash_attn":"auto"
+              }
+            }""".trimIndent()
+        )
+        val resolved = resolution.resolved.values.toJsonObject()
+
+        assertEquals(4096, resolved.getInt("n_ctx"))
+        assertEquals(2048, resolved.getInt("n_batch"))
+        assertEquals(256, resolved.getInt("n_ubatch"))
+        assertEquals("f16", resolved.getString("cache_type_k"))
+        assertEquals("f16", resolved.getString("cache_type_v"))
+        assertEquals("auto", resolved.getString("flash_attn"))
+    }
+
+    @Test
     fun mnnVisionResolutionDisablesBothModelAndKvMmapBeforeSigning() {
         val identity = identity(LocalChatRuntime.MNN_CPU, capabilities = setOf("vision"))
         val resolution = MnnRuntimeParameterAdapter().resolveLoadProfile(

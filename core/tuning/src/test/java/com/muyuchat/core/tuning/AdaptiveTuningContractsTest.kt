@@ -65,6 +65,35 @@ class AdaptiveTuningContractsTest {
     }
 
     @Test
+    fun verifiedMtpCapabilitySuppliesFallbackWhenTheModelWasRenamed() {
+        val plan = TuningPlan(
+            nCtx = 4096,
+            nPredict = 512,
+            nThreads = 8,
+            temperature = 0.7f,
+            topK = 20,
+            topP = 0.9f,
+            minP = 0.0f,
+            repeatPenalty = 1.0f,
+            presencePenalty = 0.0f,
+            advancedJson = "{}"
+        )
+
+        val adaptive = plan.toAdaptive(
+            runtimeIdentity = identity("renamed-exact-model", setOf("draft_mtp")),
+            capabilities = ModelTuningCapabilities(
+                runtime = TuningRuntime.LLAMA_CPP,
+                supportsSpeculativeMtp = true
+            ),
+            profileKind = ExecutionProfileKind.BALANCED,
+            device = device()
+        )
+
+        assertEquals("draft-mtp", adaptive.executionProfile.loadBound.speculativeType)
+        assertEquals(2, adaptive.executionProfile.loadBound.speculativeDraftMax)
+    }
+
+    @Test
     fun unknownModelAlwaysUsesIndependentCpuSafeBaseline() {
         val aggressive = TuningPlan(
             nCtx = 32768,

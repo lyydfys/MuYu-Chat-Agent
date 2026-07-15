@@ -4,6 +4,13 @@ project(mca_native LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# A clean arm64 llama.cpp build has several very large translation units.
+# Unbounded Ninja parallelism can crash the Windows NDK clang frontend before
+# an APK is produced, so keep compilation parallel but memory-bounded.
+set_property(GLOBAL PROPERTY JOB_POOLS mca_compile_pool=2 mca_link_pool=1)
+set(CMAKE_JOB_POOL_COMPILE mca_compile_pool)
+set(CMAKE_JOB_POOL_LINK mca_link_pool)
+
 option(MCA_WITH_LLAMA_CPP "Build MCA native backend with llama.cpp" ON)
 option(MCA_WITH_MNN_DIFFUSION "Build MCA native backend with MNN Stable Diffusion runner" ON)
 set(MCA_MNN_SOURCE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/MNN" CACHE PATH "Official MNN source root")
@@ -69,6 +76,19 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
     message(STATUS "MCA building with llama.cpp from ${LLAMA_SRC}")
     target_compile_definitions(mca_native PRIVATE MCA_WITH_LLAMA_CPP=1)
     add_subdirectory(${LLAMA_SRC} build-llama)
+    # Replace only llama-model.cpp with an MCA-owned overlay that disables
+    # MAP_POPULATE/WILLNEED for multi-gigabyte model mappings. The llama.cpp
+    # submodule remains pristine and every product build applies this override.
+    get_target_property(MCA_LLAMA_TARGET_SOURCES llama SOURCES)
+    set(MCA_LLAMA_TARGET_SOURCES_WITHOUT_MODEL ${MCA_LLAMA_TARGET_SOURCES})
+    list(FILTER MCA_LLAMA_TARGET_SOURCES_WITHOUT_MODEL EXCLUDE REGEX "(^|[/\\\\])llama-model[.]cpp$")
+    list(LENGTH MCA_LLAMA_TARGET_SOURCES MCA_LLAMA_SOURCE_COUNT_BEFORE)
+    list(LENGTH MCA_LLAMA_TARGET_SOURCES_WITHOUT_MODEL MCA_LLAMA_SOURCE_COUNT_AFTER)
+    if(MCA_LLAMA_SOURCE_COUNT_AFTER EQUAL MCA_LLAMA_SOURCE_COUNT_BEFORE)
+        message(FATAL_ERROR "Unable to replace upstream llama-model.cpp with the MCA mmap prefetch overlay.")
+    endif()
+    set_property(TARGET llama PROPERTY SOURCES ${MCA_LLAMA_TARGET_SOURCES_WITHOUT_MODEL})
+    target_sources(llama PRIVATE ${CMAKE_CURRENT_LIST_DIR}/llama_model_mmap_prefetch_override.cpp)
     find_package(Threads REQUIRED)
     set(MTMD_SRC ${LLAMA_SRC}/tools/mtmd)
     add_library(mca_mtmd STATIC

@@ -218,6 +218,34 @@ class AgentAdvisor(
     private val tuningEngine: TuningEngine = TuningEngine()
 ) {
     /**
+     * Builds an adaptive profile for the model the user is actually loading.
+     *
+     * This must not reuse the globally recommended candidate: a smaller model may
+     * win the recommendation ranking while the requested model needs family-specific
+     * load parameters such as Qwen3.6 A3B MTP.
+     */
+    fun recommendAdaptiveForModel(
+        device: DeviceProfile,
+        model: ModelManifest,
+        runtimeIdentity: ModelRuntimeIdentity,
+        capabilities: ModelTuningCapabilities = ModelTuningCapabilities.forIdentity(runtimeIdentity),
+        preference: UserPreference = UserPreference(),
+        lastDecodeTps: Double? = null
+    ): AdaptiveTuningRecommendation {
+        val target = ModelProfile.fromLocal(model)
+        return tuningEngine.recommendAdaptive(
+            device = device,
+            modelParametersB = target.parametersB,
+            modelName = target.displayName,
+            runtimeIdentity = runtimeIdentity,
+            modelKnowledge = capabilities.knowledgeLevel,
+            capabilities = capabilities,
+            preference = preference,
+            lastDecodeTps = lastDecodeTps
+        )
+    }
+
+    /**
      * Migration entry point for callers that can provide the real model/runtime
      * identity. The legacy recommendation remains available for the current UI,
      * while new code must apply execution/generation/canary outputs separately.

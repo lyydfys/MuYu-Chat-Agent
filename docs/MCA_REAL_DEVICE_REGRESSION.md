@@ -18,6 +18,52 @@ claims stay honest.
 | Image model bundle |  |
 | Network | Offline / Wi-Fi / mobile hotspot |
 
+## Current Qwen3.6 35B Sparse-MoE Acceptance — 2026-07-15
+
+This is the formal product-surface record for loading and generating with the exact Qwen3.6 35B-A3B GGUF on a 12 GB-class Elite device. Debug activities and direct native smoke results are not used as the pass condition.
+
+### Build, device, and model identity
+
+| Item | Final evidence |
+|---|---|
+| APK | 196,981,949 bytes; SHA-256 `44AD5A320B47CEE0AAA1E8DF6D8C1C2EE81C85ACF8343B6BBE533954978CE428`; arm64-v8a only; 73 native libraries |
+| Install binding | Elite installed `base.apk` SHA-256 exactly matched the local APK after `adb install --no-incremental -r` |
+| Signing | APK Signature Scheme v2 verified; certificate SHA-256 `2619AC4CE0AD8397B84C77DF6BA165801FD4FAB1460470F22F1EB7B3E4F9A9CF` |
+| Automated verification | 675 tests, 0 failures, 0 errors, 7 skipped; arm64 `:app:assembleDebug` passed with MNN provenance and typed QAIRT/QNN headers |
+| Device | `98a37aa7`; Xiaomi `25091RP04C` / device `piano`; `SM8750P`; Android 16 / API 36; `arm64-v8a`; `MemTotal=11,617,264 kB` |
+| Formal process | `com.muyuchat.mca/.MainActivity`, PID `23089`, same process for UI and authenticated Local API |
+| Model | modelId `879398d3-1ad2-47e0-8006-f20fecb2e54d`; architecture `qwen35moe`; IQ2_XXS; 11,686,646,144 bytes; SHA-256 `1FB8A998362EBB5F7F3C8ECE6D4803A74BA32211C751DE2E76B81E3379FBF050` |
+| Profile | `balanced-14e7004f7a978df6`, revision 1, `recordState=committed`, `verification=safe`, `reloadRequired=false`, `RuntimeOverride=NONE` |
+
+### Effective load and runtime contract
+
+| Field | Effective value |
+|---|---|
+| Backend | `llama.cpp-cpu` |
+| File-backed memory | `mmap=true`, `mlock=false`, `mmapFallbackAllowed=false`, `mmapPrefetchEnabled=false` |
+| Bounded 12/16 GB tier | `nCtx=4096`, `nBatch=2048`, `nUbatch=256`, `nParallel=1` |
+| KV and attention | `cacheTypeK=q4_0`, `cacheTypeV=q4_0`, `flashAttn=on` |
+| MTP | `specType=draft-mtp`, `specDraftNMax=2` |
+| Profile signatures | desired `F0FCBF890B25ABA0C84CE94A700B513E14ECCD51B18679D2F5F301427EEC308E`; resolved-load `11BA73D5606F34CBB35439C43730919B6DD3C45D021ECBE443BC71B6018A4F6D`; active-loaded `AF25881E31C89A963784E3E358139F2F3FBBB79C540F9F9EE41068C894596AA0`; committed-execution `81B7E2DF059695A18B984BC613E622ABE7C19A1424DA5FF959FC73F64426BFE4`; effective-execution `5F7FFF79D1A96CE590E21044580EBC3F2C8F46B7D834CFBC4343E3B23757C624` |
+
+### UI and API request evidence
+
+| Surface | Request trace | Result |
+|---|---|---|
+| MainActivity UI | requestId `ui-0bd6319ae25f4bc4a2f68804118fbffc`; native generation sequence 2 | Clean new chat; prompt `Return only this token: ELITE_UI_35B_OK`; visible answer exactly `ELITE_UI_35B_OK`; 137 prompt tokens, 8 completion tokens, final decode about `1.25313 token/s` |
+| Authenticated Local API | requestId `chatcmpl-51173d5c49ec4181b78ed446d1e10e8b`; native generation sequence 3 | HTTP 200 from `/v1/chat/completions`; visible answer exactly `ELITE_API_35B_OK`; 137 prompt tokens, 8 completion tokens; elapsed `33,868 ms`; final decode about `1.32319 token/s` |
+
+### Memory, lifecycle, and crash closure
+
+| Invariant | Evidence |
+|---|---|
+| Bootstrap | Correctness canary completed at about `1.29161 token/s`; lifecycle committed the new rule-v3 profile instead of reusing the earlier erroneous `spec_type=none` profile |
+| Memory | Observed post-canary PSS `4,167,113 kB`; final PSS `3,868,133 kB`, RSS `3,672,884 kB`, swap PSS `299,666 kB`; final `MemAvailable=5,406,000 kB` |
+| Terminal state | PID `23089` remained alive; `busy=false`, `code=idle`, `engineLifecycle=ready`, `generationActive=false`; API sequence 3 was greater than UI sequence 2 |
+| Crash window | No App FATAL, ANR, SIGSEGV, SIGABRT, OOM, LMKD, or package process death after installation; exit-info newest entry was only the expected `PACKAGE UPDATED` event from overwrite installation |
+
+One 12 GB-class Elite formal pass is sufficient for this product rule. The same sparse-MoE contract is available to 16 GB and other compatible ARM64 devices; each device still creates its own profile, and later reproducible device-specific failures are handled as targeted exceptions rather than restoring a global RAM or chipset block.
+
 ## Current MNN Release Acceptance — 2026-07-15
 
 This is the release-gating record for the current code. Older 2026-07-15 rows below remain useful historical evidence, but their earlier APK hashes and partial UI/API coverage are superseded by this campaign.
@@ -64,6 +110,7 @@ This single representative Elite pass completes MNN vision admission for all com
 
 | Date | Device | APK | Scope | Result |
 |---|---|---|---|---|
+| 2026-07-15 | `98a37aa7` / Xiaomi `25091RP04C` / `SM8750P` / 12 GB-class RAM | Final debug APK SHA-256 `44AD5A320B47CEE0AAA1E8DF6D8C1C2EE81C85ACF8343B6BBE533954978CE428` | Formal MainActivity UI plus authenticated Local API with exact Qwen3.6 35B-A3B IQ2_XXS sparse-MoE GGUF | Passed. Product UI loaded the 11.69 GB file without the old static memory rejection, committed a rule-v3 profile with demand-paged mmap, Q4 KV, Flash Attention and `draft-mtp/2`, then UI/API returned exact independent tokens with requestIds `ui-*` / `chatcmpl-*` and native sequences 2 / 3. Final PID remained alive with no OOM, LMKD, ANR, FATAL, or native signal. |
 | 2026-07-15 | `98a37aa7` / Xiaomi `25091RP04C` / `SM8750P` | Final debug APK SHA-256 `2534434C49993384C3DEC9BCAE49E8ABE05FC872167E52BFD7A7C8C8FB45B341` | Release-gating MNN multimodal campaign using formal MainActivity UI and authenticated Local API with `qwen35 4b mnn bundle` | Passed all hard assertions in the structured record above. This is the current representative-device gate and supersedes earlier 2026-07-15 APKs for release acceptance. |
 | 2026-07-15 | `f9d98aa3` / Xiaomi `2304FPN6DC` / `SM8550` | `0.2.0-alpha` debug APK, SHA-256 `F9E18519E1F17D3316150ED9730BB1E0BF0D9DA7A9D10403E2D87EBA996E3F1E` | Single representative-device MNN admission gate with `qwen35 9b mnn bundle`: original manifest `visionValidated=false`; same APK tested through production MainActivity Photo Picker and authenticated Local API PNG `image_url` | Passed both required product surfaces. Local API `/v1/models` returned HTTP 200 with `vision_ready=true`; the 960x640 request returned HTTP 200 in 33.979s, identified the blue circle, red square, and `MCA Vision Test`, with a one-character OCR miss (`VION-7K4P`). MainActivity showed the compatible-ARM64 default-open message, accepted the same real PNG through the system picker, and returned the exact `blue circle`, `red square`, and `VISION-7K4P` after formal UI regenerate at 3.0 token/s. Native reported `backend=mnn_cpu`, `runnerReady=true`, `visionReady=true`; the UI path produced 676 patches, 169 vision tokens, `image_embedding=[169,1,4096]`, all 692224 values finite with `nan=0`, `inf=0`, `signal_valid=1`, matching raw/materialized hashes, and atomic multimodal prefill. PID `19284` remained alive in MainActivity with no app-specific FATAL, ANR, native fatal signal, process death, or validation rejection. This single-device UI + Local API pass opens MNN vision by default on all compatible ARM64 devices. |
 | 2026-07-15 | `98a37aa7` / Xiaomi `25091RP04C` / `SM8750P` | Same APK and SHA-256 | Supplemental, non-gating MNN app UI regression with `Qwen3.5 2B MNN`; original manifest `visionValidated=false`; formal model selector plus PNG and JPG attachments | Passed. MainActivity showed `MNN 高速引擎`, enabled camera/photo/file inputs, and displayed `本地识图已就绪` with the compatible-ARM64 default-open message instead of the old validation warning. The PNG answer correctly identified the blue circle, red square, and `VISION-7K4P` at 17.6 token/s; the JPG also returned a visible description at 14.8 token/s. Both requests produced 676 patches and 169 finite vision tokens with `nan=0`, `inf=0`, `signal_valid=1`, and matching embedding hashes. The app remained alive in MainActivity with zero FATAL, ANR, native fatal signal, or validation-gate matches. |
@@ -112,8 +159,8 @@ This single representative Elite pass completes MNN vision admission for all com
 | 4 | Model management | Open model management from the top action | Model management, tuning, local API, and settings entries render |  |
 | 5 | Local import | Import a `.gguf` file | Model appears in the local engine list |  |
 | 6 | Model validation | Validate an imported model | Success or actionable failure reason appears |  |
-| 7 | Local chat load | Load a local chat model | Model name and backend status update |  |
-| 8 | Local chat | Send a Chinese prompt | Streaming output is readable and can be stopped |  |
+| 7 | Local chat load | Load a local chat model | Model name and backend status update | Passed on 2026-07-15 through the formal Model Hub and MainActivity path with the exact 11.69 GB Qwen3.6 35B-A3B GGUF on Elite. The UI accepted sparse-MoE mmap mode, completed the correctness canary, and exposed the committed profile and effective native configuration. |
+| 8 | Local chat | Send a Chinese prompt | Streaming output is readable and can be stopped | Passed on 2026-07-15 with Qwen3.6 35B-A3B: a clean MainActivity chat returned exactly `ELITE_UI_35B_OK`, requestId `ui-0bd6319ae25f4bc4a2f68804118fbffc`, native sequence 2, while the App remained responsive and returned to `ready`. |
 | 9 | Cloud chat | Configure a cloud chat engine | Engine can be saved, selected, tested, edited, and deleted |  |
 | 10 | Cloud images | Configure a cloud image engine | Engine can be saved, selected, tested, edited, and deleted |  |
 | 11 | Cloud vision | Configure a cloud chat engine with image input enabled, attach a photo, ask in Chinese | Request is sent only after the engine is marked image-capable; answer describes the image or returns provider-specific actionable error |  |
@@ -135,7 +182,7 @@ network.
 | 19 | API enable | Enable local API in settings | Local endpoint and key are shown | Passed on 2026-07-07 after enabling "local calls" on `f9d98aa3`; service state changed to running. |
 | 20 | Health | `curl http://PHONE_IP:11435/health` | Returns a healthy response | Passed on 2026-07-07 through `adb forward tcp:11435 tcp:11435`; `/health` returned `{"status":"ok","name":"MuYu Chat Agent"}`. |
 | 21 | Models | Request `/v1/models` | Returns OpenAI-style model list with MCA `vision_ready` and `vision_projector` fields | Passed on 2026-07-07 with MiniCPM-V loaded; `/v1/models` returned `vision_ready=true` and `vision_projector=mmproj-model-f16.gguf`. |
-| 22 | Chat | Request `/v1/chat/completions` | Returns completion JSON or SSE stream |  |
+| 22 | Chat | Request `/v1/chat/completions` | Returns completion JSON or SSE stream | Passed on 2026-07-15 with the loaded Qwen3.6 35B-A3B profile: authenticated HTTP 200 returned exactly `ELITE_API_35B_OK`, requestId `chatcmpl-51173d5c49ec4181b78ed446d1e10e8b`, native sequence 3, and terminal lifecycle `ready`. |
 | 23 | API vision | Send OpenAI-style `image_url` with a `data:image/...;base64,...` URL | GGUF+mmproj and MNN vision requests process images whenever native reports `vision_ready=true`; MNN does not require per-device validation metadata | Current release gate passed on Elite on 2026-07-15 with the final APK and `qwen35 4b mnn bundle`: authenticated HTTP 200, requestId `chatcmpl-249fd09ee83448069070b4c0147597c1`, native sequence 3, one independent PNG, exact trace SHA, correct white-robot/wooden-surface answer, stable profile/signatures, lifecycle `ready`, and no crash. |
 | 24 | Stop | Call stop endpoint during generation | Active generation stops safely |  |
 

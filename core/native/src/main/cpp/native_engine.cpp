@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "llama_model_memory_policy.hpp"
+
 #if MCA_WITH_LLAMA_CPP
 #include <unistd.h>
 #include <nlohmann/json.hpp>
@@ -33,6 +35,10 @@
 #include "mtmd-helper.h"
 #include "sampling.h"
 #include "speculative.h"
+#endif
+
+#if MCA_WITH_LLAMA_CPP
+extern "C" void mca_llama_set_model_mmap_prefetch_enabled(bool enabled) noexcept;
 #endif
 
 namespace {
@@ -70,6 +76,9 @@ long long g_decode_finished_ms = 0;
 // Process-lifetime acceptance trace. Model unload/reload must not reset it.
 std::uint64_t g_generation_sequence = 0;
 std::string g_model_path;
+std::uint64_t g_model_file_size_bytes = 0;
+bool g_mmap_fallback_allowed = false;
+bool g_mmap_prefetch_enabled = false;
 std::string g_last_error;
 std::string g_native_lib_dir;
 bool g_backend_initialized = false;
@@ -557,6 +566,11 @@ std::string stats_json(const char *backend) {
         << "\"backend\":\"" << backend << "\","
         << "\"loaded\":" << (g_loaded ? "true" : "false") << ","
         << "\"modelPath\":\"" << json_escape(g_model_path) << "\","
+        << "\"modelFileSizeBytes\":" << g_model_file_size_bytes << ","
+        << "\"mmapFallbackAllowed\":" << (g_mmap_fallback_allowed ? "true" : "false") << ","
+        << "\"mmapPrefetchEnabled\":" << (g_mmap_prefetch_enabled ? "true" : "false") << ","
+        << "\"mmap\":" << (g_effective_config.mmap ? "true" : "false") << ","
+        << "\"mlock\":" << (g_effective_config.mlock ? "true" : "false") << ","
         << "\"loadMs\":" << g_load_ms << ","
         << "\"promptTokens\":" << g_prompt_tokens << ","
         << "\"completionTokens\":" << g_completion_tokens << ","
@@ -645,6 +659,14 @@ std::string stats_json(const char *backend) {
         << "\"lastError\":\"" << json_escape(g_last_error) << "\""
         << "}";
     return out.str();
+}
+
+std::uint64_t regular_file_size_bytes(const std::string &path) {
+    struct stat st{};
+    if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+        return 0;
+    }
+    return static_cast<std::uint64_t>(st.st_size);
 }
 
 #if MCA_WITH_LLAMA_CPP
@@ -2041,6 +2063,9 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     g_decode_started_ms = 0;
     g_decode_finished_ms = 0;
     g_last_error.clear();
+    g_model_file_size_bytes = regular_file_size_bytes(path);
+    g_mmap_fallback_allowed = false;
+    g_mmap_prefetch_enabled = false;
 
 #if MCA_WITH_LLAMA_CPP
     free_llama_locked();
@@ -2118,12 +2143,22 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         model_params.tensor_buft_overrides = tensor_overrides.data();
     }
 
+    g_mmap_fallback_allowed = mca::llama::shouldRetryModelLoadWithoutMmap(
+            model_params.use_mmap,
+            g_model_file_size_bytes);
+    g_mmap_prefetch_enabled = model_params.use_mmap &&
+            mca::llama::shouldPrefetchModelMmap(g_model_file_size_bytes);
+    mca_llama_set_model_mmap_prefetch_enabled(g_mmap_prefetch_enabled);
     g_model = llama_model_load_from_file(path.c_str(), model_params);
-    if (g_model == nullptr && model_params.use_mmap) {
+    if (g_model == nullptr && g_mmap_fallback_allowed) {
         g_last_error += "\nRetrying model load with mmap=false.";
         model_params.use_mmap = false;
         g_effective_config.mmap = false;
+        g_mmap_prefetch_enabled = false;
+        mca_llama_set_model_mmap_prefetch_enabled(false);
         g_model = llama_model_load_from_file(path.c_str(), model_params);
+    } else if (g_model == nullptr && model_params.use_mmap) {
+        g_last_error += "\nLarge-model mmap load failed; unsafe mmap=false retry is disabled.";
     }
     if (g_model == nullptr) {
         if (g_last_error.empty()) {

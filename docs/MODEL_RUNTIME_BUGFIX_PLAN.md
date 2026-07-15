@@ -1,7 +1,7 @@
 # MCA 本地模型运行时 Bug 修复方案
 
 - 更新时间：2026-07-15
-- 状态：运行代码已实施；MNN 多模态代表机正式验收通过；35B / Gemma 专项正式实机矩阵独立记录
+- 状态：运行代码已实施；MNN 多模态代表机与 Qwen3.6 35B-A3B 稀疏 MoE 正式验收通过；Gemma 专项正式实机矩阵独立记录
 - 范围：GGUF / llama.cpp、本地 MNN 模型包、Agent 参数、助手与会话参数、正式 UI、Local API
 
 ## 0. 实施与验收结果
@@ -14,15 +14,17 @@
 - MNN 完整组件/ZIP 预检、路径安全、暂存和原子安装已实现；单个 `llm.mnn` 或缺组件包会返回准确缺失项。
 - MainActivity 与认证 Local API 共用 coordinator、生命周期和请求 trace。生成开始进入 `GENERATING`，完成、错误、手动停止、清空会话和转后台均收口；空闲控制面返回 `busy=false / code=idle`。
 - MNN 视觉已按功能 contract 对所有兼容 ARM64 设备默认开放，不使用芯片或逐机 `visionValidated` 白名单。代表机通过只提升功能准入，不跨设备复制线程、batch、KV、上下文或其他 profile 数值。
+- 稀疏 MoE 准入只相信 GGUF architecture metadata，文件名只用于参数规模提示。`<=16 GiB` 设备强制 `mmap=true / mlock=false / n_parallel=1`，限制 `n_ctx/n_batch/n_ubatch<=4096/2048/256`，关闭大于 4 GiB 模型的整文件 mmap 预取，并禁止 mmap 失败后回退整包匿名内存。
+- 精确验证的 Qwen3.6 35B-A3B SHA 才启用 Q4 KV、Flash Attention 与 `draft-mtp/2`。自适应配置按当前加载模型生成，不再借用全局推荐模型；规则 fingerprint v3 自动隔离此前错误提交的 `spec_type=none` profile，模型被重命名时仍由 SHA 能力补齐 MTP。
 
 最终自动化与构建：
 
-- `testDebugUnitTest`：658 tests，0 failures，0 errors，7 skipped。
+- `testDebugUnitTest`：675 tests，0 failures，0 errors，7 skipped。
 - arm64 `:app:assembleDebug`：通过；MNN vendor/runtime stamp 与 QAIRT typed headers 校验通过。
-- 最终 APK：187,399,493 bytes，SHA-256 `2534434C49993384C3DEC9BCAE49E8ABE05FC872167E52BFD7A7C8C8FB45B341`。
+- 最终 APK：196,981,949 bytes，SHA-256 `44AD5A320B47CEE0AAA1E8DF6D8C1C2EE81C85ACF8343B6BBE533954978CE428`。
 - APK Signature Scheme v2：通过；签名证书 SHA-256 `2619AC4CE0AD8397B84C77DF6BA165801FD4FAB1460470F22F1EB7B3E4F9A9CF`；Elite 安装后 `base.apk` 与本地 APK 同哈希。
 
-正式产品入口代表机验收：
+正式产品入口 MNN 代表机验收：
 
 - 设备：Xiaomi `25091RP04C`，`SM8750P`，Android 16，`arm64-v8a`，约 12 GB RAM；正式 `MainActivity`，PID `4795` / UID `10336`。
 - 模型：`qwen35 4b mnn bundle`，`backend=mnn_cpu`，`loaded=true`，`runnerReady=true`，`visionReady=true`；profile `safe-7fce66351af721de` revision 1，committed / safe。
@@ -31,7 +33,17 @@
 - UI / API 前后 modelId、profileId、activeLoaded、committedExecution、effectiveExecution 完全一致；`RuntimeOverride=NONE`；请求后 `engineLifecycle=ready`、`generationActive=false`、`busy=false / code=idle`。
 - 限定日志窗口中 App 进程与 crash buffer 均无 FATAL、ANR、SIGSEGV、SIGABRT、OOM 或进程死亡，MainActivity 保持 resumed。
 
-按产品准入规则，这一次 Elite 双入口正式通过即完成 MNN 视觉代表性验收，并默认开放全部兼容 ARM64 机型。Gen2 仅作可提速时的辅助回归，不是准入条件。该结论不能被外推成 Qwen3.6 35B、Gemma 4、QAIRT 或 MNN-Diffusion 的完整正式实机矩阵；这些能力按各自章节和回归记录单独验收。
+正式产品入口 Qwen3.6 35B-A3B 稀疏 MoE 验收：
+
+- 设备：同一台 Elite `98a37aa7` / Xiaomi `25091RP04C` / `SM8750P`，`MemTotal=11,617,264 kB`；只使用正式 `MainActivity` 与认证 Local API，最终 PID `23089`。
+- 模型：modelId `879398d3-1ad2-47e0-8006-f20fecb2e54d`，GGUF architecture `qwen35moe`，文件 `11,686,646,144` bytes，精确 SHA-256 `1FB8A998362EBB5F7F3C8ECE6D4803A74BA32211C751DE2E76B81E3379FBF050`。
+- profile：`balanced-14e7004f7a978df6` revision 1，`committed / safe`，`reloadRequired=false`，`RuntimeOverride=NONE`；规则 v3 没有复用此前错误的 v2 `spec_type=none` LKG。
+- effective：`backend=llama.cpp-cpu`，`mmap=true`，`mlock=false`，`mmapFallbackAllowed=false`，`mmapPrefetchEnabled=false`，`nCtx=4096`，`nBatch=2048`，`nUbatch=256`，`nParallel=1`，K/V=`q4_0`，Flash Attention=`on`，`specType=draft-mtp`，`specDraftNMax=2`。
+- UI：`ui-0bd6319ae25f4bc4a2f68804118fbffc`，native sequence 2，可见回答严格为 `ELITE_UI_35B_OK`；Local API：`chatcmpl-51173d5c49ec4181b78ed446d1e10e8b`，native sequence 3，HTTP 200，可见回答严格为 `ELITE_API_35B_OK`。
+- canary decode `1.29161 token/s`；API 请求约 `33,868 ms`，最终 decode `1.32319 token/s`。观测峰值 PSS `4,167,113 kB`，最终 PSS `3,868,133 kB`；结束时 `MemAvailable=5,406,000 kB`，进程存活，`busy=false`、`engineLifecycle=ready`、`generationActive=false`。
+- 最终安装后的限定日志窗口无 App FATAL、ANR、SIGSEGV、SIGABRT、OOM、LMKD 或进程死亡；exit-info 最新记录仅为覆盖安装导致的 `PACKAGE UPDATED`。
+
+按产品准入规则，Elite 双入口正式通过即完成 MNN 视觉代表性验收，并默认开放全部兼容 ARM64 机型；Gen2 仅作可提速时的辅助回归，不是准入条件。Qwen3.6 35B-A3B 已独立通过本轮 12 GB 级 Elite 正式产品入口验收，16 GB 及其他兼容 ARM64 设备使用同一稀疏 MoE 准入规则并各自在首次加载生成设备专属 profile。上述结论不能外推成 Gemma 4、QAIRT 或 MNN-Diffusion 的完整正式实机矩阵。
 
 ## 1. 背景与结论
 

@@ -115,7 +115,6 @@ import com.muyuchat.core.tuning.SafeBaselineFactory
 import com.muyuchat.core.tuning.SafetyEnvelope
 import com.muyuchat.core.tuning.TuningExecutionProfile
 import com.muyuchat.core.tuning.TuningCandidatePolicy
-import com.muyuchat.core.tuning.toAdaptive
 import com.muyuchat.feature.agent.AgentCandidateProgress
 import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.feature.agent.AgentPendingProfile
@@ -4270,9 +4269,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
             }
-            loadMemoryBlocker(model)?.let { message ->
+            val device = currentDeviceProfile()
+            val memoryAdmission = LocalModelMemoryAdmissionPolicy.evaluate(model, device)
+            memoryAdmission.blocker?.let { message ->
                 fail("加载前内存检查失败：$message")
                 return@launch
+            }
+            if (memoryAdmission.mode == LocalModelMemoryAdmissionMode.SPARSE_MOE_MMAP) {
+                _uiState.update {
+                    it.copy(statusMessage = "正在以稀疏 MoE mmap 模式加载 ${model.displayName}…")
+                }
             }
             val params = _uiState.value.params
             val runtime = model.runtime.toLocalChatRuntime()
@@ -4280,7 +4286,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 requested = model,
                 persistedModels = modelStore.listModels()
             )
-            val device = currentDeviceProfile()
             val qairtAdmissionPassed = model.runtime == ChatModelRuntime.GENIEX_QAIRT &&
                 model.id in currentQairtVerifiedLocalModelIds(modelStore.listModels())
             val identity = RuntimeIdentityFactory.create(
@@ -4443,6 +4448,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         nativeStatsJson = engine.nativeStatsJson(),
                         statusMessage = buildString {
                             append("已加载：").append(model.displayName)
+                            if (memoryAdmission.mode == LocalModelMemoryAdmissionMode.SPARSE_MOE_MMAP) {
+                                append("，稀疏 MoE mmap 模式已启用")
+                            }
                             if (JSONObject(engine.nativeStatsJson()).optBoolean("visionReady", false)) {
                                 append("，本地视觉组件已就绪")
                             }
@@ -5242,7 +5250,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 engine.stopGeneration()
                 val preflight = modelStore.validateForLoad(model.id)
                 if (!preflight.canLoad) error("加载前检查失败：${preflight.message}")
-                loadMemoryBlocker(model)?.let { error("加载前内存检查失败：$it") }
+                LocalModelMemoryAdmissionPolicy.evaluate(model, currentDeviceProfile()).blocker
+                    ?.let { error("加载前内存检查失败：$it") }
 
                 val runtime = model.runtime.toLocalChatRuntime()
                 val loadParams = model.toLoadParams(initialState.params)
@@ -7694,33 +7703,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             socket.getInputStream().readBytes().toString(Charsets.UTF_8)
         }
 
-    private fun loadMemoryBlocker(model: ModelManifest): String? {
-        val device = deviceProfileReader.read()
-        val totalRam = device.displayTotalRamBytes
-        val availableRam = device.availableRamBytes
-        if (model.runtime == ChatModelRuntime.GENIEX_QAIRT) {
-            // QAIRT context binaries own their KV allocation in the NPU runtime.  The
-            // static bundle/RAM estimate is useful diagnostics, but it cannot safely
-            // predict whether this exact chipset/runtime combination can create its
-            // handle.  Do not turn it (or the generic file-size heuristic below) into
-            // a pre-handle deny: McaInferenceService records an advisory and lets the
-            // isolated QAIRT smoke / native create result decide the outcome.
-            return null
-        }
-        val modelBudget = device.modelMemoryBudgetBytes.takeIf { it > 0L }
-            ?: maxOf(availableRam, (device.totalRamBytes * 0.70).toLong())
-        val estimatedNeed = (model.sizeBytes * 1.18).toLong() + 768L * 1024L * 1024L
-        return when {
-            totalRam > 0L && estimatedNeed > (totalRam * 0.88).toLong() ->
-                "模型约需 ${formatBytes(estimatedNeed)} 内存，已接近或超过本机总内存 ${formatBytes(totalRam)}。建议换更小的 Q4 模型。"
-            device.isLowMemory ->
-                "系统已进入低内存状态（可用约 ${formatBytes(availableRam)}），建议关闭后台应用后再加载。"
-            estimatedNeed > modelBudget && availableRam < 2L * 1024L * 1024L * 1024L ->
-                "当前系统可用内存约 ${formatBytes(availableRam)}，运行预算偏紧。建议关闭后台应用，或先用短基准确认。"
-            else -> null
-        }
-    }
-
     private fun tuningSummary(result: BenchmarkResult, recommendation: AgentRecommendation): String {
         val plan = recommendation.tuningPlan
         return buildString {
@@ -7950,21 +7932,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         capabilities: ModelTuningCapabilities,
         preference: UserPreference = _uiState.value.preference
     ): AdaptiveTuningRecommendation {
-        val legacy = buildRecommendation(preference, device, null).tuningPlan
-        return legacy.toAdaptive(
+        return advisor.recommendAdaptiveForModel(
+            device = device,
+            model = model,
             runtimeIdentity = identity,
             capabilities = capabilities,
-            profileKind = profileKindFor(preference),
-            device = device
+            preference = preference,
+            lastDecodeTps = null
         )
-    }
-
-    private fun profileKindFor(preference: UserPreference): ExecutionProfileKind = when (preference.mode) {
-        PerformanceMode.PowerSave -> ExecutionProfileKind.POWER_SAVE
-        PerformanceMode.Speed -> ExecutionProfileKind.SPEED
-        PerformanceMode.Quality -> ExecutionProfileKind.QUALITY
-        PerformanceMode.LongContext -> ExecutionProfileKind.LONG_CONTEXT
-        PerformanceMode.Balanced -> ExecutionProfileKind.BALANCED
     }
 
     private suspend fun persistBootstrapProfile(

@@ -209,12 +209,10 @@ class ModelCompatibilityTest {
     }
 
     private fun ggufFile(name: String, architecture: String, fileType: Int): File {
-        val file = File.createTempFile(name.removeSuffix(".gguf"), ".gguf")
-        file.writeBytes(fakeGguf(architecture, fileType))
-        file.deleteOnExit()
-        return File(file.parentFile, name).also {
-            file.renameTo(it)
-            it.deleteOnExit()
+        val directory = Files.createTempDirectory("gguf-fixture-").toFile().apply { deleteOnExit() }
+        return File(directory, name).apply {
+            writeBytes(fakeGguf(architecture, fileType))
+            deleteOnExit()
         }
     }
 

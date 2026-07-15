@@ -129,6 +129,45 @@ class AgentAdvisorTest {
         assertEquals(0.0f, result.adaptive.canaryParams.temperature)
     }
 
+    @Test
+    fun adaptiveRecommendationForLoadedModelDoesNotBorrowAnotherCandidatesTuningPlan() {
+        val requested = manifest(
+            name = "Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-APEX-MTP-I-Nano",
+            size = 11_686_646_144L,
+            quant = "IQ2_XXS"
+        )
+        val identity = ModelRuntimeIdentity(
+            modelId = requested.id,
+            artifactFingerprint = "qwen36-exact-artifact",
+            runtime = LocalChatRuntime.LLAMA_CPP,
+            runtimeVersion = "test",
+            nativeLibrarySha256 = "native-test",
+            capabilities = setOf("draft_mtp")
+        )
+
+        val adaptive = advisor.recommendAdaptiveForModel(
+            device = device(totalGb = 12, availableGb = 4),
+            model = requested,
+            runtimeIdentity = identity,
+            capabilities = ModelTuningCapabilities(
+                runtime = TuningRuntime.LLAMA_CPP,
+                supportsBatchTuning = true,
+                supportsQuantizedKv = true,
+                supportsFlashAttention = true,
+                supportsSpeculativeMtp = true
+            ),
+            preference = UserPreference(PerformanceMode.Balanced)
+        )
+
+        assertEquals("draft-mtp", adaptive.executionProfile.loadBound.speculativeType)
+        assertEquals(2, adaptive.executionProfile.loadBound.speculativeDraftMax)
+        assertEquals(2048, adaptive.executionProfile.loadBound.nBatch)
+        assertEquals(256, adaptive.executionProfile.loadBound.nUbatch)
+        assertEquals("q4_0", adaptive.executionProfile.loadBound.cacheTypeK)
+        assertEquals("q4_0", adaptive.executionProfile.loadBound.cacheTypeV)
+        assertEquals("on", adaptive.executionProfile.loadBound.flashAttention)
+    }
+
     private fun device(
         totalGb: Int,
         availableGb: Int,

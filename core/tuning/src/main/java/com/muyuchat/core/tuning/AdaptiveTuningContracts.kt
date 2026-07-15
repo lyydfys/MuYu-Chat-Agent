@@ -310,6 +310,17 @@ fun TuningPlan.toAdaptive(
         safeBaseline
     } else {
         val advanced = LlamaAdvancedParams.parse(advancedJson).params
+        val requestedSpeculativeType = advanced?.specType
+        val speculativeType = when {
+            !capabilities.supportsSpeculativeMtp -> null
+            requestedSpeculativeType != null -> requestedSpeculativeType
+            else -> "draft-mtp"
+        }
+        val speculativeDraftMax = when {
+            !capabilities.supportsSpeculativeMtp -> null
+            speculativeType == "draft-mtp" -> advanced?.specDraftNMax ?: 2
+            else -> 0
+        }
         val cappedContext = capabilities.maxContextTokens
             ?.let { maximum -> nCtx.coerceAtMost(maximum.coerceAtLeast(512)) }
             ?: nCtx
@@ -329,8 +340,8 @@ fun TuningPlan.toAdaptive(
                 mainGpu = advanced?.mainGpu.takeIf { capabilities.supportsGpuOffload }
                     ?: if (llamaRuntime) 0 else null,
                 cpuMoeLayers = advanced?.nCpuMoe.takeIf { capabilities.supportsCpuMoeTuning },
-                speculativeType = advanced?.specType.takeIf { capabilities.supportsSpeculativeMtp },
-                speculativeDraftMax = advanced?.specDraftNMax.takeIf { capabilities.supportsSpeculativeMtp },
+                speculativeType = speculativeType,
+                speculativeDraftMax = speculativeDraftMax,
                 nParallel = advanced?.nParallel ?: 1,
                 mmap = advanced?.mmap ?: mmap,
                 mlock = advanced?.mlock ?: mlock,

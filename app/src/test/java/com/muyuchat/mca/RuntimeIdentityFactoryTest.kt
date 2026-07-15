@@ -12,6 +12,7 @@ import com.muyuchat.core.telemetry.SocFamily
 import java.io.File
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -169,7 +170,7 @@ class RuntimeIdentityFactoryTest {
             )
             assertEquals("b".repeat(64), result.identity.projectorFingerprint)
             assertTrue(result.identity.runtimeVersion.contains("llama.cpp@4d8cc0c56ffba3f8b7fdb0130627fed2a6f71958"))
-            assertEquals("runtime-parameters-v1", result.identity.parameterPolicyVersion)
+            assertEquals("runtime-parameters-v2-sparse-moe-mmap", result.identity.parameterPolicyVersion)
             assertTrue(result.identity.evaluatorFingerprint.length == 64)
             assertTrue("local_chat" in result.identity.capabilities)
             assertTrue("projector" in result.identity.capabilities)
@@ -205,6 +206,53 @@ class RuntimeIdentityFactoryTest {
         }
     }
 
+    @Test
+    fun verifiedSparseMoeOnTwelveGigabytesCarriesMmapAndMtpCapabilities() {
+        val root = tempDirectory()
+        try {
+            val modelFile = File(root, "qwen36.gguf").apply { writeText("model") }
+            val model = manifest(
+                modelFile,
+                sha256 = "1fb8a998362ebb5f7f3c8ece6d4803a74ba32211c751de2e76b81e3379fbf050"
+            ).copy(
+                displayName = "Qwen3.6-35B-A3B-APEX-MTP-I-Nano.gguf",
+                fileName = "Qwen3.6-35B-A3B-APEX-MTP-I-Nano.gguf",
+                architecture = "qwen35moe",
+                sizeBytes = 11_686_646_144L
+            )
+
+            val result = build(model, device = device())
+
+            assertTrue("sparse_moe" in result.identity.capabilities)
+            assertTrue("sparse_moe_16gb_tier" in result.identity.capabilities)
+            assertTrue("draft_mtp" in result.identity.capabilities)
+            assertTrue("verified_q4_kv_cache" in result.identity.capabilities)
+
+            val unverified = build(
+                model.copy(sha256 = "2".repeat(64)),
+                device = device(totalRamGiB = 16)
+            )
+            assertTrue("sparse_moe_16gb_tier" in unverified.identity.capabilities)
+            assertFalse("draft_mtp" in unverified.identity.capabilities)
+            assertFalse("verified_q4_kv_cache" in unverified.identity.capabilities)
+
+            val aboveTier = build(
+                model.copy(sha256 = "3".repeat(64)),
+                device = device(totalRamGiB = 17)
+            )
+            assertFalse("sparse_moe_16gb_tier" in aboveTier.identity.capabilities)
+            assertFalse("verified_q4_kv_cache" in aboveTier.identity.capabilities)
+
+            val unknownRam = build(
+                model.copy(sha256 = "4".repeat(64)),
+                device = device(totalRamGiB = 0)
+            )
+            assertTrue("sparse_moe_16gb_tier" in unknownRam.identity.capabilities)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     private fun build(
         model: ModelManifest,
         device: DeviceProfile = device()
@@ -234,13 +282,13 @@ class RuntimeIdentityFactoryTest {
         sha256 = sha256
     )
 
-    private fun device(): DeviceProfile = DeviceProfile(
+    private fun device(totalRamGiB: Long = 12L): DeviceProfile = DeviceProfile(
         socManufacturer = "Qualcomm",
         socModel = "SM8750P",
         socFamily = SocFamily.Snapdragon,
         cpuCores = 8,
         estimatedBigCores = 4,
-        totalRamBytes = 12L * GB,
+        totalRamBytes = totalRamGiB * GB,
         availableRamBytes = 8L * GB,
         storageFreeBytes = 64L * GB,
         androidApi = 35,

@@ -350,7 +350,7 @@ class McaLoopbackServerTest {
     fun metricsExposeCanonicalCoordinatorSignaturesWithoutProfileInternals() {
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.nativeStatsJsonProvider = {
-                """{"backend":"mnn_cpu","loaded":true,"generationSequence":17,"decodeTps":9.5,"modelPath":"D:\\private\\model.mnn","mnnDebugPrompt":"prompt-private","mnnDebugRawOutput":"output-private","loadedConfigJson":"{\"modelPath\":\"/data/private/model.mnn\"}","authToken":"token-private"}"""
+                """{"backend":"llama_cpp","loaded":true,"modelFileSizeBytes":11686646144,"mmapFallbackAllowed":false,"mmapPrefetchEnabled":false,"mmap":true,"mlock":false,"generationSequence":17,"decodeTps":9.5,"modelPath":"D:\\private\\model.gguf","mnnDebugPrompt":"prompt-private","mnnDebugRawOutput":"output-private","loadedConfigJson":"{\"modelPath\":\"/data/private/model.gguf\"}","authToken":"token-private"}"""
             }
             LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
                 override fun profileJson(): String =
@@ -367,7 +367,12 @@ class McaLoopbackServerTest {
             assertEquals("c", signatures.getString("committed"))
             assertEquals("NONE", signatures.getString("override"))
             assertEquals("e", signatures.getString("effective"))
-            assertEquals("mnn_cpu", metrics.getString("backend"))
+            assertEquals("llama_cpp", metrics.getString("backend"))
+            assertEquals(11_686_646_144L, metrics.getLong("modelFileSizeBytes"))
+            assertFalse(metrics.getBoolean("mmapFallbackAllowed"))
+            assertFalse(metrics.getBoolean("mmapPrefetchEnabled"))
+            assertTrue(metrics.getBoolean("mmap"))
+            assertFalse(metrics.getBoolean("mlock"))
             assertEquals(17L, metrics.getLong("generationSequence"))
             assertEquals(9.5, metrics.getDouble("decodeTps"), 0.0)
             assertFalse(response.contains("D:\\private"))

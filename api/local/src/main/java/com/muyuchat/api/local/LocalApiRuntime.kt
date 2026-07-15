@@ -755,6 +755,11 @@ object LocalApiRuntime {
     private val NATIVE_METRIC_FIELDS = NATIVE_METRIC_STRING_FIELDS + setOf(
         "loaded",
         "runnerReady",
+        "modelFileSizeBytes",
+        "mmapFallbackAllowed",
+        "mmapPrefetchEnabled",
+        "mmap",
+        "mlock",
         "loadMs",
         "loadGeneration",
         "loadedAtMs",

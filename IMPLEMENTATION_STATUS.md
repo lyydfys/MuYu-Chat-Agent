@@ -32,20 +32,23 @@ machine-specific paths and credentials so the project can be shared safely.
 - MNN-Diffusion image generation is a separate experimental capability and must not be confused with MNN multimodal chat.
 - QNN/QAIRT admission remains exact-bundle, chipset, runtime, memory, and real-execution gated. MNN default-open policy does not weaken those constraints.
 - Local GGUF remains supported through the updated `llama.cpp` path, including CPU-safe parameter filtering and load-signature recovery.
+- Sparse MoE admission is based on GGUF architecture metadata rather than a `35B-A3B` filename. On devices with up to 16 GiB physical RAM, sparse MoE uses reclaimable file-backed mmap pages, disables mlock and whole-file prefetch, forbids a large-model non-mmap fallback, keeps one sequence, and caps context/batch/ubatch at `4096/2048/256`.
+- Exact verified Qwen3.6 35B-A3B artifacts receive Q4 KV, Flash Attention, and `draft-mtp/2`. Adaptive tuning is now generated for the model being loaded, and the rule-set fingerprint invalidates an earlier profile that accidentally borrowed another model's `spec_type=none` plan. SHA-derived MTP capability still works if the user renames the model.
 
 ## Current Verification
 
-- Full JVM unit-test matrix: 658 tests, 0 failures, 0 errors, 7 skipped.
+- Full JVM unit-test matrix: 675 tests, 0 failures, 0 errors, 7 skipped.
 - `arm64-v8a :app:assembleDebug`: passed with MNN vendor/runtime provenance and typed QAIRT/QNN header verification.
-- Final debug APK: 187,399,493 bytes; SHA-256 `2534434C49993384C3DEC9BCAE49E8ABE05FC872167E52BFD7A7C8C8FB45B341`.
+- Final debug APK: 196,981,949 bytes; SHA-256 `44AD5A320B47CEE0AAA1E8DF6D8C1C2EE81C85ACF8343B6BBE533954978CE428`.
 - APK Signature Scheme v2: verified; certificate SHA-256 `2619AC4CE0AD8397B84C77DF6BA165801FD4FAB1460470F22F1EB7B3E4F9A9CF`.
 - The same APK hash was verified from the installed Elite `base.apk`.
 - Formal Elite MainActivity + authenticated Local API MNN vision acceptance passed with distinct request IDs, native sequences 2 then 3, different image hashes, stable model/profile/signatures, `RuntimeOverride=NONE`, `engineLifecycle=ready`, and `generationActive=false`.
+- Formal Elite MainActivity + authenticated Local API Qwen3.6 35B-A3B acceptance also passed on the 12 GB-class device. Effective settings were mmap on, mlock off, no mmap fallback or prefetch, `4096/2048/256`, Q4 KV, Flash Attention, and `draft-mtp/2`; UI request `ui-0bd6319ae25f4bc4a2f68804118fbffc` used native sequence 2 and returned `ELITE_UI_35B_OK`, while API request `chatcmpl-51173d5c49ec4181b78ed446d1e10e8b` used sequence 3 and returned `ELITE_API_35B_OK`.
 - The bounded log window had no App FATAL, ANR, SIGSEGV, SIGABRT, OOM, crash-buffer entry, or process death.
 
-This MNN campaign is not evidence for every model/runtime matrix. Qwen3.6 35B,
-Gemma 4, QAIRT, and local image engines keep their own product-surface
-acceptance records.
+The MNN and Qwen3.6 35B campaigns remain separate feature records. Gemma 4,
+QAIRT, and local image engines keep their own product-surface acceptance
+records.
 
 ## Build Verification
 

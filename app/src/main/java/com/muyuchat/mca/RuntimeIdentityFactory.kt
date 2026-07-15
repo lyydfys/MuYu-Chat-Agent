@@ -9,6 +9,7 @@ import com.muyuchat.core.engine.ParameterFieldPolicyRegistry
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.modelstore.QairtExecutionAdmission
 import com.muyuchat.core.modelstore.QairtExecutionAdmissionMode
+import com.muyuchat.core.modelstore.sparseMoeInfo
 import java.io.File
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
@@ -28,7 +29,7 @@ internal object RuntimeIdentityFactory {
     private const val HASH_SCHEMA = "runtime-identity-hash-v2"
     private const val ENGINE_CONTRACT_VERSION = "mca-local-chat-engine-v1"
     private const val IDENTITY_SCHEMA_VERSION = "runtime-parameters-schema-v1"
-    private const val RULE_SET_VERSION = "model-family-rules-v1"
+    private const val RULE_SET_VERSION = "model-family-rules-v3-target-model-adaptive-tuning"
     private const val EVALUATOR_VERSION = "minimum-text-v1:2|canary:text-v1|safety:safety-v1"
     private const val EMBEDDED_TOKENIZER_VERSION = "embedded-tokenizer-v1"
     private const val EMBEDDED_TEMPLATE_VERSION = "embedded-template-v1"
@@ -436,6 +437,7 @@ internal object RuntimeIdentityFactory {
         qairtAdmissionState: String,
         bundleFiles: List<File>
     ): Set<String> = buildSet {
+        val sparseMoe = model.sparseMoeInfo()
         add("local_chat")
         add("text_generation")
         add("parameter_coordinator_v1")
@@ -446,7 +448,27 @@ internal object RuntimeIdentityFactory {
         if (templateFingerprint.isNotBlank()) add("chat_template")
         if (projectorFingerprint.isNotBlank() || model.hasVisionProjector) add("projector")
         when (runtime) {
-            LocalChatRuntime.LLAMA_CPP -> add("llama_cpp_cpu")
+            LocalChatRuntime.LLAMA_CPP -> {
+                add("llama_cpp_cpu")
+                if (sparseMoe.isSparseMoe) {
+                    add("sparse_moe")
+                    val verifiedQwen36 = model.sha256.equals(
+                        VERIFIED_QWEN36_MTP_SHA256,
+                        ignoreCase = true
+                    )
+                    if (verifiedQwen36) {
+                        add("draft_mtp")
+                    }
+                    val physicalRam = device.totalRamBytes.takeIf { it > 0L }
+                        ?: device.advertisedRamBytes
+                    val conservativeMemoryTier = physicalRam <= 0L ||
+                        physicalRam <= MAX_SPARSE_MOE_16_GIB_TIER_BYTES
+                    if (conservativeMemoryTier) {
+                        add("sparse_moe_16gb_tier")
+                        if (verifiedQwen36) add("verified_q4_kv_cache")
+                    }
+                }
+            }
             LocalChatRuntime.MNN_CPU -> {
                 add("mnn_cpu")
                 if (root.isDirectory && hasVisionSignal(bundleFiles)) add("mnn_vision_candidate")
@@ -468,6 +490,11 @@ internal object RuntimeIdentityFactory {
         val lower = file.name.lowercase(Locale.US)
         "vision" in lower || "visual" in lower || "processor" in lower || "mmproj" in lower
     }
+
+    private const val GIB = 1024L * 1024L * 1024L
+    private const val MAX_SPARSE_MOE_16_GIB_TIER_BYTES = 16L * GIB
+    private const val VERIFIED_QWEN36_MTP_SHA256 =
+        "1fb8a998362ebb5f7f3c8ece6d4803a74ba32211c751de2e76b81e3379fbf050"
 
     private fun qairtAdmissionState(
         runtime: LocalChatRuntime,
