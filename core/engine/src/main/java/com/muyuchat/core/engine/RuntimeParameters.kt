@@ -1286,8 +1286,17 @@ class ParameterCoordinator(
             profile.resolvedLoadSignature
         ) ?: error("native effective load signature does not match the resolved profile")
         active = observed
+        val publicationOverride = if (
+            committedProfile?.runtimeIdentity?.identityHash == profile.runtimeIdentity.identityHash
+        ) {
+            runtimeOverride ?: RuntimeOverrideSignature.none(profile.runtimeIdentity)
+        } else {
+            // A runtime/identity switch must never inherit a thermal or
+            // request-scoped override signed for the previously loaded model.
+            RuntimeOverrideSignature.none(profile.runtimeIdentity)
+        }
         if (committedProfile == null) commit(profile)
-        return snapshotLocked(profile)
+        return snapshotLocked(profile, publicationOverride)
     }
 
     /**

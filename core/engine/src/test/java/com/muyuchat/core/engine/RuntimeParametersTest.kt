@@ -437,6 +437,93 @@ class RuntimeParametersTest {
             verification.signatures.effective?.values?.value("n_threads")
         )
         assertNotEquals(2, verification.signatures.effective?.values?.value("n_threads"))
+
+        val rollback = coordinator.rollbackTargetFor(authorization)
+        val rolledBack = coordinator.publishLoaded(rollback, llamaStats(rollback))
+        assertEquals(identity.identityHash, rolledBack.active?.identityHash)
+        assertEquals(identity.identityHash, rolledBack.committed.identityHash)
+        assertEquals(identity.identityHash, rolledBack.override.identityHash)
+        assertEquals(identity.identityHash, rolledBack.effective?.identityHash)
+        assertFalse(rolledBack.override.isNone)
+        assertEquals(2, rolledBack.override.values.value("n_threads"))
+        assertEquals(2, rolledBack.effective?.values?.value("n_threads"))
+        assertFalse(coordinator.isAuthorizedPendingActive(authorization))
+        assertTrue(coordinator.abortAuthorizedPending(authorization))
+    }
+
+    @Test
+    fun mnnModelSwitchWithoutUnloadClearsPreviousIdentityRuntimeOverride() {
+        val firstIdentity = identity(LocalChatRuntime.MNN_CPU)
+        val secondIdentity = firstIdentity.copy(
+            modelId = "second-mnn-model",
+            artifactFingerprint = "sha256:second-mnn-model"
+        )
+        val adapter = MnnRuntimeParameterAdapter()
+        val first = adapter.resolveLoadProfile(
+            firstIdentity,
+            "{\"n_ctx\":4096,\"n_threads\":6,\"mmap\":true}",
+            profileId = "first-mnn"
+        ).profile
+        val second = adapter.resolveLoadProfile(
+            secondIdentity,
+            "{\"n_ctx\":8192,\"n_threads\":8,\"mmap\":false}",
+            profileId = "second-mnn"
+        ).profile
+        val coordinator = ParameterCoordinator()
+        coordinator.commit(first)
+        coordinator.publishLoaded(first, mnnStats(first))
+        val thermalOverride = coordinator.setRuntimeOverride(
+            CanonicalParameterSet.of(mapOf("n_threads" to 2))
+        )
+        assertFalse(thermalOverride.isNone)
+        assertEquals(firstIdentity.identityHash, thermalOverride.identityHash)
+
+        val published = coordinator.publishLoaded(second, mnnStats(second))
+
+        assertEquals(secondIdentity.identityHash, published.override.identityHash)
+        assertTrue(published.override.isNone)
+        assertEquals("NONE", published.override.digest)
+        assertTrue(published.override.values.fields.isEmpty())
+        assertEquals(secondIdentity.identityHash, published.active?.identityHash)
+        assertEquals(secondIdentity.identityHash, published.committed.identityHash)
+        assertEquals(secondIdentity.identityHash, published.effective?.identityHash)
+        assertEquals(8, published.effective?.values?.value("n_threads"))
+
+        coordinator.commit(second)
+        val committed = coordinator.snapshot()!!
+        assertEquals(secondIdentity.identityHash, committed.desired.identityHash)
+        assertEquals(secondIdentity.identityHash, committed.resolved.identityHash)
+        assertEquals(secondIdentity.identityHash, committed.active?.identityHash)
+        assertEquals(secondIdentity.identityHash, committed.committed.identityHash)
+        assertEquals(secondIdentity.identityHash, committed.override.identityHash)
+        assertEquals(secondIdentity.identityHash, committed.effective?.identityHash)
+        assertTrue(committed.override.isNone)
+    }
+
+    @Test
+    fun mnnSameIdentityRepublishPreservesNonEmptyRuntimeOverride() {
+        val identity = identity(LocalChatRuntime.MNN_CPU)
+        val profile = MnnRuntimeParameterAdapter().resolveLoadProfile(
+            identity,
+            "{\"n_ctx\":4096,\"n_threads\":6,\"mmap\":false}",
+            profileId = "mnn-active"
+        ).profile
+        val coordinator = ParameterCoordinator()
+        coordinator.commit(profile)
+        coordinator.publishLoaded(profile, mnnStats(profile))
+        val thermalOverride = coordinator.setRuntimeOverride(
+            CanonicalParameterSet.of(mapOf("n_threads" to 2))
+        )
+
+        val republished = coordinator.publishLoaded(profile, mnnStats(profile))
+
+        assertFalse(republished.override.isNone)
+        assertEquals(thermalOverride, republished.override)
+        assertEquals(identity.identityHash, republished.override.identityHash)
+        assertEquals(identity.identityHash, republished.effective?.identityHash)
+        assertEquals(2, republished.override.values.value("n_threads"))
+        assertEquals(2, republished.effective?.values?.value("n_threads"))
+        assertEquals(thermalOverride, coordinator.snapshot()?.override)
     }
 
     @Test
@@ -528,5 +615,10 @@ class RuntimeParametersTest {
     private fun llamaStats(profile: ModelExecutionProfile): String = JSONObject()
         .put("loaded", true)
         .put("effectiveConfig", profile.resolvedLoadBoundValues.toJsonObject())
+        .toString()
+
+    private fun mnnStats(profile: ModelExecutionProfile): String = JSONObject()
+        .put("loaded", true)
+        .put("loadedConfigJson", profile.resolvedLoadBoundValues.toJsonObject().toString())
         .toString()
 }

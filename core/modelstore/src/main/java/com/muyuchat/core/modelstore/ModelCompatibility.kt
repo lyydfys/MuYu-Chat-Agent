@@ -52,12 +52,24 @@ object ModelCompatibility {
         }
 
         val architecture = metadata.architecture?.lowercase()
-        if (architecture != null && !isSupportedArchitecture(architecture)) {
-            return blocked("模型架构暂不在首版兼容清单内", "architecture=$architecture")
+        if (architecture in NON_CHAT_ARCHITECTURES) {
+            return blocked("这不是聊天生成主模型", "architecture=$architecture 不能作为 decoder-only 聊天模型加载")
+        }
+        if (metadata.causalAttention == false) {
+            return blocked("这不是自回归聊天主模型", "GGUF metadata 声明 attention.causal=false")
+        }
+        if (metadata.poolingType != null && metadata.poolingType > 0) {
+            return blocked(
+                "这不是聊天生成主模型",
+                "GGUF metadata 声明 pooling_type=${metadata.poolingType}，属于 embedding / reranker / classification 路径"
+            )
         }
 
         val warnings = buildList {
             if (architecture == null) add("没有读到 general.architecture，将按文件名推断")
+            if (architecture != null && !isKnownChatArchitecture(architecture)) {
+                add("architecture=$architecture 不在内置保守调参列表，将由当前 llama.cpp 原生加载结果最终判定")
+            }
             if (metadata.quant == null) add("没有读到量化类型，加载前请确认不是 BF16/F32 超大模型")
             if (file.length() > 8L * GB) add("文件超过 8GB，手机端可能因为内存或温控加载失败")
             if (metadata.quant in setOf("F32", "F16", "BF16")) add("${metadata.quant} 精度文件很大，手机端建议优先 Q4_K_M/Q5_K_M")
@@ -73,7 +85,7 @@ object ModelCompatibility {
         )
     }
 
-    private fun isSupportedArchitecture(value: String): Boolean =
+    private fun isKnownChatArchitecture(value: String): Boolean =
         value.startsWith("qwen") ||
             value.startsWith("llama") ||
             value.startsWith("gemma") ||
@@ -96,4 +108,24 @@ object ModelCompatibility {
 
     private const val MB = 1024L * 1024L
     private const val GB = 1024L * MB
+    private val NON_CHAT_ARCHITECTURES = setOf(
+        "clip",
+        "bert",
+        "modern-bert",
+        "nomic-bert",
+        "nomic-bert-moe",
+        "neo-bert",
+        "jina-bert-v2",
+        "jina-bert-v3",
+        "eurobert",
+        "gemma-embedding",
+        "llama-embed",
+        "dream",
+        "llada",
+        "llada-moe",
+        "rnd1",
+        "t5",
+        "t5encoder",
+        "wavtokenizer-dec"
+    )
 }

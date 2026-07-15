@@ -78,6 +78,20 @@ class AdaptiveTuningPolicyTest {
     }
 
     @Test
+    fun bootstrapLoadCanaryAcceptsOnlyTheCleanMinimalToken() {
+        assertTrue(BootstrapLoadCanaryPolicy.matches(BootstrapLoadCanaryPolicy.expectedOutput))
+        assertTrue(BootstrapLoadCanaryPolicy.matches(BootstrapLoadCanaryPolicy.expectedOutput + "\n"))
+        assertTrue(BootstrapLoadCanaryPolicy.matches(BootstrapLoadCanaryPolicy.expectedOutput + "\r\n"))
+
+        assertFalse(BootstrapLoadCanaryPolicy.matches(""))
+        assertFalse(BootstrapLoadCanaryPolicy.matches(" ${BootstrapLoadCanaryPolicy.expectedOutput}"))
+        assertFalse(BootstrapLoadCanaryPolicy.matches("${BootstrapLoadCanaryPolicy.expectedOutput} "))
+        assertFalse(BootstrapLoadCanaryPolicy.matches("Answer: ${BootstrapLoadCanaryPolicy.expectedOutput}"))
+        assertFalse(BootstrapLoadCanaryPolicy.matches("MCA_LOAD_OK_18"))
+        assertFalse(BootstrapLoadCanaryPolicy.matches("MCA_LOAD_OK_\uFFFD17"))
+    }
+
+    @Test
     fun exactFiveLineCanaryAcceptsStandardLineEndingsOnly() {
         assertTrue(MinimumTextCanaryPolicy.matches(MinimumTextCanaryPolicy.expectedOutput))
         assertTrue(MinimumTextCanaryPolicy.matches(MinimumTextCanaryPolicy.expectedOutput + "\n"))

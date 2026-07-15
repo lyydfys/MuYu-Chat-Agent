@@ -30,13 +30,15 @@ internal object RuntimeIdentityFactory {
     private const val ENGINE_CONTRACT_VERSION = "mca-local-chat-engine-v1"
     private const val IDENTITY_SCHEMA_VERSION = "runtime-parameters-schema-v1"
     private const val RULE_SET_VERSION = "model-family-rules-v3-target-model-adaptive-tuning"
-    private const val EVALUATOR_VERSION = "minimum-text-v1:2|canary:text-v1|safety:safety-v1"
+    private const val EVALUATOR_VERSION =
+        "bootstrap-load-v1:1|minimum-text-v1:2|canary:text-v1|safety:safety-v1"
     private const val EMBEDDED_TOKENIZER_VERSION = "embedded-tokenizer-v1"
     private const val EMBEDDED_TEMPLATE_VERSION = "embedded-template-v1"
     private const val EMBEDDED_CONFIG_VERSION = "embedded-config-v1"
     private const val DIRECTORY_MERKLE_VERSION = "directory-merkle-v1"
     private const val NATIVE_SET_VERSION = "native-library-set-v1"
     private const val MAX_TEMPLATE_CONFIG_BYTES = 4L * 1024L * 1024L
+    private const val MNN_RUNTIME_CONFIG_FILE_NAME = "mca_runtime_config.json"
     private val SHA256 = Regex("^[0-9a-fA-F]{64}$")
 
     /** Android values needed by the factory; kept separate so JVM tests do not
@@ -165,7 +167,7 @@ internal object RuntimeIdentityFactory {
         require(root.exists()) { "Model manifest path does not exist: $modelPath" }
 
         val session = HashSession()
-        val bundleFiles = if (root.isDirectory) safeFilesUnder(root) else emptyList()
+        val bundleFiles = if (root.isDirectory) safeFilesUnder(root, runtime) else emptyList()
         val manifestArtifactSha = normalizedSha(model.sha256)
         val artifactFingerprint = manifestArtifactSha ?: when {
             root.isFile -> session.fileSha256(root)
@@ -589,7 +591,7 @@ internal object RuntimeIdentityFactory {
         return session.entriesDigest(DIRECTORY_MERKLE_VERSION, entries)
     }
 
-    private fun safeFilesUnder(root: File): List<File> {
+    private fun safeFilesUnder(root: File, runtime: LocalChatRuntime): List<File> {
         if (!root.isDirectory) return emptyList()
         val canonicalRoot = canonicalFile(root)
         val prefix = canonicalRoot.path.trimEnd(File.separatorChar) + File.separator
@@ -598,6 +600,13 @@ internal object RuntimeIdentityFactory {
             .mapNotNull { file ->
                 val canonical = runCatching { canonicalFile(file) }.getOrNull() ?: return@mapNotNull null
                 if (canonical.path == canonicalRoot.path || canonical.path.startsWith(prefix)) file else null
+            }
+            .filterNot { file ->
+                // Native writes this deterministic compatibility projection
+                // after identity creation; it is derived runtime state, not a
+                // user model component.
+                runtime == LocalChatRuntime.MNN_CPU &&
+                    relativePath(root, file).equals(MNN_RUNTIME_CONFIG_FILE_NAME, ignoreCase = true)
             }
             .toList()
     }

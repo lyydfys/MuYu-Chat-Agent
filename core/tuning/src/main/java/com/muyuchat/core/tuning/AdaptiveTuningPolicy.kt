@@ -71,6 +71,30 @@ object CandidateSelectionPolicy {
     }
 }
 
+/**
+ * Minimal first-load proof used before an external model is made available.
+ *
+ * Bootstrap loading must prove that the selected runtime can consume a user
+ * turn and return clean deterministic text, but it must not reject a valid
+ * small model merely because it cannot follow the richer multi-field tuning
+ * benchmark. The stricter [MinimumTextCanaryPolicy] remains the hard gate for
+ * committing tuned candidates.
+ */
+object BootstrapLoadCanaryPolicy {
+    const val expectedOutput: String = "MCA_LOAD_OK_17"
+    const val prompt: String =
+        "Return exactly this token and nothing else: MCA_LOAD_OK_17"
+
+    fun matches(output: String): Boolean {
+        if (output.isEmpty() || '\uFFFD' in output) return false
+        val normalized = output
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .removeSuffix("\n")
+        return normalized == expectedOutput
+    }
+}
+
 /** Strict output contract for the disposable minimum-text correctness canary. */
 object MinimumTextCanaryPolicy {
     val expectedLines: List<String> = listOf(

@@ -270,6 +270,7 @@ fun ModelHubScreen(
             when (section) {
                 ModelHubSection.LOCAL -> LocalModelsSection(
                     state = state,
+                    onImportClick = onImportClick,
                     onLoad = onLoad,
                     onVerify = onVerify,
                     onDelete = onDelete,
@@ -500,6 +501,7 @@ private fun ModelHubSegmentedTabs(
 @Composable
 private fun LocalModelsSection(
     state: ModelHubUiState,
+    onImportClick: () -> Unit,
     onLoad: (ModelManifest) -> Unit,
     onVerify: (ModelManifest) -> Unit,
     onDelete: (ModelManifest) -> Unit,
@@ -515,6 +517,16 @@ private fun LocalModelsSection(
             CardBox {
                 Text("本地推理引擎", fontWeight = FontWeight.Bold)
                 Text("高速引擎优先使用 MNN；兼容引擎继续支持 GGUF / llama.cpp 生态。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(
+                    onClick = onImportClick,
+                    enabled = !state.isBusy,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("+ 导入 GGUF / MNN 本地模型", fontWeight = FontWeight.Bold)
+                }
                 if (state.localModels.isEmpty()) {
                     Text("还没有本地推理引擎", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                     Text("可以导入 GGUF 兼容模型，也可以导入完整 MNN 组件包；推荐列表会优先下载 MNN。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

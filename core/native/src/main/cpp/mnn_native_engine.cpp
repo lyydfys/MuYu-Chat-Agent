@@ -31,6 +31,7 @@
 
 #include "nlohmann/json.hpp"
 #include "jni_utf8_codec.hpp"
+#include "mnn_legacy_chat_template_policy.hpp"
 #include "mnn_runtime_capability_policy.hpp"
 #include "mnn_stream_protocol_filter.hpp"
 #include "mnn_vision_path_policy.hpp"
@@ -697,6 +698,37 @@ bool write_json_file(const std::string& path, const json& value) {
     return output.good();
 }
 
+bool has_mnn_jinja_chat_template(const json& config) {
+    if (!config.is_object()) return false;
+    const auto jinjaIt = config.find("jinja");
+    if (jinjaIt == config.end() || !jinjaIt->is_object()) return false;
+    const auto templateIt = jinjaIt->find("chat_template");
+    return templateIt != jinjaIt->end() && templateIt->is_string() &&
+            !templateIt->get<std::string>().empty();
+}
+
+bool inject_legacy_mnn_chat_template(json& runtimeConfig, const json& modelConfig) {
+    if (has_mnn_jinja_chat_template(runtimeConfig) || has_mnn_jinja_chat_template(modelConfig)) {
+        return false;
+    }
+    std::string legacyPrompt;
+    const auto readPrompt = [&legacyPrompt](const json& source) {
+        if (!legacyPrompt.empty() || !source.is_object()) return;
+        const auto promptIt = source.find("prompt_template");
+        if (promptIt != source.end() && promptIt->is_string()) {
+            legacyPrompt = promptIt->get<std::string>();
+        }
+    };
+    readPrompt(modelConfig);
+    readPrompt(runtimeConfig);
+    if (!mca::mnn::isLegacyQwenChatMlPromptTemplate(legacyPrompt)) return false;
+
+    runtimeConfig["jinja"]["chat_template"] =
+            mca::mnn::legacyQwenChatMlJinjaTemplate();
+    runtimeConfig["jinja"]["eos"] = "<|im_end|>";
+    return true;
+}
+
 std::string prepare_mnn_runtime_config(const std::string& requestedPath) {
     const auto configPath = resolve_mnn_config_path(requestedPath);
     const auto root = parent_dir(configPath);
@@ -704,6 +736,13 @@ std::string prepare_mnn_runtime_config(const std::string& requestedPath) {
     g_visual_model_path.clear();
     g_vision_ready = false;
     if (!config.is_object()) return configPath;
+
+    const auto configuredLlmConfig = config.value("llm_config", std::string("llm_config.json"));
+    const auto safeLlmConfig = mca::mnn::normalizeMnnVisualRelativePath(configuredLlmConfig);
+    const auto modelConfig = safeLlmConfig.empty()
+            ? json::object()
+            : read_json_file_or_empty(join_path(root, safeLlmConfig));
+    bool configChanged = inject_legacy_mnn_chat_template(config, modelConfig);
 
     std::string configuredVisual;
     bool configuredVisualDeclared = false;
@@ -716,27 +755,30 @@ std::string prepare_mnn_runtime_config(const std::string& requestedPath) {
     const bool visualExists = !selectedVisual.empty();
     const bool shouldEnableVision = visualExists || config.value("is_visual", false) ||
             configuredVisualDeclared;
-    if (!shouldEnableVision) return configPath;
-
-    config["is_visual"] = true;
-    if (visualExists) {
-        // Always persist the resolved relative path.  This makes nested
-        // exporter layouts visible to MNN's Omni loader and keeps the
-        // g_vision_ready flag truthful for the Java/UI/API layers.
-        config["visual_model"] = selectedVisual;
-        g_visual_model_path = join_path(root, selectedVisual);
-    } else if (configuredVisual.empty()) {
-        config["visual_model"] = "visual.mnn";
-        g_visual_model_path = join_path(root, "visual.mnn");
-    } else {
-        g_visual_model_path = configuredVisual;
+    if (shouldEnableVision) {
+        configChanged = true;
+        config["is_visual"] = true;
+        if (visualExists) {
+            // Always persist the resolved relative path.  This makes nested
+            // exporter layouts visible to MNN's Omni loader and keeps the
+            // g_vision_ready flag truthful for the Java/UI/API layers.
+            config["visual_model"] = selectedVisual;
+            g_visual_model_path = join_path(root, selectedVisual);
+        } else if (configuredVisual.empty()) {
+            config["visual_model"] = "visual.mnn";
+            g_visual_model_path = join_path(root, "visual.mnn");
+        } else {
+            g_visual_model_path = configuredVisual;
+        }
+        g_vision_ready = visualExists;
     }
-    g_vision_ready = visualExists;
+
+    if (!configChanged) return configPath;
 
     const auto runtimeConfigPath = join_path(root, "mca_runtime_config.json");
     if (!write_json_file(runtimeConfigPath, config)) {
         throw std::runtime_error(
-                "MNN visual runtime config could not be written: " + runtimeConfigPath);
+                "MNN compatibility runtime config could not be written: " + runtimeConfigPath);
     }
     return runtimeConfigPath;
 }

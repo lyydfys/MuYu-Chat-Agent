@@ -6,6 +6,8 @@ import android.provider.OpenableColumns
 import org.json.JSONArray
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.PushbackInputStream
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -14,6 +16,10 @@ class ModelStoreRepository(private val context: Context) {
     private val manifestFile: File by lazy { File(appContext.filesDir, "mca-models.json") }
     private val managedModelDir: File by lazy {
         (appContext.getExternalFilesDir("models") ?: File(appContext.filesDir, "models")).also { it.mkdirs() }
+    }
+
+    init {
+        runCatching { cleanupStaleAtomicImports(managedModelDir) }
     }
 
     fun listModels(): List<ModelManifest> {
@@ -49,41 +55,74 @@ class ModelStoreRepository(private val context: Context) {
 
     fun getModel(id: String): ModelManifest? = listModels().firstOrNull { it.id == id }
 
-    fun importFromUris(uris: List<Uri>, displayNameOverride: String? = null): ModelManifest {
-        val validUris = uris.distinct()
-        require(validUris.isNotEmpty()) { "请选择本地推理模型文件。" }
-        if (validUris.size == 1) {
-            val uri = validUris.single()
-            val fileName = displayNameOverride?.takeIf { it.isNotBlank() } ?: queryDisplayName(uri) ?: "model.gguf"
-            return when {
-                fileName.endsWith(".gguf", ignoreCase = true) -> importFromUri(uri, displayNameOverride)
-                fileName.endsWith(".zip", ignoreCase = true) -> importMnnBundleFromZip(uri, fileName)
-                fileName.endsWith(".mnn", ignoreCase = true) ||
-                    fileName.endsWith(".weight", ignoreCase = true) ||
-                    fileName.equals("config.json", ignoreCase = true) ->
+    fun importFromUris(uris: List<Uri>, displayNameOverride: String? = null): ModelManifest =
+        synchronized(MODEL_IMPORT_LOCK) {
+            val validUris = uris.distinct()
+            require(validUris.isNotEmpty()) { "请选择本地推理模型文件。" }
+            if (validUris.size == 1) {
+                return@synchronized importSingleUriLocked(
+                    uri = validUris.single(),
+                    displayNameOverride = displayNameOverride,
+                    allowMnnZip = true
+                )
+            }
+            importMnnBundleFromUris(validUris, displayNameOverride)
+        }
+
+    fun importFromUri(uri: Uri, displayNameOverride: String? = null): ModelManifest =
+        synchronized(MODEL_IMPORT_LOCK) {
+            importSingleUriLocked(
+                uri = uri,
+                displayNameOverride = displayNameOverride,
+                allowMnnZip = false
+            )
+        }
+
+    private fun importSingleUriLocked(
+        uri: Uri,
+        displayNameOverride: String?,
+        allowMnnZip: Boolean
+    ): ModelManifest {
+        val providedName = displayNameOverride?.takeIf { it.isNotBlank() } ?: queryDisplayName(uri)
+        val expectedSize = querySize(uri).reliableProviderSize()
+        return appContext.contentResolver.openInputStream(uri).use { rawInput ->
+            requireNotNull(rawInput) { "无法读取所选文件。" }
+            val source = PushbackInputStream(rawInput.buffered(), IMPORT_MAGIC_BYTES)
+            val header = source.readPrefix(IMPORT_MAGIC_BYTES)
+            if (header.isNotEmpty()) source.unread(header)
+            when (classifyModelImport(providedName, header)) {
+                ModelImportKind.GGUF -> importGgufFromStreamLocked(source, providedName, expectedSize)
+                ModelImportKind.MNN_ZIP -> {
+                    require(allowMnnZip) { "请选择有效的 GGUF 模型文件。" }
+                    importMnnBundleFromZipStream(
+                        source = source,
+                        fileName = providedName?.trim().orEmpty().ifBlank { "mnn-bundle.zip" }
+                    )
+                }
+                ModelImportKind.MNN_COMPONENT ->
                     error("MNN 高速引擎需要同时选择 config.json、llm_config.json、llm.mnn、llm.mnn.weight、tokenizer，以及 embeddings_bf16.bin / llm.mnn.json；或导入完整 zip 包。")
-                else -> error("请选择 GGUF 模型，或选择完整 MNN 组件 / zip 包。")
+                ModelImportKind.UNKNOWN -> error("无法识别所选文件。请选择 GGUF 模型，或选择完整 MNN 组件 / zip 包。")
             }
         }
-        return importMnnBundleFromUris(validUris, displayNameOverride)
     }
 
-    fun importFromUri(uri: Uri, displayNameOverride: String? = null): ModelManifest {
-        val fileName = displayNameOverride?.takeIf { it.isNotBlank() } ?: queryDisplayName(uri) ?: "model.gguf"
-        require(fileName.endsWith(".gguf", ignoreCase = true)) { "请选择 .gguf 模型文件。" }
-        val metadata = GgufMetadataReader.read(appContext.contentResolver, uri, fileName)
-        require(metadata.isGguf) { "文件头不是 GGUF，可能不是 llama.cpp 可加载模型。" }
+    private fun importGgufFromStreamLocked(
+        source: InputStream,
+        providedName: String?,
+        expectedSize: Long?
+    ): ModelManifest {
+        val fileName = normalizedGgufImportName(providedName)
 
         managedModelDir.mkdirs()
         val target = uniqueTarget(fileName)
-        val staging = File(target.parentFile, ".${target.name}.importing-${UUID.randomUUID()}")
+        val staging = atomicImportStagingFile(target)
+        var importedDigest: String? = null
+        var importedMetadata: GgufMetadata? = null
+        var ownsTarget = false
         try {
-            val sourceDigest = appContext.contentResolver.openInputStream(uri).use { input ->
-                requireNotNull(input) { "无法读取所选文件。" }
-                copyWithSha256(input, staging)
-            }
-            querySize(uri)?.takeIf { it >= 0L }?.let { expectedSize ->
-                require(staging.length() == expectedSize) { "GGUF 文件复制不完整：源文件大小与导入结果不一致。" }
+            val sourceDigest = copyWithSha256(source, staging)
+            expectedSize?.let { size ->
+                require(staging.length() == size) { "GGUF 文件复制不完整：源文件大小与导入结果不一致。" }
             }
             val copiedMetadata = GgufMetadataReader.read(staging)
             require(copiedMetadata.isGguf) { "GGUF 文件复制后文件头校验失败。" }
@@ -92,15 +131,20 @@ class ModelStoreRepository(private val context: Context) {
             }
             val compatibility = ModelCompatibility.check(staging, copiedMetadata)
             require(compatibility.canLoad) { compatibility.message }
-            require(staging.renameTo(target)) { "无法原子提交导入的 GGUF 模型。" }
+            require(commitAtomicImportPath(staging, target)) { "无法原子提交导入的 GGUF 模型。" }
+            ownsTarget = true
+            importedDigest = sourceDigest
+            importedMetadata = copiedMetadata
         } catch (error: Throwable) {
-            staging.delete()
-            target.delete()
+            if (ownsTarget) target.delete()
             throw error
+        } finally {
+            cleanupAtomicImportStagingFile(staging, requireNotNull(target.parentFile))
         }
 
         return try {
-            val copiedMetadata = GgufMetadataReader.read(target)
+            val copiedMetadata = requireNotNull(importedMetadata) { "GGUF 导入元数据丢失。" }
+            val copiedDigest = requireNotNull(importedDigest) { "GGUF 导入摘要丢失。" }
             val manifest = ModelManifest(
                 id = UUID.randomUUID().toString(),
                 displayName = fileName.removeSuffix(".gguf"),
@@ -109,14 +153,14 @@ class ModelStoreRepository(private val context: Context) {
                 source = ModelSource.LOCAL,
                 fileName = target.name,
                 sizeBytes = target.length(),
-                sha256 = sha256(target),
+                sha256 = copiedDigest,
                 quant = copiedMetadata.quant,
                 architecture = copiedMetadata.architecture
             )
             upsert(manifest)
             manifest
         } catch (error: Throwable) {
-            target.delete()
+            if (ownsTarget) target.delete()
             throw error
         }
     }
@@ -140,6 +184,7 @@ class ModelStoreRepository(private val context: Context) {
 
         val bundleDir = uniqueBundleTarget(displayNameOverride ?: inferMnnBundleName(fileNames))
         val stagingDir = File(bundleDir.parentFile, ".${bundleDir.name}.importing-${UUID.randomUUID()}")
+        var ownsBundleDir = false
         try {
             require(stagingDir.mkdirs()) { "无法创建 MNN 组件导入暂存目录。" }
             namedUris.forEach { (uri, name) ->
@@ -148,17 +193,24 @@ class ModelStoreRepository(private val context: Context) {
                     requireNotNull(input) { "无法读取 MNN 组件：$name" }
                     copyWithSha256(input, target)
                 }
-                querySize(uri)?.takeIf { it >= 0L }?.let { expectedSize ->
+                querySize(uri).reliableProviderSize()?.let { expectedSize ->
                     require(target.length() == expectedSize) { "MNN 组件复制不完整：$name" }
                 }
                 require(sha256(target).equals(sourceDigest, ignoreCase = true)) { "MNN 组件复制校验失败：$name" }
+                val importedKind = target.inputStream().use { input ->
+                    classifyModelImport(name, input.readPrefix(IMPORT_MAGIC_BYTES))
+                }
+                require(importedKind != ModelImportKind.GGUF && importedKind != ModelImportKind.MNN_ZIP) {
+                    "一次只能导入一个 GGUF 主模型或一个 MNN ZIP；MNN 多选仅用于完整组件文件。"
+                }
             }
             val readiness = MnnBundleReadinessAnalyzer.analyze(stagingDir)
             require(readiness.canLoad) { "MNN 模型包不完整：${readiness.diagnosticSummary()}" }
-            require(stagingDir.renameTo(bundleDir)) { "无法原子提交导入的 MNN 模型包。" }
+            require(commitAtomicImportPath(stagingDir, bundleDir)) { "无法原子提交导入的 MNN 模型包。" }
+            ownsBundleDir = true
         } catch (error: Throwable) {
             stagingDir.deleteRecursively()
-            bundleDir.deleteRecursively()
+            if (ownsBundleDir) bundleDir.deleteRecursively()
             throw error
         }
         return try {
@@ -171,23 +223,25 @@ class ModelStoreRepository(private val context: Context) {
                 requiredFiles = requiredMnnFilesForDirectory(bundleDir)
             )
         } catch (error: Throwable) {
-            bundleDir.deleteRecursively()
+            if (ownsBundleDir) bundleDir.deleteRecursively()
             throw error
         }
     }
 
-    private fun importMnnBundleFromZip(uri: Uri, fileName: String): ModelManifest {
+    private fun importMnnBundleFromZipStream(source: InputStream, fileName: String): ModelManifest {
         val bundleName = stripKnownExtension(fileName, ".zip").ifBlank { "mnn-bundle" }
         val bundleDir = uniqueBundleTarget(bundleName)
+        var ownsBundleDir = false
         try {
-            appContext.contentResolver.openInputStream(uri).use { rawInput ->
-                requireNotNull(rawInput) { "无法读取 MNN zip 包。" }
-                MnnZipBundleInstaller().install(
-                    source = rawInput,
-                    finalBundleRoot = bundleDir,
-                    compressedSizeBytes = querySize(uri)
-                )
-            }
+            MnnZipBundleInstaller().install(
+                source = source,
+                finalBundleRoot = bundleDir,
+                // OpenableColumns.SIZE is provider metadata, not a trustworthy
+                // compressed-byte counter. Per-entry and absolute extraction
+                // limits remain active inside the installer.
+                compressedSizeBytes = null
+            )
+            ownsBundleDir = true
             return registerDownloadedMnnBundle(
                 displayName = inferMnnDisplayName(bundleName),
                 bundleDir = bundleDir,
@@ -197,7 +251,7 @@ class ModelStoreRepository(private val context: Context) {
                 requiredFiles = requiredMnnFilesForDirectory(bundleDir)
             )
         } catch (error: Throwable) {
-            bundleDir.deleteRecursively()
+            if (ownsBundleDir) bundleDir.deleteRecursively()
             throw error
         }
     }
@@ -334,95 +388,97 @@ class ModelStoreRepository(private val context: Context) {
         return true
     }
 
-    fun attachVisionProjector(modelId: String, uri: Uri, displayNameOverride: String? = null): ModelManifest {
-        val models = listModels()
-        val model = models.firstOrNull { it.id == modelId } ?: error("未找到要绑定视觉文件的本地模型。")
-        val fileName = displayNameOverride?.takeIf { it.isNotBlank() } ?: queryDisplayName(uri) ?: "mmproj.gguf"
-        require(fileName.endsWith(".gguf", ignoreCase = true)) { "请选择 .gguf 视觉投影器文件（通常文件名包含 mmproj）。" }
-        val metadata = GgufMetadataReader.read(appContext.contentResolver, uri, fileName)
-        require(metadata.isGguf) { "文件头不是 GGUF，可能不是 llama.cpp 可加载的视觉投影器。" }
-        require(isVisionProjectorCandidate(fileName, metadata)) {
-            "这个 GGUF 不像视觉投影器。请选择与主模型匹配的 mmproj / projector 文件。"
-        }
+    fun attachVisionProjector(modelId: String, uri: Uri, displayNameOverride: String? = null): ModelManifest =
+        synchronized(MODEL_IMPORT_LOCK) {
+            val models = listModels()
+            val model = models.firstOrNull { it.id == modelId } ?: error("未找到要绑定视觉文件的本地模型。")
+            val providedName = displayNameOverride?.takeIf { it.isNotBlank() } ?: queryDisplayName(uri) ?: "mmproj"
+            val fileName = normalizedGgufImportName(providedName)
 
-        managedModelDir.mkdirs()
-        val target = uniqueTarget(fileName)
-        val staging = File(target.parentFile, ".${target.name}.importing-${UUID.randomUUID()}")
-        try {
-            val sourceDigest = appContext.contentResolver.openInputStream(uri).use { input ->
-                requireNotNull(input) { "无法读取所选视觉文件。" }
-                copyWithSha256(input, staging)
-            }
-            querySize(uri)?.takeIf { it >= 0L }?.let { expectedSize ->
-                require(staging.length() == expectedSize) { "视觉投影器复制不完整。" }
-            }
-            val copiedMetadata = GgufMetadataReader.read(staging)
-            require(copiedMetadata.isGguf && isVisionProjectorCandidate(fileName, copiedMetadata)) {
-                "视觉投影器复制后文件头或类型校验失败。"
-            }
-            require(sha256(staging).equals(sourceDigest, ignoreCase = true)) { "视觉投影器复制后 SHA-256 校验失败。" }
-            require(staging.renameTo(target)) { "无法原子提交视觉投影器。" }
-            val updated = model.copy(
-                visionProjectorPath = target.absolutePath,
-                visionProjectorFileName = target.name,
-                visionProjectorSizeBytes = target.length(),
-                visionProjectorSha256 = sourceDigest
-            )
-            save(models.map { if (it.id == modelId) updated else it })
-            return updated
-        } catch (error: Throwable) {
-            staging.delete()
-            target.delete()
-            throw error
-        }
-    }
-
-    fun attachVisionProjectorFile(modelId: String, file: File, displayNameOverride: String? = null): ModelManifest {
-        val models = listModels()
-        val model = models.firstOrNull { it.id == modelId } ?: error("未找到要绑定视觉文件的本地模型。")
-        require(file.exists() && file.isFile && file.canRead()) { "无法读取视觉投影器文件：${file.absolutePath}" }
-        val fileName = displayNameOverride?.takeIf { it.isNotBlank() } ?: file.name
-        require(fileName.endsWith(".gguf", ignoreCase = true)) { "请选择 .gguf 视觉投影器文件（通常文件名包含 mmproj）。" }
-        val metadata = GgufMetadataReader.read(file)
-        require(metadata.isGguf) { "文件头不是 GGUF，可能不是 llama.cpp 可加载的视觉投影器。" }
-        require(isVisionProjectorCandidate(fileName, metadata)) {
-            "这个 GGUF 不像视觉投影器。请选择与主模型匹配的 mmproj / projector 文件。"
-        }
-
-        managedModelDir.mkdirs()
-        val target = if (file.isUnderManagedModelDir()) {
-            file
-        } else {
-            val destination = uniqueTarget(fileName)
-            val staging = File(destination.parentFile, ".${destination.name}.importing-${UUID.randomUUID()}")
+            managedModelDir.mkdirs()
+            val target = uniqueTarget(fileName)
+            val staging = atomicImportStagingFile(target)
+            var ownsTarget = false
             try {
-                val sourceDigest = file.inputStream().use { input -> copyWithSha256(input, staging) }
-                require(staging.length() == file.length()) { "视觉投影器复制不完整。" }
-                require(sha256(staging).equals(sourceDigest, ignoreCase = true)) { "视觉投影器复制后 SHA-256 校验失败。" }
-                require(staging.renameTo(destination)) { "无法原子提交视觉投影器。" }
-                destination
+                val sourceDigest = appContext.contentResolver.openInputStream(uri).use { input ->
+                    requireNotNull(input) { "无法读取所选视觉文件。" }
+                    copyWithSha256(input, staging)
+                }
+                querySize(uri).reliableProviderSize()?.let { expectedSize ->
+                    require(staging.length() == expectedSize) { "视觉投影器复制不完整。" }
+                }
+                val copiedMetadata = GgufMetadataReader.read(staging)
+                require(copiedMetadata.isGguf && isVisionProjectorCandidate(fileName, copiedMetadata)) {
+                    "视觉投影器复制后文件头或类型校验失败。"
+                }
+                require(sha256(staging).equals(sourceDigest, ignoreCase = true)) {
+                    "视觉投影器复制后 SHA-256 校验失败。"
+                }
+                require(commitAtomicImportPath(staging, target)) { "无法原子提交视觉投影器。" }
+                ownsTarget = true
+                val updated = model.copy(
+                    visionProjectorPath = target.absolutePath,
+                    visionProjectorFileName = target.name,
+                    visionProjectorSizeBytes = target.length(),
+                    visionProjectorSha256 = sourceDigest
+                )
+                save(models.map { if (it.id == modelId) updated else it })
+                updated
             } catch (error: Throwable) {
-                staging.delete()
-                destination.delete()
+                if (ownsTarget) target.delete()
+                throw error
+            } finally {
+                cleanupAtomicImportStagingFile(staging, requireNotNull(target.parentFile))
+            }
+        }
+
+    fun attachVisionProjectorFile(modelId: String, file: File, displayNameOverride: String? = null): ModelManifest =
+        synchronized(MODEL_IMPORT_LOCK) {
+            val models = listModels()
+            val model = models.firstOrNull { it.id == modelId } ?: error("未找到要绑定视觉文件的本地模型。")
+            require(file.exists() && file.isFile && file.canRead()) { "无法读取视觉投影器文件：${file.absolutePath}" }
+            val fileName = displayNameOverride?.takeIf { it.isNotBlank() } ?: file.name
+            require(fileName.endsWith(".gguf", ignoreCase = true)) { "请选择 .gguf 视觉投影器文件（通常文件名包含 mmproj）。" }
+            val metadata = GgufMetadataReader.read(file)
+            require(metadata.isGguf) { "文件头不是 GGUF，可能不是 llama.cpp 可加载的视觉投影器。" }
+            require(isVisionProjectorCandidate(fileName, metadata)) {
+                "这个 GGUF 不像视觉投影器。请选择与主模型匹配的 mmproj / projector 文件。"
+            }
+
+            managedModelDir.mkdirs()
+            var ownsTarget = false
+            val target = if (file.isUnderManagedModelDir()) {
+                file
+            } else {
+                val destination = uniqueTarget(fileName)
+                val staging = atomicImportStagingFile(destination)
+                try {
+                    val sourceDigest = file.inputStream().use { input -> copyWithSha256(input, staging) }
+                    require(staging.length() == file.length()) { "视觉投影器复制不完整。" }
+                    require(sha256(staging).equals(sourceDigest, ignoreCase = true)) {
+                        "视觉投影器复制后 SHA-256 校验失败。"
+                    }
+                    require(commitAtomicImportPath(staging, destination)) { "无法原子提交视觉投影器。" }
+                    ownsTarget = true
+                    destination
+                } finally {
+                    cleanupAtomicImportStagingFile(staging, requireNotNull(destination.parentFile))
+                }
+            }
+            try {
+                val updated = model.copy(
+                    visionProjectorPath = target.absolutePath,
+                    visionProjectorFileName = target.name,
+                    visionProjectorSizeBytes = target.length(),
+                    visionProjectorSha256 = sha256(target)
+                )
+                save(models.map { if (it.id == modelId) updated else it })
+                updated
+            } catch (error: Throwable) {
+                if (ownsTarget) target.delete()
                 throw error
             }
         }
-        return try {
-            val updated = model.copy(
-                visionProjectorPath = target.absolutePath,
-                visionProjectorFileName = target.name,
-                visionProjectorSizeBytes = target.length(),
-                visionProjectorSha256 = sha256(target)
-            )
-            save(models.map { if (it.id == modelId) updated else it })
-            updated
-        } catch (error: Throwable) {
-            if (!file.isUnderManagedModelDir() && target.isUnderManagedModelDir()) {
-                target.delete()
-            }
-            throw error
-        }
-    }
 
     fun markLoaded(id: String) {
         save(listModels().map { model ->
@@ -569,16 +625,26 @@ class ModelStoreRepository(private val context: Context) {
 
     private fun queryDisplayName(uri: Uri): String? {
         val projection = arrayOf(OpenableColumns.DISPLAY_NAME)
-        return appContext.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) cursor.getString(0) else null
-        }
+        val providerName = runCatching {
+            appContext.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null
+            }
+        }.getOrNull()?.trim()?.takeIf { it.isNotBlank() }
+        if (providerName != null) return providerName
+        return uri.lastPathSegment
+            ?.substringAfterLast('/')
+            ?.substringAfterLast('\\')
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
     }
 
     private fun querySize(uri: Uri): Long? {
         val projection = arrayOf(OpenableColumns.SIZE)
-        return appContext.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
-        }
+        return runCatching {
+            appContext.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+            }
+        }.getOrNull()
     }
 
     private fun uniqueTarget(fileName: String): File {
@@ -957,6 +1023,8 @@ class ModelStoreRepository(private val context: Context) {
     }
 
     private companion object {
+        private val MODEL_IMPORT_LOCK = Any()
+        private const val IMPORT_MAGIC_BYTES = 4
         private const val MB = 1024L * 1024L
         private const val GB = 1024L * MB
         private val WINDOWS_DRIVE_PREFIX = Regex("^[A-Za-z]:($|/)")
@@ -1105,4 +1173,72 @@ private fun File.safeFilesUnderRoot(): List<File> {
     }
     return files
 }
+
+/**
+ * Keeps the exact destination basename and extension visible while a
+ * user-supplied model is copied atomically. GGUF compatibility checks
+ * intentionally inspect both the file suffix and basename (for
+ * mmproj/MTP/split-part protection), so only the parent directory may carry
+ * the transaction marker.
+ */
+internal fun atomicImportStagingFile(
+    target: File,
+    transactionId: String = UUID.randomUUID().toString()
+): File {
+    require(SAFE_IMPORT_TRANSACTION_ID.matches(transactionId)) {
+        "Import transaction id contains unsupported characters."
+    }
+    return File(File(target.parentFile, ".importing-$transactionId"), target.name)
+}
+
+/**
+ * The repository serializes imports in-process; this final existence check
+ * additionally makes a failed commit non-destructive if another producer has
+ * materialized the chosen destination since it was selected.
+ */
+internal fun commitAtomicImportPath(staging: File, target: File): Boolean {
+    if (target.exists()) return false
+    return staging.renameTo(target)
+}
+
+internal fun cleanupAtomicImportStagingFile(staging: File, expectedParent: File): Boolean {
+    val root = runCatching { expectedParent.canonicalFile }.getOrNull() ?: return false
+    val requestedStagingDirectory = staging.parentFile ?: return false
+    val stagingDirectory = runCatching { requestedStagingDirectory.canonicalFile }.getOrNull() ?: return false
+    if (requestedStagingDirectory.absolutePath != stagingDirectory.absolutePath) return false
+    if (stagingDirectory.parentFile?.canonicalFile != root) return false
+    if (!stagingDirectory.name.startsWith(".importing-")) return false
+    return stagingDirectory.deleteRecursively()
+}
+
+internal fun cleanupStaleAtomicImports(
+    managedRoot: File,
+    nowMillis: Long = System.currentTimeMillis(),
+    minimumAgeMillis: Long = 24L * 60L * 60L * 1000L
+): Int {
+    val root = runCatching { managedRoot.canonicalFile }.getOrNull()?.takeIf { it.isDirectory }
+        ?: return 0
+    return root.listFiles().orEmpty().count { candidate ->
+        val canonical = runCatching { candidate.canonicalFile }.getOrNull() ?: return@count false
+        if (candidate.absolutePath != canonical.absolutePath) return@count false
+        if (canonical.parentFile?.canonicalFile != root) return@count false
+        val isStagingArtifact = when {
+            canonical.isDirectory -> CURRENT_IMPORT_DIRECTORY.matches(canonical.name) ||
+                LEGACY_NAMED_IMPORT_ARTIFACT.matches(canonical.name)
+            canonical.isFile -> LEGACY_NAMED_IMPORT_ARTIFACT.matches(canonical.name)
+            else -> false
+        }
+        if (!isStagingArtifact) return@count false
+        val modifiedAt = canonical.lastModified().takeIf { it > 0L } ?: return@count false
+        if (nowMillis - modifiedAt < minimumAgeMillis) return@count false
+        candidate.deleteRecursively()
+    }
+}
+
+internal fun Long?.reliableProviderSize(): Long? = this?.takeIf { it > 0L }
+
+private val SAFE_IMPORT_TRANSACTION_ID = Regex("[A-Za-z0-9._-]{1,128}")
+private const val UUID_PATTERN = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+private val CURRENT_IMPORT_DIRECTORY = Regex("^\\.importing-$UUID_PATTERN$")
+private val LEGACY_NAMED_IMPORT_ARTIFACT = Regex("^\\..+\\.importing-$UUID_PATTERN$")
 

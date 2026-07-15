@@ -19,11 +19,10 @@ object GgufMetadataReader {
             read(stream, fileName)
         } ?: GgufMetadata(isGguf = false)
 
-    private fun read(stream: InputStream, fileName: String): GgufMetadata {
+    internal fun read(stream: InputStream, fileName: String): GgufMetadata {
         val input = if (stream is BufferedInputStream) stream else BufferedInputStream(stream)
-        val magicBytes = ByteArray(4)
-        val magicRead = input.read(magicBytes)
-        val isGguf = magicRead == 4 && magicBytes.contentEquals(magic)
+        val magicBytes = input.readPrefix(magic.size)
+        val isGguf = magicBytes.contentEquals(magic)
         if (!isGguf) return GgufMetadata(isGguf = false)
 
         val version = runCatching { input.readUInt32Le().toInt() }.getOrNull()
@@ -31,7 +30,9 @@ object GgufMetadataReader {
             ParsedGgufMetadata(
                 architecture = inferArchitecture(fileName),
                 quant = inferQuant(fileName),
-                fileType = null
+                fileType = null,
+                causalAttention = null,
+                poolingType = null
             )
         }
         return GgufMetadata(
@@ -39,7 +40,9 @@ object GgufMetadataReader {
             version = version,
             architecture = parsed.architecture ?: inferArchitecture(fileName),
             quant = parsed.quant ?: inferQuant(fileName),
-            fileType = parsed.fileType
+            fileType = parsed.fileType,
+            causalAttention = parsed.causalAttention,
+            poolingType = parsed.poolingType
         )
     }
 
@@ -48,6 +51,8 @@ object GgufMetadataReader {
         val metadataCount = input.readUInt64Le().coerceAtMost(MAX_METADATA_KEYS)
         var architecture: String? = null
         var fileType: Int? = null
+        val causalAttentionByArchitecture = mutableMapOf<String, Boolean>()
+        val poolingTypeByArchitecture = mutableMapOf<String, Int>()
 
         for (index in 0 until metadataCount.toInt()) {
             val key = input.readGgufString()
@@ -59,15 +64,34 @@ object GgufMetadataReader {
                 key == "general.file_type" && type.isIntegerType() -> {
                     fileType = input.readIntegerValue(type).toInt()
                 }
+                key.endsWith(ATTENTION_CAUSAL_SUFFIX) &&
+                    (type == GGUF_TYPE_BOOL || type.isIntegerType()) -> {
+                    val owner = key.removeSuffix(ATTENTION_CAUSAL_SUFFIX)
+                    causalAttentionByArchitecture[owner] = if (type == GGUF_TYPE_BOOL) {
+                        input.readOne() != 0
+                    } else {
+                        input.readIntegerValue(type) != 0L
+                    }
+                }
+                key.endsWith(POOLING_TYPE_SUFFIX) && type.isIntegerType() -> {
+                    val owner = key.removeSuffix(POOLING_TYPE_SUFFIX)
+                    poolingTypeByArchitecture[owner] = input.readIntegerValue(type).toInt()
+                }
                 else -> input.skipGgufValue(type)
             }
-            if (architecture != null && fileType != null) break
         }
+
+        val causalAttention = architecture?.let(causalAttentionByArchitecture::get)
+            ?: causalAttentionByArchitecture.values.singleOrNull()
+        val poolingType = architecture?.let(poolingTypeByArchitecture::get)
+            ?: poolingTypeByArchitecture.values.singleOrNull()
 
         return ParsedGgufMetadata(
             architecture = architecture,
             quant = fileType?.let(::fileTypeToQuant) ?: inferQuant(fileName),
-            fileType = fileType
+            fileType = fileType,
+            causalAttention = causalAttention,
+            poolingType = poolingType
         )
     }
 
@@ -139,7 +163,14 @@ object GgufMetadataReader {
         while (offset < bytes.size) {
             val read = read(bytes, offset, bytes.size - offset)
             if (read < 0) throw EOFException("Unexpected end of GGUF metadata.")
-            offset += read
+            if (read == 0) {
+                val value = read()
+                if (value < 0) throw EOFException("Unexpected end of GGUF metadata.")
+                bytes[offset] = value.toByte()
+                offset += 1
+            } else {
+                offset += read
+            }
         }
     }
 
@@ -231,12 +262,16 @@ object GgufMetadataReader {
     private data class ParsedGgufMetadata(
         val architecture: String?,
         val quant: String?,
-        val fileType: Int?
+        val fileType: Int?,
+        val causalAttention: Boolean?,
+        val poolingType: Int?
     )
 
     private const val MAX_METADATA_KEYS = 128L
     private const val MAX_STRING_BYTES = 2L * 1024L * 1024L
     private const val MAX_ARRAY_ITEMS_TO_SKIP = 2_000_000L
+    private const val ATTENTION_CAUSAL_SUFFIX = ".attention.causal"
+    private const val POOLING_TYPE_SUFFIX = ".pooling_type"
 
     private const val GGUF_TYPE_UINT8 = 0
     private const val GGUF_TYPE_INT8 = 1
@@ -251,4 +286,24 @@ object GgufMetadataReader {
     private const val GGUF_TYPE_UINT64 = 10
     private const val GGUF_TYPE_INT64 = 11
     private const val GGUF_TYPE_FLOAT64 = 12
+}
+
+/** Reads up to [byteCount] bytes without assuming a provider fills a bulk read. */
+internal fun InputStream.readPrefix(byteCount: Int): ByteArray {
+    require(byteCount >= 0) { "Prefix byte count must not be negative." }
+    val bytes = ByteArray(byteCount)
+    var offset = 0
+    while (offset < bytes.size) {
+        val read = read(bytes, offset, bytes.size - offset)
+        if (read < 0) break
+        if (read == 0) {
+            val value = read()
+            if (value < 0) break
+            bytes[offset] = value.toByte()
+            offset += 1
+        } else {
+            offset += read
+        }
+    }
+    return if (offset == bytes.size) bytes else bytes.copyOf(offset)
 }

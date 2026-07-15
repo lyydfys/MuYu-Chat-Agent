@@ -944,6 +944,69 @@ class McaInferenceServiceLoadRecoveryTest {
     }
 
     @Test
+    fun consecutiveMnnModelLoadsDoNotLeakPreviousIdentityRuntimeOverride() = runBlocking {
+        val firstIdentity = ModelRuntimeIdentity(
+            modelId = "first-mnn-model",
+            artifactFingerprint = "sha256:first-mnn-model",
+            runtime = LocalChatRuntime.MNN_CPU,
+            runtimeVersion = "mnn-test",
+            nativeLibrarySha256 = "native-test",
+            installationScopeId = "installation-test"
+        )
+        val secondIdentity = firstIdentity.copy(
+            modelId = "second-mnn-model",
+            artifactFingerprint = "sha256:second-mnn-model"
+        )
+        val coordinator = ParameterCoordinator()
+        val firstProfile = coordinator.resolveProfile(
+            firstIdentity,
+            "{\"n_ctx\":4096,\"n_threads\":4}",
+            profileId = "first-mnn-profile"
+        ).profile
+        val secondProfile = coordinator.resolveProfile(
+            secondIdentity,
+            "{\"n_ctx\":8192,\"n_threads\":6}",
+            profileId = "second-mnn-profile"
+        ).profile
+        val runner = FakeLocalChatRunner()
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(LocalChatRuntime.MNN_CPU to runner),
+            parameterCoordinator = coordinator
+        )
+
+        service.loadModel(
+            modelPath = "/models/first-mnn/config.json",
+            runtime = LocalChatRuntime.MNN_CPU,
+            params = LoadParams(nCtx = 4096, nThreads = 4),
+            runtimeIdentity = firstIdentity,
+            executionProfile = firstProfile
+        ).getOrThrow()
+        coordinator.setRuntimeOverride(CanonicalParameterSet.of(mapOf("n_threads" to 2)))
+        assertFalse(requireNotNull(service.parameterSignatureSnapshot()).override.isNone)
+
+        val secondLoad = service.loadModel(
+            modelPath = "/models/second-mnn/config.json",
+            runtime = LocalChatRuntime.MNN_CPU,
+            params = LoadParams(nCtx = 8192, nThreads = 6),
+            runtimeIdentity = secondIdentity,
+            executionProfile = secondProfile
+        ).getOrThrow()
+
+        assertTrue(secondLoad.loaded)
+        assertEquals(2, runner.loadCalls)
+        val signatures = requireNotNull(service.parameterSignatureSnapshot())
+        val secondIdentityHash = secondIdentity.identityHash
+        assertEquals(secondIdentityHash, signatures.desired.identityHash)
+        assertEquals(secondIdentityHash, signatures.resolved.identityHash)
+        assertEquals(secondIdentityHash, signatures.active?.identityHash)
+        assertEquals(secondIdentityHash, signatures.committed.identityHash)
+        assertEquals(secondIdentityHash, signatures.override.identityHash)
+        assertEquals(secondIdentityHash, signatures.effective?.identityHash)
+        assertTrue(signatures.override.isNone)
+    }
+
+    @Test
     fun authorizedPendingProfileCommitsBeforeDoneAndUsesExactCandidateSignatures() = runBlocking {
         val identity = ModelRuntimeIdentity(
             modelId = "transaction-model",

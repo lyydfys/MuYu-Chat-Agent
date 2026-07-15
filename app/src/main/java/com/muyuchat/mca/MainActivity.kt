@@ -94,7 +94,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         )
-        val importLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        val importLauncher = registerForActivityResult(OpenModelDocumentsContract()) { uris ->
             if (uris.isNotEmpty()) viewModel.importModel(uris)
         }
         val localImageModelImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -127,14 +127,7 @@ class MainActivity : ComponentActivity() {
                     state = state,
                     onTab = viewModel::selectTab,
                     onImport = {
-                        importLauncher.launch(
-                            arrayOf(
-                                "application/octet-stream",
-                                "application/zip",
-                                "application/x-zip-compressed",
-                                "*/*"
-                            )
-                        )
+                        importLauncher.launch(Unit)
                     },
                     onImportLocalImageModel = {
                         localImageModelImportLauncher.launch(

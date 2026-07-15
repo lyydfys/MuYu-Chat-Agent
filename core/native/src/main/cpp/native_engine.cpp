@@ -1055,6 +1055,76 @@ std::string model_meta_string(const llama_model *model, const std::string &key) 
     return std::string(buffer.data());
 }
 
+std::string lowercase_trimmed_ascii(std::string value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    const auto last = value.find_last_not_of(" \t\r\n");
+    value = value.substr(first, last - first + 1);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return (char) std::tolower(c);
+    });
+    return value;
+}
+
+bool model_meta_declares_non_causal(
+        const llama_model *model,
+        const std::string &architecture) {
+    if (architecture.empty()) return false;
+    const auto raw = lowercase_trimmed_ascii(
+            model_meta_string(model, architecture + ".attention.causal"));
+    return raw == "false" || raw == "0";
+}
+
+bool model_meta_declares_pooling(
+        const llama_model *model,
+        const std::string &architecture) {
+    if (architecture.empty()) return false;
+    const auto raw = lowercase_trimmed_ascii(
+            model_meta_string(model, architecture + ".pooling_type"));
+    if (raw.empty() || raw == "0" || raw == "-1" || raw == "none" || raw == "unspecified") {
+        return false;
+    }
+    try {
+        return std::stoll(raw) > 0;
+    } catch (...) {
+        // Pooling metadata is not part of the autoregressive chat contract.
+        // An unfamiliar non-empty representation is therefore rejected rather
+        // than being silently routed into token generation.
+        return true;
+    }
+}
+
+bool is_dedicated_non_chat_architecture(const std::string &architecture) {
+    static const std::vector<std::string> architectures = {
+            "clip",
+            "bert",
+            "modern-bert",
+            "nomic-bert",
+            "nomic-bert-moe",
+            "neo-bert",
+            "jina-bert-v2",
+            "jina-bert-v3",
+            "eurobert",
+            "gemma-embedding",
+            "llama-embed",
+            "wavtokenizer-dec",
+    };
+    const auto normalized = lowercase_trimmed_ascii(architecture);
+    return std::find(architectures.begin(), architectures.end(), normalized) != architectures.end();
+}
+
+bool model_supports_autoregressive_chat(
+        const llama_model *model,
+        const std::string &architecture) {
+    return model != nullptr &&
+            llama_model_has_decoder(model) &&
+            !llama_model_has_encoder(model) &&
+            !llama_model_is_diffusion(model) &&
+            !is_dedicated_non_chat_architecture(architecture) &&
+            !model_meta_declares_non_causal(model, architecture) &&
+            !model_meta_declares_pooling(model, architecture);
+}
+
 int model_mtp_layer_count(const llama_model *model, const std::string &architecture) {
     if (architecture.empty()) return 0;
     const std::string raw = model_meta_string(model, architecture + ".nextn_predict_layers");
@@ -2167,6 +2237,15 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         return 1;
     }
     g_model_architecture = model_meta_string(g_model, "general.architecture");
+    if (!model_supports_autoregressive_chat(g_model, g_model_architecture)) {
+        g_last_error = "The selected GGUF is not an autoregressive chat model supported by the current generation path";
+        if (!g_model_architecture.empty()) {
+            g_last_error += ": architecture=" + g_model_architecture;
+        }
+        g_last_error += ".";
+        free_llama_locked();
+        return 18;
+    }
     g_model_mtp_layers = model_mtp_layer_count(g_model, g_model_architecture);
     g_model_hybrid = llama_model_is_hybrid(g_model);
     g_model_recurrent = llama_model_is_recurrent(g_model);

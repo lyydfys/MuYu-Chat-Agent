@@ -102,6 +102,36 @@ class RuntimeIdentityFactoryTest {
     }
 
     @Test
+    fun generatedMnnRuntimeConfigDoesNotChangeIdentityAfterFirstLoad() {
+        val root = tempDirectory()
+        try {
+            val bundle = File(root, "mnn").apply { mkdirs() }
+            File(bundle, "config.json").writeText(
+                "{\"llm_config\":\"llm_config.json\",\"prompt_template\":" +
+                    "\"<|im_start|>user\\n%s<|im_end|>\\n<|im_start|>assistant\\n\"}"
+            )
+            File(bundle, "llm_config.json").writeText("""{"hidden_size":896}""")
+            File(bundle, "llm.mnn").writeText("weights")
+            val model = manifest(
+                path = bundle,
+                sha256 = "a".repeat(64),
+                runtime = ChatModelRuntime.MNN
+            )
+
+            val beforeFirstLoad = build(model)
+            File(bundle, "mca_runtime_config.json").writeText(
+                "{\"jinja\":{\"chat_template\":\"generated compatibility template\"}}"
+            )
+            val afterFirstLoad = build(model)
+
+            assertEquals(beforeFirstLoad.configFingerprint, afterFirstLoad.configFingerprint)
+            assertEquals(beforeFirstLoad.identity.identityHash, afterFirstLoad.identity.identityHash)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun deviceIdentityIgnoresVolatileMeasurementsButTracksStableCapabilities() {
         val root = tempDirectory()
         try {

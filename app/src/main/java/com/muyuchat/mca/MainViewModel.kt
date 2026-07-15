@@ -101,6 +101,7 @@ import com.muyuchat.core.tuning.CandidateHardGate
 import com.muyuchat.core.tuning.CandidateScore
 import com.muyuchat.core.tuning.CandidateScorer
 import com.muyuchat.core.tuning.CandidateSelectionPolicy
+import com.muyuchat.core.tuning.BootstrapLoadCanaryPolicy
 import com.muyuchat.core.tuning.ExecutionProfileKind
 import com.muyuchat.core.tuning.HotExecutionParams
 import com.muyuchat.core.tuning.LoadBoundExecutionParams
@@ -7993,7 +7994,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             frequencyPenalty = 0.0f,
             reasoningMode = ReasoningMode.OFF,
             hideReasoning = true,
-            systemPrompt = "你是 MCA 正确性校准器，只按用户要求输出，不要解释。"
+            // Some valid compact MNN exporters expose a user/assistant prompt
+            // template but no system-role slot. Bootstrap proves the real chat
+            // path without injecting an unsupported role; candidate tuning
+            // still uses the richer strict correctness suite below.
+            systemPrompt = ""
         )
         val output = StringBuilder()
         var stats = RuntimeStats()
@@ -8004,7 +8009,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     messages = listOf(
                         ChatMessage(
                             Role.USER,
-                            MinimumTextCanaryPolicy.prompt
+                            BootstrapLoadCanaryPolicy.prompt
                         )
                     ),
                     params = canaryParams
@@ -8024,13 +8029,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         val text = output.toString()
-        val passed = errorMessage == null && MinimumTextCanaryPolicy.matches(text)
+        val passed = errorMessage == null && BootstrapLoadCanaryPolicy.matches(text)
         return BootstrapCanaryResult(
             passed = passed,
             detail = errorMessage ?: if (passed) {
-                "minimum-text-v1 通过（${text.length} 字，decode ${"%.2f".format(stats.decodeTps)} token/s）"
+                "bootstrap-load-v1 通过（${text.length} 字，decode ${"%.2f".format(stats.decodeTps)} token/s）"
             } else {
-                "输出未满足 minimum-text-v1 标记/模板/清洁度要求：${text.take(160)}"
+                "输出未满足 bootstrap-load-v1 最小生成契约：${text.take(160)}"
             },
             stats = stats
         )

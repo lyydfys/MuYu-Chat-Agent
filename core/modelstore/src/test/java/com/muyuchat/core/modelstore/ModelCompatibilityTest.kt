@@ -44,6 +44,34 @@ class ModelCompatibilityTest {
     }
 
     @Test
+    fun atomicImportStagingFilePreservesGgufIdentityForPreflight() {
+        val finalFile = ggufFile("Qwen3.5-4B-Q4_K_M.gguf", architecture = "qwen3", fileType = 15)
+        val staging = atomicImportStagingFile(finalFile, transactionId = "test-transaction")
+        staging.parentFile?.mkdirs()
+        finalFile.copyTo(staging)
+
+        assertEquals(finalFile.name, staging.name)
+        assertTrue(staging.name.endsWith(".gguf", ignoreCase = true))
+        assertTrue(ModelCompatibility.check(staging).canLoad)
+    }
+
+    @Test
+    fun atomicImportStagingFileKeepsAuxiliaryAndSplitGuardsEffective() {
+        val directory = Files.createTempDirectory("gguf-import-guards-").toFile()
+        val mmproj = File(directory, "mmproj-Qwen3.5.gguf")
+        val mtp = File(directory, "mtp-Qwen3.5.gguf")
+        val split = File(directory, "Qwen3.5-00001-of-00002.gguf")
+
+        listOf(mmproj, mtp, split).forEach { finalFile ->
+            val staging = atomicImportStagingFile(finalFile, transactionId = finalFile.nameWithoutExtension)
+            staging.parentFile?.mkdirs()
+            staging.writeBytes(fakeGguf(architecture = "qwen3", fileType = 15))
+            assertEquals(finalFile.name, staging.name)
+            assertFalse(ModelCompatibility.check(staging).canLoad)
+        }
+    }
+
+    @Test
     fun veryLowBitGgufWarnsAboutAnswerQuality() {
         val file = ggufFile("Gemma-4-26B-IQ2_XXS.gguf", architecture = "gemma", fileType = 19)
 
@@ -51,6 +79,109 @@ class ModelCompatibilityTest {
 
         assertTrue(result.canLoad)
         assertTrue(result.warnings.any { it.contains("极低比特") && it.contains("指令遵循") })
+    }
+
+    @Test
+    fun unknownChatArchitectureDefersFinalDecisionToCurrentLlamaRuntime() {
+        val file = ggufFile("DeepSeek-V3-Q4_K_M.gguf", architecture = "deepseek2", fileType = 15)
+
+        val result = ModelCompatibility.check(file)
+
+        assertTrue(result.canLoad)
+        assertTrue(result.warnings.any { it.contains("architecture=deepseek2") })
+    }
+
+    @Test
+    fun supportedCausalArchitecturesAreNotRejectedByANameBasedDenylist() {
+        listOf("pangu-embedded", "talkie", "paddleocr", "deepseek2-ocr").forEach { architecture ->
+            val file = ggufFile(
+                "$architecture-Q4_K_M.gguf",
+                architecture = architecture,
+                fileType = 15,
+                causalAttention = true,
+                poolingType = 0
+            )
+
+            assertTrue("architecture=$architecture", ModelCompatibility.check(file).canLoad)
+        }
+    }
+
+    @Test
+    fun poolingMetadataBlocksEmbeddingAndRerankerVariantsUsingChatArchitectureNames() {
+        listOf(
+            Triple("qwen2", 1, "embedding"),
+            Triple("qwen3", 3, "embedding-last"),
+            Triple("qwen3", 4, "reranker")
+        ).forEach { (architecture, poolingType, label) ->
+            val file = ggufFile(
+                "$architecture-$label-Q4_K_M.gguf",
+                architecture = architecture,
+                fileType = 15,
+                causalAttention = true,
+                poolingType = poolingType
+            )
+
+            val metadata = GgufMetadataReader.read(file)
+            val result = ModelCompatibility.check(file, metadata)
+
+            assertEquals(poolingType, metadata.poolingType)
+            assertFalse(result.canLoad)
+            assertTrue(result.message.contains("pooling_type=$poolingType"))
+        }
+    }
+
+    @Test
+    fun nonCausalMetadataBlocksAnOtherwiseKnownChatArchitecture() {
+        val file = ggufFile(
+            "Qwen3-NonCausal-Q4_K_M.gguf",
+            architecture = "qwen3",
+            fileType = 15,
+            causalAttention = false
+        )
+
+        val metadata = GgufMetadataReader.read(file)
+        val result = ModelCompatibility.check(file, metadata)
+
+        assertEquals(false, metadata.causalAttention)
+        assertFalse(result.canLoad)
+        assertTrue(result.message.contains("attention.causal=false"))
+    }
+
+    @Test
+    fun causalChatMetadataWithNoPoolingRemainsLoadable() {
+        val file = ggufFile(
+            "Qwen3-Chat-Q4_K_M.gguf",
+            architecture = "qwen3",
+            fileType = 15,
+            causalAttention = true,
+            poolingType = 0
+        )
+
+        val metadata = GgufMetadataReader.read(file)
+
+        assertEquals(true, metadata.causalAttention)
+        assertEquals(0, metadata.poolingType)
+        assertTrue(ModelCompatibility.check(file, metadata).canLoad)
+    }
+
+    @Test
+    fun embeddingArchitectureIsNotRegisteredAsAChatModel() {
+        val file = ggufFile("Nomic-Embed-Q4_K_M.gguf", architecture = "nomic-bert", fileType = 15)
+
+        val result = ModelCompatibility.check(file)
+
+        assertFalse(result.canLoad)
+        assertTrue(result.message.contains("architecture=nomic-bert"))
+    }
+
+    @Test
+    fun nonCausalDiffusionArchitectureIsNotRegisteredAsAutoregressiveChat() {
+        val file = ggufFile("LLaDA-Q4_K_M.gguf", architecture = "llada", fileType = 15)
+
+        val result = ModelCompatibility.check(file)
+
+        assertFalse(result.canLoad)
+        assertTrue(result.message.contains("architecture=llada"))
     }
 
     @Test
@@ -208,26 +339,47 @@ class ModelCompatibilityTest {
         File(dir, "qnn_context.bin").writeBytes(byteArrayOf(1))
     }
 
-    private fun ggufFile(name: String, architecture: String, fileType: Int): File {
+    private fun ggufFile(
+        name: String,
+        architecture: String,
+        fileType: Int,
+        causalAttention: Boolean? = null,
+        poolingType: Int? = null
+    ): File {
         val directory = Files.createTempDirectory("gguf-fixture-").toFile().apply { deleteOnExit() }
         return File(directory, name).apply {
-            writeBytes(fakeGguf(architecture, fileType))
+            writeBytes(fakeGguf(architecture, fileType, causalAttention, poolingType))
             deleteOnExit()
         }
     }
 
-    private fun fakeGguf(architecture: String, fileType: Int): ByteArray =
+    private fun fakeGguf(
+        architecture: String,
+        fileType: Int,
+        causalAttention: Boolean? = null,
+        poolingType: Int? = null
+    ): ByteArray =
         ByteArrayOutputStream().apply {
             write(byteArrayOf('G'.code.toByte(), 'G'.code.toByte(), 'U'.code.toByte(), 'F'.code.toByte()))
             writeU32(3)
             writeU64(0)
-            writeU64(2)
+            writeU64(2L + (if (causalAttention != null) 1L else 0L) + (if (poolingType != null) 1L else 0L))
             writeString("general.architecture")
             writeU32(8)
             writeString(architecture)
             writeString("general.file_type")
             writeU32(4)
             writeU32(fileType)
+            causalAttention?.let { causal ->
+                writeString("$architecture.attention.causal")
+                writeU32(7)
+                write(if (causal) 1 else 0)
+            }
+            poolingType?.let { pooling ->
+                writeString("$architecture.pooling_type")
+                writeU32(4)
+                writeU32(pooling)
+            }
         }.toByteArray()
 
     private fun ByteArrayOutputStream.writeString(value: String) {

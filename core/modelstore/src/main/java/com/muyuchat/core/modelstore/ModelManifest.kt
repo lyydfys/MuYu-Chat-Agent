@@ -123,5 +123,7 @@ data class GgufMetadata(
     val version: Int? = null,
     val architecture: String? = null,
     val quant: String? = null,
-    val fileType: Int? = null
+    val fileType: Int? = null,
+    val causalAttention: Boolean? = null,
+    val poolingType: Int? = null
 )
