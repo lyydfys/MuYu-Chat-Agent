@@ -2,12 +2,36 @@ package com.muyuchat.core.modelstore
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.file.Files
 
 class ModelCompatibilityTest {
+    @Test
+    fun readyMnnVisualComponentAcceptsImagesOnEveryCompatibleDevice() {
+        val unvalidatedMnn = ModelManifest(
+            id = "mnn-vision",
+            displayName = "MNN visual",
+            path = "/models/mnn",
+            runtime = ChatModelRuntime.MNN,
+            source = ModelSource.LOCAL,
+            fileName = "config.json",
+            sizeBytes = 1L,
+            sha256 = "sha",
+            visionValidated = false
+        )
+        val validatedMnn = unvalidatedMnn.copy(visionValidated = true)
+        val gguf = unvalidatedMnn.copy(runtime = ChatModelRuntime.LLAMA_CPP)
+
+        assertTrue(unvalidatedMnn.acceptsImageInput(nativeVisionReady = true))
+        assertTrue(validatedMnn.acceptsImageInput(nativeVisionReady = true))
+        assertTrue(gguf.acceptsImageInput(nativeVisionReady = true))
+        assertFalse(validatedMnn.acceptsImageInput(nativeVisionReady = false))
+    }
+
     @Test
     fun qwenMainModelPassesPreflight() {
         val file = ggufFile("Qwen3.5-4B-Q4_K_M.gguf", architecture = "qwen3", fileType = 15)
@@ -17,6 +41,16 @@ class ModelCompatibilityTest {
         assertTrue(result.canLoad)
         assertEquals("qwen3", metadata.architecture)
         assertEquals("Q4_K_M", metadata.quant)
+    }
+
+    @Test
+    fun veryLowBitGgufWarnsAboutAnswerQuality() {
+        val file = ggufFile("Gemma-4-26B-IQ2_XXS.gguf", architecture = "gemma", fileType = 19)
+
+        val result = ModelCompatibility.check(file)
+
+        assertTrue(result.canLoad)
+        assertTrue(result.warnings.any { it.contains("极低比特") && it.contains("指令遵循") })
     }
 
     @Test
@@ -35,6 +69,143 @@ class ModelCompatibilityTest {
 
         assertFalse(result.canLoad)
         assertTrue(result.message.contains("分片"))
+    }
+
+    @Test
+    fun mnnBundleRequiresLlmConfigAndNonEmptyCoreFiles() {
+        val dir = Files.createTempDirectory("mnn-bundle").toFile()
+        listOf(
+            "config.json",
+            "llm_config.json",
+            "llm.mnn",
+            "llm.mnn.weight",
+            "llm.mnn.json",
+            "tokenizer.txt"
+        )
+            .forEach { name -> File(dir, name).writeText("x") }
+
+        assertTrue(isCompleteMnnBundleDirectory(dir))
+
+        File(dir, "llm_config.json").delete()
+        assertFalse(isCompleteMnnBundleDirectory(dir))
+
+        File(dir, "llm_config.json").writeText("x")
+        File(dir, "llm.mnn.weight").writeBytes(ByteArray(0))
+        assertFalse(isCompleteMnnBundleDirectory(dir))
+
+        File(dir, "llm.mnn.weight").writeText("x")
+        File(dir, "llm.mnn.json").delete()
+        assertFalse(isCompleteMnnBundleDirectory(dir))
+    }
+
+    @Test
+    fun qairtBundleAcceptsUnpackedGenieXArtifacts() {
+        val dir = Files.createTempDirectory("qairt-bundle").toFile()
+        assertFalse(isCompleteQairtBundleDirectory(dir))
+
+        File(dir, "genie_config.json").writeText("{}")
+        assertFalse(isCompleteQairtBundleDirectory(dir))
+
+        File(dir, "qnn_context.bin").writeBytes(byteArrayOf(1, 2, 3))
+        assertTrue(isCompleteQairtBundleDirectory(dir))
+
+        File(dir, "genie_config.json").delete()
+        assertFalse(isCompleteQairtBundleDirectory(dir))
+    }
+
+    @Test
+    fun qairtBundleResolvesAnUnambiguousNestedRoot() {
+        val outer = Files.createTempDirectory("qairt-wrapper").toFile()
+        val root = File(outer, "Qwen3-geniex").apply { mkdirs() }
+        writeQairtBundle(root)
+
+        assertEquals(root.canonicalFile, findQairtBundleRoot(outer))
+        assertFalse(isCompleteQairtBundleDirectory(outer))
+    }
+
+    @Test
+    fun qairtBundleDoesNotFlattenAmbiguousRoots() {
+        val outer = Files.createTempDirectory("qairt-ambiguous").toFile()
+        writeQairtBundle(File(outer, "part-a").apply { mkdirs() })
+        writeQairtBundle(File(outer, "part-b").apply { mkdirs() })
+
+        assertNull(findQairtBundleRoot(outer))
+        assertFalse(isCompleteQairtBundleDirectory(outer))
+    }
+
+    @Test
+    fun qairtManifestMigratesFromLegacyOuterDirectory() {
+        val outer = Files.createTempDirectory("qairt-manifest").toFile()
+        val root = File(outer, "bundle").apply { mkdirs() }
+        writeQairtBundle(root)
+        val legacy = ModelManifest(
+            id = "legacy-qairt",
+            displayName = "Legacy QAIRT",
+            path = outer.absolutePath,
+            runtime = ChatModelRuntime.GENIEX_QAIRT,
+            source = ModelSource.LOCAL,
+            fileName = outer.name,
+            sizeBytes = 0L,
+            sha256 = ""
+        )
+
+        val migrated = normalizeQairtManifestRoot(ModelManifest.fromJson(legacy.toJson()))
+
+        assertEquals(root.canonicalPath, migrated.path)
+        assertEquals(root.name, migrated.fileName)
+    }
+
+    @Test
+    fun installedQairtRecoveryFindsCompleteOrphanAndSkipsRegisteredRepo() {
+        val sdkRoot = Files.createTempDirectory("installed-qairt").toFile()
+        val owner = File(sdkRoot, "qualcomm").apply { mkdirs() }
+        val vl = File(owner, "Qwen3-VL-4B-Instruct").apply { mkdirs() }
+        val text = File(owner, "Qwen3-4B-Instruct-2507").apply { mkdirs() }
+        val incomplete = File(owner, "incomplete").apply { mkdirs() }
+        writeQairtBundle(vl)
+        writeQairtBundle(text)
+        File(incomplete, "metadata.json").writeText("{}")
+        val registered = ModelManifest(
+            id = "registered-text",
+            displayName = "Qwen3 4B QAIRT",
+            path = Files.createTempDirectory("managed-qairt").toFile().absolutePath,
+            runtime = ChatModelRuntime.GENIEX_QAIRT,
+            source = ModelSource.HUGGING_FACE,
+            repoId = "qualcomm/Qwen3-4B-Instruct-2507",
+            fileName = "Qwen3-4B-Instruct-2507",
+            sizeBytes = 1L,
+            sha256 = "sha"
+        )
+
+        val recovered = findRecoverableInstalledQairtBundles(sdkRoot, listOf(registered))
+
+        assertEquals(listOf("qualcomm/Qwen3-VL-4B-Instruct"), recovered.map { it.repoId })
+        assertEquals(vl.canonicalPath, recovered.single().bundleDir.canonicalPath)
+    }
+
+    @Test
+    fun installedQairtRecoverySkipsBundleAlreadyRegisteredByCanonicalPath() {
+        val sdkRoot = Files.createTempDirectory("installed-qairt-path").toFile()
+        val bundle = File(File(sdkRoot, "qualcomm").apply { mkdirs() }, "Qwen3-VL-4B-Instruct")
+            .apply { mkdirs() }
+        writeQairtBundle(bundle)
+        val registered = ModelManifest(
+            id = "registered-vl",
+            displayName = "Qwen3-VL-4B-Instruct",
+            path = bundle.absolutePath,
+            runtime = ChatModelRuntime.GENIEX_QAIRT,
+            source = ModelSource.LOCAL,
+            fileName = bundle.name,
+            sizeBytes = 1L,
+            sha256 = "sha"
+        )
+
+        assertTrue(findRecoverableInstalledQairtBundles(sdkRoot, listOf(registered)).isEmpty())
+    }
+
+    private fun writeQairtBundle(dir: File) {
+        File(dir, "genie_config.json").writeText("{}")
+        File(dir, "qnn_context.bin").writeBytes(byteArrayOf(1))
     }
 
     private fun ggufFile(name: String, architecture: String, fileType: Int): File {

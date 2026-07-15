@@ -1,0 +1,682 @@
+package com.muyuchat.mca
+
+import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
+import com.muyuchat.core.deviceprofile.DeviceProfile
+import com.muyuchat.core.deviceprofile.QnnRuntimeProbeState
+import com.muyuchat.core.deviceprofile.QnnRuntimeStatus
+import com.muyuchat.core.deviceprofile.ThermalStatus
+import com.muyuchat.core.telemetry.SocFamily
+import com.muyuchat.core.telemetry.SocInfo
+import java.io.File
+import java.nio.file.Files
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class LocalImageQnnRunnerTest {
+    @Test
+    fun qnnImageBundleDoesNotBecomeActiveWhenRuntimeIsMissing() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(runnerReady = true).health(
+            device = snapdragonElite(qnnReady = false),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.QNN_RUNTIME_MISSING, report.state)
+        assertFalse(report.npuActive)
+    }
+
+    @Test
+    fun qnnImageBundleDoesNotBecomeActiveWhenRuntimeLoadProbeFails() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(runnerReady = true).health(
+            device = snapdragonDevice("SM8750", failedRuntime("mock load failure")),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.QNN_RUNTIME_MISSING, report.state)
+        assertFalse(report.npuActive)
+    }
+
+    @Test
+    fun qnn228BundleRequiresExactV73RuntimeInsteadOfReadyGenericRuntime() {
+        val bundle = qnnImageBundle(requiredRuntimeArch = 73)
+        val report = QnnHtpImageRunner(runnerReady = true).health(
+            device = snapdragonGen2(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.QNN_RUNTIME_MISSING, report.state)
+        assertFalse(report.npuActive)
+        assertTrue(report.message.contains("骁龙 8 Gen 2 NPU 运行环境"))
+        assertFalse(Regex("""(?i)SM\d{4}|HTP\s*V\d+|soc_model""").containsMatchIn(report.message))
+    }
+
+    @Test
+    fun qnnImageBundleCanEnterSmokeWhenCdspRpcDiagnosticFails() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(runnerReady = true).health(
+            device = snapdragonDevice(
+                "SM8750",
+                blockedTransportRuntime("library \"libhidlbase.so\" not found")
+            ),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_REQUIRED, report.state)
+        assertFalse(report.npuActive)
+        assertTrue(report.message.contains("smoke"))
+    }
+
+    @Test
+    fun qnnImageBundleDoesNotBecomeActiveWhenRunnerIsNotPackaged() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(runnerReady = false).health(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.RUNNER_NOT_PACKAGED, report.state)
+        assertFalse(report.npuActive)
+    }
+
+    @Test
+    fun qnnImageBundleRequiresSmokeBeforeActive() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(runnerReady = true).health(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_REQUIRED, report.state)
+        assertFalse(report.npuActive)
+        assertEquals(384, report.smokeWidth)
+        assertEquals(384, report.smokeHeight)
+        assertEquals(1, report.smokeSteps)
+    }
+
+    @Test
+    fun validSmokeSuiteOverridesLegacyPipelineSmokeWithoutGraphMetadata() {
+        val bundle = qnnImageBundle()
+        val manifestFile = File(bundle, "manifest.json")
+        val manifest = JSONObject(manifestFile.readText(Charsets.UTF_8))
+        manifest.put(
+            "smoke",
+            JSONObject()
+                .put("width", 512)
+                .put("height", 512)
+                .put("steps", 4)
+                .put("timeoutSeconds", 240)
+                .put("prompt", "a small ceramic cup on a bright wooden desk")
+        )
+        manifest.put(
+            "smokes",
+            JSONArray()
+                .put(
+                    JSONObject()
+                        .put("graphName", "model")
+                        .put("contextBinary", "diffusion/unet_context.bin")
+                        .put(
+                            "inputs",
+                            JSONArray()
+                                .put(JSONObject().put("name", "sample").put("dataType", "uint16").put("shape", JSONArray(listOf(1, 4, 64, 64))))
+                                .put(JSONObject().put("name", "timestamp").put("dataType", "int32").put("shape", JSONArray(listOf(1))))
+                                .put(JSONObject().put("name", "text_embedding").put("dataType", "uint16").put("shape", JSONArray(listOf(1, 77, 768))))
+                        )
+                        .put(
+                            "outputs",
+                            JSONArray().put(
+                                JSONObject().put("name", "output").put("dataType", "uint16").put("shape", JSONArray(listOf(1, 4, 64, 64)))
+                            )
+                        )
+                )
+                .put(
+                    JSONObject()
+                        .put("graphName", "model")
+                        .put("contextBinary", "vae/vae_decoder_context.bin")
+                        .put(
+                            "inputs",
+                            JSONArray().put(
+                                JSONObject().put("name", "input").put("dataType", "uint16").put("shape", JSONArray(listOf(1, 4, 64, 64)))
+                            )
+                        )
+                        .put(
+                            "outputs",
+                            JSONArray().put(
+                                JSONObject().put("name", "output").put("dataType", "uint16").put("shape", JSONArray(listOf(1, 3, 512, 512)))
+                            )
+                        )
+                )
+        )
+        manifestFile.writeText(manifest.toString(), Charsets.UTF_8)
+
+        val harnessSpec = qnnGraphSmokeSpecForHarness(bundle)
+        val health = QnnHtpImageRunner(runnerReady = true).health(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+        val smoke = QnnHtpImageRunner(
+            runnerReady = true,
+            forcedSmokePassed = true
+        ).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals("model", harnessSpec.graphName)
+        assertEquals("diffusion/unet_context.bin", harnessSpec.contextBinary)
+        assertEquals(LocalImageQnnState.SMOKE_REQUIRED, health.state)
+        assertEquals(512, health.smokeWidth)
+        assertEquals(512, health.smokeHeight)
+        assertEquals(4, health.smokeSteps)
+        assertEquals(LocalImageQnnState.NPU_ACTIVE, smoke.state)
+        assertTrue(smoke.npuActive)
+    }
+
+    @Test
+    fun failedSmokeKeepsQnnImageInactive() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(
+            runnerReady = true,
+            forcedSmokePassed = false
+        ).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_FAILED, report.state)
+        assertFalse(report.npuActive)
+    }
+
+    @Test
+    fun invalidQnnImageSmokeMetadataStaysInactiveBeforeNativeBridge() {
+        val bundle = qnnImageBundle(smokeOverrides = """"contextBinary": "../bad_context.bin"""")
+        val report = QnnHtpImageRunner(runnerReady = true).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_METADATA_INVALID, report.state)
+        assertFalse(report.npuActive)
+        assertTrue(report.message.contains("safe relative bundle path"))
+    }
+
+    @Test
+    fun missingQnnImageContextBinaryStaysInactiveBeforeNativeBridge() {
+        val bundle = qnnImageBundle(contextBinary = "diffusion/missing_context.bin")
+        val report = QnnHtpImageRunner(runnerReady = true).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_METADATA_INVALID, report.state)
+        assertFalse(report.npuActive)
+        assertTrue(report.message.contains("contextBinary is missing"))
+        assertTrue(report.message.contains("diffusion/missing_context.bin"))
+    }
+
+    @Test
+    fun emptyQnnImageContextBinaryStaysInactiveBeforeNativeBridge() {
+        val bundle = qnnImageBundle(contextBinaryContent = "")
+        val report = QnnHtpImageRunner(runnerReady = true).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_METADATA_INVALID, report.state)
+        assertFalse(report.npuActive)
+        assertTrue(report.message.contains("contextBinary is missing"))
+    }
+
+    @Test
+    fun nativeBridgeWithoutGraphExecutionKeepsQnnImageInactive() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(
+            runnerReady = true,
+            smokeBridge = FakeImageSmokeBridge(
+                NativeQnnSmokeResult(
+                    message = "graph runner pending",
+                    runnerReady = true,
+                    graphRunnerReady = false,
+                    graphExecute = false,
+                    npuActive = false,
+                    smokePassed = false,
+                    elapsedMs = 42,
+                    graphMetadataReady = true,
+                    qnnInterfacePresent = true,
+                    sdkHeadersPresent = true,
+                    typedGraphBindingsCompiled = true,
+                    smokeInputCount = 2,
+                    smokeOutputCount = 1,
+                    tensorBufferPlanReady = true,
+                    inputBufferBytes = 65_540,
+                    outputBufferBytes = 65_536,
+                    executionStage = "graph_execution_unimplemented",
+                    runtimeLoaded = true,
+                    qnnInterfaceFound = true,
+                    bundleManifestFound = true,
+                    bundleGraphArtifactFound = true,
+                    smokeMetadataComplete = true,
+                    sdkHeadersCompiled = true,
+                    inputTensors = listOf(
+                        QnnTensorBufferDiagnostics(
+                            name = "latent",
+                            role = "input",
+                            dataType = "float32",
+                            shape = listOf(1, 4, 64, 64),
+                            elementCount = 16_384,
+                            bytesPerElement = 4,
+                            byteSize = 65_536,
+                            supported = true
+                        ),
+                        QnnTensorBufferDiagnostics(
+                            name = "timestep",
+                            role = "input",
+                            dataType = "int32",
+                            shape = listOf(1),
+                            elementCount = 1,
+                            bytesPerElement = 4,
+                            byteSize = 4,
+                            supported = true
+                        )
+                    ),
+                    outputTensors = listOf(
+                        QnnTensorBufferDiagnostics(
+                            name = "noise_pred",
+                            role = "output",
+                            dataType = "float32",
+                            shape = listOf(1, 4, 64, 64),
+                            elementCount = 16_384,
+                            bytesPerElement = 4,
+                            byteSize = 65_536,
+                            supported = true
+                        )
+                    )
+                )
+            )
+        ).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_FAILED, report.state)
+        assertFalse(report.npuActive)
+        assertFalse(report.graphExecute)
+        assertEquals(42, report.smokeElapsedMs)
+        assertEquals("graph_execution_unimplemented", report.qnnDiagnostics.executionStage)
+        assertTrue(report.qnnDiagnostics.graphMetadataReady)
+        assertTrue(report.qnnDiagnostics.tensorBufferPlanReady)
+        assertEquals(2, report.qnnDiagnostics.smokeInputCount)
+        assertEquals(1, report.qnnDiagnostics.smokeOutputCount)
+        assertTrue(report.qnnDiagnostics.allTensorsBindable)
+        assertEquals("latent", report.qnnDiagnostics.inputTensors.first().name)
+        assertEquals(65_536L, report.qnnDiagnostics.inputTensors.first().byteSize)
+        assertFalse(report.qnnDiagnostics.graphExecuted)
+        assertEquals(
+            "graph_execution_unimplemented",
+            report.toJson().getJSONObject("qnnDiagnostics").getString("executionStage")
+        )
+        assertEquals(
+            "noise_pred",
+            report.toJson()
+                .getJSONObject("qnnDiagnostics")
+                .getJSONArray("outputTensors")
+                .getJSONObject(0)
+                .getString("name")
+        )
+    }
+
+    @Test
+    fun forwardCompatibleSm8550ContextStillReportsNativeFailureOnSm8750() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(
+            runnerReady = true,
+            smokeBridge = FakeImageSmokeBridge(
+                NativeQnnSmokeResult(
+                    message = "QNN contextCreateFromBinary failed: invalid config",
+                    runnerReady = true,
+                    graphRunnerReady = false,
+                    graphExecute = false,
+                    npuActive = false,
+                    smokePassed = false,
+                    elapsedMs = 121,
+                    graphMetadataReady = true,
+                    executionStage = "context_load_failed",
+                    runtimeLoaded = true,
+                    qnnInterfaceFound = true,
+                    backendCreated = true,
+                    contextLoaded = false,
+                    binaryMetadata = QnnBinaryMetadataDiagnostics(
+                        attempted = true,
+                        parsed = true,
+                        version = 3,
+                        buildId = "v2.28.0.241029232508_102474",
+                        socModel = 43,
+                        graphCount = 1,
+                        graphNames = listOf("sd15_unet"),
+                        message = "QNN context binary metadata parsed; socModel=43"
+                    )
+                )
+            )
+        ).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_FAILED, report.state)
+        assertFalse(report.npuActive)
+        assertTrue(report.message.contains("invalid config"))
+        assertEquals(43, report.qnnDiagnostics.binaryMetadata.socModel)
+        assertEquals(
+            43,
+            report.toJson()
+                .getJSONObject("qnnDiagnostics")
+                .getJSONObject("binaryMetadata")
+                .getInt("socModel")
+        )
+    }
+
+    @Test
+    fun forwardCompatibleSm8550ContextCanBecomeActiveOnSm8750AfterGraphExecution() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(
+            runnerReady = true,
+            smokeBridge = FakeImageSmokeBridge(
+                NativeQnnSmokeResult(
+                    message = "graph execute ok",
+                    runnerReady = true,
+                    graphRunnerReady = true,
+                    graphExecute = true,
+                    npuActive = true,
+                    smokePassed = true,
+                    elapsedMs = 7_100,
+                    executionStage = "graph_execute_passed",
+                    binaryMetadata = QnnBinaryMetadataDiagnostics(
+                        attempted = true,
+                        parsed = true,
+                        version = 3,
+                        socModel = 43,
+                        graphCount = 1,
+                        graphNames = listOf("sd15_unet")
+                    )
+                )
+            )
+        ).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.NPU_ACTIVE, report.state)
+        assertTrue(report.npuActive)
+        assertTrue(report.smokePassed)
+        assertTrue(report.graphExecute)
+        assertTrue(report.qnnDiagnostics.graphExecuted)
+        assertTrue(report.message.contains("通过"))
+        assertEquals("qnn_graph", report.toJson().getString("executionMode"))
+        assertFalse(report.toJson().getBoolean("fallback"))
+    }
+
+    @Test
+    fun newerSm8750ContextIsStillRejectedOnSm8550AfterGraphExecution() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(
+            runnerReady = true,
+            smokeBridge = FakeImageSmokeBridge(
+                NativeQnnSmokeResult(
+                    message = "graph execute ok",
+                    runnerReady = true,
+                    graphRunnerReady = true,
+                    graphExecute = true,
+                    npuActive = true,
+                    smokePassed = true,
+                    elapsedMs = 7_100,
+                    executionStage = "graph_execute_passed",
+                    binaryMetadata = QnnBinaryMetadataDiagnostics(
+                        attempted = true,
+                        parsed = true,
+                        version = 3,
+                        socModel = 69,
+                        graphCount = 1,
+                        graphNames = listOf("sd15_unet")
+                    )
+                )
+            )
+        ).runSmoke(
+            device = snapdragonGen2(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_FAILED, report.state)
+        assertFalse(report.npuActive)
+        assertTrue(report.graphExecute)
+        assertTrue(report.message.contains("骁龙 8 Elite"))
+        assertTrue(report.message.contains("骁龙 8 Gen 2"))
+        assertFalse(report.message.contains("SM8750"))
+        assertFalse(report.message.contains("SM8550"))
+    }
+
+    @Test
+    fun nativeBridgeMustProveGraphExecutionBeforeImageNpuActive() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(
+            runnerReady = true,
+            smokeBridge = FakeImageSmokeBridge(
+                NativeQnnSmokeResult(
+                    message = "graph execute ok",
+                    runnerReady = true,
+                    graphRunnerReady = true,
+                    graphExecute = true,
+                    npuActive = true,
+                    smokePassed = true,
+                    elapsedMs = 7_100
+                )
+            )
+        ).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.NPU_ACTIVE, report.state)
+        assertTrue(report.npuActive)
+        assertTrue(report.graphExecute)
+        assertEquals(7_100, report.smokeElapsedMs)
+    }
+
+    @Test
+    fun passedSmokeIsTheOnlyPathToQnnImageNpuActive() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(
+            runnerReady = true,
+            forcedSmokePassed = true,
+            forcedSmokeElapsedMs = 12_500
+        ).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.NPU_ACTIVE, report.state)
+        assertTrue(report.npuActive)
+        assertTrue(report.smokePassed)
+        assertTrue(report.graphExecute)
+        assertEquals(12_500, report.smokeElapsedMs)
+    }
+
+    @Test
+    fun incompleteQnnImageBundleStaysInactiveBeforeRunnerCheck() {
+        val bundle = qnnImageBundle(includeVae = false)
+        val report = QnnHtpImageRunner(runnerReady = true).health(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.BUNDLE_INCOMPLETE, report.state)
+        assertFalse(report.npuActive)
+        assertTrue(report.message.contains("VAE"))
+    }
+
+    @Test
+    fun qnnImageBundleHonorsMinimumDeviceTier() {
+        val bundle = qnnImageBundle(minDeviceTier = "SNAPDRAGON_8_ELITE")
+        val report = QnnHtpImageRunner(runnerReady = true).health(
+            device = snapdragonGen2(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.DEVICE_UNSUPPORTED, report.state)
+        assertFalse(report.npuActive)
+    }
+
+    private fun qnnImageBundle(
+        includeVae: Boolean = true,
+        minDeviceTier: String = "SNAPDRAGON_8_GEN2",
+        smokeOverrides: String? = null,
+        contextBinary: String = "diffusion/unet_context.bin",
+        contextBinaryContent: String = "x",
+        requiredRuntimeArch: Int? = null
+    ): File {
+        val root = Files.createTempDirectory("qnn-image-bundle").toFile()
+        root.touch("diffusion/unet_context.bin", contextBinaryContent)
+        if (includeVae) root.touch("vae/vae_decoder_context.bin")
+        root.touch("text_encoder/clip_context.bin")
+        root.touch("tokenizer/tokenizer.json")
+        File(root, "manifest.json").writeText(
+            """
+            {
+              "schema": "mca.image_engine.bundle.v1",
+              "id": "sd15-qnn-min",
+              "title": "SD1.5 QNN Min",
+              "runtime": "QNN_HTP",
+              "minDeviceTier": "$minDeviceTier",
+              "family": "SD15",
+              "requiresQnnRuntime": true,
+              ${requiredRuntimeArch?.let { arch ->
+                  """"requiredRuntimeProfile": {"qnnSdk": "2.28", "htpArch": $arch, "completeBundleRuntime": true},"""
+              }.orEmpty()}
+              "requiresSmokeTest": true,
+              "components": [
+                {"role": "DIFFUSION", "path": "diffusion/unet_context.bin"},
+                {"role": "VAE", "path": "vae/vae_decoder_context.bin"},
+                {"role": "TEXT_ENCODER", "path": "text_encoder/clip_context.bin"},
+                {"role": "TOKENIZER", "path": "tokenizer/tokenizer.json"}
+              ],
+              "smoke": {
+                "width": 384,
+                "height": 384,
+                "steps": 1,
+                "timeoutSeconds": 180,
+                "graphName": "sd15_unet",
+                ${smokeOverrides ?: """"contextBinary": "$contextBinary""""},
+                "inputs": [
+                  {"name": "latent", "dataType": "float32", "shape": [1, 4, 48, 48]},
+                  {"name": "timestep", "dataType": "int32", "shape": [1]},
+                  {"name": "text_embeddings", "dataType": "float32", "shape": [1, 77, 768]}
+                ],
+                "outputs": [
+                  {"name": "noise_pred", "dataType": "float32", "shape": [1, 4, 48, 48]}
+                ]
+              }
+            }
+            """.trimIndent(),
+            Charsets.UTF_8
+        )
+        return root
+    }
+
+    private fun snapdragonElite(qnnReady: Boolean): DeviceProfile =
+        snapdragonDevice("SM8750", qnnReady)
+
+    private fun snapdragonGen2(qnnReady: Boolean): DeviceProfile =
+        snapdragonDevice("SM8550", qnnReady)
+
+    private fun snapdragonDevice(chipsetCode: String, qnnReady: Boolean): DeviceProfile {
+        val runtime = if (qnnReady) readyRuntime() else QnnRuntimeStatus.Missing
+        return snapdragonDevice(chipsetCode, runtime)
+    }
+
+    private fun snapdragonDevice(chipsetCode: String, qnnRuntime: QnnRuntimeStatus): DeviceProfile {
+        val acceleration = DeviceAccelerationAnalyzer.assess(
+            soc = SocInfo("Qualcomm", chipsetCode, SocFamily.Snapdragon),
+            totalRamBytes = 16.gb,
+            qnnRuntime = qnnRuntime
+        )
+        return DeviceProfile(
+            socManufacturer = "Qualcomm",
+            socModel = chipsetCode,
+            socFamily = SocFamily.Snapdragon,
+            cpuCores = 8,
+            estimatedBigCores = 4,
+            totalRamBytes = 16.gb,
+            availableRamBytes = 10.gb,
+            storageFreeBytes = 64.gb,
+            androidApi = 35,
+            thermalStatus = ThermalStatus.None,
+            batteryPercent = 80,
+            isCharging = true,
+            supportedAbis = listOf("arm64-v8a"),
+            primaryAbi = "arm64-v8a",
+            advertisedRamBytes = 16.gb,
+            accelerationProfile = acceleration
+        )
+    }
+
+    private fun readyRuntime(): QnnRuntimeStatus =
+        QnnRuntimeStatus(
+            qnnSystemLibraryPresent = true,
+            qnnHtpLibraryPresent = true,
+            htpSkelLibraryPresent = true,
+            // A smoke-ready profile must include the matching DSP stub as well
+            // as System/HTP/Skel.  Keep this fixture representative of a real
+            // packaged profile so it reaches the bundle/graph gates below.
+            htpStubLibraryPresent = true,
+            searchDirectories = listOf("/data/local/tmp/qnn"),
+            probeState = QnnRuntimeProbeState.LOADABLE,
+            probeMessage = "mock load ok"
+        )
+
+    private fun failedRuntime(message: String): QnnRuntimeStatus =
+        QnnRuntimeStatus(
+            qnnSystemLibraryPresent = true,
+            qnnHtpLibraryPresent = true,
+            htpSkelLibraryPresent = true,
+            searchDirectories = listOf("/data/local/tmp/qnn"),
+            probeState = QnnRuntimeProbeState.LOAD_FAILED,
+            probeMessage = message
+        )
+
+    private fun blockedTransportRuntime(message: String): QnnRuntimeStatus =
+        QnnRuntimeStatus(
+            qnnSystemLibraryPresent = true,
+            qnnHtpLibraryPresent = true,
+            htpSkelLibraryPresent = true,
+            htpStubLibraryPresent = true,
+            cdspRpcLibraryPresent = true,
+            cdspRpcLibraryLoadable = false,
+            cdspRpcMessage = message,
+            searchDirectories = listOf("/data/app/lib/arm64"),
+            probeState = QnnRuntimeProbeState.LOADABLE,
+            probeMessage = "host runtime ok"
+        )
+
+    private fun File.touch(name: String, content: String = "x"): File =
+        File(this, name).also {
+            it.parentFile?.mkdirs()
+            it.writeText(content)
+        }
+
+    private class FakeImageSmokeBridge(
+        private val result: NativeQnnSmokeResult
+    ) : LocalImageQnnSmokeBridge {
+        override val runnerReady: Boolean = true
+        override fun runImageSmoke(
+            bundleRoot: File,
+            runtimeDirs: List<String>,
+            smokeSpec: QnnSmokeSpec
+        ): NativeQnnSmokeResult = result
+    }
+
+    private val Int.gb: Long
+        get() = this * 1024L * 1024L * 1024L
+}

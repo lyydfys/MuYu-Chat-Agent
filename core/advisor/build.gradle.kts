@@ -20,8 +20,10 @@ android {
 dependencies {
     implementation(project(":core:benchmark"))
     implementation(project(":core:deviceprofile"))
+    implementation(project(":core:engine"))
     implementation(project(":core:modelstore"))
     implementation(project(":core:download"))
     implementation(project(":core:tuning"))
     testImplementation(libs.junit)
+    testImplementation(libs.json)
 }

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "artifactType": "real_device_failure_diagnostics",
+  "capturedAt": "2026-07-11T00:00:00.0000000+00:00",
+  "runId": "offline-failure-run",
+  "reason": "process_died",
+  "observedPid": 4242,
+  "lastTelemetrySample": {
+    "capturedAt": "2026-07-11T00:00:01.0000000+00:00",
+    "pid": 4242,
+    "appRssKb": 524288,
+    "thermalStatusRank": 2
+  },
+  "evidence": [
+    {
+      "name": "logcat_crash",
+      "ok": true,
+      "exitCode": 0,
+      "text": "Fatal signal was not present in the crash buffer."
+    },
+    {
+      "name": "app_meminfo",
+      "ok": false,
+      "exitCode": 1,
+      "text": "Process record was unavailable after the observed process death."
+    },
+    {
+      "name": "thermal",
+      "ok": true,
+      "exitCode": 0,
+      "text": "Thermal status remained MODERATE."
+    }
+  ]
+}

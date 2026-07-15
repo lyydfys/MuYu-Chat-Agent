@@ -207,6 +207,7 @@ data class ChatUiState(
     val selectedModelId: String? = null,
     val selectedModelName: String? = null,
     val selectedModelIsCloud: Boolean = false,
+    val selectedModelRuntimeLabel: String? = null,
     val selectedImageModelId: String? = null,
     val selectedImageModelName: String? = null,
     val selectedImageModelIsCloud: Boolean = false,
@@ -222,7 +223,10 @@ data class ChatUiState(
     val webSearchResearchMode: String = "AUTO",
     val webSearchResearchModeLabel: String = "",
     val webSearchResearchOverridden: Boolean = false,
-    val webSearchProviderLabel: String = ""
+    val webSearchProviderLabel: String = "",
+    val visionCapabilityLabel: String = "识图未就绪",
+    val visionCapabilityDetail: String = "请加载云端多模态模型，或绑定本地 mmproj 视觉投影器。",
+    val visionCapabilityReady: Boolean = false
 )
 
 data class AssistantUiItem(
@@ -236,7 +240,6 @@ data class AssistantUiItem(
     val defaultModelId: String?,
     val temperature: Float,
     val topP: Float,
-    val nCtx: Int,
     val nPredict: Int,
     val reasoningMode: ReasoningMode,
     val memoryEnabled: Boolean,
@@ -256,7 +259,6 @@ data class AssistantEditorDraft(
     val defaultModelId: String?,
     val temperature: Float,
     val topP: Float,
-    val nCtx: Int,
     val nPredict: Int,
     val reasoningMode: ReasoningMode,
     val memoryEnabled: Boolean,
@@ -501,6 +503,9 @@ fun ChatScreen(
                 webSearchResearchModeLabel = state.webSearchResearchModeLabel,
                 webSearchResearchOverridden = state.webSearchResearchOverridden,
                 webSearchProviderLabel = state.webSearchProviderLabel,
+                visionCapabilityLabel = state.visionCapabilityLabel,
+                visionCapabilityDetail = state.visionCapabilityDetail,
+                visionCapabilityReady = state.visionCapabilityReady,
                 onToggleWebSearchForTurn = onToggleWebSearchForTurn,
                 onSelectWebSearchResearchMode = onSelectWebSearchResearchMode,
                 onOpenWebSearchSettings = onOpenWebSearchSettings,
@@ -893,7 +898,6 @@ private fun AssistantEditorPage(
     var defaultModelId by remember(assistant?.id) { mutableStateOf(assistant?.defaultModelId) }
     var temperatureText by remember(assistant?.id) { mutableStateOf((assistant?.temperature ?: GenerationParams().temperature).cleanParamText()) }
     var topPText by remember(assistant?.id) { mutableStateOf((assistant?.topP ?: GenerationParams().topP).cleanParamText()) }
-    var nCtxText by remember(assistant?.id) { mutableStateOf((assistant?.nCtx ?: GenerationParams().nCtx).toString()) }
     var nPredictText by remember(assistant?.id) { mutableStateOf((assistant?.nPredict ?: GenerationParams().nPredict).toString()) }
     var reasoningMode by remember(assistant?.id) { mutableStateOf(assistant?.reasoningMode ?: GenerationParams().reasoningMode) }
     var memoryEnabled by remember(assistant?.id) { mutableStateOf(assistant?.memoryEnabled ?: false) }
@@ -910,7 +914,6 @@ private fun AssistantEditorPage(
             defaultModelId = defaultModelId,
             temperature = temperatureText.toAssistantFloat(assistant?.temperature ?: GenerationParams().temperature, 0f, 2f),
             topP = topPText.toAssistantFloat(assistant?.topP ?: GenerationParams().topP, 0f, 1f),
-            nCtx = nCtxText.toAssistantInt(assistant?.nCtx ?: GenerationParams().nCtx, 512, 262_144),
             nPredict = nPredictText.toAssistantInt(assistant?.nPredict ?: GenerationParams().nPredict, 128, 65_536),
             reasoningMode = reasoningMode,
             memoryEnabled = memoryEnabled,
@@ -1050,22 +1053,13 @@ private fun AssistantEditorPage(
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        OutlinedTextField(
-                            value = nCtxText,
-                            onValueChange = { nCtxText = it },
-                            label = { Text("上下文") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f)
-                        )
-                        OutlinedTextField(
-                            value = nPredictText,
-                            onValueChange = { nPredictText = it },
-                            label = { Text("输出长度") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
+                    OutlinedTextField(
+                        value = nPredictText,
+                        onValueChange = { nPredictText = it },
+                        label = { Text("输出长度") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         ReasoningMode.entries.forEach { mode ->
@@ -1077,7 +1071,7 @@ private fun AssistantEditorPage(
                         }
                     }
                     Text(
-                        "保存后作为该助手的默认参数；聊天页和智能调参仍可继续调整当前会话。",
+                        "助手只保存生成参数；上下文、线程和 native 加载参数属于当前模型配置。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2718,7 +2712,7 @@ private fun McaAppMenuPage(
                 subtitle = state.assistants.firstOrNull { it.selected }?.let { "${it.name} · 角色卡与能力" } ?: "当前助手、角色卡、提示词与能力",
                 onClick = onOpenAssistants
             )
-            AppMenuRow(icon = { Icon(Icons.Default.Folder, null) }, title = "模型管理", subtitle = "本地 GGUF 与魔塔下载", onClick = onOpenModels)
+            AppMenuRow(icon = { Icon(Icons.Default.Folder, null) }, title = "模型管理", subtitle = "本地高速/兼容引擎与魔塔下载", onClick = onOpenModels)
             AppMenuRow(icon = { McaLogoMark(size = 22.dp, cornerRadius = 7.dp) }, title = "智能调参", subtitle = "测速、推荐与高级参数", onClick = onOpenAgent)
             AppMenuRow(icon = { Icon(Icons.Default.NetworkWifi, null) }, title = "本地 API", subtitle = "接口地址、Key、API 使用文档", onClick = onOpenApi)
             AppMenuRow(icon = { Icon(Icons.Default.Settings, null) }, title = "系统设置", subtitle = "运行、日志、诊断与实验功能", onClick = onOpenSettings)
@@ -3110,7 +3104,15 @@ private fun ChatStatusBar(
 ) {
     val apiActive = state.selectedModelIsCloud || state.apiEnabled || state.restEnabled
     var modelMenuExpanded by rememberSaveable { mutableStateOf(false) }
-    val assistantName = state.assistants.firstOrNull { it.selected }?.name ?: "默认助手"
+    val modelRuntimeLabel = state.selectedModelRuntimeLabel?.takeIf { it.isNotBlank() }
+    val modelSubtitle = if (state.selectedModelName == null) {
+        modelRuntimeLabel ?: "未加载本地或云端推理引擎"
+    } else {
+        listOfNotNull(
+            modelRuntimeLabel,
+            "${"%.1f".format(state.stats.decodeTps)} token/s".takeIf { state.stats.decodeTps > 0.0 }
+        ).joinToString(" · ")
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -3154,7 +3156,7 @@ private fun ChatStatusBar(
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = if (state.selectedModelName == null) "$assistantName · 未加载" else "$assistantName · ${"%.1f".format(state.stats.decodeTps)} token/s",
+                            text = modelSubtitle,
                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 13.sp),
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -3554,10 +3556,11 @@ private fun ModelChoicePill(
                         if (model.cloud) {
                             if (model.subtitle.isNotBlank()) add(model.subtitle)
                         } else {
+                            if (model.subtitle.isNotBlank()) add(model.subtitle)
                             model.quant?.let(::add)
                             formatModelBytes(model.sizeBytes)?.let(::add)
                         }
-                    }.joinToString(" · ").ifBlank { if (model.cloud) "云端模型" else "本地 GGUF" },
+                    }.joinToString(" · ").ifBlank { if (model.cloud) "云端模型" else "本地推理" },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     color = if (model.loaded) selectedColor else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -4315,8 +4318,12 @@ private fun formatModelBytes(bytes: Long): String? {
 private fun String.removeModelSuffix(): String =
     removeSuffix(".gguf")
         .removeSuffix(".GGUF")
+        .removeSuffix(".mnn")
+        .removeSuffix(".MNN")
         .removeSuffix("-GGUF")
         .removeSuffix("_GGUF")
+        .removeSuffix("-MNN")
+        .removeSuffix("_MNN")
 
 private fun extractAttachmentName(input: String): String? =
     ATTACHMENT_NAME_PATTERNS.firstNotNullOfOrNull { pattern ->
@@ -4365,6 +4372,34 @@ private val ATTACHMENT_NAME_PATTERNS = listOf(
     Regex("""【上传图片：([^】]+)】""")
 )
 
+private val IMAGE_ATTACHMENT_PATTERN = Regex("""【上传图片：([^】]+)】""")
+private val IMAGE_ATTACHMENT_WITH_URI_PATTERN = Regex("""【上传图片：([^】]+)】(?:\s*\n描述：[^\n]+)?\s*\n(\S+)""")
+
+private fun hasImageAttachmentMarker(input: String): Boolean =
+    IMAGE_ATTACHMENT_PATTERN.containsMatchIn(input)
+
+private fun extractAttachmentMeta(input: String): String? {
+    val uriString = IMAGE_ATTACHMENT_WITH_URI_PATTERN.find(input)
+        ?.groupValues
+        ?.getOrNull(2)
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?: return null
+    val sourceLabel = when {
+        uriString.startsWith("content://", ignoreCase = true) -> "系统图片"
+        uriString.startsWith("file://", ignoreCase = true) -> "本地文件"
+        uriString.startsWith("http://", ignoreCase = true) || uriString.startsWith("https://", ignoreCase = true) -> "网络图片"
+        uriString.startsWith("data:image", ignoreCase = true) -> "内联图片"
+        else -> "图片输入"
+    }
+    val extension = uriString
+        .substringBefore('?')
+        .substringAfterLast('.', "")
+        .takeIf { it.length in 2..5 }
+        ?.uppercase()
+    return listOfNotNull(sourceLabel, extension, "发送前自动压缩").joinToString(" · ")
+}
+
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun ChatInputBar(
@@ -4388,6 +4423,9 @@ private fun ChatInputBar(
     webSearchResearchModeLabel: String,
     webSearchResearchOverridden: Boolean,
     webSearchProviderLabel: String,
+    visionCapabilityLabel: String,
+    visionCapabilityDetail: String,
+    visionCapabilityReady: Boolean,
     onToggleWebSearchForTurn: () -> Unit,
     onSelectWebSearchResearchMode: (String) -> Unit,
     onOpenWebSearchSettings: () -> Unit,
@@ -4489,6 +4527,9 @@ private fun ChatInputBar(
             }
             AttachmentPreview(
                 input = input,
+                visionCapabilityLabel = visionCapabilityLabel,
+                visionCapabilityDetail = visionCapabilityDetail,
+                visionCapabilityReady = visionCapabilityReady,
                 onRemove = { onInputChange(removeAttachmentFromInput(input)) }
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -5058,44 +5099,98 @@ private fun ChatUiState.imageTaskSummary(): String {
 }
 
 @Composable
-private fun AttachmentPreview(input: String, onRemove: () -> Unit) {
+private fun AttachmentPreview(
+    input: String,
+    visionCapabilityLabel: String,
+    visionCapabilityDetail: String,
+    visionCapabilityReady: Boolean,
+    onRemove: () -> Unit
+) {
     val name = remember(input) { extractAttachmentName(input) } ?: return
+    val isImageAttachment = remember(input) { hasImageAttachmentMarker(input) }
+    val statusColor = if (visionCapabilityReady) McaPrimaryBlue else MaterialTheme.colorScheme.error
+    val containerColor = if (isImageAttachment) {
+        if (visionCapabilityReady) McaInputIconSurface.copy(alpha = 0.92f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.44f)
+    } else {
+        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+    }
+    val contentColor = if (isImageAttachment) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = 10.dp),
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
-        shape = RoundedCornerShape(14.dp)
+        color = containerColor,
+        shape = RoundedCornerShape(16.dp),
+        border = if (isImageAttachment) BorderStroke(1.dp, statusColor.copy(alpha = 0.22f)) else null
     ) {
         Row(
-            modifier = Modifier.padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+            modifier = Modifier.padding(start = 12.dp, end = 6.dp, top = 9.dp, bottom = 9.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "文件",
-                color = MaterialTheme.colorScheme.primary,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
+            Surface(
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.76f),
+                shape = RoundedCornerShape(10.dp),
                 modifier = Modifier
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            )
+                    .heightIn(min = 30.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = if (isImageAttachment) Icons.Default.Image else Icons.Default.Folder,
+                        contentDescription = null,
+                        tint = if (isImageAttachment) statusColor else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (isImageAttachment) "识图" else "文件",
+                        color = if (isImageAttachment) statusColor else MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
             Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = name,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = name,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = contentColor,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium
+                )
+                if (isImageAttachment) {
+                    Text(
+                        text = "$visionCapabilityLabel · $visionCapabilityDetail",
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                    extractAttachmentMeta(input)?.let { meta ->
+                        Text(
+                            text = meta,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
             IconButton(onClick = onRemove, modifier = Modifier.size(30.dp)) {
                 Icon(
                     Icons.Default.Close,
                     contentDescription = "移除附件",
                     modifier = Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.74f)
+                    tint = contentColor.copy(alpha = 0.74f)
                 )
             }
         }

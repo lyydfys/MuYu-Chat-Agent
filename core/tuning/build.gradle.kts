@@ -21,4 +21,5 @@ dependencies {
     implementation(project(":core:deviceprofile"))
     implementation(project(":core:engine"))
     testImplementation(libs.junit)
+    testImplementation(libs.json)
 }

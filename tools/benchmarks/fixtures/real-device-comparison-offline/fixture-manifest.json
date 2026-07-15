@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "fixtureType": "real_device_comparison_offline",
+  "configPath": "config.json",
+  "smokeFixtures": [
+    {
+      "id": "chat_terminal_metrics",
+      "caseId": "offline-chat",
+      "kind": "chat",
+      "path": "smoke-chat.json",
+      "runId": "offline-chat-run",
+      "expectedMetrics": {
+        "smokeStatus": "completed",
+        "smokeError": null,
+        "model": "Offline Chat Native",
+        "runtime": "qnn",
+        "loadTimeMs": 420,
+        "loadTimeSource": "first_load_ok.loadMs",
+        "ttftMs": 650,
+        "ttftSource": "first_token.elapsedMs",
+        "promptTokens": 128,
+        "completionTokens": 36,
+        "decodeDurationMs": 1200,
+        "decodeTps": 30,
+        "decodeTpsSource": "terminal.nativeStats.completionTokens/terminal.nativeStats.decodeMs",
+        "totalDurationMs": 1850,
+        "totalDurationSource": "terminal.elapsedMs"
+      }
+    },
+    {
+      "id": "image_terminal_metrics",
+      "caseId": "offline-image",
+      "kind": "image",
+      "path": "smoke-image.json",
+      "runId": "offline-image-run",
+      "expectedMetrics": {
+        "smokeStatus": "completed",
+        "model": "Offline Image Config",
+        "runtime": "qnn_htp",
+        "loadTimeMs": 600,
+        "loadTimeSource": "terminal.result.unetContextLoadMs+vaeContextLoadMs",
+        "totalDurationMs": 5000,
+        "totalDurationSource": "terminal.elapsedMs",
+        "imageLatencyMs": 5000,
+        "imageLatencySource": "terminal.elapsedMs",
+        "firstProgressMs": 800,
+        "stepsCompleted": 10,
+        "stepsPerSecond": 2,
+        "outputRemotePath": "outputs/offline-image.png"
+      }
+    }
+  ],
+  "failureDiagnostics": {
+    "path": "failure-diagnostics.json",
+    "runId": "offline-failure-run",
+    "reason": "process_died",
+    "expectedEvidenceNames": [
+      "logcat_crash",
+      "app_meminfo",
+      "thermal"
+    ]
+  }
+}

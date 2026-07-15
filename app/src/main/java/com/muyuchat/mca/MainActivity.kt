@@ -72,7 +72,11 @@ import com.muyuchat.feature.settings.WebSearchSettingsDraft
 import com.muyuchat.feature.settings.WebSearchSettingsUiState
 import com.muyuchat.mca.ui.McaTheme
 import com.muyuchat.core.benchmark.BenchmarkResult
+import com.muyuchat.core.deviceprofile.AccelerationCapabilityStatus
+import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.modelstore.ChatModelRuntime
+import com.muyuchat.core.telemetry.SocFamily
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -90,8 +94,8 @@ class MainActivity : ComponentActivity() {
                 }
             }
         )
-        val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) viewModel.importModel(uri)
+        val importLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isNotEmpty()) viewModel.importModel(uris)
         }
         val localImageModelImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) viewModel.importLocalImageModel(uri)
@@ -185,6 +189,7 @@ private fun McaApp(
     fun finishAppMenuReturn() {
         onTab(AppTab.CHAT)
     }
+    val chatVisionCapability = state.chatVisionCapability()
 
     Scaffold { padding ->
         val modifier = Modifier
@@ -225,6 +230,10 @@ private fun McaApp(
                         )
                         addAll(
                             state.models
+                                .filter { model ->
+                                    model.runtime != com.muyuchat.core.modelstore.ChatModelRuntime.GENIEX_QAIRT ||
+                                        model.id in state.qairtVerifiedLocalModelIds
+                                }
                                 .sortedWith(
                                     compareByDescending<com.muyuchat.core.modelstore.ModelManifest> {
                                         if (it.id == state.loadedModelId) 1 else 0
@@ -250,17 +259,19 @@ private fun McaApp(
                                 .sortedByDescending { if (it.id == state.selectedLocalImageModelId) 1 else 0 }
                                 .take(3)
                                 .map { model ->
-                                    val readiness = model.localImageReadinessMessage()
+                                    val qnnVerificationCurrent = state.qnnImageVerificationCurrentByModelId[model.id]
+                                    val readiness = model.localImageReadinessForUi(qnnVerificationCurrent)
+                                    val readinessLabel = model.localImageReadinessLabelForUi(qnnVerificationCurrent)
                                     ChatModelChoice(
                                         id = MainViewModel.LOCAL_IMAGE_MODEL_CHOICE_PREFIX + model.id,
                                         displayName = model.displayName,
-                                        quant = if (readiness == null) "本地生图" else "缺少组件",
+                                        quant = if (readiness == null) "本地生图" else readinessLabel,
                                         sizeBytes = model.sizeBytes,
                                         loaded = state.selectedImageBackend == ImageBackend.LOCAL && model.id == state.selectedLocalImageModelId,
                                         subtitle = if (readiness == null) {
                                             "${model.family.label} · ${model.runtime.label}"
                                         } else {
-                                            "${model.family.label} · 需导入组件包"
+                                            "${model.family.label} · $readinessLabel"
                                         },
                                         cloud = false
                                     )
@@ -302,7 +313,6 @@ private fun McaApp(
                             defaultModelId = assistant.defaultModelId,
                             temperature = assistantParams.temperature,
                             topP = assistantParams.topP,
-                            nCtx = assistantParams.nCtx,
                             nPredict = assistantParams.nPredict,
                             reasoningMode = assistantParams.reasoningMode,
                             memoryEnabled = assistant.memoryEnabled,
@@ -364,6 +374,11 @@ private fun McaApp(
                         state.loadedModelName
                     },
                     selectedModelIsCloud = state.selectedChatBackend == ChatBackend.CLOUD,
+                    selectedModelRuntimeLabel = if (state.selectedChatBackend == ChatBackend.CLOUD) {
+                        state.cloudModels.firstOrNull { it.id == state.selectedCloudChatModelId }?.apiFormat?.label
+                    } else {
+                        state.models.firstOrNull { it.id == state.loadedModelId }?.runtime?.label
+                    },
                     selectedImageModelId = if (state.selectedImageBackend == ImageBackend.CLOUD) {
                         state.selectedCloudImageModelId?.let { MainViewModel.CLOUD_IMAGE_MODEL_CHOICE_PREFIX + it }
                     } else {
@@ -402,7 +417,10 @@ private fun McaApp(
                         } else {
                             append(state.webSearchConfig.providerLabel)
                         }
-                    }
+                    },
+                    visionCapabilityLabel = chatVisionCapability.label,
+                    visionCapabilityDetail = chatVisionCapability.detail,
+                    visionCapabilityReady = chatVisionCapability.ready
                 ),
                 onInputChange = viewModel::onInputChange,
                 onSend = viewModel::sendMessage,
@@ -451,7 +469,6 @@ private fun McaApp(
                         defaultModelId = draft.defaultModelId?.removePrefix(MainViewModel.CLOUD_MODEL_CHOICE_PREFIX),
                         temperature = draft.temperature,
                         topP = draft.topP,
-                        nCtx = draft.nCtx,
                         nPredict = draft.nPredict,
                         reasoningMode = draft.reasoningMode,
                         memoryEnabled = draft.memoryEnabled,
@@ -495,7 +512,20 @@ private fun McaApp(
                     statusMessage = state.statusMessage,
                     loadedModelName = state.loadedModelName,
                     lastAutoTuningSummary = state.lastAutoTuningSummary,
+                    localStabilitySmokeSummary = state.localStabilitySmokeSummary,
                     params = state.params,
+                    profileId = state.profileId,
+                    revision = state.revision,
+                    profileRecordState = state.profileRecordState,
+                    verification = state.verification,
+                    engineLifecycle = state.engineLifecycle,
+                    tuningJobState = state.tuningJobState,
+                    reloadRequired = state.reloadRequired,
+                    pending = state.pendingProfile,
+                    rollback = state.rollbackProfile,
+                    etaSeconds = state.tuningEtaSeconds,
+                    phase = state.tuningPhase,
+                    candidateProgress = state.tuningCandidateProgress,
                     agentDecisionHistory = state.agentLogs.take(10).map { log ->
                         val recommendation = runCatching { org.json.JSONObject(log.recommendationJson) }.getOrNull()
                         val name = recommendation
@@ -516,8 +546,17 @@ private fun McaApp(
                 onApplyRecommendation = viewModel::applyAgentRecommendation,
                 onBenchmark = viewModel::runAgentBenchmark,
                 onQuickDebug = viewModel::runAgentQuickDebug,
+                onStandardDebug = viewModel::runAgentStandardDebug,
                 onDeepDebug = viewModel::runAgentDeepDebug,
                 onPowerDebug = viewModel::runAgentPowerDebug,
+                onStabilitySmoke = viewModel::runAgentStabilitySmoke,
+                onStartTuning = viewModel::startAgentTuning,
+                onPauseTuning = viewModel::pauseAgentTuning,
+                onResumeTuning = viewModel::resumeAgentTuning,
+                onCancelTuning = viewModel::cancelAgentTuning,
+                onQueryTuningJob = viewModel::queryAgentTuningJob,
+                onApplyPendingProfile = viewModel::applyPendingAgentProfile,
+                onRollbackProfile = viewModel::rollbackAgentProfile,
                 onAgentInfo = viewModel::showAgentDebugExplanation,
                 onParamsChange = viewModel::updateParams,
                 onBack = closePage,
@@ -533,8 +572,10 @@ private fun McaApp(
                 ModelHubScreen(
                 state = ModelHubUiState(
                     localModels = state.models,
+                    mnnRuntimeAvailable = state.mnnRuntimeAvailable,
                     localImageModels = state.localImageModels.map { model ->
-                        val readiness = model.localImageReadinessMessage()
+                        val qnnVerificationCurrent = state.qnnImageVerificationCurrentByModelId[model.id]
+                        val readiness = model.localImageReadinessForUi(qnnVerificationCurrent)
                         LocalImageModelUiItem(
                             id = model.id,
                             displayName = model.displayName,
@@ -546,6 +587,7 @@ private fun McaApp(
                             componentCount = model.componentCount,
                             readyForGeneration = readiness == null,
                             readinessMessage = readiness,
+                            readinessLabel = model.localImageReadinessLabelForUi(qnnVerificationCurrent),
                             selected = state.selectedImageBackend == ImageBackend.LOCAL && model.id == state.selectedLocalImageModelId
                         )
                     },
@@ -564,9 +606,13 @@ private fun McaApp(
                     downloadStatus = state.downloadStatus,
                     deviceTotalRamBytes = state.deviceProfile?.displayTotalRamBytes ?: 0L,
                     deviceAvailableRamBytes = state.deviceProfile?.availableRamBytes ?: 0L,
-                    deviceAccelerationSummary = "本地推理固定使用 CPU；云端接口用于更高性能模型。",
-                    deviceImagePolicy = "本地生图固定使用 CPU stable-diffusion.cpp；需要速度优先时建议切换云端生图。",
-                    deviceImageTier = "CPU",
+                    deviceAccelerationSummary = state.deviceProfile?.deviceAccelerationSummary().orEmpty(),
+                    deviceImagePolicy = state.deviceProfile?.deviceImagePolicy().orEmpty(),
+                    deviceImageTier = state.deviceProfile?.deviceImageTierKey().orEmpty(),
+                    deviceChipsetCode = state.deviceProfile?.accelerationProfile?.chipsetCode.orEmpty(),
+                    deviceIsSnapdragon = state.deviceProfile?.socFamily == SocFamily.Snapdragon,
+                    qairtVerifiedLocalModelIds = state.qairtVerifiedLocalModelIds,
+                    qairtVerifiedRecommendationIds = state.qairtVerifiedRecommendationIds,
                     cloudApi = CloudApiUiState(
                         enabled = state.cloudApiConfig.enabled,
                         apiFormat = state.cloudApiConfig.apiFormat.name,
@@ -576,6 +622,7 @@ private fun McaApp(
                         baseUrl = state.cloudApiConfig.baseUrl,
                         apiKey = state.cloudApiConfig.apiKey,
                         chatModel = state.cloudApiConfig.chatModel,
+                        supportsVision = state.cloudApiConfig.supportsVision,
                         imageApiFormat = state.cloudApiConfig.imageApiFormat.name,
                         availableImageFormats = cloudImageApiFormats().map { it.name to it.label },
                         imageModel = state.cloudApiConfig.imageModel,
@@ -593,6 +640,7 @@ private fun McaApp(
                                 protocolLabel = model.protocolLabel,
                                 modelName = model.modelName,
                                 baseUrl = model.baseUrl,
+                                supportsVision = model.supportsVision,
                                 imageSize = if (model.kind == CloudModelKind.IMAGE) model.imageSize else "",
                                 selected = when (model.kind) {
                                     CloudModelKind.CHAT -> state.selectedChatBackend == ChatBackend.CLOUD && model.id == state.selectedCloudChatModelId
@@ -635,6 +683,7 @@ private fun McaApp(
                 onCloudBaseUrlChange = viewModel::updateCloudBaseUrl,
                 onCloudApiKeyChange = viewModel::updateCloudApiKey,
                 onCloudChatModelChange = viewModel::updateCloudChatModel,
+                onCloudSupportsVisionChange = viewModel::updateCloudSupportsVision,
                 onCloudImageFormatChange = viewModel::updateCloudImageApiFormat,
                 onCloudImageModelChange = viewModel::updateCloudImageModel,
                 onCloudImageSizeChange = viewModel::updateCloudImageSize,
@@ -921,6 +970,7 @@ private fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
     apiKey = apiKey,
     localApiAddress = localApiAddress,
     openApiAddress = openApiAddress,
+    loadedModelId = loadedModelId,
     nativeStatsJson = nativeStatsJson,
     diagnosticReport = diagnosticReport,
     chatSessionCount = chatSessions.size,
@@ -1022,6 +1072,140 @@ private fun MainUiState.toWebSearchTurnModeLabel(): String {
             webSearchConfig.triggerMode == WebSearchTriggerMode.SMART -> "智能"
             else -> "手动"
         }
+    }
+}
+
+private fun DeviceProfile.deviceAccelerationSummary(): String {
+    val acceleration = accelerationProfile
+    val runtime = if (acceleration.qnnRuntime.usableForSmoke) {
+        "QNN runtime 已就绪"
+    } else if (acceleration.qnnRuntime.transportDependencyBlocked) {
+        "NPU 运行环境受限"
+    } else if (acceleration.qnnRuntime.ready) {
+        "QNN runtime 探测失败"
+    } else {
+        "QNN runtime 待打包"
+    }
+    return "${acceleration.snapdragonTier.label} · ${acceleration.localChat.label} · $runtime"
+}
+
+private fun DeviceProfile.deviceImagePolicy(): String {
+    val acceleration = accelerationProfile
+    val image = acceleration.localImage
+    val runtimeText = when (image.status) {
+        AccelerationCapabilityStatus.EXPERIMENTAL_READY ->
+            "当前设备可进入 QNN 生图实验入口，但每个生图包仍必须通过 1-step 校验后才可选择。"
+        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_MISSING ->
+            "当前设备满足 NPU 生图候选条件；待打包 QNN/QAIRT runtime 与认证生图包后启用。"
+        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED ->
+            "当前设备已找到 QNN runtime 文件，但原生加载探测尚未通过；暂不进入 NPU 生图 smoke。"
+        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_LOAD_FAILED ->
+            "当前设备已找到 QNN runtime 文件，但原生加载探测失败；修复 runtime 打包前不会启用 NPU 生图。"
+        AccelerationCapabilityStatus.DEVICE_CAPABLE_HTP_TRANSPORT_BLOCKED ->
+            "当前设备可加载骁龙 NPU 运行环境，但设备通信依赖被系统限制；图执行验证通过前隐藏 NPU 生图入口。"
+        AccelerationCapabilityStatus.READY ->
+            "当前稳定路径为 stable-diffusion.cpp / MNN CPU，NPU 生图不会被宣传为已启用。"
+        AccelerationCapabilityStatus.UNSUPPORTED ->
+            "当前设备不展示 QNN 生图入口，默认使用 CPU 兼容生图。"
+    }
+    val visionText = when (acceleration.localVision.status) {
+        AccelerationCapabilityStatus.EXPERIMENTAL_READY ->
+            "本地识图可尝试 LiteRT-LM / QNN NPU 包。"
+        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_MISSING ->
+            "本地视觉 NPU 仍属 LiteRT-LM / QNN 实验路线，当前等待 runtime 和模型包。"
+        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED ->
+            "本地识图已找到 QNN runtime 文件，但原生加载探测尚未通过，暂不进入 NPU smoke。"
+        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_LOAD_FAILED ->
+            "本地识图已找到 QNN runtime 文件，但原生加载探测失败，暂不进入 NPU smoke。"
+        AccelerationCapabilityStatus.DEVICE_CAPABLE_HTP_TRANSPORT_BLOCKED ->
+            "本地识图可加载骁龙 NPU 运行环境，但设备通信依赖被系统限制，暂不进入 NPU 验证。"
+        AccelerationCapabilityStatus.READY ->
+            "本地识图使用 GGUF mmproj / MNN 兼容路径。"
+        AccelerationCapabilityStatus.UNSUPPORTED ->
+            "本地识图不启用 NPU 路线。"
+    }
+    return "$visionText $runtimeText"
+}
+
+private fun DeviceProfile.deviceImageTierKey(): String {
+    val acceleration = accelerationProfile
+    return when {
+        acceleration.qnnRuntime.usableForSmoke && acceleration.sdxlNpuCandidate -> "qnn_sdxl_ready"
+        acceleration.qnnRuntime.usableForSmoke && acceleration.stableDiffusion15NpuCandidate -> "qnn_sd15_ready"
+        acceleration.sdxlNpuCandidate -> "qnn_sdxl_candidate"
+        acceleration.stableDiffusion15NpuCandidate -> "qnn_sd15_candidate"
+        else -> "cpu"
+    }
+}
+
+private data class VisionCapabilityUi(
+    val label: String,
+    val detail: String,
+    val ready: Boolean
+)
+
+private fun MainUiState.chatVisionCapability(): VisionCapabilityUi {
+    if (selectedChatBackend == ChatBackend.CLOUD) {
+        val cloudModel = cloudModels.firstOrNull {
+            it.id == selectedCloudChatModelId && it.kind == CloudModelKind.CHAT && it.configured
+        }
+        return if (cloudModel != null) {
+            if (cloudModel.supportsVision) {
+                VisionCapabilityUi(
+                    label = "云端多模态",
+                    detail = "图片将发送给当前云端模型，识图能力由服务商和模型决定。",
+                    ready = true
+                )
+            } else {
+                VisionCapabilityUi(
+                    label = "云端识图未启用",
+                    detail = "请编辑云端推理引擎，开启支持图片输入。",
+                    ready = false
+                )
+            }
+        } else {
+            VisionCapabilityUi(
+                label = "未加载云端模型",
+                detail = "请在模型管理加载支持图片输入的云端推理引擎。",
+                ready = false
+            )
+        }
+    }
+
+    val loadedModel = models.firstOrNull { it.id == loadedModelId }
+    val nativeVisionReady = runCatching {
+        org.json.JSONObject(nativeStatsJson).optBoolean("visionReady", false)
+    }.getOrDefault(false)
+    return when {
+        loadedModel == null -> VisionCapabilityUi(
+            label = "未加载本地模型",
+            detail = "请加载 MNN 多模态包，或加载多模态 GGUF 并绑定匹配 mmproj。",
+            ready = false
+        )
+        loadedModel.acceptsImageInput(nativeVisionReady) -> VisionCapabilityUi(
+            label = "本地识图已就绪",
+            detail = if (loadedModel.runtime == ChatModelRuntime.MNN) {
+                "MNN 视觉组件已加载；所有兼容 ARM64 机型默认开放图片输入。"
+            } else {
+                "当前本地模型已启用视觉模块。"
+            },
+            ready = true
+        )
+        loadedModel.runtime == ChatModelRuntime.MNN -> VisionCapabilityUi(
+            label = "MNN 视觉组件未就绪",
+            detail = "请加载包含可读 visual.mnn 的完整多模态包；就绪后即可发送图片。",
+            ready = false
+        )
+        !loadedModel.visionProjectorPath.isNullOrBlank() -> VisionCapabilityUi(
+            label = "视觉投影器待启用",
+            detail = "已绑定 mmproj，请重新加载模型后再发图。",
+            ready = false
+        )
+        else -> VisionCapabilityUi(
+            label = "本地识图未启用",
+            detail = "纯文本模型不能识图，请使用 MNN 多模态包或绑定匹配 mmproj。",
+            ready = false
+        )
     }
 }
 

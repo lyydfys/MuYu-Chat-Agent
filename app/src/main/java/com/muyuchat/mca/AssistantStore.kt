@@ -16,7 +16,7 @@ data class AssistantRecord(
     val systemPrompt: String = GenerationParams().systemPrompt,
     val defaultModelMode: String = "follow_current",
     val defaultModelId: String? = null,
-    val paramsJson: String = GenerationParams().toJson(),
+    val paramsJson: String = GenerationParams().toAssistantGenerationJson(),
     val memoryEnabled: Boolean = false,
     val webSearchEnabled: Boolean = false,
     val fileContextEnabled: Boolean = true,
@@ -48,7 +48,7 @@ data class AssistantRecord(
                 id = DEFAULT_ID,
                 name = "默认助手",
                 systemPrompt = systemPrompt.ifBlank { GenerationParams().systemPrompt },
-                paramsJson = params.copy(systemPrompt = systemPrompt.ifBlank { GenerationParams().systemPrompt }).toJson(),
+                paramsJson = params.copy(systemPrompt = systemPrompt.ifBlank { GenerationParams().systemPrompt }).toAssistantGenerationJson(),
                 createdAt = 0L,
                 updatedAt = 0L
             )
@@ -60,6 +60,14 @@ data class AssistantRecord(
                 .ifBlank { source.cleanAssistantString("systemPrompt", "system_prompt", "prompt", "instructions") }
                 .ifBlank { source.toCharacterCardPrompt() }
                 .ifBlank { defaults.systemPrompt }
+            val rawParams = json.cleanAssistantString("paramsJson", "params_json")
+                .ifBlank { source.cleanAssistantString("paramsJson", "params_json") }
+                .ifBlank { defaults.paramsJson }
+            val defaultParams = assistantGenerationParamsFromJson(
+                defaults.paramsJson,
+                GenerationParams(),
+                defaults.systemPrompt
+            )
             return AssistantRecord(
                 id = json.cleanAssistantString("id")
                     .ifBlank { source.cleanAssistantString("id", "character_id") }
@@ -78,7 +86,11 @@ data class AssistantRecord(
                     .ifBlank { defaults.defaultModelMode },
                 defaultModelId = json.cleanAssistantString("defaultModelId", "default_model_id")
                     .takeIf { it.isNotBlank() && it != "null" },
-                paramsJson = json.cleanAssistantString("paramsJson", "params_json").ifBlank { defaults.paramsJson },
+                paramsJson = sanitizeAssistantParamsJsonPreservingLegacyExecution(
+                    rawParams,
+                    defaultParams,
+                    systemPrompt
+                ),
                 memoryEnabled = json.optBoolean("memoryEnabled", defaults.memoryEnabled),
                 webSearchEnabled = json.optBoolean("webSearchEnabled", defaults.webSearchEnabled),
                 fileContextEnabled = json.optBoolean("fileContextEnabled", defaults.fileContextEnabled),
@@ -187,5 +199,56 @@ internal fun normalizeAssistantRecords(
     } else {
         listOf(fallback) + records
     }
-    return withDefault.distinctBy { it.id }.ifEmpty { listOf(fallback) }
+    val defaults = assistantGenerationParamsFromJson(
+        fallback.paramsJson,
+        GenerationParams(),
+        fallback.systemPrompt
+    )
+    return withDefault
+        .distinctBy { it.id }
+        .map { assistant ->
+            assistant.copy(
+                paramsJson = sanitizeAssistantParamsJsonPreservingLegacyExecution(
+                    assistant.paramsJson,
+                    defaults,
+                    assistant.systemPrompt
+                )
+            )
+        }
+        .ifEmpty { listOf(fallback) }
 }
+
+/**
+ * Migrates an old assistant card without losing the two execution values that historically lived
+ * in its params JSON. They are retained only for lossless export/import compatibility; all
+ * runtime application paths use [assistantGenerationParamsFromJson], which deliberately copies
+ * generation fields onto the caller's model execution defaults and therefore ignores these keys.
+ */
+internal fun sanitizeAssistantParamsJsonPreservingLegacyExecution(
+    rawJson: String,
+    defaults: GenerationParams,
+    systemPrompt: String
+): String {
+    val sanitized = runCatching {
+        JSONObject(sanitizeAssistantParamsJson(rawJson, defaults, systemPrompt))
+    }.getOrElse {
+        return sanitizeAssistantParamsJson(rawJson, defaults, systemPrompt)
+    }
+    val raw = runCatching { JSONObject(rawJson) }.getOrNull() ?: return sanitized.toString()
+    LEGACY_EXECUTION_INT_FIELDS.forEach { (canonical, aliases) ->
+        val value = aliases.firstNotNullOfOrNull { key ->
+            if (raw.has(key) && !raw.isNull(key)) {
+                raw.optInt(key, Int.MIN_VALUE).takeIf { it > 0 }
+            } else {
+                null
+            }
+        }
+        value?.let { sanitized.put(canonical, it) }
+    }
+    return sanitized.toString()
+}
+
+private val LEGACY_EXECUTION_INT_FIELDS: List<Pair<String, List<String>>> = listOf(
+    "n_ctx" to listOf("n_ctx", "nCtx"),
+    "n_threads" to listOf("n_threads", "nThreads")
+)

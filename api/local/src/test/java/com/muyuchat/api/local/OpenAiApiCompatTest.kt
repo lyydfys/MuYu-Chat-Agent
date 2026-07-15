@@ -78,6 +78,46 @@ class OpenAiApiCompatTest {
     }
 
     @Test
+    fun infersMimeTypeFromInlineImageDataUrl() {
+        val dataUrl = "data:image/png;base64,abc123"
+        val request = OpenAiApiCompat.parseChatRequest(
+            """
+            {
+              "messages": [
+                {"role": "user", "content": [
+                  {"type": "text", "text": "识别这张图"},
+                  {"type": "image_url", "image_url": {"url": "$dataUrl"}}
+                ]}
+              ]
+            }
+            """.trimIndent()
+        )
+        val attachment = request.messages.single().imageAttachments.single()
+
+        assertEquals("image/png", attachment.mimeType)
+        assertEquals(dataUrl, attachment.dataBase64)
+    }
+
+    @Test
+    fun decodesPercentEncodedTextFromThirdPartyClients() {
+        val request = OpenAiApiCompat.parseChatRequest(
+            """
+            {
+              "messages": [
+                {"role": "system", "content": "You%20are%20a%20saved%20character%20card."},
+                {"role": "user", "content": "Please%20answer%20in%20Chinese%3A%20%E4%BD%A0%E5%A5%BD"}
+              ],
+              "system_prompt": "Top%20level%20persona"
+            }
+            """.trimIndent()
+        )
+
+        assertEquals("You are a saved character card.", request.messages[0].content)
+        assertEquals("Please answer in Chinese: 你好", request.messages[1].content)
+        assertEquals("Top level persona", request.params.systemPrompt)
+    }
+
+    @Test
     fun parsesCompletionsPromptAndClampsMaxTokens() {
         val request = OpenAiApiCompat.parseChatRequest(
             """{"prompt":"写一句中文问候","max_tokens":99999,"stream":false}"""
@@ -106,6 +146,41 @@ class OpenAiApiCompatTest {
 
         assertEquals("第一段\n第二段", request.messages[0].content)
         assertEquals(ReasoningMode.ADVANCED, request.params.reasoningMode)
+    }
+
+    @Test
+    fun parsesResponsesStyleInputImageParts() {
+        val dataUrl = "data:image/jpeg;base64,abc123"
+        val request = OpenAiApiCompat.parseChatRequest(
+            """
+            {
+              "input": [
+                {
+                  "role": "user",
+                  "content": [
+                    {"type": "input_text", "text": "这张图里有什么？"},
+                    {"type": "input_image", "image_url": "$dataUrl"}
+                  ]
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(1, request.messages.size)
+        assertEquals(Role.USER, request.messages.single().role)
+        assertEquals("这张图里有什么？", request.messages.single().content)
+        assertEquals(dataUrl, request.messages.single().imageAttachments.single().dataBase64)
+
+        val renderedMessages = JSONArray(request.messagesJson(multimodal = true))
+        val rendered = (0 until renderedMessages.length())
+            .asSequence()
+            .map { renderedMessages.getJSONObject(it) }
+            .first { it.getString("role") == "user" }
+            .getJSONArray("content")
+        assertEquals("text", rendered.getJSONObject(0).getString("type"))
+        assertEquals("image_url", rendered.getJSONObject(1).getString("type"))
+        assertEquals(dataUrl, rendered.getJSONObject(1).getJSONObject("image_url").getString("url"))
     }
 
     @Test
@@ -225,6 +300,8 @@ class OpenAiApiCompatTest {
 
         assertTrue(cors.contains("Access-Control-Allow-Origin: *"))
         assertTrue(cors.contains("Access-Control-Allow-Methods: GET, POST, OPTIONS"))
+        assertTrue(cors.contains("Idempotency-Key"))
+        assertTrue(cors.contains("Access-Control-Expose-Headers: Retry-After, X-Retry-After-Ms"))
         assertTrue(cors.contains("Access-Control-Allow-Private-Network: true"))
         assertEquals("bad key", error.getJSONObject("error").getString("message"))
         assertEquals("mca_error", error.getJSONObject("error").getString("type"))
@@ -232,14 +309,12 @@ class OpenAiApiCompatTest {
     }
 
     @Test
-    fun apiRequestParamsMapToNativeGenerationJson() {
+    fun apiRequestGenerationParamsPreserveRuntimeOwnedFields() {
         val request = OpenAiApiCompat.parseChatRequest(
             """
             {
               "messages": [{"role": "user", "content": "测速"}],
-              "n_ctx": 4096,
               "max_tokens": 3072,
-              "n_threads": 8,
               "temperature": 0.55,
               "top_k": 30,
               "top_p": 0.9,
@@ -252,14 +327,22 @@ class OpenAiApiCompatTest {
               "reasoning_mode": "standard",
               "show_reasoning": true
             }
-            """.trimIndent()
+            """.trimIndent(),
+            baseParams = GenerationParams(
+                nCtx = 32768,
+                nThreads = 8,
+                chatTemplateMode = "runtime-owned-template",
+                advancedJson = """{"n_batch":2048}"""
+            )
         )
 
         val json = org.json.JSONObject(request.params.toJson())
 
-        assertEquals(4096, json.getInt("n_ctx"))
+        assertEquals(32768, json.getInt("n_ctx"))
         assertEquals(3072, json.getInt("n_predict"))
         assertEquals(8, json.getInt("n_threads"))
+        assertEquals("runtime-owned-template", json.getString("chat_template_mode"))
+        assertEquals(2048, json.getJSONObject("advanced_json").getInt("n_batch"))
         assertEquals(0.55, json.getDouble("temperature"), 0.001)
         assertEquals(30, json.getInt("top_k"))
         assertEquals(0.9, json.getDouble("top_p"), 0.001)
@@ -270,5 +353,72 @@ class OpenAiApiCompatTest {
         assertEquals("</s>", json.getJSONArray("stop_words").getString(0))
         assertEquals("standard", json.getString("reasoning_mode"))
         assertFalse(json.getBoolean("hide_reasoning"))
+    }
+
+    @Test
+    fun rejectsRuntimeAndUnknownAdvancedFieldsInsteadOfPassingThemToNative() {
+        val result = OpenAiApiCompat.parseChatRequestChecked(
+            """
+            {
+              "messages": [{"role": "user", "content": "hello"}],
+              "n_batch": 2048,
+              "n_ubatch": 256,
+              "flash_attn": "on",
+              "spec_type": "draft-mtp",
+              "spec_draft_n_max": 2,
+              "n_parallel": 1,
+              "advanced_json": {"future_native": {"enabled": true}}
+            }
+            """.trimIndent()
+        )
+
+        assertTrue(result is OpenAiChatParseResult.Rejected)
+        val rejection = (result as OpenAiChatParseResult.Rejected).rejection
+        val details = org.json.JSONObject(rejection.detailsJson)
+        val fields = details.getJSONArray("restricted_fields").toString()
+
+        assertEquals("parameter_scope_conflict", rejection.code)
+        assertEquals("generation_only", details.getString("allowed_scope"))
+        assertTrue(fields.contains("n_batch"))
+        assertTrue(fields.contains("flash_attn"))
+        assertTrue(fields.contains("spec_type"))
+        assertTrue(fields.contains("advanced_json"))
+    }
+
+    @Test
+    fun rejectsAllLoadExecutionTemplateGpuMoeAndMtpEntryPoints() {
+        val restrictedFields = listOf(
+            "n_ctx" to "32768",
+            "n_threads" to "8",
+            "chat_template_mode" to "\"jinja\"",
+            "n_gpu_layers" to "99",
+            "main_gpu" to "1",
+            "n_cpu_moe" to "5",
+            "spec_type" to "\"draft-mtp\"",
+            "mnn_backend" to "\"opencl\"",
+            "future_native_switch" to "true",
+            "advanced_json" to "{\"future_native\":true}"
+        )
+
+        restrictedFields.forEach { (field, value) ->
+            val result = OpenAiApiCompat.parseChatRequestChecked(
+                """{"messages":[{"role":"user","content":"hi"}],"$field":$value}"""
+            )
+            assertTrue("Expected $field to be rejected", result is OpenAiChatParseResult.Rejected)
+            val rejection = (result as OpenAiChatParseResult.Rejected).rejection
+            assertEquals("parameter_scope_conflict", rejection.code)
+            assertTrue(rejection.detailsJson.contains(field))
+        }
+    }
+
+    @Test
+    fun rejectsRestrictedFieldsNestedInsideExtraBody() {
+        val result = OpenAiApiCompat.parseChatRequestChecked(
+            """{"messages":[{"role":"user","content":"hi"}],"extra_body":{"n_ctx":16384}}"""
+        )
+
+        assertTrue(result is OpenAiChatParseResult.Rejected)
+        val details = (result as OpenAiChatParseResult.Rejected).rejection.detailsJson
+        assertTrue(details.contains("extra_body.n_ctx"))
     }
 }

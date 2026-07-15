@@ -1,0 +1,30 @@
+From c35f14f3ab5cb65094863b9a0e888370b027a670 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] llm: refresh sampler after runtime generation config changes
+
+MNN 3.5.0 creates its sampler in Llm::load().  A later set_config() merges
+per-request generation settings but previously left that sampler unchanged.
+Consequently a request reported as greedy could still execute with the model
+package's original mixed sampler.  Recreate only an already-existing sampler;
+pre-load configuration keeps the normal load path unchanged.
+
+---
+ transformers/llm/engine/src/llm.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/transformers/llm/engine/src/llm.cpp b/transformers/llm/engine/src/llm.cpp
+index 0834bb6..9950d75 100644
+--- a/transformers/llm/engine/src/llm.cpp
++++ b/transformers/llm/engine/src/llm.cpp
+@@ -125,6 +125,13 @@ bool Llm::set_config(const std::string& content) {
+             mBlockSize = mValidBlockSize[mValidBlockSize.size()-1];
+         } while (false);
+     }
++    // The sampler is created by load(), but generation options are commonly
++    // changed between requests. Rebuild an existing sampler so those options
++    // (especially greedy vs. mixed sampling) take effect immediately instead
++    // of continuing to use the package's initial sampler configuration.
++    if (mSampler != nullptr) {
++        mSampler.reset(Sampler::createSampler(mContext, mConfig));
++    }
+     return true;
+ }

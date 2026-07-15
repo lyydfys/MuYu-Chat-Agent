@@ -30,6 +30,13 @@ val mcaAbiFilters = providers.gradleProperty("mca.abis")
     .split(",")
     .map { it.trim() }
     .filter { it.isNotBlank() }
+// Validation-only switch: put a coherent non-GenieX QNN host pair first when
+// exercising an older context profile such as SM8550/V73. The normal APK
+// keeps the existing GenieX QAIRT runtime order.
+val mcaQnnRuntimeOverrideGenieX = providers.gradleProperty("mcaQnnRuntimeOverrideGenieX")
+    .orNull
+    ?.trim()
+    ?.equals("true", ignoreCase = true) == true
 
 android {
     namespace = "com.muyuchat.mca"
@@ -59,6 +66,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Reuse the locally configured release signing key for on-device smoke builds.
+            if (releaseSigningEnabled) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
         release {
             isMinifyEnabled = false
             if (releaseSigningEnabled) {
@@ -68,6 +81,7 @@ android {
     }
 
     buildFeatures {
+        aidl = true
         compose = true
     }
 
@@ -80,7 +94,11 @@ android {
             // that choice explicit and keep debug builds quiet.
             keepDebugSymbols += setOf(
                 "**/libmca_native.so",
+                "**/libmca_mnn_native.so",
+                "**/libmca_qnn_native.so",
                 "**/libmca_sd_native.so",
+                "**/libMNN.so",
+                "**/libQnn*.so",
                 "**/libggml*.so",
                 "**/libllama*.so",
                 "**/libmtmd*.so",
@@ -88,6 +106,20 @@ android {
                 "**/libomp.so",
                 "**/libandroidx.graphics.path.so"
             )
+            pickFirsts += setOf(
+                "**/libggml.so",
+                "**/libggml-base.so",
+                "**/libllama.so",
+                "**/libllama-common.so",
+                "**/libmtmd.so",
+                "**/libomp.so"
+            )
+            if (mcaQnnRuntimeOverrideGenieX) {
+                pickFirsts += setOf(
+                    "**/libQnnSystem.so",
+                    "**/libQnnHtp.so"
+                )
+            }
         }
     }
 
@@ -98,7 +130,13 @@ android {
 }
 
 dependencies {
+    if (mcaQnnRuntimeOverrideGenieX) {
+        implementation(project(":core:native"))
+    }
     implementation(project(":core:engine"))
+    if (!mcaQnnRuntimeOverrideGenieX) {
+        implementation(project(":core:native"))
+    }
     implementation(project(":core:sd-native"))
     implementation(project(":core:modelstore"))
     implementation(project(":core:download"))

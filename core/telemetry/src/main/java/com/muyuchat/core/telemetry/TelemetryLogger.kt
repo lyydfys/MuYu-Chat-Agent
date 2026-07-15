@@ -16,15 +16,16 @@ class TelemetryLogger(private val context: Context) {
     }
 
     fun memorySnapshotDetailed(): MemorySnapshot {
-        val memoryInfo = Debug.MemoryInfo()
-        Debug.getMemoryInfo(memoryInfo)
+        val memoryInfo = runCatching {
+            Debug.MemoryInfo().also { Debug.getMemoryInfo(it) }
+        }.getOrNull()
         val systemInfo = SystemMemoryReader.read(context)
         val runtime = Runtime.getRuntime()
         return MemorySnapshot(
-            processPssKb = memoryInfo.totalPss.toLong(),
+            processPssKb = memoryInfo?.totalPss?.toLong() ?: 0L,
             processRssKb = readProcStatusKb("VmRSS"),
-            nativeHeapKb = Debug.getNativeHeapAllocatedSize() / 1024L,
-            nativeHeapSizeKb = Debug.getNativeHeapSize() / 1024L,
+            nativeHeapKb = runCatching { Debug.getNativeHeapAllocatedSize() / 1024L }.getOrDefault(0L),
+            nativeHeapSizeKb = runCatching { Debug.getNativeHeapSize() / 1024L }.getOrDefault(0L),
             javaHeapKb = (runtime.totalMemory() - runtime.freeMemory()) / 1024L,
             availMemKb = systemInfo.availableBytes / 1024L,
             totalMemKb = systemInfo.totalBytes / 1024L,

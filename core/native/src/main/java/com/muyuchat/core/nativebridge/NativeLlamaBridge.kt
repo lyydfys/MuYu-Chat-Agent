@@ -2,6 +2,8 @@
 
 class NativeLlamaBridge {
     companion object {
+        const val LOAD_SIGNATURE_MISMATCH = -11
+
         val loadError: Throwable? = runCatching {
             System.loadLibrary("mca_native")
         }.exceptionOrNull()
@@ -16,6 +18,7 @@ class NativeLlamaBridge {
     external fun beginCompletion(messagesJson: String, paramsJson: String): Int
     external fun generateNextChunk(): String?
     external fun requestStop()
+    external fun requestStopIfActive(): Boolean
     external fun getRuntimeStatsJson(): String
     external fun shutdown()
 }

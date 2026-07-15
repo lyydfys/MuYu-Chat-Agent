@@ -15,6 +15,11 @@ enum class ReasoningMode(val label: String) {
     ADVANCED("进阶")
 }
 
+enum class MultimodalContentEncoding {
+    OPENAI_PARTS,
+    MNN_IMAGE_TAGS_FIRST
+}
+
 data class ChatMessage(
     val role: Role,
     val content: String,
@@ -102,19 +107,52 @@ data class LoadParams(
     val nThreads: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(2) - 1,
     val mmap: Boolean = true,
     val mlock: Boolean = false,
-    val visionProjectorPath: String? = null
+    val visionProjectorPath: String? = null,
+    val geniexComputeUnit: String? = null,
+    val advancedJson: String = "{}"
 ) {
-    fun toJson(): String = JSONObject()
-        .put("n_ctx", nCtx)
-        .put("n_threads", nThreads)
-        .put("mmap", mmap)
-        .put("mlock", mlock)
-        .apply {
+    companion object {
+        fun fromJson(json: String, defaults: LoadParams = LoadParams()): LoadParams {
+            val root = runCatching { JSONObject(json) }.getOrNull() ?: return defaults
+            return LoadParams(
+                nCtx = root.optInt("n_ctx", defaults.nCtx),
+                nThreads = root.optInt("n_threads", defaults.nThreads),
+                mmap = root.optBoolean("mmap", defaults.mmap),
+                mlock = root.optBoolean("mlock", defaults.mlock),
+                visionProjectorPath = root.optString("mmproj_path", defaults.visionProjectorPath.orEmpty())
+                    .takeIf { it.isNotBlank() },
+                geniexComputeUnit = root.optString(
+                    "geniex_compute_unit",
+                    root.optString("compute_unit", defaults.geniexComputeUnit.orEmpty())
+                ).trim().takeIf { it.isNotBlank() },
+                advancedJson = LlamaAdvancedParams.collectFromRoot(root, defaults.advancedJson)
+            )
+        }
+    }
+
+    fun advancedValidationErrors(): List<String> =
+        LlamaAdvancedParams.parse(advancedJson).errorMessages
+
+    fun toJson(): String {
+        val advanced = LlamaAdvancedParams.parse(advancedJson)
+        return JSONObject()
+            .put("n_ctx", nCtx)
+            .put("n_threads", nThreads)
+            .put("mmap", mmap)
+            .put("mlock", mlock)
+            .apply {
+                // Valid advanced canonical values override the LoadParams defaults.
+                advanced.putCanonicalFields(this)
+                put("advanced_json", advanced.advancedJsonValue())
             if (!visionProjectorPath.isNullOrBlank()) {
                 put("mmproj_path", visionProjectorPath)
             }
+            if (!geniexComputeUnit.isNullOrBlank()) {
+                put("geniex_compute_unit", geniexComputeUnit)
+            }
         }
         .toString()
+    }
 }
 
 data class GenerationParams(
@@ -163,11 +201,7 @@ data class GenerationParams(
                     ?: root.optJSONArray("stop")?.toStringList()
                     ?: defaults.stopWords,
                 chatTemplateMode = root.optString("chat_template_mode", defaults.chatTemplateMode),
-                advancedJson = when (val advanced = root.opt("advanced_json")) {
-                    is JSONObject -> advanced.toString()
-                    is String -> advanced.ifBlank { defaults.advancedJson }
-                    else -> defaults.advancedJson
-                },
+                advancedJson = LlamaAdvancedParams.collectFromRoot(root, defaults.advancedJson),
                 reasoningMode = root.optReasoningMode(defaults.reasoningMode),
                 hideReasoning = root.optBoolean("hide_reasoning", defaults.hideReasoning)
             )
@@ -214,85 +248,118 @@ data class GenerationParams(
         ReasoningMode.ADVANCED -> 1536
     }
 
-    fun toJson(): String = JSONObject()
-        .put("n_ctx", nCtx)
-        .put("n_predict", effectiveNPredict())
-        .put("n_threads", nThreads)
-        .put("temperature", temperature)
-        .put("top_k", topK)
-        .put("top_p", topP)
-        .put("min_p", minP)
-        .put("repeat_penalty", repeatPenalty)
-        .put("repetition_penalty", repeatPenalty)
-        .put("presence_penalty", presencePenalty)
-        .put("frequency_penalty", frequencyPenalty)
-        .put("seed", seed)
-        .put("system_prompt", systemPrompt)
-        .put("stop_words", JSONArray(stopWords))
-        .put("chat_template_mode", chatTemplateMode)
-        .put("reasoning_mode", reasoningMode.name.lowercase())
-        .put("enable_thinking", reasoningMode != ReasoningMode.OFF && !hideReasoning)
-        .put("thinking_budget", effectiveThinkingBudget())
-        .put("hide_reasoning", hideReasoning || reasoningMode == ReasoningMode.OFF)
-        .put("advanced_json", runCatching { JSONObject(advancedJson.ifBlank { "{}" }) }.getOrElse { JSONObject() })
-        .toString()
+    fun advancedValidationErrors(): List<String> =
+        LlamaAdvancedParams.parse(advancedJson).errorMessages
+
+    fun toJson(): String {
+        val advanced = LlamaAdvancedParams.parse(advancedJson)
+        return JSONObject()
+            .put("n_ctx", nCtx)
+            .put("n_predict", effectiveNPredict())
+            .put("n_threads", nThreads)
+            .put("temperature", temperature)
+            .put("top_k", topK)
+            .put("top_p", topP)
+            .put("min_p", minP)
+            .put("repeat_penalty", repeatPenalty)
+            .put("repetition_penalty", repeatPenalty)
+            .put("presence_penalty", presencePenalty)
+            .put("frequency_penalty", frequencyPenalty)
+            .put("seed", seed)
+            .put("system_prompt", systemPrompt)
+            .put("stop_words", JSONArray(stopWords))
+            .put("chat_template_mode", chatTemplateMode)
+            .put("reasoning_mode", reasoningMode.name.lowercase())
+            .put("enable_thinking", reasoningMode != ReasoningMode.OFF && !hideReasoning)
+            .put("thinking_budget", effectiveThinkingBudget())
+            .put("hide_reasoning", hideReasoning || reasoningMode == ReasoningMode.OFF)
+            .apply {
+                advanced.putCanonicalFields(this)
+                put("advanced_json", advanced.advancedJsonValue())
+            }
+            .toString()
+    }
 }
 
 data class ChatRequest(
     val messages: List<ChatMessage>,
-    val params: GenerationParams = GenerationParams()
+    val params: GenerationParams = GenerationParams(),
+    /** Request-scoped authoritative context; never persisted into assistants or chat history. */
+    val runtimeSystemContext: String = ""
 ) {
-    fun messagesJson(multimodal: Boolean = false): String {
+    fun messagesJson(
+        multimodal: Boolean = false,
+        contentEncoding: MultimodalContentEncoding = MultimodalContentEncoding.OPENAI_PARTS
+    ): String {
         val array = JSONArray()
         val effectiveMessages = withSystemPrompt(messages)
         effectiveMessages.forEach { message ->
             array.put(
                 JSONObject()
                     .put("role", message.role.name.lowercase())
-                    .put("content", message.toJsonContent(multimodal))
+                    .put("content", message.toJsonContent(multimodal, contentEncoding))
                     .put("created_at", message.createdAt)
             )
         }
         return array.toString()
     }
 
-    private fun ChatMessage.toJsonContent(multimodal: Boolean): Any {
+    private fun ChatMessage.toJsonContent(
+        multimodal: Boolean,
+        contentEncoding: MultimodalContentEncoding
+    ): Any {
         if (!multimodal || imageAttachments.isEmpty()) return content
+        val usableAttachments = imageAttachments.filter { it.hasInlineData || it.uriString.isNotBlank() }
+        if (usableAttachments.isEmpty()) return content
+        if (contentEncoding == MultimodalContentEncoding.MNN_IMAGE_TAGS_FIRST) {
+            return buildString {
+                usableAttachments.forEach { attachment ->
+                    val source = if (attachment.hasInlineData) attachment.dataUrl() else attachment.uriString
+                    append("<img>").append(source).append("</img>")
+                }
+                append(content)
+            }
+        }
         val parts = JSONArray()
         if (content.isNotBlank()) {
             parts.put(JSONObject().put("type", "text").put("text", content))
         }
-        imageAttachments
-            .filter { it.hasInlineData || it.uriString.isNotBlank() }
-            .forEach { attachment ->
-                parts.put(
-                    JSONObject()
-                        .put("type", "image_url")
-                        .put(
-                            "image_url",
-                            JSONObject()
-                                .put(
-                                    "url",
-                                    if (attachment.hasInlineData) attachment.dataUrl() else attachment.uriString
-                                )
-                                .put("detail", "auto")
+        usableAttachments.forEach { attachment ->
+            parts.put(
+                JSONObject()
+                    .put("type", "image_url")
+                    .put(
+                        "image_url",
+                        JSONObject()
+                            .put(
+                                "url",
+                                if (attachment.hasInlineData) attachment.dataUrl() else attachment.uriString
+                            )
+                            .put("detail", "auto")
                         )
-                )
-            }
-        if (parts.length() == 0) return content
+            )
+        }
         return parts
     }
 
     private fun withSystemPrompt(input: List<ChatMessage>): List<ChatMessage> {
         val prompt = params.effectiveSystemPrompt().trim()
-        if (prompt.isBlank()) return input
+        val runtimeContext = runtimeSystemContext.trim()
+        if (prompt.isBlank() && runtimeContext.isBlank()) return input
         val firstSystem = input.indexOfFirst { it.role == Role.SYSTEM }
         if (firstSystem < 0) {
-            return listOf(ChatMessage(Role.SYSTEM, prompt)) + input
+            val systemContent = listOf(prompt, runtimeContext)
+                .filter { it.isNotBlank() }
+                .joinToString("\n\n")
+            return listOf(ChatMessage(Role.SYSTEM, systemContent)) + input
         }
         return input.mapIndexed { index, message ->
             if (index == firstSystem) {
-                message.copy(content = listOf(message.content, params.reasoningInstruction())
+                message.copy(content = listOf(
+                    message.content,
+                    runtimeContext,
+                    params.reasoningInstruction()
+                )
                     .filter { it.isNotBlank() }
                     .joinToString("\n\n"))
             } else {
@@ -344,6 +411,9 @@ data class RuntimeStats(
     val nThreadsBatch: Int = 0,
     val nBatch: Int = 0,
     val nUbatch: Int = 0,
+    val nCtx: Int = 0,
+    val maxAllTokens: Int = 0,
+    val maxNewTokens: Int = 0,
     val backendDevices: String = "[]",
     val lastError: String? = null
 )

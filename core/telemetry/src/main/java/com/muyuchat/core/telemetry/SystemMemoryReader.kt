@@ -47,23 +47,20 @@ data class SystemMemorySnapshot(
 
 object SystemMemoryReader {
     fun read(context: Context): SystemMemorySnapshot {
-        val activityManager = context.applicationContext
-            .getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val memoryInfo = ActivityManager.MemoryInfo()
-        activityManager.getMemoryInfo(memoryInfo)
         val proc = readProcMemInfo()
-        val activityAvailable = memoryInfo.availMem.coerceAtLeast(0L)
+        val memoryInfo = runCatching {
+            val activityManager = context.applicationContext
+                .getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            ActivityManager.MemoryInfo().also { activityManager.getMemoryInfo(it) }
+        }.getOrNull()
+        val activityAvailable = memoryInfo?.availMem?.coerceAtLeast(0L) ?: 0L
         val procAvailable = proc["MemAvailable"].orZeroBytes()
         return SystemMemorySnapshot(
-            totalBytes = memoryInfo.totalMem.takeIf { it > 0L } ?: proc["MemTotal"].orZeroBytes(),
-            advertisedBytes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                memoryInfo.advertisedMem.coerceAtLeast(0L)
-            } else {
-                0L
-            },
+            totalBytes = memoryInfo?.totalMem?.takeIf { it > 0L } ?: proc["MemTotal"].orZeroBytes(),
+            advertisedBytes = memoryInfo?.advertisedBytesCompat() ?: 0L,
             availableBytes = max(activityAvailable, procAvailable),
-            thresholdBytes = memoryInfo.threshold.coerceAtLeast(0L),
-            lowMemory = memoryInfo.lowMemory,
+            thresholdBytes = memoryInfo?.threshold?.coerceAtLeast(0L) ?: 0L,
+            lowMemory = memoryInfo?.lowMemory ?: false,
             procMemTotalBytes = proc["MemTotal"].orZeroBytes(),
             procMemAvailableBytes = procAvailable,
             procMemFreeBytes = proc["MemFree"].orZeroBytes(),
@@ -74,6 +71,15 @@ object SystemMemoryReader {
             procSwapTotalBytes = proc["SwapTotal"].orZeroBytes()
         )
     }
+
+    private fun ActivityManager.MemoryInfo.advertisedBytesCompat(): Long =
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                advertisedMem.coerceAtLeast(0L)
+            } else {
+                0L
+            }
+        }.getOrDefault(0L)
 
     private fun readProcMemInfo(): Map<String, Long> {
         return runCatching {

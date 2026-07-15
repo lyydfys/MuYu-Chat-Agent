@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "artifactType": "benchmark_config",
+  "defaults": {
+    "runs": 3,
+    "warmupRuns": 1,
+    "cooldownSeconds": 0,
+    "maximumCooldownSeconds": 60,
+    "cancellationProbe": false
+  },
+  "cases": [
+    {
+      "id": "offline-chat",
+      "label": "Offline chat metric fixture",
+      "kind": "chat",
+      "model": "Offline Chat Config",
+      "extras": {
+        "runtime": "qnn",
+        "nThreads": 4,
+        "useAccelerator": true
+      }
+    },
+    {
+      "id": "offline-image",
+      "label": "Offline image metric fixture",
+      "kind": "image",
+      "model": "Offline Image Config",
+      "extras": {
+        "runtime": "qnn_htp",
+        "width": 512,
+        "cfgScale": {
+          "type": "float",
+          "value": 7.0
+        },
+        "semanticGenerate": true
+      }
+    }
+  ]
+}

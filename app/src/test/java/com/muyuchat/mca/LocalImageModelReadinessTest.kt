@@ -1,0 +1,1118 @@
+﻿package com.muyuchat.mca
+
+import com.muyuchat.core.download.ImageEngineAccelerator
+import com.muyuchat.core.download.ImageEngineBundleComponentRole
+import com.muyuchat.core.download.ImageEngineBundleComponentSpec
+import com.muyuchat.core.download.ImageEngineBundleRuntime
+import com.muyuchat.core.download.ImageEngineBundleSpec
+import com.muyuchat.core.download.ImageEngineIntegrityMetadataStatus
+import com.muyuchat.core.download.ImageEngineMinDeviceTier
+import com.muyuchat.core.download.ImageEngineQnnSmokeSpec
+import com.muyuchat.core.download.ImageEngineQnnSmokeTensorSpec
+import com.muyuchat.core.download.ImageEngineQnnRuntimeProfileSpec
+import com.muyuchat.core.download.ImageEngineSmokeSpec
+import com.muyuchat.core.download.ModelRepositoryProvider
+import com.muyuchat.core.download.RemoteModelFile
+import com.muyuchat.core.deviceprofile.QnnRuntimeProbeState
+import com.muyuchat.core.deviceprofile.QnnRuntimeStatus
+import java.io.File
+import java.nio.file.Files
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class LocalImageModelReadinessTest {
+    @Test
+    fun qnnRuntimeUsesPublicSnapdragonLabel() {
+        assertEquals("骁龙 NPU", LocalImageRuntime.QNN_HTP.label)
+    }
+
+    @Test
+    fun qnnRuntimeSearchDirectoriesAddsCanonicalBundleRuntimeWithoutDuplicates() {
+        val root = Files.createTempDirectory("qnn-runtime-search").toFile()
+        try {
+            val runtime = File(root, "runtime").apply { mkdirs() }
+
+            val directories = qnnRuntimeSearchDirectories(
+                bundleRoot = root,
+                existingDirectories = listOf(
+                    runtime.absolutePath,
+                    File(runtime, ".").absolutePath,
+                    "/vendor/lib64"
+                )
+            )
+
+            assertEquals(listOf(runtime.canonicalPath, "/vendor/lib64"), directories)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun qnnRuntimeSearchDirectoriesKeepsExistingPathsWhenBundleHasNoRuntimeDirectory() {
+        val root = Files.createTempDirectory("qnn-runtime-search-missing").toFile()
+        try {
+            val existing = listOf("/vendor/lib64", "/system/lib64")
+
+            assertEquals(existing, qnnRuntimeSearchDirectories(root, existing))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun qnnRuntimeDirectoriesPrioritizeDeviceSelectedCoherentHost() {
+        val generic = Files.createTempDirectory("qnn-generic-runtime").toFile()
+        val gen2 = Files.createTempDirectory("qnn-gen2-runtime").toFile()
+        try {
+            val status = QnnRuntimeStatus(
+                qnnSystemLibraryPresent = true,
+                qnnHtpLibraryPresent = true,
+                htpSkelLibraryPresent = true,
+                htpStubLibraryPresent = true,
+                qnnSystemLibraryPath = File(gen2, "libQnnSystem.so").absolutePath,
+                qnnHtpLibraryPath = File(gen2, "libQnnHtp.so").absolutePath,
+                htpSkelLibraryPath = File(gen2, "libQnnHtpV73Skel.so").absolutePath,
+                htpStubLibraryPath = File(gen2, "libQnnHtpV73Stub.so").absolutePath,
+                searchDirectories = listOf(generic.absolutePath, gen2.absolutePath),
+                probeState = QnnRuntimeProbeState.LOADABLE
+            )
+
+            val directories = qnnRuntimeDirectoriesFor(status)
+
+            assertEquals(gen2.canonicalPath, directories.first())
+            assertEquals(1, directories.count { it == gen2.canonicalPath })
+            assertTrue(directories.contains(generic.canonicalPath))
+        } finally {
+            generic.deleteRecursively()
+            gen2.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun completeMnnDiffusionStableLayoutRequiresRuntimeVerification() {
+        val root = Files.createTempDirectory("mnn-diffusion-sd").toFile()
+        val primary = root.touch("unet.mnn")
+        root.touch("text_encoder.mnn")
+        root.touch("text_encoder.mnn.weight")
+        root.touch("unet.mnn.weight")
+        root.touch("vae_decoder.mnn")
+        root.touch("vae_decoder.mnn.weight")
+        root.touch("tokenizer.mtok")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.MNN_DIFFUSION
+        )
+
+        val message = record.localImageReadinessMessage()
+
+        assertNull(record.localImageStructuralReadinessMessage())
+        assertNotNull(message)
+        assertTrue(message!!.contains("20-step"))
+    }
+
+    @Test
+    fun unverifiedStableDiffusionCppEngineCannotBecomeReadyForAutomaticSelection() {
+        val root = Files.createTempDirectory("sdcpp-unverified").toFile()
+        try {
+            val checkpoint = root.touch("sd_turbo.safetensors")
+            val record = localImageRecord(
+                root = root,
+                primary = checkpoint,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.SD_TURBO
+            )
+
+            assertNull(record.localImageStructuralReadinessMessage())
+            assertFalse(record.isReadyForLocalImageGeneration())
+            assertEquals("待校验", record.localImageReadinessLabel())
+            assertTrue(record.localImageReadinessMessage()!!.contains("smoke"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun passedStableDiffusionCppEngineCanBecomeReadyAfterRealSmoke() {
+        val root = Files.createTempDirectory("sdcpp-passed").toFile()
+        try {
+            val checkpoint = root.touch("sd_turbo.safetensors")
+            val record = localImageRecord(
+                root = root,
+                primary = checkpoint,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.SD_TURBO,
+                verificationStatus = LocalImageVerificationStatus.PASSED
+            )
+
+            assertTrue(record.isReadyForLocalImageGeneration())
+            assertEquals("可用", record.localImageReadinessLabel())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun passedMnnDiffusionRuntimeVerificationIsReady() {
+        val root = Files.createTempDirectory("mnn-diffusion-sd-passed").toFile()
+        val primary = root.touch("unet.mnn")
+        root.touch("text_encoder.mnn")
+        root.touch("text_encoder.mnn.weight")
+        root.touch("unet.mnn.weight")
+        root.touch("vae_decoder.mnn")
+        root.touch("vae_decoder.mnn.weight")
+        root.touch("tokenizer.mtok")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.MNN_DIFFUSION
+        ).copy(
+            verificationStatus = LocalImageVerificationStatus.PASSED,
+            verificationMessage = "1-step 通过"
+        )
+
+        assertNull(record.localImageReadinessMessage())
+    }
+
+    @Test
+    fun mnnImageSmokeAllowsManualUseButCannotBecomeAutomaticDefault() {
+        val root = Files.createTempDirectory("mnn-diffusion-sd-smoke").toFile()
+        val primary = root.touch("unet.mnn")
+        root.touch("text_encoder.mnn")
+        root.touch("text_encoder.mnn.weight")
+        root.touch("unet.mnn.weight")
+        root.touch("vae_decoder.mnn")
+        root.touch("vae_decoder.mnn.weight")
+        root.touch("tokenizer.mtok")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.MNN_DIFFUSION
+        ).copy(
+            verificationStatus = LocalImageVerificationStatus.MNN_SMOKE_PASSED,
+            verificationMessage = "direct/opencl 512x512 20-step PNG smoke passed"
+        )
+
+        assertTrue(record.isReadyForLocalImageGeneration())
+        assertEquals("MNN smoke", record.localImageReadinessLabel())
+        assertFalse(record.isCertifiedForAutomaticLocalImageSelection())
+    }
+
+    @Test
+    fun failedMnnDiffusionRuntimeVerificationBlocksGenerationReadiness() {
+        val root = Files.createTempDirectory("mnn-diffusion-runtime-failed").toFile()
+        val primary = root.touch("unet.mnn")
+        root.touch("text_encoder.mnn")
+        root.touch("text_encoder.mnn.weight")
+        root.touch("unet.mnn.weight")
+        root.touch("vae_decoder.mnn")
+        root.touch("vae_decoder.mnn.weight")
+        root.touch("tokenizer.mtok")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.MNN_DIFFUSION
+        ).copy(
+            verificationStatus = LocalImageVerificationStatus.FAILED,
+            verificationMessage = "UNet smoke 未通过"
+        )
+
+        val message = record.localImageReadinessMessage()
+
+        assertNotNull(message)
+        assertTrue(message!!.contains("运行校验未通过"))
+        assertTrue(message.contains("UNet smoke 未通过"))
+    }
+
+    @Test
+    fun incompleteMnnDiffusionBundleReportsMissingComponents() {
+        val root = Files.createTempDirectory("mnn-diffusion-missing").toFile()
+        val primary = root.touch("unet.mnn")
+        root.touch("text_encoder.mnn")
+        root.touch("text_encoder.mnn.weight")
+        root.touch("unet.mnn.weight")
+        root.touch("tokenizer.txt")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.MNN_DIFFUSION
+        )
+
+        val message = record.localImageReadinessMessage()
+        assertNotNull(message)
+        assertTrue(message!!.contains("vae_decoder.mnn"))
+    }
+
+    @Test
+    fun mnnDiffusionBundleCanPrepareTokenizerTxtFromVocabAndMerges() {
+        val root = Files.createTempDirectory("mnn-diffusion-tokenizer").toFile()
+        val primary = root.touch("unet.mnn")
+        root.touch("text_encoder.mnn")
+        root.touch("text_encoder.mnn.weight")
+        root.touch("unet.mnn.weight")
+        root.touch("vae_decoder.mnn")
+        root.touch("vae_decoder.mnn.weight")
+        File(root, "vocab.json").writeText(
+            """{"a":0,"b":1,"ab":2}"""
+        )
+        File(root, "merges.txt").writeText(
+            """
+            #version: 0.2
+            a b
+            """.trimIndent()
+        )
+
+        assertTrue(prepareMnnDiffusionTokenizerIfPossible(root))
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.MNN_DIFFUSION
+        )
+
+        assertTrue(File(root, "tokenizer.txt").isFile)
+        assertNull(record.localImageStructuralReadinessMessage())
+        assertNotNull(record.localImageReadinessMessage())
+    }
+
+    @Test
+    fun sanaMnnRequiredComponentsMatchDownloadContract() {
+        assertEquals(
+            listOf(
+                "config.json",
+                "llm/config.json",
+                "llm/llm_config.json",
+                "llm/llm.mnn",
+                "llm/llm.mnn.weight",
+                "llm/tokenizer.txt",
+                "llm/meta_queries.mnn",
+                "connector.mnn",
+                "connector.mnn.weight",
+                "projector.mnn",
+                "projector.mnn.weight",
+                "transformer.mnn",
+                "transformer.mnn.weight",
+                "vae_decoder.mnn",
+                "vae_decoder.mnn.weight",
+                "vae_encoder.mnn",
+                "vae_encoder.mnn.weight"
+            ),
+            LocalImageBundleContract.sanaRequiredComponentPaths
+        )
+    }
+
+    @Test
+    fun imageBundleExposesUnknownSourceIntegrityMetadataWithoutInventingAHash() {
+        val bundle = ImageEngineBundleSpec(
+            id = "unverified",
+            title = "Unverified",
+            components = listOf(
+                ImageEngineBundleComponentSpec(
+                    role = ImageEngineBundleComponentRole.DIFFUSION,
+                    repoId = "publisher/model",
+                    fileName = "model.gguf"
+                )
+            )
+        )
+
+        assertEquals(ImageEngineIntegrityMetadataStatus.UNKNOWN, bundle.integrityMetadataStatus)
+        assertEquals(ImageEngineIntegrityMetadataStatus.UNKNOWN, bundle.components.single().integrityMetadataStatus)
+        assertNull(bundle.components.single().sha256)
+    }
+
+    @Test
+    fun mnnReadinessExplicitlyReportsUnknownPublisherHashFromDownloadAudit() {
+        val root = Files.createTempDirectory("mnn-audit-unknown-source").toFile()
+        try {
+            val primary = root.touch("unet.mnn")
+            root.touch("text_encoder.mnn")
+            root.touch("text_encoder.mnn.weight")
+            root.touch("unet.mnn.weight")
+            root.touch("vae_decoder.mnn")
+            root.touch("vae_decoder.mnn.weight")
+            root.touch("tokenizer.mtok")
+            root.writeComponentAudit("unet.mnn", "UNKNOWN")
+
+            val message = localImageRecord(
+                root = root,
+                primary = primary,
+                runtime = LocalImageRuntime.MNN_DIFFUSION
+            ).localImageStructuralReadinessMessage()
+
+            assertNotNull(message)
+            assertTrue(message!!.contains("Publisher SHA-256 is unavailable"))
+            assertTrue(message.contains("unet.mnn"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun mnnReadinessRejectsTamperedComponentRecordedInDownloadAudit() {
+        val root = Files.createTempDirectory("mnn-audit-tampered").toFile()
+        try {
+            val primary = root.touch("unet.mnn")
+            root.touch("text_encoder.mnn")
+            root.touch("text_encoder.mnn.weight")
+            root.touch("unet.mnn.weight")
+            root.touch("vae_decoder.mnn")
+            root.touch("vae_decoder.mnn.weight")
+            root.touch("tokenizer.mtok")
+            root.writeComponentAudit("unet.mnn", "UNKNOWN")
+            primary.writeText("tampered")
+
+            val message = localImageRecord(
+                root = root,
+                primary = primary,
+                runtime = LocalImageRuntime.MNN_DIFFUSION
+            ).localImageStructuralReadinessMessage()
+
+            assertNotNull(message)
+            assertTrue(message!!.contains("integrity audit failed"))
+            assertTrue(message.contains("SIZE_MISMATCH"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun completeSanaMnnDiffusionBundleRequiresRuntimeVerification() {
+        val root = Files.createTempDirectory("mnn-diffusion-sana").toFile()
+        val primary = root.createCompleteSanaBundle()
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.MNN_DIFFUSION,
+            family = LocalImageModelFamily.SANA
+        )
+
+        val message = record.localImageReadinessMessage()
+        assertNull(record.localImageStructuralReadinessMessage())
+        assertNotNull(message)
+        assertTrue(message!!.contains("至少 2-step"))
+    }
+
+    @Test
+    fun sanaManifestFamilyOverridesStaleSd15RecordForReadiness() {
+        val root = Files.createTempDirectory("mnn-diffusion-sana-manifest").toFile()
+        val primary = root.createCompleteSanaBundle()
+        File(root, "manifest.json").writeText(
+            """
+            {
+              "runtime": "MNN_DIFFUSION",
+              "family": "SANA",
+              "smoke": { "width": 512, "height": 512, "steps": 1 }
+            }
+            """.trimIndent(),
+            Charsets.UTF_8
+        )
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.MNN_DIFFUSION,
+            family = LocalImageModelFamily.SD15
+        )
+
+        assertNull(record.localImageStructuralReadinessMessage())
+        assertTrue(record.localImageReadinessMessage()!!.contains("2-step"))
+    }
+
+    @Test
+    fun sanaMnnReadinessReportsEveryMissingRequiredComponent() {
+        LocalImageBundleContract.sanaRequiredComponentPaths.forEach { missingPath ->
+            val root = Files.createTempDirectory("mnn-sana-missing").toFile()
+            try {
+                val primary = root.createCompleteSanaBundle()
+                assertTrue(File(root, missingPath).delete())
+
+                val check = LocalImageBundleContract.inspectMnnBundle(
+                    bundleRoot = root,
+                    primaryFile = primary,
+                    family = LocalImageModelFamily.SANA
+                )
+                assertEquals("unexpected missing set for $missingPath", listOf(missingPath), check.missingComponents)
+
+                val readinessPrimary = if (missingPath == "transformer.mnn") {
+                    File(root, "connector.mnn")
+                } else {
+                    primary
+                }
+                val message = localImageRecord(
+                    root = root,
+                    primary = readinessPrimary,
+                    runtime = LocalImageRuntime.MNN_DIFFUSION,
+                    family = LocalImageModelFamily.SANA
+                ).localImageStructuralReadinessMessage()
+                assertNotNull("readiness should reject missing $missingPath", message)
+                assertTrue("readiness should name $missingPath: $message", message!!.contains(missingPath))
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun sanaMnnReadinessRejectsEveryEmptyRequiredComponent() {
+        LocalImageBundleContract.sanaRequiredComponentPaths.forEach { emptyPath ->
+            val root = Files.createTempDirectory("mnn-sana-empty").toFile()
+            try {
+                val primary = root.createCompleteSanaBundle()
+                File(root, emptyPath).writeBytes(byteArrayOf())
+
+                val check = LocalImageBundleContract.inspectMnnBundle(
+                    bundleRoot = root,
+                    primaryFile = primary,
+                    family = LocalImageModelFamily.SANA
+                )
+                assertEquals("empty file should fail for $emptyPath", listOf(emptyPath), check.missingComponents)
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun sanaMnnContractResolvesExtractedWrapperDirectory() {
+        val outer = Files.createTempDirectory("mnn-sana-wrapper").toFile()
+        val bundle = File(outer, "MNN-Sana-Edit-V2").apply { mkdirs() }
+        val primary = bundle.createCompleteSanaBundle()
+
+        val check = LocalImageBundleContract.inspectMnnBundle(
+            bundleRoot = outer,
+            primaryFile = primary,
+            family = LocalImageModelFamily.SANA
+        )
+
+        assertEquals(bundle.canonicalFile, check.root!!.canonicalFile)
+        assertTrue(check.missingComponents.isEmpty())
+        assertNull(
+            localImageRecord(
+                root = outer,
+                primary = primary,
+                runtime = LocalImageRuntime.MNN_DIFFUSION,
+                family = LocalImageModelFamily.SANA
+            ).localImageStructuralReadinessMessage()
+        )
+    }
+
+    @Test
+    fun sanaVerificationRouteUsesManifestFamilyAndMinimumTwoSteps() {
+        val route = mnnVerificationRoute(
+            modelFamily = LocalImageModelFamily.SD15,
+            manifest = LocalImageBundleManifest(
+                family = LocalImageModelFamily.SANA,
+                smokeWidth = 640,
+                smokeHeight = 768,
+                smokeSteps = 1
+            )
+        )
+
+        assertEquals(LocalImageModelFamily.SANA, route.family)
+        assertEquals(2, route.steps)
+        assertEquals(640, route.width)
+        assertEquals(768, route.height)
+        assertFalse(route.requiresUnetPreflight)
+    }
+
+    @Test
+    fun sanaVerificationRouteKeepsHigherManifestStepCount() {
+        val route = mnnVerificationRoute(
+            modelFamily = LocalImageModelFamily.SANA,
+            manifest = LocalImageBundleManifest(
+                family = LocalImageModelFamily.SANA,
+                smokeSteps = 10
+            )
+        )
+
+        assertEquals(10, route.steps)
+        assertFalse(route.requiresUnetPreflight)
+    }
+
+    @Test
+    fun stableDiffusionMnnVerificationUsesValidatedDirectTwentyStepContract() {
+        val route = mnnVerificationRoute(
+            modelFamily = LocalImageModelFamily.SD15,
+            manifest = LocalImageBundleManifest(
+                family = LocalImageModelFamily.SD15,
+                smokeWidth = 768,
+                smokeHeight = 768,
+                smokeSteps = 10
+            )
+        )
+
+        assertEquals(LocalImageModelFamily.SD15, route.family)
+        assertEquals(20, route.steps)
+        assertEquals(512, route.width)
+        assertEquals(512, route.height)
+        assertTrue(route.requiresUnetPreflight)
+    }
+
+    @Test
+    fun incompleteSanaMnnDiffusionBundleReportsExactMissingComponents() {
+        val root = Files.createTempDirectory("mnn-diffusion-sana-missing").toFile()
+        val primary = root.touch("transformer.mnn")
+        root.touch("connector.mnn")
+        root.touch("projector.mnn")
+        root.touch("vae_decoder.mnn")
+        root.touch("llm/config.json")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.MNN_DIFFUSION,
+            family = LocalImageModelFamily.SANA
+        )
+
+        val message = record.localImageStructuralReadinessMessage()
+        assertNotNull(message)
+        assertTrue(message!!.contains("llm/meta_queries.mnn"))
+        assertFalse(message.contains("text_encoder.mnn"))
+    }
+
+    @Test
+    fun fluxGgufSingleFileStillRequiresCompanionBundle() {
+        val root = Files.createTempDirectory("flux-gguf").toFile()
+        val primary = root.touch("flux-2-klein-4b-Q4_0.gguf")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+            family = LocalImageModelFamily.FLUX
+        )
+
+        assertNotNull(record.localImageReadinessMessage())
+    }
+
+    @Test
+    fun completeQnnImageBundleRequiresSmokeVerificationBeforeUse() {
+        val root = Files.createTempDirectory("qnn-sd15").toFile()
+        val primary = root.touch("sd15_qnn_context.bin")
+        root.touch("unet_qnn_context.bin")
+        root.touch("vae_decoder_qnn_context.bin")
+        root.touch("clip_text_encoder_qnn_context.bin")
+        root.touch("tokenizer.json")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.QNN_HTP
+        )
+
+        val message = record.localImageReadinessMessage()
+
+        assertNull(record.localImageStructuralReadinessMessage())
+        assertNotNull(message)
+        assertTrue(message!!.contains("QNN"))
+        assertTrue(message.contains("1-step"))
+    }
+
+    @Test
+    fun qnnSmokePassedStaysDiagnosticUntilSemanticGenerationPasses() {
+        val root = Files.createTempDirectory("qnn-sd15-smoke-passed").toFile()
+        val primary = root.touch("sd15_qnn_context.bin")
+        root.touch("unet_qnn_context.bin")
+        root.touch("vae_decoder_qnn_context.bin")
+        root.touch("clip_text_encoder_qnn_context.bin")
+        root.touch("tokenizer.json")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.QNN_HTP,
+            verificationStatus = LocalImageVerificationStatus.QNN_SMOKE_PASSED,
+            verificationMessage = "QNN smoke passed"
+        )
+
+        val message = record.localImageReadinessMessage()
+
+        assertNotNull(message)
+        assertEquals("NPU smoke", record.localImageReadinessLabel())
+    }
+
+    @Test
+    fun qnnOneStepImageSmokeAllowsManualUseButCannotBecomeAutomaticDefault() {
+        val root = Files.createTempDirectory("qnn-sdxl-image-smoke").toFile()
+        val primary = root.touch("sdxl_qnn_context.bin")
+        root.touch("unet_qnn_context.bin")
+        root.touch("vae_decoder_qnn_context.bin")
+        root.touch("clip_text_encoder_qnn_context.bin")
+        root.touch("tokenizer.json")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.QNN_HTP,
+            family = LocalImageModelFamily.SDXL,
+            verificationStatus = LocalImageVerificationStatus.QNN_IMAGE_SMOKE_PASSED,
+            verificationMessage = "1-step NPU PNG smoke passed"
+        )
+
+        assertTrue(record.isReadyForLocalImageGeneration())
+        assertEquals("NPU 1-step smoke", record.localImageReadinessLabel())
+        assertFalse(record.isCertifiedForAutomaticLocalImageSelection())
+    }
+
+    @Test
+    fun qnnPipelineProbePassedStaysDiagnosticUntilSemanticGenerationPasses() {
+        val root = Files.createTempDirectory("qnn-sd15-pipeline-probe").toFile()
+        val primary = root.touch("sd15_qnn_context.bin")
+        root.touch("unet_qnn_context.bin")
+        root.touch("vae_decoder_qnn_context.bin")
+        root.touch("clip_text_encoder_qnn_context.bin")
+        root.touch("tokenizer.json")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.QNN_HTP,
+            verificationStatus = LocalImageVerificationStatus.QNN_PIPELINE_PROBE_PASSED,
+            verificationMessage = "QNN pipeline probe passed"
+        )
+
+        val message = record.localImageReadinessMessage()
+
+        assertNotNull(message)
+        assertEquals("NPU probe", record.localImageReadinessLabel())
+    }
+
+    @Test
+    fun incompleteQnnImageBundleReportsMissingRuntimeComponents() {
+        val root = Files.createTempDirectory("qnn-image-missing").toFile()
+        val primary = root.touch("sd15_qnn_context.bin")
+        root.touch("clip_text_encoder_qnn_context.bin")
+
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = LocalImageRuntime.QNN_HTP
+        )
+
+        val message = record.localImageReadinessMessage()
+
+        assertNotNull(message)
+        assertTrue(message!!.contains("VAE"))
+    }
+
+    @Test
+    fun qnnManifestSelectsDeclaredDiffusionPrimaryAndSmokeSize() {
+        val root = Files.createTempDirectory("qnn-manifest-sd15").toFile()
+        val primary = root.touch("diffusion/unet_context.bin")
+        root.touch("runtime/libQnnHtp.so")
+        root.touch("vae/vae_decoder_context.bin")
+        root.touch("text_encoder/clip_context.bin")
+        root.touch("tokenizer/tokenizer.json")
+        File(root, "manifest.json").writeText(
+            """
+            {
+              "schema": "mca.image_engine.bundle.v1",
+              "id": "sd15-qnn-min",
+              "title": "SD1.5 QNN Min",
+              "runtime": "QNN_HTP",
+              "family": "SD15",
+              "components": [
+                {"role": "DIFFUSION", "path": "diffusion/unet_context.bin"},
+                {"role": "VAE", "path": "vae/vae_decoder_context.bin"},
+                {"role": "TEXT_ENCODER", "path": "text_encoder/clip_context.bin"},
+                {"role": "TOKENIZER", "path": "tokenizer/tokenizer.json"}
+              ],
+              "smoke": {"width": 384, "height": 384, "steps": 1}
+            }
+            """.trimIndent()
+        )
+
+        val manifest = localImageBundleManifestFromRoot(root)
+
+        assertNotNull(manifest)
+        assertEquals("sd15-qnn-min", manifest!!.id)
+        assertEquals("SD1.5 QNN Min", manifest.displayName)
+        assertEquals(LocalImageRuntime.QNN_HTP, manifest.runtime)
+        assertEquals(LocalImageModelFamily.SD15, manifest.family)
+        assertEquals("384x384", manifest.imageSize)
+        assertEquals(primary.canonicalFile, manifest.primaryFile!!.canonicalFile)
+        assertEquals(4, manifest.componentCount)
+    }
+
+    @Test
+    fun mnnManifestUsesSmokeSpecAndRequiresRuntimeVerification() {
+        val root = Files.createTempDirectory("mnn-manifest-sd15").toFile()
+        val primary = root.touch("unet.mnn")
+        root.touch("text_encoder.mnn")
+        root.touch("text_encoder.mnn.weight")
+        root.touch("unet.mnn.weight")
+        root.touch("vae_decoder.mnn")
+        root.touch("vae_decoder.mnn.weight")
+        root.touch("tokenizer.mtok")
+        File(root, "manifest.json").writeText(
+            """
+            {
+              "schema": "mca.image_engine.bundle.v1",
+              "runtime": "MNN_DIFFUSION",
+              "family": "SD15",
+              "components": [
+                {"role": "DIFFUSION", "path": "unet.mnn"},
+                {"role": "VAE", "path": "vae_decoder.mnn"},
+                {"role": "TEXT_ENCODER", "path": "text_encoder.mnn"},
+                {"role": "TOKENIZER", "path": "tokenizer.mtok"}
+              ],
+              "smokeSpec": {"width": 512, "height": 512, "steps": 1}
+            }
+            """.trimIndent()
+        )
+
+        val manifest = localImageBundleManifestFromRoot(root)
+        val record = localImageRecord(
+            root = root,
+            primary = primary,
+            runtime = manifest!!.runtime!!,
+            family = manifest.family!!
+        )
+
+        assertEquals(LocalImageRuntime.MNN_DIFFUSION, manifest.runtime)
+        assertEquals("512x512", manifest.imageSize)
+        assertNull(record.localImageStructuralReadinessMessage())
+        assertNotNull(record.localImageReadinessMessage())
+    }
+
+    @Test
+    fun manifestPrimaryPathCannotEscapeBundleRoot() {
+        val root = Files.createTempDirectory("qnn-manifest-unsafe").toFile()
+        root.touch("diffusion/unet_context.bin")
+        File(root, "manifest.json").writeText(
+            """
+            {
+              "runtime": "QNN_HTP",
+              "family": "SD15",
+              "components": [
+                {"role": "DIFFUSION", "path": "../outside.bin"}
+              ],
+              "smoke": {"width": 384, "height": 384}
+            }
+            """.trimIndent()
+        )
+
+        val manifest = localImageBundleManifestFromRoot(root)
+
+        assertNotNull(manifest)
+        assertFalse(manifest!!.primaryFile?.canonicalPath?.startsWith(root.canonicalPath) == true)
+        assertNull(manifest.primaryFile)
+    }
+
+    @Test
+    fun downloadedRecommendationManifestCanBeParsedAsBundleManifest() {
+        val root = Files.createTempDirectory("downloaded-mnn-manifest").toFile()
+        val unet = root.touch("unet.mnn")
+        val vae = root.touch("vae_decoder.mnn")
+        val textEncoder = root.touch("text_encoder.mnn")
+        val tokenizer = root.touch("tokenizer.mtok")
+        val bundle = ImageEngineBundleSpec(
+            id = "sd15_mnn_bundle",
+            title = "MNN SD1.5 384 验证包",
+            components = emptyList(),
+            runtime = ImageEngineBundleRuntime.MNN_DIFFUSION,
+            accelerator = ImageEngineAccelerator.CPU,
+            minDeviceTier = ImageEngineMinDeviceTier.ANY,
+            smokeSpec = ImageEngineSmokeSpec(width = 384, height = 384, steps = 1, timeoutSeconds = 90)
+        )
+        val targets = listOf(
+            remote("unet.mnn", ImageEngineBundleComponentRole.DIFFUSION) to unet,
+            remote("vae_decoder.mnn", ImageEngineBundleComponentRole.VAE) to vae,
+            remote("text_encoder.mnn", ImageEngineBundleComponentRole.TEXT_ENCODER) to textEncoder,
+            remote("tokenizer.mtok", ImageEngineBundleComponentRole.TOKENIZER) to tokenizer
+        )
+        File(root, "manifest.json").writeText(
+            downloadedImageBundleManifestJson(
+                displayName = "MNN SD1.5 384 链路验证包",
+                bundle = bundle,
+                targets = targets
+            ).toString(2),
+            Charsets.UTF_8
+        )
+
+        val manifest = localImageBundleManifestFromRoot(root)
+
+        assertNotNull(manifest)
+        assertEquals("sd15_mnn_bundle", manifest!!.id)
+        assertEquals("MNN SD1.5 384 链路验证包", manifest.displayName)
+        assertEquals(LocalImageRuntime.MNN_DIFFUSION, manifest.runtime)
+        assertEquals(LocalImageModelFamily.SD15, manifest.family)
+        assertEquals("384x384", manifest.imageSize)
+        assertEquals(unet.canonicalFile, manifest.primaryFile!!.canonicalFile)
+        assertEquals(4, manifest.componentCount)
+    }
+
+    @Test
+    fun downloadedSdTurboManifestKeepsExplicitFamilyAndCheckpointRole() {
+        val root = Files.createTempDirectory("downloaded-sd-turbo-manifest").toFile()
+        try {
+            val checkpoint = root.touch("checkpoint.safetensors")
+            val bundle = ImageEngineBundleSpec(
+                id = "sd_turbo_512_direct",
+                title = "Stable Diffusion Turbo 512",
+                components = emptyList(),
+                runtime = ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP,
+                accelerator = ImageEngineAccelerator.CPU,
+                smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 1, timeoutSeconds = 600),
+                modelFamily = "SD_TURBO"
+            )
+            val remote = remote("checkpoint.safetensors", ImageEngineBundleComponentRole.DIFFUSION)
+                .copy(relativePath = "checkpoint.safetensors")
+            val manifestJson = downloadedImageBundleManifestJson(
+                displayName = bundle.title,
+                bundle = bundle,
+                targets = listOf(remote to checkpoint)
+            )
+            File(root, "manifest.json").writeText(manifestJson.toString(2), Charsets.UTF_8)
+
+            val manifest = localImageBundleManifestFromRoot(root)
+
+            assertEquals("SD_TURBO", manifestJson.getString("family"))
+            assertEquals("DIFFUSION", manifestJson.getJSONArray("components").getJSONObject(0).getString("role"))
+            assertNotNull(manifest)
+            assertEquals(LocalImageModelFamily.SD_TURBO, manifest!!.family)
+            assertEquals(checkpoint.canonicalFile, manifest.primaryFile!!.canonicalFile)
+            assertEquals("512x512", manifest.imageSize)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun downloadedQnnZipRecommendationManifestKeepsSmokeSuiteAfterExtraction() {
+        val root = Files.createTempDirectory("downloaded-qnn-manifest").toFile()
+        val unet = root.touch("unet.bin")
+        root.touch("vae_decoder.bin")
+        root.touch("clip_v2.mnn")
+        root.touch("tokenizer.json")
+        val bundle = ImageEngineBundleSpec(
+            id = "cyberrealistic_sd15_qnn228",
+            title = "CyberRealistic SD1.5 QNN 2.28",
+            components = emptyList(),
+            runtime = ImageEngineBundleRuntime.QNN_HTP,
+            accelerator = ImageEngineAccelerator.QNN_HTP,
+            minDeviceTier = ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN2,
+            requiresQnnRuntime = true,
+            requiresSmokeTest = true,
+            smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 4, timeoutSeconds = 240),
+            qnnSmokeSpecs = listOf(
+                ImageEngineQnnSmokeSpec(
+                    contextBinary = "unet.bin",
+                    inputs = listOf(
+                        ImageEngineQnnSmokeTensorSpec("sample", "uint16", listOf(1, 4, 64, 64)),
+                        ImageEngineQnnSmokeTensorSpec("timestamp", "int32", listOf(1)),
+                        ImageEngineQnnSmokeTensorSpec("text_embedding", "uint16", listOf(1, 77, 768))
+                    ),
+                    outputs = listOf(
+                        ImageEngineQnnSmokeTensorSpec("output", "uint16", listOf(1, 4, 64, 64), role = "output")
+                    )
+                ),
+                ImageEngineQnnSmokeSpec(
+                    contextBinary = "vae_decoder.bin",
+                    prompt = "vae decoder smoke",
+                    inputs = listOf(
+                        ImageEngineQnnSmokeTensorSpec("input", "uint16", listOf(1, 4, 64, 64))
+                    ),
+                    outputs = listOf(
+                        ImageEngineQnnSmokeTensorSpec("output", "uint16", listOf(1, 3, 512, 512), role = "output")
+                    )
+                )
+            )
+        )
+        val deletedZipTarget = File(root, "cyberrealistic_final_qnn2.28_8gen2.zip")
+        val targets = listOf(
+            remote("cyberrealistic_final_qnn2.28_8gen2.zip", ImageEngineBundleComponentRole.DIFFUSION) to deletedZipTarget
+        )
+        File(root, "manifest.json").writeText(
+            downloadedImageBundleManifestJson(
+                displayName = "CyberRealistic SD1.5 NPU",
+                bundle = bundle,
+                targets = targets
+            ).toString(2),
+            Charsets.UTF_8
+        )
+
+        val manifest = localImageBundleManifestFromRoot(root)
+        val record = localImageRecord(
+            root = root,
+            primary = unet,
+            runtime = LocalImageRuntime.QNN_HTP
+        )
+
+        assertNotNull(manifest)
+        assertEquals("cyberrealistic_sd15_qnn228", manifest!!.id)
+        assertEquals(LocalImageRuntime.QNN_HTP, manifest.runtime)
+        assertEquals(ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN2, manifest.minDeviceTier)
+        assertEquals(2, manifest.qnnSmokeSpecs.size)
+        assertEquals("unet.bin", manifest.qnnSmokeSpec.contextBinary)
+        assertTrue(manifest.qnnSmokeSpecs.all { it.completeForGraphSmoke })
+        assertNull(manifest.primaryFile)
+        assertNull(record.localImageStructuralReadinessMessage())
+    }
+
+    @Test
+    fun downloadedQnn228ManifestPersistsRuntimeContractAndBlocksMissingBundleRuntime() {
+        val root = Files.createTempDirectory("downloaded-qnn-runtime-contract").toFile()
+        val unet = root.touch("unet.bin")
+        root.touch("vae_decoder.bin")
+        root.touch("clip_v2.mnn")
+        root.touch("tokenizer.json")
+        val bundle = ImageEngineBundleSpec(
+            id = "dreamshaper_sd15_qnn228",
+            title = "DreamShaper SD1.5 QNN 2.28",
+            components = emptyList(),
+            runtime = ImageEngineBundleRuntime.QNN_HTP,
+            accelerator = ImageEngineAccelerator.QNN_HTP,
+            minDeviceTier = ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN2,
+            requiresQnnRuntime = true,
+            requiredRuntimeProfile = ImageEngineQnnRuntimeProfileSpec("2.28", 73, true)
+        )
+        val remote = remote("dreamshaper_8_qnn2.28_8gen2.zip", ImageEngineBundleComponentRole.DIFFUSION)
+        val persistedManifest = downloadedImageBundleManifestJson(
+            displayName = bundle.title,
+            bundle = bundle,
+            targets = listOf(remote to File(root, remote.name))
+        )
+        // Compatibility: early contract writers may omit the boolean because
+        // the data-model default is true. Deserialization must retain that
+        // fail-closed meaning rather than silently disabling the contract.
+        persistedManifest.getJSONObject("requiredRuntimeProfile").remove("completeBundleRuntime")
+        File(root, "manifest.json").writeText(persistedManifest.toString(2), Charsets.UTF_8)
+
+        val manifest = localImageBundleManifestFromRoot(root)
+        val record = localImageRecord(root, unet, LocalImageRuntime.QNN_HTP)
+
+        assertNotNull(manifest?.requiredRuntimeProfile)
+        assertEquals("2.28", manifest!!.requiredRuntimeProfile!!.qnnSdk)
+        assertEquals(73, manifest.requiredRuntimeProfile!!.htpArch)
+        assertTrue(manifest.requiredRuntimeProfile!!.completeBundleRuntime)
+        val readinessMessage = requireNotNull(record.localImageStructuralReadinessMessage())
+        assertTrue(readinessMessage.contains("骁龙 8 Gen 2 NPU 运行环境"))
+        assertFalse(Regex("""(?i)SM\d{4}|HTP\s*V\d+|soc_model""").containsMatchIn(readinessMessage))
+    }
+
+    @Test
+    fun downloadedManifestKeepsRemoteRelativeComponentPath() {
+        val root = Files.createTempDirectory("downloaded-nested-manifest").toFile()
+        val primary = root.touch("diffusion/unet.mnn")
+        val bundle = ImageEngineBundleSpec(
+            id = "nested-mnn",
+            title = "Nested MNN",
+            components = emptyList(),
+            runtime = ImageEngineBundleRuntime.MNN_DIFFUSION,
+            accelerator = ImageEngineAccelerator.CPU
+        )
+        val remote = remote("unet.mnn", ImageEngineBundleComponentRole.DIFFUSION)
+            .copy(relativePath = "diffusion/unet.mnn")
+
+        val manifest = downloadedImageBundleManifestJson(
+            displayName = bundle.title,
+            bundle = bundle,
+            targets = listOf(remote to primary)
+        )
+
+        assertEquals("diffusion/unet.mnn", manifest.getJSONArray("components")
+            .getJSONObject(0)
+            .getString("path"))
+    }
+
+    @Test
+    fun qnnZipExtractionDoesNotOverwriteExistingMcaManifest() {
+        val root = Files.createTempDirectory("qnn-zip-manifest-protection").toFile()
+        val manifestFile = File(root, "manifest.json")
+        manifestFile.writeText("""{"schema":"mca.image_engine.bundle.v1","id":"mca"}""", Charsets.UTF_8)
+        val zipFile = File(root, "qnn.zip")
+        ZipOutputStream(zipFile.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry("manifest.json"))
+            zip.write("""{"schema":"third.party","id":"zip"}""".toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("diffusion/unet_context.bin"))
+            zip.write(byteArrayOf(1, 2, 3))
+            zip.closeEntry()
+        }
+
+        extractImageBundleZipIntoDirectory(zipFile, root)
+
+        assertEquals("mca", org.json.JSONObject(manifestFile.readText(Charsets.UTF_8)).getString("id"))
+        assertTrue(File(root, "diffusion/unet_context.bin").isFile)
+    }
+
+    private fun localImageRecord(
+        root: File,
+        primary: File,
+        runtime: LocalImageRuntime,
+        family: LocalImageModelFamily = LocalImageModelFamily.SD15,
+        verificationStatus: LocalImageVerificationStatus = LocalImageVerificationStatus.UNKNOWN,
+        verificationMessage: String = ""
+    ): LocalImageModelRecord =
+        LocalImageModelRecord(
+            id = root.name,
+            displayName = root.name,
+            path = primary.absolutePath,
+            fileName = primary.name,
+            sizeBytes = primary.length(),
+            sha256 = "test",
+            runtime = runtime,
+            family = family,
+            bundleRoot = root.absolutePath,
+            verificationStatus = verificationStatus,
+            verificationMessage = verificationMessage
+        )
+
+    private fun File.touch(name: String): File =
+        File(this, name).also {
+            it.parentFile?.mkdirs()
+            it.writeText("x")
+        }
+
+    private fun File.createCompleteSanaBundle(): File {
+        LocalImageBundleContract.sanaRequiredComponentPaths.forEach { path -> touch(path) }
+        return File(this, "transformer.mnn")
+    }
+
+    private fun File.writeComponentAudit(path: String, sourceMetadataStatus: String) {
+        val content = File(this, path).readBytes()
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(content)
+            .joinToString("") { "%02x".format(it) }
+        File(this, ".mca-component-audit.json").writeText(
+            """
+            {
+              "schema": "mca.model_bundle.audit.v1",
+              "components": [{
+                "path": "$path",
+                "observedSizeBytes": ${content.size},
+                "observedSha256": "$digest",
+                "sourceMetadataStatus": "$sourceMetadataStatus"
+              }]
+            }
+            """.trimIndent(),
+            Charsets.UTF_8
+        )
+    }
+
+    private fun remote(
+        fileName: String,
+        role: ImageEngineBundleComponentRole
+    ): RemoteModelFile =
+        RemoteModelFile(
+            repoId = "MNN/stable-diffusion-v1-5-mnn-opencl",
+            revision = "master",
+            path = fileName,
+            name = fileName,
+            downloadUrl = "https://example.invalid/$fileName",
+            provider = ModelRepositoryProvider.MODELSCOPE,
+            bundleRole = role
+        )
+}

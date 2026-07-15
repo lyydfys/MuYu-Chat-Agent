@@ -4,5 +4,22 @@
             android:name=".debug.LocalImageSmokeActivity"
             android:exported="true"
             android:theme="@style/Theme.MuYuChatAgent" />
+        <activity
+            android:name=".debug.LocalChatSmokeActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MuYuChatAgent" />
+        <activity
+            android:name=".debug.QairtDryRunSmokeActivity"
+            android:exported="true"
+            android:process=":qairt_smoke"
+            android:theme="@style/Theme.MuYuChatAgent" />
+        <activity
+            android:name=".debug.QairtDryRunWorkerSmokeActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MuYuChatAgent" />
+        <activity
+            android:name=".debug.LocalImageStoreSmokeActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MuYuChatAgent" />
     </application>
 </manifest>

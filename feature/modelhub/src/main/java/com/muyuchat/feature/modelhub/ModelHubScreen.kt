@@ -80,27 +80,31 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.download.DownloadStatus
-import com.muyuchat.core.download.LocalImageEngineTier
-import com.muyuchat.core.download.ModelRepositoryProvider
 import com.muyuchat.core.download.ModelScopeHubModel
-import com.muyuchat.core.download.ModelScopeRecommendedGroup
 import com.muyuchat.core.download.ModelScopeRecommendedKind
 import com.muyuchat.core.download.ModelScopeRecommendedModel
+import com.muyuchat.core.download.RecommendedModelStatus
 import com.muyuchat.core.download.RemoteModelFile
+import com.muyuchat.core.download.RemoteModelFileKind
+import com.muyuchat.core.download.fileKind
 import com.muyuchat.core.download.isChatModelCandidate
 import com.muyuchat.core.download.isImageModelCandidate
+import com.muyuchat.core.download.isVisionModelCandidate
 import com.muyuchat.core.download.kindLabel
+import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
+import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 data class ModelHubUiState(
     val localModels: List<ModelManifest> = emptyList(),
+    val mnnRuntimeAvailable: Boolean = false,
     val localImageModels: List<LocalImageModelUiItem> = emptyList(),
     val remoteFiles: List<RemoteModelFile> = emptyList(),
     val recommendedRemoteModels: List<ModelScopeRecommendedModel> = emptyList(),
     val hubModels: List<ModelScopeHubModel> = emptyList(),
-    val hubQuery: String = "Qwen3.5 GGUF Q4_K_M",
+    val hubQuery: String = "Qwen3.5 MNN",
     val hubPage: Int = 1,
     val hubTotalCount: Int = 0,
     val repoInput: String = "",
@@ -115,6 +119,10 @@ data class ModelHubUiState(
     val deviceAccelerationSummary: String = "",
     val deviceImagePolicy: String = "",
     val deviceImageTier: String = "",
+    val deviceChipsetCode: String = "",
+    val deviceIsSnapdragon: Boolean = false,
+    val qairtVerifiedLocalModelIds: Set<String> = emptySet(),
+    val qairtVerifiedRecommendationIds: Set<String> = emptySet(),
     val cloudApi: CloudApiUiState = CloudApiUiState(),
     val isBusy: Boolean = false,
     val loadedModelId: String? = null,
@@ -132,6 +140,7 @@ data class LocalImageModelUiItem(
     val componentCount: Int = 1,
     val readyForGeneration: Boolean = true,
     val readinessMessage: String? = null,
+    val readinessLabel: String = "",
     val selected: Boolean = false
 )
 
@@ -147,6 +156,7 @@ data class CloudApiUiState(
     val baseUrl: String = "",
     val apiKey: String = "",
     val chatModel: String = "",
+    val supportsVision: Boolean = false,
     val imageApiFormat: String = "OPENAI_IMAGES",
     val availableImageFormats: List<Pair<String, String>> = listOf(
         "OPENAI_IMAGES" to "OpenAI Images",
@@ -180,6 +190,7 @@ data class CloudModelUiItem(
     val protocolLabel: String,
     val modelName: String,
     val baseUrl: String,
+    val supportsVision: Boolean = false,
     val imageSize: String = "",
     val selected: Boolean = false
 )
@@ -221,6 +232,7 @@ fun ModelHubScreen(
     onCloudBaseUrlChange: (String) -> Unit,
     onCloudApiKeyChange: (String) -> Unit,
     onCloudChatModelChange: (String) -> Unit,
+    onCloudSupportsVisionChange: (Boolean) -> Unit,
     onCloudImageFormatChange: (String) -> Unit,
     onCloudImageModelChange: (String) -> Unit,
     onCloudImageSizeChange: (String) -> Unit,
@@ -331,6 +343,7 @@ fun ModelHubScreen(
                 onBaseUrlChange = onCloudBaseUrlChange,
                 onApiKeyChange = onCloudApiKeyChange,
                 onChatModelChange = onCloudChatModelChange,
+                onSupportsVisionChange = onCloudSupportsVisionChange,
                 onImageModelChange = onCloudImageModelChange,
                 onImageSizeChange = onCloudImageSizeChange,
                 onImageEndpointPathChange = onCloudImageEndpointPathChange,
@@ -501,15 +514,17 @@ private fun LocalModelsSection(
         item {
             CardBox {
                 Text("本地推理引擎", fontWeight = FontWeight.Bold)
-                Text("GGUF 主模型用于普通聊天页的本地推理", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("高速引擎优先使用 MNN；兼容引擎继续支持 GGUF / llama.cpp 生态。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (state.localModels.isEmpty()) {
                     Text("还没有本地推理引擎", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                    Text("可以在 文件 页导入 GGUF，或从推荐列表下载到 MCA 的模型目录。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("可以导入 GGUF 兼容模型，也可以导入完整 MNN 组件包；推荐列表会优先下载 MNN。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                     state.localModels.forEach { model ->
                         LocalModelCard(
                             model = model,
                             isLoaded = model.id == state.loadedModelId,
+                            mnnRuntimeAvailable = state.mnnRuntimeAvailable,
+                            qairtVerified = model.id in state.qairtVerifiedLocalModelIds,
                             enabled = !state.isBusy,
                             onLoad = { onLoad(model) },
                             onVerify = { onVerify(model) },
@@ -612,6 +627,7 @@ private fun CloudModelEditorPage(
     onBaseUrlChange: (String) -> Unit,
     onApiKeyChange: (String) -> Unit,
     onChatModelChange: (String) -> Unit,
+    onSupportsVisionChange: (Boolean) -> Unit,
     onImageModelChange: (String) -> Unit,
     onImageSizeChange: (String) -> Unit,
     onImageEndpointPathChange: (String) -> Unit,
@@ -703,6 +719,34 @@ private fun CloudModelEditorPage(
                             )
                         }
                     )
+                    if (!isImage) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("支持图片输入", fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "仅在当前云端模型确实支持多模态识图时开启。",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = cloud.supportsVision,
+                                    onCheckedChange = onSupportsVisionChange,
+                                    enabled = enabled
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -954,6 +998,7 @@ private fun CloudModelRow(
                 val meta = buildString {
                     append("协议：").append(model.protocolLabel)
                     if (model.imageSize.isNotBlank()) append(" · 尺寸：").append(model.imageSize)
+                    if (model.kind == "CHAT" && model.supportsVision) append(" · 图片输入")
                 }
                 Text(meta, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(model.baseUrl, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1103,62 +1148,208 @@ private fun RecommendedModelsSection(
     onOpenPage: (String) -> Unit,
     modifier: Modifier
 ) {
-    var expandedGroups by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    val catalog = remember(
+        state.recommendedRemoteModels,
+        state.deviceChipsetCode,
+        state.deviceIsSnapdragon,
+        state.deviceTotalRamBytes
+    ) {
+        buildRecommendationCatalog(
+            models = state.recommendedRemoteModels,
+            deviceChipsetCode = state.deviceChipsetCode,
+            deviceTotalRamBytes = state.deviceTotalRamBytes,
+            deviceIsSnapdragon = state.deviceIsSnapdragon
+        )
+    }
+    var expandedGroups by rememberSaveable(state.deviceChipsetCode) {
+        mutableStateOf(emptyList<String>())
+    }
+    val cpuChatGroups = listOf(
+        Triple("cpu-chat-light", "轻量档 · 4–8GB", catalog.lightChat),
+        Triple("cpu-chat-main", "主力档 · 8–16GB", catalog.mainChat),
+        Triple("cpu-chat-quality", "高质量档 · 12–24GB", catalog.qualityChat)
+    )
+    val npuImageGroups = listOf(
+        Triple("npu-image-sd15", "SD1.5 QNN", catalog.npuImageSd15),
+        Triple("npu-image-sdxl", "SDXL QNN", catalog.npuImageSdxl),
+        Triple("npu-image-gen5", "骁龙 8 Elite Gen 5 官方模型", catalog.npuImageGen5)
+    )
+    val hasRecommendations = cpuChatGroups.any { it.third.isNotEmpty() } ||
+        catalog.npuChat.isNotEmpty() ||
+        catalog.cpuImage.isNotEmpty() ||
+        catalog.npuImage.isNotEmpty()
+
     LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
-            Text("推荐优先走 ModelScope；每个分组默认显示两个，展开后查看其余候选。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val ramGb = totalRamGb(state.deviceTotalRamBytes)
+            val deviceLabel = recommendationDeviceLabel(state.deviceChipsetCode)
+            Text(
+                buildString {
+                    append("当前设备：").append(deviceLabel)
+                    if (ramGb > 0.0) append(" · ").append(ramGb.roundToInt()).append("GB")
+                    append("。内存仅作建议，不限制下载；实验模型不会自动设为默认。")
+                    append(EXPERIMENTAL_DOWNLOAD_NOTICE)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
-        if (state.deviceAccelerationSummary.isNotBlank()) {
-            item {
-                AssistChip(onClick = {}, label = { Text(state.deviceAccelerationSummary) })
-                if (state.deviceImagePolicy.isNotBlank()) {
-                    Text(state.deviceImagePolicy, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-        if (state.recommendedRemoteModels.isEmpty()) {
+
+        if (!hasRecommendations) {
             item { EmptyCard("暂无推荐模型", "稍后刷新推荐列表，或到广场搜索公开模型。") }
         } else {
-            ModelScopeRecommendedGroup.entries.forEach { group ->
-                val groupModels = state.recommendedRemoteModels
-                    .filter { it.group == group }
-                    .sortedWith(
-                        compareByDescending<ModelScopeRecommendedModel> { localImageFitScore(it, state.deviceImageTier) }
-                            .thenBy { it.priority }
-                            .thenByDescending { deviceFitScore(it, state.deviceTotalRamBytes) }
-                            .thenBy { kotlin.math.abs(it.minRamGb - totalRamGb(state.deviceTotalRamBytes)) }
-                    )
-                if (groupModels.isNotEmpty()) {
-                    item(key = "recommended-${group.name}-header") {
-                        Text(group.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            item(key = "cpu-chat-header") {
+                RecommendationSectionHeader(
+                    title = "CPU 图文聊天",
+                    body = "本机通用路线，按内存分档；每档默认展示首选模型。"
+                )
+            }
+            cpuChatGroups.forEach { (key, title, models) ->
+                if (models.isNotEmpty()) {
+                    item(key = "$key-header") {
+                        Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     }
-                    val expanded = group.name in expandedGroups
-                    val visibleModels = if (expanded) groupModels else groupModels.take(2)
-                    items(visibleModels, key = { it.id }) { model ->
+                    val expanded = key in expandedGroups
+                    val visibleModels = if (expanded) models else collapsedRecommendationModels(models)
+                    items(visibleModels, key = { "$key-${it.id}" }) { model ->
                         RecommendedModelCard(
                             model = model,
                             deviceTotalRamBytes = state.deviceTotalRamBytes,
                             deviceAvailableRamBytes = state.deviceAvailableRamBytes,
+                            deviceChipsetCode = state.deviceChipsetCode,
+                            deviceIsSnapdragon = state.deviceIsSnapdragon,
+                            qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
                             enabled = !state.isBusy,
                             onShowFiles = { onShowFiles(model) },
                             onDownload = { onDownload(model) },
                             onOpenPage = { onOpenPage(model.modelPageUrl) }
                         )
                     }
-                    if (groupModels.size > 2) {
-                        item(key = "recommended-${group.name}-more") {
-                            OutlinedButton(
+                    if (models.size > 1) {
+                        item(key = "$key-more") {
+                            RecommendationExpandButton(
+                                expanded = expanded,
+                                hiddenCount = models.size - 1,
                                 onClick = {
-                                    expandedGroups = if (expanded) {
-                                        expandedGroups - group.name
-                                    } else {
-                                        expandedGroups + group.name
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(999.dp)
-                            ) {
-                                Text(if (expanded) "收起${group.label}" else "更多${group.label}（${groupModels.size - 2}）")
+                                    expandedGroups = expandedGroups.toggle(key, expanded)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (catalog.npuChat.isNotEmpty()) {
+                item(key = "npu-chat-header") {
+                    RecommendationSectionHeader(
+                        title = "NPU 图文聊天",
+                        body = "全部模型均可查看；仅匹配的骁龙芯片提供 QAIRT 下载入口。"
+                    )
+                }
+                val key = "npu-chat"
+                val expanded = key in expandedGroups
+                val visibleModels = if (expanded) catalog.npuChat else collapsedRecommendationModels(catalog.npuChat)
+                items(visibleModels, key = { "$key-${it.id}" }) { model ->
+                    RecommendedModelCard(
+                        model = model,
+                        deviceTotalRamBytes = state.deviceTotalRamBytes,
+                        deviceAvailableRamBytes = state.deviceAvailableRamBytes,
+                        deviceChipsetCode = state.deviceChipsetCode,
+                        deviceIsSnapdragon = state.deviceIsSnapdragon,
+                        qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                        enabled = !state.isBusy,
+                        onShowFiles = { onShowFiles(model) },
+                        onDownload = { onDownload(model) },
+                        onOpenPage = { onOpenPage(model.modelPageUrl) }
+                    )
+                }
+                if (catalog.npuChat.size > 1) {
+                    item(key = "$key-more") {
+                        RecommendationExpandButton(
+                            expanded = expanded,
+                            hiddenCount = catalog.npuChat.size - 1,
+                            onClick = { expandedGroups = expandedGroups.toggle(key, expanded) }
+                        )
+                    }
+                }
+            }
+
+            item(key = "cpu-image-header") {
+                RecommendationSectionHeader(
+                    title = "CPU 生图",
+                    body = "所有机型均可下载；默认展示首选，其余实验模型折叠。"
+                )
+            }
+            if (catalog.cpuImage.isEmpty()) {
+                item(key = "cpu-image-empty") {
+                    Text("暂无可展示的 CPU 生图实验模型。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                val key = "cpu-image"
+                val expanded = key in expandedGroups
+                val visibleModels = if (expanded) catalog.cpuImage else collapsedRecommendationModels(catalog.cpuImage)
+                items(visibleModels, key = { "$key-${it.id}" }) { model ->
+                    RecommendedModelCard(
+                        model = model,
+                        deviceTotalRamBytes = state.deviceTotalRamBytes,
+                        deviceAvailableRamBytes = state.deviceAvailableRamBytes,
+                        deviceChipsetCode = state.deviceChipsetCode,
+                        deviceIsSnapdragon = state.deviceIsSnapdragon,
+                        qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                        enabled = !state.isBusy,
+                        onShowFiles = { onShowFiles(model) },
+                        onDownload = { onDownload(model) },
+                        onOpenPage = { onOpenPage(model.modelPageUrl) }
+                    )
+                }
+                if (catalog.cpuImage.size > 1) {
+                    item(key = "$key-more") {
+                        RecommendationExpandButton(
+                            expanded = expanded,
+                            hiddenCount = catalog.cpuImage.size - 1,
+                            collapsedLabel = "查看实验模型（${catalog.cpuImage.size - 1}）",
+                            expandedLabel = "收起实验模型",
+                            onClick = { expandedGroups = expandedGroups.toggle(key, expanded) }
+                        )
+                    }
+                }
+            }
+
+            if (catalog.npuImage.isNotEmpty()) {
+                item(key = "npu-image-header") {
+                    RecommendationSectionHeader(
+                        title = "NPU 生图",
+                        body = "骁龙设备允许实验下载；未验证芯片可能遇到 QNN Context 不兼容。"
+                    )
+                }
+                npuImageGroups.forEach { (key, title, models) ->
+                    if (models.isNotEmpty()) {
+                        item(key = "$key-header") {
+                            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        }
+                        val expanded = key in expandedGroups
+                        val visibleModels = if (expanded) models else collapsedRecommendationModels(models)
+                        items(visibleModels, key = { "$key-${it.id}" }) { model ->
+                            RecommendedModelCard(
+                                model = model,
+                                deviceTotalRamBytes = state.deviceTotalRamBytes,
+                                deviceAvailableRamBytes = state.deviceAvailableRamBytes,
+                                deviceChipsetCode = state.deviceChipsetCode,
+                                deviceIsSnapdragon = state.deviceIsSnapdragon,
+                                qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                                enabled = !state.isBusy,
+                                onShowFiles = { onShowFiles(model) },
+                                onDownload = { onDownload(model) },
+                                onOpenPage = { onOpenPage(model.modelPageUrl) }
+                            )
+                        }
+                        if (models.size > 1) {
+                            item(key = "$key-more") {
+                                RecommendationExpandButton(
+                                    expanded = expanded,
+                                    hiddenCount = models.size - 1,
+                                    onClick = { expandedGroups = expandedGroups.toggle(key, expanded) }
+                                )
                             }
                         }
                     }
@@ -1167,6 +1358,38 @@ private fun RecommendedModelsSection(
         }
     }
 }
+
+@Composable
+private fun RecommendationSectionHeader(title: String, body: String) {
+    Column(modifier = Modifier.padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(body, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun RecommendationExpandButton(
+    expanded: Boolean,
+    hiddenCount: Int,
+    onClick: () -> Unit,
+    collapsedLabel: String = "展开其他 $hiddenCount 个",
+    expandedLabel: String = "收起"
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(999.dp)
+    ) {
+        Text(if (expanded) expandedLabel else collapsedLabel)
+    }
+}
+
+private fun List<String>.toggle(key: String, remove: Boolean): List<String> =
+    if (remove) this - key else this + key
+
+internal fun recommendationDeviceLabel(chipsetCode: String): String =
+    if (chipsetCode.isBlank()) "通用 CPU"
+    else DeviceAccelerationAnalyzer.publicChipsetDisplayName(chipsetCode)
 
 @Composable
 private fun MarketSection(
@@ -1231,13 +1454,13 @@ private fun RemoteFilesSection(
     LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Button(onClick = onImportClick, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(999.dp)) {
-                Icon(Icons.Default.UploadFile, contentDescription = "导入 GGUF", modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.UploadFile, contentDescription = "导入本地推理引擎", modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("导入 GGUF")
+                Text("导入本地推理引擎")
             }
         }
         item {
-            Text("选择可下载的 GGUF 文件；系统会自动识别推理模型或图像生成模型，并放入对应列表。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("支持单个 GGUF 兼容模型，也支持多选完整 MNN 组件或导入 MNN zip 包。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1249,7 +1472,7 @@ private fun RemoteFilesSection(
                     label = { Text("模型 ID 或链接") }
                 )
                 IconButton(onClick = onFetchRemoteFiles, enabled = !state.isBusy) {
-                    Icon(Icons.Default.Search, contentDescription = "查找 GGUF")
+                    Icon(Icons.Default.Search, contentDescription = "查找本地推理文件")
                 }
             }
         }
@@ -1308,45 +1531,114 @@ private fun RecommendedModelCard(
     model: ModelScopeRecommendedModel,
     deviceTotalRamBytes: Long,
     deviceAvailableRamBytes: Long,
+    deviceChipsetCode: String,
+    deviceIsSnapdragon: Boolean = false,
+    qairtVerified: Boolean,
     enabled: Boolean,
     onShowFiles: () -> Unit,
     onDownload: () -> Unit,
     onOpenPage: () -> Unit
 ) {
     val hasModelPage = !model.repoId.startsWith("pending/", ignoreCase = true)
+    val downloadAccess = recommendationDownloadAccess(model, deviceChipsetCode, deviceIsSnapdragon)
+    val fitLabel = deviceFitLabel(model, deviceTotalRamBytes, deviceAvailableRamBytes)
+    val hardwareLine = recommendationHardwareLine(model, fitLabel)
+    val verificationLine = recommendationVerificationLine(model, qairtVerified)
+    val shortDescription = model.recommendationShortDescription()
+    val experimentalDownload = model.status == RecommendedModelStatus.EXPERIMENTAL &&
+        downloadAccess.canDownload
+    val fitColor = if (fitLabel == "不建议本机运行") {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val verificationColor = when (model.status) {
+        RecommendedModelStatus.EXPERIMENTAL -> MaterialTheme.colorScheme.secondary
+        RecommendedModelStatus.PENDING_INTEGRATION,
+        RecommendedModelStatus.NOT_RECOMMENDED -> MaterialTheme.colorScheme.error
+        RecommendedModelStatus.RECOMMENDED -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
     CardBox {
-        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(shortName(model.title), fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            if (model.kind == ModelScopeRecommendedKind.IMAGE) {
-                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(999.dp)) {
-                    Text(model.localImageEngineTier?.label ?: "本地生图", modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
+        ) {
+            Text(
+                model.title,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f)
+            )
+            RecommendationStatusBadge(model.status)
+        }
+        Text(
+            "${recommendedRouteLabel(model)} · ${model.parameterScale} · ${model.quant}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            hardwareLine,
+            style = MaterialTheme.typography.bodySmall,
+            color = fitColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            verificationLine,
+            style = MaterialTheme.typography.bodySmall,
+            color = verificationColor,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            shortDescription,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (downloadAccess.canDownload) {
+            Text(
+                RECOMMENDATION_DOWNLOAD_SOURCE_POLICY,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (experimentalDownload) {
+                OutlinedButton(
+                    onClick = onDownload,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(999.dp)
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(recommendationDownloadCtaLabel(model, canDownload = true, experimental = true))
+                }
+            } else {
+                Button(
+                    onClick = onDownload,
+                    enabled = enabled && downloadAccess.canDownload,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(999.dp)
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        recommendationDownloadCtaLabel(
+                            model,
+                            canDownload = downloadAccess.canDownload,
+                            experimental = downloadAccess.experimental
+                        )
+                    )
                 }
             }
-        }
-        Text("${model.parameterScale} · ${model.quant} · 建议 ${model.minRamGb}GB+ 内存", style = MaterialTheme.typography.bodySmall)
-        Text("来源：${model.provider.label}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        AssistChip(onClick = {}, label = { Text(deviceFitLabel(model, deviceTotalRamBytes, deviceAvailableRamBytes)) })
-        Text(recommendationReason(model), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-        Text(model.description.take(96), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (!model.downloadable) {
-            Text("该模型暂未接入可验证的 GGUF / stable-diffusion.cpp 一键下载链路。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            riskTags(model).take(3).forEach { tag -> AssistChip(onClick = {}, label = { Text(tag) }) }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onDownload, enabled = enabled && model.downloadable, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
-                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    when {
-                        !model.downloadable -> "待接入"
-                        model.kind == ModelScopeRecommendedKind.IMAGE && model.imageEngineBundle != null -> "下载包"
-                        else -> "下载"
-                    }
-                )
-            }
-            OutlinedButton(onClick = onShowFiles, enabled = enabled && model.downloadable, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
+            OutlinedButton(onClick = onShowFiles, enabled = enabled && downloadAccess.canDownload, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
                 Text("文件")
             }
             IconButton(onClick = onOpenPage, enabled = hasModelPage) {
@@ -1366,7 +1658,11 @@ private fun HubModelCard(
     CardBox {
         Text(shortName(model.displayName), fontWeight = FontWeight.Bold)
         Text("${formatBytes(model.fileSizeBytes)} · 下载 ${model.downloads} · 收藏 ${model.likes} · ${model.license ?: "未知许可"}", style = MaterialTheme.typography.bodySmall)
-        val tags = model.tags.filter { it.contains("gguf", ignoreCase = true) || it.startsWith("task:") }.take(3)
+        val tags = model.tags.filter {
+            it.contains("gguf", ignoreCase = true) ||
+                it.contains("mnn", ignoreCase = true) ||
+                it.startsWith("task:")
+        }.take(3)
         if (tags.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 tags.forEach { tag -> AssistChip(onClick = {}, label = { Text(tag.substringAfter(':')) }) }
@@ -1448,6 +1744,8 @@ private fun LegacyLocalModelCard(
 private fun LocalModelCard(
     model: ModelManifest,
     isLoaded: Boolean,
+    mnnRuntimeAvailable: Boolean,
+    qairtVerified: Boolean,
     enabled: Boolean,
     onLoad: () -> Unit,
     onVerify: () -> Unit,
@@ -1461,6 +1759,10 @@ private fun LocalModelCard(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            val isMnnRuntime = model.runtime == ChatModelRuntime.MNN
+            val isQairtRuntime = model.runtime == ChatModelRuntime.GENIEX_QAIRT
+            val canLoadRuntime = !isMnnRuntime || mnnRuntimeAvailable
+            val canNormalLoad = canLoadRuntime && (!isQairtRuntime || qairtVerified)
             Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     shortName(model.displayName),
@@ -1490,17 +1792,18 @@ private fun LocalModelCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Text(
-                "CPU 推理",
+                when {
+                    isMnnRuntime -> "MNN CPU 高速路径"
+                    isQairtRuntime && qairtVerified -> "已通过当前设备的 QAIRT 隔离验收"
+                    isQairtRuntime -> "需完成当前芯片与运行时的隔离验收后才能正常加载"
+                    else -> "GGUF / llama.cpp 兼容路径"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Text(
-                if (model.hasVisionProjector) {
-                    "本地识图：已绑定 ${model.visionProjectorFileName ?: "mmproj"}"
-                } else {
-                    "本地识图：未绑定 mmproj 视觉投影器"
-                },
-                maxLines = 1,
+                localVisionStatusText(model, isLoaded),
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodySmall,
                 color = if (model.hasVisionProjector) {
@@ -1509,17 +1812,40 @@ private fun LocalModelCard(
                     MaterialTheme.colorScheme.onSurfaceVariant
                 }
             )
+            if (isMnnRuntime && !mnnRuntimeAvailable) {
+                Text(
+                    "当前 APK 未启用 MNN-LLM executor。请先使用 GGUF 兼容模型，或打包官方 MNN runtime 后再加载 MNN 模型。",
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            } else if (isMnnRuntime) {
+                Text(
+                    "推荐模型优先走 MNN 高速引擎；GGUF / llama.cpp 继续作为兼容生态补充。",
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Button(
                     onClick = onLoad,
-                    enabled = enabled && !isLoaded,
+                    enabled = enabled && !isLoaded && canNormalLoad,
                     modifier = Modifier.weight(1f).height(44.dp),
                     shape = RoundedCornerShape(999.dp),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text(if (isLoaded) "已加载" else "加载", maxLines = 1, softWrap = false)
+                    if (!canLoadRuntime) {
+                        Text("引擎未启用", maxLines = 1, softWrap = false)
+                    } else if (isQairtRuntime && !qairtVerified) {
+                        Text("待验收", maxLines = 1, softWrap = false)
+                    } else {
+                        Text(if (isLoaded) "已加载" else "加载", maxLines = 1, softWrap = false)
+                    }
                 }
                 OutlinedButton(
                     onClick = onVerify,
@@ -1530,7 +1856,7 @@ private fun LocalModelCard(
                 ) {
                     Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("校验", maxLines = 1, softWrap = false)
+                    Text(if (isQairtRuntime) "隔离验收" else "校验", maxLines = 1, softWrap = false)
                 }
                 OutlinedButton(
                     onClick = onAttachVisionProjector,
@@ -1541,7 +1867,7 @@ private fun LocalModelCard(
                 ) {
                     Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("识图", maxLines = 1, softWrap = false)
+                    Text(if (model.hasVisionProjector) "更换" else "绑定", maxLines = 1, softWrap = false)
                 }
                 IconButton(onClick = onDelete, enabled = enabled, modifier = Modifier.size(44.dp)) {
                     Icon(Icons.Default.Delete, contentDescription = "删除")
@@ -1551,6 +1877,27 @@ private fun LocalModelCard(
     }
 }
 
+@Composable
+private fun RecommendationStatusBadge(status: RecommendedModelStatus) {
+    val (containerColor, contentColor) = when (status) {
+        RecommendedModelStatus.RECOMMENDED ->
+            MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+        RecommendedModelStatus.EXPERIMENTAL ->
+            MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
+        RecommendedModelStatus.PENDING_INTEGRATION ->
+            MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
+        RecommendedModelStatus.NOT_RECOMMENDED ->
+            MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
+    }
+    Surface(color = containerColor, shape = RoundedCornerShape(999.dp)) {
+        Text(
+            recommendationStatusLabel(status),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = contentColor
+        )
+    }
+}
 @Composable
 private fun LocalImageModelCard(
     model: LocalImageModelUiItem,
@@ -1594,7 +1941,7 @@ private fun LocalImageModelCard(
                 buildString {
                     append(model.fileName)
                     if (model.componentCount > 1) append(" · ").append(model.componentCount).append(" 个组件")
-                    if (!model.readyForGeneration) append(" · 缺少组件")
+                    if (!model.readyForGeneration) append(" · ").append(model.readinessLabel.ifBlank { "不可用" })
                 },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1611,7 +1958,7 @@ private fun LocalImageModelCard(
                 )
             }
             Text(
-                "CPU 生图",
+                localImageExecutionLabel(model.runtimeLabel),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelSmall,
@@ -1629,7 +1976,7 @@ private fun LocalImageModelCard(
                     Text(
                         when {
                             model.selected -> "当前"
-                            !model.readyForGeneration -> "缺组件"
+                            !model.readyForGeneration -> model.readinessLabel.ifBlank { "不可用" }
                             else -> "设为生图"
                         },
                         maxLines = 1
@@ -1653,20 +2000,41 @@ private fun LocalImageModelCard(
     }
 }
 
+private fun localImageExecutionLabel(runtimeLabel: String): String {
+    val lower = runtimeLabel.lowercase()
+    return when {
+        "qnn" in lower || "npu" in lower || "htp" in lower -> "骁龙 NPU 生图"
+        "mnn" in lower -> "MNN 生图"
+        "onnx" in lower -> "ONNX 生图"
+        else -> "CPU 生图"
+    }
+}
+
 @Composable
 private fun RemoteFileCard(file: RemoteModelFile, enabled: Boolean, onDownload: () -> Unit) {
-    val isDownloadableModel = file.isChatModelCandidate() || file.isImageModelCandidate()
+    val kind = file.fileKind()
+    val isProjector = kind == RemoteModelFileKind.PROJECTOR
+    val isDownloadableModel =
+        file.isChatModelCandidate() || file.isVisionModelCandidate() || file.isImageModelCandidate() || isProjector
     CardBox {
         Text(shortName(file.name), fontWeight = FontWeight.Bold)
         Text("${file.kindLabel()} · ${file.sizeBytes?.let(::formatBytes) ?: "未知大小"}", style = MaterialTheme.typography.bodySmall)
         Text("来源：${file.provider.label}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (!isDownloadableModel) {
             Text("这是辅助文件，不适合作为推理引擎加载。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        } else if (isProjector) {
+            Text("下载后会绑定到当前已加载的本地多模态主模型。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Button(onClick = onDownload, enabled = enabled && isDownloadableModel, shape = RoundedCornerShape(999.dp)) {
             Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
-            Text(if (isDownloadableModel) "下载到本机" else "辅助文件")
+            Text(
+                when {
+                    isProjector -> "下载并绑定"
+                    isDownloadableModel -> "下载到本机"
+                    else -> "辅助文件"
+                }
+            )
         }
     }
 }
@@ -1714,7 +2082,24 @@ private fun shortName(value: String): String =
     value.substringAfterLast('/')
         .substringAfterLast('\\')
         .removeSuffix(".gguf")
+        .removeSuffix(".mnn")
         .let { if (it.length > 36) it.take(33) + "..." else it }
+
+private fun localVisionStatusText(model: ModelManifest, isLoaded: Boolean): String =
+    when {
+        model.runtime == ChatModelRuntime.MNN ->
+            if (isLoaded) {
+                "\u672c\u5730\u8bc6\u56fe\uff1aMNN \u591a\u6a21\u6001\u5305\u5df2\u52a0\u8f7d\uff1b\u5982\u5305\u5185\u542b visual.mnn\uff0c\u53ef\u76f4\u63a5\u53d1\u9001\u56fe\u7247\u3002"
+            } else {
+                "\u672c\u5730\u8bc6\u56fe\uff1aMNN \u591a\u6a21\u6001\u5305\u52a0\u8f7d\u540e\u53ef\u542f\u7528 visual.mnn\uff1b\u7eaf\u6587\u672c MNN \u4ecd\u53ea\u652f\u6301\u804a\u5929\u3002"
+            }
+        model.hasVisionProjector && isLoaded ->
+            "\u672c\u5730\u8bc6\u56fe\uff1a\u5df2\u7ed1\u5b9a ${model.visionProjectorFileName ?: "mmproj"}\uff0c\u5982\u804a\u5929\u9875\u4ecd\u63d0\u793a\u672a\u5c31\u7eea\uff0c\u8bf7\u91cd\u65b0\u52a0\u8f7d\u6a21\u578b\u3002"
+        model.hasVisionProjector ->
+            "\u672c\u5730\u8bc6\u56fe\uff1a\u5df2\u7ed1\u5b9a ${model.visionProjectorFileName ?: "mmproj"}\uff0c\u52a0\u8f7d\u8be5\u6a21\u578b\u540e\u53ef\u53d1\u9001\u56fe\u7247\u3002"
+        else ->
+            "\u672c\u5730\u8bc6\u56fe\uff1a\u7eaf\u6587\u672c\u6a21\u578b\u4e0d\u80fd\u76f4\u63a5\u8bc6\u56fe\uff1b\u8bf7\u4f7f\u7528 MNN \u591a\u6a21\u6001\u5305\u6216\u7ed1\u5b9a\u5339\u914d mmproj\u3002"
+    }
 
 private fun sourceLabel(value: String): String = when (value.lowercase()) {
     "modelscope" -> "魔塔"
@@ -1732,67 +2117,21 @@ private fun DownloadStatus?.downloadStatusLabel(): String = when (this) {
     null -> "准备中"
 }
 
-private fun recommendationReason(model: ModelScopeRecommendedModel): String =
-    when {
-        !model.downloadable -> "待接入档，先展示方向，避免给出会失败的下载入口。"
-        model.kind == ModelScopeRecommendedKind.IMAGE -> when (model.localImageEngineTier) {
-            LocalImageEngineTier.QUICK -> "默认推荐，优先保证手机端快速出图和稳定性。"
-            LocalImageEngineTier.STANDARD -> "更清晰的本地生成档，适合能接受更长等待的设备。"
-            LocalImageEngineTier.COMPACT_QUALITY -> "画质探索档，适合高性能设备验证新架构效果。"
-            LocalImageEngineTier.LARGE_QUALITY -> "备用实验档，面向高级用户做兼容性验证。"
-            LocalImageEngineTier.HEAVY_EXPERIMENTAL -> "前沿观察档，提供入口但不建议作为日常默认模型。"
-            null -> "本地图像生成模型，建议先下载后做短基准。"
-        }
-        model.minRamGb <= 4 -> "低内存设备优先，速度和稳定性更好。"
-        model.minRamGb <= 6 -> "适合主流手机，中文对话和速度更均衡。"
-        model.minRamGb <= 8 -> "效果优先，建议加载后运行 Agent 短基准。"
-        model.minRamGb <= 12 -> "质量更强，但发热、耗电和内存压力更高。"
-        else -> "实验档，仅建议高内存设备或高级用户验证。"
-    }
-
-private fun riskTags(model: ModelScopeRecommendedModel): List<String> = buildList {
-    if (!model.downloadable) add("待接入")
-    if (model.kind == ModelScopeRecommendedKind.IMAGE) {
-        model.localImageEngineTier?.label?.let(::add)
-        if ((model.imageEngineBundle?.components?.size ?: 0) > 1) add("组件包")
-        else add("单文件")
-    }
-    when {
-        model.minRamGb <= 4 -> add("低内存友好")
-        model.minRamGb <= 6 -> add("主流推荐")
-        model.minRamGb <= 8 -> add("效果优先")
-        model.minRamGb <= 12 -> add("可能发热")
-        else -> add("可能 OOM")
-    }
-    if ("qwen" in model.repoId.lowercase()) add("适合中文")
-    if ("gemma" in model.repoId.lowercase()) add("多语种")
-    if (model.provider == ModelRepositoryProvider.MODELSCOPE) add("ModelScope")
-    if (model.provider == ModelRepositoryProvider.HUGGING_FACE) add("Hugging Face")
-    if (model.minRamGb >= 8) add("建议短基准")
-}
-
 private fun totalRamGb(bytes: Long): Double = bytes / 1024.0 / 1024.0 / 1024.0
 
-private fun deviceFitScore(model: ModelScopeRecommendedModel, totalRamBytes: Long): Int {
-    val ramGb = totalRamGb(totalRamBytes)
+private fun recommendedRouteLabel(model: ModelScopeRecommendedModel): String {
+    val imageBundle = model.imageEngineBundle
+    val visionBundle = model.visionModelBundle
     return when {
-        ramGb <= 0.0 -> 0
-        model.minRamGb <= ramGb && model.minRamGb >= ramGb - 4.0 -> 4
-        model.minRamGb <= ramGb -> 3
-        model.minRamGb <= ramGb + 2.0 -> 2
-        else -> 1
+        imageBundle != null -> imageBundle.runtimeSummary
+        model.mnnModelBundle != null -> RecommendedRoute.MNN
+        visionBundle != null -> visionBundle.runtimeSummary
+        else -> model.chatRuntime.label
     }
 }
 
-private fun localImageFitScore(model: ModelScopeRecommendedModel, deviceImageTier: String): Int {
-    val engineTier = model.localImageEngineTier ?: return 0
-    return when (engineTier) {
-        LocalImageEngineTier.QUICK -> 5
-        LocalImageEngineTier.STANDARD -> 4
-        LocalImageEngineTier.COMPACT_QUALITY -> 3
-        LocalImageEngineTier.LARGE_QUALITY -> 1
-        LocalImageEngineTier.HEAVY_EXPERIMENTAL -> 0
-    }
+private object RecommendedRoute {
+    const val MNN = "MNN 高速引擎"
 }
 
 private fun deviceFitLabel(

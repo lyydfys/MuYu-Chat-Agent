@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "defaults": {
+    "runs": 3,
+    "timeoutSeconds": 1200,
+    "pollIntervalMs": 1000,
+    "cooldownSeconds": 45,
+    "forceStopBeforeRun": true,
+    "stabilityCvThresholdPercent": 10.0,
+    "cancellationProbe": false,
+    "cancellationDelayMs": 750,
+    "cancellationMaxTokens": 512,
+    "cancellationTimeoutSeconds": 30
+  },
+  "cases": [
+    {
+      "id": "qwen35-2b-geniex-hybrid",
+      "label": "Qwen3.5 2B GGUF - GenieX hybrid",
+      "kind": "chat",
+      "model": "Qwen3.5-2B Q4_0",
+      "cancellationProbe": true,
+      "extras": {
+        "modelPath": "/storage/emulated/0/Android/data/com.muyuchat.mca/files/models/qwen35_2b_geniex_q4/Qwen3.5-2B-Q4_0.gguf",
+        "displayName": "Qwen3.5-2B Q4_0 / GenieX hybrid",
+        "runtime": "geniex_llama_cpp",
+        "computeUnit": "hybrid",
+        "nCtx": 1024,
+        "nThreads": 4,
+        "maxTokens": 64,
+        "smokeMode": "api_only"
+      }
+    },
+    {
+      "id": "qwen35-2b-geniex-cpu",
+      "label": "Qwen3.5 2B GGUF - GenieX CPU",
+      "kind": "chat",
+      "model": "Qwen3.5-2B Q4_0",
+      "cancellationProbe": true,
+      "extras": {
+        "modelPath": "/storage/emulated/0/Android/data/com.muyuchat.mca/files/models/qwen35_2b_geniex_q4/Qwen3.5-2B-Q4_0.gguf",
+        "displayName": "Qwen3.5-2B Q4_0 / GenieX CPU",
+        "runtime": "geniex_llama_cpp",
+        "computeUnit": "cpu",
+        "nCtx": 1024,
+        "nThreads": 4,
+        "maxTokens": 64,
+        "smokeMode": "api_only"
+      }
+    },
+    {
+      "id": "meinamix-sd15-qnn",
+      "label": "MeinaMix SD1.5 - QNN HTP",
+      "kind": "image",
+      "model": "MeinaMix SD1.5 QNN 2.28",
+      "timeoutSeconds": 1800,
+      "extras": {
+        "runtime": "qnn_htp",
+        "bundleRoot": "/storage/emulated/0/Android/data/com.muyuchat.mca/files/qnn-bundles/meinamix-sd15-qnn228-8gen2",
+        "semanticGenerate": true,
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "threads": 4,
+        "seed": 20260710,
+        "cfgScale": {
+          "type": "float",
+          "value": 7.0
+        },
+        "sampleMethod": "pndm",
+        "family": "SD15",
+        "backendMode": "cpu",
+        "tokenEmbeddingMode": "dual_slice_first_half",
+        "prompt": "natural light portrait photo of a young woman standing by a window, soft skin tones, realistic lens, clean background"
+      }
+    }
+  ]
+}

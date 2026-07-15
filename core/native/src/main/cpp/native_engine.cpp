@@ -6,10 +6,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <cctype>
 #include <fstream>
+#include <limits>
+#include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -18,19 +22,42 @@
 
 #if MCA_WITH_LLAMA_CPP
 #include <unistd.h>
+#include <nlohmann/json.hpp>
 #include "chat.h"
 #include "common.h"
 #include "ggml-backend.h"
 #include "llama.h"
+#include "llama_model_device_policy.hpp"
+#include "llama_prefix_cache_policy.hpp"
 #include "mtmd.h"
 #include "mtmd-helper.h"
 #include "sampling.h"
+#include "speculative.h"
 #endif
 
 namespace {
 
 std::mutex g_mutex;
 std::atomic_bool g_stop_requested{false};
+std::atomic_bool g_generation_active{false};
+
+enum class GenerationStopReason : int {
+    IDLE = 0,
+    RUNNING,
+    STOP_REQUESTED,
+    STOP_TOKEN,
+    MAX_NEW_TOKENS,
+    NORMAL_FINISHED,
+    RUNNER_UNAVAILABLE,
+    BEGIN_FAILED,
+    GENERATION_FAILED,
+    CONTEXT_SHIFT_FAILED,
+    DECODE_FAILED,
+    UNLOADED,
+    SHUTDOWN,
+};
+
+std::atomic<GenerationStopReason> g_generation_stop_reason{GenerationStopReason::IDLE};
 bool g_loaded = false;
 long long g_load_ms = 0;
 long long g_prompt_tokens = 0;
@@ -40,6 +67,8 @@ long long g_prefill_started_ms = 0;
 long long g_prefill_finished_ms = 0;
 long long g_decode_started_ms = 0;
 long long g_decode_finished_ms = 0;
+// Process-lifetime acceptance trace. Model unload/reload must not reset it.
+std::uint64_t g_generation_sequence = 0;
 std::string g_model_path;
 std::string g_last_error;
 std::string g_native_lib_dir;
@@ -49,6 +78,7 @@ int g_n_threads = 0;
 int g_n_threads_batch = 0;
 int g_n_batch = 0;
 int g_n_ubatch = 0;
+int g_max_new_tokens = 0;
 float g_sampling_temp = 0.0f;
 int g_sampling_top_k = 0;
 float g_sampling_top_p = 0.0f;
@@ -62,9 +92,105 @@ bool g_last_enable_thinking = true;
 bool g_vision_ready = false;
 std::string g_mmproj_path;
 
+struct RuntimeConfig {
+    int n_ctx = 4096;
+    int n_threads = 1;
+    int n_threads_batch = 1;
+    int n_batch = 512;
+    int n_ubatch = 512;
+    int n_gpu_layers = -1;
+    int main_gpu = 0;
+    std::string split_mode = "layer";
+    int n_cpu_moe = 0;
+    std::string cache_type_k = "f16";
+    std::string cache_type_v = "f16";
+    std::string flash_attn = "auto";
+    bool perf = false;
+    int n_parallel = 1;
+    int cache_reuse = 0;
+    std::string spec_type = "none";
+    int spec_draft_n_max = 0;
+    bool mmap = true;
+    bool mlock = false;
+};
+
+RuntimeConfig g_requested_config;
+RuntimeConfig g_effective_config;
+size_t g_backend_gpu_device_count = 0;
+bool g_gpu_offload_supported = false;
+bool g_cache_state_valid = false;
+bool g_cache_reuse_hit = false;
+int g_cache_reused_tokens = 0;
+long long g_cache_reuse_hits = 0;
+long long g_cache_reuse_misses = 0;
+std::string g_cache_reuse_reason = "not_attempted";
+std::string g_cache_reuse_strategy = "disabled";
+bool g_cache_checkpoint_valid = false;
+size_t g_cache_checkpoint_tokens = 0;
+size_t g_cache_checkpoint_bytes = 0;
+bool g_model_hybrid = false;
+bool g_model_recurrent = false;
+bool g_spec_requested = false;
+bool g_spec_request_active = false;
+bool g_spec_context_ready = false;
+bool g_spec_done = false;
+long long g_spec_drafted_tokens = 0;
+long long g_spec_accepted_tokens = 0;
+long long g_spec_steps = 0;
+std::string g_spec_request_reason = "disabled";
+std::string g_model_architecture;
+int g_model_mtp_layers = 0;
+#if MCA_WITH_LLAMA_CPP
+constexpr bool LLAMA_RUNTIME_FEATURES_COMPILED = true;
+#else
+constexpr bool LLAMA_RUNTIME_FEATURES_COMPILED = false;
+#endif
+
 void set_last_error(const std::string &message) {
     g_last_error = message;
     __android_log_print(ANDROID_LOG_ERROR, "MCA", "%s", message.c_str());
+}
+
+const char *generation_stop_reason_name(GenerationStopReason reason) {
+    switch (reason) {
+        case GenerationStopReason::IDLE: return "idle";
+        case GenerationStopReason::RUNNING: return "running";
+        case GenerationStopReason::STOP_REQUESTED: return "stop_requested";
+        case GenerationStopReason::STOP_TOKEN: return "stop_token";
+        case GenerationStopReason::MAX_NEW_TOKENS: return "max_new_tokens";
+        case GenerationStopReason::NORMAL_FINISHED: return "normal_finished";
+        case GenerationStopReason::RUNNER_UNAVAILABLE: return "runner_unavailable";
+        case GenerationStopReason::BEGIN_FAILED: return "begin_failed";
+        case GenerationStopReason::GENERATION_FAILED: return "generation_failed";
+        case GenerationStopReason::CONTEXT_SHIFT_FAILED: return "context_shift_failed";
+        case GenerationStopReason::DECODE_FAILED: return "decode_failed";
+        case GenerationStopReason::UNLOADED: return "unloaded";
+        case GenerationStopReason::SHUTDOWN: return "shutdown";
+    }
+    return "unknown";
+}
+
+void mark_generation_inactive(GenerationStopReason reason) {
+    g_generation_active.store(false, std::memory_order_release);
+    g_generation_stop_reason.store(reason, std::memory_order_release);
+}
+
+void mark_generation_running() {
+    g_generation_stop_reason.store(GenerationStopReason::RUNNING, std::memory_order_release);
+    g_generation_active.store(true, std::memory_order_release);
+}
+
+bool finish_generation_if_active(GenerationStopReason reason) {
+    bool expected = true;
+    if (!g_generation_active.compare_exchange_strong(
+            expected,
+            false,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+        return false;
+    }
+    g_generation_stop_reason.store(reason, std::memory_order_release);
+    return true;
 }
 
 std::string jstring_to_string(JNIEnv *env, jstring value) {
@@ -77,6 +203,14 @@ std::string jstring_to_string(JNIEnv *env, jstring value) {
 
 jstring string_to_jstring(JNIEnv *env, const std::string &value) {
     return env->NewStringUTF(value.c_str());
+}
+
+void throw_java_illegal_state(JNIEnv *env, const std::string &message) {
+    if (env == nullptr || env->ExceptionCheck()) return;
+    jclass exception_class = env->FindClass("java/lang/IllegalStateException");
+    if (exception_class == nullptr) return;
+    env->ThrowNew(exception_class, message.c_str());
+    env->DeleteLocalRef(exception_class);
 }
 
 long long now_ms() {
@@ -346,6 +480,51 @@ std::string json_escape(const std::string &value) {
     return out;
 }
 
+bool runtime_config_equal_load_bound(const RuntimeConfig &a, const RuntimeConfig &b) {
+    return a.n_ctx == b.n_ctx &&
+           a.n_batch == b.n_batch &&
+           a.n_ubatch == b.n_ubatch &&
+           a.n_gpu_layers == b.n_gpu_layers &&
+           a.main_gpu == b.main_gpu &&
+           a.split_mode == b.split_mode &&
+           a.n_cpu_moe == b.n_cpu_moe &&
+           a.cache_type_k == b.cache_type_k &&
+           a.cache_type_v == b.cache_type_v &&
+           a.flash_attn == b.flash_attn &&
+           a.perf == b.perf &&
+           a.n_parallel == b.n_parallel &&
+           a.spec_type == b.spec_type &&
+           a.spec_draft_n_max == b.spec_draft_n_max &&
+           a.mmap == b.mmap &&
+           a.mlock == b.mlock;
+}
+
+std::string runtime_config_json(const RuntimeConfig &config) {
+    std::ostringstream out;
+    out << "{"
+        << "\"n_ctx\":" << config.n_ctx << ","
+        << "\"n_threads\":" << config.n_threads << ","
+        << "\"n_threads_batch\":" << config.n_threads_batch << ","
+        << "\"n_batch\":" << config.n_batch << ","
+        << "\"n_ubatch\":" << config.n_ubatch << ","
+        << "\"n_gpu_layers\":" << config.n_gpu_layers << ","
+        << "\"main_gpu\":" << config.main_gpu << ","
+        << "\"split_mode\":\"" << json_escape(config.split_mode) << "\","
+        << "\"n_cpu_moe\":" << config.n_cpu_moe << ","
+        << "\"cache_type_k\":\"" << json_escape(config.cache_type_k) << "\","
+        << "\"cache_type_v\":\"" << json_escape(config.cache_type_v) << "\","
+        << "\"flash_attn\":\"" << json_escape(config.flash_attn) << "\","
+        << "\"perf\":" << (config.perf ? "true" : "false") << ","
+        << "\"n_parallel\":" << config.n_parallel << ","
+        << "\"cache_reuse\":" << config.cache_reuse << ","
+        << "\"spec_type\":\"" << json_escape(config.spec_type) << "\","
+        << "\"spec_draft_n_max\":" << config.spec_draft_n_max << ","
+        << "\"mmap\":" << (config.mmap ? "true" : "false") << ","
+        << "\"mlock\":" << (config.mlock ? "true" : "false")
+        << "}";
+    return out.str();
+}
+
 std::string backend_devices_json_array() {
 #if MCA_WITH_LLAMA_CPP
     std::ostringstream out;
@@ -381,6 +560,14 @@ std::string stats_json(const char *backend) {
         << "\"loadMs\":" << g_load_ms << ","
         << "\"promptTokens\":" << g_prompt_tokens << ","
         << "\"completionTokens\":" << g_completion_tokens << ","
+        << "\"generationSequence\":" << g_generation_sequence << ","
+        << "\"generationActive\":"
+        << (g_generation_active.load(std::memory_order_acquire) ? "true" : "false") << ","
+        << "\"stopRequested\":"
+        << (g_stop_requested.load(std::memory_order_acquire) ? "true" : "false") << ","
+        << "\"generationStopReason\":\""
+        << generation_stop_reason_name(g_generation_stop_reason.load(std::memory_order_acquire))
+        << "\","
         << "\"contextShifts\":" << g_context_shifts << ","
         << "\"prefillMs\":" << prefill_ms << ","
         << "\"decodeMs\":" << decode_ms << ","
@@ -389,6 +576,21 @@ std::string stats_json(const char *backend) {
         << "\"nThreadsBatch\":" << g_n_threads_batch << ","
         << "\"nBatch\":" << g_n_batch << ","
         << "\"nUbatch\":" << g_n_ubatch << ","
+        << "\"nCtx\":" << g_effective_config.n_ctx << ","
+        << "\"maxAllTokens\":" << g_effective_config.n_ctx << ","
+        << "\"maxNewTokens\":" << g_max_new_tokens << ","
+        << "\"nGpuLayers\":" << g_effective_config.n_gpu_layers << ","
+        << "\"mainGpu\":" << g_effective_config.main_gpu << ","
+        << "\"splitMode\":\"" << json_escape(g_effective_config.split_mode) << "\","
+        << "\"nCpuMoe\":" << g_effective_config.n_cpu_moe << ","
+        << "\"cacheTypeK\":\"" << json_escape(g_effective_config.cache_type_k) << "\","
+        << "\"cacheTypeV\":\"" << json_escape(g_effective_config.cache_type_v) << "\","
+        << "\"flashAttn\":\"" << json_escape(g_effective_config.flash_attn) << "\","
+        << "\"perf\":" << (g_effective_config.perf ? "true" : "false") << ","
+        << "\"nParallel\":" << g_effective_config.n_parallel << ","
+        << "\"cacheReuseThreshold\":" << g_effective_config.cache_reuse << ","
+        << "\"specType\":\"" << json_escape(g_effective_config.spec_type) << "\","
+        << "\"specDraftNMax\":" << g_effective_config.spec_draft_n_max << ","
         << "\"temperature\":" << g_sampling_temp << ","
         << "\"topK\":" << g_sampling_top_k << ","
         << "\"topP\":" << g_sampling_top_p << ","
@@ -404,6 +606,41 @@ std::string stats_json(const char *backend) {
         << "\"backendReady\":" << (g_backend_device_count > 0 ? "true" : "false") << ","
         << "\"backendDeviceCount\":" << g_backend_device_count << ","
         << "\"backendDevices\":" << backend_devices_json_array() << ","
+        << "\"requestedConfig\":" << runtime_config_json(g_requested_config) << ","
+        << "\"effectiveConfig\":" << runtime_config_json(g_effective_config) << ","
+        << "\"backendCapabilities\":{"
+        << "\"gpuOffloadSupported\":" << (g_gpu_offload_supported ? "true" : "false") << ","
+        << "\"gpuDeviceCount\":" << g_backend_gpu_device_count << ","
+        << "\"modelArchitecture\":\"" << json_escape(g_model_architecture) << "\","
+        << "\"modelMtpLayers\":" << g_model_mtp_layers << ","
+        << "\"dynamicBackendLoading\":" << (LLAMA_RUNTIME_FEATURES_COMPILED ? "true" : "false") << ","
+        << "\"kvCacheQuantization\":" << (LLAMA_RUNTIME_FEATURES_COMPILED ? "true" : "false") << ","
+        << "\"draftMtpCompiled\":" << (LLAMA_RUNTIME_FEATURES_COMPILED ? "true" : "false")
+        << "},"
+        << "\"cacheReuse\":{"
+        << "\"valid\":" << (g_cache_state_valid ? "true" : "false") << ","
+        << "\"hit\":" << (g_cache_reuse_hit ? "true" : "false") << ","
+        << "\"reusedTokens\":" << g_cache_reused_tokens << ","
+        << "\"hits\":" << g_cache_reuse_hits << ","
+        << "\"misses\":" << g_cache_reuse_misses << ","
+        << "\"reason\":\"" << json_escape(g_cache_reuse_reason) << "\","
+        << "\"strategy\":\"" << json_escape(g_cache_reuse_strategy) << "\","
+        << "\"checkpointValid\":" << (g_cache_checkpoint_valid ? "true" : "false") << ","
+        << "\"checkpointTokens\":" << g_cache_checkpoint_tokens << ","
+        << "\"checkpointBytes\":" << g_cache_checkpoint_bytes << ","
+        << "\"modelHybrid\":" << (g_model_hybrid ? "true" : "false") << ","
+        << "\"modelRecurrent\":" << (g_model_recurrent ? "true" : "false")
+        << "},"
+        << "\"speculative\":{"
+        << "\"requested\":" << (g_spec_requested ? "true" : "false") << ","
+        << "\"contextReady\":" << (g_spec_context_ready ? "true" : "false") << ","
+        << "\"activeForRequest\":" << (g_spec_request_active ? "true" : "false") << ","
+        << "\"draftedTokens\":" << g_spec_drafted_tokens << ","
+        << "\"acceptedTokens\":" << g_spec_accepted_tokens << ","
+        << "\"steps\":" << g_spec_steps << ","
+        << "\"acceptanceRate\":" << (g_spec_drafted_tokens > 0 ? (double) g_spec_accepted_tokens / (double) g_spec_drafted_tokens : 0.0) << ","
+        << "\"reason\":\"" << json_escape(g_spec_request_reason) << "\""
+        << "},"
         << "\"nativeLibDir\":\"" << json_escape(g_native_lib_dir) << "\","
         << "\"lastError\":\"" << json_escape(g_last_error) << "\""
         << "}";
@@ -411,25 +648,405 @@ std::string stats_json(const char *backend) {
 }
 
 #if MCA_WITH_LLAMA_CPP
-constexpr int BATCH_SIZE = 512;
 constexpr int OVERFLOW_HEADROOM = 4;
 
 llama_model *g_model = nullptr;
 llama_context *g_context = nullptr;
+llama_context *g_mtp_context = nullptr;
 llama_batch g_batch{};
 bool g_batch_ready = false;
 common_chat_templates_ptr g_chat_templates;
 common_sampler *g_sampler = nullptr;
+common_speculative_ptr g_speculative;
+common_params_speculative g_speculative_params;
 mtmd_context *g_mtmd_context = nullptr;
 std::vector<common_chat_msg> g_chat_messages;
+llama_tokens g_context_tokens;
+llama_tokens g_cache_checkpoint_prefix;
+std::vector<uint8_t> g_cache_checkpoint_data;
+size_t g_cache_checkpoint_threshold = 0;
+llama_tokens g_spec_prompt_tokens;
+llama_tokens g_spec_draft_tokens;
+llama_token g_spec_pending_token = LLAMA_TOKEN_NULL;
+bool g_spec_pending_valid = false;
 llama_pos g_current_position = 0;
 int g_n_ctx = 4096;
 int g_n_predict = 8192;
 int g_n_keep = 128;
 std::string g_cached_token_chars;
 
+using ordered_json = nlohmann::ordered_json;
+
+mca::llama::PrefixCacheStrategy active_prefix_cache_strategy_locked() {
+    const size_t reuse_tokens = g_effective_config.cache_reuse > 0
+                                ? (size_t) g_effective_config.cache_reuse
+                                : 0;
+    return mca::llama::prefixCacheStrategy(
+            g_model_hybrid,
+            g_model_recurrent,
+            reuse_tokens);
+}
+
+void refresh_prefix_cache_strategy_locked() {
+    g_cache_reuse_strategy =
+            mca::llama::prefixCacheStrategyName(active_prefix_cache_strategy_locked());
+}
+
+void invalidate_prefix_cache_checkpoint_locked() {
+    g_cache_checkpoint_prefix.clear();
+    g_cache_checkpoint_data.clear();
+    g_cache_checkpoint_threshold = 0;
+    g_cache_checkpoint_valid = false;
+    g_cache_checkpoint_tokens = 0;
+    g_cache_checkpoint_bytes = 0;
+}
+
+std::string take_last_error_suffix_locked(size_t start) {
+    if (g_last_error.size() <= start) {
+        return {};
+    }
+    std::string suffix = g_last_error.substr(start);
+    g_last_error.resize(start);
+    return suffix;
+}
+
+bool save_partial_prefix_checkpoint_locked(
+        const llama_tokens &tokens,
+        size_t checkpoint_tokens) {
+    invalidate_prefix_cache_checkpoint_locked();
+    if (g_context == nullptr || checkpoint_tokens == 0 ||
+        checkpoint_tokens > tokens.size() ||
+        g_current_position != (llama_pos) checkpoint_tokens) {
+        return false;
+    }
+
+    constexpr llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+    const size_t checkpoint_size = llama_state_seq_get_size_ext(g_context, 0, flags);
+    if (checkpoint_size == 0) {
+        return false;
+    }
+
+    try {
+        std::vector<uint8_t> checkpoint_data(checkpoint_size);
+        const size_t written = llama_state_seq_get_data_ext(
+                g_context,
+                checkpoint_data.data(),
+                checkpoint_data.size(),
+                0,
+                flags);
+        if (written != checkpoint_data.size()) {
+            return false;
+        }
+
+        llama_tokens checkpoint_prefix(
+                tokens.begin(),
+                tokens.begin() + (llama_tokens::difference_type) checkpoint_tokens);
+        g_cache_checkpoint_data = std::move(checkpoint_data);
+        g_cache_checkpoint_prefix = std::move(checkpoint_prefix);
+        g_cache_checkpoint_threshold = checkpoint_tokens;
+        g_cache_checkpoint_valid = true;
+        g_cache_checkpoint_tokens = checkpoint_tokens;
+        g_cache_checkpoint_bytes = checkpoint_size;
+        return true;
+    } catch (const std::exception &) {
+        return false;
+    }
+}
+
+bool restore_partial_prefix_checkpoint_locked() {
+    if (g_context == nullptr || !g_cache_checkpoint_valid ||
+        g_cache_checkpoint_data.empty()) {
+        return false;
+    }
+    constexpr llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+    const size_t restored = llama_state_seq_set_data_ext(
+            g_context,
+            g_cache_checkpoint_data.data(),
+            g_cache_checkpoint_data.size(),
+            0,
+            flags);
+    return restored == g_cache_checkpoint_data.size();
+}
+
+std::string lower_ascii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return (char) std::tolower(c);
+    });
+    return value;
+}
+
+RuntimeConfig default_runtime_config() {
+    RuntimeConfig config;
+    const int threads_default = std::max(1, (int) sysconf(_SC_NPROCESSORS_ONLN) - 2);
+    config.n_threads = threads_default;
+    config.n_threads_batch = threads_default;
+    const auto model_defaults = llama_model_default_params();
+    config.n_gpu_layers = model_defaults.n_gpu_layers;
+    config.main_gpu = model_defaults.main_gpu;
+    config.split_mode = "layer";
+    config.mmap = model_defaults.use_mmap;
+    config.mlock = model_defaults.use_mlock;
+    return config;
+}
+
+bool validate_runtime_config(const RuntimeConfig &config, std::string &error) {
+    auto fail = [&](const std::string &message) {
+        error = message;
+        return false;
+    };
+    if (config.n_ctx < 128 || config.n_ctx > 1048576) {
+        return fail("n_ctx must be in [128, 1048576].");
+    }
+    if (config.n_threads < 1 || config.n_threads > 256) {
+        return fail("n_threads must be in [1, 256].");
+    }
+    if (config.n_threads_batch < 1 || config.n_threads_batch > 256) {
+        return fail("n_threads_batch must be in [1, 256].");
+    }
+    if (config.n_batch < 1 || config.n_batch > 65536) {
+        return fail("n_batch must be in [1, 65536].");
+    }
+    if (config.n_ubatch < 1 || config.n_ubatch > config.n_batch) {
+        return fail("n_ubatch must be in [1, n_batch].");
+    }
+    if (config.n_gpu_layers < -2 || config.n_gpu_layers > 100000) {
+        return fail("n_gpu_layers must be -2 (all), -1 (auto), or a non-negative integer.");
+    }
+    if (config.main_gpu < 0 || config.main_gpu >= (int) llama_max_devices()) {
+        return fail("main_gpu is outside llama_max_devices().");
+    }
+    if (config.split_mode != "none" && config.split_mode != "layer" &&
+        config.split_mode != "row" && config.split_mode != "tensor") {
+        return fail("split_mode must be one of: none, layer, row, tensor.");
+    }
+    if (config.n_cpu_moe < 0 || config.n_cpu_moe > 10000) {
+        return fail("n_cpu_moe must be in [0, 10000].");
+    }
+    static const std::vector<std::string> cache_types = {
+            "f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"};
+    if (std::find(cache_types.begin(), cache_types.end(), config.cache_type_k) == cache_types.end()) {
+        return fail("cache_type_k is unsupported: " + config.cache_type_k);
+    }
+    if (std::find(cache_types.begin(), cache_types.end(), config.cache_type_v) == cache_types.end()) {
+        return fail("cache_type_v is unsupported: " + config.cache_type_v);
+    }
+    if (config.flash_attn != "on" && config.flash_attn != "off" && config.flash_attn != "auto") {
+        return fail("flash_attn must be one of: on, off, auto.");
+    }
+    if (config.n_parallel != 1) {
+        return fail("n_parallel must be 1: the Android JNI engine is single-sequence.");
+    }
+    if (config.cache_reuse < 0 || config.cache_reuse > config.n_ctx) {
+        return fail("cache_reuse must be in [0, n_ctx].");
+    }
+    if (config.spec_type != "none" && config.spec_type != "draft-mtp") {
+        return fail("spec_type must be one of: none, draft-mtp.");
+    }
+    if (config.spec_type == "none" && config.spec_draft_n_max != 0) {
+        return fail("spec_draft_n_max must be 0 when spec_type is none.");
+    }
+    if (config.spec_type == "draft-mtp" &&
+        (config.spec_draft_n_max < 1 || config.spec_draft_n_max > 8)) {
+        return fail("spec_draft_n_max must be in [1, 8] for draft-mtp.");
+    }
+    if (config.spec_type == "draft-mtp" && config.n_batch < config.spec_draft_n_max + 1) {
+        return fail("n_batch must be at least spec_draft_n_max + 1 for draft-mtp verification.");
+    }
+    if (config.n_cpu_moe > 0 && config.n_gpu_layers == 0) {
+        return fail("n_cpu_moe requires GPU offload; n_gpu_layers is 0.");
+    }
+    const bool quantized_k = config.cache_type_k != "f32" && config.cache_type_k != "f16" && config.cache_type_k != "bf16";
+    const bool quantized_v = config.cache_type_v != "f32" && config.cache_type_v != "f16" && config.cache_type_v != "bf16";
+    if (quantized_v && config.flash_attn == "off") {
+        return fail("quantized cache_type_v requires flash_attn on or auto.");
+    }
+    if (config.split_mode == "tensor" && (quantized_k || quantized_v)) {
+        return fail("split_mode=tensor cannot be combined with quantized KV cache.");
+    }
+    return true;
+}
+
+bool parse_runtime_config(const std::string &text,
+                          const RuntimeConfig &defaults,
+                          RuntimeConfig &config,
+                          std::string &error) {
+    config = defaults;
+    ordered_json root;
+    try {
+        root = ordered_json::parse(text.empty() ? "{}" : text);
+    } catch (const std::exception &e) {
+        error = std::string("Invalid params JSON: ") + e.what();
+        return false;
+    }
+    if (!root.is_object()) {
+        error = "Params JSON must be an object.";
+        return false;
+    }
+
+    ordered_json advanced = ordered_json::object();
+    if (root.contains("advanced_json") && !root["advanced_json"].is_null()) {
+        try {
+            if (root["advanced_json"].is_object()) {
+                advanced = root["advanced_json"];
+            } else if (root["advanced_json"].is_string()) {
+                advanced = ordered_json::parse(root["advanced_json"].get<std::string>());
+                if (!advanced.is_object()) throw std::runtime_error("advanced_json must decode to an object");
+            } else {
+                throw std::runtime_error("advanced_json must be an object or JSON object string");
+            }
+        } catch (const std::exception &e) {
+            error = std::string("Invalid advanced_json: ") + e.what();
+            return false;
+        }
+    }
+
+    auto value_for = [&](const char *key) -> const ordered_json * {
+        if (root.contains(key) && !root[key].is_null()) return &root[key];
+        if (advanced.contains(key) && !advanced[key].is_null()) return &advanced[key];
+        return nullptr;
+    };
+    auto read_int = [&](const char *key, int &target) -> bool {
+        const auto *value = value_for(key);
+        if (value == nullptr) return true;
+        if (!value->is_number_integer() && !value->is_number_unsigned()) {
+            error = std::string(key) + " must be an integer.";
+            return false;
+        }
+        try {
+            const long long parsed = value->get<long long>();
+            if (parsed < std::numeric_limits<int>::min() || parsed > std::numeric_limits<int>::max()) {
+                error = std::string(key) + " is outside the 32-bit integer range.";
+                return false;
+            }
+            target = (int) parsed;
+            return true;
+        } catch (const std::exception &e) {
+            error = std::string("Invalid ") + key + ": " + e.what();
+            return false;
+        }
+    };
+    auto read_bool = [&](const char *key, bool &target) -> bool {
+        const auto *value = value_for(key);
+        if (value == nullptr) return true;
+        if (!value->is_boolean()) {
+            error = std::string(key) + " must be a boolean.";
+            return false;
+        }
+        target = value->get<bool>();
+        return true;
+    };
+    auto read_string = [&](const char *key, std::string &target) -> bool {
+        const auto *value = value_for(key);
+        if (value == nullptr) return true;
+        if (!value->is_string()) {
+            error = std::string(key) + " must be a string.";
+            return false;
+        }
+        target = lower_ascii(value->get<std::string>());
+        return true;
+    };
+
+    if (!read_int("n_ctx", config.n_ctx) ||
+        !read_int("n_threads", config.n_threads) ||
+        !read_int("n_threads_batch", config.n_threads_batch) ||
+        !read_int("n_batch", config.n_batch) ||
+        !read_int("n_ubatch", config.n_ubatch) ||
+        !read_int("main_gpu", config.main_gpu) ||
+        !read_int("n_cpu_moe", config.n_cpu_moe) ||
+        !read_int("n_parallel", config.n_parallel) ||
+        !read_int("cache_reuse", config.cache_reuse) ||
+        !read_int("spec_draft_n_max", config.spec_draft_n_max) ||
+        !read_bool("perf", config.perf) ||
+        !read_bool("mmap", config.mmap) ||
+        !read_bool("mlock", config.mlock) ||
+        !read_string("split_mode", config.split_mode) ||
+        !read_string("cache_type_k", config.cache_type_k) ||
+        !read_string("cache_type_v", config.cache_type_v) ||
+        !read_string("spec_type", config.spec_type)) {
+        return false;
+    }
+
+    if (const auto *value = value_for("n_gpu_layers")) {
+        if (value->is_string()) {
+            const std::string mode = lower_ascii(value->get<std::string>());
+            if (mode == "auto") config.n_gpu_layers = -1;
+            else if (mode == "all") config.n_gpu_layers = -2;
+            else {
+                error = "n_gpu_layers string must be auto or all.";
+                return false;
+            }
+        } else if (value->is_number_integer() || value->is_number_unsigned()) {
+            try {
+                config.n_gpu_layers = value->get<int>();
+            } catch (const std::exception &e) {
+                error = std::string("Invalid n_gpu_layers: ") + e.what();
+                return false;
+            }
+        } else {
+            error = "n_gpu_layers must be an integer, auto, or all.";
+            return false;
+        }
+    }
+
+    if (const auto *value = value_for("flash_attn")) {
+        if (value->is_boolean()) {
+            config.flash_attn = value->get<bool>() ? "on" : "off";
+        } else if (value->is_string()) {
+            config.flash_attn = lower_ascii(value->get<std::string>());
+        } else {
+            error = "flash_attn must be a boolean or one of: on, off, auto.";
+            return false;
+        }
+    }
+
+    return validate_runtime_config(config, error);
+}
+
+ggml_type cache_type_from_name(const std::string &name) {
+    static const std::map<std::string, ggml_type> types = {
+            {"f32", GGML_TYPE_F32}, {"f16", GGML_TYPE_F16}, {"bf16", GGML_TYPE_BF16},
+            {"q8_0", GGML_TYPE_Q8_0}, {"q4_0", GGML_TYPE_Q4_0}, {"q4_1", GGML_TYPE_Q4_1},
+            {"iq4_nl", GGML_TYPE_IQ4_NL}, {"q5_0", GGML_TYPE_Q5_0}, {"q5_1", GGML_TYPE_Q5_1}};
+    const auto it = types.find(name);
+    return it == types.end() ? GGML_TYPE_COUNT : it->second;
+}
+
+llama_split_mode split_mode_from_name(const std::string &name) {
+    if (name == "none") return LLAMA_SPLIT_MODE_NONE;
+    if (name == "row") return LLAMA_SPLIT_MODE_ROW;
+    if (name == "tensor") return LLAMA_SPLIT_MODE_TENSOR;
+    return LLAMA_SPLIT_MODE_LAYER;
+}
+
+llama_flash_attn_type flash_attn_from_name(const std::string &name) {
+    if (name == "on") return LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    if (name == "off") return LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    return LLAMA_FLASH_ATTN_TYPE_AUTO;
+}
+
+std::string model_meta_string(const llama_model *model, const std::string &key) {
+    if (model == nullptr) return "";
+    const int32_t needed = llama_model_meta_val_str(model, key.c_str(), nullptr, 0);
+    if (needed <= 0) return "";
+    std::vector<char> buffer((size_t) needed + 1, '\0');
+    if (llama_model_meta_val_str(model, key.c_str(), buffer.data(), buffer.size()) < 0) return "";
+    return std::string(buffer.data());
+}
+
+int model_mtp_layer_count(const llama_model *model, const std::string &architecture) {
+    if (architecture.empty()) return 0;
+    const std::string raw = model_meta_string(model, architecture + ".nextn_predict_layers");
+    if (raw.empty()) return 0;
+    try {
+        return std::stoi(raw);
+    } catch (...) {
+        return -1;
+    }
+}
+
 common_params_sampling build_sampling_params(const std::string &params_json) {
     common_params_sampling params;
+    params.no_perf = !g_effective_config.perf;
     params.temp = parse_float(params_json, "temperature", params.temp);
     params.top_k = parse_int(params_json, "top_k", params.top_k);
     params.top_p = parse_float(params_json, "top_p", params.top_p);
@@ -533,6 +1150,13 @@ bool ensure_backends_loaded_locked() {
         g_backend_initialized = true;
     }
     g_backend_device_count = ggml_backend_dev_count();
+    g_backend_gpu_device_count = 0;
+    for (size_t i = 0; i < g_backend_device_count; ++i) {
+        if (ggml_backend_dev_type(ggml_backend_dev_get(i)) != GGML_BACKEND_DEVICE_TYPE_CPU) {
+            g_backend_gpu_device_count++;
+        }
+    }
+    g_gpu_offload_supported = llama_supports_gpu_offload() && g_backend_gpu_device_count > 0;
     if (g_backend_device_count > 0) return true;
 
     g_last_error += "No llama.cpp ggml backend devices are registered. ";
@@ -540,6 +1164,44 @@ bool ensure_backends_loaded_locked() {
     g_last_error += "Backend files: " + list_ggml_backend_files(g_native_lib_dir) + ". ";
     g_last_error += "On Android, dynamic GGML backends require extracted native libraries; keep android:extractNativeLibs=\"true\" / jniLibs.useLegacyPackaging=true.";
     return false;
+}
+
+bool resolve_backend_config(const RuntimeConfig &requested,
+                            RuntimeConfig &effective,
+                            std::string &error) {
+    effective = requested;
+    const bool force_gpu = requested.n_gpu_layers == -2 || requested.n_gpu_layers > 0;
+    if (force_gpu && !g_gpu_offload_supported) {
+        error = "n_gpu_layers requests GPU offload, but this APK has no usable non-CPU llama.cpp backend.";
+        return false;
+    }
+    if (requested.n_cpu_moe > 0 && !g_gpu_offload_supported) {
+        error = "n_cpu_moe requires a usable GPU offload backend, but none is registered.";
+        return false;
+    }
+    if (g_backend_gpu_device_count > 0 && requested.main_gpu >= (int) g_backend_gpu_device_count &&
+        requested.n_gpu_layers != 0) {
+        error = "main_gpu exceeds the registered non-CPU backend device count.";
+        return false;
+    }
+    if (!g_gpu_offload_supported) {
+        if (requested.main_gpu != 0) {
+            error = "main_gpu must be 0 when no GPU backend is registered.";
+            return false;
+        }
+        if (requested.n_gpu_layers == -1) {
+            effective.n_gpu_layers = 0;
+        }
+        effective.main_gpu = 0;
+        effective.split_mode = "none";
+    } else if (requested.n_gpu_layers == 0) {
+        effective.main_gpu = 0;
+        effective.split_mode = "none";
+    }
+    if (requested.spec_type == "draft-mtp" && requested.cache_reuse > 0) {
+        effective.cache_reuse = 0;
+    }
+    return true;
 }
 
 void android_llama_log(ggml_log_level level, const char *text, void *) {
@@ -554,6 +1216,13 @@ void android_llama_log(ggml_log_level level, const char *text, void *) {
 }
 
 void free_llama_locked() {
+    g_speculative.reset();
+    g_spec_request_active = false;
+    invalidate_prefix_cache_checkpoint_locked();
+    if (g_mtp_context != nullptr) {
+        llama_free(g_mtp_context);
+        g_mtp_context = nullptr;
+    }
     if (g_mtmd_context != nullptr) {
         mtmd_free(g_mtmd_context);
         g_mtmd_context = nullptr;
@@ -576,12 +1245,19 @@ void free_llama_locked() {
         g_model = nullptr;
     }
     g_chat_messages.clear();
+    g_context_tokens.clear();
+    g_spec_prompt_tokens.clear();
+    g_spec_draft_tokens.clear();
+    g_spec_pending_token = LLAMA_TOKEN_NULL;
+    g_spec_pending_valid = false;
+    g_spec_done = false;
     g_current_position = 0;
     g_cached_token_chars.clear();
     g_n_threads = 0;
     g_n_threads_batch = 0;
     g_n_batch = 0;
     g_n_ubatch = 0;
+    g_max_new_tokens = 0;
     g_sampling_temp = 0.0f;
     g_sampling_top_k = 0;
     g_sampling_top_p = 0.0f;
@@ -596,10 +1272,23 @@ void free_llama_locked() {
     g_mmproj_path.clear();
     g_context_shifts = 0;
     g_n_keep = 128;
+    g_cache_state_valid = false;
+    g_cache_reuse_hit = false;
+    g_cache_reused_tokens = 0;
+    g_cache_reuse_reason = "model_unloaded";
+    g_model_hybrid = false;
+    g_model_recurrent = false;
+    g_cache_reuse_strategy = "disabled";
+    g_spec_context_ready = false;
+    g_spec_request_reason = g_spec_requested ? "model_unloaded" : "disabled";
 }
 
 bool shift_context_locked() {
     if (g_context == nullptr) return false;
+    if (g_spec_request_active) {
+        g_last_error += "\nContext shifting is not supported while draft-mtp is active.";
+        return false;
+    }
     const int n_keep = std::min(std::max(32, g_n_keep), std::max(32, g_n_ctx - 8));
     if (g_current_position <= n_keep + OVERFLOW_HEADROOM + 16) {
         g_last_error += "\nContext is full but too small to shift safely.";
@@ -615,6 +1304,10 @@ bool shift_context_locked() {
     llama_memory_seq_add(mem, 0, n_keep + n_discard, g_current_position, -n_discard);
     g_current_position -= n_discard;
     g_context_shifts++;
+    invalidate_prefix_cache_checkpoint_locked();
+    g_cache_state_valid = false;
+    g_context_tokens.clear();
+    g_cache_reuse_reason = "invalidated_by_context_shift";
     __android_log_print(
             ANDROID_LOG_INFO,
             "MCA",
@@ -626,9 +1319,13 @@ bool shift_context_locked() {
 }
 
 int decode_tokens(const llama_tokens &tokens, bool logits_last) {
-    for (int i = 0; i < (int) tokens.size(); i += BATCH_SIZE) {
+    if (g_n_batch <= 0) {
+        g_last_error += "\nInvalid effective n_batch.";
+        return 5;
+    }
+    for (int i = 0; i < (int) tokens.size(); i += g_n_batch) {
         if (g_stop_requested.load(std::memory_order_relaxed)) return 3;
-        const int batch_size = std::min((int) tokens.size() - i, BATCH_SIZE);
+        const int batch_size = std::min((int) tokens.size() - i, g_n_batch);
         common_batch_clear(g_batch);
         if (g_current_position + batch_size >= g_n_ctx - OVERFLOW_HEADROOM) {
             if (!shift_context_locked()) return 4;
@@ -638,6 +1335,11 @@ int decode_tokens(const llama_tokens &tokens, bool logits_last) {
             common_batch_add(g_batch, tokens[i + j], g_current_position + j, {0}, want_logits);
         }
         if (llama_decode(g_context, g_batch) != 0) return 2;
+        if (g_spec_request_active &&
+            (g_speculative == nullptr || !common_speculative_process(g_speculative.get(), g_batch))) {
+            g_last_error += "\ncommon_speculative_process failed during target prefill.";
+            return 6;
+        }
         g_current_position += batch_size;
     }
     return 0;
@@ -799,7 +1501,7 @@ int prefill_multimodal_locked(
             chunks,
             0,
             0,
-            BATCH_SIZE,
+            g_n_batch,
             true,
             &new_position);
     g_prompt_tokens = (long long) mtmd_helper_get_n_tokens(chunks);
@@ -810,6 +1512,476 @@ int prefill_multimodal_locked(
     }
     g_current_position = new_position;
     return 0;
+}
+
+void clear_target_context_locked(const std::string &reason) {
+    if (g_context != nullptr) {
+        llama_memory_clear(llama_get_memory(g_context), false);
+    }
+    invalidate_prefix_cache_checkpoint_locked();
+    g_current_position = 0;
+    g_context_tokens.clear();
+    g_cache_state_valid = false;
+    g_cache_reuse_hit = false;
+    g_cache_reused_tokens = 0;
+    g_cache_reuse_reason = reason;
+}
+
+bool trim_context_locked(llama_context *ctx, llama_pos position, const char *label) {
+    if (ctx == nullptr) return false;
+    if (!llama_memory_seq_rm(llama_get_memory(ctx), 0, position, -1)) {
+        g_last_error += std::string("\nFailed to trim ") + label +
+                        " context at position " + std::to_string(position) + ".";
+        return false;
+    }
+    return true;
+}
+
+void invalidate_speculative_contexts_locked(const std::string &reason) {
+    g_speculative.reset();
+    g_spec_request_active = false;
+    g_spec_request_reason = reason;
+    g_spec_pending_token = LLAMA_TOKEN_NULL;
+    g_spec_pending_valid = false;
+    g_spec_done = true;
+    g_spec_prompt_tokens.clear();
+    g_spec_draft_tokens.clear();
+    clear_target_context_locked(reason);
+    if (g_mtp_context != nullptr) {
+        llama_memory_clear(llama_get_memory(g_mtp_context), false);
+    }
+}
+
+bool trim_speculative_contexts_locked(llama_pos position, const char *label) {
+    const std::string target_label = std::string("target ") + label;
+    const std::string mtp_label = std::string("MTP ") + label;
+    const bool target_ok = trim_context_locked(g_context, position, target_label.c_str());
+    const bool mtp_ok = trim_context_locked(g_mtp_context, position, mtp_label.c_str());
+    if (!target_ok || !mtp_ok) {
+        invalidate_speculative_contexts_locked("speculative_context_recovery_failed");
+        return false;
+    }
+    return true;
+}
+
+size_t longest_common_token_prefix(const llama_tokens &first, const llama_tokens &second) {
+    const size_t limit = std::min(first.size(), second.size());
+    size_t matched = 0;
+    while (matched < limit && first[matched] == second[matched]) matched++;
+    return matched;
+}
+
+size_t prepare_text_prefix_locked(const llama_tokens &tokens) {
+    g_cache_reuse_hit = false;
+    g_cache_reused_tokens = 0;
+    const auto strategy = active_prefix_cache_strategy_locked();
+    const size_t threshold = g_effective_config.cache_reuse > 0
+                             ? (size_t) g_effective_config.cache_reuse
+                             : 0;
+    if (strategy == mca::llama::PrefixCacheStrategy::Disabled) {
+        clear_target_context_locked("disabled");
+        return 0;
+    }
+
+    if (strategy == mca::llama::PrefixCacheStrategy::PartialStateCheckpoint) {
+        const bool checkpoint_shape_valid =
+                g_cache_checkpoint_valid &&
+                !g_cache_checkpoint_data.empty() &&
+                g_cache_checkpoint_threshold == threshold &&
+                g_cache_checkpoint_tokens == threshold &&
+                g_cache_checkpoint_prefix.size() == threshold;
+        const bool context_prefix_valid =
+                g_cache_state_valid &&
+                g_context_tokens.size() >= threshold &&
+                mca::llama::tokenPrefixMatches(
+                        g_context_tokens,
+                        g_cache_checkpoint_prefix);
+        const bool prompt_prefix_matches =
+                checkpoint_shape_valid &&
+                mca::llama::tokenPrefixMatches(
+                        tokens,
+                        g_cache_checkpoint_prefix);
+        const bool can_reuse = mca::llama::canReusePartialStateCheckpoint(
+                strategy,
+                context_prefix_valid,
+                checkpoint_shape_valid,
+                g_cache_checkpoint_tokens,
+                threshold,
+                tokens.size(),
+                prompt_prefix_matches);
+        if (!can_reuse) {
+            const char *reason = "partial_checkpoint_unavailable";
+            if (!g_cache_state_valid || g_context_tokens.size() < threshold) {
+                reason = "partial_checkpoint_context_invalid";
+            } else if (!g_cache_checkpoint_valid || g_cache_checkpoint_data.empty()) {
+                reason = "no_partial_checkpoint";
+            } else if (g_cache_checkpoint_threshold != threshold ||
+                       g_cache_checkpoint_tokens != threshold ||
+                       g_cache_checkpoint_prefix.size() != threshold) {
+                reason = "partial_checkpoint_threshold_mismatch";
+            } else if (tokens.size() <= threshold) {
+                reason = "prompt_not_longer_than_partial_checkpoint";
+            } else if (!context_prefix_valid) {
+                reason = "partial_checkpoint_context_mismatch";
+            } else if (!prompt_prefix_matches) {
+                reason = "partial_checkpoint_prefix_mismatch";
+            }
+            g_cache_reuse_misses++;
+            clear_target_context_locked(reason);
+            return 0;
+        }
+
+        const size_t restore_error_start = g_last_error.size();
+        if (!restore_partial_prefix_checkpoint_locked()) {
+            const std::string restore_error =
+                    take_last_error_suffix_locked(restore_error_start);
+            g_cache_reuse_misses++;
+            clear_target_context_locked("partial_checkpoint_restore_failed");
+            if (!restore_error.empty()) {
+                __android_log_print(
+                        ANDROID_LOG_WARN,
+                        "MCA",
+                        "Partial prefix checkpoint restore failed: %s",
+                        restore_error.c_str());
+            }
+            return 0;
+        }
+        // Hybrid seq_rm() consults recurrent memory first. Restoring the state
+        // moves that tail back to threshold - 1 so removing [threshold, end)
+        // can safely trim the attention suffix without recurrent rollback.
+        if (!trim_context_locked(
+                g_context,
+                (llama_pos) threshold,
+                "target partial-checkpoint cache-reuse")) {
+            const std::string trim_error = g_last_error;
+            g_last_error.clear();
+            g_cache_reuse_misses++;
+            clear_target_context_locked("partial_checkpoint_suffix_trim_failed");
+            __android_log_print(ANDROID_LOG_WARN, "MCA", "%s", trim_error.c_str());
+            return 0;
+        }
+
+        g_current_position = (llama_pos) threshold;
+        g_context_tokens = g_cache_checkpoint_prefix;
+        g_cache_state_valid = true;
+        g_cache_reuse_hit = true;
+        g_cache_reused_tokens = (int) threshold;
+        g_cache_reuse_hits++;
+        // Preserve the public cache-hit reason across direct-trim and
+        // recurrent-checkpoint strategies; `strategy` identifies the path.
+        g_cache_reuse_reason = "text_prefix_hit";
+        return threshold;
+    }
+
+    if (!g_cache_state_valid || g_context_tokens.empty()) {
+        g_cache_reuse_misses++;
+        clear_target_context_locked("no_cached_prefix");
+        return 0;
+    }
+
+    const size_t matched = longest_common_token_prefix(tokens, g_context_tokens);
+    if (matched < (size_t) g_effective_config.cache_reuse) {
+        g_cache_reuse_misses++;
+        clear_target_context_locked("common_prefix_below_threshold");
+        return 0;
+    }
+    size_t reuse = matched;
+    if (reuse == tokens.size() && reuse > 0) {
+        // Re-evaluate at least one token so the logits correspond to the new request tail.
+        reuse--;
+    }
+    if (reuse == 0) {
+        g_cache_reuse_misses++;
+        clear_target_context_locked("no_reusable_token_after_logit_boundary");
+        return 0;
+    }
+
+    if (reuse < g_context_tokens.size()) {
+        if (!trim_context_locked(g_context, (llama_pos) reuse, "target cache-reuse")) {
+            const std::string trim_error = g_last_error;
+            g_last_error.clear();
+            g_cache_reuse_misses++;
+            clear_target_context_locked("backend_cannot_remove_cached_suffix");
+            __android_log_print(ANDROID_LOG_WARN, "MCA", "%s", trim_error.c_str());
+            return 0;
+        }
+    }
+
+    g_current_position = (llama_pos) reuse;
+    g_context_tokens.resize(reuse);
+    g_cache_state_valid = true;
+    g_cache_reuse_hit = true;
+    g_cache_reused_tokens = (int) reuse;
+    g_cache_reuse_hits++;
+    g_cache_reuse_reason = "text_prefix_hit";
+    return reuse;
+}
+
+int decode_text_prompt_locked(const llama_tokens &tokens, size_t reused) {
+    if (reused > tokens.size()) {
+        g_last_error = "Prefix-cache reuse exceeds the prompt token count.";
+        return 6;
+    }
+
+    const auto strategy = active_prefix_cache_strategy_locked();
+    const size_t threshold = g_effective_config.cache_reuse > 0
+                             ? (size_t) g_effective_config.cache_reuse
+                             : 0;
+    if (reused == 0 && mca::llama::shouldCreatePartialStateCheckpoint(
+            strategy,
+            threshold,
+            tokens.size())) {
+        // Stop at exactly N tokens: the partial state belongs to position N,
+        // while the non-empty suffix below re-establishes request-tail logits.
+        const auto checkpoint_end =
+                tokens.begin() + (llama_tokens::difference_type) threshold;
+        const llama_tokens checkpoint_prefix(tokens.begin(), checkpoint_end);
+        const int prefix_rc = decode_tokens(checkpoint_prefix, false);
+        if (prefix_rc != 0) {
+            invalidate_prefix_cache_checkpoint_locked();
+            return prefix_rc;
+        }
+
+        const size_t save_error_start = g_last_error.size();
+        if (!save_partial_prefix_checkpoint_locked(tokens, threshold)) {
+            const std::string save_error = take_last_error_suffix_locked(save_error_start);
+            g_cache_reuse_reason = "partial_checkpoint_save_failed";
+            __android_log_print(
+                    ANDROID_LOG_WARN,
+                    "MCA",
+                    "Failed to save partial prefix checkpoint at %zu tokens.%s%s",
+                    threshold,
+                    save_error.empty() ? "" : " ",
+                    save_error.c_str());
+        }
+
+        const llama_tokens suffix(checkpoint_end, tokens.end());
+        return decode_tokens(suffix, true);
+    }
+
+    const auto suffix_begin = tokens.begin() + (llama_tokens::difference_type) reused;
+    const llama_tokens suffix(suffix_begin, tokens.end());
+    return decode_tokens(suffix, true);
+}
+
+bool prepare_speculative_request_locked() {
+    g_speculative.reset();
+    g_spec_pending_token = LLAMA_TOKEN_NULL;
+    g_spec_pending_valid = false;
+    g_spec_done = false;
+    g_spec_prompt_tokens.clear();
+    g_spec_draft_tokens.clear();
+    if (!g_spec_requested || g_mtp_context == nullptr) {
+        g_spec_request_active = false;
+        g_spec_request_reason = g_spec_requested ? "mtp_context_not_ready" : "disabled";
+        return !g_spec_requested;
+    }
+
+    llama_memory_clear(llama_get_memory(g_mtp_context), false);
+    g_speculative_params = common_params_speculative{};
+    g_speculative_params.types = {COMMON_SPECULATIVE_TYPE_DRAFT_MTP};
+    g_speculative_params.draft.n_max = g_effective_config.spec_draft_n_max;
+    g_speculative_params.draft.n_min = 0;
+    g_speculative_params.draft.p_min = 0.0f;
+    g_speculative_params.draft.backend_sampling = false;
+    g_speculative_params.draft.cache_type_k = cache_type_from_name(g_effective_config.cache_type_k);
+    g_speculative_params.draft.cache_type_v = cache_type_from_name(g_effective_config.cache_type_v);
+    g_speculative_params.draft.ctx_tgt = g_context;
+    g_speculative_params.draft.ctx_dft = g_mtp_context;
+    try {
+        g_speculative.reset(common_speculative_init(g_speculative_params, 1));
+    } catch (const std::exception &e) {
+        g_last_error = std::string("common_speculative_init(draft-mtp) failed: ") + e.what();
+        g_spec_request_active = false;
+        g_spec_request_reason = "initialization_failed";
+        return false;
+    } catch (...) {
+        g_last_error = "common_speculative_init(draft-mtp) failed with an unknown native error.";
+        g_spec_request_active = false;
+        g_spec_request_reason = "initialization_failed";
+        return false;
+    }
+    if (g_speculative == nullptr) {
+        g_last_error = "common_speculative_init(draft-mtp) returned null.";
+        g_spec_request_active = false;
+        g_spec_request_reason = "initialization_failed";
+        return false;
+    }
+    g_spec_request_active = true;
+    g_spec_request_reason = "active";
+    return true;
+}
+
+struct SpecStepResult {
+    llama_tokens output;
+    bool ok = true;
+    bool done = false;
+};
+
+SpecStepResult speculative_step_locked() {
+    SpecStepResult result;
+    if (!g_spec_request_active || g_speculative == nullptr || g_mtp_context == nullptr) {
+        g_last_error = "draft-mtp step requested without an active speculative context.";
+        result.ok = false;
+        return result;
+    }
+    if (g_spec_done) {
+        result.done = true;
+        return result;
+    }
+    const auto *vocab = llama_model_get_vocab(g_model);
+
+    if (!g_spec_pending_valid) {
+        const llama_token token = common_sampler_sample(g_sampler, g_context, -1);
+        common_sampler_accept(g_sampler, token, true);
+        if (llama_vocab_is_eog(vocab, token)) {
+            g_spec_done = true;
+            result.done = true;
+            return result;
+        }
+        g_spec_pending_token = token;
+        g_spec_pending_valid = true;
+        result.output.push_back(token);
+        return result;
+    }
+
+    if (g_current_position >= g_n_ctx - OVERFLOW_HEADROOM) {
+        g_last_error = "draft-mtp reached the context boundary; context shifting is disabled for synchronized target/MTP contexts.";
+        result.ok = false;
+        return result;
+    }
+
+    const llama_pos base = g_current_position;
+    const int remaining = g_n_predict - (int) g_completion_tokens;
+    const int context_room = g_n_ctx - OVERFLOW_HEADROOM - (int) base - 1;
+    const int n_max = std::max(0, std::min({
+            g_effective_config.spec_draft_n_max,
+            std::max(0, remaining - 1),
+            std::max(0, context_room)}));
+
+    g_spec_draft_tokens.clear();
+    if (n_max > 0) {
+        auto &draft_params = common_speculative_get_draft_params(g_speculative.get(), 0);
+        draft_params = {
+                /* .drafting = */ true,
+                /* .n_max    = */ n_max,
+                /* .n_past   = */ base,
+                /* .id_last  = */ g_spec_pending_token,
+                /* .prompt   = */ &g_spec_prompt_tokens,
+                /* .result   = */ &g_spec_draft_tokens,
+        };
+        common_speculative_draft(g_speculative.get());
+        if (!trim_context_locked(g_mtp_context, base, "MTP draft pre-advance")) {
+            invalidate_speculative_contexts_locked("mtp_draft_rollback_failed");
+            result.ok = false;
+            return result;
+        }
+        if (g_stop_requested.load(std::memory_order_relaxed)) {
+            result.done = true;
+            return result;
+        }
+    }
+
+    if ((int) g_spec_draft_tokens.size() + 1 > g_n_batch) {
+        g_last_error = "draft-mtp verification batch exceeds effective n_batch.";
+        result.ok = false;
+        return result;
+    }
+
+    common_batch_clear(g_batch);
+    common_batch_add(g_batch, g_spec_pending_token, base, {0}, true);
+    for (size_t i = 0; i < g_spec_draft_tokens.size(); ++i) {
+        common_batch_add(g_batch, g_spec_draft_tokens[i], base + 1 + (llama_pos) i, {0}, true);
+    }
+    const int decode_rc = llama_decode(g_context, g_batch);
+    if (decode_rc != 0) {
+        g_last_error = "llama_decode failed during draft-mtp verification: " + std::to_string(decode_rc);
+        trim_speculative_contexts_locked(base, "verification failure");
+        result.ok = false;
+        return result;
+    }
+    if (!common_speculative_process(g_speculative.get(), g_batch)) {
+        g_last_error = "common_speculative_process failed during draft-mtp verification.";
+        trim_speculative_contexts_locked(base, "process failure");
+        result.ok = false;
+        return result;
+    }
+    if (g_stop_requested.load(std::memory_order_relaxed)) {
+        trim_speculative_contexts_locked(base, "stop rollback");
+        result.done = true;
+        return result;
+    }
+
+    const llama_token committed_pending = g_spec_pending_token;
+    if (g_spec_draft_tokens.empty()) {
+        const llama_token next = common_sampler_sample(g_sampler, g_context, 0);
+        common_sampler_accept(g_sampler, next, true);
+        g_context_tokens.push_back(committed_pending);
+        g_spec_prompt_tokens.push_back(committed_pending);
+        g_current_position = base + 1;
+        if (!trim_speculative_contexts_locked(g_current_position, "single-token accept")) {
+            result.ok = false;
+            return result;
+        }
+        if (llama_vocab_is_eog(vocab, next)) {
+            g_spec_pending_token = LLAMA_TOKEN_NULL;
+            g_spec_pending_valid = false;
+            g_spec_done = true;
+            result.done = true;
+            return result;
+        }
+        g_spec_pending_token = next;
+        g_spec_pending_valid = true;
+        result.output.push_back(next);
+        g_spec_steps++;
+        return result;
+    }
+
+    llama_tokens sampled = common_sampler_sample_and_accept_n(g_sampler, g_context, g_spec_draft_tokens);
+    if (sampled.empty()) {
+        g_last_error = "draft-mtp verification returned no sampled tokens.";
+        trim_speculative_contexts_locked(base, "empty verification result");
+        result.ok = false;
+        return result;
+    }
+
+    size_t eog_index = sampled.size();
+    for (size_t i = 0; i < sampled.size(); ++i) {
+        if (llama_vocab_is_eog(vocab, sampled[i])) {
+            eog_index = i;
+            break;
+        }
+    }
+    const uint16_t accepted = (uint16_t) std::min(eog_index, sampled.size() - 1);
+    common_speculative_accept(g_speculative.get(), 0, accepted);
+
+    g_context_tokens.push_back(committed_pending);
+    g_spec_prompt_tokens.push_back(committed_pending);
+    for (size_t i = 0; i < accepted; ++i) {
+        g_context_tokens.push_back(sampled[i]);
+        g_spec_prompt_tokens.push_back(sampled[i]);
+    }
+    g_current_position = base + 1 + accepted;
+    if (!trim_speculative_contexts_locked(g_current_position, "accepted verification")) {
+        result.ok = false;
+        return result;
+    }
+
+    g_spec_drafted_tokens += (long long) g_spec_draft_tokens.size();
+    g_spec_accepted_tokens += accepted;
+    g_spec_steps++;
+    if (eog_index < sampled.size()) {
+        result.output.assign(sampled.begin(), sampled.begin() + (long long) eog_index);
+        g_spec_pending_token = LLAMA_TOKEN_NULL;
+        g_spec_pending_valid = false;
+        g_spec_done = true;
+        result.done = true;
+    } else {
+        result.output = sampled;
+        g_spec_pending_token = sampled.back();
+        g_spec_pending_valid = true;
+    }
+    return result;
 }
 #else
 std::vector<std::string> g_stub_chunks;
@@ -856,7 +2028,12 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     const std::string path = jstring_to_string(env, modelPath);
     const std::string params = jstring_to_string(env, paramsJson);
     g_stop_requested.store(true, std::memory_order_relaxed);
+    mark_generation_inactive(GenerationStopReason::UNLOADED);
+    g_loaded = false;
+    g_load_ms = 0;
     g_model_path = path;
+    g_model_architecture.clear();
+    g_model_mtp_layers = 0;
     g_prompt_tokens = 0;
     g_completion_tokens = 0;
     g_prefill_started_ms = 0;
@@ -869,10 +2046,48 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     free_llama_locked();
     const long long started = now_ms();
 
+    RuntimeConfig requested;
+    std::string config_error;
+    if (!parse_runtime_config(params, default_runtime_config(), requested, config_error)) {
+        g_last_error = "Invalid llama runtime config: " + config_error;
+        return 12;
+    }
+    if (params.find("\"n_threads\"") != std::string::npos &&
+        params.find("\"n_threads_batch\"") == std::string::npos) {
+        requested.n_threads_batch = requested.n_threads;
+        if (!validate_runtime_config(requested, config_error)) {
+            g_last_error = "Invalid llama runtime config: " + config_error;
+            return 12;
+        }
+    }
+    g_requested_config = requested;
+
     if (!ensure_backends_loaded_locked()) {
         return 11;
     }
     g_last_error.clear();
+
+    RuntimeConfig effective;
+    if (!resolve_backend_config(requested, effective, config_error)) {
+        g_last_error = "Unsupported llama runtime config: " + config_error;
+        return 13;
+    }
+    g_effective_config = effective;
+    g_spec_requested = effective.spec_type == "draft-mtp";
+    g_spec_context_ready = false;
+    g_spec_request_active = false;
+    g_spec_done = false;
+    g_spec_drafted_tokens = 0;
+    g_spec_accepted_tokens = 0;
+    g_spec_steps = 0;
+    g_spec_request_reason = g_spec_requested ? "awaiting_text_request" : "disabled";
+    g_cache_reuse_hits = 0;
+    g_cache_reuse_misses = 0;
+    g_cache_reuse_hit = false;
+    g_cache_reused_tokens = 0;
+    g_cache_reuse_reason = requested.spec_type == "draft-mtp" && requested.cache_reuse > 0
+                           ? "disabled_by_draft_mtp"
+                           : (effective.cache_reuse > 0 ? "no_cached_prefix" : "disabled");
 
     {
         std::ifstream input(path, std::ios::binary);
@@ -883,12 +2098,31 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     }
 
     llama_model_params model_params = llama_model_default_params();
-    model_params.use_mmap = parse_bool(params, "mmap", true);
-    model_params.use_mlock = parse_bool(params, "mlock", false);
+    model_params.use_mmap = effective.mmap;
+    model_params.use_mlock = effective.mlock;
+    model_params.n_gpu_layers = effective.n_gpu_layers;
+    model_params.main_gpu = mca::llama::modelMainGpuForLoad(
+            g_gpu_offload_supported,
+            effective.n_gpu_layers,
+            effective.main_gpu);
+    model_params.split_mode = split_mode_from_name(effective.split_mode);
+
+    std::list<std::string> moe_patterns;
+    std::vector<llama_model_tensor_buft_override> tensor_overrides;
+    for (int i = 0; i < effective.n_cpu_moe; ++i) {
+        moe_patterns.push_back(llm_ffn_exps_block_regex(i));
+        tensor_overrides.push_back({moe_patterns.back().c_str(), ggml_backend_cpu_buffer_type()});
+    }
+    if (!tensor_overrides.empty()) {
+        tensor_overrides.push_back({nullptr, nullptr});
+        model_params.tensor_buft_overrides = tensor_overrides.data();
+    }
+
     g_model = llama_model_load_from_file(path.c_str(), model_params);
     if (g_model == nullptr && model_params.use_mmap) {
         g_last_error += "\nRetrying model load with mmap=false.";
         model_params.use_mmap = false;
+        g_effective_config.mmap = false;
         g_model = llama_model_load_from_file(path.c_str(), model_params);
     }
     if (g_model == nullptr) {
@@ -897,29 +2131,85 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         }
         return 1;
     }
+    g_model_architecture = model_meta_string(g_model, "general.architecture");
+    g_model_mtp_layers = model_mtp_layer_count(g_model, g_model_architecture);
+    g_model_hybrid = llama_model_is_hybrid(g_model);
+    g_model_recurrent = llama_model_is_recurrent(g_model);
+    refresh_prefix_cache_strategy_locked();
+    if (g_spec_requested && g_model_mtp_layers != 1) {
+        g_last_error = g_model_mtp_layers <= 0
+                       ? "draft-mtp was requested, but the GGUF has no nextn_predict_layers metadata/MTP head."
+                       : "draft-mtp currently requires exactly one MTP block; model reports " +
+                         std::to_string(g_model_mtp_layers) + ".";
+        free_llama_locked();
+        return 17;
+    }
+    if (effective.n_cpu_moe > llama_model_n_layer(g_model)) {
+        g_last_error = "n_cpu_moe exceeds the model layer count (" +
+                       std::to_string(llama_model_n_layer(g_model)) + ").";
+        free_llama_locked();
+        return 14;
+    }
 
-    g_n_ctx = parse_int(params, "n_ctx", 4096);
-    const int n_threads_default = std::max(1, (int) sysconf(_SC_NPROCESSORS_ONLN) - 2);
-    const int n_threads = parse_int(params, "n_threads", n_threads_default);
+    g_n_ctx = effective.n_ctx;
+    const int n_threads = effective.n_threads;
 
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = g_n_ctx;
-    ctx_params.n_batch = BATCH_SIZE;
-    ctx_params.n_ubatch = BATCH_SIZE;
+    ctx_params.n_batch = effective.n_batch;
+    ctx_params.n_ubatch = effective.n_ubatch;
+    ctx_params.n_seq_max = 1;
+    const uint32_t speculative_rollback_window = g_spec_requested
+                                                 ? (uint32_t) effective.spec_draft_n_max + 1U
+                                                 : 0U;
+    ctx_params.n_rs_seq = speculative_rollback_window;
     ctx_params.n_threads = n_threads;
-    ctx_params.n_threads_batch = n_threads;
+    ctx_params.n_threads_batch = effective.n_threads_batch;
+    ctx_params.type_k = cache_type_from_name(effective.cache_type_k);
+    ctx_params.type_v = cache_type_from_name(effective.cache_type_v);
+    ctx_params.flash_attn_type = flash_attn_from_name(effective.flash_attn);
+    ctx_params.no_perf = !effective.perf;
     g_n_threads = n_threads;
-    g_n_threads_batch = n_threads;
-    g_n_batch = BATCH_SIZE;
-    g_n_ubatch = BATCH_SIZE;
+    g_n_threads_batch = effective.n_threads_batch;
+    g_n_batch = effective.n_batch;
+    g_n_ubatch = effective.n_ubatch;
     g_context = llama_init_from_model(g_model, ctx_params);
     if (g_context == nullptr) {
-        g_last_error += "\nllama_init_from_model returned null. Try lower n_ctx or a smaller Q4 model.";
+        g_last_error += "\nllama_init_from_model returned null for the requested context/KV/flash configuration.";
         free_llama_locked();
         return 2;
     }
 
-    g_batch = llama_batch_init(BATCH_SIZE, 0, 1);
+    g_n_ctx = (int) llama_n_ctx(g_context);
+    g_n_batch = (int) llama_n_batch(g_context);
+    g_n_ubatch = (int) llama_n_ubatch(g_context);
+    g_effective_config.n_ctx = g_n_ctx;
+    g_effective_config.n_batch = g_n_batch;
+    g_effective_config.n_ubatch = g_n_ubatch;
+
+    if (g_spec_requested) {
+        const auto seq_rm_type = common_context_can_seq_rm(g_context);
+        if (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO || seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+            (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS &&
+             llama_n_rs_seq(g_context) < speculative_rollback_window)) {
+            g_last_error = "draft-mtp requires bounded partial target-context rollback; this model/context does not provide it.";
+            free_llama_locked();
+            return 15;
+        }
+
+        llama_context_params mtp_params = ctx_params;
+        mtp_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+        mtp_params.n_rs_seq = 0;
+        g_mtp_context = llama_init_from_model(g_model, mtp_params);
+        if (g_mtp_context == nullptr) {
+            g_last_error = "draft-mtp was requested, but the model has no usable MTP head/context.";
+            free_llama_locked();
+            return 16;
+        }
+        g_spec_context_ready = true;
+    }
+
+    g_batch = llama_batch_init(g_n_batch, 0, 1);
     g_batch_ready = true;
     try {
         g_chat_templates = common_chat_templates_init(g_model, "");
@@ -949,6 +2239,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         vision_params.use_gpu = false;
         vision_params.print_timings = false;
         vision_params.n_threads = n_threads;
+        vision_params.flash_attn_type = ctx_params.flash_attn_type;
         vision_params.warmup = false;
         g_mtmd_context = mtmd_init_from_file(mmproj_path.c_str(), g_model, vision_params);
         if (g_mtmd_context == nullptr) {
@@ -969,12 +2260,14 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     g_load_ms = now_ms() - started;
     g_loaded = true;
     g_stop_requested.store(false, std::memory_order_relaxed);
+    mark_generation_inactive(GenerationStopReason::IDLE);
     return 0;
 #else
     (void) params;
     g_loaded = true;
     g_load_ms = 12;
     g_stop_requested.store(false, std::memory_order_relaxed);
+    mark_generation_inactive(GenerationStopReason::IDLE);
     return 0;
 #endif
 }
@@ -983,6 +2276,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_unloadModel(JNIEnv *, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_stop_requested.store(true, std::memory_order_relaxed);
+    mark_generation_inactive(GenerationStopReason::UNLOADED);
 #if MCA_WITH_LLAMA_CPP
     free_llama_locked();
 #else
@@ -1001,10 +2295,18 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
 ) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (!g_loaded) return -1;
+        g_cache_reuse_hit = false;
+        g_cache_reused_tokens = 0;
+        g_cache_reuse_reason = "not_attempted";
+        if (!g_loaded) {
+            mark_generation_inactive(GenerationStopReason::BEGIN_FAILED);
+            return -1;
+        }
         const std::string messages_json = jstring_to_string(env, messagesJson);
         const std::string params_json = jstring_to_string(env, paramsJson);
+        mark_generation_inactive(GenerationStopReason::BEGIN_FAILED);
         g_stop_requested.store(false, std::memory_order_relaxed);
+        g_last_error.clear();
         g_prompt_tokens = 0;
         g_completion_tokens = 0;
         g_prefill_started_ms = now_ms();
@@ -1014,21 +2316,62 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
 
 #if MCA_WITH_LLAMA_CPP
         if (g_context == nullptr) return -2;
-        if (!configure_sampler_locked(params_json)) return -3;
-        const int requested_threads = parse_int(params_json, "n_threads", g_n_threads > 0 ? g_n_threads : 1);
-        const int requested_threads_batch = parse_int(params_json, "n_threads_batch", requested_threads);
-        if (requested_threads != g_n_threads || requested_threads_batch != g_n_threads_batch) {
-            llama_set_n_threads(g_context, requested_threads, requested_threads_batch);
-            g_n_threads = requested_threads;
-            g_n_threads_batch = requested_threads_batch;
+        RuntimeConfig request_config;
+        std::string config_error;
+        if (!parse_runtime_config(params_json, g_requested_config, request_config, config_error)) {
+            g_last_error = "Invalid completion runtime config: " + config_error;
+            return -10;
         }
-        llama_memory_clear(llama_get_memory(g_context), false);
+        if (params_json.find("\"n_threads\"") != std::string::npos &&
+            params_json.find("\"n_threads_batch\"") == std::string::npos) {
+            request_config.n_threads_batch = request_config.n_threads;
+            if (!validate_runtime_config(request_config, config_error)) {
+                g_last_error = "Invalid completion runtime config: " + config_error;
+                return -10;
+            }
+        }
+        if (!runtime_config_equal_load_bound(request_config, g_requested_config)) {
+            g_last_error = "Completion config changes load-bound fields; reload the model before generating.";
+            return -11;
+        }
+
+        const int previous_effective_cache_reuse = g_effective_config.cache_reuse;
+        g_requested_config.n_threads = request_config.n_threads;
+        g_requested_config.n_threads_batch = request_config.n_threads_batch;
+        g_requested_config.cache_reuse = request_config.cache_reuse;
+        g_effective_config.n_threads = request_config.n_threads;
+        g_effective_config.n_threads_batch = request_config.n_threads_batch;
+        g_effective_config.cache_reuse = g_spec_requested ? 0 : request_config.cache_reuse;
+        refresh_prefix_cache_strategy_locked();
+        if (previous_effective_cache_reuse != g_effective_config.cache_reuse) {
+            invalidate_prefix_cache_checkpoint_locked();
+            g_cache_reuse_reason = "cache_reuse_threshold_changed";
+        }
+        if (g_spec_requested && request_config.cache_reuse > 0) {
+            g_cache_reuse_reason = "disabled_by_draft_mtp";
+        }
+        if (request_config.n_threads != g_n_threads || request_config.n_threads_batch != g_n_threads_batch) {
+            llama_set_n_threads(g_context, request_config.n_threads, request_config.n_threads_batch);
+            if (g_mtp_context != nullptr) {
+                llama_set_n_threads(g_mtp_context, request_config.n_threads, request_config.n_threads_batch);
+            }
+            g_n_threads = request_config.n_threads;
+            g_n_threads_batch = request_config.n_threads_batch;
+        }
+        if (!configure_sampler_locked(params_json)) return -3;
         common_sampler_reset(g_sampler);
         g_chat_messages.clear();
-        g_current_position = 0;
         g_cached_token_chars.clear();
         g_context_shifts = 0;
         g_n_predict = parse_int(params_json, "n_predict", 8192);
+        if (g_n_predict < 1 || g_n_predict > 1048576) {
+            g_last_error = "n_predict must be in [1, 1048576].";
+            return -12;
+        }
+        g_max_new_tokens = g_n_predict;
+        g_spec_pending_token = LLAMA_TOKEN_NULL;
+        g_spec_pending_valid = false;
+        g_spec_done = false;
         g_prefill_started_ms = now_ms();
         ChatTemplateOptions chat_options;
         chat_options.use_jinja = should_use_jinja(params_json);
@@ -1038,18 +2381,75 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         g_last_enable_thinking = chat_options.enable_thinking;
         const auto messages = parse_messages(messages_json);
         int rc = 0;
-        if (messages_have_images(messages)) {
+        const bool has_images = messages_have_images(messages);
+        if (has_images) {
+            g_speculative.reset();
+            g_spec_request_active = false;
+            g_spec_request_reason = g_spec_requested ? "disabled_for_multimodal" : "disabled";
+            if (g_mtp_context != nullptr) {
+                llama_memory_clear(llama_get_memory(g_mtp_context), false);
+            }
+            clear_target_context_locked("disabled_for_multimodal");
             rc = prefill_multimodal_locked(messages, chat_options);
+            g_cache_state_valid = false;
+            g_context_tokens.clear();
+            g_cache_reuse_reason = "disabled_for_multimodal";
         } else {
             const auto formatted = format_messages(messages, chat_options);
             auto tokens = common_tokenize(g_context, formatted, true, true);
+            if (tokens.empty()) {
+                g_last_error = "The rendered text prompt tokenized to an empty sequence.";
+                return -13;
+            }
             g_prompt_tokens = (long long) tokens.size();
-            rc = decode_tokens(tokens, true);
+            size_t reused = 0;
+            if (g_spec_requested) {
+                clear_target_context_locked("disabled_by_draft_mtp");
+                if (!prepare_speculative_request_locked()) return -14;
+            } else {
+                g_speculative.reset();
+                g_spec_request_active = false;
+                g_spec_request_reason = "disabled";
+                if (g_mtp_context != nullptr) {
+                    llama_memory_clear(llama_get_memory(g_mtp_context), false);
+                }
+                reused = prepare_text_prefix_locked(tokens);
+            }
+            rc = decode_text_prompt_locked(tokens, reused);
+            if (rc == 0) {
+                if (mca::llama::canPersistPrefixCacheAfterPrefill(
+                        (size_t) g_context_shifts)) {
+                    g_context_tokens = tokens;
+                    g_cache_state_valid = true;
+                } else {
+                    // shift_context_locked() already invalidated both cache
+                    // representations; do not relabel shifted KV positions as
+                    // the original, unshifted prompt token sequence.
+                    invalidate_prefix_cache_checkpoint_locked();
+                    g_context_tokens.clear();
+                    g_cache_state_valid = false;
+                    g_cache_reuse_reason = "invalidated_by_context_shift";
+                }
+                if (g_spec_request_active) {
+                    g_spec_prompt_tokens = tokens;
+                    common_speculative_begin(g_speculative.get(), 0, g_spec_prompt_tokens);
+                }
+            } else {
+                invalidate_prefix_cache_checkpoint_locked();
+                g_cache_state_valid = false;
+                g_context_tokens.clear();
+                g_cache_reuse_reason = "invalidated_by_prefill_failure";
+            }
         }
         g_n_keep = std::min(
                 std::max(64, (int) (g_prompt_tokens / 4)),
                 std::max(64, g_n_ctx / 2));
         g_prefill_finished_ms = now_ms();
+        if (rc == 0) {
+            // Failed begin paths (including load-signature mismatch -11) return above.
+            ++g_generation_sequence;
+            mark_generation_running();
+        }
         return rc;
 #else
         (void) messages_json;
@@ -1061,16 +2461,20 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
                 " 接入 llama.cpp 后，",
                 "这里会替换为真实 GGUF 模型在骁龙/天玑 ARM CPU 上的本地推理结果。"
         };
+        ++g_generation_sequence;
+        mark_generation_running();
         return 0;
 #endif
     } catch (const std::exception &e) {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_stop_requested.store(true, std::memory_order_relaxed);
+        mark_generation_inactive(GenerationStopReason::BEGIN_FAILED);
         set_last_error(std::string("beginCompletion exception: ") + e.what());
         return -20;
     } catch (...) {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_stop_requested.store(true, std::memory_order_relaxed);
+        mark_generation_inactive(GenerationStopReason::BEGIN_FAILED);
         set_last_error("beginCompletion exception: unknown native error");
         return -21;
     }
@@ -1079,31 +2483,102 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_stop_requested.load(std::memory_order_relaxed)) return nullptr;
+    if (g_stop_requested.load(std::memory_order_acquire)) {
+        finish_generation_if_active(GenerationStopReason::STOP_REQUESTED);
+        return nullptr;
+    }
+    if (!g_generation_active.load(std::memory_order_acquire)) return nullptr;
 
 #if MCA_WITH_LLAMA_CPP
-    if (g_context == nullptr || g_sampler == nullptr) return nullptr;
-    if (g_n_predict > 0 && g_completion_tokens >= g_n_predict) return nullptr;
+    if (g_context == nullptr || g_sampler == nullptr) {
+        finish_generation_if_active(GenerationStopReason::RUNNER_UNAVAILABLE);
+        return nullptr;
+    }
+    if (g_n_predict > 0 && g_completion_tokens >= g_n_predict) {
+        finish_generation_if_active(GenerationStopReason::MAX_NEW_TOKENS);
+        return nullptr;
+    }
 
     const long long token_started = now_ms();
     if (g_completion_tokens == 0) {
         g_decode_started_ms = token_started;
         g_decode_finished_ms = token_started;
     }
+
+    if (g_spec_request_active) {
+        const SpecStepResult step = speculative_step_locked();
+        if (!step.ok) {
+            g_stop_requested.store(true, std::memory_order_relaxed);
+            finish_generation_if_active(GenerationStopReason::GENERATION_FAILED);
+            g_speculative.reset();
+            g_spec_request_active = false;
+            g_spec_request_reason = "generation_failed";
+            g_decode_finished_ms = now_ms();
+            throw_java_illegal_state(
+                    env,
+                    g_last_error.empty() ? "draft-mtp generation failed." : g_last_error);
+            return nullptr;
+        }
+        if (step.output.empty()) {
+            if (step.done) {
+                g_decode_finished_ms = now_ms();
+                finish_generation_if_active(GenerationStopReason::NORMAL_FINISHED);
+            }
+            return step.done ? nullptr : string_to_jstring(env, "");
+        }
+        g_completion_tokens += (long long) step.output.size();
+        for (const llama_token token: step.output) {
+            g_cached_token_chars += common_token_to_piece(g_context, token);
+        }
+        g_decode_finished_ms = now_ms();
+        if (step.done) {
+            finish_generation_if_active(GenerationStopReason::NORMAL_FINISHED);
+        } else if (g_n_predict > 0 && g_completion_tokens >= g_n_predict) {
+            finish_generation_if_active(GenerationStopReason::MAX_NEW_TOKENS);
+        }
+        if (is_valid_utf8(g_cached_token_chars.c_str())) {
+            const std::string out = g_cached_token_chars;
+            g_cached_token_chars.clear();
+            return string_to_jstring(env, out);
+        }
+        return string_to_jstring(env, "");
+    }
+
     const llama_token token = common_sampler_sample(g_sampler, g_context, -1);
     common_sampler_accept(g_sampler, token, true);
-    if (llama_vocab_is_eog(llama_model_get_vocab(g_model), token)) return nullptr;
+    if (llama_vocab_is_eog(llama_model_get_vocab(g_model), token)) {
+        finish_generation_if_active(GenerationStopReason::STOP_TOKEN);
+        return nullptr;
+    }
 
     if (g_current_position >= g_n_ctx - OVERFLOW_HEADROOM) {
-        if (!shift_context_locked()) return nullptr;
+        if (!shift_context_locked()) {
+            finish_generation_if_active(GenerationStopReason::CONTEXT_SHIFT_FAILED);
+            return nullptr;
+        }
     }
 
     common_batch_clear(g_batch);
     common_batch_add(g_batch, token, g_current_position, {0}, true);
-    if (llama_decode(g_context, g_batch) != 0) return nullptr;
+    const int decode_rc = llama_decode(g_context, g_batch);
+    if (decode_rc != 0) {
+        g_last_error = "llama_decode failed during token generation: " + std::to_string(decode_rc);
+        invalidate_prefix_cache_checkpoint_locked();
+        g_cache_state_valid = false;
+        g_context_tokens.clear();
+        g_cache_reuse_reason = "invalidated_by_decode_failure";
+        finish_generation_if_active(GenerationStopReason::DECODE_FAILED);
+        return nullptr;
+    }
     g_current_position++;
     g_completion_tokens++;
+    if (g_cache_state_valid) {
+        g_context_tokens.push_back(token);
+    }
     g_decode_finished_ms = now_ms();
+    if (g_n_predict > 0 && g_completion_tokens >= g_n_predict) {
+        finish_generation_if_active(GenerationStopReason::MAX_NEW_TOKENS);
+    }
 
     g_cached_token_chars += common_token_to_piece(g_context, token);
     if (is_valid_utf8(g_cached_token_chars.c_str())) {
@@ -1113,7 +2588,10 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *
     }
     return string_to_jstring(env, "");
 #else
-    if (g_stub_chunk_index >= g_stub_chunks.size()) return nullptr;
+    if (g_stub_chunk_index >= g_stub_chunks.size()) {
+        finish_generation_if_active(GenerationStopReason::NORMAL_FINISHED);
+        return nullptr;
+    }
     const long long token_started = now_ms();
     if (g_completion_tokens == 0) {
         g_decode_started_ms = token_started;
@@ -1122,20 +2600,39 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *
     const std::string chunk = g_stub_chunks[g_stub_chunk_index++];
     g_completion_tokens += 8;
     g_decode_finished_ms = now_ms();
+    if (g_stub_chunk_index >= g_stub_chunks.size()) {
+        finish_generation_if_active(GenerationStopReason::NORMAL_FINISHED);
+    }
     return string_to_jstring(env, chunk);
 #endif
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_requestStop(JNIEnv *, jobject) {
-    g_stop_requested.store(true, std::memory_order_relaxed);
+    g_stop_requested.store(true, std::memory_order_release);
+    finish_generation_if_active(GenerationStopReason::STOP_REQUESTED);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_requestStopIfActive(JNIEnv *, jobject) {
+    // Serialize the proof with generateNextChunk(): if the current token was a
+    // natural terminal token, that call marks generation inactive before this
+    // lock can be acquired. The CAS then distinguishes a real accepted stop
+    // from a post-completion request without relying on timing alone.
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!finish_generation_if_active(GenerationStopReason::STOP_REQUESTED)) {
+        return JNI_FALSE;
+    }
+    g_stop_requested.store(true, std::memory_order_release);
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getRuntimeStatsJson(JNIEnv *env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
 #if MCA_WITH_LLAMA_CPP
-    return string_to_jstring(env, stats_json("llama.cpp-cpu"));
+    const bool using_gpu_config = g_gpu_offload_supported && g_effective_config.n_gpu_layers != 0;
+    return string_to_jstring(env, stats_json(using_gpu_config ? "llama.cpp-gpu" : "llama.cpp-cpu"));
 #else
     return string_to_jstring(env, stats_json("cpu-stub"));
 #endif
@@ -1145,11 +2642,14 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_shutdown(JNIEnv *, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_stop_requested.store(true, std::memory_order_relaxed);
+    mark_generation_inactive(GenerationStopReason::SHUTDOWN);
 #if MCA_WITH_LLAMA_CPP
     free_llama_locked();
     llama_backend_free();
     g_backend_initialized = false;
     g_backend_device_count = 0;
+    g_backend_gpu_device_count = 0;
+    g_gpu_offload_supported = false;
 #else
     g_stub_chunks.clear();
     g_stub_chunk_index = 0;

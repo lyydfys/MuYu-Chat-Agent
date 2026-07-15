@@ -61,6 +61,9 @@ object ModelCompatibility {
             if (metadata.quant == null) add("没有读到量化类型，加载前请确认不是 BF16/F32 超大模型")
             if (file.length() > 8L * GB) add("文件超过 8GB，手机端可能因为内存或温控加载失败")
             if (metadata.quant in setOf("F32", "F16", "BF16")) add("${metadata.quant} 精度文件很大，手机端建议优先 Q4_K_M/Q5_K_M")
+            if (metadata.quant.isVeryLowBitQuant()) {
+                add("${metadata.quant} 属于极低比特量化，中文、OCR、事实准确性和指令遵循可能明显下降；不要作为高质量默认，优先 Q4_K_M/Q5_K_M")
+            }
         }
         return ModelCompatibilityResult(
             canLoad = true,
@@ -79,6 +82,11 @@ object ModelCompatibility {
 
     private fun blocked(title: String, details: String): ModelCompatibilityResult =
         ModelCompatibilityResult(canLoad = false, title = title, details = details)
+
+    private fun String?.isVeryLowBitQuant(): Boolean {
+        val value = this?.uppercase().orEmpty()
+        return value.startsWith("IQ1_") || value.startsWith("IQ2_") || value.startsWith("Q2_")
+    }
 
     private fun formatBytes(bytes: Long): String {
         val gb = bytes / GB.toDouble()

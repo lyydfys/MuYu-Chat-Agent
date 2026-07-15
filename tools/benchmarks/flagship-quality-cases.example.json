@@ -1,0 +1,604 @@
+{
+  "schemaVersion": 1,
+  "artifactType": "benchmark_config",
+  "suite": {
+    "id": "mca-local-ai-flagship-acceptance-v1",
+    "version": "1.0",
+    "status": "definition_only",
+    "containsMeasuredResults": false,
+    "description": "MCA QNN chat, QNN/VLM vision, QNN image and MNN image product-quality acceptance matrix.",
+    "companionDocument": "docs/experiments/LOCAL_AI_FLAGSHIP_ACCEPTANCE.md",
+    "requiredTracks": ["qnn_chat", "qnn_vlm", "qnn_image", "mnn_image"],
+    "allowedResultStates": ["not_run", "not_measured", "not_applicable", "invalid", "fail", "pass"],
+    "placeholderRule": "Any unresolved __SET_*__ value makes an execution invalid."
+  },
+  "defaults": {
+    "runs": 3,
+    "warmupRuns": 1,
+    "timeoutSeconds": 1200,
+    "pollIntervalMs": 1000,
+    "cooldownSeconds": 45,
+    "forceStopBeforeRun": true,
+    "stabilityCvThresholdPercent": 15.0,
+    "cancellationProbe": false,
+    "cancellationDelayMs": 750,
+    "cancellationMaxTokens": 512,
+    "cancellationTimeoutSeconds": 30,
+    "temperature": 0.0,
+    "reasoningMode": "off",
+    "humanReviewers": 2,
+    "telemetrySampleIntervalMs": 1000
+  },
+  "executionProtocol": {
+    "measuredRunsMustBeIndependent": true,
+    "sameInputsAcrossMeasuredRuns": true,
+    "sameSeedAcrossImageMeasuredRuns": true,
+    "recordWarmupButExcludeFromAggregates": true,
+    "restartAppAndReloadModelBeforeEachMeasuredRun": true,
+    "startTelemetryBeforeModelLoad": true,
+    "stopTelemetryAtLeastMsAfterTerminalEvent": 2000,
+    "cooldownUntilWithinStartTemperatureC": 2.0,
+    "maximumCooldownSeconds": 300,
+    "qualityAdapterRequired": true,
+    "legacyRunnerCompatibility": "run-real-device-comparison.ps1 validates schemaVersion, kind and scalar extras, but smoke activities do not guarantee injection of qualityInput."
+  },
+  "metricContract": {
+    "commonRequired": [
+      "loadMs",
+      "totalDurationMs",
+      "rssStartMb",
+      "peakRssMb",
+      "rssEndMb",
+      "availableRamMinMb",
+      "batteryTemperatureStartC",
+      "batteryTemperatureMaxC",
+      "batteryTemperatureEndC",
+      "thermalStatusStart",
+      "thermalStatusMax",
+      "thermalStatusEnd",
+      "batteryLevelStartPercent",
+      "batteryLevelEndPercent",
+      "chargingState",
+      "cancelLatencyMs",
+      "threeRunStability"
+    ],
+    "chatAndVisionRequired": ["promptTokens", "completionTokens", "ttftMs", "decodeTps"],
+    "imageRequired": ["firstProgressMs", "stepsCompleted", "stepsPerSecond", "outputWidth", "outputHeight", "outputSha256"],
+    "imageNotApplicable": ["ttftMs", "decodeTps"],
+    "memorySourcePriority": ["proc_status_vmrss", "dumpsys_total_rss"],
+    "batteryOptionalCounters": ["chargeCounterStartUah", "chargeCounterEndUah", "energyCounterStartNwh", "energyCounterEndNwh"],
+    "missingValueRule": "Use null plus not_measured/not_applicable; never substitute zero.",
+    "stabilityStatistics": ["values", "median", "mean", "sampleStandardDeviation", "coefficientOfVariationPercent", "minimum", "maximum"]
+  },
+  "acceptanceThresholds": {
+    "global": {
+      "measuredRunSuccessesRequired": 3,
+      "measuredRunsRequired": 3,
+      "crashAnrOomMax": 0,
+      "fallbackCountMax": 0,
+      "emptyOrCorruptOutputMax": 0,
+      "peakRssFractionOfPhysicalRamMax": 0.75,
+      "availableRamMinMb": 768,
+      "batteryTemperatureMaxC": 45.0,
+      "batteryTemperatureDeltaCMax": 8.0,
+      "thermalStatusForbiddenAtOrAbove": "SEVERE",
+      "batteryLevelDropPerRunPercentMax": 2.0,
+      "humanWeightedScoreMedianMin": 4.0,
+      "humanWeightedScorePerOutputMin": 3.5,
+      "humanDimensionMin": 3.0,
+      "criticalDefectsMax": 0,
+      "humanReviewersRequired": 2
+    },
+    "qnn_chat": {
+      "backendEvidencePerRunRequired": true,
+      "actualRequestMustUseQnnOrQairt": true,
+      "ttftMedianMsMax": 1500,
+      "decodeTpsMedianMin": 12.0,
+      "ttftCvPercentMax": 20.0,
+      "decodeTpsCvPercentMax": 10.0,
+      "totalDurationCvPercentMax": 15.0,
+      "cancelLatencyMsMax": 1000,
+      "cancellationRunsRequired": 3
+    },
+    "qnn_vlm": {
+      "backendEvidencePerRunRequired": true,
+      "actualRequestMustUseQnnOrQairt": true,
+      "ttftMedianMsMax": 6000,
+      "decodeTpsMedianMin": 6.0,
+      "ttftCvPercentMax": 20.0,
+      "decodeTpsCvPercentMax": 15.0,
+      "totalDurationCvPercentMax": 15.0,
+      "cancelLatencyMsMax": 1500,
+      "cancellationRunsRequired": 3
+    },
+    "qnn_image": {
+      "backendEvidencePerRunRequired": true,
+      "runtimeRequired": "qnn_htp",
+      "actualGraphExecuteRequired": true,
+      "npuActiveRequired": true,
+      "totalDurationMedianMsMax": 30000,
+      "firstProgressMedianMsMax": 3000,
+      "totalDurationCvPercentMax": 12.0,
+      "peakRssCvPercentMax": 10.0,
+      "cancelLatencyMsMax": 2000,
+      "cancellationRunsRequired": 3
+    },
+    "mnn_image": {
+      "backendEvidencePerRunRequired": true,
+      "runtimeRequired": "mnn_diffusion",
+      "totalDurationMedianMsMax": 120000,
+      "firstProgressMedianMsMax": 8000,
+      "totalDurationCvPercentMax": 15.0,
+      "peakRssCvPercentMax": 10.0,
+      "cancelLatencyMsMax": 3000,
+      "cancellationRunsRequired": 3
+    },
+    "energyRegression": {
+      "firstApprovedSessionState": "baseline_created",
+      "sameDeviceNormalizedDrainRegressionPercentMax": 15.0,
+      "normalization": "charge counter drain per minute",
+      "chargingStateMustRemainConstant": true
+    }
+  },
+  "rubrics": {
+    "text_or_vision_v1": {
+      "scale": {
+        "0": "Empty, corrupt, completely wrong or unsafe.",
+        "1": "Only a small relevant fragment is usable.",
+        "2": "Major requirements are missing or wrong.",
+        "3": "Usable with obvious errors.",
+        "4": "Minor issues do not block use.",
+        "5": "Complete, correct and directly usable."
+      },
+      "dimensions": [
+        {"id": "correctness", "weight": 0.4},
+        {"id": "instructionFollowing", "weight": 0.25},
+        {"id": "completenessRelevance", "weight": 0.2},
+        {"id": "chineseReadabilityConciseness", "weight": 0.15}
+      ]
+    },
+    "image_generation_v1": {
+      "scale": {
+        "0": "Empty, corrupt or unrelated image.",
+        "1": "Barely recognizable target.",
+        "2": "Major prompt or structural failure.",
+        "3": "Usable with visible defects.",
+        "4": "Minor defects only.",
+        "5": "Strong prompt fidelity and production-ready visual quality."
+      },
+      "dimensions": [
+        {"id": "promptFidelity", "weight": 0.3},
+        {"id": "compositionSpatialRelations", "weight": 0.2},
+        {"id": "subjectStructure", "weight": 0.2},
+        {"id": "artifactFreedom", "weight": 0.2},
+        {"id": "visualCoherence", "weight": 0.1}
+      ]
+    }
+  },
+  "fixtures": {
+    "long_context_cn_v1": {
+      "state": "deterministic_recipe",
+      "encoding": "UTF-8",
+      "materialization": {
+        "algorithm": "Concatenate prefix, records 001 through 160, then suffix. Format every index as three decimal digits. Use overrideText instead of recordTemplate at overrideIndex.",
+        "prefix": "请阅读以下160条巡检记录。除目标记录外，其余内容都是固定填充。不要根据常识补充信息。\n",
+        "recordCount": 160,
+        "recordTemplate": "【记录{{index:03d}}】区域：常规区；设备编号：ZX-{{index:03d}}；负责人：值班组；状态：已归档；项目代号：无；预算上限：无；验收日期：无；风险等级：低；说明：该条仅用于固定长上下文填充，不包含最终答案。\n",
+        "overrideIndex": 137,
+        "overrideText": "【记录137】区域：东区实验室；设备编号：ZX-137；负责人：林澈；状态：待验收；项目代号：青岚-17；预算上限：48万元；验收日期：2026-09-18；风险等级：B；说明：这是唯一需要回答的目标记录。\n",
+        "suffix": "问题：只输出一行严格 JSON，不要 Markdown，不要解释，键顺序必须是 项目代号、负责人、预算上限、验收日期、风险等级。"
+      },
+      "minimumPromptTokens": 6144,
+      "artifact": {
+        "localPath": "__SET_LONG_CONTEXT_UTF8_PATH__",
+        "sha256": "__SET_LONG_CONTEXT_SHA256__"
+      },
+      "expectedJson": {
+        "项目代号": "青岚-17",
+        "负责人": "林澈",
+        "预算上限": "48万元",
+        "验收日期": "2026-09-18",
+        "风险等级": "B"
+      }
+    },
+    "vlm_scene_photo_v1": {
+      "state": "must_be_frozen_before_run",
+      "artifact": {
+        "localPath": "__SET_VLM_SCENE_LOCAL_PNG__",
+        "devicePath": "__SET_VLM_SCENE_DEVICE_PNG__",
+        "sha256": "__SET_VLM_SCENE_SHA256__",
+        "width": 1024,
+        "height": 768,
+        "colorSpace": "sRGB"
+      },
+      "captureSpec": "A straight-on staged photo of a light wood desk. One red ceramic cup is in the left foreground. One closed blue A5 notebook is centered. One green pen lies immediately to the right of the notebook. Exactly two oranges are in the upper-right area. A digital clock in the upper-left reads 09:35. No person, hand, mirror or extra readable text is visible.",
+      "expectedFacts": {
+        "杯子颜色": "红色",
+        "笔记本颜色": "蓝色",
+        "橙子数量": 2,
+        "时钟时间": "09:35",
+        "笔的位置": "笔记本右侧",
+        "是否有人": "否"
+      }
+    },
+    "vlm_ocr_ticket_v1": {
+      "state": "must_be_frozen_before_run",
+      "artifact": {
+        "localPath": "__SET_VLM_OCR_LOCAL_PNG__",
+        "devicePath": "__SET_VLM_OCR_DEVICE_PNG__",
+        "sha256": "__SET_VLM_OCR_SHA256__",
+        "width": 1024,
+        "height": 768,
+        "colorSpace": "sRGB"
+      },
+      "renderSpec": "White A5 pickup slip on a neutral gray background, front-facing, sharp focus, black Noto Sans CJK SC text, no perspective distortion and no other text.",
+      "exactLines": [
+        "木语自提单",
+        "订单号：MCA-2026-0711",
+        "日期：2026年7月11日",
+        "总计：¥128.50",
+        "取件码：青岚-4827",
+        "备注：请在18:30前领取"
+      ],
+      "criticalFields": ["订单号", "总计", "取件码"],
+      "characterErrorRateMax": 0.05
+    },
+    "vlm_spatial_diagram_v1": {
+      "state": "must_be_frozen_before_run",
+      "artifact": {
+        "localPath": "__SET_VLM_SPATIAL_LOCAL_PNG__",
+        "devicePath": "__SET_VLM_SPATIAL_DEVICE_PNG__",
+        "sha256": "__SET_VLM_SPATIAL_SHA256__",
+        "width": 1024,
+        "height": 768,
+        "colorSpace": "sRGB"
+      },
+      "renderSpec": "Clean white diagram. A red circle is left of a blue square on the middle row. A green triangle is directly above the blue square. A yellow five-point star is fully inside a black rectangular frame in the lower-right. A purple arrow points from the upper-right toward the yellow star. Shapes do not overlap except the star being contained by the frame. No labels or other objects.",
+      "expectedRelations": [
+        "红色圆形在蓝色方形左侧",
+        "绿色三角形在蓝色方形上方",
+        "黄色五角星在黑色矩形内部",
+        "紫色箭头指向黄色五角星",
+        "红色圆形与蓝色方形不重叠"
+      ]
+    }
+  },
+  "generationPrompts": {
+    "chinese_text_v1": {
+      "seed": 20260711,
+      "prompt": "正面平视的现代咖啡店门头，白色墙面，深绿色金属招牌，招牌中央只出现四个清晰、端正、等大的简体中文汉字“木语咖啡”，字序准确，没有其他文字，真实商业摄影，日间自然光，细节清晰，512x512构图。",
+      "negativePrompt": "乱码，错别字，繁体字，英文字母，额外文字，重复招牌，倾斜文字，低清晰度，噪点"
+    },
+    "person_v1": {
+      "seed": 20260712,
+      "prompt": "一位约30岁的东亚女性产品设计师独自坐在明亮工作室的木桌前，半身环境人像，正面略偏三分之二角度，双眼清晰，双手完整可见，右手握铅笔，左手压住打开的素描本，桌上只有一盏白色台灯，窗外柔和晨光，真实摄影，自然肤色，512x512构图，不要文字。",
+      "negativePrompt": "多人，额外手指，缺失手指，融合手，重复肢体，畸形面部，塑料皮肤，文字，水印，严重模糊"
+    },
+    "product_v1": {
+      "seed": 20260713,
+      "prompt": "单个哑光白色无线耳机充电盒的高端产品摄影，盒盖打开约60度，左右两只耳机都正确放在槽内，三分之二视角，浅灰无缝背景，左侧柔光，右下方自然阴影，主体完整居中，边缘锐利，材质真实，512x512构图，不要品牌、文字、手和其他物体。",
+      "negativePrompt": "多个产品，额外耳机，缺失耳机，结构断裂，悬浮部件，文字，标志，手，杂乱背景，低清晰度"
+    },
+    "landscape_v1": {
+      "seed": 20260714,
+      "prompt": "雨后清晨的桂林喀斯特山水，前景是一段湿润石岸和一叶小木舟，中景为平静河面与清晰倒影，远景有三层薄雾山峰，云层间透出柔和金色晨光，空气通透，真实风景摄影，层次清楚，512x512构图，不要人物、建筑和文字。",
+      "negativePrompt": "城市，高楼，人物，文字，过度饱和，重复山体，断裂倒影，低清晰度，噪点"
+    },
+    "complex_composition_v1": {
+      "seed": 20260715,
+      "prompt": "雨夜城市有轨电车站的电影感广角场景：前景左侧只有一位穿黄色雨衣的人撑透明伞，人物完整；中景右侧一辆红色自行车靠在黑色栏杆上；背景中央只有一辆绿色有轨电车正在进站；站台上方恰好两盏暖色圆灯；湿地面同时映出人物、红色自行车和绿色电车，空间层次明确，真实摄影，512x512构图，所有标牌无可读文字。",
+      "negativePrompt": "额外人物，额外自行车，多辆电车，超过两盏圆灯，物体融合，错误倒影，可读文字，水印，严重模糊"
+    }
+  },
+  "cases": [
+    {
+      "id": "qnn-chat-zh-001",
+      "label": "QNN chat / Chinese inventory arithmetic",
+      "kind": "chat",
+      "definitionOnly": true,
+      "model": "__SET_QNN_CHAT_MODEL_NAME__",
+      "stabilityCvThresholdPercent": 10.0,
+      "cancellationProbe": false,
+      "oracle": {"lines": ["现有库存：92件", "缺口：18件", "建议补货：18件"]},
+      "extras": {
+        "runtime": "geniex_qairt",
+        "modelPath": "__SET_QNN_CHAT_MODEL_PATH__",
+        "displayName": "__SET_QNN_CHAT_MODEL_NAME__",
+        "prompt": "你是仓库核算助手。期初库存128件，已售36件，安全库存线110件。严格只输出三行，禁止解释：\n现有库存：<整数>件\n缺口：<整数>件\n建议补货：<整数>件",
+        "smokeMode": "api_only",
+        "computeUnit": "npu",
+        "nCtx": 2048,
+        "nThreads": 4,
+        "maxTokens": 96
+      }
+    },
+    {
+      "id": "qnn-chat-code-001",
+      "label": "QNN chat / Kotlin closed-interval merge",
+      "kind": "chat",
+      "definitionOnly": true,
+      "model": "__SET_QNN_CHAT_MODEL_NAME__",
+      "stabilityCvThresholdPercent": 10.0,
+      "cancellationProbe": false,
+      "oracle": {"compileRequired": true, "fixedTestsRequired": true},
+      "extras": {
+        "runtime": "geniex_qairt",
+        "modelPath": "__SET_QNN_CHAT_MODEL_PATH__",
+        "displayName": "__SET_QNN_CHAT_MODEL_NAME__",
+        "prompt": "只输出可编译的 Kotlin 代码，不要 Markdown、解释或示例输出。实现 fun mergeClosedIntervals(intervals: List<IntRange>): List<IntRange>，按起点排序并合并所有重叠的闭区间；空输入返回空列表；计算边界时不得发生 Int 溢出。",
+        "smokeMode": "api_only",
+        "computeUnit": "npu",
+        "nCtx": 4096,
+        "nThreads": 4,
+        "maxTokens": 512
+      }
+    },
+    {
+      "id": "qnn-chat-longctx-001",
+      "label": "QNN chat / deterministic long context",
+      "kind": "chat",
+      "definitionOnly": true,
+      "model": "__SET_QNN_CHAT_MODEL_NAME__",
+      "fixtureRef": "long_context_cn_v1",
+      "stabilityCvThresholdPercent": 12.0,
+      "cancellationProbe": false,
+      "extras": {
+        "runtime": "geniex_qairt",
+        "modelPath": "__SET_QNN_CHAT_MODEL_PATH__",
+        "displayName": "__SET_QNN_CHAT_MODEL_NAME__",
+        "prompt": "__SET_LONG_CONTEXT_PROMPT__",
+        "smokeMode": "api_only",
+        "computeUnit": "npu",
+        "nCtx": 8192,
+        "nThreads": 4,
+        "maxTokens": 256
+      }
+    },
+    {
+      "id": "qnn-vlm-scene-001",
+      "label": "QNN VLM / staged desk scene",
+      "kind": "vlm",
+      "definitionOnly": true,
+      "model": "__SET_QNN_VLM_MODEL_NAME__",
+      "fixtureRef": "vlm_scene_photo_v1",
+      "stabilityCvThresholdPercent": 15.0,
+      "cancellationProbe": false,
+      "extras": {
+        "runtime": "geniex_qairt",
+        "modelPath": "__SET_QNN_VLM_STUB_ROOT__",
+        "displayName": "__SET_QNN_VLM_MODEL_NAME__",
+        "imagePath": "__SET_VLM_SCENE_DEVICE_PNG__",
+        "prompt": "只根据图片输出一行严格 JSON，键顺序为 杯子颜色、笔记本颜色、橙子数量、时钟时间、笔的位置、是否有人。不要 Markdown 或解释。",
+        "smokeMode": "api_only",
+        "nCtx": 8192,
+        "nThreads": 4,
+        "maxTokens": 192
+      }
+    },
+    {
+      "id": "qnn-vlm-ocr-001",
+      "label": "QNN VLM / Chinese pickup-slip OCR",
+      "kind": "vlm",
+      "definitionOnly": true,
+      "model": "__SET_QNN_VLM_MODEL_NAME__",
+      "fixtureRef": "vlm_ocr_ticket_v1",
+      "stabilityCvThresholdPercent": 15.0,
+      "cancellationProbe": false,
+      "extras": {
+        "runtime": "geniex_qairt",
+        "modelPath": "__SET_QNN_VLM_STUB_ROOT__",
+        "displayName": "__SET_QNN_VLM_MODEL_NAME__",
+        "imagePath": "__SET_VLM_OCR_DEVICE_PNG__",
+        "prompt": "逐行抄录图片中的全部中文自提单文字，保持原顺序、标点、数字和金额，不要 Markdown、解释或补充。",
+        "smokeMode": "api_only",
+        "nCtx": 8192,
+        "nThreads": 4,
+        "maxTokens": 256
+      }
+    },
+    {
+      "id": "qnn-vlm-spatial-001",
+      "label": "QNN VLM / spatial relations",
+      "kind": "vlm",
+      "definitionOnly": true,
+      "model": "__SET_QNN_VLM_MODEL_NAME__",
+      "fixtureRef": "vlm_spatial_diagram_v1",
+      "stabilityCvThresholdPercent": 15.0,
+      "cancellationProbe": false,
+      "extras": {
+        "runtime": "geniex_qairt",
+        "modelPath": "__SET_QNN_VLM_STUB_ROOT__",
+        "displayName": "__SET_QNN_VLM_MODEL_NAME__",
+        "imagePath": "__SET_VLM_SPATIAL_DEVICE_PNG__",
+        "prompt": "只输出图片中成立的空间关系，每行一条，不要添加图片中不存在的关系，不要 Markdown 或解释。",
+        "smokeMode": "api_only",
+        "nCtx": 8192,
+        "nThreads": 4,
+        "maxTokens": 256
+      }
+    },
+    {
+      "id": "qnn-image-text-001",
+      "label": "QNN image / exact Chinese sign text",
+      "kind": "image",
+      "definitionOnly": true,
+      "model": "__SET_QNN_IMAGE_MODEL_NAME__",
+      "qualityInputRef": "generationPrompts.chinese_text_v1",
+      "stabilityCvThresholdPercent": 12.0,
+      "timeoutSeconds": 1200,
+      "extras": {
+        "runtime": "qnn_htp",
+        "bundleRoot": "__SET_QNN_IMAGE_BUNDLE_ROOT__",
+        "modelPath": "__SET_QNN_IMAGE_MODEL_PATH__",
+        "prompt": "正面平视的现代咖啡店门头，白色墙面，深绿色金属招牌，招牌中央只出现四个清晰、端正、等大的简体中文汉字“木语咖啡”，字序准确，没有其他文字，真实商业摄影，日间自然光，细节清晰，512x512构图。",
+        "width": 512,
+        "height": 512,
+        "steps": 20,
+        "threads": 4,
+        "seed": 20260711,
+        "cfgScale": {"type": "float", "value": 7.0},
+        "distilledGuidance": {"type": "float", "value": 3.5},
+        "flowShift": {"type": "float", "value": -1.0},
+        "sampleMethod": "pndm",
+        "family": "SD15",
+        "backendMode": "cpu",
+        "tokenEmbeddingMode": "auto",
+        "memoryMode": 0,
+        "semanticGenerate": true
+      }
+    },
+    {
+      "id": "qnn-image-person-001",
+      "label": "QNN image / single-person studio portrait",
+      "kind": "image",
+      "definitionOnly": true,
+      "model": "__SET_QNN_IMAGE_MODEL_NAME__",
+      "qualityInputRef": "generationPrompts.person_v1",
+      "stabilityCvThresholdPercent": 12.0,
+      "timeoutSeconds": 1200,
+      "extras": {
+        "runtime": "qnn_htp", "bundleRoot": "__SET_QNN_IMAGE_BUNDLE_ROOT__", "modelPath": "__SET_QNN_IMAGE_MODEL_PATH__",
+        "prompt": "一位约30岁的东亚女性产品设计师独自坐在明亮工作室的木桌前，半身环境人像，正面略偏三分之二角度，双眼清晰，双手完整可见，右手握铅笔，左手压住打开的素描本，桌上只有一盏白色台灯，窗外柔和晨光，真实摄影，自然肤色，512x512构图，不要文字。",
+        "width": 512, "height": 512, "steps": 20, "threads": 4, "seed": 20260712,
+        "cfgScale": {"type": "float", "value": 7.0}, "distilledGuidance": {"type": "float", "value": 3.5}, "flowShift": {"type": "float", "value": -1.0},
+        "sampleMethod": "pndm", "family": "SD15", "backendMode": "cpu", "tokenEmbeddingMode": "auto", "memoryMode": 0, "semanticGenerate": true
+      }
+    },
+    {
+      "id": "qnn-image-product-001",
+      "label": "QNN image / wireless-earbud product",
+      "kind": "image",
+      "definitionOnly": true,
+      "model": "__SET_QNN_IMAGE_MODEL_NAME__",
+      "qualityInputRef": "generationPrompts.product_v1",
+      "stabilityCvThresholdPercent": 12.0,
+      "timeoutSeconds": 1200,
+      "extras": {
+        "runtime": "qnn_htp", "bundleRoot": "__SET_QNN_IMAGE_BUNDLE_ROOT__", "modelPath": "__SET_QNN_IMAGE_MODEL_PATH__",
+        "prompt": "单个哑光白色无线耳机充电盒的高端产品摄影，盒盖打开约60度，左右两只耳机都正确放在槽内，三分之二视角，浅灰无缝背景，左侧柔光，右下方自然阴影，主体完整居中，边缘锐利，材质真实，512x512构图，不要品牌、文字、手和其他物体。",
+        "width": 512, "height": 512, "steps": 20, "threads": 4, "seed": 20260713,
+        "cfgScale": {"type": "float", "value": 7.0}, "distilledGuidance": {"type": "float", "value": 3.5}, "flowShift": {"type": "float", "value": -1.0},
+        "sampleMethod": "pndm", "family": "SD15", "backendMode": "cpu", "tokenEmbeddingMode": "auto", "memoryMode": 0, "semanticGenerate": true
+      }
+    },
+    {
+      "id": "qnn-image-landscape-001",
+      "label": "QNN image / Guilin landscape",
+      "kind": "image",
+      "definitionOnly": true,
+      "model": "__SET_QNN_IMAGE_MODEL_NAME__",
+      "qualityInputRef": "generationPrompts.landscape_v1",
+      "stabilityCvThresholdPercent": 12.0,
+      "timeoutSeconds": 1200,
+      "extras": {
+        "runtime": "qnn_htp", "bundleRoot": "__SET_QNN_IMAGE_BUNDLE_ROOT__", "modelPath": "__SET_QNN_IMAGE_MODEL_PATH__",
+        "prompt": "雨后清晨的桂林喀斯特山水，前景是一段湿润石岸和一叶小木舟，中景为平静河面与清晰倒影，远景有三层薄雾山峰，云层间透出柔和金色晨光，空气通透，真实风景摄影，层次清楚，512x512构图，不要人物、建筑和文字。",
+        "width": 512, "height": 512, "steps": 20, "threads": 4, "seed": 20260714,
+        "cfgScale": {"type": "float", "value": 7.0}, "distilledGuidance": {"type": "float", "value": 3.5}, "flowShift": {"type": "float", "value": -1.0},
+        "sampleMethod": "pndm", "family": "SD15", "backendMode": "cpu", "tokenEmbeddingMode": "auto", "memoryMode": 0, "semanticGenerate": true
+      }
+    },
+    {
+      "id": "qnn-image-complex-001",
+      "label": "QNN image / complex tram-stop composition",
+      "kind": "image",
+      "definitionOnly": true,
+      "model": "__SET_QNN_IMAGE_MODEL_NAME__",
+      "qualityInputRef": "generationPrompts.complex_composition_v1",
+      "stabilityCvThresholdPercent": 12.0,
+      "timeoutSeconds": 1200,
+      "extras": {
+        "runtime": "qnn_htp", "bundleRoot": "__SET_QNN_IMAGE_BUNDLE_ROOT__", "modelPath": "__SET_QNN_IMAGE_MODEL_PATH__",
+        "prompt": "雨夜城市有轨电车站的电影感广角场景：前景左侧只有一位穿黄色雨衣的人撑透明伞，人物完整；中景右侧一辆红色自行车靠在黑色栏杆上；背景中央只有一辆绿色有轨电车正在进站；站台上方恰好两盏暖色圆灯；湿地面同时映出人物、红色自行车和绿色电车，空间层次明确，真实摄影，512x512构图，所有标牌无可读文字。",
+        "width": 512, "height": 512, "steps": 20, "threads": 4, "seed": 20260715,
+        "cfgScale": {"type": "float", "value": 7.0}, "distilledGuidance": {"type": "float", "value": 3.5}, "flowShift": {"type": "float", "value": -1.0},
+        "sampleMethod": "pndm", "family": "SD15", "backendMode": "cpu", "tokenEmbeddingMode": "auto", "memoryMode": 0, "semanticGenerate": true
+      }
+    },
+    {
+      "id": "mnn-image-text-001",
+      "label": "MNN image / exact Chinese sign text",
+      "kind": "image",
+      "definitionOnly": true,
+      "model": "__SET_MNN_IMAGE_MODEL_NAME__",
+      "qualityInputRef": "generationPrompts.chinese_text_v1",
+      "stabilityCvThresholdPercent": 15.0,
+      "timeoutSeconds": 1800,
+      "extras": {
+        "runtime": "mnn_diffusion", "bundleRoot": "__SET_MNN_IMAGE_BUNDLE_ROOT__", "modelPath": "__SET_MNN_IMAGE_MODEL_PATH__",
+        "prompt": "正面平视的现代咖啡店门头，白色墙面，深绿色金属招牌，招牌中央只出现四个清晰、端正、等大的简体中文汉字“木语咖啡”，字序准确，没有其他文字，真实商业摄影，日间自然光，细节清晰，512x512构图。",
+        "width": 512, "height": 512, "steps": 20, "threads": 4, "seed": 20260711,
+        "cfgScale": {"type": "float", "value": 7.0}, "distilledGuidance": {"type": "float", "value": 3.5}, "flowShift": {"type": "float", "value": -1.0},
+        "sampleMethod": "pndm", "family": "SD15", "backendMode": "opencl", "tokenEmbeddingMode": "auto", "memoryMode": 0, "runner": "direct", "directUnetSmoke": true
+      }
+    },
+    {
+      "id": "mnn-image-person-001",
+      "label": "MNN image / single-person studio portrait",
+      "kind": "image",
+      "definitionOnly": true,
+      "model": "__SET_MNN_IMAGE_MODEL_NAME__",
+      "qualityInputRef": "generationPrompts.person_v1",
+      "stabilityCvThresholdPercent": 15.0,
+      "timeoutSeconds": 1800,
+      "extras": {
+        "runtime": "mnn_diffusion", "bundleRoot": "__SET_MNN_IMAGE_BUNDLE_ROOT__", "modelPath": "__SET_MNN_IMAGE_MODEL_PATH__",
+        "prompt": "一位约30岁的东亚女性产品设计师独自坐在明亮工作室的木桌前，半身环境人像，正面略偏三分之二角度，双眼清晰，双手完整可见，右手握铅笔，左手压住打开的素描本，桌上只有一盏白色台灯，窗外柔和晨光，真实摄影，自然肤色，512x512构图，不要文字。",
+        "width": 512, "height": 512, "steps": 20, "threads": 4, "seed": 20260712,
+        "cfgScale": {"type": "float", "value": 7.0}, "distilledGuidance": {"type": "float", "value": 3.5}, "flowShift": {"type": "float", "value": -1.0},
+        "sampleMethod": "pndm", "family": "SD15", "backendMode": "opencl", "tokenEmbeddingMode": "auto", "memoryMode": 0, "runner": "direct", "directUnetSmoke": true
+      }
+    },
+    {
+      "id": "mnn-image-product-001",
+      "label": "MNN image / wireless-earbud product",
+      "kind": "image",
+      "definitionOnly": true,
+      "model": "__SET_MNN_IMAGE_MODEL_NAME__",
+      "qualityInputRef": "generationPrompts.product_v1",
+      "stabilityCvThresholdPercent": 15.0,
+      "timeoutSeconds": 1800,
+      "extras": {
+        "runtime": "mnn_diffusion", "bundleRoot": "__SET_MNN_IMAGE_BUNDLE_ROOT__", "modelPath": "__SET_MNN_IMAGE_MODEL_PATH__",
+        "prompt": "单个哑光白色无线耳机充电盒的高端产品摄影，盒盖打开约60度，左右两只耳机都正确放在槽内，三分之二视角，浅灰无缝背景，左侧柔光，右下方自然阴影，主体完整居中，边缘锐利，材质真实，512x512构图，不要品牌、文字、手和其他物体。",
+        "width": 512, "height": 512, "steps": 20, "threads": 4, "seed": 20260713,
+        "cfgScale": {"type": "float", "value": 7.0}, "distilledGuidance": {"type": "float", "value": 3.5}, "flowShift": {"type": "float", "value": -1.0},
+        "sampleMethod": "pndm", "family": "SD15", "backendMode": "opencl", "tokenEmbeddingMode": "auto", "memoryMode": 0, "runner": "direct", "directUnetSmoke": true
+      }
+    },
+    {
+      "id": "mnn-image-landscape-001",
+      "label": "MNN image / Guilin landscape",
+      "kind": "image",
+      "definitionOnly": true,
+      "model": "__SET_MNN_IMAGE_MODEL_NAME__",
+      "qualityInputRef": "generationPrompts.landscape_v1",
+      "stabilityCvThresholdPercent": 15.0,
+      "timeoutSeconds": 1800,
+      "extras": {
+        "runtime": "mnn_diffusion", "bundleRoot": "__SET_MNN_IMAGE_BUNDLE_ROOT__", "modelPath": "__SET_MNN_IMAGE_MODEL_PATH__",
+        "prompt": "雨后清晨的桂林喀斯特山水，前景是一段湿润石岸和一叶小木舟，中景为平静河面与清晰倒影，远景有三层薄雾山峰，云层间透出柔和金色晨光，空气通透，真实风景摄影，层次清楚，512x512构图，不要人物、建筑和文字。",
+        "width": 512, "height": 512, "steps": 20, "threads": 4, "seed": 20260714,
+        "cfgScale": {"type": "float", "value": 7.0}, "distilledGuidance": {"type": "float", "value": 3.5}, "flowShift": {"type": "float", "value": -1.0},
+        "sampleMethod": "pndm", "family": "SD15", "backendMode": "opencl", "tokenEmbeddingMode": "auto", "memoryMode": 0, "runner": "direct", "directUnetSmoke": true
+      }
+    },
+    {
+      "id": "mnn-image-complex-001",
+      "label": "MNN image / complex tram-stop composition",
+      "kind": "image",
+      "definitionOnly": true,
+      "model": "__SET_MNN_IMAGE_MODEL_NAME__",
+      "qualityInputRef": "generationPrompts.complex_composition_v1",
+      "stabilityCvThresholdPercent": 15.0,
+      "timeoutSeconds": 1800,
+      "extras": {
+        "runtime": "mnn_diffusion", "bundleRoot": "__SET_MNN_IMAGE_BUNDLE_ROOT__", "modelPath": "__SET_MNN_IMAGE_MODEL_PATH__",
+        "prompt": "雨夜城市有轨电车站的电影感广角场景：前景左侧只有一位穿黄色雨衣的人撑透明伞，人物完整；中景右侧一辆红色自行车靠在黑色栏杆上；背景中央只有一辆绿色有轨电车正在进站；站台上方恰好两盏暖色圆灯；湿地面同时映出人物、红色自行车和绿色电车，空间层次明确，真实摄影，512x512构图，所有标牌无可读文字。",
+        "width": 512, "height": 512, "steps": 20, "threads": 4, "seed": 20260715,
+        "cfgScale": {"type": "float", "value": 7.0}, "distilledGuidance": {"type": "float", "value": 3.5}, "flowShift": {"type": "float", "value": -1.0},
+        "sampleMethod": "pndm", "family": "SD15", "backendMode": "opencl", "tokenEmbeddingMode": "auto", "memoryMode": 0, "runner": "direct", "directUnetSmoke": true
+      }
+    }
+  ]
+}

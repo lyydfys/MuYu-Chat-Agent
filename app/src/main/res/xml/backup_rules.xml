@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Runtime profiles are valid only for this installation/device capability scope. -->
+    <exclude domain="database" path="mca-runtime.db" />
+    <exclude domain="database" path="mca-runtime.db-wal" />
+    <exclude domain="database" path="mca-runtime.db-shm" />
+    <exclude domain="database" path="mca-runtime.db-journal" />
+</full-backup-content>

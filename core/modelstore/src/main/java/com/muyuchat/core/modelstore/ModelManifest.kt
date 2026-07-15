@@ -20,11 +20,26 @@ data class ModelManifest(
     val visionProjectorFileName: String? = null,
     val visionProjectorSizeBytes: Long = 0L,
     val visionProjectorSha256: String? = null,
+    /**
+     * Legacy persisted certification bit retained for manifest/API backward
+     * compatibility. MNN vision is now enabled on every compatible device once
+     * the native runner has successfully loaded a readable visual component.
+     */
+    val visionValidated: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val lastLoadedAt: Long? = null
 ) {
     val hasVisionProjector: Boolean
         get() = !visionProjectorPath.isNullOrBlank()
+
+    /**
+     * Product image admission is device-agnostic. The native runner owns runtime,
+     * bundle and visual-component validation; once it reports readiness the same
+     * CPU path is available across ARM64 chipset vendors. Device-specific issues
+     * should be handled as explicit compatibility exceptions, not an allowlist.
+     */
+    fun acceptsImageInput(nativeVisionReady: Boolean): Boolean =
+        nativeVisionReady
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
@@ -44,6 +59,7 @@ data class ModelManifest(
         .put("visionProjectorFileName", visionProjectorFileName)
         .put("visionProjectorSizeBytes", visionProjectorSizeBytes)
         .put("visionProjectorSha256", visionProjectorSha256)
+        .put("visionValidated", visionValidated)
         .put("createdAt", createdAt)
         .put("lastLoadedAt", lastLoadedAt)
 
@@ -66,6 +82,7 @@ data class ModelManifest(
             visionProjectorFileName = json.optString("visionProjectorFileName").takeIf { it.isNotBlank() && it != "null" },
             visionProjectorSizeBytes = json.optLong("visionProjectorSizeBytes"),
             visionProjectorSha256 = json.optString("visionProjectorSha256").takeIf { it.isNotBlank() && it != "null" },
+            visionValidated = json.optBoolean("visionValidated", false),
             createdAt = json.optLong("createdAt"),
             lastLoadedAt = json.optLong("lastLoadedAt").takeIf { json.has("lastLoadedAt") && !json.isNull("lastLoadedAt") }
         )
@@ -87,10 +104,17 @@ enum class ModelSource {
 }
 
 enum class ChatModelRuntime(val storageValue: String, val label: String) {
-    LLAMA_CPP("llama_cpp", "llama.cpp GGUF");
+    MNN("mnn", "MNN 高速引擎"),
+    LLAMA_CPP("llama_cpp", "GGUF 兼容引擎"),
+    GENIEX_QAIRT("geniex_qairt", "GenieX QAIRT NPU");
 
     companion object {
-        fun from(value: String?): ChatModelRuntime = LLAMA_CPP
+        fun from(value: String?): ChatModelRuntime = when (value?.lowercase()) {
+            "mnn", "mnn_llm", "mnn-llm" -> MNN
+            "llama", "llama_cpp", "llama.cpp", "gguf" -> LLAMA_CPP
+            "geniex", "geniex_qairt", "qairt", "qnn", "qnn_htp" -> GENIEX_QAIRT
+            else -> LLAMA_CPP
+        }
     }
 }
 

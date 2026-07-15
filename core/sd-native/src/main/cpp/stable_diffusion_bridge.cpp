@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <dirent.h>
+#include <limits.h>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -44,6 +45,7 @@ struct ProgressState {
     int threads = 0;
     std::string phase = "idle";
     std::string message;
+    std::string component_selection_json = "{}";
 };
 
 ProgressState g_progress;
@@ -80,6 +82,14 @@ void set_progress_stage(const std::string &phase, const std::string &message) {
     std::lock_guard<std::mutex> lock(g_progress_mutex);
     g_progress.phase = phase;
     g_progress.message = message;
+    g_progress.updated_ms = now_ms();
+}
+
+void set_progress_component_selection(const std::string &component_selection_json) {
+    std::lock_guard<std::mutex> lock(g_progress_mutex);
+    g_progress.component_selection_json = component_selection_json.empty()
+                                          ? "{}"
+                                          : component_selection_json;
     g_progress.updated_ms = now_ms();
 }
 
@@ -277,7 +287,8 @@ std::string progress_to_json() {
         << "\"secondsPerStep\":" << snapshot.seconds_per_step << ","
         << "\"width\":" << snapshot.width << ","
         << "\"height\":" << snapshot.height << ","
-        << "\"threads\":" << snapshot.threads << "}";
+        << "\"threads\":" << snapshot.threads << ","
+        << "\"componentSelection\":" << snapshot.component_selection_json << "}";
     return out.str();
 }
 
@@ -397,6 +408,15 @@ struct ComponentPaths {
     std::string llm;
     std::string llm_vision;
     std::string embeddings_connectors;
+    std::string selection_mode = "compatibility_inference";
+    bool selection_fallback = true;
+    std::string bundle_root;
+    std::string primary_slot;
+    std::string primary_path;
+    std::string text_encoder_path;
+    std::string text_encoder_slot;
+    std::string tokenizer_path;
+    std::string manifest_path;
 };
 
 bool likely_split_diffusion_family(const std::string &family, const std::string &path) {
@@ -405,6 +425,9 @@ bool likely_split_diffusion_family(const std::string &family, const std::string 
            contains(key, "z-image") ||
            contains(key, "qwen_image") ||
            contains(key, "qwen-image") ||
+           contains(key, "glm_image") ||
+           contains(key, "glm-image") ||
+           contains(key, "dreamlite") ||
            contains(key, "flux") ||
            contains(key, "wan") ||
            contains(key, "chroma") ||
@@ -414,11 +437,17 @@ bool likely_split_diffusion_family(const std::string &family, const std::string 
 
 ComponentPaths infer_components(const std::string &model_path, const std::string &bundle_root, const std::string &family) {
     ComponentPaths paths;
+    paths.selection_mode = "compatibility_inference";
+    paths.selection_fallback = true;
+    paths.bundle_root = bundle_root;
     if (likely_split_diffusion_family(family, model_path)) {
         paths.diffusion = model_path;
+        paths.primary_slot = "diffusion";
     } else {
         paths.model = model_path;
+        paths.primary_slot = "model";
     }
+    paths.primary_path = model_path;
 
     std::vector<std::string> files;
     if (dir_exists(bundle_root)) {
@@ -460,7 +489,220 @@ ComponentPaths infer_components(const std::string &model_path, const std::string
     if (paths.diffusion.empty() && paths.model.empty()) {
         paths.model = model_path;
     }
+    if (!paths.llm.empty()) {
+        paths.text_encoder_path = paths.llm;
+        paths.text_encoder_slot = "llm";
+    } else if (!paths.t5xxl.empty()) {
+        paths.text_encoder_path = paths.t5xxl;
+        paths.text_encoder_slot = "t5xxl";
+    } else if (!paths.clip_l.empty()) {
+        paths.text_encoder_path = paths.clip_l;
+        paths.text_encoder_slot = "clip_l";
+    }
     return paths;
+}
+
+bool canonical_existing_file_within_root(const std::string &raw_path,
+                                         const std::string &raw_root,
+                                         std::string &canonical_path,
+                                         std::string &error) {
+    char root_buffer[PATH_MAX] = {};
+    char path_buffer[PATH_MAX] = {};
+    if (raw_root.empty() || realpath(raw_root.c_str(), root_buffer) == nullptr || !dir_exists(root_buffer)) {
+        error = "component bundle root does not exist";
+        return false;
+    }
+    if (raw_path.empty() || realpath(raw_path.c_str(), path_buffer) == nullptr || !file_exists(path_buffer)) {
+        error = "component file does not exist: " + raw_path;
+        return false;
+    }
+    const std::string root(root_buffer);
+    const std::string path(path_buffer);
+    if (path.size() <= root.size() || path.compare(0, root.size(), root) != 0 || path[root.size()] != '/') {
+        error = "component path escapes its bundle root: " + raw_path;
+        return false;
+    }
+    canonical_path = path;
+    return true;
+}
+
+std::string component_selection_json(const ComponentPaths &paths) {
+    std::ostringstream out;
+    out << "{\"mode\":\"" << escape_json(paths.selection_mode) << "\","
+        << "\"fallback\":" << json_bool(paths.selection_fallback) << ","
+        << "\"bundleRoot\":\"" << escape_json(paths.bundle_root) << "\","
+        << "\"primarySlot\":\"" << escape_json(paths.primary_slot) << "\","
+        << "\"primaryPath\":\"" << escape_json(paths.primary_path) << "\","
+        << "\"vaePath\":\"" << escape_json(paths.vae) << "\","
+        << "\"textEncoderPath\":\"" << escape_json(paths.text_encoder_path) << "\","
+        << "\"textEncoderSlot\":\"" << escape_json(paths.text_encoder_slot) << "\","
+        << "\"tokenizerPath\":\"" << escape_json(paths.tokenizer_path) << "\","
+        << "\"manifestPath\":\"" << escape_json(paths.manifest_path) << "\"}";
+    return out.str();
+}
+
+bool resolve_component_paths(const std::string &model_path,
+                             const std::string &bundle_root,
+                             const std::string &family,
+                             const std::string &params_json,
+                             ComponentPaths &paths,
+                             std::string &error) {
+    const std::string mode = parse_string(
+            params_json,
+            "componentSelectionMode",
+            "compatibility_inference");
+    if (mode == "compatibility_inference") {
+        paths = infer_components(model_path, bundle_root, family);
+        paths.selection_mode = mode;
+        paths.selection_fallback = true;
+        return true;
+    }
+    if (mode != "manifest_roles") {
+        error = "unsupported component selection mode: " + mode;
+        return false;
+    }
+
+    paths = ComponentPaths{};
+    paths.selection_mode = mode;
+    paths.selection_fallback = false;
+    const std::string requested_root = parse_string(
+            params_json,
+            "componentBundleRoot",
+            bundle_root);
+    char requested_root_buffer[PATH_MAX] = {};
+    char jni_root_buffer[PATH_MAX] = {};
+    if (realpath(requested_root.c_str(), requested_root_buffer) == nullptr ||
+        !dir_exists(requested_root_buffer)) {
+        error = "explicit component bundle root does not exist";
+        return false;
+    }
+    if (realpath(bundle_root.c_str(), jni_root_buffer) == nullptr ||
+        std::string(requested_root_buffer) != std::string(jni_root_buffer)) {
+        error = "explicit component bundle root does not match the JNI bundle root";
+        return false;
+    }
+    paths.bundle_root = requested_root_buffer;
+    paths.primary_slot = parse_string(params_json, "componentPrimarySlot", "");
+    const std::string requested_primary = parse_string(params_json, "componentPrimaryPath", "");
+    if (paths.primary_slot != "model" && paths.primary_slot != "diffusion") {
+        error = "explicit primary component slot must be model or diffusion";
+        return false;
+    }
+    if (!canonical_existing_file_within_root(
+            requested_primary,
+            paths.bundle_root,
+            paths.primary_path,
+            error)) {
+        return false;
+    }
+    char model_path_buffer[PATH_MAX] = {};
+    if (realpath(model_path.c_str(), model_path_buffer) == nullptr ||
+        paths.primary_path != std::string(model_path_buffer)) {
+        error = "explicit primary component does not match the JNI model path";
+        return false;
+    }
+    const bool split_family = likely_split_diffusion_family(family, paths.primary_path);
+    if ((split_family && paths.primary_slot != "diffusion") ||
+        (!split_family && paths.primary_slot != "model")) {
+        error = "explicit primary component slot does not match the model family";
+        return false;
+    }
+    if (paths.primary_slot == "model") {
+        paths.model = paths.primary_path;
+    } else {
+        paths.diffusion = paths.primary_path;
+    }
+
+    const bool require_vae = split_family ||
+                             parse_bool(params_json, "componentRequireVae", false);
+    const bool require_text_encoder = split_family || parse_bool(
+            params_json,
+            "componentRequireTextEncoder",
+            false);
+    const bool require_tokenizer = parse_bool(
+            params_json,
+            "componentRequireTokenizer",
+            false);
+    const std::string requested_vae = parse_string(params_json, "componentVaePath", "");
+    if (!requested_vae.empty()) {
+        if (!canonical_existing_file_within_root(
+                requested_vae,
+                paths.bundle_root,
+                paths.vae,
+                error)) {
+            return false;
+        }
+    } else if (require_vae) {
+        error = "explicit component selection is missing required VAE";
+        return false;
+    }
+
+    const std::string requested_text_encoder = parse_string(
+            params_json,
+            "componentTextEncoderPath",
+            "");
+    paths.text_encoder_slot = parse_string(
+            params_json,
+            "componentTextEncoderSlot",
+            "");
+    if (!requested_text_encoder.empty()) {
+        if (!canonical_existing_file_within_root(
+                requested_text_encoder,
+                paths.bundle_root,
+                paths.text_encoder_path,
+                error)) {
+            return false;
+        }
+        if (paths.text_encoder_slot == "llm") {
+            paths.llm = paths.text_encoder_path;
+        } else if (paths.text_encoder_slot == "t5xxl") {
+            paths.t5xxl = paths.text_encoder_path;
+        } else if (paths.text_encoder_slot == "clip_l") {
+            paths.clip_l = paths.text_encoder_path;
+        } else if (paths.text_encoder_slot == "clip_g") {
+            paths.clip_g = paths.text_encoder_path;
+        } else {
+            error = "unsupported explicit text encoder slot: " + paths.text_encoder_slot;
+            return false;
+        }
+    } else if (require_text_encoder) {
+        error = "explicit component selection is missing required text encoder";
+        return false;
+    } else if (!paths.text_encoder_slot.empty()) {
+        error = "explicit text encoder slot was provided without a text encoder path";
+        return false;
+    }
+
+    const std::string requested_tokenizer = parse_string(
+            params_json,
+            "componentTokenizerPath",
+            "");
+    if (!requested_tokenizer.empty()) {
+        if (!canonical_existing_file_within_root(
+                requested_tokenizer,
+                paths.bundle_root,
+                paths.tokenizer_path,
+                error)) {
+            return false;
+        }
+    } else if (require_tokenizer) {
+        error = "explicit component selection is missing required tokenizer";
+        return false;
+    }
+
+    const std::string requested_manifest = parse_string(
+            params_json,
+            "componentManifestPath",
+            "");
+    if (requested_manifest.empty() || !canonical_existing_file_within_root(
+            requested_manifest,
+            paths.bundle_root,
+            paths.manifest_path,
+            error)) {
+        if (requested_manifest.empty()) error = "explicit component selection is missing manifest path";
+        return false;
+    }
+    return true;
 }
 
 std::string make_context_key(const ComponentPaths &paths, int threads) {
@@ -476,6 +718,8 @@ std::string make_context_key(const ComponentPaths &paths, int threads) {
         << paths.llm << "|"
         << paths.llm_vision << "|"
         << paths.embeddings_connectors << "|"
+        << paths.selection_mode << "|"
+        << paths.tokenizer_path << "|"
         << threads << "|"
         << sd_runtime_backend_label();
     return key.str();
@@ -564,11 +808,32 @@ std::string generate_impl(const std::string &model_path,
     const float flow_shift = parse_float(params_json, "flowShift", -1.0f);
     const std::string negative_prompt = parse_string(params_json, "negativePrompt", "");
     const std::string sample_method_name = parse_string(params_json, "sampleMethod", "euler");
+    const auto method = str_to_sample_method(sample_method_name.c_str());
+    if (method == SAMPLE_METHOD_COUNT) {
+        return "{\"ok\":false,\"error\":\"unsupported sample method: " +
+               escape_json(sample_method_name) + "\"}";
+    }
     set_progress("initializing", "checking model bundle", 0, steps, 0.0f, width, height, threads);
     if (g_cancel_requested.load(std::memory_order_relaxed)) {
         return "{\"ok\":false,\"cancelled\":true,\"error\":\"cancelled\"}";
     }
-    const ComponentPaths paths = infer_components(model_path, bundle_root, family);
+    ComponentPaths paths;
+    std::string component_error;
+    if (!resolve_component_paths(
+            model_path,
+            bundle_root,
+            family,
+            params_json,
+            paths,
+            component_error)) {
+        set_progress("failed", component_error, 0, steps, 0.0f, width, height, threads);
+        return "{\"ok\":false,\"error\":\"" + escape_json(component_error) +
+               "\",\"componentSelection\":{\"mode\":\"" +
+               escape_json(parse_string(params_json, "componentSelectionMode", "compatibility_inference")) +
+               "\",\"fallback\":false}}";
+    }
+    const std::string selected_components_json = component_selection_json(paths);
+    set_progress_component_selection(selected_components_json);
     const std::string ctx_key = make_context_key(paths, threads);
     set_progress("loading", "loading stable-diffusion.cpp context", 0, steps, 0.0f, width, height, threads);
     sd_ctx_t *ctx = ensure_context(paths, ctx_key, threads);
@@ -595,8 +860,7 @@ std::string generate_impl(const std::string &model_path,
     if (flow_shift > 0.0f) {
         gen.sample_params.flow_shift = flow_shift;
     }
-    const auto method = str_to_sample_method(sample_method_name.c_str());
-    gen.sample_params.sample_method = method == SAMPLE_METHOD_COUNT ? sd_get_default_sample_method(ctx) : method;
+    gen.sample_params.sample_method = method;
     gen.sample_params.scheduler = sd_get_default_scheduler(ctx, gen.sample_params.sample_method);
 
     set_progress("preparing", "preparing image generation", 0, steps, 0.0f, width, height, threads);
@@ -638,8 +902,17 @@ std::string generate_impl(const std::string &model_path,
         << "\"mimeType\":\"image/png\","
         << "\"width\":" << first.width << ","
         << "\"height\":" << first.height << ","
+        << "\"steps\":" << steps << ","
+        << "\"threads\":" << threads << ","
+        << "\"seed\":" << seed << ","
+        << "\"cfgScale\":" << cfg << ","
+        << "\"distilledGuidance\":" << distilled_guidance << ","
+        << "\"flowShift\":" << flow_shift << ","
+        << "\"sampleMethod\":\"" << escape_json(sd_sample_method_name(gen.sample_params.sample_method)) << "\","
+        << "\"backendMode\":\"cpu\","
         << "\"backend\":\"stable-diffusion.cpp\","
         << "\"runtimeBackend\":\"" << sd_runtime_backend_label() << "\","
+        << "\"componentSelection\":" << selected_components_json << ","
         << "\"systemInfo\":\"" << escape_json(sd_get_system_info()) << "\"}";
     return out.str();
 }
@@ -658,14 +931,23 @@ Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_generate(
     g_cancel_requested.store(false, std::memory_order_relaxed);
     g_generation_active.store(true, std::memory_order_relaxed);
     set_progress("initializing", "starting local image generation");
+    set_progress_component_selection("{}");
     sd_set_log_callback(sd_log_callback, nullptr);
     sd_set_progress_callback(sd_progress_callback, nullptr);
     sd_set_cancel_callback(sd_cancel_callback, nullptr);
-    const std::string result = generate_impl(
+    std::string result = generate_impl(
             jstring_to_string(env, model_path),
             jstring_to_string(env, bundle_root),
             jstring_to_string(env, params_json),
             jstring_to_string(env, output_path));
+    if (g_ctx != nullptr) {
+        free_sd_ctx(g_ctx);
+        g_ctx = nullptr;
+        g_ctx_key.clear();
+    }
+    if (!result.empty() && result.back() == '}') {
+        result.insert(result.size() - 1, ",\"contextReleased\":true");
+    }
     g_generation_active.store(false, std::memory_order_relaxed);
     sd_set_cancel_callback(nullptr, nullptr);
     return string_to_jstring(env, result);

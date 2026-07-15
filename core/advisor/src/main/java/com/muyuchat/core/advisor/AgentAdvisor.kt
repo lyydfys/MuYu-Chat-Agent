@@ -4,6 +4,9 @@ import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.deviceprofile.ThermalStatus
 import com.muyuchat.core.download.RemoteModelFile
 import com.muyuchat.core.modelstore.ModelManifest
+import com.muyuchat.core.tuning.AdaptiveTuningRecommendation
+import com.muyuchat.core.tuning.ModelTuningCapabilities
+import com.muyuchat.core.engine.ModelRuntimeIdentity
 import com.muyuchat.core.tuning.TuningEngine
 import com.muyuchat.core.tuning.TuningPlan
 import com.muyuchat.core.tuning.UserPreference
@@ -41,6 +44,8 @@ data class ModelProfile(
     val quant: String?,
     val architecture: String?,
     val license: String?,
+    val totalParametersB: Double? = parametersB,
+    val activeParametersB: Double? = parametersB,
     val repoId: String? = null,
     val revision: String? = null,
     val localPath: String? = null,
@@ -54,6 +59,8 @@ data class ModelProfile(
         .put("fileName", fileName)
         .put("sizeBytes", sizeBytes)
         .put("parametersB", parametersB)
+        .put("totalParametersB", totalParametersB)
+        .put("activeParametersB", activeParametersB)
         .put("quant", quant)
         .put("architecture", architecture)
         .put("license", license)
@@ -64,47 +71,65 @@ data class ModelProfile(
         .put("chatTemplateSupported", chatTemplateSupported)
 
     companion object {
-        fun fromLocal(model: ModelManifest): ModelProfile = ModelProfile(
-            id = model.id,
-            displayName = model.displayName,
-            source = "local",
-            fileName = model.fileName,
-            sizeBytes = model.sizeBytes,
-            parametersB = inferParametersB(model.displayName, model.sizeBytes),
-            quant = model.quant ?: inferQuant(model.displayName),
-            architecture = model.architecture,
-            license = model.license,
-            repoId = model.repoId,
-            revision = model.revision,
-            localPath = model.path,
-            chatTemplateSupported = model.architecture != null || looksChatModel(model.displayName)
-        )
+        fun fromLocal(model: ModelManifest): ModelProfile {
+            val scale = inferParameterScale(model.displayName, model.sizeBytes)
+            return ModelProfile(
+                id = model.id,
+                displayName = model.displayName,
+                source = "local",
+                fileName = model.fileName,
+                sizeBytes = model.sizeBytes,
+                parametersB = scale.active ?: scale.total,
+                totalParametersB = scale.total,
+                activeParametersB = scale.active,
+                quant = model.quant ?: inferQuant(model.displayName),
+                architecture = model.architecture,
+                license = model.license,
+                repoId = model.repoId,
+                revision = model.revision,
+                localPath = model.path,
+                chatTemplateSupported = model.architecture != null || looksChatModel(model.displayName)
+            )
+        }
 
-        fun fromRemote(file: RemoteModelFile): ModelProfile = ModelProfile(
-            id = "${file.repoId}/${file.path}",
-            displayName = file.name.removeSuffix(".gguf"),
-            source = "modelscope",
-            fileName = file.name,
-            sizeBytes = file.sizeBytes ?: 0L,
-            parametersB = inferParametersB(file.name, file.sizeBytes ?: 0L),
-            quant = inferQuant(file.name),
-            architecture = inferArchitecture(file.name),
-            license = file.license,
-            repoId = file.repoId,
-            revision = file.revision,
-            downloadUrl = file.downloadUrl,
-            chatTemplateSupported = inferArchitecture(file.name) != null || looksChatModel(file.name)
-        )
+        fun fromRemote(file: RemoteModelFile): ModelProfile {
+            val scale = inferParameterScale(file.name, file.sizeBytes ?: 0L)
+            return ModelProfile(
+                id = "${file.repoId}/${file.path}",
+                displayName = file.name.removeSuffix(".gguf"),
+                source = "modelscope",
+                fileName = file.name,
+                sizeBytes = file.sizeBytes ?: 0L,
+                parametersB = scale.active ?: scale.total,
+                totalParametersB = scale.total,
+                activeParametersB = scale.active,
+                quant = inferQuant(file.name),
+                architecture = inferArchitecture(file.name),
+                license = file.license,
+                repoId = file.repoId,
+                revision = file.revision,
+                downloadUrl = file.downloadUrl,
+                chatTemplateSupported = inferArchitecture(file.name) != null || looksChatModel(file.name)
+            )
+        }
 
-        private fun inferParametersB(name: String, sizeBytes: Long): Double? {
+        private fun inferParameterScale(name: String, sizeBytes: Long): ParameterScale {
+            val moe = Regex("""(?i)(\d+(?:\.\d+)?)\s*[bB]\s*[-_/]?\s*[aA](\d+(?:\.\d+)?)\s*[bB]""")
+                .find(name)
+            if (moe != null) {
+                return ParameterScale(
+                    total = moe.groupValues.getOrNull(1)?.toDoubleOrNull(),
+                    active = moe.groupValues.getOrNull(2)?.toDoubleOrNull()
+                )
+            }
             val direct = Regex("""(?i)(\d+(?:\.\d+)?)\s*[bB](?:[^A-Za-z]|$)""")
                 .find(name)
                 ?.groupValues
                 ?.getOrNull(1)
                 ?.toDoubleOrNull()
-            if (direct != null) return direct
+            if (direct != null) return ParameterScale(total = direct, active = direct)
             val gb = sizeBytes / GB.toDouble()
-            return when {
+            val inferred = when {
                 gb <= 0.0 -> null
                 gb < 1.2 -> 1.0
                 gb < 2.4 -> 1.5
@@ -112,6 +137,7 @@ data class ModelProfile(
                 gb < 9.5 -> 7.0
                 else -> 13.0
             }
+            return ParameterScale(total = inferred, active = inferred)
         }
 
         private fun inferQuant(name: String): String? {
@@ -139,6 +165,11 @@ data class ModelProfile(
         private const val GB = 1024L * 1024L * 1024L
     }
 }
+
+private data class ParameterScale(
+    val total: Double?,
+    val active: Double?
+)
 
 data class AgentCandidate(
     val model: ModelProfile,
@@ -178,9 +209,49 @@ data class AgentRecommendation(
         .put("preference", preference.toJson())
 }
 
+data class AdaptiveAgentRecommendation(
+    val legacy: AgentRecommendation,
+    val adaptive: AdaptiveTuningRecommendation
+)
+
 class AgentAdvisor(
     private val tuningEngine: TuningEngine = TuningEngine()
 ) {
+    /**
+     * Migration entry point for callers that can provide the real model/runtime
+     * identity. The legacy recommendation remains available for the current UI,
+     * while new code must apply execution/generation/canary outputs separately.
+     */
+    fun recommendAdaptive(
+        device: DeviceProfile,
+        localModels: List<ModelManifest>,
+        remoteFiles: List<RemoteModelFile>,
+        runtimeIdentity: ModelRuntimeIdentity,
+        capabilities: ModelTuningCapabilities = ModelTuningCapabilities.forIdentity(runtimeIdentity),
+        preference: UserPreference = UserPreference(),
+        lastDecodeTps: Double? = null
+    ): AdaptiveAgentRecommendation {
+        val legacy = recommend(
+            device = device,
+            localModels = localModels,
+            remoteFiles = remoteFiles,
+            preference = preference,
+            lastDecodeTps = lastDecodeTps
+        )
+        val targetB = legacy.recommended?.model?.parametersB ?: targetParametersB(device, preference)
+        val adaptive = tuningEngine.recommendAdaptive(
+            device = device,
+            modelParametersB = targetB,
+            modelName = legacy.recommended?.model?.displayName,
+            runtimeIdentity = runtimeIdentity,
+            modelKnowledge = capabilities.knowledgeLevel,
+            capabilities = capabilities,
+            preference = preference,
+            lastDecodeTps = lastDecodeTps
+        )
+        return AdaptiveAgentRecommendation(legacy = legacy, adaptive = adaptive)
+    }
+
     fun recommend(
         device: DeviceProfile,
         localModels: List<ModelManifest>,
@@ -199,16 +270,19 @@ class AgentAdvisor(
         val tuningPlan = tuningEngine.recommend(
             device = device,
             modelParametersB = recommended?.model?.parametersB ?: targetB,
+            modelName = recommended?.model?.displayName,
             preference = preference,
             lastDecodeTps = lastDecodeTps
         )
         val confirmations = buildList {
             if (recommended?.model?.source == "modelscope") add("下载 ${recommended.model.displayName}")
-            if ((recommended?.model?.parametersB ?: 0.0) >= 7.0) add("加载高内存模型")
+            if ((recommended?.model?.totalParametersB ?: recommended?.model?.parametersB ?: 0.0) >= 7.0 ||
+                (recommended?.model?.sizeBytes ?: 0L) >= 4L * GB
+            ) add("加载高内存模型")
             if (preference.allowExperimentalBackend) add("启用实验后端")
         }
         val explanation = if (recommended == null) {
-            "当前没有可推荐的 GGUF 模型。请先导入本地模型，或在模型页从 ModelScope 查询 .gguf 文件。"
+            "当前没有可推荐的本地推理引擎。请先导入本地模型，或在模型页从 ModelScope 下载 MNN / GGUF 模型。"
         } else {
             buildString {
                 append("建议使用 ${recommended.model.displayName}。")
@@ -303,10 +377,13 @@ class AgentAdvisor(
         val budget = memoryBudgetBytes(device)
         val need = estimatedRuntimeMemoryBytes(model)
         val parametersB = model.parametersB ?: 3.0
+        val qwen36A3bMtp = model.isQwen36A3bMtp()
         return when {
             parametersB >= 13.0 -> RiskLevel.Blocked
+            qwen36A3bMtp && total > 0L && need > (total * 0.92).toLong() -> RiskLevel.High
             total > 0L && need > (total * 0.92).toLong() -> RiskLevel.Blocked
             parametersB >= 7.0 && ramGb < 8 -> RiskLevel.Blocked
+            qwen36A3bMtp && need > budget -> RiskLevel.High
             device.isLowMemory && need > budget -> RiskLevel.High
             need > budget && parametersB >= 7.0 -> RiskLevel.High
             need > budget && parametersB >= 3.0 -> RiskLevel.Medium
@@ -320,7 +397,13 @@ class AgentAdvisor(
 
     private fun reason(device: DeviceProfile, model: ModelProfile, targetB: Double, risk: RiskLevel): String {
         val size = if (model.sizeBytes > 0) formatBytes(model.sizeBytes) else "未知大小"
-        val scale = model.parametersB?.let { "${it}B" } ?: "未知参数规模"
+        val scale = when {
+            model.totalParametersB != null && model.activeParametersB != null &&
+                model.totalParametersB != model.activeParametersB ->
+                "总 ${model.totalParametersB}B / 激活 ${model.activeParametersB}B"
+            model.parametersB != null -> "${model.parametersB}B"
+            else -> "未知参数规模"
+        }
         val riskText = when (risk) {
             RiskLevel.Low -> "风险较低"
             RiskLevel.Medium -> "需要关注内存和发热"
@@ -367,21 +450,28 @@ class AgentAdvisor(
     }
 
     private fun estimatedRuntimeMemoryBytes(model: ModelProfile): Long {
-        val scale = model.parametersB ?: 3.0
+        val activeScale = model.activeParametersB ?: model.parametersB ?: 3.0
+        val totalScale = model.totalParametersB ?: model.parametersB ?: activeScale
         val fileResident = when {
             model.sizeBytes > 0L -> (model.sizeBytes * 1.18).toLong()
-            scale <= 1.6 -> (1.2 * GB).toLong()
-            scale <= 3.5 -> (2.8 * GB).toLong()
-            scale <= 7.5 -> (5.2 * GB).toLong()
+            totalScale <= 1.6 -> (1.2 * GB).toLong()
+            totalScale <= 3.5 -> (2.8 * GB).toLong()
+            totalScale <= 7.5 -> (5.2 * GB).toLong()
             else -> (7.5 * GB).toLong()
         }
         val contextAndRuntime = when {
-            scale <= 1.6 -> 512L * MB
-            scale <= 3.5 -> 768L * MB
-            scale <= 7.5 -> 1200L * MB
+            activeScale <= 1.6 -> 512L * MB
+            activeScale <= 3.5 -> 768L * MB
+            activeScale <= 7.5 -> 1200L * MB
             else -> 1600L * MB
         }
         return fileResident + contextAndRuntime
+    }
+
+    private fun ModelProfile.isQwen36A3bMtp(): Boolean {
+        val value = "$displayName/$fileName".lowercase()
+        return ("qwen3.6" in value || "qwen36" in value) &&
+            ("35b-a3b" in value || "apex" in value || "mtp" in value)
     }
 
     private fun formatBytes(bytes: Long): String {

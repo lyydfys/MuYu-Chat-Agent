@@ -3184,6 +3184,25 @@ private val freshnessSearchHints = listOf(
     "ranking",
     "review"
 )
+private val DEVICE_CLOCK_EXTERNAL_FACT_HINTS = listOf(
+    "新闻", "发生", "事件", "天气", "气温", "股价", "汇率", "比赛", "比分",
+    "航班", "列车", "政策", "公告", "发布", "更新", "价格", "日程", "节日",
+    "news", "happened", "event", "weather", "temperature", "stock", "exchange",
+    "score", "flight", "train", "policy", "announcement", "released", "price"
+)
+private val DEVICE_CLOCK_ONLY_PATTERNS = listOf(
+    Regex("(?:请问|告诉我|帮我看看|你知道)?(?:今天|现在|当前|此刻|此时)?(?:是)?(?:几号|几月几日|几月几号|日期是什么|星期几|周几|几点|几点了|时间是什么|当前时间|本地时间|当前日期|本地日期|当前时区|本地时区)(?:了|呢|是)?"),
+    Regex("(?:今天|现在|当前|此刻|此时)(?:是)?(?:什么日期|什么时间|什么时区|哪一天)"),
+    // Natural Chinese often puts the subject before the question particle:
+    // "当前时区是什么" / "本地日期是什么".  Keep this narrowly scoped to
+    // date/time/zone nouns so external factual questions still route online.
+    Regex("(?:今天|现在|当前|此刻|此时|本地)(?:日期|时间|时区)(?:是什么|是啥|呢)?"),
+    Regex("what(?:is|'s)?(?:the)?(?:current|local|today'?s)*(?:date|day|time|timezone)(?:today|now)?"),
+    Regex("what(?:date|day)isittoday"),
+    Regex("whattimeisit"),
+    Regex("(?:current|local|today'?s)+(?:date|day|time|timezone)"),
+    Regex("show(?:me)?(?:the)?(?:current|local|today'?s)*(?:date|day|time|timezone)")
+)
 private val officialSearchHints = listOf(
     "接口",
     "api",
@@ -3638,10 +3657,14 @@ fun WebSearchPlan.shouldUseWebSearchAutomatically(mode: WebSearchTriggerMode): B
         WebSearchTriggerMode.MANUAL -> false
         WebSearchTriggerMode.ALWAYS -> displayQuery.isNotBlank()
         WebSearchTriggerMode.SMART -> {
-            directUrls.isNotEmpty() ||
-                explicitSearchRequested ||
-                queries.size > 1 ||
-                userQuestion.hasSmartSearchHint()
+            if (userQuestion.isDeviceClockOnlyQuestion() && !explicitSearchRequested && directUrls.isEmpty()) {
+                false
+            } else {
+                directUrls.isNotEmpty() ||
+                    explicitSearchRequested ||
+                    queries.size > 1 ||
+                    userQuestion.hasSmartSearchHint()
+            }
         }
     }
 
@@ -3654,7 +3677,11 @@ private fun buildWebSearchTriggerReasons(
     buildList {
         if (directUrls.isNotEmpty()) add("包含 ${directUrls.size} 个网页链接")
         if (explicitSearchRequested) add("用户明确要求搜索/联网")
-        if (question.containsAnySearchHint(freshnessSearchHints)) add("包含实时或最新信息词")
+        if (question.isDeviceClockOnlyQuestion()) {
+            add("仅询问设备当前日期、时间或时区，无需联网")
+        } else if (question.containsAnySearchHint(freshnessSearchHints)) {
+            add("包含实时或最新信息词")
+        }
         if (question.containsAnySearchHint(officialSearchHints)) add("包含官网、文档、接口或下载类线索")
         if (question.containsAnySearchHint(comparisonSearchHints)) add("包含对比、推荐或选择类线索")
         if (question.containsAnySearchHint(factualSearchHints)) add("包含事实状态类查询线索")
@@ -3689,9 +3716,19 @@ private fun String.hasExplicitSearchIntent(): Boolean {
 }
 
 private fun String.hasSmartSearchHint(): Boolean {
+    if (isDeviceClockOnlyQuestion()) return false
     val text = lowercase(Locale.ROOT)
     return (freshnessSearchHints + officialSearchHints + comparisonSearchHints + researchSearchHints + factualSearchHints)
         .any { text.contains(it.lowercase(Locale.ROOT)) }
+}
+
+internal fun String.isDeviceClockOnlyQuestion(): Boolean {
+    val normalized = lowercase(Locale.ROOT)
+        .replace(Regex("[\\s，,。.!！?？；;：:、]+"), "")
+        .trim()
+    if (normalized.isBlank()) return false
+    if (DEVICE_CLOCK_EXTERNAL_FACT_HINTS.any(normalized::contains)) return false
+    return DEVICE_CLOCK_ONLY_PATTERNS.any { pattern -> pattern.matches(normalized) }
 }
 
 private fun String.containsAnySearchHint(hints: List<String>): Boolean {

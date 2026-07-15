@@ -1,0 +1,28 @@
+{
+  "runId": "offline-image-run",
+  "status": "completed",
+  "events": [
+    {
+      "runId": "offline-image-run",
+      "status": "generation_starting",
+      "elapsedMs": 0
+    },
+    {
+      "runId": "offline-image-run",
+      "status": "first_progress",
+      "elapsedMs": 800
+    },
+    {
+      "runId": "offline-image-run",
+      "status": "completed",
+      "elapsedMs": 5000,
+      "runtime": "qnn_htp",
+      "result": {
+        "unetContextLoadMs": 480,
+        "vaeContextLoadMs": 120,
+        "steps": 10,
+        "outputPath": "outputs/offline-image.png"
+      }
+    }
+  ]
+}

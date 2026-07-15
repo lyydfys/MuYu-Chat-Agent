@@ -1,6 +1,9 @@
 .gradle/
+.gradle-runtime/
 .kotlin/
+.cache/
 .local-history-backups/
+.worktrees/
 build/
 **/build/
 **/.cxx/
@@ -25,6 +28,9 @@ android-sdk/
 android-sdk-cmdline*.zip
 android-sdk-cmdline-extract/
 
+# Rehydrated from the pinned manifest + patch in vendor/mnn.
+/third_party/MNN/
+
 # Generated APKs and binaries are reproducible from Gradle
 *.apk
 *.aab
@@ -33,5 +39,9 @@ android-sdk-cmdline-extract/
 *.log
 
 # Local verification scratch files
+.tmp/
 .tmp-*
 .external/
+tmp_*/
+*.obj
+*.exe

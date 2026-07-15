@@ -6,6 +6,12 @@ plugins {
 val configuredNdkVersion = libs.versions.ndk.get()
 val stableDiffusionDir = rootProject.layout.projectDirectory.dir("third_party/stable-diffusion.cpp")
 val stableDiffusionPatch = rootProject.layout.projectDirectory.file("third_party/patches/stable-diffusion.cpp-mca-android.patch")
+val mcaAbiFilters = providers.gradleProperty("mca.abis")
+    .orElse("arm64-v8a,x86_64")
+    .get()
+    .split(",")
+    .map { it.trim() }
+    .filter { it.isNotBlank() }
 
 val patchStableDiffusionCpp by tasks.registering {
     group = "build setup"
@@ -55,7 +61,7 @@ android {
         minSdk = libs.versions.minSdk.get().toInt()
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += mcaAbiFilters
         }
 
         externalNativeBuild {

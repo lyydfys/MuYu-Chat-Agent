@@ -100,6 +100,7 @@ data class CloudApiConfig(
     val baseUrl: String = "",
     val apiKey: String = "",
     val chatModel: String = "",
+    val supportsVision: Boolean = false,
     val imageApiFormat: CloudImageApiFormat = CloudImageApiFormat.OPENAI_IMAGES,
     val imageModel: String = "",
     val imageSize: String = "1024x1024",
@@ -168,6 +169,35 @@ private fun String.isMiMoBaseUrl(): Boolean =
 private fun String.isOpenAiImagesEndpointPath(): Boolean =
     trim('/').endsWith(CloudImageApiFormat.OPENAI_IMAGES.defaultEndpointPath, ignoreCase = true)
 
+internal fun Request.Builder.addCloudApiKeyHeaders(config: CloudApiConfig): Request.Builder {
+    if (config.apiKey.isNotBlank()) {
+        addHeader("Authorization", "Bearer ${config.apiKey}")
+        if (config.baseUrl.isMiMoBaseUrl()) {
+            addHeader("api-key", config.apiKey)
+        }
+    }
+    return this
+}
+
+internal fun guessCloudVisionSupport(modelName: String, baseUrl: String): Boolean {
+    val text = "$modelName $baseUrl".lowercase()
+    val visionHints = listOf(
+        "vision",
+        "multimodal",
+        "multi-modal",
+        "vl",
+        "mimo",
+        "gpt-4o",
+        "qwen-vl",
+        "qvq",
+        "claude-3",
+        "claude-sonnet",
+        "claude-opus",
+        "claude-haiku"
+    )
+    return visionHints.any { it in text }
+}
+
 data class CloudModelRecord(
     val id: String = UUID.randomUUID().toString(),
     val kind: CloudModelKind,
@@ -177,6 +207,7 @@ data class CloudModelRecord(
     val baseUrl: String,
     val apiKey: String,
     val modelName: String,
+    val supportsVision: Boolean = false,
     val imageApiFormat: CloudImageApiFormat = CloudImageApiFormat.OPENAI_IMAGES,
     val imageEndpointPath: String = "",
     val imageSize: String = "1024x1024",
@@ -203,6 +234,7 @@ data class CloudModelRecord(
             baseUrl = baseUrl,
             apiKey = apiKey,
             chatModel = modelName,
+            supportsVision = supportsVision,
             imageApiFormat = imageApiFormat,
             imageModel = imageApiFormat.defaultImageModel,
             imageSize = imageSize,
@@ -218,6 +250,7 @@ data class CloudModelRecord(
             baseUrl = baseUrl,
             apiKey = apiKey,
             chatModel = apiFormat.defaultModel,
+            supportsVision = false,
             imageApiFormat = imageApiFormat,
             imageModel = modelName,
             imageSize = imageSize,
@@ -231,14 +264,21 @@ class CloudApiStore(context: Context) {
     fun load(): CloudApiConfig {
         val format = parseFormat(prefs.getString(KEY_API_FORMAT, null))
         val imageFormat = CloudImageApiFormat.from(prefs.getString(KEY_IMAGE_API_FORMAT, null))
+        val baseUrl = prefs.getString(KEY_BASE_URL, null).orEmpty().ifBlank { format.defaultBaseUrl }
+        val chatModel = prefs.getString(KEY_CHAT_MODEL, null).orEmpty().ifBlank { format.defaultModel }
         return CloudApiConfig(
             enabled = prefs.getBoolean(KEY_ENABLED, false),
             apiFormat = format,
             providerName = prefs.getString(KEY_PROVIDER_NAME, null).orEmpty().ifBlank { format.label },
             displayName = prefs.getString(KEY_DISPLAY_NAME, null).orEmpty().ifBlank { "Cloud Chat" },
-            baseUrl = prefs.getString(KEY_BASE_URL, null).orEmpty().ifBlank { format.defaultBaseUrl },
+            baseUrl = baseUrl,
             apiKey = decryptApiKey(),
-            chatModel = prefs.getString(KEY_CHAT_MODEL, null).orEmpty().ifBlank { format.defaultModel },
+            chatModel = chatModel,
+            supportsVision = if (prefs.contains(KEY_CHAT_SUPPORTS_VISION)) {
+                prefs.getBoolean(KEY_CHAT_SUPPORTS_VISION, false)
+            } else {
+                guessCloudVisionSupport(chatModel, baseUrl)
+            },
             imageApiFormat = imageFormat,
             imageModel = if (prefs.contains(KEY_IMAGE_MODEL)) {
                 prefs.getString(KEY_IMAGE_MODEL, null).orEmpty()
@@ -259,6 +299,7 @@ class CloudApiStore(context: Context) {
             .putString(KEY_DISPLAY_NAME, normalized.displayName)
             .putString(KEY_BASE_URL, normalized.baseUrl)
             .putString(KEY_CHAT_MODEL, normalized.chatModel)
+            .putBoolean(KEY_CHAT_SUPPORTS_VISION, normalized.supportsVision)
             .putString(KEY_IMAGE_API_FORMAT, normalized.imageApiFormat.name)
             .putString(KEY_IMAGE_MODEL, normalized.imageModel)
             .putString(KEY_IMAGE_SIZE, normalized.imageSize)
@@ -282,6 +323,7 @@ class CloudApiStore(context: Context) {
                             baseUrl = legacy.baseUrl,
                             apiKey = legacy.apiKey,
                             modelName = legacy.chatModel,
+                            supportsVision = legacy.supportsVision,
                             imageSize = legacy.imageSize
                         )
                     )
@@ -370,6 +412,14 @@ class CloudApiStore(context: Context) {
             baseUrl = optString("baseUrl"),
             apiKey = if (cipher != null && iv != null) decryptApiKeyPayload(cipher, iv) else optString("apiKey"),
             modelName = optString("modelName"),
+            supportsVision = if (has("supportsVision")) {
+                optBoolean("supportsVision", false)
+            } else {
+                guessCloudVisionSupport(
+                    modelName = optString("modelName"),
+                    baseUrl = optString("baseUrl")
+                )
+            },
             imageApiFormat = parseImageFormat(optString("imageApiFormat", optString("apiFormat"))),
             imageEndpointPath = optString("imageEndpointPath"),
             imageSize = optString("imageSize", DEFAULT_IMAGE_SIZE),
@@ -390,6 +440,7 @@ class CloudApiStore(context: Context) {
             .put("apiKeyCipher", encrypted?.first.orEmpty())
             .put("apiKeyIv", encrypted?.second.orEmpty())
             .put("modelName", modelName)
+            .put("supportsVision", supportsVision)
             .put("imageApiFormat", imageApiFormat.name)
             .put("imageEndpointPath", imageEndpointPath)
             .put("imageSize", imageSize)
@@ -498,6 +549,7 @@ class CloudApiStore(context: Context) {
         private const val KEY_DISPLAY_NAME = "cloud_display_name"
         private const val KEY_BASE_URL = "cloud_base_url"
         private const val KEY_CHAT_MODEL = "cloud_chat_model"
+        private const val KEY_CHAT_SUPPORTS_VISION = "cloud_chat_supports_vision"
         private const val KEY_IMAGE_API_FORMAT = "cloud_image_api_format"
         private const val KEY_IMAGE_MODEL = "cloud_image_model"
         private const val KEY_IMAGE_SIZE = "cloud_image_size"
@@ -567,12 +619,7 @@ class CloudImageProvider(
         val builder = Request.Builder()
             .url(endpointUrl(config.baseUrl, config.imageEndpointPathForRequest()))
             .addHeader("Accept", "application/json")
-        if (config.apiKey.isNotBlank()) {
-            builder.addHeader("Authorization", "Bearer ${config.apiKey}")
-            if (config.baseUrl.isMiMoBaseUrl()) {
-                builder.addHeader("api-key", config.apiKey)
-            }
-        }
+            .addCloudApiKeyHeaders(config)
         return builder.post(root.toString().toRequestBody(JSON_MEDIA_TYPE)).build()
     }
 
@@ -613,12 +660,7 @@ class CloudImageProvider(
         val builder = Request.Builder()
             .url(endpointUrl(config.baseUrl, config.imageEndpointPathForRequest()))
             .addHeader("Accept", "application/json")
-        if (config.apiKey.isNotBlank()) {
-            builder.addHeader("Authorization", "Bearer ${config.apiKey}")
-            if (config.baseUrl.isMiMoBaseUrl()) {
-                builder.addHeader("api-key", config.apiKey)
-            }
-        }
+            .addCloudApiKeyHeaders(config)
         return builder.post(root.toString().toRequestBody(JSON_MEDIA_TYPE)).build()
     }
 
@@ -782,6 +824,140 @@ class CloudImageProvider(
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
+
+internal fun coalesceCloudChatMessagesByRole(messages: List<ChatMessage>): List<ChatMessage> {
+    val result = mutableListOf<ChatMessage>()
+    messages.forEach { message ->
+        val last = result.lastOrNull()
+        if (last != null && last.role == message.role) {
+            result[result.lastIndex] = last.copy(
+                content = listOf(last.content, message.content)
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n\n"),
+                imageAttachments = last.imageAttachments + message.imageAttachments
+            )
+        } else {
+            result.add(message)
+        }
+    }
+    return result
+}
+
+internal fun buildOpenAiChatJson(config: CloudApiConfig, request: ChatRequest): JSONObject {
+    val params = request.params
+    return JSONObject()
+        .put("model", config.chatModel.trim())
+        .put("messages", JSONArray(request.messagesJson(multimodal = true)))
+        .put("stream", true)
+        .put("temperature", params.temperature.toDouble())
+        .put("top_p", params.topP.toDouble())
+        .put("presence_penalty", params.presencePenalty.toDouble())
+        .put("frequency_penalty", params.frequencyPenalty.toDouble())
+        .put("max_tokens", params.effectiveNPredict().coerceIn(1, 32768))
+        .also { root ->
+            if (params.stopWords.isNotEmpty()) {
+                root.put("stop", JSONArray(params.stopWords))
+            }
+            applyOpenAiCompatibleReasoning(root, config, params)
+        }
+}
+
+internal fun buildAnthropicChatJson(config: CloudApiConfig, request: ChatRequest): JSONObject {
+    val split = splitCloudSystemMessages(request)
+    val params = request.params
+    return JSONObject()
+        .put("model", config.chatModel.trim())
+        .put("stream", true)
+        .put("max_tokens", params.effectiveNPredict().coerceIn(1, 8192))
+        .put("temperature", params.temperature.toDouble())
+        .put("top_p", params.topP.toDouble())
+        .put("system", split.system)
+        .put("messages", split.messages.toAnthropicMessagesJson())
+        .also { root ->
+            if (params.reasoningMode != ReasoningMode.OFF) {
+                root.put(
+                    "thinking",
+                    JSONObject()
+                        .put("type", "enabled")
+                        .put("budget_tokens", params.effectiveThinkingBudget().coerceAtLeast(1024))
+                )
+            }
+        }
+}
+
+private fun applyOpenAiCompatibleReasoning(
+    root: JSONObject,
+    config: CloudApiConfig,
+    params: GenerationParams
+) {
+    val thinkingEnabled = params.reasoningMode != ReasoningMode.OFF
+    if (!config.baseUrl.contains("openai.com", ignoreCase = true)) {
+        root.put("enable_thinking", thinkingEnabled)
+        root.put("thinking_budget", params.effectiveThinkingBudget())
+        root.put(
+            "chat_template_kwargs",
+            JSONObject().put("enable_thinking", thinkingEnabled)
+        )
+    }
+}
+
+private fun splitCloudSystemMessages(request: ChatRequest): CloudSplitMessages {
+    val system = StringBuilder()
+    val messages = mutableListOf<ChatMessage>()
+    for (message in request.messages) {
+        if (message.role == Role.SYSTEM) {
+            if (system.isNotBlank()) system.append("\n\n")
+            system.append(message.content)
+        } else {
+            messages.add(message)
+        }
+    }
+    if (messages.isEmpty() || messages.first().role != Role.USER) {
+        messages.add(0, ChatMessage(Role.USER, "Continue."))
+    }
+    return CloudSplitMessages(system.toString(), coalesceCloudChatMessagesByRole(messages))
+}
+
+private fun List<ChatMessage>.toAnthropicMessagesJson(): JSONArray {
+    val array = JSONArray()
+    forEach { message ->
+        array.put(
+            JSONObject()
+                .put("role", if (message.role == Role.ASSISTANT) "assistant" else "user")
+                .put("content", message.toAnthropicContentJson())
+        )
+    }
+    return array
+}
+
+private fun ChatMessage.toAnthropicContentJson(): Any {
+    if (imageAttachments.isEmpty()) return content
+    val parts = JSONArray()
+    imageAttachments
+        .filter { it.hasInlineData }
+        .forEach { attachment ->
+            parts.put(
+                JSONObject()
+                    .put("type", "image")
+                    .put(
+                        "source",
+                        JSONObject()
+                            .put("type", "base64")
+                            .put("media_type", attachment.mimeType.ifBlank { "image/jpeg" })
+                            .put("data", attachment.plainBase64())
+                    )
+            )
+        }
+    if (content.isNotBlank()) {
+        parts.put(JSONObject().put("type", "text").put("text", content))
+    }
+    return if (parts.length() == 0) content else parts
+}
+
+private data class CloudSplitMessages(
+    val system: String,
+    val messages: List<ChatMessage>
+)
 
 class OpenAiCompatibleChatProvider(
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -998,11 +1174,9 @@ class OpenAiCompatibleChatProvider(
         val builder = Request.Builder()
             .url(chatEndpointUrl(config.baseUrl, "chat/completions"))
             .addHeader("Accept", "text/event-stream")
-        if (config.apiKey.isNotBlank()) {
-            builder.addHeader("Authorization", "Bearer ${config.apiKey}")
-        }
+            .addCloudApiKeyHeaders(config)
         return builder
-            .post(buildOpenAiJson(config, request).toString().toRequestBody(JSON_MEDIA_TYPE))
+            .post(buildOpenAiChatJson(config, request).toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
     }
 
@@ -1012,7 +1186,7 @@ class OpenAiCompatibleChatProvider(
             .addHeader("x-api-key", config.apiKey)
             .addHeader("anthropic-version", "2023-06-01")
             .addHeader("Accept", "text/event-stream")
-            .post(buildAnthropicJson(config, request).toString().toRequestBody(JSON_MEDIA_TYPE))
+            .post(buildAnthropicChatJson(config, request).toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
     private fun quickOpenAiRequest(config: CloudApiConfig): Request {
@@ -1028,9 +1202,7 @@ class OpenAiCompatibleChatProvider(
         val builder = Request.Builder()
             .url(chatEndpointUrl(config.baseUrl, "chat/completions"))
             .addHeader("Accept", "application/json")
-        if (config.apiKey.isNotBlank()) {
-            builder.addHeader("Authorization", "Bearer ${config.apiKey}")
-        }
+            .addCloudApiKeyHeaders(config)
         return builder.post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build()
     }
 
@@ -1053,64 +1225,6 @@ class OpenAiCompatibleChatProvider(
                     .toRequestBody(JSON_MEDIA_TYPE)
             )
             .build()
-
-    private fun buildOpenAiJson(config: CloudApiConfig, request: ChatRequest): JSONObject {
-        val params = request.params
-        return JSONObject()
-            .put("model", config.chatModel.trim())
-            .put("messages", JSONArray(request.messagesJson(multimodal = true)))
-            .put("stream", true)
-            .put("temperature", params.temperature.toDouble())
-            .put("top_p", params.topP.toDouble())
-            .put("presence_penalty", params.presencePenalty.toDouble())
-            .put("frequency_penalty", params.frequencyPenalty.toDouble())
-            .put("max_tokens", params.effectiveNPredict().coerceIn(1, 32768))
-            .also { root ->
-                if (params.stopWords.isNotEmpty()) {
-                    root.put("stop", JSONArray(params.stopWords))
-                }
-                applyOpenAiCompatibleReasoning(root, config, params)
-            }
-    }
-
-    private fun buildAnthropicJson(config: CloudApiConfig, request: ChatRequest): JSONObject {
-        val split = splitSystemMessages(request)
-        val params = request.params
-        return JSONObject()
-            .put("model", config.chatModel.trim())
-            .put("stream", true)
-            .put("max_tokens", params.effectiveNPredict().coerceIn(1, 8192))
-            .put("temperature", params.temperature.toDouble())
-            .put("top_p", params.topP.toDouble())
-            .put("system", split.system)
-            .put("messages", split.messages.toAnthropicMessages())
-            .also { root ->
-                if (params.reasoningMode != ReasoningMode.OFF) {
-                    root.put(
-                        "thinking",
-                        JSONObject()
-                            .put("type", "enabled")
-                            .put("budget_tokens", params.effectiveThinkingBudget().coerceAtLeast(1024))
-                    )
-                }
-            }
-    }
-
-    private fun applyOpenAiCompatibleReasoning(
-        root: JSONObject,
-        config: CloudApiConfig,
-        params: GenerationParams
-    ) {
-        val thinkingEnabled = params.reasoningMode != ReasoningMode.OFF
-        if (!config.baseUrl.contains("openai.com", ignoreCase = true)) {
-            root.put("enable_thinking", thinkingEnabled)
-            root.put("thinking_budget", params.effectiveThinkingBudget())
-            root.put(
-                "chat_template_kwargs",
-                JSONObject().put("enable_thinking", thinkingEnabled)
-            )
-        }
-    }
 
     private fun parseStreamChunk(format: CloudApiFormat, data: String): CloudChunk? =
         when (format) {
@@ -1207,72 +1321,6 @@ class OpenAiCompatibleChatProvider(
     private fun String.cleanProviderDelta(): String =
         takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
 
-    private fun splitSystemMessages(request: ChatRequest): SplitMessages {
-        val system = StringBuilder()
-        val messages = mutableListOf<ChatMessage>()
-        for (message in request.messages) {
-            if (message.role == Role.SYSTEM) {
-                if (system.isNotBlank()) system.append("\n\n")
-                system.append(message.content)
-            } else {
-                messages.add(message)
-            }
-        }
-        if (messages.isEmpty() || messages.first().role != Role.USER) {
-            messages.add(0, ChatMessage(Role.USER, "Continue."))
-        }
-        return SplitMessages(system.toString(), messages.coalescedByRole())
-    }
-
-    private fun List<ChatMessage>.coalescedByRole(): List<ChatMessage> {
-        val result = mutableListOf<ChatMessage>()
-        forEach { message ->
-            val last = result.lastOrNull()
-            if (last != null && last.role == message.role) {
-                result[result.lastIndex] = last.copy(content = last.content + "\n\n" + message.content)
-            } else {
-                result.add(message)
-            }
-        }
-        return result
-    }
-
-    private fun List<ChatMessage>.toAnthropicMessages(): JSONArray {
-        val array = JSONArray()
-        forEach { message ->
-            array.put(
-                JSONObject()
-                    .put("role", if (message.role == Role.ASSISTANT) "assistant" else "user")
-                    .put("content", message.toAnthropicContent())
-            )
-        }
-        return array
-    }
-
-    private fun ChatMessage.toAnthropicContent(): Any {
-        if (imageAttachments.isEmpty()) return content
-        val parts = JSONArray()
-        imageAttachments
-            .filter { it.hasInlineData }
-            .forEach { attachment ->
-                parts.put(
-                    JSONObject()
-                        .put("type", "image")
-                        .put(
-                            "source",
-                            JSONObject()
-                                .put("type", "base64")
-                                .put("media_type", attachment.mimeType.ifBlank { "image/jpeg" })
-                                .put("data", attachment.plainBase64())
-                        )
-                )
-            }
-        if (content.isNotBlank()) {
-            parts.put(JSONObject().put("type", "text").put("text", content))
-        }
-        return if (parts.length() == 0) content else parts
-    }
-
     private fun parseErrorMessage(body: String): String {
         if (body.isBlank()) return "请求失败"
         val json = runCatching { JSONObject(body) }.getOrNull() ?: return body.take(240)
@@ -1305,11 +1353,6 @@ class OpenAiCompatibleChatProvider(
             e2eTps = tps
         )
     }
-
-    private data class SplitMessages(
-        val system: String,
-        val messages: List<ChatMessage>
-    )
 
     private data class CloudChunk(
         val text: String = "",

@@ -5,6 +5,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(MCA_WITH_LLAMA_CPP "Build MCA native backend with llama.cpp" ON)
+option(MCA_WITH_MNN_DIFFUSION "Build MCA native backend with MNN Stable Diffusion runner" ON)
+set(MCA_MNN_SOURCE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/MNN" CACHE PATH "Official MNN source root")
+set(MCA_MNN_ANDROID_BUILD_ROOT "${MCA_MNN_SOURCE_ROOT}/project/android/build_64" CACHE PATH "Official MNN Android build root")
+set(MCA_QNN_SDK_ROOT "" CACHE PATH "Qualcomm AI Runtime / QNN SDK root")
 
 if(DEFINED ANDROID_ABI)
     message(STATUS "MCA Android ABI: ${ANDROID_ABI}")
@@ -22,6 +26,35 @@ if(DEFINED ANDROID_ABI)
 endif()
 
 add_library(mca_native SHARED native_engine.cpp)
+add_library(mca_mnn_native SHARED mnn_native_engine.cpp)
+add_library(mca_qnn_native SHARED qnn_native_bridge.cpp)
+target_link_libraries(mca_qnn_native PRIVATE android log dl)
+target_include_directories(mca_qnn_native PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/stable-diffusion.cpp/thirdparty")
+set(MCA_QNN_INCLUDE_DIR "")
+foreach(QNN_INCLUDE_CANDIDATE
+        "${MCA_QNN_SDK_ROOT}/include"
+        "$ENV{QNN_SDK_ROOT}/include"
+        "$ENV{QAIRT_SDK_ROOT}/include")
+    if(EXISTS "${QNN_INCLUDE_CANDIDATE}/QNN/QnnInterface.h")
+        set(MCA_QNN_INCLUDE_DIR "${QNN_INCLUDE_CANDIDATE}")
+        break()
+    endif()
+endforeach()
+if(MCA_QNN_INCLUDE_DIR)
+    message(STATUS "MCA QNN SDK headers found at ${MCA_QNN_INCLUDE_DIR}")
+    target_include_directories(mca_qnn_native PRIVATE
+            "${MCA_QNN_INCLUDE_DIR}"
+            "${MCA_QNN_INCLUDE_DIR}/QNN")
+    target_compile_definitions(mca_qnn_native PRIVATE
+            MCA_WITH_QNN_SDK_HEADERS=1
+            MCA_QNN_SDK_ROOT_CONFIGURED=1)
+else()
+    message(STATUS "MCA QNN SDK headers not found. Set MCA_QNN_SDK_ROOT, QNN_SDK_ROOT, or QAIRT_SDK_ROOT to enable typed QNN graph bindings.")
+    target_compile_definitions(mca_qnn_native PRIVATE
+            MCA_WITH_QNN_SDK_HEADERS=0
+            MCA_QNN_SDK_ROOT_CONFIGURED=$<BOOL:${MCA_QNN_SDK_ROOT}>)
+endif()
 
 target_compile_definitions(mca_native PRIVATE
         GGML_SYSTEM_ARCH=${GGML_SYSTEM_ARCH}
@@ -29,6 +62,9 @@ target_compile_definitions(mca_native PRIVATE
         GGML_OPENMP=$<BOOL:${GGML_OPENMP}>)
 
 set(LLAMA_SRC ${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/llama.cpp)
+target_include_directories(mca_mnn_native PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${LLAMA_SRC}/vendor)
 if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
     message(STATUS "MCA building with llama.cpp from ${LLAMA_SRC}")
     target_compile_definitions(mca_native PRIVATE MCA_WITH_LLAMA_CPP=1)
@@ -90,4 +126,170 @@ else()
     message(WARNING "MCA_WITH_LLAMA_CPP is OFF or llama.cpp is missing; building JNI stub.")
     target_compile_definitions(mca_native PRIVATE MCA_WITH_LLAMA_CPP=0)
     target_link_libraries(mca_native PRIVATE android log)
+endif()
+
+set(MCA_MNN_LLM_HEADER "${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/include/llm/llm.hpp")
+set(MCA_MNN_DIFFUSION_HEADER "${MCA_MNN_SOURCE_ROOT}/transformers/diffusion/engine/include/diffusion/stable_diffusion.hpp")
+set(MCA_MNN_SANA_HEADER "${MCA_MNN_SOURCE_ROOT}/transformers/diffusion/engine/include/diffusion/sana_llm.hpp")
+set(MCA_MNN_SANA_SESSION_SRC "${CMAKE_CURRENT_LIST_DIR}/mnn_sana_session.cpp")
+set(MCA_MNN_DIFFUSION_SAFE_SRC "${CMAKE_CURRENT_LIST_DIR}/mnn_stable_diffusion_safe.cpp")
+set(MCA_MNN_SANA_DIFFUSION_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/diffusion/engine/src/sana_diffusion.cpp")
+set(MCA_MNN_DIFFUSION_OFFICIAL_TOKENIZER_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/diffusion/engine/src/tokenizer.cpp")
+set(MCA_MNN_DIFFUSION_SCHEDULER_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/diffusion/engine/src/scheduler.cpp")
+set(MCA_MNN_LLM_TOKENIZER_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/src/tokenizer/tokenizer.cpp")
+set(MCA_MNN_LLM_UNICODE_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/src/tokenizer/unicode.cpp")
+set(MCA_MNN_LLM_UNICODE_DATA_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/src/tokenizer/unicode_data.cpp")
+set(MCA_MNN_CV_COLOR_SRC "${MCA_MNN_SOURCE_ROOT}/tools/cv/source/imgproc/color.cpp")
+set(MCA_MNN_CV_IMGCODECS_SRC "${MCA_MNN_SOURCE_ROOT}/tools/cv/source/imgcodecs/imgcodecs.cpp")
+## The current MNN Android CMake build publishes one coherent split runtime at
+## its build root.  Some source trees also retain an older nested OFF/ layout.
+## libllm is ABI-coupled to all five dependency libraries, so never link one
+## layout while packaging the other.  Prefer the current set as a unit and
+## retain the nested layout only for old vendor builds that do not have it.
+set(MCA_MNN_RUNTIME_CURRENT_REQUIRED_LIBS
+        "libMNN.so"
+        "libMNN_Express.so"
+        "libMNN_CL.so"
+        "tools/cv/libMNNOpenCV.so"
+        "tools/audio/libMNNAudio.so"
+        "libllm.so")
+set(MCA_MNN_RUNTIME_LEGACY_REQUIRED_LIBS
+        "OFF/${ANDROID_ABI}/libMNN.so"
+        "express/OFF/${ANDROID_ABI}/libMNN_Express.so"
+        "source/backend/opencl/OFF/${ANDROID_ABI}/libMNN_CL.so"
+        "tools/cv/OFF/${ANDROID_ABI}/libMNNOpenCV.so"
+        "tools/audio/OFF/${ANDROID_ABI}/libMNNAudio.so"
+        "OFF/${ANDROID_ABI}/libllm.so")
+set(MCA_MNN_RUNTIME_ROOT "")
+set(MCA_MNN_RUNTIME_LAYOUT "")
+foreach(MNN_RUNTIME_ROOT_CANDIDATE
+        "${MCA_MNN_ANDROID_BUILD_ROOT}"
+        "${MCA_MNN_SOURCE_ROOT}/project/android/build_64_mca_full")
+    foreach(MNN_RUNTIME_LAYOUT_CANDIDATE current legacy)
+        if(MNN_RUNTIME_LAYOUT_CANDIDATE STREQUAL "current")
+            set(MNN_RUNTIME_REQUIRED_LIBS ${MCA_MNN_RUNTIME_CURRENT_REQUIRED_LIBS})
+        else()
+            set(MNN_RUNTIME_REQUIRED_LIBS ${MCA_MNN_RUNTIME_LEGACY_REQUIRED_LIBS})
+        endif()
+        set(MNN_RUNTIME_COMPLETE TRUE)
+        foreach(MNN_RUNTIME_LIB_RELATIVE IN LISTS MNN_RUNTIME_REQUIRED_LIBS)
+            if(NOT EXISTS "${MNN_RUNTIME_ROOT_CANDIDATE}/${MNN_RUNTIME_LIB_RELATIVE}")
+                set(MNN_RUNTIME_COMPLETE FALSE)
+                break()
+            endif()
+        endforeach()
+        if(MNN_RUNTIME_COMPLETE)
+            set(MCA_MNN_RUNTIME_ROOT "${MNN_RUNTIME_ROOT_CANDIDATE}")
+            set(MCA_MNN_RUNTIME_LAYOUT "${MNN_RUNTIME_LAYOUT_CANDIDATE}")
+            list(GET MNN_RUNTIME_REQUIRED_LIBS 0 MCA_MNN_RUNTIME_CORE_RELATIVE)
+            list(GET MNN_RUNTIME_REQUIRED_LIBS 1 MCA_MNN_RUNTIME_EXPRESS_RELATIVE)
+            list(GET MNN_RUNTIME_REQUIRED_LIBS 2 MCA_MNN_RUNTIME_OPENCL_RELATIVE)
+            list(GET MNN_RUNTIME_REQUIRED_LIBS 3 MCA_MNN_RUNTIME_OPENCV_RELATIVE)
+            list(GET MNN_RUNTIME_REQUIRED_LIBS 4 MCA_MNN_RUNTIME_AUDIO_RELATIVE)
+            list(GET MNN_RUNTIME_REQUIRED_LIBS 5 MCA_MNN_RUNTIME_LLM_RELATIVE)
+            break()
+        endif()
+    endforeach()
+    if(MCA_MNN_RUNTIME_ROOT)
+        break()
+    endif()
+endforeach()
+if(ANDROID_ABI STREQUAL "arm64-v8a" AND EXISTS "${MCA_MNN_LLM_HEADER}" AND MCA_MNN_RUNTIME_ROOT)
+    message(STATUS "MCA building MNN runner with complete ${MCA_MNN_RUNTIME_LAYOUT} split runtime from ${MCA_MNN_RUNTIME_ROOT}")
+    add_library(mca_imported_mnn_core SHARED IMPORTED)
+    set_target_properties(mca_imported_mnn_core PROPERTIES
+            IMPORTED_LOCATION "${MCA_MNN_RUNTIME_ROOT}/${MCA_MNN_RUNTIME_CORE_RELATIVE}")
+    add_library(mca_imported_mnn_express SHARED IMPORTED)
+    set_target_properties(mca_imported_mnn_express PROPERTIES
+            IMPORTED_LOCATION "${MCA_MNN_RUNTIME_ROOT}/${MCA_MNN_RUNTIME_EXPRESS_RELATIVE}")
+    add_library(mca_imported_mnn_opencl SHARED IMPORTED)
+    set_target_properties(mca_imported_mnn_opencl PROPERTIES
+            IMPORTED_LOCATION "${MCA_MNN_RUNTIME_ROOT}/${MCA_MNN_RUNTIME_OPENCL_RELATIVE}")
+    add_library(mca_imported_mnn_opencv SHARED IMPORTED)
+    set_target_properties(mca_imported_mnn_opencv PROPERTIES
+            IMPORTED_LOCATION "${MCA_MNN_RUNTIME_ROOT}/${MCA_MNN_RUNTIME_OPENCV_RELATIVE}")
+    add_library(mca_imported_mnn_audio SHARED IMPORTED)
+    set_target_properties(mca_imported_mnn_audio PROPERTIES
+            IMPORTED_LOCATION "${MCA_MNN_RUNTIME_ROOT}/${MCA_MNN_RUNTIME_AUDIO_RELATIVE}")
+    add_library(mca_imported_mnn_llm SHARED IMPORTED)
+    set_target_properties(mca_imported_mnn_llm PROPERTIES
+            IMPORTED_LOCATION "${MCA_MNN_RUNTIME_ROOT}/${MCA_MNN_RUNTIME_LLM_RELATIVE}")
+    target_compile_definitions(mca_mnn_native PRIVATE MCA_WITH_MNN_LLM=1)
+    target_include_directories(mca_mnn_native PRIVATE
+            ${MCA_MNN_SOURCE_ROOT}/include
+            ${MCA_MNN_SOURCE_ROOT}/source
+            ${MCA_MNN_SOURCE_ROOT}/tools/cv/include
+            ${MCA_MNN_SOURCE_ROOT}/tools/audio/include
+            ${MCA_MNN_SOURCE_ROOT}/3rd_party
+            ${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/include)
+    # Visual MNN-LLM models call MNN::CV::imread even when the optional local
+    # diffusion shim is omitted. The coherent runtime selection above already
+    # requires libMNNOpenCV, so keep image-codec compilation tied to the
+    # runtime, not to the unrelated Stable Diffusion sources.
+    target_compile_definitions(mca_mnn_native PRIVATE
+            MNN_IMGCODECS=1
+            MNN_IMGPROC_COLOR=1)
+    if(MCA_WITH_MNN_DIFFUSION
+            AND EXISTS "${MCA_MNN_DIFFUSION_HEADER}"
+            AND EXISTS "${MCA_MNN_SANA_HEADER}"
+            AND EXISTS "${MCA_MNN_SANA_SESSION_SRC}"
+            AND EXISTS "${MCA_MNN_DIFFUSION_SAFE_SRC}"
+            AND EXISTS "${MCA_MNN_SANA_DIFFUSION_SRC}"
+            AND EXISTS "${MCA_MNN_DIFFUSION_OFFICIAL_TOKENIZER_SRC}"
+            AND EXISTS "${MCA_MNN_DIFFUSION_SCHEDULER_SRC}"
+            AND EXISTS "${MCA_MNN_LLM_TOKENIZER_SRC}"
+            AND EXISTS "${MCA_MNN_LLM_UNICODE_SRC}"
+            AND EXISTS "${MCA_MNN_LLM_UNICODE_DATA_SRC}"
+            AND EXISTS "${MCA_MNN_CV_COLOR_SRC}"
+            AND EXISTS "${MCA_MNN_CV_IMGCODECS_SRC}")
+        message(STATUS "MCA building MNN Stable Diffusion safe runner shim.")
+        target_sources(mca_mnn_native PRIVATE
+                "${MCA_MNN_SANA_SESSION_SRC}"
+                "${MCA_MNN_DIFFUSION_SAFE_SRC}"
+                # The local engine owns Diffusion's base/factory symbols so the
+                # official diffusion.cpp is intentionally excluded here.
+                "${MCA_MNN_SANA_DIFFUSION_SRC}"
+                "${MCA_MNN_DIFFUSION_OFFICIAL_TOKENIZER_SRC}"
+                "${MCA_MNN_DIFFUSION_SCHEDULER_SRC}"
+                "${MCA_MNN_LLM_TOKENIZER_SRC}"
+                "${MCA_MNN_LLM_UNICODE_SRC}"
+                "${MCA_MNN_LLM_UNICODE_DATA_SRC}"
+                "${MCA_MNN_CV_COLOR_SRC}"
+                "${MCA_MNN_CV_IMGCODECS_SRC}")
+        target_compile_definitions(mca_mnn_native PRIVATE
+                MCA_WITH_MNN_DIFFUSION=1
+                MCA_WITH_MNN_DIFFUSION_SAFE_RUNNER=1
+                FREE_LLM_INSTANCE=1
+                MNN_DIFFUSION_WITH_LLM_TOKENIZER=1
+                # mca_mnn_native also compiles MNN's Tokenizer for the
+                # diffusion shim. Those duplicate symbols interpose libllm's
+                # tokenizer at runtime, so they must retain upstream Jinja
+                # support or every chat template silently degrades to raw
+                # system+user text.
+                LLM_USE_JINJA=1
+                )
+        target_include_directories(mca_mnn_native PRIVATE
+                ${MCA_MNN_SOURCE_ROOT}/transformers/diffusion/engine/include
+                ${MCA_MNN_SOURCE_ROOT}/transformers/diffusion/engine/src
+                ${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/src
+                ${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/src/tokenizer
+                ${MCA_MNN_SOURCE_ROOT}/3rd_party/imageHelper)
+    else()
+        message(STATUS "MCA building without MNN Stable Diffusion runner sources.")
+        target_compile_definitions(mca_mnn_native PRIVATE MCA_WITH_MNN_DIFFUSION=0)
+    endif()
+    target_link_libraries(mca_mnn_native PRIVATE
+            mca_imported_mnn_llm
+            mca_imported_mnn_opencl
+            mca_imported_mnn_opencv
+            mca_imported_mnn_audio
+            mca_imported_mnn_express
+            mca_imported_mnn_core
+            android
+            log)
+else()
+    message(STATUS "MCA building MNN runner stub. Build the complete MNN split runtime to enable MNN chat and diffusion.")
+    target_compile_definitions(mca_mnn_native PRIVATE MCA_WITH_MNN_LLM=0)
+    target_compile_definitions(mca_mnn_native PRIVATE MCA_WITH_MNN_DIFFUSION=0)
+    target_link_libraries(mca_mnn_native PRIVATE android log)
 endif()

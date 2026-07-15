@@ -21,6 +21,8 @@ Use this before making the repository public.
 
 - [x] Local chat is described as the primary stable local path.
 - [x] Local image generation is clearly marked experimental.
+- [x] Snapdragon NPU support is documented as a gated roadmap unless real-device
+      QNN/HTP smoke evidence is recorded.
 - [x] Cloud features are described as user-configured provider integrations.
 - [x] Local image generation is described as experimental in README and release notes.
 - [x] Model licenses are left to the user/provider and are not implied by MCA.

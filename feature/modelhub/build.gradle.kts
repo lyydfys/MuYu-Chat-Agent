@@ -23,6 +23,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":core:deviceprofile"))
     implementation(project(":core:modelstore"))
     implementation(project(":core:download"))
     implementation(platform(libs.androidx.compose.bom))
@@ -31,4 +32,5 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons)
+    testImplementation(libs.junit)
 }

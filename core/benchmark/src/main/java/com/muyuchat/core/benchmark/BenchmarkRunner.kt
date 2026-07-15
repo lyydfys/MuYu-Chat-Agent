@@ -289,7 +289,7 @@ class BenchmarkRunner(
         val request = ChatRequest(
             messages = listOf(
                 ChatMessage(Role.SYSTEM, "You are MCA benchmark runner. Answer briefly."),
-                ChatMessage(Role.USER, "用中文写一句话说明本地大模型部署的优点。")
+                ChatMessage(Role.USER, "用中文用一句话说明手机端本地大模型部署的一个优势。")
             ),
             params = params
         )

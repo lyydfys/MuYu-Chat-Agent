@@ -1,0 +1,2310 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e292c1379b291e29131f45b76b76a00f81a96070..7cda658008274b45868396778878c299fe43d4ab 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -631,6 +631,13 @@ else()
+     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /fp:precise")
+ endif()
+ 
++# The official diffusion sources use try/catch for load and generation errors.
++# Keep the lean default for regular MNN builds, but let a diffusion-enabled
++# Android build compile those sources with the language feature available.
++if (MNN_BUILD_DIFFUSION AND NOT MSVC)
++    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
++endif()
++
+ # Metal
+ list(APPEND MNN_DEPS MNN)
+ 
+@@ -1098,4 +1105,4 @@ endif()
+ if (MNN_GENERATE_PODSPEC)
+     include(${CMAKE_CURRENT_LIST_DIR}/cmake/generate_podspec.cmake)
+     generate_mnn_podspec_from_targets()
+-endif()
+\ No newline at end of file
++endif()
+diff --git a/skills/support-new-llm/common-pitfalls.md b/skills/support-new-llm/common-pitfalls.md
+index aa4db6eeede9aa02a67c9216a31f8a0ce88f630e..39f9a0ca9458e99cdd1c7fcf865a1d164b1967fb 100644
+--- a/skills/support-new-llm/common-pitfalls.md
++++ b/skills/support-new-llm/common-pitfalls.md
+@@ -471,3 +471,23 @@ elif model_type == 'lfm2_audio':
+ - 非标准加载的模型**权重路径可能不同**于标准 HF 模型，需要通过 `print(original_model)` 或 `state_dict().keys()` 确认实际路径
+ - 嵌套的 config 结构可能需要在 `config.py` 的 `from_pretrained` 中手动提取子配置
+ - 某些包的注意力实现默认使用 `flash_attention_2`，CPU 上需要手动切换为 `sdpa` 或 `eager`
++
++---
++
++## 15. 跨 RuntimeManager 的多模态 embedding 所有权
++
++视觉/音频模块可能与 LLM 使用不同的 `Executor::RuntimeManager`。模块输出即使已经
++`readMap()`，也不能直接与 LLM embedding 建立懒表达式连接；`Variable::input(src)` 也
++不应被当作“已经脱离源表达式图”的证明。源模块释放、缓存清理或 executor 切换后，
++`_Concat` 等算子可能在 `Expr::_addLinkForInputs` 阶段访问失效输入。
++
++运行时合并多模态 embedding 时必须：
++
++1. 在源输出仍有效时 `readMap<uint8_t>()`。
++2. 按原始 shape、order、dtype 创建新的 `_Input`，根据 `Info::size * type.bytes()` 做真实 host `memcpy`。
++3. 不对来自不同 RuntimeManager 的 VARP 直接调用懒 `_Concat`；先校验 rank、dtype、order、hidden size、非拼接轴和溢出，再把各段 host buffer 复制到一个新的 `_Input`。
++4. 合并前验证视觉 pad 连续段长度与每个视觉 embedding 的序列长度一致，并验证 embedding/deep-stack 数量，任何不一致都返回明确诊断，不能继续下标访问。
++5. contract test 至少覆盖 axis 0 的文本/视觉合并、axis 1 的 deep-stack 合并、hidden size 不一致、非拼接轴不一致和视觉 pad 段数量/长度不一致。
++
++通过标准是合并结果完全由新的 INPUT buffer 持有；“先 `Variable::input`，再 `_Concat`，
++最后才 memcpy”仍会在到达最终 memcpy 前崩溃，不算完成物化。
+diff --git a/transformers/diffusion/engine/include/diffusion/sana_diffusion.hpp b/transformers/diffusion/engine/include/diffusion/sana_diffusion.hpp
+index 418658f2e74ab8f3cecc8fb71c0316ec64529e05..afc456901af84aad68ac09e30096e55918e675ff 100644
+--- a/transformers/diffusion/engine/include/diffusion/sana_diffusion.hpp
++++ b/transformers/diffusion/engine/include/diffusion/sana_diffusion.hpp
+@@ -66,6 +66,7 @@ namespace MNN
+             //   use_cfg: 是否使用Classifier-Free Guidance（需要input_embeds包含正负样本）
+             //   cfg_scale: CFG引导强度（仅use_cfg=true时生效）
+             //   progressCallback: 进度回调函数
++            // The callback is invoked after each denoising step; exceptions may propagate as cancellation.
+             virtual bool run(const VARP input_embeds,
+                              const std::string &mode,
+                              const std::string &inputImagePath,
+diff --git a/transformers/diffusion/engine/include/diffusion/sana_llm.hpp b/transformers/diffusion/engine/include/diffusion/sana_llm.hpp
+index 42af902400bbb086abd35a041da4a416467c39d4..2797eee9be299d3918da5db5dd1f53a85b67795c 100644
+--- a/transformers/diffusion/engine/include/diffusion/sana_llm.hpp
++++ b/transformers/diffusion/engine/include/diffusion/sana_llm.hpp
+@@ -7,6 +7,8 @@
+ #include <memory>
+ #include <iostream>
+ #include <algorithm>
++#include <exception>
++#include <limits>
+ #if defined(__APPLE__) && defined(__MACH__)
+ #include <TargetConditionals.h>
+ #if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
+@@ -42,24 +44,63 @@ public:
+     SanaLlm(const std::string& config_path) {
+         // Load LLM
+         mLlm.reset(Llm::createLLM(config_path + "/config.json"));
+-        mLlm->set_config("{\"hidden_states\":true}");
+-        mLlm->load();
++        if (mLlm == nullptr) {
++            MNN_ERROR("Failed to create Sana LLM from %s\n", config_path.c_str());
++            return;
++        }
++
++        try {
++            if (!mLlm->set_config("{\"hidden_states\":true}")) {
++                MNN_ERROR("Failed to configure Sana LLM from %s\n", config_path.c_str());
++                mLlm.reset();
++                return;
++            }
++            if (!mLlm->load()) {
++                MNN_ERROR("Failed to load Sana LLM from %s\n", config_path.c_str());
++                mLlm.reset();
++                return;
++            }
++        } catch (const std::exception& e) {
++            MNN_ERROR("Exception while loading Sana LLM from %s: %s\n", config_path.c_str(), e.what());
++            mLlm.reset();
++            return;
++        } catch (...) {
++            MNN_ERROR("Unknown exception while loading Sana LLM from %s\n", config_path.c_str());
++            mLlm.reset();
++            return;
++        }
++
++        const auto* context = mLlm->getContext();
++        if (context == nullptr || context->status != LlmStatus::RUNNING) {
++            MNN_ERROR("Sana LLM load completed without a usable runtime\n");
++            mLlm.reset();
++            return;
++        }
+         
+         // Load Meta Queries (Assuming meta_queries.mnn is in the same dir)
+         std::string meta_path = config_path + "/meta_queries.mnn";
+         mMetaQueries = Variable::load(meta_path.c_str());
+-        if (!mMetaQueries.empty()) {
++        if (!mMetaQueries.empty() && mMetaQueries[0].get() != nullptr && mMetaQueries[0]->getInfo() != nullptr) {
+             mMetaQueries[0].fix(VARP::CONSTANT);
+         } else {
+             MNN_ERROR("Failed to load meta_queries.mnn from %s\n", meta_path.c_str());
++            mMetaQueries.clear();
++        }
++    }
++
++    bool is_loaded() const {
++        if (mLlm == nullptr) {
++            return false;
+         }
++        const auto* context = mLlm->getContext();
++        return context != nullptr && context->status == LlmStatus::RUNNING;
+     }
+ 
+     // 处理单个或多个prompts（用于CFG）
+     // use_cfg: 如果为true，则生成batch_size=2（用于CFG），negative_prompt可以为空字符串
+     VARP process(const std::string& prompt, bool use_cfg = false, const std::string& negative_prompt = "") {
+         AUTOTIME;
+-        if (mMetaQueries.empty()) {
++        if (!is_loaded() || mMetaQueries.empty() || mMetaQueries[0].get() == nullptr) {
+             return nullptr;
+         }
+ 
+@@ -100,9 +141,14 @@ public:
+             all_ids.push_back(ids);
+             if (ids.size() > max_len) max_len = ids.size();
+         }
++
++        if (all_ids.empty() || max_len <= 0) {
++            MNN_ERROR("Sana LLM tokenizer returned no input tokens\n");
++            return nullptr;
++        }
+         
+         // Check if already in error state
+-        if (mLlm->getContext()->status == LlmStatus::INTERNAL_ERROR) {
++        if (!is_loaded()) {
+             return nullptr;
+         }
+ 
+@@ -130,10 +176,14 @@ public:
+         }
+ 
+         auto input_ids_var = _Const(flat_input_ids.data(), {batch, max_len}, NCHW, halide_type_of<int>());
++        if (input_ids_var.get() == nullptr) {
++            MNN_ERROR("Failed to create Sana LLM input ids\n");
++            return nullptr;
++        }
+         // embedding expects input_ids
+         
+         // Check if already in error state
+-        if (mLlm->getContext()->status == LlmStatus::INTERNAL_ERROR) {
++        if (!is_loaded()) {
+             return nullptr;
+         }
+         
+@@ -143,10 +193,18 @@ public:
+         }
+         // Reshape to [Batch, SeqLen, Hidden]
+         inputs_embeds = _Reshape(inputs_embeds, {batch, max_len, -1});
++        if (inputs_embeds.get() == nullptr) {
++            MNN_ERROR("Failed to reshape Sana LLM input embeddings\n");
++            return nullptr;
++        }
+ 
+         // 3. Meta Queries
+         int num_queries = 256; 
+         auto meta_queries = mMetaQueries[0]; // [256, H]
++        if (meta_queries.get() == nullptr || meta_queries->getInfo() == nullptr) {
++            MNN_ERROR("Sana meta queries output is invalid\n");
++            return nullptr;
++        }
+         // Expand meta_queries to [Batch, NumQueries, H]
+         auto meta_queries_batch = _Unsqueeze(meta_queries, {0}); // [1, 256, H]
+         
+@@ -158,9 +216,17 @@ public:
+             }
+             meta_queries_batch = _Concat(meta_list, 0); // [Batch, 256, H]
+         }
++        if (meta_queries_batch.get() == nullptr) {
++            MNN_ERROR("Failed to expand Sana meta queries\n");
++            return nullptr;
++        }
+ 
+         // 4. Concatenate
+         auto full_embeds = _Concat({inputs_embeds, meta_queries_batch}, 1); // Concat on SeqLen dim (1)
++        if (full_embeds.get() == nullptr) {
++            MNN_ERROR("Failed to build Sana LLM input embeddings\n");
++            return nullptr;
++        }
+         
+         // 5. Update Attention Mask
+         // Original mask [Batch, SeqLen]. we need [Batch, SeqLen + NumQueries]
+@@ -288,25 +354,46 @@ public:
+ 
+         mLlm->setKVCacheInfo(batch*total_len, 0);
+         auto outputs = mLlm->forwardRaw(full_embeds, attention_mask, position_ids);
+-        if(outputs.empty()) {
++        if (outputs.empty()) {
++            MNN_ERROR("Sana LLM forward returned no outputs\n");
+             return nullptr;
+         }
+         int hiddenStateIndex = mLlm->getOutputIndex("hidden_states");
+         hiddenStateIndex = hiddenStateIndex == -1 ? outputs.size() - 1 : hiddenStateIndex;
+ 
++        if (hiddenStateIndex < 0 || static_cast<size_t>(hiddenStateIndex) >= outputs.size() ||
++            outputs[hiddenStateIndex].get() == nullptr || outputs[hiddenStateIndex]->getInfo() == nullptr ||
++            outputs[hiddenStateIndex]->getInfo()->dim.size() < 3) {
++            MNN_ERROR("Sana LLM hidden_states output is invalid\n");
++            return nullptr;
++        }
++
+         // Get hidden_states ouptput
+         auto output = outputs[hiddenStateIndex]; // Assume this is the correct output
+         output = _Reshape(output, {batch, -1, output->getInfo()->dim[2]});
++        if (output.get() == nullptr) {
++            MNN_ERROR("Failed to reshape Sana LLM hidden_states output\n");
++            return nullptr;
++        }
+ 
+         // 7. Slice last 256 tokens
+         // output matches [Batch, TotalLen, HiddenSize] (if it is hidden states)
+         // We want [Batch, 256, HiddenSize], corresponding to the queries.
+         // Queries are at the end. [TotalLen-NumQueries .. TotalLen]
+         auto splits = _Split(output, {total_len - num_queries, num_queries}, 1); 
++        if (splits.size() < 2 || splits[1].get() == nullptr) {
++            MNN_ERROR("Failed to extract Sana LLM meta-query hidden states\n");
++            return nullptr;
++        }
+         // splits[0] is text part, splits[1] is query part.
+         
+ #if FREE_LLM_INSTANCE
+-        ((MNN::Tensor*)(splits[1]->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
++        auto tensor = splits[1]->getTensor();
++        if (tensor == nullptr) {
++            MNN_ERROR("Failed to materialize Sana LLM meta-query output\n");
++            return nullptr;
++        }
++        ((MNN::Tensor*)tensor)->wait(Tensor::MAP_TENSOR_READ, true);
+         mLlm.reset();
+ #endif
+         return splits[1];
+diff --git a/transformers/diffusion/engine/src/sana_diffusion.cpp b/transformers/diffusion/engine/src/sana_diffusion.cpp
+index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f7b4e1fd5 100644
+--- a/transformers/diffusion/engine/src/sana_diffusion.cpp
++++ b/transformers/diffusion/engine/src/sana_diffusion.cpp
+@@ -13,6 +13,7 @@
+ #include <random>
+ #include <fstream>
+ #include <chrono>
++#include <cstring>
+ #include "diffusion/sana_diffusion.hpp"
+ #include "tokenizer.hpp"
+ #include "scheduler.hpp"
+@@ -33,6 +34,14 @@
+ 
+ using namespace CV;
+ 
++namespace {
++
++bool valid_varp(const VARP& value) {
++    return value.get() != nullptr;
++}
++
++} // namespace
++
+ namespace MNN
+ {
+     namespace DIFFUSION
+@@ -46,6 +55,8 @@ namespace MNN
+         bool SanaDiffusion::load()
+         {
+             AUTOTIME;
++            try
++            {
+ 
+             // 配置后端
+             ScheduleConfig config;
+@@ -74,12 +85,22 @@ namespace MNN
+             config.backendConfig = &backendConfig;
+ 
+             auto exe = ExecutorScope::Current();
++            if (exe == nullptr)
++            {
++                MNN_ERROR("Error: failed to acquire MNN executor scope\n");
++                return false;
++            }
+             exe->lazyEval = false;
+             exe->setGlobalExecutorConfig(config.type, backendConfig, config.numThread);
+ 
+             Module::Config module_config;
+             module_config.shapeMutable = false;
+             runtime_manager_.reset(Executor::RuntimeManager::createRuntimeManager(config));
++            if (runtime_manager_ == nullptr)
++            {
++                MNN_ERROR("Error: failed to create Sana runtime manager\n");
++                return false;
++            }
+ 
+             // 内存优化配置
+             if (mMemoryMode == 0)
+@@ -99,18 +120,28 @@ namespace MNN
+ 
+             // 加载模型组件
+             // Sana架构：LLM特征 -> Connector -> Projector -> DiT Transformer -> VAE Decoder
+-            mModules.resize(5);
++            mModules.assign(5, nullptr);
+             {
+                 // 模块0: Connector - 桥接LLM特征空间
+                 {
+                     std::string model_path = mModelPath + "/connector.mnn";
+                     mModules[0].reset(Module::load({"llm_out"}, {"connector_out"}, model_path.c_str(), runtime_manager_, &module_config));
++                    if (mModules[0] == nullptr)
++                    {
++                        MNN_ERROR("Failed to load connector model from %s\n", model_path.c_str());
++                        return false;
++                    }
+                 }
+ 
+                 // 模块1: Projector - 投影到Diffusion特征空间
+                 {
+                     std::string model_path = mModelPath + "/projector.mnn";
+                     mModules[1].reset(Module::load({"connector_out"}, {"prompt_embeds"}, model_path.c_str(), runtime_manager_, &module_config));
++                    if (mModules[1] == nullptr)
++                    {
++                        MNN_ERROR("Failed to load projector model from %s\n", model_path.c_str());
++                        return false;
++                    }
+                 }
+ 
+                 // 模块2: DiT Transformer - 核心去噪模型
+@@ -132,12 +163,21 @@ namespace MNN
+                     {
+                         MNN_PRINT("Transformer loaded successfully\n");
+                     }
++                    if (mModules[2] == nullptr)
++                    {
++                        return false;
++                    }
+                 }
+ 
+                 // 模块3: VAE Decoder - 将latent解码为图像
+                 {
+                     std::string model_path = mModelPath + "/vae_decoder.mnn";
+                     mModules[3].reset(Module::load({"latent_sample"}, {"sample"}, model_path.c_str(), runtime_manager_, &module_config));
++                    if (mModules[3] == nullptr)
++                    {
++                        MNN_ERROR("Failed to load VAE decoder model from %s\n", model_path.c_str());
++                        return false;
++                    }
+                 }
+             }
+ 
+@@ -145,6 +185,21 @@ namespace MNN
+             mModules[4] = nullptr;
+ 
+             return true;
++            }
++            catch (const std::exception& e)
++            {
++                MNN_ERROR("Exception while loading Sana diffusion models: %s\n", e.what());
++                mModules.clear();
++                runtime_manager_.reset();
++                return false;
++            }
++            catch (...)
++            {
++                MNN_ERROR("Unknown exception while loading Sana diffusion models\n");
++                mModules.clear();
++                runtime_manager_.reset();
++                return false;
++            }
+         }
+ 
+         // VAE Decoder: 将latent解码为图像
+@@ -152,11 +207,32 @@ namespace MNN
+         {
+             AUTOTIME;
+ 
++            if (!valid_varp(latent) || mModules.size() <= 3 || mModules[3] == nullptr)
++            {
++                MNN_ERROR("Error: VAE decoder input or module is invalid\n");
++                return nullptr;
++            }
++
+             // 反归一化latent (scaling_factor = 0.41407)
+             latent = latent / _Const(0.41407f);
++            if (!valid_varp(latent))
++            {
++                MNN_ERROR("Error: failed to normalize VAE decoder input\n");
++                return nullptr;
++            }
+ 
+             auto outputs = mModules[3]->onForward({latent});
++            if (outputs.empty() || !valid_varp(outputs[0]))
++            {
++                MNN_ERROR("Error: VAE decoder forward failed\n");
++                return nullptr;
++            }
+             auto output = _Convert(outputs[0], NCHW);
++            if (!valid_varp(output))
++            {
++                MNN_ERROR("Error: VAE decoder output conversion failed\n");
++                return nullptr;
++            }
+ 
+             // 后处理：归一化到[0,1]并转换为uint8图像
+             auto image = output;
+@@ -205,6 +281,11 @@ namespace MNN
+             }
+ 
+             auto input_var = _Input({1, 3, 512, 512}, NCHW, halide_type_of<float>());
++            if (!valid_varp(input_var))
++            {
++                MNN_ERROR("Error: failed to create VAE encoder input\n");
++                return nullptr;
++            }
+             auto image_ptr = image->readMap<void>();
+             auto input_ptr = input_var->writeMap<void>();
+ 
+@@ -224,9 +305,19 @@ namespace MNN
+             }
+ 
+             auto latent_dist = _Convert(outputs[0], NCHW);
++            if (!valid_varp(latent_dist))
++            {
++                MNN_ERROR("Error: VAE encoder output conversion failed\n");
++                return nullptr;
++            }
+ 
+             // 归一化latent (scaling_factor = 0.41407)
+             auto ref_latents = latent_dist * _Const(0.41407f);
++            if (!valid_varp(ref_latents))
++            {
++                MNN_ERROR("Error: failed to scale VAE encoder latents\n");
++                return nullptr;
++            }
+             return ref_latents;
+         }
+ 
+@@ -236,13 +327,30 @@ namespace MNN
+         {
+             VARP image = imread(imagePath);
+ 
++            if (!valid_varp(image) || image->getInfo() == nullptr || image->getInfo()->dim.size() < 2)
++            {
++                MNN_ERROR("Error: failed to load input image from %s\n", imagePath.c_str());
++                return nullptr;
++            }
++
+             auto info = image->getInfo();
+             orig_height = info->dim[0];
+             orig_width = info->dim[1];
+ 
++            if (orig_width <= 0 || orig_height <= 0)
++            {
++                MNN_ERROR("Error: input image has invalid dimensions %dx%d\n", orig_width, orig_height);
++                return nullptr;
++            }
++
+             MNN_PRINT("Original image size: %dx%d\n", orig_width, orig_height);
+ 
+             image = cvtColor(image, COLOR_BGR2RGB);
++            if (!valid_varp(image))
++            {
++                MNN_ERROR("Error: failed to convert input image color format\n");
++                return nullptr;
++            }
+ 
+             float aspect_ratio = (float)std::max(orig_width, orig_height) / (float)std::min(orig_width, orig_height);
+ 
+@@ -264,6 +372,11 @@ namespace MNN
+                 std::vector<int> paddings = {pad_top, pad_bottom, pad_left, pad_right, 0, 0};
+                 auto paddings_var = _Const(paddings.data(), {3, 2}, NCHW, halide_type_of<int>());
+                 image = _Pad(image, paddings_var, CONSTANT);
++                if (!valid_varp(image))
++                {
++                    MNN_ERROR("Error: failed to pad input image\n");
++                    return nullptr;
++                }
+             }
+             else
+             {
+@@ -272,6 +385,11 @@ namespace MNN
+ 
+             // Resize到512x512
+             image = resize(image, Size(512, 512), 0, 0, INTER_LINEAR, -1, {0, 0, 0}, {1, 1, 1});
++            if (!valid_varp(image))
++            {
++                MNN_ERROR("Error: failed to resize input image\n");
++                return nullptr;
++            }
+ 
+             // 归一化到[-1, 1]
+             image = _Cast(image, halide_type_of<float>());
+@@ -281,12 +399,23 @@ namespace MNN
+             // HWC -> NCHW
+             image = _Transpose(image, {2, 0, 1});
+             image = _Unsqueeze(image, {0});
++            if (!valid_varp(image))
++            {
++                MNN_ERROR("Error: failed to prepare VAE encoder image tensor\n");
++                return nullptr;
++            }
+ 
+             return image;
+         }
+ 
+     bool SanaDiffusion::run(const std::string prompt, const std::string imagePath, int iterNum, int randomSeed, std::function<void(int)> progressCallback) {
+-        return true;
++        (void)prompt;
++        (void)imagePath;
++        (void)iterNum;
++        (void)randomSeed;
++        (void)progressCallback;
++        MNN_ERROR("SanaDiffusion::run(prompt, imagePath, ...) is unsupported; use the embedding overload\n");
++        return false;
+     }
+         // 核心推理流程
+         // 输入：LLM特征(来自Qwen3-0.6B) -> Connector -> Projector -> DiT去噪 -> VAE解码 -> 输出图像
+@@ -304,6 +433,18 @@ namespace MNN
+         {
+             AUTOTIME;
+ 
++            if (!valid_varp(input_embeds))
++            {
++                MNN_ERROR("Error: Sana input embeddings are null\n");
++                return false;
++            }
++            if (mModules.size() < 5 || mModules[0] == nullptr || mModules[1] == nullptr ||
++                mModules[2] == nullptr || mModules[3] == nullptr)
++            {
++                MNN_ERROR("Error: Sana diffusion modules are not loaded\n");
++                return false;
++            }
++
+             // 验证分辨率（必须是32的倍数，因为VAE scale factor是32）
+             if (width % 32 != 0 || height % 32 != 0)
+             {
+@@ -339,6 +480,12 @@ namespace MNN
+                 // 对于img2img，需要将输入图像resize到目标分辨率
+                 VARP pixel_values = load_and_process_image(inputImagePath, orig_width, orig_height, pad_left, pad_top);
+ 
++                if (!valid_varp(pixel_values))
++                {
++                    MNN_ERROR("Error: failed to preprocess input image\n");
++                    return false;
++                }
++
+                 // TODO: 如果输入图像尺寸与目标尺寸不同，需要resize
+                 // 当前实现假设输入图像会被resize到目标分辨率
+ 
+@@ -353,7 +500,13 @@ namespace MNN
+ 
+                 if (mMemoryMode != 1)
+                 {
+-                    ((MNN::Tensor *)(ref_latents->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
++                    auto tensor = ref_latents->getTensor();
++                    if (tensor == nullptr)
++                    {
++                        MNN_ERROR("Error: VAE encoder latent tensor is unavailable\n");
++                        return false;
++                    }
++                    ((MNN::Tensor *)tensor)->wait(Tensor::MAP_TENSOR_READ, true);
+                     // 只有当mModules[4]不为空时才reset
+                     if (mModules[4] != nullptr)
+                     {
+@@ -373,27 +526,54 @@ namespace MNN
+             // Connector: 初步转换LLM特征
+             MNN_PRINT("Running Connector...\n");
+             auto connector_res = mModules[0]->onForward({llm_out});
++            if (connector_res.empty() || !valid_varp(connector_res[0]))
++            {
++                MNN_ERROR("Error: Connector forward failed\n");
++                return false;
++            }
+             auto connector_out = connector_res[0];
+ 
+             if (mMemoryMode != 1)
+             {
+-                ((MNN::Tensor *)(connector_out->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
++                auto tensor = connector_out->getTensor();
++                if (tensor == nullptr)
++                {
++                    MNN_ERROR("Error: Connector output tensor is unavailable\n");
++                    return false;
++                }
++                ((MNN::Tensor *)tensor)->wait(Tensor::MAP_TENSOR_READ, true);
+                 mModules[0].reset();
+             }
+ 
+             // Projector: 投影到Diffusion特征空间
+             MNN_PRINT("Running Projector...\n");
+             auto projector_res = mModules[1]->onForward({connector_out});
++            if (projector_res.empty() || !valid_varp(projector_res[0]))
++            {
++                MNN_ERROR("Error: Projector forward failed\n");
++                return false;
++            }
+             auto prompt_embeds = projector_res[0];
+ 
+             if (mMemoryMode != 1)
+             {
+-                ((MNN::Tensor *)(prompt_embeds->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
++                auto tensor = prompt_embeds->getTensor();
++                if (tensor == nullptr)
++                {
++                    MNN_ERROR("Error: Projector output tensor is unavailable\n");
++                    return false;
++                }
++                ((MNN::Tensor *)tensor)->wait(Tensor::MAP_TENSOR_READ, true);
+                 mModules[1].reset();
+             }
+ 
+             // ========== 步骤3: 处理CFG（Classifier-Free Guidance） ==========
+             auto prompt_info = prompt_embeds->getInfo();
++            if (prompt_info == nullptr || prompt_info->dim.size() < 2 || prompt_info->dim[0] <= 0 || prompt_info->dim[1] <= 0)
++            {
++                MNN_ERROR("Error: Projector returned invalid prompt embeddings\n");
++                return false;
++            }
+             int batch_size = 1;
+             if (prompt_info && prompt_info->dim.size() > 0)
+             {
+@@ -419,11 +599,21 @@ namespace MNN
+                 // Reorder embeddings for CFG: [Neg, Pos]
+                 // Input order from LLM is [Pos, Neg], we need to swap
+                 auto split_res = _Split(prompt_embeds, {2}, 0);
++                if (split_res.size() < 2 || !valid_varp(split_res[0]) || !valid_varp(split_res[1]))
++                {
++                    MNN_ERROR("Error: failed to split prompt embeddings for CFG\n");
++                    return false;
++                }
+                 auto prompt_embeds_pos = split_res[0]; // First is positive
+                 auto prompt_embeds_neg = split_res[1]; // Second is negative
+ 
+                 // Reorder: [Neg, Pos]
+                 prompt_embeds = _Concat({prompt_embeds_neg, prompt_embeds_pos}, 0);
++                if (!valid_varp(prompt_embeds))
++                {
++                    MNN_ERROR("Error: failed to reorder prompt embeddings for CFG\n");
++                    return false;
++                }
+             }
+             else
+             {
+@@ -431,6 +621,11 @@ namespace MNN
+                 {
+                     MNN_PRINT("Warning: batch_size=2 but use_cfg=false, using only first prompt.\n");
+                     auto split_res = _Split(prompt_embeds, {2}, 0);
++                    if (split_res.empty() || !valid_varp(split_res[0]))
++                    {
++                        MNN_ERROR("Error: failed to select prompt embedding batch\n");
++                        return false;
++                    }
+                     prompt_embeds = split_res[0]; // Use only positive prompt
+                     batch_size = 1;
+                     seq_len = prompt_embeds->getInfo()->dim[1];
+@@ -456,12 +651,23 @@ namespace MNN
+                 noise[i] = normal(rng);
+ 
+             VARP latents = _Input({1, latent_channels, latent_h, latent_w}, NCHW, halide_type_of<float>());
+-            memcpy(latents->writeMap<float>(), noise.data(), noise.size() * sizeof(float));
++            auto latents_ptr = latents->writeMap<float>();
++            if (latents_ptr == nullptr)
++            {
++                MNN_ERROR("Error: failed to allocate Sana latent input\n");
++                return false;
++            }
++            memcpy(latents_ptr, noise.data(), noise.size() * sizeof(float));
+ 
+             // CFG模式需要批处理latents
+             if (use_cfg)
+             {
+                 latents = _Concat({latents, latents}, 0); // [2, 32, 16, 16]
++                if (!valid_varp(latents))
++                {
++                    MNN_ERROR("Error: failed to batch Sana latents for CFG\n");
++                    return false;
++                }
+                 MNN_PRINT("Batched latents for CFG: [2, %d, %d, %d]\n", latent_channels, latent_h, latent_w);
+             }
+ 
+@@ -479,6 +685,11 @@ namespace MNN
+                 if (use_cfg)
+                 {
+                     ref_latents_batched = _Concat({ref_latents, ref_latents}, 0); // [2, 32, 16, 16]
++                    if (!valid_varp(ref_latents_batched))
++                    {
++                        MNN_ERROR("Error: failed to batch Sana reference latents for CFG\n");
++                        return false;
++                    }
+                     MNN_PRINT("Batched ref_latents for CFG: [2, %d, %d, %d]\n", latent_channels, latent_h, latent_w);
+                 }
+                 else
+@@ -504,6 +715,11 @@ namespace MNN
+             // ========== 步骤5: 生成时间步序列 ==========
+             // 使用Flow Matching调度器（蒸馏加速的关键）
+             int num_inference_steps = iterNum;
++            if (num_inference_steps <= 1)
++            {
++                MNN_PRINT("Warning: Sana steps must be at least 2 for the product path; using one safe denoising step for %d\n", iterNum);
++                num_inference_steps = 1;
++            }
+             std::vector<double> timesteps;
+             std::vector<double> sigmas;
+ 
+@@ -512,7 +728,9 @@ namespace MNN
+             {
+                 double start = 1.0;
+                 double end = 1.0 / 1000.0;
+-                double alpha = start + i * (end - start) / (double)(num_inference_steps - 1);
++                double alpha = num_inference_steps == 1
++                    ? end
++                    : start + i * (end - start) / (double)(num_inference_steps - 1);
+                 double sigma = 1.0 - alpha;
+ 
+                 // Flow shift: 调整噪声分布，加速收敛
+@@ -535,8 +753,19 @@ namespace MNN
+             // Attention mask：根据batch_size调整
+             int mask_batch = use_cfg ? 2 : 1;
+             VARP encoder_attention_mask = _Input({mask_batch, seq_len}, NCHW, halide_type_of<float>());
+-            std::fill(encoder_attention_mask->writeMap<float>(),
+-                      encoder_attention_mask->writeMap<float>() + mask_batch * seq_len, 1.0f);
++            if (!valid_varp(encoder_attention_mask))
++            {
++                MNN_ERROR("Error: failed to allocate Sana attention mask\n");
++                return false;
++            }
++            auto attention_mask_ptr = encoder_attention_mask->writeMap<float>();
++            if (attention_mask_ptr == nullptr)
++            {
++                MNN_ERROR("Error: failed to allocate Sana attention mask\n");
++                return false;
++            }
++            std::fill(attention_mask_ptr,
++                      attention_mask_ptr + mask_batch * seq_len, 1.0f);
+ 
+             for (int i = 0; i < num_inference_steps; ++i)
+             {
+@@ -548,7 +777,17 @@ namespace MNN
+ 
+                 // Timestep：根据batch_size调整
+                 VARP timestep_var = _Input({mask_batch}, NCHW, halide_type_of<float>());
++                if (!valid_varp(timestep_var))
++                {
++                    MNN_ERROR("Error: failed to create Sana timestep input at step %d\n", i + 1);
++                    return false;
++                }
+                 auto t_ptr = timestep_var->writeMap<float>();
++                if (t_ptr == nullptr)
++                {
++                    MNN_ERROR("Error: failed to allocate Sana timestep input at step %d\n", i + 1);
++                    return false;
++                }
+                 for (int b = 0; b < mask_batch; ++b)
+                 {
+                     t_ptr[b] = (float)t;
+@@ -571,6 +810,11 @@ namespace MNN
+                 }
+ 
+                 auto noise_pred = _Convert(res[0], NCHW);
++                if (!valid_varp(noise_pred))
++                {
++                    MNN_ERROR("Error: Transformer output conversion failed at step %d\n", i + 1);
++                    return false;
++                }
+ 
+                 // 应用CFG（Classifier-Free Guidance）
+                 VARP noise_pred_guided;
+@@ -578,6 +822,11 @@ namespace MNN
+                 {
+                     // 分离条件和无条件预测
+                     auto split_res = _Split(noise_pred, {2}, 0);
++                    if (split_res.size() < 2 || !valid_varp(split_res[0]) || !valid_varp(split_res[1]))
++                    {
++                        MNN_ERROR("Error: failed to split transformer output for CFG at step %d\n", i + 1);
++                        return false;
++                    }
+                     auto noise_pred_uncond = split_res[0]; // 负样本（无条件）
+                     auto noise_pred_text = split_res[1];   // 正样本（有条件）
+ 
+@@ -588,6 +837,11 @@ namespace MNN
+                 {
+                     noise_pred_guided = noise_pred;
+                 }
++                if (!valid_varp(noise_pred_guided))
++                {
++                    MNN_ERROR("Error: failed to build guided noise prediction at step %d\n", i + 1);
++                    return false;
++                }
+ 
+                 // Euler采样步骤
+                 float dt;
+@@ -601,19 +855,45 @@ namespace MNN
+                 }
+ 
+                 sample = sample + noise_pred_guided * _Const(dt / 1000.0f);
++                if (!valid_varp(sample))
++                {
++                    MNN_ERROR("Error: failed to update Sana latent at step %d\n", i + 1);
++                    return false;
++                }
+ 
+                 // CFG模式：保持batch维度一致
+                 if (use_cfg)
+                 {
+                     auto sample_split = _Split(sample, {2}, 0);
++                    if (sample_split.empty() || !valid_varp(sample_split[0]))
++                    {
++                        MNN_ERROR("Error: failed to restore CFG latent batch at step %d\n", i + 1);
++                        return false;
++                    }
+                     sample = sample_split[0];
+                     sample = _Concat({sample, sample}, 0);
++                    if (!valid_varp(sample))
++                    {
++                        MNN_ERROR("Error: failed to duplicate CFG latent batch at step %d\n", i + 1);
++                        return false;
++                    }
++                }
++
++                if (progressCallback)
++                {
++                    progressCallback(5 + (i + 1) * 90 / num_inference_steps);
+                 }
+             }
+ 
+             if (mMemoryMode != 1)
+             {
+-                ((MNN::Tensor *)(sample->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
++                auto tensor = sample->getTensor();
++                if (tensor == nullptr)
++                {
++                    MNN_ERROR("Error: final Sana latent tensor is unavailable\n");
++                    return false;
++                }
++                ((MNN::Tensor *)tensor)->wait(Tensor::MAP_TENSOR_READ, true);
+                 mModules[2].reset();
+             }
+ 
+@@ -622,6 +902,11 @@ namespace MNN
+             if (use_cfg)
+             {
+                 auto final_split = _Split(sample, {2}, 0);
++                if (final_split.empty() || !valid_varp(final_split[0]))
++                {
++                    MNN_ERROR("Error: failed to extract final CFG latent\n");
++                    return false;
++                }
+                 final_latents = final_split[0];
+             }
+             else
+@@ -629,10 +914,24 @@ namespace MNN
+                 final_latents = sample;
+             }
+ 
++            if (!valid_varp(final_latents))
++            {
++                MNN_ERROR("Error: final Sana latents are invalid\n");
++                return false;
++            }
++
+             // ========== 步骤7: VAE解码 ==========
+             MNN_PRINT("Running VAE Decoder...\n");
+             VARP image = vae_decoder(final_latents);
+-            image.fix(VARP::CONSTANT);
++            if (!valid_varp(image) || !image.fix(VARP::CONSTANT))
++            {
++                MNN_ERROR("Error: VAE decoder did not produce a valid image\n");
++                if (mMemoryMode != 1)
++                {
++                    mModules[3].reset();
++                }
++                return false;
++            }
+ 
+             // ========== 步骤8: 保存结果 ==========
+             bool success = imwrite(outputImagePath, image);
+@@ -640,13 +939,17 @@ namespace MNN
+             {
+                 MNN_PRINT("SUCCESS! Generated image saved to %s\n", outputImagePath.c_str());
+             }
++            else
++            {
++                MNN_ERROR("Error: failed to save generated image to %s\n", outputImagePath.c_str());
++            }
+ 
+             if (mMemoryMode != 1)
+             {
+                 mModules[3].reset();
+             }
+ 
+-            return true;
++            return success;
+         }
+ 
+     } // namespace DIFFUSION
+diff --git a/transformers/llm/engine/src/llm.cpp b/transformers/llm/engine/src/llm.cpp
+index 2f163a4906932667b501cd830bab0b6355b41478..ea838a0ebecfa8e7d7d75f3e154d7c0758e0e8f5 100644
+--- a/transformers/llm/engine/src/llm.cpp
++++ b/transformers/llm/engine/src/llm.cpp
+@@ -10,6 +10,7 @@
+ #include <iostream>
+ #include <sstream>
+ #include <iomanip>
++#include <array>
+ #include <unordered_set>
+ 
+ #include "prompt_cache_utils.hpp"
+@@ -123,8 +124,30 @@ void Llm::setChatTemplate() {
+ }
+ 
+ bool Llm::set_config(const std::string& content) {
+-    mConfig->config_.merge(ujson::json::parse(content));
++    auto update = ujson::json::parse(content);
++    const bool sampler_changed = update.is_object() && [&update]() {
++        static const std::array<const char*, 23> sampler_keys = {
++            "sampler_type", "mixed_samplers", "temperature", "topK", "top_k",
++            "topP", "top_p", "minP", "min_p", "tfsZ", "typical",
++            "penalty", "repetition_penalty", "presence_penalty", "frequency_penalty",
++            "penalty_window", "penalty_sampler", "ngram", "ngram_factor", "max_penalty",
++            "logit_bias", "banned_tokens", "seed"
++        };
++        for (const auto* key : sampler_keys) {
++            if (update.contains(key)) return true;
++        }
++        return false;
++    }();
++    mConfig->config_.merge(update);
+     setChatTemplate();
++    // The sampler is constructed during load(), so merely merging per-request
++    // generation settings used to leave temperature/top-k/top-p/seed stuck at
++    // the values from the initial model config. Recreate it only when a
++    // sampler-affecting setting changes; calls made before load() have no
++    // sampler instance yet and continue to configure the normal load path.
++    if (sampler_changed && mSampler != nullptr) {
++        mSampler.reset(Sampler::createSampler(mContext, mConfig));
++    }
+     mAsync = mConfig->config_.value("async", true);
+     mGenerateParam->timeout_ms = mConfig->timeout_ms();
+     mValidBlockSize.clear();
+@@ -855,6 +878,12 @@ bool Llm::stoped() {
+ void Llm::generate(int max_token) {
+     CHECK_LLM_RUNNING(mContext);
+     MNN::Express::ExecutorScope s(mExecutor);
++    if (mGenerateParam == nullptr || mGenerateParam->outputs.empty() ||
++        mGenerateParam->outputs[0] == nullptr) {
++        MNN_ERROR("MNN-LLM decode blocked: prefill produced no valid logits.\n");
++        mContext->status = LlmStatus::INTERNAL_ERROR;
++        return;
++    }
+     if (is_stop(mContext->current_token)) {
+         return;
+     }
+@@ -906,6 +935,7 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
+         if (0 == mBlockSize || input_ids.size() <= mBlockSize) {
+             auto hidden_states = embedding(input_ids);
+             if(hidden_states == nullptr) {
++                mContext->status = LlmStatus::INTERNAL_ERROR;
+                 return {};
+             }
+             auto result = generate(hidden_states, max_tokens);
+@@ -923,9 +953,13 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
+             std::vector<int> chunk_ids(input_ids.begin() + start, input_ids.begin() + end);
+             auto input_embeds = embedding(chunk_ids);
+             if(input_embeds == nullptr) {
++                mContext->status = LlmStatus::INTERNAL_ERROR;
+                 return {};
+             }
+             generate(input_embeds, 0);
++            if (mContext->status == LlmStatus::INTERNAL_ERROR) {
++                return {};
++            }
+         }
+         completePrefixWrite();
+     } else {
+@@ -969,11 +1003,18 @@ void Llm::response(const MultimodalPrompt& multimodal_input,
+ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) {
+     CHECK_LLM_RUNNING_RET(mContext, std::vector<int>());
+     MNN::Express::ExecutorScope s(mExecutor);
+-    
++    const auto inputInfo = input_embeds == nullptr ? nullptr : input_embeds->getInfo();
++    if (inputInfo == nullptr || mSeqLenIndex < 0 ||
++        mSeqLenIndex >= static_cast<int>(inputInfo->dim.size()) ||
++        inputInfo->dim[mSeqLenIndex] <= 0) {
++        MNN_ERROR("MNN-LLM prefill blocked: input embedding is null or has an invalid sequence dimension.\n");
++        mContext->status = LlmStatus::INTERNAL_ERROR;
++        return {};
++    }
+     if (max_tokens < 0) {
+         max_tokens = mConfig->max_new_tokens();
+     }
+-    int seqLen = input_embeds->getInfo()->dim[mSeqLenIndex];
++    int seqLen = inputInfo->dim[mSeqLenIndex];
+     mContext->prompt_len = seqLen;
+ 
+     // Disable record queue during prefill for better performance
+@@ -982,7 +1023,9 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens)
+     }
+     Timer _t;
+     auto outputs = forwardVec(input_embeds);
+-    if(mGenerateParam->outputs.size() < 1) {
++    if (outputs.empty() || mGenerateParam == nullptr || mGenerateParam->outputs.empty() ||
++        mGenerateParam->outputs[0] == nullptr) {
++        MNN_ERROR("MNN-LLM prefill failed: forward produced no valid logits.\n");
+         mContext->status = LlmStatus::INTERNAL_ERROR;
+         return {};
+     }
+@@ -1617,4 +1660,4 @@ bool Llm::is_stop(int token_id) {
+     return stop;
+ }
+ } // namespace Transformer
+-} // namespace MNN
+\ No newline at end of file
++} // namespace MNN
+diff --git a/transformers/llm/engine/src/omni.cpp b/transformers/llm/engine/src/omni.cpp
+index 5adba3f90e6973dfbdf4570f2cfc76268d07020e..953fffbe4d218631f01f22456dcd3d796f8bf72b 100644
+--- a/transformers/llm/engine/src/omni.cpp
++++ b/transformers/llm/engine/src/omni.cpp
+@@ -11,6 +11,8 @@
+ #endif
+ #include <regex>
+ #include <algorithm>
++#include <cstdint>
++#include <cstring>
+ #include <random>
+ #include <MNN/AutoTime.hpp>
+ #include <MNN/expr/ExecutorScope.hpp>
+@@ -20,6 +22,7 @@
+ #include "tokenizer/tokenizer.hpp"
+ #include "diskembedding.hpp"
+ #include "sampler.hpp"
++#include "omni_embedding_contract.hpp"
+ #ifdef LLM_SUPPORT_HTTP_RESOURCE
+ #include "httplib.h"
+ #endif
+@@ -169,6 +172,137 @@ bool Omni::load() {
+ }
+ 
+ #ifdef LLM_SUPPORT_VISION
++// Vision modules can own a different executor than the language model. Copying
++// their evaluated output into an INPUT variable while the LLM executor is
++// current prevents lazy expression graphs from crossing that boundary.
++static VARP materializeForLlmExecutor(VARP embedding) {
++    if (embedding == nullptr) {
++        return nullptr;
++    }
++    const auto info = embedding->getInfo();
++    if (info == nullptr || info->size <= 0 || info->type.bytes() <= 0) {
++        return nullptr;
++    }
++    size_t byteCount = 0;
++    if (!OmniEmbeddingContract::checkedMultiply(info->size, static_cast<size_t>(info->type.bytes()), byteCount)) {
++        return nullptr;
++    }
++    const auto source = embedding->readMap<uint8_t>();
++    if (source == nullptr) {
++        return nullptr;
++    }
++    auto copied = _Input(info->dim, info->order, info->type);
++    if (copied == nullptr) {
++        return nullptr;
++    }
++    auto destination = copied->writeMap<uint8_t>();
++    if (destination == nullptr) {
++        return nullptr;
++    }
++    ::memcpy(destination, source, byteCount);
++    return copied;
++}
++
++static bool sameTensorType(const halide_type_t& lhs, const halide_type_t& rhs) {
++    return lhs.code == rhs.code && lhs.bits == rhs.bits && lhs.lanes == rhs.lanes;
++}
++
++// Embedding segments may originate from different runtime managers. Building a
++// lazy _Concat expression links those graphs and can dereference an expired
++// Expr input. Concatenate already-materialized host buffers instead so the LLM
++// receives one self-contained INPUT variable.
++static VARP concatMaterializedEmbeddings(const std::vector<VARP>& segments,
++                                         int axis,
++                                         int expectedHiddenSize,
++                                         const char* diagnosticLabel) {
++    std::vector<std::vector<int>> shapes;
++    std::vector<const Variable::Info*> infos;
++    shapes.reserve(segments.size());
++    infos.reserve(segments.size());
++    for (size_t index = 0; index < segments.size(); ++index) {
++        if (segments[index] == nullptr) {
++            MNN_PRINT("Omni embedding contract failed label=%s reason=null_segment index=%zu\n", diagnosticLabel, index);
++            return nullptr;
++        }
++        const auto info = segments[index]->getInfo();
++        if (info == nullptr || info->size == 0 || info->type.bytes() <= 0) {
++            MNN_PRINT("Omni embedding contract failed label=%s reason=invalid_info index=%zu\n", diagnosticLabel, index);
++            return nullptr;
++        }
++        if (!infos.empty() &&
++            (info->order != infos.front()->order || !sameTensorType(info->type, infos.front()->type))) {
++            MNN_PRINT("Omni embedding contract failed label=%s reason=type_or_order_mismatch index=%zu\n",
++                      diagnosticLabel, index);
++            return nullptr;
++        }
++        infos.push_back(info);
++        shapes.push_back(info->dim);
++    }
++
++    OmniEmbeddingContract::ConcatPlan plan;
++    std::string error;
++    if (!OmniEmbeddingContract::buildConcatPlan(shapes, axis, expectedHiddenSize, plan, error)) {
++        MNN_PRINT("Omni embedding contract failed label=%s reason=%s\n", diagnosticLabel, error.c_str());
++        return nullptr;
++    }
++    const size_t elementBytes = static_cast<size_t>(infos.front()->type.bytes());
++    size_t outputBytes = 0;
++    if (!OmniEmbeddingContract::checkedMultiply(plan.outputElements, elementBytes, outputBytes)) {
++        MNN_PRINT("Omni embedding contract failed label=%s reason=output_byte_overflow\n", diagnosticLabel);
++        return nullptr;
++    }
++
++    std::vector<const uint8_t*> sources;
++    sources.reserve(segments.size());
++    for (size_t index = 0; index < segments.size(); ++index) {
++        size_t expectedElements = 0;
++        size_t outerAndAxis = 0;
++        if (!OmniEmbeddingContract::checkedMultiply(plan.outerCount, plan.axisLengths[index], outerAndAxis) ||
++            !OmniEmbeddingContract::checkedMultiply(outerAndAxis, plan.innerCount, expectedElements) ||
++            expectedElements != infos[index]->size) {
++            MNN_PRINT("Omni embedding contract failed label=%s reason=logical_size_mismatch index=%zu expected=%zu actual=%zu\n",
++                      diagnosticLabel, index, expectedElements, infos[index]->size);
++            return nullptr;
++        }
++        const auto source = segments[index]->readMap<uint8_t>();
++        if (source == nullptr) {
++            MNN_PRINT("Omni embedding contract failed label=%s reason=read_map_failed index=%zu\n", diagnosticLabel, index);
++            return nullptr;
++        }
++        sources.push_back(source);
++    }
++
++    auto output = _Input(plan.outputShape, infos.front()->order, infos.front()->type);
++    if (output == nullptr) {
++        MNN_PRINT("Omni embedding contract failed label=%s reason=output_alloc_failed\n", diagnosticLabel);
++        return nullptr;
++    }
++    auto destination = output->writeMap<uint8_t>();
++    if (destination == nullptr) {
++        MNN_PRINT("Omni embedding contract failed label=%s reason=write_map_failed\n", diagnosticLabel);
++        return nullptr;
++    }
++    size_t outputAxis = static_cast<size_t>(plan.outputShape[plan.axis]);
++    for (size_t outer = 0; outer < plan.outerCount; ++outer) {
++        size_t axisOffset = 0;
++        for (size_t index = 0; index < segments.size(); ++index) {
++            size_t chunkElements = 0;
++            if (!OmniEmbeddingContract::checkedMultiply(plan.axisLengths[index], plan.innerCount, chunkElements)) {
++                return nullptr;
++            }
++            const size_t sourceElementOffset = outer * chunkElements;
++            const size_t destinationElementOffset = (outer * outputAxis + axisOffset) * plan.innerCount;
++            ::memcpy(destination + destinationElementOffset * elementBytes,
++                     sources[index] + sourceElementOffset * elementBytes,
++                     chunkElements * elementBytes);
++            axisOffset += plan.axisLengths[index];
++        }
++    }
++    MNN_ASSERT(output->getInfo() != nullptr && output->getInfo()->size == plan.outputElements);
++    (void)outputBytes;
++    return output;
++}
++
+ std::vector<int> Omni::defaultVisionProcess(VARP image) {
+     MNN::Express::ExecutorScope s(mExecutor);
+     mVisionHeight = UP_DIV(mVisionHeight, mVisionSizeUnit) * mVisionSizeUnit;
+@@ -178,7 +312,11 @@ std::vector<int> Omni::defaultVisionProcess(VARP image) {
+                             mVisionMean, mVisionNorm);
+     image = Express::_Unsqueeze(image, {0});
+     image = Express::_Convert(image, NC4HW4);
+-    auto imageEmbedding = mVisionModule->forward(image);
++    auto imageEmbedding = materializeForLlmExecutor(mVisionModule->forward(image));
++    if (imageEmbedding == nullptr) {
++        MNN_PRINT("Omni failed to materialize default vision embedding\n");
++        return {};
++    }
+ 
+     mVisionEmbeddings.push_back(imageEmbedding);
+     int visionLen = imageEmbedding->getInfo()->dim[0];
+@@ -281,7 +419,15 @@ std::vector<int> Omni::gemma4VisionProcess(VARP image) {
+ 
+     // Run vision model (outputs fixed max_soft_tokens)
+     auto outputs = mVisionModule->onForward({image, posIds});
+-    auto imageEmbedding = outputs[0];
++    if (outputs.empty()) {
++        MNN_PRINT("Omni Gemma vision module returned no embeddings\n");
++        return {};
++    }
++    auto imageEmbedding = materializeForLlmExecutor(outputs[0]);
++    if (imageEmbedding == nullptr) {
++        MNN_PRINT("Omni failed to materialize Gemma vision embedding\n");
++        return {};
++    }
+ 
+     // Squeeze batch dim: [1, max_soft_tokens, hidden] -> [max_soft_tokens, hidden]
+     imageEmbedding = Express::_Squeeze(imageEmbedding, {0});
+@@ -313,18 +459,39 @@ std::vector<int> Omni::gemma4VisionProcess(VARP image) {
+ std::vector<int> Omni::qwen2VisionProcess(VARP image) {
+     AUTOTIME;
+     MNN::Express::ExecutorScope s(mExecutor);
+-    const auto inputNames = mVisionModule->getInfo()->inputNames;
++    const auto moduleInfo = mVisionModule == nullptr ? nullptr : mVisionModule->getInfo();
++    if (moduleInfo == nullptr || moduleInfo->inputNames.empty()) {
++        MNN_PRINT("Omni Qwen vision contract failed reason=missing_module_info_or_inputs\n");
++        return {};
++    }
++    const auto inputNames = moduleInfo->inputNames;
+     bool hasWindowIndex = inputNames.size() == 4 && inputNames[3] == "window_index";
+-    bool isQwen3VL = inputNames.size() == 5 && inputNames[3] == "idx_tensor";
++    bool isQwen3VL = OmniEmbeddingContract::isQwen35VisionInputContract(inputNames);
++    const std::string modelType = mConfig->config_.value("model_type", std::string());
++    const bool isQwen35 = modelType == "qwen3_5" || modelType == "qwen3_5_moe";
++    if (isQwen35 && !isQwen3VL) {
++        MNN_PRINT("Omni Qwen3.5 vision contract failed reason=input_names_mismatch converter=%s\n",
++                  moduleInfo->version.c_str());
++        return {};
++    }
+     const int patch_size = isQwen3VL ? 16 : 14;
+     constexpr int temporal_patch_size = 2;
+     constexpr int merge_size = 2;
+     const int align_size = patch_size * merge_size;
++    const int sourceHeight = mVisionHeight;
++    const int sourceWidth = mVisionWidth;
+     // Qwen2-VL / Qwen2.5-VL / Qwen3-VL
+     mVisionHeight = round(mVisionHeight / (float)align_size) * align_size;
+     mVisionWidth = round(mVisionWidth / (float)align_size) * align_size;
++    const auto resizeFilter = OmniEmbeddingContract::qwenVisionResizeFilter(
++            mConfig->config_.value("mca_qwen_vision_resize_filter", std::string("linear")));
++    const auto interpolationCornerMode = OmniEmbeddingContract::qwenVisionInterpolationCornerMode(
++            mConfig->config_.value("mca_qwen_vision_interpolation_mode", std::string("mnnchat_legacy")));
++    const auto cvResizeFilter = resizeFilter == OmniEmbeddingContract::VisionResizeFilter::Bicubic
++            ? MNN::CV::INTER_CUBIC
++            : MNN::CV::INTER_LINEAR;
+     image = MNN::CV::resize(image, {mVisionWidth, mVisionHeight}, 0, 0,
+-                            MNN::CV::INTER_LINEAR, MNN::CV::COLOR_BGR2RGB,
++                            cvResizeFilter, MNN::CV::COLOR_BGR2RGB,
+                             mVisionMean, mVisionNorm);
+     image = Express::_Unsqueeze(image, {0});
+     image = Express::_Convert(image, NCHW);
+@@ -337,6 +504,11 @@ std::vector<int> Omni::qwen2VisionProcess(VARP image) {
+     int grid_t = temporal / temporal_patch_size;
+     int grid_h = height / patch_size;
+     int grid_w = width / patch_size;
++    if (grid_t <= 0 || grid_h <= 1 || grid_w <= 1 || grid_h % merge_size != 0 || grid_w % merge_size != 0) {
++        MNN_PRINT("Omni Qwen vision contract failed reason=invalid_grid source=%dx%d resized=%dx%d grid=%dx%dx%d\n",
++                  sourceHeight, sourceWidth, mVisionHeight, mVisionWidth, grid_t, grid_h, grid_w);
++        return {};
++    }
+     addPositionIds(grid_t, grid_h / merge_size, grid_w / merge_size);
+     // build patches
+     patches = Express::_Reshape(patches, {
+@@ -351,6 +523,13 @@ std::vector<int> Omni::qwen2VisionProcess(VARP image) {
+         channel * temporal_patch_size * patch_size * patch_size
+     });
+     const int seq_len = grid_t * grid_h * grid_w;
++    if (isQwen35) {
++        MNN_PRINT("Omni Qwen3.5 vision preprocess source=%dx%d resized=%dx%d resize=%s patch=%d temporal_patch=%d merge=%d grid=%dx%dx%d patches=%d vision_tokens=%d\n",
++                  sourceHeight, sourceWidth, mVisionHeight, mVisionWidth,
++                  OmniEmbeddingContract::visionResizeFilterName(resizeFilter), patch_size,
++                  temporal_patch_size, merge_size, grid_t, grid_h, grid_w, seq_len,
++                  seq_len / (merge_size * merge_size));
++    }
+     // build position_ids
+     const int wblock_size = merge_size * merge_size;
+     const int hblock_size = wblock_size * grid_w / merge_size;
+@@ -366,6 +545,11 @@ std::vector<int> Omni::qwen2VisionProcess(VARP image) {
+             wpos_ptr[index] = j;
+         }
+     }
++    if (isQwen35) {
++        MNN_PRINT("Omni Qwen3.5 vision position_contract shape=[2,%d] h_range=0..%d w_range=0..%d first=[%d,%d] last=[%d,%d]\n",
++                  seq_len, grid_h - 1, grid_w - 1, hpos_ptr[0], wpos_ptr[0],
++                  hpos_ptr[seq_len - 1], wpos_ptr[seq_len - 1]);
++    }
+     VARP attention_mask, window_index;
+     VARPS moduleInputs= {patches, position_ids};
+     if (hasWindowIndex) {
+@@ -435,6 +619,10 @@ std::vector<int> Omni::qwen2VisionProcess(VARP image) {
+     if (isQwen3VL) {
+         // Qwne3-VL
+         const int num_grid = mConfig->config_.value("num_grid_per_side", 1);
++        if (num_grid <= 1) {
++            MNN_PRINT("Omni Qwen vision contract failed reason=invalid_num_grid_per_side actual=%d\n", num_grid);
++            return {};
++        }
+         const int num_patches = grid_h * grid_w;
+         std::vector<float> h_idxs(grid_h);
+         std::vector<float> w_idxs(grid_w);
+@@ -460,13 +648,32 @@ std::vector<int> Omni::qwen2VisionProcess(VARP image) {
+                 idx_ptr[0 * num_patches + idx] = h_idx_floor * num_grid + w_idx_floor;
+                 idx_ptr[1 * num_patches + idx] = h_idx_floor * num_grid + w_idx_ceil;
+                 idx_ptr[2 * num_patches + idx] = h_idx_ceil * num_grid + w_idx_floor;
+-                idx_ptr[3 * num_patches + idx] = h_idx_ceil * num_grid + w_idx_ceil;
++                idx_ptr[3 * num_patches + idx] = h_idx_ceil * num_grid +
++                        (interpolationCornerMode == OmniEmbeddingContract::VisionInterpolationCornerMode::Corrected
++                                ? w_idx_ceil
++                                : w_idx_floor);
+                 weight_ptr[0 * num_patches + idx] = (1.0f - dh) * (1.0f - dw);
+                 weight_ptr[1 * num_patches + idx] = (1.0f - dh) * dw;
+                 weight_ptr[2 * num_patches + idx] = dh * (1.0f - dw);
+                 weight_ptr[3 * num_patches + idx] = dh * dw;
+             }
+         }
++        if (isQwen35) {
++            OmniEmbeddingContract::InterpolationContractStats interpolationStats;
++            std::string interpolationError;
++            const int positionEmbeddingCount = num_grid * num_grid;
++            if (!OmniEmbeddingContract::validateInterpolationContract(
++                    idx_ptr, weight_ptr, static_cast<size_t>(num_patches), positionEmbeddingCount,
++                    interpolationStats, interpolationError)) {
++                MNN_PRINT("Omni Qwen3.5 vision contract failed reason=%s\n", interpolationError.c_str());
++                return {};
++            }
++            MNN_PRINT("Omni Qwen3.5 vision interpolation_contract mode=%s patches=%d position_embeddings=%d idx_range=%d..%d weight_range=%.9g..%.9g max_weight_sum_error=%.9g\n",
++                      OmniEmbeddingContract::visionInterpolationCornerModeName(interpolationCornerMode),
++                      num_patches, positionEmbeddingCount, interpolationStats.minimumIndex,
++                      interpolationStats.maximumIndex, interpolationStats.minimumWeight,
++                      interpolationStats.maximumWeight, interpolationStats.maximumWeightSumError);
++        }
+         idx_tensor = Express::_Reshape(idx_tensor, {4, grid_t, grid_h / merge_size, merge_size, grid_w / merge_size, merge_size});
+         idx_tensor = Express::_Permute(idx_tensor, {0, 1, 2, 4, 3, 5});
+         idx_tensor = Express::_Reshape(idx_tensor, {4, -1});
+@@ -476,6 +683,27 @@ std::vector<int> Omni::qwen2VisionProcess(VARP image) {
+         moduleInputs.push_back(idx_tensor);
+         moduleInputs.push_back(weight_tensor);
+     }
++    if (isQwen35) {
++        const auto patchInfo = patches == nullptr ? nullptr : patches->getInfo();
++        if (patchInfo == nullptr || !sameTensorType(patchInfo->type, halide_type_of<float>())) {
++            MNN_PRINT("Omni Qwen3.5 vision contract failed reason=patch_stats_unsupported_dtype\n");
++            return {};
++        }
++        const auto patchPtr = patches == nullptr ? nullptr : patches->readMap<float>();
++        OmniEmbeddingContract::FloatTensorStats patchStats;
++        std::string patchStatsError;
++        if (patchInfo == nullptr || !OmniEmbeddingContract::summarizeFloatTensor(
++                patchPtr, patchInfo == nullptr ? 0 : static_cast<size_t>(patchInfo->size),
++                patchStats, patchStatsError)) {
++            MNN_PRINT("Omni Qwen3.5 vision contract failed reason=patch_stats_%s\n", patchStatsError.c_str());
++            return {};
++        }
++        MNN_PRINT("Omni Qwen3.5 vision tensor_stats name=patches shape=[%d,%d] count=%zu finite=%zu nan=%zu inf=%zu zero=%zu min=%.9g max=%.9g mean=%.9g rms=%.9g\n",
++                  seq_len, channel * temporal_patch_size * patch_size * patch_size,
++                  patchStats.elementCount, patchStats.finiteCount, patchStats.nanCount,
++                  patchStats.infinityCount, patchStats.zeroCount, patchStats.minimum,
++                  patchStats.maximum, patchStats.mean, patchStats.rootMeanSquare);
++    }
+ #ifdef DEBUG_IMAGE
+     patches.fix(MNN::Express::VARP::CONSTANT);
+     patches->setName("patches");
+@@ -486,9 +714,142 @@ std::vector<int> Omni::qwen2VisionProcess(VARP image) {
+     MNN::Express::Variable::save({patches, position_ids, attention_mask}, "input.mnn");
+ #endif
+     auto outputs = mVisionModule->onForward(moduleInputs);
+-    auto imageEmbedding = outputs[0];
++    if (outputs.empty()) {
++        MNN_PRINT("Omni Qwen vision module returned no embeddings\n");
++        return {};
++    }
++    if (isQwen35 && outputs.size() != 1) {
++        MNN_PRINT("Omni Qwen3.5 vision contract failed reason=unexpected_output_count expected=1 actual=%zu converter=%s\n",
++                  outputs.size(), moduleInfo->version.c_str());
++        return {};
++    }
++    if (!isQwen35 && isQwen3VL && mConfig->has_deepstack() && outputs.size() != 2) {
++        MNN_PRINT("Omni Qwen3-VL vision contract failed reason=missing_deepstack_output actual=%zu converter=%s\n",
++                  outputs.size(), moduleInfo->version.c_str());
++        return {};
++    }
++    if (outputs.size() > 2) {
++        MNN_PRINT("Omni Qwen vision contract failed reason=too_many_outputs actual=%zu\n", outputs.size());
++        return {};
++    }
++    const int expectedVisionLen = seq_len / (merge_size * merge_size);
++    OmniEmbeddingContract::FloatTensorStats rawEmbeddingStats;
++    std::string rawEmbeddingSignalError;
++    bool rawEmbeddingSignalValid = true;
++    if (isQwen35) {
++        const auto rawImageInfo = outputs[0] == nullptr ? nullptr : outputs[0]->getInfo();
++        if (rawImageInfo == nullptr || rawImageInfo->dim.size() != 3 ||
++            rawImageInfo->dim[0] != expectedVisionLen || rawImageInfo->dim[1] != 1 ||
++            rawImageInfo->dim[2] != mConfig->hidden_size()) {
++            MNN_PRINT("Omni Qwen3.5 vision contract failed reason=raw_image_embedding_shape expected=[%d,1,%d]\n",
++                      expectedVisionLen, mConfig->hidden_size());
++            return {};
++        }
++        if (!sameTensorType(rawImageInfo->type, halide_type_of<float>())) {
++            MNN_PRINT("Omni Qwen3.5 vision contract failed reason=raw_image_embedding_stats_unsupported_dtype\n");
++            return {};
++        }
++        const auto rawEmbeddingPtr = outputs[0]->readMap<float>();
++        std::string rawEmbeddingStatsError;
++        if (!OmniEmbeddingContract::summarizeFloatTensor(
++                rawEmbeddingPtr, static_cast<size_t>(rawImageInfo->size),
++                rawEmbeddingStats, rawEmbeddingStatsError)) {
++            MNN_PRINT("Omni Qwen3.5 vision contract failed reason=raw_image_embedding_stats_%s\n",
++                      rawEmbeddingStatsError.c_str());
++            return {};
++        }
++        rawEmbeddingSignalValid = OmniEmbeddingContract::validateFloatTensorSignal(
++                rawEmbeddingStats, rawEmbeddingSignalError);
++        MNN_PRINT("Omni Qwen3.5 vision tensor_stats name=image_embedding_raw shape=[%d,1,%d] count=%zu finite=%zu nan=%zu inf=%zu zero=%zu min=%.9g max=%.9g mean=%.9g rms=%.9g hash=%016llx signal_valid=%d\n",
++                  expectedVisionLen, mConfig->hidden_size(), rawEmbeddingStats.elementCount,
++                  rawEmbeddingStats.finiteCount, rawEmbeddingStats.nanCount,
++                  rawEmbeddingStats.infinityCount, rawEmbeddingStats.zeroCount,
++                  rawEmbeddingStats.minimum, rawEmbeddingStats.maximum,
++                  rawEmbeddingStats.mean, rawEmbeddingStats.rootMeanSquare,
++                  static_cast<unsigned long long>(rawEmbeddingStats.fingerprint64),
++                  rawEmbeddingSignalValid ? 1 : 0);
++    }
++    auto imageEmbedding = materializeForLlmExecutor(outputs[0]);
++    if (imageEmbedding == nullptr) {
++        MNN_PRINT("Omni failed to materialize Qwen vision embedding\n");
++        return {};
++    }
++    const auto imageInfo = imageEmbedding->getInfo();
++    if (imageInfo == nullptr || imageInfo->dim.size() != 3 || imageInfo->dim[0] != expectedVisionLen ||
++        imageInfo->dim[1] != 1 || imageInfo->dim[2] != mConfig->hidden_size()) {
++        MNN_PRINT("Omni Qwen vision contract failed reason=image_embedding_shape expected=[%d,1,%d]\n",
++                  expectedVisionLen, mConfig->hidden_size());
++        return {};
++    }
++    if (isQwen35) {
++        if (!sameTensorType(imageInfo->type, halide_type_of<float>())) {
++            MNN_PRINT("Omni Qwen3.5 vision contract failed reason=image_embedding_stats_unsupported_dtype\n");
++            return {};
++        }
++        const auto embeddingPtr = imageEmbedding->readMap<float>();
++        OmniEmbeddingContract::FloatTensorStats embeddingStats;
++        std::string embeddingStatsError;
++        if (!OmniEmbeddingContract::summarizeFloatTensor(
++                embeddingPtr, static_cast<size_t>(imageInfo->size), embeddingStats, embeddingStatsError)) {
++            MNN_PRINT("Omni Qwen3.5 vision contract failed reason=image_embedding_stats_%s\n",
++                      embeddingStatsError.c_str());
++            return {};
++        }
++        std::string materializedSignalError;
++        const bool materializedSignalValid = OmniEmbeddingContract::validateFloatTensorSignal(
++                embeddingStats, materializedSignalError);
++        MNN_PRINT("Omni Qwen3.5 vision tensor_stats name=image_embedding shape=[%d,1,%d] stage=materialized count=%zu finite=%zu nan=%zu inf=%zu zero=%zu min=%.9g max=%.9g mean=%.9g rms=%.9g hash=%016llx signal_valid=%d\n",
++                  expectedVisionLen, mConfig->hidden_size(), embeddingStats.elementCount,
++                  embeddingStats.finiteCount, embeddingStats.nanCount, embeddingStats.infinityCount,
++                  embeddingStats.zeroCount, embeddingStats.minimum, embeddingStats.maximum,
++                  embeddingStats.mean, embeddingStats.rootMeanSquare,
++                  static_cast<unsigned long long>(embeddingStats.fingerprint64),
++                  materializedSignalValid ? 1 : 0);
++        std::string materializedMatchError;
++        const bool materializedMatchesRaw = OmniEmbeddingContract::validateMaterializedFloatTensorMatch(
++                rawEmbeddingStats, embeddingStats, materializedMatchError);
++        MNN_PRINT("Omni Qwen3.5 vision materialization_contract raw_hash=%016llx materialized_hash=%016llx match=%d\n",
++                  static_cast<unsigned long long>(rawEmbeddingStats.fingerprint64),
++                  static_cast<unsigned long long>(embeddingStats.fingerprint64),
++                  materializedMatchesRaw ? 1 : 0);
++        if (!rawEmbeddingSignalValid) {
++            MNN_PRINT("Omni Qwen3.5 vision contract failed reason=raw_image_embedding_%s\n",
++                      rawEmbeddingSignalError.c_str());
++            return {};
++        }
++        if (!materializedSignalValid) {
++            MNN_PRINT("Omni Qwen3.5 vision contract failed reason=materialized_image_embedding_%s\n",
++                      materializedSignalError.c_str());
++            return {};
++        }
++        if (!materializedMatchesRaw) {
++            MNN_PRINT("Omni Qwen3.5 vision contract failed reason=%s\n",
++                      materializedMatchError.c_str());
++            return {};
++        }
++    }
+     if (outputs.size() == 2) {
+-        mDeepStackEmbeddings.push_back(outputs[1]);
++        auto deepStackEmbedding = materializeForLlmExecutor(outputs[1]);
++        if (deepStackEmbedding == nullptr) {
++            MNN_PRINT("Omni failed to materialize Qwen deep-stack embedding\n");
++            return {};
++        }
++        const auto deepStackInfo = deepStackEmbedding->getInfo();
++        if (deepStackInfo == nullptr || deepStackInfo->dim.size() != 3 || deepStackInfo->dim[0] != 3 ||
++            deepStackInfo->dim[1] != expectedVisionLen || deepStackInfo->dim[2] != mConfig->hidden_size()) {
++            MNN_PRINT("Omni Qwen vision contract failed reason=deepstack_shape expected=[3,%d,%d]\n",
++                      expectedVisionLen, mConfig->hidden_size());
++            return {};
++        }
++        mDeepStackEmbeddings.push_back(deepStackEmbedding);
++    } else if (isQwen35 && mConfig->has_deepstack()) {
++        // Official Qwen3.5 declares no deep-stack visual layers, while MNN 3.4
++        // exports retain a legacy deepstack_embeds input in the language graph.
++        // Keep that graph input exactly zero and make the legacy boundary
++        // explicit; never synthesize visual deep-stack features that the bundle
++        // does not contain.
++        MNN_PRINT("Omni Qwen3.5 vision deepstack_contract official_visual_layers=0 visual_outputs=1 llm_input=legacy_zero converter=%s\n",
++                  moduleInfo->version.c_str());
+     }
+ #ifdef DEBUG_IMAGE
+     imageEmbedding->setName("image_embeds");
+@@ -512,7 +873,11 @@ std::vector<int> Omni::smolvlmVisionProcess(VARP image) {
+     globalImage = Express::_Unsqueeze(globalImage, {0});
+     globalImage = Express::_Convert(globalImage, NCHW);
+     // Forward global image first to determine visionLen dynamically
+-    auto globalEmbedding = mVisionModule->forward(globalImage);
++    auto globalEmbedding = materializeForLlmExecutor(mVisionModule->forward(globalImage));
++    if (globalEmbedding == nullptr) {
++        MNN_PRINT("Omni failed to materialize SmolVLM global embedding\n");
++        return {};
++    }
+     auto globalDims = globalEmbedding->getInfo()->dim;
+     // globalEmbedding shape: (1, visionLen, 1, hidden) or (visionLen, 1, hidden)
+     int visionLen = (globalDims.size() >= 3) ? globalDims[globalDims.size() - 3] : globalDims[0];
+@@ -554,7 +919,11 @@ std::vector<int> Omni::smolvlmVisionProcess(VARP image) {
+             mVisionSizeUnit,
+             mVisionSizeUnit
+         });
+-        auto imageEmbedding = mVisionModule->forward(patches);
++        auto imageEmbedding = materializeForLlmExecutor(mVisionModule->forward(patches));
++        if (imageEmbedding == nullptr) {
++            MNN_PRINT("Omni failed to materialize SmolVLM patch embedding\n");
++            return {};
++        }
+         auto embeddingDims = imageEmbedding->getInfo()->dim;
+         for (int i = 0; i < embeddingDims[0]; i++) {
+             auto embedding = _Squeeze(_GatherV2(imageEmbedding, _var<int>({i}, {1}), _var<int>({0}, {1})), {0});
+@@ -748,7 +1117,16 @@ std::vector<int> Omni::minicpmVisionProcess(VARP image) {
+     // tgt size
+     auto tgt_sizes = Express::_Input({B, 2}, NCHW, halide_type_of<int>());
+     ::memcpy(tgt_sizes->writeMap<int>(), tgtSize.data(), tgtSize.size() * sizeof(int));
+-    auto imageEmbedding = mVisionModule->onForward({pixel_values, position_ids, attention_mask, tgt_sizes})[0];
++    auto outputs = mVisionModule->onForward({pixel_values, position_ids, attention_mask, tgt_sizes});
++    if (outputs.empty()) {
++        MNN_PRINT("Omni MiniCPM vision module returned no embeddings\n");
++        return {};
++    }
++    auto imageEmbedding = materializeForLlmExecutor(outputs[0]);
++    if (imageEmbedding == nullptr) {
++        MNN_PRINT("Omni failed to materialize MiniCPM vision embedding\n");
++        return {};
++    }
+     for (int i = 0; i < B; i++) {
+         auto embedding = _Permute(_GatherV2(imageEmbedding, _var<int>({i}, {1}), _var<int>({0}, {1})), {1, 0, 2});
+         mVisionEmbeddings.push_back(embedding);
+@@ -800,7 +1178,12 @@ std::vector<int> Omni::visionProcess(VARP image) {
+     }
+     Timer _t;
+     std::vector<int> imgIds;
+-    const auto inputNames = mVisionModule->getInfo()->inputNames;
++    const auto moduleInfo = mVisionModule == nullptr ? nullptr : mVisionModule->getInfo();
++    if (moduleInfo == nullptr || moduleInfo->inputNames.empty()) {
++        MNN_PRINT("Omni vision contract failed reason=missing_module_info_or_inputs\n");
++        return {};
++    }
++    const auto inputNames = moduleInfo->inputNames;
+     if (inputNames.size() >= 3 && inputNames[0] == "patches") {
+         imgIds = qwen2VisionProcess(image);
+     } else if (inputNames[0] == "pixel_values") {
+@@ -814,6 +1197,13 @@ std::vector<int> Omni::visionProcess(VARP image) {
+     } else {
+         imgIds = defaultVisionProcess(image);
+     }
++    if (imgIds.empty()) {
++        MNN_PRINT("Omni vision processing failed reason=empty_image_tokens\n");
++        mVisionEmbeddings.clear();
++        mDeepStackEmbeddings.clear();
++        mContext->status = LlmStatus::INTERNAL_ERROR;
++        return {};
++    }
+     bool async = mConfig->config_.value("async", true);
+     if (!async) {
+         for (auto& embd : mVisionEmbeddings) {
+@@ -1130,9 +1520,45 @@ VARP Omni::embedding(const std::vector<int>& input_ids) {
+     std::vector<int> cur_txt_ids;
+     bool inVision = false, inAudio = false;
+     bool hasDeepStack = !mDeepStackEmbeddings.empty();
++    auto clearMultimodalEmbeddings = [&]() {
++        mVisionEmbeddings.clear();
++        mAudioEmbeddings.clear();
++        mDeepStackEmbeddings.clear();
++    };
++    std::vector<int> expectedVisionLengths;
++    expectedVisionLengths.reserve(mVisionEmbeddings.size());
++    for (size_t index = 0; index < mVisionEmbeddings.size(); ++index) {
++        const auto info = mVisionEmbeddings[index] == nullptr ? nullptr : mVisionEmbeddings[index]->getInfo();
++        if (info == nullptr || info->dim.empty() || info->dim[0] <= 0 ||
++            info->dim.back() != mConfig->hidden_size()) {
++            MNN_PRINT("Omni embedding contract failed reason=invalid_vision_embedding index=%zu\n", index);
++            clearMultimodalEmbeddings();
++            return nullptr;
++        }
++        expectedVisionLengths.push_back(info->dim[0]);
++    }
++    std::string visionRunError;
++    if (!OmniEmbeddingContract::validateVisionPadRuns(input_ids, mVisionPad, expectedVisionLengths, visionRunError)) {
++        MNN_PRINT("Omni embedding contract failed reason=%s\n", visionRunError.c_str());
++        clearMultimodalEmbeddings();
++        return nullptr;
++    }
++    if (hasDeepStack && mDeepStackEmbeddings.size() != mVisionEmbeddings.size()) {
++        MNN_PRINT("Omni embedding contract failed reason=deepstack_vision_count_mismatch vision=%zu deepstack=%zu\n",
++                  mVisionEmbeddings.size(), mDeepStackEmbeddings.size());
++        clearMultimodalEmbeddings();
++        return nullptr;
++    }
+     std::vector<int> deepstackShape;
+     if (hasDeepStack) {
+-        deepstackShape = mDeepStackEmbeddings[0]->getInfo()->dim; // N, seqlen, hddien_size
++        const auto deepStackInfo = mDeepStackEmbeddings[0] == nullptr ? nullptr : mDeepStackEmbeddings[0]->getInfo();
++        if (deepStackInfo == nullptr || deepStackInfo->dim.size() != 3 || deepStackInfo->dim[0] != 3 ||
++            deepStackInfo->dim[2] != mConfig->hidden_size()) {
++            MNN_PRINT("Omni embedding contract failed reason=invalid_deepstack_shape\n");
++            clearMultimodalEmbeddings();
++            return nullptr;
++        }
++        deepstackShape = deepStackInfo->dim; // N, seqlen, hidden_size
+     }
+     auto deepstacksTxt = [&]() {
+         if (hasDeepStack) {
+@@ -1153,6 +1579,13 @@ VARP Omni::embedding(const std::vector<int>& input_ids) {
+         } else if (id == mAudioPad) {
+             auto txt_embedding = Llm::embedding(cur_txt_ids);
+             if(txt_embedding == nullptr) {
++                clearMultimodalEmbeddings();
++                return nullptr;
++            }
++            if (audio_idx >= static_cast<int>(mAudioEmbeddings.size())) {
++                MNN_PRINT("Omni embedding contract failed reason=audio_index_out_of_range index=%d size=%zu\n",
++                          audio_idx, mAudioEmbeddings.size());
++                clearMultimodalEmbeddings();
+                 return nullptr;
+             }
+             auto mul_embedding = mAudioEmbeddings[audio_idx++];
+@@ -1171,6 +1604,13 @@ VARP Omni::embedding(const std::vector<int>& input_ids) {
+         } else if (id == mVisionPad) {
+             auto txt_embedding = Llm::embedding(cur_txt_ids);
+             if(txt_embedding == nullptr) {
++                clearMultimodalEmbeddings();
++                return nullptr;
++            }
++            if (vision_idx >= static_cast<int>(mVisionEmbeddings.size())) {
++                MNN_PRINT("Omni embedding contract failed reason=vision_index_out_of_range index=%d size=%zu\n",
++                          vision_idx, mVisionEmbeddings.size());
++                clearMultimodalEmbeddings();
+                 return nullptr;
+             }
+             if (hasDeepStack) {
+@@ -1188,27 +1628,59 @@ VARP Omni::embedding(const std::vector<int>& input_ids) {
+     if (!cur_txt_ids.empty()) {
+         auto txt_embedding = Llm::embedding(cur_txt_ids);
+         if(txt_embedding == nullptr) {
++            clearMultimodalEmbeddings();
+             return nullptr;
+         }
+         embeddings.push_back(txt_embedding);
+         deepstacksTxt();
+     }
+-    auto mergedEmbed = Express::_Concat(embeddings, 0);
+-    // Deep copy: materialize the lazy concat so vision data persists after clear
+-    {
+-        auto cInfo = mergedEmbed->getInfo();
+-        auto cPtr = mergedEmbed->readMap<float>();
+-        auto freshEmbed = _Input(cInfo->dim, cInfo->order);
+-        ::memcpy(freshEmbed->writeMap<float>(), cPtr, cInfo->size * sizeof(float));
+-        mergedEmbed = freshEmbed;
+-    }
+-    mVisionEmbeddings.clear();
+-    mAudioEmbeddings.clear();
+-    mDeepStackEmbeddings.clear();
++    auto mergedEmbed = concatMaterializedEmbeddings(embeddings, 0, mConfig->hidden_size(), "multimodal_prefill");
++    if (mergedEmbed == nullptr) {
++        clearMultimodalEmbeddings();
++        return nullptr;
++    }
++    const auto mergedInfo = mergedEmbed->getInfo();
++    if (mergedInfo == nullptr || mSeqLenIndex < 0 ||
++        mSeqLenIndex >= static_cast<int>(mergedInfo->dim.size()) ||
++        mergedInfo->dim[mSeqLenIndex] != static_cast<int>(input_ids.size())) {
++        MNN_PRINT("Omni embedding contract failed reason=merged_sequence_mismatch expected=%zu actual=%d\n",
++                  input_ids.size(),
++                  mergedInfo == nullptr || mSeqLenIndex < 0 ||
++                          mSeqLenIndex >= static_cast<int>(mergedInfo->dim.size())
++                          ? -1 : mergedInfo->dim[mSeqLenIndex]);
++        clearMultimodalEmbeddings();
++        return nullptr;
++    }
+     // Qwen3-VL
+     if (hasDeepStack) {
+-        mExtraArgs[0] = Express::_Concat(deepstacks, 1);
+-    }
++        auto mergedDeepStack = concatMaterializedEmbeddings(deepstacks, 1, mConfig->hidden_size(), "deepstack_prefill");
++        if (mergedDeepStack == nullptr || mExtraArgs.empty()) {
++            clearMultimodalEmbeddings();
++            return nullptr;
++        }
++        mExtraArgs[0] = mergedDeepStack;
++    } else if (mConfig->has_deepstack() && !mExtraArgs.empty()) {
++        const std::string modelType = mConfig->config_.value("model_type", std::string());
++        const bool isQwen35 = modelType == "qwen3_5" || modelType == "qwen3_5_moe";
++        if (!isQwen35) {
++            MNN_PRINT("Omni embedding contract failed reason=missing_required_deepstack model_type=%s\n",
++                      modelType.c_str());
++            clearMultimodalEmbeddings();
++            return nullptr;
++        }
++        // Qwen3.5 MNN 3.4 visual exports have one output and the official
++        // Qwen3.5 vision config has no deep-stack visual layers. Preserve the
++        // exact MNNChat placeholder contract initialized by load() and used by
++        // single-token decode. Expanding it to [3, seq, hidden] injects a
++        // fabricated full-sequence tensor and changes multimodal semantics.
++        const auto placeholderShape =
++                OmniEmbeddingContract::qwen35LegacyDeepstackPlaceholderShape();
++        mExtraArgs[0] = Express::_Fill(
++                _var<int>(placeholderShape, {static_cast<int>(placeholderShape.size())}),
++                _Scalar<float>(0.0));
++        MNN_PRINT("Omni Qwen3.5 vision deepstack_input mode=legacy_zero shape=[3,1,1] elements=3\n");
++    }
++    clearMultimodalEmbeddings();
+     return mergedEmbed;
+ }
+ 
+@@ -1458,14 +1930,62 @@ void Omni::responseInterleaved(const std::vector<int>& input_ids, std::ostream*
+ void Omni::response(const std::vector<int>& input_ids, std::ostream* os, const char* end_with, int max_new_tokens) {
+     MNN::Express::ExecutorScope s(mExecutor);
+     if (!end_with) { end_with = "\n"; }
++    // tokenizer_encode() executes visual processors before response(). Preserve
++    // a fail-closed processor error across generate_init(), which otherwise
++    // resets every loaded context back to RUNNING and would silently turn a
++    // failed image request into text-only generation.
++    const bool multimodalInputPreparationFailed =
++            mContext->status == LlmStatus::INTERNAL_ERROR;
+     generate_init(os, end_with);
++    if (multimodalInputPreparationFailed) {
++        MNN_PRINT("Omni multimodal response blocked reason=input_preparation_failed\n");
++        mContext->status = LlmStatus::INTERNAL_ERROR;
++        return;
++    }
+     if (mTalker) {
+         mTalker->generate_init();
+     }
+     CHECK_LLM_RUNNING(mContext);
+     if (!mTalker || !mTalker->mInterleaved) {
+         MNN::Timer thinker_timer;
+-        generate(input_ids, max_new_tokens);
++        const bool hasPendingMultimodalEmbedding =
++                !mVisionEmbeddings.empty() || !mAudioEmbeddings.empty();
++        if (!hasPendingMultimodalEmbedding) {
++            generate(input_ids, max_new_tokens);
++        } else {
++            OmniEmbeddingContract::MultimodalPrefillPlan plan;
++            std::string error;
++            const int configuredChunkSize = mConfig->config_.value("chunk", 0);
++            if (!OmniEmbeddingContract::buildMultimodalPrefillPlan(
++                    input_ids,
++                    mVisionPad,
++                    mAudioPad,
++                    mVisionEmbeddings.size(),
++                    mAudioEmbeddings.size(),
++                    configuredChunkSize,
++                    plan,
++                    error)) {
++                MNN_PRINT("Omni multimodal prefill contract failed reason=%s\n", error.c_str());
++                mVisionEmbeddings.clear();
++                mAudioEmbeddings.clear();
++                mDeepStackEmbeddings.clear();
++                mContext->status = LlmStatus::INTERNAL_ERROR;
++                return;
++            }
++            MNN_PRINT("Omni multimodal prefill mode=atomic tokens=%zu configured_chunk=%d effective_chunk=%d chunk_would_split_media=%d\n",
++                      plan.tokenCount,
++                      configuredChunkSize,
++                      plan.effectiveChunkSize,
++                      plan.configuredChunkWouldSplitMediaRun ? 1 : 0);
++            // Preserve the upstream token-id generation path. It owns history
++            // insertion, embedding timing, prefix/KV bookkeeping, and prefill
++            // lifecycle. MCA only enforces an atomic block size around it;
++            // embedding() performs the media and merged-sequence contracts.
++            const int previousBlockSize = mBlockSize;
++            mBlockSize = plan.effectiveChunkSize;
++            generate(input_ids, max_new_tokens);
++            mBlockSize = previousBlockSize;
++        }
+         mThinkerElapsedUs = thinker_timer.durationInUs();
+     } else {
+         responseInterleaved(input_ids, os, end_with, max_new_tokens);
+diff --git a/transformers/llm/engine/src/omni_embedding_contract.hpp b/transformers/llm/engine/src/omni_embedding_contract.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..7233070e9bc89954b11fa0f9c5a5827ac6dd1f6a
+--- /dev/null
++++ b/transformers/llm/engine/src/omni_embedding_contract.hpp
+@@ -0,0 +1,463 @@
++#ifndef MNN_TRANSFORMER_OMNI_EMBEDDING_CONTRACT_HPP
++#define MNN_TRANSFORMER_OMNI_EMBEDDING_CONTRACT_HPP
++
++#include <cstddef>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++#include <string>
++#include <vector>
++
++namespace MNN {
++namespace Transformer {
++namespace OmniEmbeddingContract {
++
++struct ConcatPlan {
++    int axis = 0;
++    size_t outerCount = 0;
++    size_t innerCount = 0;
++    size_t outputElements = 0;
++    std::vector<int> outputShape;
++    std::vector<size_t> axisLengths;
++};
++
++struct MultimodalPrefillPlan {
++    bool atomic = false;
++    bool configuredChunkWouldSplitMediaRun = false;
++    int effectiveChunkSize = 0;
++    size_t tokenCount = 0;
++    size_t visionRunCount = 0;
++    size_t audioRunCount = 0;
++};
++
++enum class VisionResizeFilter {
++    Linear,
++    Bicubic,
++};
++
++enum class VisionInterpolationCornerMode {
++    MnnChatLegacy,
++    Corrected,
++};
++
++struct FloatTensorStats {
++    size_t elementCount = 0;
++    size_t finiteCount = 0;
++    size_t nanCount = 0;
++    size_t infinityCount = 0;
++    size_t zeroCount = 0;
++    float minimum = 0.0f;
++    float maximum = 0.0f;
++    double mean = 0.0;
++    double rootMeanSquare = 0.0;
++    uint64_t fingerprint64 = 14695981039346656037ULL;
++};
++
++struct InterpolationContractStats {
++    int minimumIndex = 0;
++    int maximumIndex = 0;
++    float minimumWeight = 0.0f;
++    float maximumWeight = 0.0f;
++    float maximumWeightSumError = 0.0f;
++};
++
++inline bool checkedMultiply(size_t lhs, size_t rhs, size_t& result) {
++    if (lhs != 0 && rhs > std::numeric_limits<size_t>::max() / lhs) {
++        return false;
++    }
++    result = lhs * rhs;
++    return true;
++}
++
++// MNNChat's shipping Qwen visual path uses INTER_LINEAR. Keep that as the
++// source-equivalent baseline and allow an explicit bicubic A/B override.
++inline VisionResizeFilter qwenVisionResizeFilter(const std::string& requestedFilter) {
++    return requestedFilter == "bicubic"
++            ? VisionResizeFilter::Bicubic
++            : VisionResizeFilter::Linear;
++}
++
++inline const char* visionResizeFilterName(VisionResizeFilter filter) {
++    return filter == VisionResizeFilter::Bicubic ? "bicubic" : "linear";
++}
++
++// MNNChat 0.8.2.2 duplicates the h_ceil/w_floor corner in slot 3. Preserve
++// that exact behavior for a hard source-equivalent baseline, while retaining
++// the mathematically corrected h_ceil/w_ceil layout as an explicit A/B mode.
++inline VisionInterpolationCornerMode qwenVisionInterpolationCornerMode(
++        const std::string& requestedMode) {
++    return requestedMode == "corrected"
++            ? VisionInterpolationCornerMode::Corrected
++            : VisionInterpolationCornerMode::MnnChatLegacy;
++}
++
++inline const char* visionInterpolationCornerModeName(VisionInterpolationCornerMode mode) {
++    return mode == VisionInterpolationCornerMode::Corrected
++            ? "corrected"
++            : "mnnchat_legacy";
++}
++
++inline std::vector<int> qwen35LegacyDeepstackPlaceholderShape() {
++    return {3, 1, 1};
++}
++
++inline bool summarizeFloatTensor(const float* values,
++                                 size_t elementCount,
++                                 FloatTensorStats& stats,
++                                 std::string& error) {
++    stats = {};
++    error.clear();
++    if (values == nullptr) {
++        error = "null_tensor_data";
++        return false;
++    }
++    if (elementCount == 0) {
++        error = "empty_tensor";
++        return false;
++    }
++    stats.elementCount = elementCount;
++    constexpr uint64_t kFnvPrime64 = 1099511628211ULL;
++    double sum = 0.0;
++    double squareSum = 0.0;
++    bool hasFiniteValue = false;
++    for (size_t index = 0; index < elementCount; ++index) {
++        const float value = values[index];
++        uint32_t bits = 0;
++        static_assert(sizeof(bits) == sizeof(value), "float fingerprint assumes 32-bit float");
++        ::memcpy(&bits, &value, sizeof(bits));
++        for (int shift = 0; shift < 32; shift += 8) {
++            stats.fingerprint64 ^= static_cast<uint8_t>((bits >> shift) & 0xffU);
++            stats.fingerprint64 *= kFnvPrime64;
++        }
++        if (std::isnan(value)) {
++            ++stats.nanCount;
++            continue;
++        }
++        if (std::isinf(value)) {
++            ++stats.infinityCount;
++            continue;
++        }
++        if (!hasFiniteValue) {
++            stats.minimum = value;
++            stats.maximum = value;
++            hasFiniteValue = true;
++        } else {
++            stats.minimum = value < stats.minimum ? value : stats.minimum;
++            stats.maximum = value > stats.maximum ? value : stats.maximum;
++        }
++        if (value == 0.0f) {
++            ++stats.zeroCount;
++        }
++        ++stats.finiteCount;
++        sum += static_cast<double>(value);
++        squareSum += static_cast<double>(value) * static_cast<double>(value);
++    }
++    if (!hasFiniteValue) {
++        error = "tensor_has_no_finite_values";
++        return false;
++    }
++    stats.mean = sum / static_cast<double>(stats.finiteCount);
++    stats.rootMeanSquare = std::sqrt(squareSum / static_cast<double>(stats.finiteCount));
++    return true;
++}
++
++inline bool validateFloatTensorSignal(const FloatTensorStats& stats, std::string& error) {
++    error.clear();
++    if (stats.elementCount == 0) {
++        error = "empty_tensor";
++        return false;
++    }
++    if (stats.finiteCount != stats.elementCount || stats.nanCount != 0 || stats.infinityCount != 0) {
++        error = "tensor_contains_non_finite_values";
++        return false;
++    }
++    if (stats.zeroCount == stats.elementCount) {
++        error = "tensor_all_zero";
++        return false;
++    }
++    if (!std::isfinite(stats.mean) || !std::isfinite(stats.rootMeanSquare) ||
++        stats.rootMeanSquare <= 0.0) {
++        error = "tensor_summary_not_finite";
++        return false;
++    }
++    return true;
++}
++
++inline bool validateMaterializedFloatTensorMatch(const FloatTensorStats& raw,
++                                                 const FloatTensorStats& materialized,
++                                                 std::string& error) {
++    error.clear();
++    if (raw.elementCount != materialized.elementCount) {
++        error = "materialized_tensor_element_count_mismatch";
++        return false;
++    }
++    if (raw.fingerprint64 != materialized.fingerprint64) {
++        error = "materialized_tensor_fingerprint_mismatch";
++        return false;
++    }
++    return true;
++}
++
++inline bool validateInterpolationContract(const int* indices,
++                                          const float* weights,
++                                          size_t patchCount,
++                                          int positionEmbeddingCount,
++                                          InterpolationContractStats& stats,
++                                          std::string& error) {
++    stats = {};
++    error.clear();
++    if (indices == nullptr || weights == nullptr) {
++        error = "null_interpolation_data";
++        return false;
++    }
++    if (patchCount == 0 || positionEmbeddingCount <= 0) {
++        error = "invalid_interpolation_shape";
++        return false;
++    }
++    stats.minimumIndex = std::numeric_limits<int>::max();
++    stats.maximumIndex = std::numeric_limits<int>::min();
++    stats.minimumWeight = std::numeric_limits<float>::max();
++    stats.maximumWeight = std::numeric_limits<float>::lowest();
++    for (size_t patch = 0; patch < patchCount; ++patch) {
++        float weightSum = 0.0f;
++        for (size_t corner = 0; corner < 4; ++corner) {
++            const size_t offset = corner * patchCount + patch;
++            const int positionIndex = indices[offset];
++            const float weight = weights[offset];
++            if (positionIndex < 0 || positionIndex >= positionEmbeddingCount) {
++                error = "interpolation_index_out_of_range_at_" + std::to_string(offset);
++                return false;
++            }
++            if (!std::isfinite(weight) || weight < 0.0f || weight > 1.0f) {
++                error = "interpolation_weight_out_of_range_at_" + std::to_string(offset);
++                return false;
++            }
++            stats.minimumIndex = positionIndex < stats.minimumIndex ? positionIndex : stats.minimumIndex;
++            stats.maximumIndex = positionIndex > stats.maximumIndex ? positionIndex : stats.maximumIndex;
++            stats.minimumWeight = weight < stats.minimumWeight ? weight : stats.minimumWeight;
++            stats.maximumWeight = weight > stats.maximumWeight ? weight : stats.maximumWeight;
++            weightSum += weight;
++        }
++        const float weightSumError = std::fabs(weightSum - 1.0f);
++        stats.maximumWeightSumError = weightSumError > stats.maximumWeightSumError
++                ? weightSumError
++                : stats.maximumWeightSumError;
++    }
++    if (stats.maximumWeightSumError > 1.0e-4f) {
++        error = "interpolation_weight_sum_mismatch";
++        return false;
++    }
++    return true;
++}
++
++inline bool buildConcatPlan(const std::vector<std::vector<int>>& shapes,
++                            int axis,
++                            int expectedHiddenSize,
++                            ConcatPlan& plan,
++                            std::string& error) {
++    plan = {};
++    error.clear();
++    if (shapes.empty()) {
++        error = "no_segments";
++        return false;
++    }
++    const size_t rank = shapes.front().size();
++    if (rank == 0) {
++        error = "rank_zero";
++        return false;
++    }
++    if (axis < 0) {
++        axis += static_cast<int>(rank);
++    }
++    if (axis < 0 || axis >= static_cast<int>(rank)) {
++        error = "axis_out_of_range";
++        return false;
++    }
++    plan.axis = axis;
++    plan.outputShape = shapes.front();
++    size_t outputAxis = 0;
++    for (size_t segmentIndex = 0; segmentIndex < shapes.size(); ++segmentIndex) {
++        const auto& shape = shapes[segmentIndex];
++        if (shape.size() != rank) {
++            error = "rank_mismatch_at_segment_" + std::to_string(segmentIndex);
++            return false;
++        }
++        if (expectedHiddenSize > 0 && shape.back() != expectedHiddenSize) {
++            error = "hidden_size_mismatch_at_segment_" + std::to_string(segmentIndex);
++            return false;
++        }
++        for (size_t dimension = 0; dimension < rank; ++dimension) {
++            if (shape[dimension] <= 0) {
++                error = "non_positive_dimension_at_segment_" + std::to_string(segmentIndex);
++                return false;
++            }
++            if (static_cast<int>(dimension) != axis && shape[dimension] != plan.outputShape[dimension]) {
++                error = "non_concat_dimension_mismatch_at_segment_" + std::to_string(segmentIndex);
++                return false;
++            }
++        }
++        const size_t axisLength = static_cast<size_t>(shape[axis]);
++        if (axisLength > std::numeric_limits<size_t>::max() - outputAxis) {
++            error = "concat_axis_overflow";
++            return false;
++        }
++        outputAxis += axisLength;
++        plan.axisLengths.push_back(axisLength);
++    }
++    if (outputAxis > static_cast<size_t>(std::numeric_limits<int>::max())) {
++        error = "concat_axis_exceeds_int";
++        return false;
++    }
++    plan.outputShape[axis] = static_cast<int>(outputAxis);
++
++    plan.outerCount = 1;
++    for (int dimension = 0; dimension < axis; ++dimension) {
++        if (!checkedMultiply(plan.outerCount, static_cast<size_t>(plan.outputShape[dimension]), plan.outerCount)) {
++            error = "outer_size_overflow";
++            return false;
++        }
++    }
++    plan.innerCount = 1;
++    for (size_t dimension = static_cast<size_t>(axis + 1); dimension < rank; ++dimension) {
++        if (!checkedMultiply(plan.innerCount, static_cast<size_t>(plan.outputShape[dimension]), plan.innerCount)) {
++            error = "inner_size_overflow";
++            return false;
++        }
++    }
++    size_t outerAndAxis = 0;
++    if (!checkedMultiply(plan.outerCount, outputAxis, outerAndAxis) ||
++        !checkedMultiply(outerAndAxis, plan.innerCount, plan.outputElements)) {
++        error = "output_size_overflow";
++        return false;
++    }
++    return true;
++}
++
++inline bool validateVisionPadRuns(const std::vector<int>& inputIds,
++                                  int visionPad,
++                                  const std::vector<int>& expectedLengths,
++                                  std::string& error) {
++    error.clear();
++    std::vector<int> actualLengths;
++    for (size_t index = 0; index < inputIds.size();) {
++        if (inputIds[index] != visionPad) {
++            ++index;
++            continue;
++        }
++        size_t end = index + 1;
++        while (end < inputIds.size() && inputIds[end] == visionPad) {
++            ++end;
++        }
++        actualLengths.push_back(static_cast<int>(end - index));
++        index = end;
++    }
++    if (actualLengths.size() != expectedLengths.size()) {
++        error = "vision_run_count_mismatch_expected_" + std::to_string(expectedLengths.size()) +
++                "_actual_" + std::to_string(actualLengths.size());
++        return false;
++    }
++    for (size_t index = 0; index < expectedLengths.size(); ++index) {
++        if (expectedLengths[index] <= 0 || actualLengths[index] != expectedLengths[index]) {
++            error = "vision_run_length_mismatch_at_" + std::to_string(index) +
++                    "_expected_" + std::to_string(expectedLengths[index]) +
++                    "_actual_" + std::to_string(actualLengths[index]);
++            return false;
++        }
++    }
++    return true;
++}
++
++inline size_t countPadRuns(const std::vector<int>& inputIds, int padToken) {
++    size_t runCount = 0;
++    for (size_t index = 0; index < inputIds.size();) {
++        if (inputIds[index] != padToken) {
++            ++index;
++            continue;
++        }
++        ++runCount;
++        do {
++            ++index;
++        } while (index < inputIds.size() && inputIds[index] == padToken);
++    }
++    return runCount;
++}
++
++inline bool chunkBoundarySplitsPadRun(const std::vector<int>& inputIds,
++                                      int padToken,
++                                      int chunkSize) {
++    if (chunkSize <= 0 || inputIds.size() <= static_cast<size_t>(chunkSize)) {
++        return false;
++    }
++    for (size_t boundary = static_cast<size_t>(chunkSize);
++         boundary < inputIds.size();
++         boundary += static_cast<size_t>(chunkSize)) {
++        if (inputIds[boundary - 1] == padToken && inputIds[boundary] == padToken) {
++            return true;
++        }
++    }
++    return false;
++}
++
++// Media embeddings are produced for a complete image/audio placeholder and are
++// not consumable a chunk at a time. Any request with pending media therefore
++// uses one atomic prefill. This preserves a one-to-one mapping between each
++// complete pad run and its materialized embedding even when the configured
++// language chunk size would otherwise split the run.
++inline bool buildMultimodalPrefillPlan(const std::vector<int>& inputIds,
++                                       int visionPad,
++                                       int audioPad,
++                                       size_t pendingVisionEmbeddings,
++                                       size_t pendingAudioEmbeddings,
++                                       int configuredChunkSize,
++                                       MultimodalPrefillPlan& plan,
++                                       std::string& error) {
++    plan = {};
++    error.clear();
++    plan.tokenCount = inputIds.size();
++    plan.effectiveChunkSize = configuredChunkSize;
++    if (pendingVisionEmbeddings == 0 && pendingAudioEmbeddings == 0) {
++        return true;
++    }
++    if (inputIds.empty()) {
++        error = "empty_multimodal_token_stream";
++        return false;
++    }
++    if (pendingVisionEmbeddings > 0) {
++        plan.visionRunCount = countPadRuns(inputIds, visionPad);
++        if (plan.visionRunCount != pendingVisionEmbeddings) {
++            error = "vision_run_count_mismatch_expected_" + std::to_string(pendingVisionEmbeddings) +
++                    "_actual_" + std::to_string(plan.visionRunCount);
++            return false;
++        }
++        plan.configuredChunkWouldSplitMediaRun =
++                chunkBoundarySplitsPadRun(inputIds, visionPad, configuredChunkSize);
++    }
++    if (pendingAudioEmbeddings > 0) {
++        plan.audioRunCount = countPadRuns(inputIds, audioPad);
++        if (plan.audioRunCount != pendingAudioEmbeddings) {
++            error = "audio_run_count_mismatch_expected_" + std::to_string(pendingAudioEmbeddings) +
++                    "_actual_" + std::to_string(plan.audioRunCount);
++            return false;
++        }
++        plan.configuredChunkWouldSplitMediaRun =
++                plan.configuredChunkWouldSplitMediaRun ||
++                chunkBoundarySplitsPadRun(inputIds, audioPad, configuredChunkSize);
++    }
++    plan.atomic = true;
++    plan.effectiveChunkSize = 0;
++    return true;
++}
++
++inline bool isQwen35VisionInputContract(const std::vector<std::string>& inputNames) {
++    static const std::vector<std::string> expected = {
++        "patches", "position_ids", "attention_mask", "idx_tensor", "weight_tensor"
++    };
++    return inputNames == expected;
++}
++
++} // namespace OmniEmbeddingContract
++} // namespace Transformer
++} // namespace MNN
++
++#endif
+diff --git a/transformers/llm/engine/src/sampler.cpp b/transformers/llm/engine/src/sampler.cpp
+index d070c4a3318a30e1ccefe05e96191f890daac2a1..8e716da0f4e4a464299628ded0595686ca764980 100644
+--- a/transformers/llm/engine/src/sampler.cpp
++++ b/transformers/llm/engine/src/sampler.cpp
+@@ -1,6 +1,7 @@
+ #include <random>
+ #include <algorithm>
+ #include <cmath>
++#include <cstdint>
+ #include <numeric>
+ #include <unordered_map>
+ #include <limits>
+@@ -158,8 +159,16 @@ Sampler* Sampler::createSampler(std::shared_ptr<LlmContext> context, std::shared
+     return new Sampler(context, config);
+ }
+ 
++static std::mt19937::result_type sampler_seed(const std::shared_ptr<LlmConfig>& config) {
++    const int requested_seed = config->config_.value("seed", -1);
++    if (requested_seed >= 0) {
++        return static_cast<std::mt19937::result_type>(requested_seed);
++    }
++    return std::random_device{}();
++}
++
+ Sampler::Sampler(std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config)
+-    : mContext(context), mRng(std::random_device{}()) {
++    : mContext(context), mRng(sampler_seed(config)) {
+     mConfig.max_all_tokens = config->max_all_tokens();
+     mConfig.max_new_tokens = config->max_new_tokens();
+     mConfig.type = config->sampler_type();

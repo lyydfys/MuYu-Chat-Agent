@@ -52,6 +52,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -72,8 +73,10 @@ import androidx.compose.ui.unit.dp
 import com.muyuchat.core.advisor.AgentCandidate
 import com.muyuchat.core.advisor.AgentRecommendation
 import com.muyuchat.core.benchmark.BenchmarkResult
+import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
 import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.LlamaAdvancedParams
 import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
 import kotlinx.coroutines.launch
@@ -91,10 +94,93 @@ data class AgentUiState(
     val statusMessage: String? = null,
     val loadedModelName: String? = null,
     val lastAutoTuningSummary: String? = null,
+    val localStabilitySmokeSummary: String? = null,
     val tuningTrials: List<TuningTrialItem> = emptyList(),
     val agentDecisionHistory: List<AgentDecisionItem> = emptyList(),
-    val params: GenerationParams = GenerationParams()
+    val params: GenerationParams = GenerationParams(),
+    val profileId: String? = null,
+    val revision: Long? = null,
+    val profileRecordState: AgentProfileRecordState = AgentProfileRecordState.NONE,
+    val verification: AgentProfileVerification = AgentProfileVerification.UNKNOWN,
+    val engineLifecycle: AgentEngineLifecycle = AgentEngineLifecycle.UNKNOWN,
+    val tuningJobState: AgentTuningJobState = AgentTuningJobState.IDLE,
+    val reloadRequired: Boolean = false,
+    val pending: AgentPendingProfile? = null,
+    val rollback: AgentRollbackProfile? = null,
+    val etaSeconds: Long? = null,
+    val phase: String? = null,
+    val candidateProgress: AgentCandidateProgress = AgentCandidateProgress()
 )
+
+enum class AgentProfileRecordState(val label: String) {
+    NONE("未建立"),
+    STAGED("候选已暂存"),
+    COMMITTED("已提交"),
+    REJECTED("已拒绝")
+}
+
+enum class AgentProfileVerification(val label: String) {
+    UNKNOWN("未验证"),
+    SAFE("安全基线"),
+    COMPATIBLE("本机兼容"),
+    DEVICE_VERIFIED("正式双入口通过")
+}
+
+enum class AgentEngineLifecycle(val label: String) {
+    UNKNOWN("状态未知"),
+    UNLOADED("未加载"),
+    LOADING("加载中"),
+    READY("可推理"),
+    GENERATING("生成中"),
+    STOPPING("停止中"),
+    RELOADING("重新加载中"),
+    ROLLING_BACK("回滚中"),
+    ERROR("运行异常")
+}
+
+enum class AgentTuningJobState(val label: String) {
+    IDLE("无任务"),
+    QUEUED("等待开始"),
+    RUNNING("调优中"),
+    PAUSED("已暂停"),
+    CANCELING("取消中"),
+    VALIDATING("验证候选"),
+    SUCCEEDED("调优完成"),
+    FAILED("调优失败"),
+    RECOVERING("恢复中")
+}
+
+data class AgentPendingProfile(
+    val profileId: String? = null,
+    val revision: Long? = null,
+    val summary: String? = null,
+    val readyToApply: Boolean = false
+)
+
+data class AgentRollbackProfile(
+    val targetProfileId: String? = null,
+    val targetRevision: Long? = null,
+    val summary: String? = null,
+    val available: Boolean = false
+)
+
+data class AgentCandidateProgress(
+    val completed: Int = 0,
+    val total: Int = 0,
+    val currentCandidate: String? = null,
+    val passed: Int = 0,
+    val rejected: Int = 0
+) {
+    val fraction: Float
+        get() = if (total > 0) completed.toFloat().div(total).coerceIn(0f, 1f) else 0f
+}
+
+enum class AgentTuningMode(val label: String) {
+    QUICK("快速"),
+    STANDARD("标准"),
+    DEEP("深度"),
+    POWER_SAVE("省电")
+}
 
 private enum class AgentInfoDialog {
     GUIDE,
@@ -134,12 +220,21 @@ fun AgentScreen(
     onApplyRecommendation: () -> Unit,
     onBenchmark: () -> Unit,
     onQuickDebug: () -> Unit,
+    onStandardDebug: () -> Unit,
     onDeepDebug: () -> Unit,
     onPowerDebug: () -> Unit,
     onAgentInfo: () -> Unit,
     onParamsChange: (GenerationParams) -> Unit,
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onStabilitySmoke: (() -> Unit)? = null,
+    onStartTuning: ((AgentTuningMode, Boolean) -> Unit)? = null,
+    onPauseTuning: (() -> Unit)? = null,
+    onResumeTuning: (() -> Unit)? = null,
+    onCancelTuning: (() -> Unit)? = null,
+    onQueryTuningJob: (() -> Unit)? = null,
+    onApplyPendingProfile: (() -> Unit)? = null,
+    onRollbackProfile: (() -> Unit)? = null
 ) {
     var infoDialog by rememberSaveable { mutableStateOf<AgentInfoDialog?>(null) }
 
@@ -170,8 +265,10 @@ fun AgentScreen(
                     state = state,
                     onPreferenceChange = onPreferenceChange,
                     onQuickDebug = onQuickDebug,
+                    onStandardDebug = onStandardDebug,
                     onDeepDebug = onDeepDebug,
                     onPowerDebug = onPowerDebug,
+                    onStabilitySmoke = onStabilitySmoke,
                     onAgentInfo = {
                         onAgentInfo()
                         infoDialog = if (state.benchmark == null || state.recommendation == null) {
@@ -184,6 +281,19 @@ fun AgentScreen(
             }
 
             item { CurrentModelReportCard(state) }
+
+            item {
+                RuntimeProfileCard(
+                    state = state,
+                    onStartTuning = onStartTuning,
+                    onPauseTuning = onPauseTuning,
+                    onResumeTuning = onResumeTuning,
+                    onCancelTuning = onCancelTuning,
+                    onQueryTuningJob = onQueryTuningJob,
+                    onApplyPendingProfile = onApplyPendingProfile,
+                    onRollbackProfile = onRollbackProfile
+                )
+            }
 
             state.recommendation?.let { recommendation ->
                 item {
@@ -518,8 +628,10 @@ private fun SmartDebugCard(
     state: AgentUiState,
     onPreferenceChange: (UserPreference) -> Unit,
     onQuickDebug: () -> Unit,
+    onStandardDebug: () -> Unit,
     onDeepDebug: () -> Unit,
     onPowerDebug: () -> Unit,
+    onStabilitySmoke: (() -> Unit)?,
     onAgentInfo: () -> Unit
 ) {
     Card(
@@ -594,6 +706,16 @@ private fun SmartDebugCard(
                     Text("快速调试")
                 }
                 OutlinedButton(
+                    onClick = onStandardDebug,
+                    enabled = !state.isBusy && state.loadedModelName != null,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("标准调试")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
                     onClick = onDeepDebug,
                     enabled = !state.isBusy && state.loadedModelName != null,
                     modifier = Modifier.weight(1f),
@@ -601,8 +723,6 @@ private fun SmartDebugCard(
                 ) {
                     Text("深度调试")
                 }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(
                     onClick = onPowerDebug,
                     enabled = !state.isBusy && state.loadedModelName != null,
@@ -611,12 +731,20 @@ private fun SmartDebugCard(
                 ) {
                     Text("省电调试")
                 }
-                TextButton(
-                    onClick = onAgentInfo,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(if (state.benchmark == null || state.recommendation == null) "调参说明" else "调试解释")
-                }
+            }
+            TextButton(onClick = onAgentInfo, modifier = Modifier.fillMaxWidth()) {
+                Text(if (state.benchmark == null || state.recommendation == null) "调参说明" else "调试解释")
+            }
+            OutlinedButton(
+                onClick = { onStabilitySmoke?.invoke() },
+                enabled = onStabilitySmoke != null && !state.isBusy && state.loadedModelName != null,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("稳定性自检")
+            }
+            state.localStabilitySmokeSummary?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -650,6 +778,262 @@ private fun CurrentModelReportCard(state: AgentUiState) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RuntimeProfileCard(
+    state: AgentUiState,
+    onStartTuning: ((AgentTuningMode, Boolean) -> Unit)?,
+    onPauseTuning: (() -> Unit)?,
+    onResumeTuning: (() -> Unit)?,
+    onCancelTuning: (() -> Unit)?,
+    onQueryTuningJob: (() -> Unit)?,
+    onApplyPendingProfile: (() -> Unit)?,
+    onRollbackProfile: (() -> Unit)?
+) {
+    var selectedMode by rememberSaveable { mutableStateOf(AgentTuningMode.QUICK) }
+    var autoApply by rememberSaveable { mutableStateOf(false) }
+    val jobState = state.tuningJobState
+    val pending = state.pending
+    val rollback = state.rollback
+    val controlsConnected = listOf(
+        onStartTuning,
+        onPauseTuning,
+        onResumeTuning,
+        onCancelTuning,
+        onQueryTuningJob,
+        onApplyPendingProfile,
+        onRollbackProfile
+    ).any { it != null }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("运行配置与调优任务", fontWeight = FontWeight.Bold)
+                Text(
+                    "Profile、引擎和任务是三套独立状态；Activity 重建只查询同一任务，不会把候选误判为失败。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            RuntimeStatusLine(
+                label = "当前 Profile",
+                value = buildString {
+                    append(shortIdentifier(state.profileId) ?: "尚未建立")
+                    state.revision?.let { append(" · r$it") }
+                }
+            )
+            RuntimeStatusLine(
+                label = "记录 / 验证",
+                value = "${state.profileRecordState.label} · ${state.verification.label}"
+            )
+            RuntimeStatusLine(
+                label = "引擎 / 任务",
+                value = "${state.engineLifecycle.label} · ${jobState.label}"
+            )
+
+            if (state.reloadRequired) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        "模型执行参数已变化，需要应用候选并重新加载。助手或会话的生成参数不会触发重载。",
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+
+            pending?.let { value ->
+                RuntimeStatusLine(
+                    label = "待应用候选",
+                    value = buildString {
+                        append(shortIdentifier(value.profileId) ?: "已暂存")
+                        value.revision?.let { append(" · r$it") }
+                        value.summary?.takeIf(String::isNotBlank)?.let { append(" · $it") }
+                    }
+                )
+            }
+            rollback?.takeIf { it.available }?.let { value ->
+                RuntimeStatusLine(
+                    label = "回滚目标",
+                    value = buildString {
+                        append(shortIdentifier(value.targetProfileId) ?: "上一个稳定配置")
+                        value.targetRevision?.let { append(" · r$it") }
+                        value.summary?.takeIf(String::isNotBlank)?.let { append(" · $it") }
+                    }
+                )
+            }
+
+            val progress = state.candidateProgress
+            if (state.phase != null || state.etaSeconds != null || progress.total > 0) {
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text(
+                        buildString {
+                            append(state.phase?.takeIf(String::isNotBlank) ?: jobState.label)
+                            state.etaSeconds?.takeIf { it >= 0L }?.let { append(" · 预计剩余 ${formatEta(it)}") }
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                    if (progress.total > 0) {
+                        LinearProgressIndicator(
+                            progress = { progress.fraction },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            buildString {
+                                append("候选 ${progress.completed.coerceIn(0, progress.total)}/${progress.total}")
+                                progress.currentCandidate?.takeIf(String::isNotBlank)?.let { append(" · $it") }
+                                append(" · 通过 ${progress.passed} · 拒绝 ${progress.rejected}")
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Text("调优模式", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    AgentTuningMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = selectedMode == mode,
+                            onClick = { selectedMode = mode },
+                            enabled = !jobState.isActive && !state.isBusy,
+                            label = { Text(mode.label) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("通过后自动应用", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "默认关闭；关闭时先暂存候选，再由你点击“应用并重载”。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = autoApply,
+                        onCheckedChange = { autoApply = it },
+                        enabled = !jobState.isActive && !state.isBusy
+                    )
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { onStartTuning?.invoke(selectedMode, autoApply) },
+                    enabled = onStartTuning != null && !state.isBusy && state.loadedModelName != null && jobState.canStart,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("开始调优")
+                }
+                OutlinedButton(
+                    onClick = { onPauseTuning?.invoke() },
+                    enabled = onPauseTuning != null && jobState.canPause,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("暂停")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { onResumeTuning?.invoke() },
+                    enabled = onResumeTuning != null && jobState.canResume,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("续跑")
+                }
+                OutlinedButton(
+                    onClick = { onCancelTuning?.invoke() },
+                    enabled = onCancelTuning != null && jobState.canCancel,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(if (jobState == AgentTuningJobState.CANCELING) "取消中" else "取消任务")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { onApplyPendingProfile?.invoke() },
+                    enabled = onApplyPendingProfile != null &&
+                        pending?.readyToApply == true &&
+                        !state.isBusy &&
+                        !jobState.isActive,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("应用并重载")
+                }
+                OutlinedButton(
+                    onClick = { onRollbackProfile?.invoke() },
+                    enabled = onRollbackProfile != null && rollback?.available == true && !state.isBusy,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("回滚稳定配置")
+                }
+            }
+            TextButton(
+                onClick = { onQueryTuningJob?.invoke() },
+                enabled = onQueryTuningJob != null,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("查询任务状态")
+            }
+            Text(
+                if (controlsConnected) {
+                    "模型忙碌时仍可查询或取消任务；会改变模型生命周期的操作会等待安全边界。"
+                } else {
+                    "任务控制面尚未接入；状态字段与操作入口已保留，接入后无需改动页面结构。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun RuntimeStatusLine(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            label,
+            modifier = Modifier.weight(0.36f),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            value,
+            modifier = Modifier.weight(0.64f),
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium
+        )
     }
 }
 
@@ -882,6 +1266,10 @@ private fun AdvancedParamsCard(
     onParamsChange: (GenerationParams) -> Unit
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
+    val advancedResult = remember(params.advancedJson) {
+        LlamaAdvancedParams.parse(params.advancedJson)
+    }
+    val advanced = advancedResult.params
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -895,9 +1283,9 @@ private fun AdvancedParamsCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("高级参数", fontWeight = FontWeight.Bold)
+                    Text("参数分层", fontWeight = FontWeight.Bold)
                     Text(
-                        "智能调试和手动调节共用同一份参数。",
+                        "模型执行配置与助手/会话生成配置独立保存，不再共用同一份参数。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -911,32 +1299,233 @@ private fun AdvancedParamsCard(
                     )
                 }
             }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    "执行：上下文 ${params.nCtx} · 线程 ${params.nThreads} · 模板 ${params.chatTemplateMode}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "生成：最大输出 ${params.nPredict} · 温度 ${"%.2f".format(params.temperature)} · top_p ${"%.2f".format(params.topP)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (!expanded) return@Column
+
+            ParameterLayerTitle(
+                title = "模型执行参数（加载 / 热执行）",
+                description = "只属于当前模型、设备和 runtime。加载字段变化会创建待应用候选；热执行字段仅在 runtime 明确支持时原位生效。"
+            )
+            ParameterSubsectionTitle(
+                title = "加载参数",
+                description = "上下文、batch、KV、GPU/MoE、MTP、mmap/mlock 等会进入加载签名，修改后需要受控重载。"
+            )
+            CompactIntSlider("上下文长度 n_ctx", params.nCtx, 1024f..65536f) {
+                onParamsChange(params.copy(nCtx = it))
+            }
             Text(
-                "上下文 ${params.nCtx} · 回复 ${params.nPredict} · 线程 ${params.nThreads} · 创造性 ${"%.2f".format(params.temperature)}",
+                "下列结构化控件是 llama.cpp 专属字段；MNN、QAIRT 等 runtime 必须由各自适配器过滤，禁止跨 runtime 透传。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            if (!expanded) return@Column
+            if (advanced == null) {
+                Text(
+                    "高级 JSON 格式无效，请先在下方修正后再使用结构化控件。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            } else {
+                val updateAdvanced: (LlamaAdvancedParams) -> Unit = { updated ->
+                    onParamsChange(params.copy(advancedJson = updated.toJsonString()))
+                }
+                AdvancedChoiceChips(
+                    title = "逻辑批大小",
+                    selected = (advanced.nBatch ?: 512).toString(),
+                    choices = listOf("256", "512", "1024", "2048")
+                ) { raw ->
+                    val batch = raw.toInt()
+                    val currentUbatch = advanced.nUbatch ?: 256
+                    updateAdvanced(
+                        advanced.copy(
+                            nBatch = batch,
+                            nUbatch = currentUbatch.coerceAtMost(batch)
+                        )
+                    )
+                }
+                val effectiveBatch = advanced.nBatch ?: 512
+                AdvancedChoiceChips(
+                    title = "物理批大小",
+                    selected = (advanced.nUbatch ?: 256).toString(),
+                    choices = listOf(32, 64, 128, 256, 512, 1024, 2048)
+                        .filter { it <= effectiveBatch && effectiveBatch % it == 0 }
+                        .map(Int::toString)
+                ) { raw -> updateAdvanced(advanced.copy(nUbatch = raw.toInt())) }
+                AdvancedChoiceChips(
+                    title = "K Cache",
+                    selected = advanced.cacheTypeK ?: "f16",
+                    choices = listOf("f16", "q8_0", "q4_0")
+                ) { updateAdvanced(advanced.copy(cacheTypeK = it)) }
+                AdvancedChoiceChips(
+                    title = "V Cache",
+                    selected = advanced.cacheTypeV ?: "f16",
+                    choices = listOf("f16", "q8_0", "q4_0")
+                ) { updateAdvanced(advanced.copy(cacheTypeV = it)) }
+                AdvancedChoiceChips(
+                    title = "Flash Attention",
+                    selected = advanced.flashAttn ?: "auto",
+                    choices = listOf("auto", "on", "off")
+                ) { updateAdvanced(advanced.copy(flashAttn = it)) }
+                AdvancedChoiceChips(
+                    title = "推测解码",
+                    selected = advanced.specType ?: "none",
+                    choices = listOf("none", "draft-mtp")
+                ) { updateAdvanced(advanced.copy(specType = it)) }
+                if (advanced.specType == "draft-mtp") {
+                    CompactIntSlider(
+                        "MTP 最大草稿 token",
+                        advanced.specDraftNMax ?: 2,
+                        0f..8f
+                    ) { updateAdvanced(advanced.copy(specDraftNMax = it)) }
+                }
+                AdvancedChoiceChips(
+                    title = "并行序列",
+                    selected = (advanced.nParallel ?: 1).toString(),
+                    choices = listOf("1")
+                ) { updateAdvanced(advanced.copy(nParallel = it.toInt())) }
+                Text(
+                    "当前 Android JNI 为单会话执行器，并行序列固定为 1。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                AdvancedChoiceChips(
+                    title = "GPU 层",
+                    selected = (advanced.nGpuLayers ?: 0).toString(),
+                    choices = listOf("0", "-1", "-2", "999"),
+                    labels = mapOf("0" to "CPU", "-1" to "自动", "-2" to "全部", "999" to "999")
+                ) { updateAdvanced(advanced.copy(nGpuLayers = it.toInt())) }
+                CompactIntSlider(
+                    "主 GPU",
+                    advanced.mainGpu ?: 0,
+                    0f..3f
+                ) { updateAdvanced(advanced.copy(mainGpu = it)) }
+                AdvancedChoiceChips(
+                    title = "拆分模式",
+                    selected = advanced.splitMode ?: "none",
+                    choices = listOf("none", "layer", "row", "tensor")
+                ) { updateAdvanced(advanced.copy(splitMode = it)) }
+                CompactIntSlider(
+                    "CPU MoE 层",
+                    advanced.nCpuMoe ?: 0,
+                    0f..64f
+                ) { updateAdvanced(advanced.copy(nCpuMoe = it)) }
+                Text(
+                    "GPU/MoE 控件记录的是请求值；是否支持及最终有效值必须以当前 APK 注册的 backend 与 Native 回读为准。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                AdvancedBooleanChips("性能统计", advanced.perf ?: true) {
+                    updateAdvanced(advanced.copy(perf = it))
+                }
+                AdvancedBooleanChips("内存映射 mmap", advanced.mmap ?: true) {
+                    updateAdvanced(advanced.copy(mmap = it))
+                }
+                AdvancedBooleanChips("锁定内存 mlock", advanced.mlock ?: false) {
+                    updateAdvanced(advanced.copy(mlock = it))
+                }
+            }
 
-            CompactIntSlider("上下文长度", params.nCtx, 1024f..65536f) {
-                onParamsChange(params.copy(nCtx = it))
-            }
-            CompactIntSlider("回复长度", params.nPredict, 128f..65536f) {
-                onParamsChange(params.copy(nPredict = it))
-            }
-            CompactIntSlider("运行线程", params.nThreads, 1f..16f) {
+            ParameterSubsectionTitle(
+                title = "热执行参数",
+                description = "线程与缓存复用只有在当前 runtime 策略声明 HOT_EXECUTION 时才可原位应用；否则仍会进入待重载候选。"
+            )
+            CompactIntSlider("运行线程 n_threads", params.nThreads, 1f..16f) {
                 onParamsChange(params.copy(nThreads = it))
             }
-            CompactFloatSlider("创造性", params.temperature, 0f..2f) {
+            if (advanced != null) {
+                val updateAdvanced: (LlamaAdvancedParams) -> Unit = { updated ->
+                    onParamsChange(params.copy(advancedJson = updated.toJsonString()))
+                }
+                CompactIntSlider(
+                    "批处理线程 n_threads_batch",
+                    advanced.nThreadsBatch ?: params.nThreads,
+                    1f..16f
+                ) { updateAdvanced(advanced.copy(nThreadsBatch = it)) }
+                AdvancedChoiceChips(
+                    title = "前缀缓存复用 cache_reuse",
+                    selected = (advanced.cacheReuse ?: 0).toString(),
+                    choices = listOf("0", "128", "256", "512")
+                ) { updateAdvanced(advanced.copy(cacheReuse = it.toInt())) }
+            }
+
+            ParameterSubsectionTitle(
+                title = "模板与执行正确性 gate",
+                description = "模板/Jinja 会改变 role、prompt 与特殊 token。每次变化必须重跑完整正确性验证，不能进入纯性能搜索。"
+            )
+            OutlinedTextField(
+                value = params.chatTemplateMode,
+                onValueChange = { onParamsChange(params.copy(chatTemplateMode = it.ifBlank { "auto" })) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("对话模板模式 chat_template_mode") }
+            )
+            if (advanced != null) {
+                val updateAdvanced: (LlamaAdvancedParams) -> Unit = { updated ->
+                    onParamsChange(params.copy(advancedJson = updated.toJsonString()))
+                }
+                AdvancedBooleanChips("Jinja 模板 use_jinja", advanced.useJinja ?: true) {
+                    updateAdvanced(advanced.copy(useJinja = it))
+                }
+            }
+            Text(
+                "cache_reuse 同样影响正确性，候选必须验证缓存命中与未命中回答等价。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (advancedResult.issues.isNotEmpty()) {
+                advancedResult.errorMessages.forEach { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+            OutlinedTextField(
+                value = params.advancedJson,
+                onValueChange = { onParamsChange(params.copy(advancedJson = it.ifBlank { "{}" })) },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 3,
+                label = { Text("Runtime 高级 JSON（当前模型专属）") },
+                supportingText = { Text("未知或不支持字段必须隔离，不得直接透传 native。") }
+            )
+
+            ParameterLayerTitle(
+                title = "助手 / 会话生成参数",
+                description = "sampling、系统提示词和最大输出只影响生成，不触发模型重载。智能调参只能给出建议，绝不会静默改写用户设置。"
+            )
+            CompactIntSlider("最大输出 n_predict", params.nPredict, 128f..65536f) {
+                onParamsChange(params.copy(nPredict = it))
+            }
+            CompactFloatSlider("创造性 temperature", params.temperature, 0f..2f) {
                 onParamsChange(params.copy(temperature = it))
             }
-            CompactFloatSlider("回答聚焦度", params.topP, 0.1f..1f) {
+            CompactFloatSlider("回答聚焦度 top_p", params.topP, 0.1f..1f) {
                 onParamsChange(params.copy(topP = it))
+            }
+            CompactIntSlider("候选数量 top_k", params.topK, 0f..200f) {
+                onParamsChange(params.copy(topK = it))
+            }
+            CompactFloatSlider("最小概率 min_p", params.minP, 0f..1f) {
+                onParamsChange(params.copy(minP = it))
             }
             CompactFloatSlider("重复惩罚", params.repeatPenalty, 1.0f..1.3f) {
                 onParamsChange(params.copy(repeatPenalty = it))
             }
-            CompactFloatSlider("频率惩罚", params.frequencyPenalty, 0f..1f) {
+            CompactFloatSlider("存在惩罚", params.presencePenalty, -2f..2f) {
+                onParamsChange(params.copy(presencePenalty = it))
+            }
+            CompactFloatSlider("频率惩罚", params.frequencyPenalty, -2f..2f) {
                 onParamsChange(params.copy(frequencyPenalty = it))
             }
             OutlinedTextField(
@@ -944,17 +1533,82 @@ private fun AdvancedParamsCard(
                 onValueChange = { onParamsChange(params.copy(systemPrompt = it)) },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 3,
-                label = { Text("系统提示词") }
-            )
-            OutlinedTextField(
-                value = params.advancedJson,
-                onValueChange = { onParamsChange(params.copy(advancedJson = it.ifBlank { "{}" })) },
-                modifier = Modifier.fillMaxWidth(),
-                minLines = 3,
-                label = { Text("高级 JSON") }
+                label = { Text("系统提示词（助手 / 会话）") },
+                supportingText = { Text("保存到助手或会话生成层，不写入模型执行 Profile。") }
             )
         }
     }
+}
+
+@Composable
+private fun ParameterLayerTitle(title: String, description: String) {
+    Column(
+        modifier = Modifier.padding(top = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        Text(
+            description,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun ParameterSubsectionTitle(title: String, description: String) {
+    Column(
+        modifier = Modifier.padding(top = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            description,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun AdvancedChoiceChips(
+    title: String,
+    selected: String,
+    choices: List<String>,
+    labels: Map<String, String> = emptyMap(),
+    onSelected: (String) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+        choices.chunked(4).forEach { rowChoices ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                rowChoices.forEach { choice ->
+                    FilterChip(
+                        selected = selected == choice,
+                        onClick = { onSelected(choice) },
+                        label = { Text(labels[choice] ?: choice) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdvancedBooleanChips(
+    title: String,
+    value: Boolean,
+    onValue: (Boolean) -> Unit
+) {
+    AdvancedChoiceChips(
+        title = title,
+        selected = if (value) "on" else "off",
+        choices = listOf("on", "off"),
+        labels = mapOf("on" to "开启", "off" to "关闭")
+    ) { onValue(it == "on") }
 }
 
 @Composable
@@ -1061,6 +1715,56 @@ private fun shortName(value: String?): String? =
         ?.substringAfterLast('\\')
         ?.let { if (it.length > 32) it.take(29) + "..." else it }
 
+private fun shortIdentifier(value: String?): String? =
+    value?.takeIf { it.isNotBlank() }?.let {
+        if (it.length > 20) "${it.take(9)}…${it.takeLast(7)}" else it
+    }
+
+private fun formatEta(seconds: Long): String = when {
+    seconds >= 3600L -> "${seconds / 3600L}小时${(seconds % 3600L) / 60L}分"
+    seconds >= 60L -> "${seconds / 60L}分${seconds % 60L}秒"
+    else -> "${seconds}秒"
+}
+
+private val AgentTuningJobState.isActive: Boolean
+    get() = when (this) {
+        AgentTuningJobState.QUEUED,
+        AgentTuningJobState.RUNNING,
+        AgentTuningJobState.PAUSED,
+        AgentTuningJobState.CANCELING,
+        AgentTuningJobState.VALIDATING,
+        AgentTuningJobState.RECOVERING -> true
+
+        AgentTuningJobState.IDLE,
+        AgentTuningJobState.SUCCEEDED,
+        AgentTuningJobState.FAILED -> false
+    }
+
+private val AgentTuningJobState.canStart: Boolean
+    get() = this == AgentTuningJobState.IDLE ||
+        this == AgentTuningJobState.SUCCEEDED ||
+        this == AgentTuningJobState.FAILED
+
+private val AgentTuningJobState.canPause: Boolean
+    get() = this == AgentTuningJobState.RUNNING || this == AgentTuningJobState.VALIDATING
+
+private val AgentTuningJobState.canResume: Boolean
+    get() = this == AgentTuningJobState.PAUSED
+
+private val AgentTuningJobState.canCancel: Boolean
+    get() = when (this) {
+        AgentTuningJobState.QUEUED,
+        AgentTuningJobState.RUNNING,
+        AgentTuningJobState.PAUSED,
+        AgentTuningJobState.VALIDATING,
+        AgentTuningJobState.RECOVERING -> true
+
+        AgentTuningJobState.IDLE,
+        AgentTuningJobState.CANCELING,
+        AgentTuningJobState.SUCCEEDED,
+        AgentTuningJobState.FAILED -> false
+    }
+
 private fun riskText(label: String): String = when (label.lowercase()) {
     "low" -> "低"
     "medium" -> "中"
@@ -1085,15 +1789,10 @@ private fun socText(value: String): String = when (value.lowercase()) {
 }
 
 private fun socDisplayName(profile: DeviceProfile): String {
-    val raw = profile.socLabel.ifBlank { profile.socModel }.ifBlank { profile.socManufacturer }
-    if (raw.isBlank() || raw.equals("Unknown", ignoreCase = true)) return socText(profile.socFamily.name)
-    return raw
-        .replace("Qualcomm", "高通")
-        .replace("Snapdragon", "骁龙")
-        .replace("MediaTek", "联发科")
-        .replace("Dimensity", "天玑")
-        .replace(Regex("\\s+"), " ")
-        .trim()
+    val raw = profile.accelerationProfile.chipsetCode.ifBlank {
+        profile.socModel.ifBlank { profile.socManufacturer }
+    }
+    return DeviceAccelerationAnalyzer.publicChipsetDisplayName(raw, profile.socFamily)
 }
 
 private fun thermalText(value: String): String = when (value.lowercase()) {

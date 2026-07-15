@@ -22,4 +22,8 @@ dependencies {
     implementation(project(":core:engine"))
     implementation(project(":core:tuning"))
     implementation(libs.kotlinx.coroutines.android)
+    testImplementation(libs.junit)
+    // CandidateExecutor tests exercise the JSON-backed tuning profile builder;
+    // use the real JVM implementation instead of the Android stub methods.
+    testImplementation(libs.json)
 }

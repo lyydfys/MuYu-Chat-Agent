@@ -1,0 +1,38 @@
+{
+  "runId": "offline-chat-run",
+  "status": "completed",
+  "events": [
+    {
+      "runId": "offline-chat-run",
+      "status": "starting",
+      "elapsedMs": 0,
+      "model": {
+        "displayName": "Offline Chat Activity",
+        "runtime": "qnn"
+      }
+    },
+    {
+      "runId": "offline-chat-run",
+      "status": "first_load_ok",
+      "elapsedMs": 420,
+      "loadMs": 420
+    },
+    {
+      "runId": "offline-chat-run",
+      "status": "first_token",
+      "elapsedMs": 650
+    },
+    {
+      "runId": "offline-chat-run",
+      "status": "completed",
+      "elapsedMs": 1850,
+      "nativeStats": {
+        "modelName": "Offline Chat Native",
+        "backend": "qnn",
+        "promptTokens": 128,
+        "completionTokens": 36,
+        "decodeMs": 1200
+      }
+    }
+  ]
+}

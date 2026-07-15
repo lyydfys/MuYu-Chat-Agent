@@ -20,4 +20,6 @@ android {
 dependencies {
     api(project(":core:telemetry"))
     implementation(libs.androidx.core.ktx)
+    testImplementation(libs.junit)
+    testImplementation(libs.json)
 }

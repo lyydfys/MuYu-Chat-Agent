@@ -78,6 +78,7 @@ data class SettingsUiState(
     val apiKey: String = "",
     val localApiAddress: String = "",
     val openApiAddress: String = "",
+    val loadedModelId: String? = null,
     val nativeStatsJson: String = "{}",
     val diagnosticReport: String = "",
     val chatSessionCount: Int = 0,
@@ -1827,8 +1828,8 @@ fun ExperimentsScreen(
         item {
             InfoCard(
                 title = "本地多模态",
-                primary = if (state.nativeStatsJson.contains("\"visionReady\":true")) "视觉 runner 已就绪" else "需要多模态 GGUF 与匹配 mmproj",
-                secondary = "不是所有 GGUF 都能识图；文本模型必须搭配支持视觉的模型结构和投影器。"
+                primary = if (state.nativeStatsJson.contains("\"visionReady\":true")) "视觉 runner 已就绪" else "需要 MNN 多模态包或 GGUF+mmproj",
+                secondary = "不是所有文本模型都能识图；MNN 需要完整多模态包，GGUF 需要匹配的视觉投影器。"
             )
         }
         item {
@@ -1861,6 +1862,7 @@ fun LocalApiToolScreen(
     var showApiDocs by rememberSaveable { mutableStateOf(false) }
     var modelsSelfTest by rememberSaveable { mutableStateOf("尚未测试 /v1/models。") }
     var chatSelfTest by rememberSaveable { mutableStateOf("尚未测试 /v1/chat/completions。") }
+    var visionSelfTest by rememberSaveable { mutableStateOf("尚未测试图片输入接口。") }
     var selfTestBusy by rememberSaveable { mutableStateOf(false) }
     val localBaseAddress = state.localApiAddress
         .ifBlank { "http://127.0.0.1:11435/v1" }
@@ -1978,6 +1980,7 @@ fun LocalApiToolScreen(
                 ApiSelfTestCard(
                     modelsResult = modelsSelfTest,
                     chatResult = chatSelfTest,
+                    visionResult = visionSelfTest,
                     busy = selfTestBusy,
                     enabled = state.apiEnabled && state.apiKey.isNotBlank(),
                     onTestModels = {
@@ -1990,7 +1993,22 @@ fun LocalApiToolScreen(
                     onTestChat = {
                         scope.launch {
                             selfTestBusy = true
-                            chatSelfTest = runLocalApiChatSelfTest(localBaseAddress, state.apiKey)
+                            chatSelfTest = runLocalApiChatSelfTest(
+                                baseUrl = localBaseAddress,
+                                apiKey = state.apiKey,
+                                loadedModelId = state.loadedModelId
+                            )
+                            selfTestBusy = false
+                        }
+                    },
+                    onTestVision = {
+                        scope.launch {
+                            selfTestBusy = true
+                            visionSelfTest = runLocalApiVisionSelfTest(
+                                baseUrl = localBaseAddress,
+                                apiKey = state.apiKey,
+                                loadedModelId = state.loadedModelId
+                            )
                             selfTestBusy = false
                         }
                     }
@@ -2064,10 +2082,12 @@ private fun ApiStatusCard(
 private fun ApiSelfTestCard(
     modelsResult: String,
     chatResult: String,
+    visionResult: String,
     busy: Boolean,
     enabled: Boolean,
     onTestModels: () -> Unit,
-    onTestChat: () -> Unit
+    onTestChat: () -> Unit,
+    onTestVision: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -2098,6 +2118,13 @@ private fun ApiSelfTestCard(
                     Text("测试聊天接口")
                 }
             }
+            Button(
+                onClick = onTestVision,
+                enabled = enabled && !busy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("测试识图接口")
+            }
             ApiSelfTestResultBlock(
                 title = "/v1/models",
                 primary = if (busy) "正在测试..." else modelsResult,
@@ -2106,7 +2133,12 @@ private fun ApiSelfTestCard(
             ApiSelfTestResultBlock(
                 title = "/v1/chat/completions",
                 primary = if (busy) "正在测试..." else chatResult,
-                secondary = "会发起一次短输出请求；未加载本地模型时会返回 503，这是有效的排错信息。"
+                secondary = "会发起一次 SSE 流式短输出，并检查 [DONE] 终止帧；未加载本地模型时会返回 503。"
+            )
+            ApiSelfTestResultBlock(
+                title = "image_url",
+                primary = if (busy) "正在测试..." else visionResult,
+                secondary = "会发送一张极小的 base64 测试图；本地识图需 vision_ready=true。"
             )
         }
     }
@@ -2207,6 +2239,13 @@ private fun ApiUsageDocumentContent(
         }
         item {
             InfoCard(
+                title = "图片输入",
+                primary = "兼容 messages 里的 image_url，也兼容 Responses 风格 input_image。支持 data:image base64、本地可读路径、file: URL、可访问的 http(s) 图片。",
+                secondary = "Android content:// 不能稳定跨应用传给本机 HTTP API，建议转成 base64 或文件路径。本地识图需要先加载 MNN 多模态包，或加载多模态 GGUF 并绑定匹配 mmproj；/v1/models 会返回 vision_ready，也可以在本地 API 页面直接运行“测试识图接口”。云端识图需要在对应云端推理引擎中开启图片输入能力，实际效果由所选模型和服务商决定。"
+            )
+        }
+        item {
+            InfoCard(
                 title = "完整聊天接口",
                 primary = chatCompletionsAddress,
                 secondary = "仅在客户端要求填写完整请求地址，或你手动发起 HTTP 请求时使用。"
@@ -2216,7 +2255,7 @@ private fun ApiUsageDocumentContent(
             InfoCard(
                 title = "网页对话",
                 primary = webChatAddress,
-                secondary = "浏览器打开后可直接使用网页界面；同网段访问同样需要开启“开放端口”。"
+                secondary = "浏览器打开后可直接使用网页界面，支持文本聊天和图片附件；同网段访问同样需要开启“开放端口”。"
             )
         }
         item {
@@ -2316,11 +2355,16 @@ private suspend fun runLocalApiModelsSelfTest(baseUrl: String, apiKey: String): 
         }
     }
 
-private suspend fun runLocalApiChatSelfTest(baseUrl: String, apiKey: String): String =
+private suspend fun runLocalApiChatSelfTest(
+    baseUrl: String,
+    apiKey: String,
+    loadedModelId: String?
+): String =
     withContext(Dispatchers.IO) {
         val url = "${baseUrl.normalizedApiBase()}/chat/completions"
+        val modelField = localApiSelfTestModelField(loadedModelId)
         val body = """
-            {"model":"mca-local","messages":[{"role":"user","content":"ping"}],"max_tokens":8,"temperature":0,"stream":false}
+            {$modelField"messages":[{"role":"user","content":"ping"}],"max_tokens":8,"temperature":0,"stream":true}
         """.trimIndent()
         runCatching {
             val response = httpRequest(
@@ -2328,16 +2372,97 @@ private suspend fun runLocalApiChatSelfTest(baseUrl: String, apiKey: String): St
                 url = url,
                 apiKey = apiKey,
                 contentType = "application/json; charset=utf-8",
-                body = body
+                body = body,
+                accept = "text/event-stream"
             )
+            if (response.code in 200..299 && !response.body.contains("data: [DONE]")) {
+                return@runCatching "聊天接口已连接，但流式响应缺少 [DONE] 终止帧，请检查本地 API 服务状态。"
+            }
             response.toSelfTestMessage(
-                successPrefix = "聊天接口请求成功",
+                successPrefix = "流式聊天接口请求成功",
                 knownFailureHint = "如果返回 503，说明接口已连通但本地聊天模型尚未加载。"
             )
         }.getOrElse { error ->
             "请求失败：${error.message ?: error.javaClass.simpleName}\n$url"
         }
     }
+
+private suspend fun runLocalApiVisionSelfTest(
+    baseUrl: String,
+    apiKey: String,
+    loadedModelId: String?
+): String =
+    withContext(Dispatchers.IO) {
+        val url = "${baseUrl.normalizedApiBase()}/chat/completions"
+        val modelField = localApiSelfTestModelField(loadedModelId)
+        val body = """
+            {
+              $modelField
+              "messages": [
+                {
+                  "role": "user",
+                  "content": [
+                    {"type": "text", "text": "请用一句中文说明这张测试图。"},
+                    {
+                      "type": "image_url",
+                      "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+                        "detail": "auto"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "max_tokens": 48,
+              "temperature": 0,
+              "stream": false
+            }
+        """.trimIndent()
+        runCatching {
+            val response = httpRequest(
+                method = "POST",
+                url = url,
+                apiKey = apiKey,
+                contentType = "application/json; charset=utf-8",
+                body = body,
+                readTimeoutMillis = 120_000
+            )
+            response.toSelfTestMessage(
+                successPrefix = "识图接口请求成功",
+                knownFailureHint = "若提示未启用识图，请先加载 MNN 多模态包，或加载多模态 GGUF 并绑定匹配 mmproj。"
+            )
+        }.getOrElse { error ->
+            "请求失败：${error.message ?: error.javaClass.simpleName}\n$url"
+        }
+    }
+
+internal fun localApiSelfTestModelField(loadedModelId: String?): String = loadedModelId
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+    ?.let { "\"model\":${it.asJsonString()}," }
+    .orEmpty()
+
+private fun String.asJsonString(): String = buildString(length + 2) {
+    append('\"')
+    this@asJsonString.forEach { character ->
+        when (character) {
+            '\"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            '\b' -> append("\\b")
+            '\u000C' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (character.code < 0x20) {
+                append("\\u")
+                append(character.code.toString(16).padStart(4, '0'))
+            } else {
+                append(character)
+            }
+        }
+    }
+    append('\"')
+}
 
 private data class ApiHttpResponse(
     val code: Int,
@@ -2349,13 +2474,15 @@ private fun httpRequest(
     url: String,
     apiKey: String,
     contentType: String? = null,
-    body: String? = null
+    body: String? = null,
+    accept: String = "application/json",
+    readTimeoutMillis: Int = 20_000
 ): ApiHttpResponse {
     val connection = (URL(url).openConnection() as HttpURLConnection).apply {
         requestMethod = method.uppercase()
         connectTimeout = 5_000
-        readTimeout = 20_000
-        setRequestProperty("Accept", "application/json")
+        readTimeout = readTimeoutMillis
+        setRequestProperty("Accept", accept)
         if (apiKey.isNotBlank()) {
             setRequestProperty("Authorization", "Bearer $apiKey")
         }

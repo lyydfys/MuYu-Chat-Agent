@@ -1,0 +1,24 @@
+From 15e1a121d29d320ace1336000cf994b74cf67c9e Mon Sep 17 00:00:00 2001
+Subject: [PATCH] Reserve LLM chat message string storage
+
+Reserve two strings per message before retaining c_str() pointers so later
+push_back calls cannot invalidate role/content pointers.
+
+---
+ bindings/android/app/src/main/cpp/jniutils.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/bindings/android/app/src/main/cpp/jniutils.cpp b/bindings/android/app/src/main/cpp/jniutils.cpp
+index ee72fdd0..d4a018b7 100644
+--- a/bindings/android/app/src/main/cpp/jniutils.cpp
++++ b/bindings/android/app/src/main/cpp/jniutils.cpp
+@@ -520,6 +520,7 @@ std::vector<geniex_LlmChatMessage> extract_llm_chat_messages(
+     std::vector<geniex_LlmChatMessage> msgs;
+     str_buf.clear();
+     jsize len = env->GetArrayLength(jmessages);
++    str_buf.reserve(2 * len);
+     msgs.reserve(len);
+ 
+     for (jsize i = 0; i < len; ++i) {
+-- 
+2.50.1

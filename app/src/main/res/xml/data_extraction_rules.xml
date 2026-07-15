@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="database" path="mca-runtime.db" />
+        <exclude domain="database" path="mca-runtime.db-wal" />
+        <exclude domain="database" path="mca-runtime.db-shm" />
+        <exclude domain="database" path="mca-runtime.db-journal" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="database" path="mca-runtime.db" />
+        <exclude domain="database" path="mca-runtime.db-wal" />
+        <exclude domain="database" path="mca-runtime.db-shm" />
+        <exclude domain="database" path="mca-runtime.db-journal" />
+    </device-transfer>
+</data-extraction-rules>

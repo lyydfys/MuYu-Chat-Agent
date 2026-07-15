@@ -1,13 +1,16 @@
 ﻿package com.muyuchat.core.engine
 
 import android.content.Context
+import com.muyuchat.core.modelstore.QairtExecutionAdmission
+import com.muyuchat.core.modelstore.QairtBundleRiskAnalyzer
+import com.muyuchat.core.modelstore.QairtBundleRuntimeIdentity
 import com.muyuchat.core.telemetry.MemorySnapshot
-import com.muyuchat.core.nativebridge.NativeLlamaBridge
 import com.muyuchat.core.telemetry.RuntimeMetrics
 import com.muyuchat.core.telemetry.SocDetector
 import com.muyuchat.core.telemetry.TelemetryLogger
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,78 +20,544 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
+import java.io.File
+import java.security.MessageDigest
+import java.util.UUID
 import kotlin.math.max
+
+/**
+ * Conservative fallback used before a runtime tokenizer is available.
+ *
+ * CJK/kana/hangul and supplementary code points are dense token domains,
+ * while ordinary Latin text is usually closer to three or four characters
+ * per token.  Treating every two UTF-16 code units as a token rejected valid
+ * long English documents at more than twice the native MNN token count.
+ */
+internal fun estimateLocalPromptTokens(text: String): Int {
+    if (text.isEmpty()) return 1
+    var denseTokens = 0
+    var sparseCharacters = 0
+    var index = 0
+    while (index < text.length) {
+        val codePoint = Character.codePointAt(text, index)
+        when {
+            codePoint in 0x3400..0x9FFF ||
+                codePoint in 0xF900..0xFAFF ||
+                codePoint in 0x3040..0x30FF ||
+                codePoint in 0xAC00..0xD7AF -> denseTokens += 1
+            Character.isSupplementaryCodePoint(codePoint) -> denseTokens += 2
+            else -> sparseCharacters += 1
+        }
+        index += Character.charCount(codePoint)
+    }
+    return max(1, denseTokens + (sparseCharacters + 2) / 3)
+}
+
+data class LocalChatExecutionContext(
+    val requestId: String = UUID.randomUUID().toString(),
+    val loadAuthorization: LoadAuthorization? = null,
+    /** Kept for source compatibility; a Boolean alone no longer grants trust. */
+    val allowTrustedHotOverride: Boolean = false,
+    val hotOverrideAuthorization: HotOverrideAuthorization? = null,
+    val pendingProfileDisposition: PendingProfileDisposition = PendingProfileDisposition.COMMIT_ON_VISIBLE_SUCCESS,
+    val lifecycleLease: EngineLifecycleLease? = null,
+    /**
+     * Optional request-scoped observer for privacy-reviewed local-vision preparation diagnostics.
+     * The engine isolates observer failures from inference and gives this sink its own JSON copy so
+     * callers cannot mutate the existing debug diagnostic or another request's evidence.
+     */
+    val visionDiagnosticSink: ((String, JSONObject) -> Unit)? = null
+)
+
+/** Opaque, engine-owned exclusive lifecycle lease used by formal candidate evaluation. */
+class EngineLifecycleLease internal constructor(
+    internal val service: McaInferenceService,
+    internal val ownerToken: Any,
+    val leaseId: String = UUID.randomUUID().toString()
+) {
+    @Volatile
+    internal var active: Boolean = true
+    internal var deferredAuthorization: LoadAuthorization? = null
+    internal var releasing: Boolean = false
+
+    /** Idempotent; release is safe from candidate cleanup/finally blocks. */
+    suspend fun release() {
+        service.releaseExclusiveLifecycleLease(this)
+    }
+}
+
+enum class PendingProfileDisposition {
+    /** Formal user/apply transaction: commit the exact active candidate before Done. */
+    COMMIT_ON_VISIBLE_SUCCESS,
+
+    /** Keep the exact candidate active under an exclusive lease for an external correctness gate. */
+    DEFER_TO_LEASE_HOLDER,
+
+    /** Formal candidate evaluation: run under the candidate, then restore the locked rollback target. */
+    ROLLBACK_AFTER_REQUEST
+}
 
 class McaInferenceService(
     context: Context,
-    private val bridge: NativeLlamaBridge = NativeLlamaBridge(),
-    private val io: CoroutineDispatcher = Dispatchers.IO
+    runners: Map<LocalChatRuntime, LocalChatRunner>? = null,
+    private val io: CoroutineDispatcher = Dispatchers.IO,
+    private val memorySnapshotProvider: (() -> MemorySnapshot)? = null,
+    qairtVerificationStoreOverride: QairtExecutionVerificationStore? = null,
+    qairtIdentityProviderOverride: ((String?) -> QairtBundleRuntimeIdentity?)? = null,
+    qairtDryRunProcessVerifierOverride: (() -> Boolean)? = null,
+    private val parameterCoordinator: ParameterCoordinator = ParameterCoordinator(),
+    installationScopeId: String? = null,
+    private val deviceClockContextProvider: DeviceClockContextProvider = DeviceClockContextProvider()
 ) {
+    private val runners: Map<LocalChatRuntime, LocalChatRunner> =
+        runners ?: defaultLocalChatRunners(context.applicationContext)
     private val mutex = Mutex()
     private val telemetry = TelemetryLogger(context.applicationContext)
     private val socInfo = SocDetector.detect()
     private val appContext = context.applicationContext
+    private val parameterInstallationScopeId = installationScopeId
+        ?.takeIf { it.isNotBlank() }
+        ?: "process-local:${UUID.randomUUID()}"
+    private val qairtVerificationStore = qairtVerificationStoreOverride
+        ?: QairtExecutionVerificationStore.forContext(appContext)
+    private val qairtIdentityProvider: (String?) -> QairtBundleRuntimeIdentity? =
+        qairtIdentityProviderOverride ?: { bundleSha256 ->
+            qairtRuntimeIdentityFor(appContext, bundleSha256)
+        }
+    private val qairtDryRunProcessVerifier: () -> Boolean =
+        qairtDryRunProcessVerifierOverride ?: { isQairtIsolatedDryRunProcess(appContext) }
     private val _stats = MutableStateFlow(RuntimeStats(backend = "cpu", loaded = false))
+    private var activeRuntime: LocalChatRuntime = LocalChatRuntime.MNN_CPU
+    private var activeLoadSession: LoadedModelSession? = null
+    @Volatile
+    private var lastQairtExecutionAdmission: QairtExecutionAdmission? = null
+    private var qairtDryRunWitness: QairtDryRunWitness? = null
+    // A failed or cancelled MNN turn can leave native state unsafe to reuse.
+    // Most successful text turns are reset in native beginCompletion(); the
+    // narrow Gemma 4 text-isolation exception is selected by
+    // MnnSessionLifecyclePolicy after a successful turn.
+    private var mnnSessionNeedsReloadBeforeNextRequest = false
 
     val stats = _stats.asStateFlow()
 
-    init {
-        if (NativeLlamaBridge.isAvailable) {
-            bridge.initBackends(appContext.applicationInfo.nativeLibraryDir)
-        } else {
-            _stats.value = _stats.value.copy(lastError = NativeLlamaBridge.loadError?.message)
+    /**
+     * Latest QAIRT admission decision. Unknown bundle/device/runtime combinations
+     * stay runnable, but must be promoted only after their isolated dry-run.
+     */
+    val qairtExecutionAdmission: QairtExecutionAdmission?
+        get() = lastQairtExecutionAdmission
+
+    /**
+     * Debug/validation tooling calls this only after an isolated QAIRT smoke has
+     * reached create, generated a visible response, and cleanly destroyed the
+     * native handle. A normal app load never self-certifies an unverified bundle.
+     */
+    fun recordVerifiedQairtDryRun(bundleSha256: String?): Boolean {
+        val identity = qairtIdentityProvider(bundleSha256) ?: return false
+        val witness = qairtDryRunWitness ?: return false
+        if (!qairtDryRunProcessVerifier() ||
+            witness.identity != identity ||
+            !witness.sawNpuExecution ||
+            !witness.sawVisibleCompletion ||
+            !witness.destroyedCleanly
+        ) {
+            return false
+        }
+        qairtVerificationStore.recordVerified(identity)
+        qairtDryRunWitness = null
+        return true
+    }
+
+    fun isRuntimeAvailable(runtime: LocalChatRuntime): Boolean =
+        this.runners[runtime]?.isAvailable == true
+
+    fun parameterSignatureSnapshot(): ParameterSignatureSnapshot? =
+        parameterCoordinator.snapshot()
+
+    /**
+     * Read-only six-signature proof for the exact unconsumed pending candidate.
+     * RuntimeOverride is forced to NONE for candidate validation.
+     */
+    fun authorizedPendingSignatureVerification(
+        authorization: LoadAuthorization
+    ): AuthorizedPendingSignatureVerification? =
+        parameterCoordinator.authorizedPendingSignatureVerification(authorization)
+
+    fun activeExecutionProfile(): ModelExecutionProfile? =
+        parameterCoordinator.committedProfile()
+
+    /**
+     * Engine-owned candidate/apply boundary. The returned authorization is
+     * opaque and binds transactionId + profile identity/revision/all signatures.
+     */
+    fun stagePendingExecutionProfile(
+        transactionId: String,
+        profile: ModelExecutionProfile,
+        rollbackTargetProfileId: String? = activeExecutionProfile()?.profileId
+    ): LoadAuthorization {
+        val authorization = parameterCoordinator.createLoadAuthorization(transactionId, profile)
+        parameterCoordinator.stageAuthorizedPending(profile, authorization, rollbackTargetProfileId)
+        return authorization
+    }
+
+    /** Issues a value-bound HOT_EXECUTION lease; a public Boolean cannot replace it. */
+    fun authorizeHotExecutionOverride(
+        profile: ModelExecutionProfile,
+        values: CanonicalParameterSet
+    ): HotOverrideAuthorization = parameterCoordinator.createHotOverrideAuthorization(profile, values)
+
+    /**
+     * Stops an in-flight request, then waits until the real engine lifecycle is
+     * exclusively owned. Pass the returned lease through LocalChatExecutionContext
+     * for canary generation and always release it in a finally block.
+     */
+    suspend fun acquireExclusiveLifecycleLease(): EngineLifecycleLease {
+        stopGeneration()
+        val owner = Any()
+        mutex.lock(owner)
+        return EngineLifecycleLease(this, owner)
+    }
+
+    internal suspend fun releaseExclusiveLifecycleLease(lease: EngineLifecycleLease) {
+        require(lease.service === this) { "lifecycle lease belongs to another engine" }
+        val shouldRelease = synchronized(lease) {
+            if (!lease.active || lease.releasing) false else {
+                lease.releasing = true
+                true
+            }
+        }
+        if (!shouldRelease) return
+        try {
+            val deferred = synchronized(lease) { lease.deferredAuthorization }
+            if (deferred != null) {
+                runCatching {
+                    rollbackDeferredPendingExecutionProfile(deferred, lease)
+                }.onFailure { error ->
+                    parameterCoordinator.abortAuthorizedPending(deferred)
+                    parameterCoordinator.markUnloaded()
+                    activeLoadSession = null
+                    _stats.value = _stats.value.copy(
+                        loaded = false,
+                        lastError = "Deferred pending cleanup failed: ${error.message ?: error::class.java.simpleName}"
+                    )
+                }
+            }
+        } finally {
+            synchronized(lease) {
+                lease.deferredAuthorization = null
+                lease.active = false
+                lease.releasing = false
+            }
+            mutex.unlock(lease.ownerToken)
         }
     }
 
-    suspend fun loadModel(modelPath: String, params: LoadParams = LoadParams()): Result<RuntimeStats> = withContext(io) {
-        runCatching {
-            stopGeneration()
-            val started = System.currentTimeMillis()
-            val rc = bridge.loadModel(modelPath, params.toJson())
-            if (rc != 0) {
-                val nativeStats = nativeStatsJson()
-                val nativeError = runCatching {
-                    JSONObject(nativeStats).optString("lastError").takeIf { it.isNotBlank() }
-                }.getOrNull()
-                error(
-                    buildString {
-                        append("Native loadModel failed: ").append(rc)
-                        if (!nativeError.isNullOrBlank()) append("；").append(nativeError.trim())
-                    }
-                )
+    suspend fun commitDeferredPendingExecutionProfile(
+        authorization: LoadAuthorization,
+        lease: EngineLifecycleLease
+    ): ModelExecutionProfile = withLifecycleLock(lease) {
+        require(synchronized(lease) { lease.deferredAuthorization === authorization }) {
+            "the lifecycle lease does not own this deferred pending transaction"
+        }
+        val committed = parameterCoordinator.commitAuthorizedPending(authorization)
+        adoptCommittedProfileSessionLocked(committed)
+        synchronized(lease) { lease.deferredAuthorization = null }
+        committed
+    }
+
+    /** Returns null on success; a non-null message means the engine was left unloaded. */
+    suspend fun rollbackDeferredPendingExecutionProfile(
+        authorization: LoadAuthorization,
+        lease: EngineLifecycleLease
+    ): String? = withLifecycleLock(lease) {
+        require(synchronized(lease) { lease.deferredAuthorization === authorization }) {
+            "the lifecycle lease does not own this deferred pending transaction"
+        }
+        val session = activeLoadSession ?: error("deferred pending transaction has no active session")
+        val rollbackError = rollbackAuthorizedPendingLocked(
+            PendingRollbackContext(session, authorization)
+        )
+        if (rollbackError != null) {
+            parameterCoordinator.abortAuthorizedPending(authorization)
+            parameterCoordinator.markUnloaded()
+            activeLoadSession = null
+            _stats.value = _stats.value.copy(
+                loaded = false,
+                lastError = "Deferred pending rollback failed: $rollbackError"
+            )
+        }
+        synchronized(lease) { lease.deferredAuthorization = null }
+        rollbackError
+    }
+
+    suspend fun preflightChat(
+        request: ChatRequest,
+        executionContext: LocalChatExecutionContext = LocalChatExecutionContext()
+    ): CompletionPreflight = withLifecycleLock(executionContext.lifecycleLease) lifecycle@ {
+        val session = activeLoadSession
+            ?: return@lifecycle CompletionPreflight.Rejected(
+                code = "model_not_loaded",
+                changedFields = emptySet(),
+                quarantinedOverrides = emptyList(),
+                message = "No local model execution profile is loaded."
+            )
+        parameterCoordinator.preflight(
+            identity = session.runtimeIdentity,
+            requestParamsJson = request.params.toJson(),
+            trustedAuthorization = executionContext.loadAuthorization,
+            allowTrustedHotOverride = executionContext.allowTrustedHotOverride,
+            hotOverrideAuthorization = executionContext.hotOverrideAuthorization
+        )
+    }
+
+    init {
+        this.runners.values.forEach { runner ->
+            if (runner.isAvailable) {
+                runCatching { runner.initBackends(appContext.applicationInfo.nativeLibraryDir) }
             }
-            val loadMs = System.currentTimeMillis() - started
-            val memory = telemetry.memorySnapshotDetailed()
-            val nativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
-            val stats = RuntimeStats(
-                loaded = true,
+        }
+        val defaultRunner = this.runners[activeRuntime]
+        if (defaultRunner != null && !defaultRunner.isAvailable) {
+            _stats.value = _stats.value.copy(
+                backend = activeRuntime.backendId,
+                lastError = defaultRunner.loadError?.message
+            )
+        }
+    }
+
+    suspend fun loadModel(
+        modelPath: String,
+        runtime: LocalChatRuntime = LocalChatRuntime.MNN_CPU,
+        params: LoadParams = LoadParams(),
+        qairtBundleSha256: String? = null,
+        qairtExecutionPurpose: QairtExecutionPurpose = QairtExecutionPurpose.NORMAL,
+        runtimeIdentity: ModelRuntimeIdentity? = null,
+        executionProfile: ModelExecutionProfile? = null
+    ): Result<RuntimeStats> = withContext(io) {
+        runCatching {
+            require(modelPath.isNotBlank()) { "modelPath must not be blank" }
+            val resolvedIdentity = executionProfile?.runtimeIdentity
+                ?: runtimeIdentity
+                ?: defaultRuntimeIdentity(
+                    modelPath = modelPath,
+                    runtime = runtime,
+                    params = params,
+                    artifactFingerprintOverride = qairtBundleSha256
+                        ?.trim()
+                        ?.takeIf { runtime == LocalChatRuntime.GENIEX_QAIRT && it.isNotBlank() }
+                )
+            executionProfile?.let { persisted ->
+                require(persisted.runtimeIdentity.runtime == runtime) {
+                    "execution profile runtime does not match requested runtime"
+                }
+                require(runtimeIdentity == null || runtimeIdentity.identityHash == persisted.runtimeIdentity.identityHash) {
+                    "execution profile identity does not match requested runtime identity"
+                }
+            }
+            val resolvedExecutionProfile = executionProfile ?: parameterCoordinator.resolveProfile(
+                identity = resolvedIdentity,
+                requestedParamsJson = params.toJson(),
+                profileId = UUID.randomUUID().toString()
+            ).profile
+            require(resolvedExecutionProfile.runtimeIdentity.identityHash == resolvedIdentity.identityHash) {
+                "execution profile identity changed during load resolution"
+            }
+            val effectiveLoadParams = loadParamsForProfile(params, resolvedExecutionProfile)
+            val nativeLoadParamsJson = parameterCoordinator.nativeLoadJson(resolvedExecutionProfile)
+            val admissionMemory = memorySnapshotProvider?.invoke() ?: telemetry.memorySnapshotDetailed()
+            val admission = qairtExecutionAdmissionForLoad(
                 modelPath = modelPath,
-                backend = nativeStats?.optString("backend")?.takeIf { it.isNotBlank() } ?: "cpu",
-                loadMs = loadMs,
-                nThreads = nativeStats?.optInt("nThreads") ?: params.nThreads,
-                nThreadsBatch = nativeStats?.optInt("nThreadsBatch") ?: params.nThreads,
-                nBatch = nativeStats?.optInt("nBatch") ?: 0,
-                nUbatch = nativeStats?.optInt("nUbatch") ?: 0,
-                backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: "[]"
-            ).withMemory(memory)
-            _stats.value = stats
-            stats
+                runtime = runtime,
+                memory = admissionMemory,
+                bundleSha256 = qairtBundleSha256
+            )
+            lastQairtExecutionAdmission = admission
+            requireQairtExecutionPurpose(
+                runtime = runtime,
+                purpose = qairtExecutionPurpose,
+                bundleSha256 = qairtBundleSha256,
+                admission = admission
+            )
+            // Selecting an already healthy MNN model is an idempotent UI action.
+            // Avoiding a pointless native unload/load is essential for Gemma,
+            // whose upstream session can hang after repeated cold construction.
+            // Failed/cancelled MNN turns deliberately bypass this fast path and
+            // are refreshed below before their next request.
+            mutex.withLock {
+                validateExecutionProfilePathLocked(modelPath, resolvedExecutionProfile)
+                parameterCoordinator.prepareOrdinaryLoad(resolvedExecutionProfile)
+                reusableMnnLoadedStats(modelPath, runtime, resolvedExecutionProfile)
+            }?.let { reusable ->
+                if (executionProfile != null) {
+                    mutex.withLock { adoptEquivalentLoadedProfileLocked(resolvedExecutionProfile) }
+                }
+                return@runCatching reusable
+            }
+            stopGeneration()
+            mutex.withLock {
+                // A running request may have completed while stopGeneration()
+                // waited outside the lock. Recheck so that concurrent model-page
+                // taps still do not tear down a healthy MNN session.
+                reusableMnnLoadedStats(modelPath, runtime, resolvedExecutionProfile)?.let { reusable ->
+                    if (executionProfile != null) adoptEquivalentLoadedProfileLocked(resolvedExecutionProfile)
+                    return@withLock reusable
+                }
+                runCatching { runnerFor(activeRuntime).unloadModel() }
+                parameterCoordinator.markUnloaded()
+                _stats.value = RuntimeStats(loaded = false, backend = runtime.backendId)
+                activeRuntime = runtime
+                activeLoadSession = null
+                mnnSessionNeedsReloadBeforeNextRequest = false
+                if (runtime == LocalChatRuntime.GENIEX_QAIRT) {
+                    // A new QAIRT attempt must earn a new witness. Do not let a
+                    // prior create/generate result certify a different handle.
+                    qairtDryRunWitness = null
+                }
+                val runner = runnerFor(runtime)
+                if (!runner.isAvailable) {
+                    val message = unavailableStats(runtime, runner.loadError).optString("lastError")
+                    _stats.value = RuntimeStats(
+                        loaded = false,
+                        backend = runtime.backendId,
+                        modelPath = modelPath,
+                        nThreads = effectiveLoadParams.nThreads,
+                        nCtx = effectiveLoadParams.nCtx,
+                        maxAllTokens = effectiveLoadParams.nCtx,
+                        lastError = message
+                    )
+                    error(message)
+                }
+                val started = System.currentTimeMillis()
+                val rc = runner.loadModel(modelPath, nativeLoadParamsJson)
+                if (rc != 0) {
+                    val nativeStats = nativeStatsJson()
+                    val nativeError = runCatching {
+                        JSONObject(nativeStats).optString("lastError").takeIf { it.isNotBlank() }
+                    }.getOrNull()
+                    error(
+                        buildString {
+                            append("Native loadModel failed: ").append(rc)
+                            if (!nativeError.isNullOrBlank()) append("；").append(nativeError.trim())
+                        }.also { message ->
+                            runCatching { runner.requestStop() }
+                            runCatching { runner.unloadModel() }
+                            activeLoadSession = null
+                            mnnSessionNeedsReloadBeforeNextRequest = false
+                            _stats.value = RuntimeStats(
+                                loaded = false,
+                                modelPath = modelPath,
+                                backend = runtime.backendId,
+                                nThreads = effectiveLoadParams.nThreads,
+                                nThreadsBatch = effectiveLoadParams.nThreads,
+                                nCtx = effectiveLoadParams.nCtx,
+                                maxAllTokens = effectiveLoadParams.nCtx,
+                                lastError = message
+                            )
+                        }
+                    )
+                }
+                val loadMs = System.currentTimeMillis() - started
+                val stats = loadedStatsFromNative(modelPath, runtime, effectiveLoadParams, loadMs)
+                if (runtime == LocalChatRuntime.GENIEX_QAIRT &&
+                    qairtExecutionPurpose == QairtExecutionPurpose.ISOLATED_DRY_RUN
+                ) {
+                    val identity = qairtIdentityProvider(qairtBundleSha256)
+                        ?.takeIf(QairtBundleRuntimeIdentity::isComplete)
+                        ?: run {
+                            runCatching { runner.requestStop() }
+                            runCatching { runner.unloadModel() }
+                            parameterCoordinator.markUnloaded()
+                            activeLoadSession = null
+                            error("QAIRT 隔离验收缺少完整模型包哈希、芯片或运行时身份。")
+                        }
+                    val nativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
+                    if (nativeStats == null || !hasQairtNpuExecutionEvidence(nativeStats)) {
+                        runCatching { runner.requestStop() }
+                        runCatching { runner.unloadModel() }
+                        parameterCoordinator.markUnloaded()
+                        activeLoadSession = null
+                        _stats.value = RuntimeStats(
+                            loaded = false,
+                            modelPath = modelPath,
+                            backend = runtime.backendId,
+                            nThreads = effectiveLoadParams.nThreads,
+                            nCtx = effectiveLoadParams.nCtx,
+                            maxAllTokens = effectiveLoadParams.nCtx,
+                            lastError = "QAIRT 隔离验收未取得 NPU 执行证据。"
+                        )
+                        error("QAIRT 隔离验收未取得 NPU 执行证据，拒绝认证该模型包。")
+                    }
+                    qairtDryRunWitness = QairtDryRunWitness(
+                        identity = identity,
+                        sawNpuExecution = true,
+                        npuEvidence = nativeStats.opt("backendDevices")?.toString().orEmpty()
+                    )
+                }
+                if (runtime.usesCoordinatedParameters()) {
+                    runCatching {
+                        // QAIRT publish/commit is intentionally after both static
+                        // admission and native NPU evidence validation above.
+                        parameterCoordinator.publishLoaded(resolvedExecutionProfile, nativeStatsJson())
+                        parameterCoordinator.commit(resolvedExecutionProfile)
+                    }.getOrElse { signatureError ->
+                        runCatching { runner.requestStop() }
+                        runCatching { runner.unloadModel() }
+                        parameterCoordinator.markUnloaded()
+                        if (runtime == LocalChatRuntime.GENIEX_QAIRT) qairtDryRunWitness = null
+                        activeLoadSession = null
+                        mnnSessionNeedsReloadBeforeNextRequest = false
+                        error("Native effective parameter verification failed: ${signatureError.message}")
+                    }
+                }
+                activeLoadSession = LoadedModelSession(
+                    modelPath = modelPath,
+                    runtime = runtime,
+                    params = effectiveLoadParams,
+                    runtimeIdentity = resolvedIdentity,
+                    executionProfile = resolvedExecutionProfile,
+                    nativeLoadParamsJson = nativeLoadParamsJson
+                )
+                mnnSessionNeedsReloadBeforeNextRequest = false
+                _stats.value = stats
+                stats
+            }
         }
     }
 
     suspend fun unloadModel() = withContext(io) {
         stopGeneration()
-        bridge.unloadModel()
-        _stats.value = RuntimeStats(loaded = false, backend = "cpu")
+        mutex.withLock {
+            val unloadedRuntime = activeRuntime
+            val dryRunWitness = qairtDryRunWitness
+            runnerFor(unloadedRuntime).unloadModel()
+            parameterCoordinator.markUnloaded()
+            if (unloadedRuntime == LocalChatRuntime.GENIEX_QAIRT && dryRunWitness != null) {
+                val nativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
+                dryRunWitness.destroyedCleanly = nativeStats != null &&
+                    !nativeStats.optBoolean("loaded", true) &&
+                    nativeStats.optString("lastError").isBlank()
+            }
+            activeLoadSession = null
+            mnnSessionNeedsReloadBeforeNextRequest = false
+            lastQairtExecutionAdmission = null
+            _stats.value = RuntimeStats(loaded = false, backend = activeRuntime.backendId)
+        }
     }
 
-    fun streamChat(request: ChatRequest): Flow<GenerateEvent> = flow {
-        mutex.withLock {
-            val current = _stats.value
+    fun streamChat(
+        request: ChatRequest,
+        executionContext: LocalChatExecutionContext = LocalChatExecutionContext()
+    ): Flow<GenerateEvent> = flow {
+        var pendingRollbackContext: PendingRollbackContext? = null
+        var pendingTransactionCommitted = false
+        var pendingTransactionDeferred = false
+        try {
+            withLifecycleLock(executionContext.lifecycleLease) lifecycle@ {
+            var current = _stats.value
             if (!current.loaded) {
-                val errorStats = current.copy(lastError = "No GGUF model is loaded.")
-                emit(GenerateEvent.Error("请先在模型页加载一个 GGUF 模型。", errorStats))
-                return@withLock
+                val errorStats = current.copy(lastError = "No local chat model is loaded.")
+                emit(GenerateEvent.Error("请先在模型页加载一个本地推理模型。", errorStats))
+                return@lifecycle
             }
             val memoryBeforeGenerate = telemetry.memorySnapshotDetailed()
             if (memoryBeforeGenerate.availMemKb in 1 until LOW_MEMORY_START_GUARD_KB) {
@@ -98,27 +567,267 @@ class McaInferenceService(
                 ).withMemory(memoryBeforeGenerate)
                 _stats.value = errorStats
                 emit(GenerateEvent.Error(message, errorStats))
-                return@withLock
+                return@lifecycle
             }
 
-            val protected = protectContext(request)
+            val requestWithRuntimeContext = request.copy(
+                runtimeSystemContext = deviceClockContextProvider.contextFor(request.messages)
+            )
+
+            val incomingHasImageAttachments = requestWithRuntimeContext.hasImageAttachments()
+            if (activeRuntime == LocalChatRuntime.MNN_CPU && mnnSessionNeedsReloadBeforeNextRequest) {
+                val reloadError = reloadActiveMnnSessionForNextRequestLocked()
+                if (reloadError != null) {
+                    val errorStats = _stats.value.copy(lastError = reloadError)
+                    _stats.value = errorStats
+                    emit(GenerateEvent.Error(reloadError, errorStats))
+                    return@lifecycle
+                }
+                current = _stats.value
+            }
+
+            var preparedParameters: CompletionPreflight.Ready? = null
+            if (activeRuntime.usesCoordinatedParameters()) {
+                val session = activeLoadSession
+                if (session == null) {
+                    val message = "模型运行参数状态缺失，请重新加载当前模型。"
+                    val errorStats = current.copy(lastError = message)
+                    _stats.value = errorStats
+                    emit(GenerateEvent.Error(message, errorStats))
+                    return@lifecycle
+                }
+                val suppliedLoadAuthorization = executionContext.loadAuthorization
+                if (suppliedLoadAuthorization != null &&
+                    parameterCoordinator.isAuthorizedPendingActive(suppliedLoadAuthorization)
+                ) {
+                    pendingRollbackContext = PendingRollbackContext(
+                        baseSession = session,
+                        authorization = suppliedLoadAuthorization
+                    )
+                }
+                var preflight = parameterCoordinator.preflight(
+                    identity = session.runtimeIdentity,
+                    requestParamsJson = requestWithRuntimeContext.params.toJson(),
+                    trustedAuthorization = executionContext.loadAuthorization,
+                    allowTrustedHotOverride = executionContext.allowTrustedHotOverride,
+                    hotOverrideAuthorization = executionContext.hotOverrideAuthorization
+                )
+                if (preflight is CompletionPreflight.Rejected &&
+                    preflight.code == "model_reload_required_authorized"
+                ) {
+                    val decision = parameterCoordinator.decideMismatchRecovery(
+                        requestId = executionContext.requestId,
+                        identity = session.runtimeIdentity,
+                        trustedAuthorization = executionContext.loadAuthorization
+                    )
+                    val reloadError = when (decision) {
+                        is MismatchRecoveryDecision.ReloadAuthorizedPending -> {
+                            pendingRollbackContext = pendingRollbackContext ?: PendingRollbackContext(
+                                baseSession = session,
+                                authorization = decision.transaction.authorization
+                            )
+                            reloadCoordinatedProfileLocked(
+                                session = session,
+                                target = decision.transaction.profile,
+                                authorization = decision.transaction.authorization,
+                                commitAfterLoad = false
+                            )
+                        }
+                        is MismatchRecoveryDecision.ReloadCommittedForDrift ->
+                            reloadCoordinatedProfileLocked(session, decision.profile, null, false)
+                        is MismatchRecoveryDecision.Fail -> decision.message
+                    }
+                    if (reloadError != null) {
+                        val errorStats = _stats.value.copy(lastError = reloadError)
+                        _stats.value = errorStats
+                        emit(GenerateEvent.Error(reloadError, errorStats))
+                        return@lifecycle
+                    }
+                    current = _stats.value
+                    val reloadedSession = activeLoadSession ?: session
+                    preflight = parameterCoordinator.preflight(
+                        identity = reloadedSession.runtimeIdentity,
+                        requestParamsJson = requestWithRuntimeContext.params.toJson(),
+                        trustedAuthorization = executionContext.loadAuthorization,
+                        allowTrustedHotOverride = executionContext.allowTrustedHotOverride,
+                        hotOverrideAuthorization = executionContext.hotOverrideAuthorization
+                    )
+                }
+                when (preflight) {
+                    is CompletionPreflight.Ready -> {
+                        preparedParameters = preflight
+                        val staged = executionContext.loadAuthorization
+                            ?.let(parameterCoordinator::authorizedPendingFor)
+                            ?.takeIf { transaction ->
+                                transaction.profile.desiredSignature.digest == preflight.signatures.desired.digest &&
+                                    transaction.profile.resolvedLoadSignature.digest == preflight.signatures.resolved.digest &&
+                                    transaction.profile.committedExecutionSignature.digest == preflight.signatures.committed.digest
+                            }
+                        if (staged != null) {
+                            pendingRollbackContext = pendingRollbackContext ?: PendingRollbackContext(
+                                baseSession = activeLoadSession ?: session,
+                                authorization = staged.authorization
+                            )
+                        }
+                    }
+                    is CompletionPreflight.Rejected -> {
+                        val message = buildString {
+                            append(preflight.message)
+                            if (preflight.changedFields.isNotEmpty()) {
+                                append(" changed_fields=")
+                                append(preflight.changedFields.sorted().joinToString(","))
+                            }
+                        }
+                        val errorStats = current.copy(lastError = message)
+                        _stats.value = errorStats
+                        emit(GenerateEvent.Error(message, errorStats))
+                        return@lifecycle
+                    }
+                }
+            }
+
+            val requestWithVisionFiles = if (incomingHasImageAttachments) {
+                if (!localVisionReady()) {
+                    val message = "当前本地模型未启用识图。请加载 MNN 多模态包，或加载本地多模态 GGUF 并绑定匹配 mmproj 后重新加载模型。"
+                    val errorStats = current.copy(lastError = message)
+                    _stats.value = errorStats
+                    emit(GenerateEvent.Error(message, errorStats))
+                    return@lifecycle
+                }
+                runCatching {
+                    withContext(io) {
+                        LocalVisionInputPreparer.prepare(
+                            request = requestWithRuntimeContext,
+                            cacheDir = appContext.cacheDir,
+                            diagnosticSink = { stage, details ->
+                                dispatchVisionDiagnostic(executionContext, stage, details)
+                            }
+                        )
+                    }
+                }.getOrElse { error ->
+                    val message = "本地图片预处理失败：${error.message ?: "无法读取图片"}"
+                    val errorStats = current.copy(lastError = message)
+                    _stats.value = errorStats
+                    emit(GenerateEvent.Error(message, errorStats))
+                    return@lifecycle
+                }
+            } else {
+                requestWithRuntimeContext
+            }
+
+            val protected = protectContext(requestWithVisionFiles)
             if (protected.error != null) {
                 val errorStats = current.copy(lastError = protected.error)
                 _stats.value = errorStats
                 emit(GenerateEvent.Error(protected.error, errorStats))
-                return@withLock
+                return@lifecycle
             }
             val activeRequest = protected.request
+            val runner = runnerFor(activeRuntime)
 
             val started = System.currentTimeMillis()
-            val hasImageAttachments = activeRequest.messages.any { it.imageAttachments.isNotEmpty() }
-            val beginRc = withContext(io) {
-                bridge.beginCompletion(
-                    activeRequest.messagesJson(multimodal = hasImageAttachments),
-                    activeRequest.params.toJson()
-                )
+            val hasImageAttachments = activeRequest.hasImageAttachments()
+            val shouldRefreshMnnAfterRequest = activeRuntime == LocalChatRuntime.MNN_CPU
+            suspend fun beginNative(paramsJson: String): Result<Int> = runCatching {
+                withContext(io) {
+                    runner.beginCompletion(
+                        activeRequest.messagesJson(
+                            multimodal = hasImageAttachments,
+                            contentEncoding = if (activeRuntime == LocalChatRuntime.MNN_CPU) {
+                                MultimodalContentEncoding.MNN_IMAGE_TAGS_FIRST
+                            } else {
+                                MultimodalContentEncoding.OPENAI_PARTS
+                            }
+                        ),
+                        paramsJson
+                    )
+                }
+            }
+            var beginResult = beginNative(
+                preparedParameters?.nativeParamsJson ?: activeRequest.params.toJson()
+            )
+            beginResult.exceptionOrNull()?.let { error ->
+                if (shouldRefreshMnnAfterRequest) {
+                    mnnSessionNeedsReloadBeforeNextRequest = true
+                }
+                runCatching { runner.requestStop() }
+                if (error is CancellationException) throw error
+                val message = "Native beginCompletion failed: ${error.message ?: error::class.java.simpleName}"
+                val errorStats = _stats.value.copy(lastError = message)
+                _stats.value = errorStats
+                emit(GenerateEvent.Error(message, errorStats))
+                return@lifecycle
+            }
+            var beginRc = beginResult.getOrThrow()
+            if (beginRc != 0 && activeRuntime.usesCoordinatedParameters()) {
+                val session = activeLoadSession
+                val nativeError = runCatching {
+                    JSONObject(nativeStatsJson()).optString("lastError").takeIf { it.isNotBlank() }
+                }.getOrNull()
+                if (session != null && parameterCoordinator.isLoadSignatureMismatch(
+                        session.runtimeIdentity,
+                        beginRc,
+                        nativeError
+                    )
+                ) {
+                    val decision = parameterCoordinator.decideMismatchRecovery(
+                        requestId = executionContext.requestId,
+                        identity = session.runtimeIdentity,
+                        trustedAuthorization = executionContext.loadAuthorization
+                    )
+                    val reloadError = when (decision) {
+                        is MismatchRecoveryDecision.ReloadAuthorizedPending -> {
+                            pendingRollbackContext = pendingRollbackContext ?: PendingRollbackContext(
+                                baseSession = session,
+                                authorization = decision.transaction.authorization
+                            )
+                            reloadCoordinatedProfileLocked(
+                                session,
+                                decision.transaction.profile,
+                                decision.transaction.authorization,
+                                false
+                            )
+                        }
+                        is MismatchRecoveryDecision.ReloadCommittedForDrift ->
+                            reloadCoordinatedProfileLocked(session, decision.profile, null, false)
+                        is MismatchRecoveryDecision.Fail -> decision.message
+                    }
+                    if (reloadError == null) {
+                        current = _stats.value
+                        val reloadedSession = activeLoadSession
+                        val retryPreflight = reloadedSession?.let {
+                            parameterCoordinator.preflight(
+                                identity = it.runtimeIdentity,
+                                requestParamsJson = activeRequest.params.toJson(),
+                                trustedAuthorization = executionContext.loadAuthorization,
+                                allowTrustedHotOverride = executionContext.allowTrustedHotOverride,
+                                hotOverrideAuthorization = executionContext.hotOverrideAuthorization
+                            )
+                        }
+                        if (retryPreflight is CompletionPreflight.Ready) {
+                            beginResult = beginNative(retryPreflight.nativeParamsJson)
+                            beginResult.exceptionOrNull()?.let { error ->
+                                if (shouldRefreshMnnAfterRequest) mnnSessionNeedsReloadBeforeNextRequest = true
+                                runCatching { runner.requestStop() }
+                                if (error is CancellationException) throw error
+                                val message = "Native beginCompletion recovery failed: ${error.message ?: error::class.java.simpleName}"
+                                val errorStats = _stats.value.copy(lastError = message)
+                                _stats.value = errorStats
+                                emit(GenerateEvent.Error(message, errorStats))
+                                return@lifecycle
+                            }
+                            beginRc = beginResult.getOrThrow()
+                        } else if (retryPreflight is CompletionPreflight.Rejected) {
+                            beginRc = NativeRuntimeErrorCodes.LOAD_SIGNATURE_MISMATCH
+                        }
+                    }
+                }
             }
             if (beginRc != 0) {
+                if (shouldRefreshMnnAfterRequest) {
+                    mnnSessionNeedsReloadBeforeNextRequest = true
+                }
+                runCatching { runner.requestStop() }
                 val nativeError = runCatching {
                     JSONObject(nativeStatsJson()).optString("lastError").takeIf { it.isNotBlank() }
                 }.getOrNull()
@@ -127,8 +836,9 @@ class McaInferenceService(
                     if (!nativeError.isNullOrBlank()) append("；").append(nativeError.trim())
                 }
                 val errorStats = _stats.value.copy(lastError = message)
+                _stats.value = errorStats
                 emit(GenerateEvent.Error(message, errorStats))
-                return@withLock
+                return@lifecycle
             }
 
             var firstTokenAt = 0L
@@ -145,10 +855,26 @@ class McaInferenceService(
             val hideReasoning = request.params.hideReasoning || request.params.reasoningMode == ReasoningMode.OFF
             var reasoningStartedAt = 0L
             var reasoningDurationMs = 0L
+            var visibleOutputSeen = false
+            var mnnGenerationCompletedNormally = false
+            var mnnGenerationWasInterrupted = false
+            // A failure thrown by FlowCollector.emit() belongs to the downstream consumer.
+            // It must escape unchanged: attempting to emit a second error event from our
+            // catch block violates Flow's exception-transparency contract.
+            var downstreamEmissionFailed = false
+
+            suspend fun emitGenerated(event: GenerateEvent) {
+                try {
+                    emit(event)
+                } catch (error: Throwable) {
+                    downstreamEmissionFailed = true
+                    throw error
+                }
+            }
 
             try {
                 while (true) {
-                    val chunk = withContext(io) { bridge.generateNextChunk() } ?: break
+                    val chunk = withContext(io) { runner.generateNextChunk() } ?: break
                     if (chunk.isBlank()) continue
                     val now = System.currentTimeMillis()
                     if (firstTokenAt == 0L) firstTokenAt = now
@@ -208,6 +934,9 @@ class McaInferenceService(
                         nThreadsBatch = nativeStats?.optInt("nThreadsBatch") ?: _stats.value.nThreadsBatch,
                         nBatch = nativeStats?.optInt("nBatch") ?: _stats.value.nBatch,
                         nUbatch = nativeStats?.optInt("nUbatch") ?: _stats.value.nUbatch,
+                        nCtx = nativeStats?.optInt("nCtx")?.takeIf { it > 0 } ?: _stats.value.nCtx,
+                        maxAllTokens = nativeStats?.optInt("maxAllTokens")?.takeIf { it > 0 } ?: _stats.value.maxAllTokens,
+                        maxNewTokens = nativeStats?.optInt("maxNewTokens")?.takeIf { it > 0 } ?: _stats.value.maxNewTokens,
                         backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: _stats.value.backendDevices,
                         lastError = null
                     ).withMemory(latestMemory)
@@ -216,25 +945,30 @@ class McaInferenceService(
                     }
                     if (latestMemory.availMemKb in 1 until LOW_MEMORY_RUNTIME_STOP_KB) {
                         val message = "生成过程中可用内存降到 ${formatMb(latestMemory.availMemKb)}，已停止生成以避免系统回收或崩溃。建议降低 n_ctx / n_predict 或关闭后台应用。"
-                        bridge.requestStop()
+                        mnnGenerationWasInterrupted = shouldRefreshMnnAfterRequest
+                        runner.requestStop()
                         val errorStats = finalStats.copy(lastError = message)
                         _stats.value = errorStats
                         writeLog(errorStats, activeRequest.params, error = message)
-                        emit(GenerateEvent.Error(message, errorStats))
-                        return@withLock
+                        emitGenerated(GenerateEvent.Error(message, errorStats))
+                        return@lifecycle
                     }
                     val filtered = reasoningFilter.filter(chunk)
+                    if (filtered.visible.isNotBlank()) {
+                        visibleOutputSeen = true
+                    }
                     var stopForReasoningLoop = false
                     if (filtered.reasoning.isNotBlank() && !hideReasoning) {
                         if (reasoningStartedAt == 0L) reasoningStartedAt = now
                         reasoningDurationMs = now - reasoningStartedAt
                         stopForReasoningLoop = reasoningLoopGuard.shouldStop(filtered.reasoning)
                         if (stopForReasoningLoop) {
-                            bridge.requestStop()
+                            mnnGenerationWasInterrupted = shouldRefreshMnnAfterRequest
+                            runner.requestStop()
                         }
                     }
                     if (filtered.visible.isNotBlank() || (filtered.reasoning.isNotBlank() && !hideReasoning)) {
-                        emit(
+                        emitGenerated(
                             GenerateEvent.Chunk(
                                 text = filtered.visible,
                                 stats = finalStats,
@@ -243,7 +977,7 @@ class McaInferenceService(
                             )
                         )
                     } else if (filtered.reasoning.isNotBlank() && hideReasoning && generatedTokens % HIDDEN_REASONING_PROGRESS_STEP_TOKENS == 0) {
-                        emit(
+                        emitGenerated(
                             GenerateEvent.Chunk(
                                 text = "",
                                 stats = finalStats,
@@ -263,14 +997,25 @@ class McaInferenceService(
                     request = activeRequest
                 )
                 _stats.value = finalStats
+                if (shouldRefreshMnnAfterRequest) {
+                    val nativeStopReason = finalNativeStats
+                        ?.optString("generationStopReason")
+                        .orEmpty()
+                    if (nativeStopReason in MNN_UNSAFE_STOP_REASONS) {
+                        mnnGenerationWasInterrupted = true
+                    }
+                }
                 val remaining = reasoningFilter.finish()
                 if (remaining.reasoning.isNotBlank() && !hideReasoning) {
                     val now = System.currentTimeMillis()
                     if (reasoningStartedAt == 0L) reasoningStartedAt = now
                     reasoningDurationMs = now - reasoningStartedAt
                 }
+                if (remaining.visible.isNotBlank()) {
+                    visibleOutputSeen = true
+                }
                 if (remaining.visible.isNotBlank() || (remaining.reasoning.isNotBlank() && !hideReasoning)) {
-                    emit(
+                    emitGenerated(
                         GenerateEvent.Chunk(
                             text = remaining.visible,
                             stats = finalStats,
@@ -279,28 +1024,167 @@ class McaInferenceService(
                         )
                     )
                 }
+                if (!visibleOutputSeen) {
+                    val message = "本地模型本轮没有生成可见正文。请重试；若持续发生，请降低上下文或更换模型。"
+                    val errorStats = finalStats.copy(lastError = message)
+                    _stats.value = errorStats
+                    writeLog(errorStats, activeRequest.params, error = message)
+                    emitGenerated(GenerateEvent.Error(message, errorStats))
+                    return@lifecycle
+                }
                 writeLog(finalStats, activeRequest.params, error = null)
-                emit(GenerateEvent.Done(finalStats))
+                if (activeRuntime == LocalChatRuntime.GENIEX_QAIRT) {
+                    qairtDryRunWitness?.sawVisibleCompletion = true
+                }
+                pendingRollbackContext?.let { transaction ->
+                    if (executionContext.pendingProfileDisposition ==
+                        PendingProfileDisposition.COMMIT_ON_VISIBLE_SUCCESS
+                    ) {
+                        val committed = parameterCoordinator.commitAuthorizedPending(transaction.authorization)
+                        adoptCommittedProfileSessionLocked(committed)
+                        pendingTransactionCommitted = true
+                    } else if (executionContext.pendingProfileDisposition ==
+                        PendingProfileDisposition.DEFER_TO_LEASE_HOLDER
+                    ) {
+                        val lease = executionContext.lifecycleLease
+                            ?: error("deferred pending disposition requires an exclusive lifecycle lease")
+                        synchronized(lease) {
+                            require(lease.deferredAuthorization == null ||
+                                lease.deferredAuthorization === transaction.authorization) {
+                                "lifecycle lease already owns another deferred transaction"
+                            }
+                            lease.deferredAuthorization = transaction.authorization
+                        }
+                        pendingTransactionDeferred = true
+                    }
+                }
+                mnnGenerationCompletedNormally = !mnnGenerationWasInterrupted
+                emitGenerated(GenerateEvent.Done(finalStats))
             } catch (t: Throwable) {
-                bridge.requestStop()
-                if (t is CancellationException) throw t
+                // Never let cleanup hide a downstream/cancellation exception.
+                runCatching { runner.requestStop() }
+                if (t is CancellationException || downstreamEmissionFailed) throw t
                 val errorStats = _stats.value.copy(lastError = t.message)
                 _stats.value = errorStats
                 writeLog(errorStats, activeRequest.params, error = t.message)
                 emit(GenerateEvent.Error(t.message ?: "Generation failed.", errorStats))
+            } finally {
+                // Native beginCompletion() calls reset() for every request. That reset only
+                // covers the base LLM context, however; MNN Omni keeps visual state in its
+                // subclass. Recreate an MNN session before the next request after every
+                // image turn so image embeddings/counters cannot leak into a later turn.
+                // Most text-only successful turns remain reusable. MNN 3.5 Gemma 4
+                // text-isolation bundles are the narrow exception: under the MNN 3.6
+                // loader, their first reset can emit EOP as the entire next answer.
+                // Those bundles have no legacy visual graph and have proven safe to
+                // reconstruct, so refresh them before the next request.
+                val mustRefreshMnnForVisualState = hasImageAttachments
+                val mustRefreshMnnForTextCompatibility =
+                    !hasImageAttachments &&
+                        activeLoadSession?.let { session ->
+                            MnnSessionLifecyclePolicy
+                                .requiresFreshSessionAfterSuccessfulTextTurn(session.modelPath)
+                        } == true
+                if (shouldRefreshMnnAfterRequest &&
+                    (!mnnGenerationCompletedNormally ||
+                        mustRefreshMnnForVisualState ||
+                        mustRefreshMnnForTextCompatibility)
+                ) {
+                    mnnSessionNeedsReloadBeforeNextRequest = true
+                }
+            }
+            }
+        } finally {
+            try {
+                val rollback = pendingRollbackContext
+                if (rollback != null && !pendingTransactionCommitted && !pendingTransactionDeferred) {
+                    withContext(NonCancellable) {
+                        withLifecycleLock(executionContext.lifecycleLease) {
+                            val rollbackError = rollbackAuthorizedPendingLocked(rollback)
+                            if (rollbackError != null) {
+                                parameterCoordinator.abortAuthorizedPending(rollback.authorization)
+                                parameterCoordinator.markUnloaded()
+                                activeLoadSession = null
+                                _stats.value = _stats.value.copy(
+                                    loaded = false,
+                                    lastError = "Pending profile rollback failed: $rollbackError"
+                                )
+                            }
+                        }
+                    }
+                }
+            } finally {
+                parameterCoordinator.finishRequest(executionContext.requestId)
             }
         }
     }
 
     suspend fun stopGeneration() = withContext(io) {
-        runCatching { bridge.requestStop() }
+        runCatching { runnerFor(activeRuntime).requestStop() }
     }
 
-    fun nativeStatsJson(): String = runCatching { bridge.getRuntimeStatsJson() }.getOrElse {
+    /**
+     * Requests cancellation only when the active runner can atomically prove
+     * that generation is still in progress. A false result is deliberately
+     * inconclusive and must not be treated as cancellation evidence.
+     */
+    suspend fun stopGenerationIfActive(): Boolean = withContext(io) {
+        runCatching { runnerFor(activeRuntime).requestStopIfActive() }
+            .getOrDefault(false)
+    }
+
+    /** Releases every configured native runner, including inactive QAIRT sessions retained by callers. */
+    suspend fun shutdown() = withContext(io) {
+        // Interrupt an active stream before waiting for streamChat's mutex ownership.
+        runCatching { runnerFor(activeRuntime).requestStop() }
+        mutex.withLock {
+            runners.values.distinct().forEach { runner ->
+                runCatching { runner.requestStop() }
+                runCatching { runner.shutdown() }
+            }
+            parameterCoordinator.markUnloaded()
+            activeLoadSession = null
+            qairtDryRunWitness = null
+            lastQairtExecutionAdmission = null
+            mnnSessionNeedsReloadBeforeNextRequest = false
+            _stats.value = RuntimeStats(loaded = false, backend = activeRuntime.backendId)
+        }
+    }
+
+    fun nativeStatsJson(): String = runCatching { runnerFor(activeRuntime).getRuntimeStatsJson() }.getOrElse {
         JSONObject().put("error", it.message).toString()
     }
 
     fun recentLogs(limit: Int = 200): List<RuntimeMetrics> = telemetry.recent(limit)
+
+    private fun dispatchVisionDiagnostic(
+        executionContext: LocalChatExecutionContext,
+        stage: String,
+        details: JSONObject
+    ) {
+        val snapshot = runCatching { details.toString() }.getOrDefault("{}")
+        runCatching { LocalChatRunnerDebug.emit(stage, JSONObject(snapshot)) }
+        executionContext.visionDiagnosticSink?.let { sink ->
+            val redacted = JSONObject().apply {
+                details.optString("status")
+                    .trim()
+                    .lowercase()
+                    .takeIf(VISION_DIAGNOSTIC_TOKEN_PATTERN::matches)
+                    ?.let { put("status", it) }
+                details.optString("preprocessing")
+                    .trim()
+                    .lowercase()
+                    .takeIf(VISION_DIAGNOSTIC_TOKEN_PATTERN::matches)
+                    ?.let { put("preprocessing", it) }
+                details.optString("inputSha256")
+                    .trim()
+                    .lowercase()
+                    .takeIf(VISION_DIAGNOSTIC_SHA256_PATTERN::matches)
+                    ?.let { put("inputSha256", it) }
+            }
+            runCatching { sink(stage, redacted) }
+        }
+    }
 
     private fun writeLog(stats: RuntimeStats, params: GenerationParams, error: String?) {
         telemetry.append(
@@ -337,15 +1221,387 @@ class McaInferenceService(
         )
     }
 
-    private fun estimateTokens(text: String): Int = max(1, text.length / 2)
+    private fun estimateTokens(text: String): Int = estimateLocalPromptTokens(text)
 
     private fun estimatePromptTokens(request: ChatRequest): Int =
         request.messages.sumOf { estimateTokens(it.content) } +
             estimateTokens(request.params.systemPrompt) +
+            estimateTokens(request.runtimeSystemContext) +
             REASONING_INSTRUCTION_ESTIMATE_TOKENS
 
     private fun promptReserveTokens(nCtx: Int): Int =
         (nCtx / 8).coerceIn(MIN_RESERVED_OUTPUT_TOKENS, MAX_PROMPT_RESERVE_TOKENS)
+
+    private fun ChatRequest.hasImageAttachments(): Boolean =
+        messages.any { it.imageAttachments.isNotEmpty() }
+
+    private fun localVisionReady(): Boolean =
+        runCatching { JSONObject(nativeStatsJson()).optBoolean("visionReady", false) }
+            .getOrDefault(false)
+
+    private fun runnerFor(runtime: LocalChatRuntime): LocalChatRunner =
+        runners[runtime] ?: error("本地推理后端未注册：${runtime.label}")
+
+    private suspend fun <T> withLifecycleLock(
+        lease: EngineLifecycleLease?,
+        block: suspend () -> T
+    ): T {
+        if (lease == null) return mutex.withLock { block() }
+        require(lease.service === this && lease.active && mutex.holdsLock(lease.ownerToken)) {
+            "lifecycle lease is invalid, released, or belongs to another engine"
+        }
+        return block()
+    }
+
+    private fun loadParamsForProfile(
+        requested: LoadParams,
+        profile: ModelExecutionProfile
+    ): LoadParams = requested.copy(
+        nCtx = (profile.resolvedLoadBoundValues.value("n_ctx") as? Number)?.toInt()
+            ?: requested.nCtx,
+        nThreads = (profile.hotExecutionValues.value("n_threads") as? Number)?.toInt()
+            ?: requested.nThreads,
+        mmap = profile.resolvedLoadBoundValues.value("mmap") as? Boolean ?: requested.mmap,
+        mlock = profile.resolvedLoadBoundValues.value("mlock") as? Boolean ?: requested.mlock
+    )
+
+    /** Called only while [mutex] is held. */
+    private fun validateExecutionProfilePathLocked(
+        modelPath: String,
+        profile: ModelExecutionProfile
+    ) {
+        activeLoadSession
+            ?.takeIf { it.runtimeIdentity.identityHash == profile.runtimeIdentity.identityHash }
+            ?.let { session ->
+                require(sameModelLocation(session.modelPath, modelPath)) {
+                    "the same model runtime identity cannot be rebound to a different model path"
+                }
+            }
+    }
+
+    /** Rebind persisted profile metadata only when the native execution is identical. */
+    private fun adoptEquivalentLoadedProfileLocked(profile: ModelExecutionProfile) {
+        val session = activeLoadSession ?: error("no loaded session is available for profile adoption")
+        require(session.runtimeIdentity.identityHash == profile.runtimeIdentity.identityHash &&
+            session.executionProfile.resolvedLoadSignature.digest == profile.resolvedLoadSignature.digest &&
+            session.executionProfile.committedExecutionSignature.digest == profile.committedExecutionSignature.digest
+        ) { "persisted profile is not equivalent to the active native session" }
+        parameterCoordinator.commit(profile)
+        activeLoadSession = session.copy(
+            runtimeIdentity = profile.runtimeIdentity,
+            executionProfile = profile,
+            nativeLoadParamsJson = parameterCoordinator.nativeLoadJson(profile),
+            params = loadParamsForProfile(session.params, profile)
+        )
+    }
+
+    /** Called after ParameterCoordinator has atomically committed [profile]. */
+    private fun adoptCommittedProfileSessionLocked(profile: ModelExecutionProfile) {
+        val session = activeLoadSession ?: error("committed profile has no active native session")
+        require(session.runtimeIdentity.identityHash == profile.runtimeIdentity.identityHash) {
+            "committed profile identity does not match the active native session"
+        }
+        activeLoadSession = session.copy(
+            params = loadParamsForProfile(session.params, profile),
+            runtimeIdentity = profile.runtimeIdentity,
+            executionProfile = profile,
+            nativeLoadParamsJson = parameterCoordinator.nativeLoadJson(profile)
+        )
+    }
+
+    /**
+     * Reuse only an exact, healthy MNN load. Deliberately do not generalise this
+     * to QAIRT: its bundle verification/admission and handle state are model
+     * specific and must still run through a fresh load boundary when requested.
+     */
+    private fun reusableMnnLoadedStats(
+        modelPath: String,
+        runtime: LocalChatRuntime,
+        profile: ModelExecutionProfile
+    ): RuntimeStats? {
+        if (runtime != LocalChatRuntime.MNN_CPU || activeRuntime != LocalChatRuntime.MNN_CPU) return null
+        if (mnnSessionNeedsReloadBeforeNextRequest || !_stats.value.loaded) return null
+        val session = activeLoadSession ?: return null
+        if (session.runtime != LocalChatRuntime.MNN_CPU) return null
+        if (session.runtimeIdentity.identityHash != profile.runtimeIdentity.identityHash) return null
+        if (session.executionProfile.resolvedLoadSignature.digest != profile.resolvedLoadSignature.digest) return null
+        if (session.executionProfile.committedExecutionSignature.digest != profile.committedExecutionSignature.digest) return null
+        if (!sameModelLocation(session.modelPath, modelPath)) return null
+        return _stats.value
+    }
+
+    private fun sameModelLocation(first: String, second: String): Boolean =
+        runCatching { File(first).canonicalPath == File(second).canonicalPath }
+            .getOrDefault(first == second)
+
+    private suspend fun reloadActiveMnnSessionForNextRequestLocked(): String? {
+        val session = activeLoadSession
+            ?: return "MNN 会话需要刷新，但没有可恢复的模型加载记录。请重新加载本地模型后再试。"
+        val runner = runnerFor(session.runtime)
+        if (!runner.isAvailable) {
+            return unavailableStats(session.runtime, runner.loadError).optString("lastError")
+        }
+        runCatching { runner.requestStop() }
+        runCatching { runner.unloadModel() }
+        parameterCoordinator.markUnloaded()
+        _stats.value = RuntimeStats(
+            loaded = false,
+            modelPath = session.modelPath,
+            backend = session.runtime.backendId,
+            nThreads = session.params.nThreads,
+            nCtx = session.params.nCtx,
+            maxAllTokens = session.params.nCtx,
+            lastError = "Refreshing MNN session before next request."
+        )
+        val started = System.currentTimeMillis()
+        val rc = withContext(io) { runner.loadModel(session.modelPath, session.nativeLoadParamsJson) }
+        if (rc != 0) {
+            val nativeError = runCatching {
+                JSONObject(nativeStatsJson()).optString("lastError").takeIf { it.isNotBlank() }
+            }.getOrNull()
+            val message = buildString {
+                append("MNN 会话刷新失败：").append(rc)
+                if (!nativeError.isNullOrBlank()) append("；").append(nativeError.trim())
+            }
+            activeLoadSession = null
+            mnnSessionNeedsReloadBeforeNextRequest = false
+            runCatching { runner.requestStop() }
+            runCatching { runner.unloadModel() }
+            _stats.value = RuntimeStats(
+                loaded = false,
+                modelPath = session.modelPath,
+                backend = session.runtime.backendId,
+                nThreads = session.params.nThreads,
+                nCtx = session.params.nCtx,
+                maxAllTokens = session.params.nCtx,
+                lastError = message
+            )
+            return message
+        }
+        mnnSessionNeedsReloadBeforeNextRequest = false
+        runCatching {
+            parameterCoordinator.publishLoaded(session.executionProfile, nativeStatsJson())
+        }.getOrElse { signatureError ->
+            activeLoadSession = null
+            runCatching { runner.requestStop() }
+            runCatching { runner.unloadModel() }
+            parameterCoordinator.markUnloaded()
+            return "MNN 会话刷新后的参数回读不一致：${signatureError.message}"
+        }
+        _stats.value = loadedStatsFromNative(
+            modelPath = session.modelPath,
+            runtime = session.runtime,
+            params = session.params,
+            loadMs = System.currentTimeMillis() - started
+        )
+        return null
+    }
+
+    /** Called only while [mutex] is held; never re-enters public loadModel(). */
+    private suspend fun reloadCoordinatedProfileLocked(
+        session: LoadedModelSession,
+        target: ModelExecutionProfile,
+        authorization: LoadAuthorization?,
+        commitAfterLoad: Boolean
+    ): String? {
+        if (session.runtimeIdentity.identityHash != target.runtimeIdentity.identityHash) {
+            return "受控重载目标与当前模型身份不一致，请通过模型切换流程重新加载。"
+        }
+        val runner = runnerFor(session.runtime)
+        if (!runner.isAvailable) {
+            return unavailableStats(session.runtime, runner.loadError).optString("lastError")
+        }
+        if (authorization == null) {
+            // A committed/drift recovery is an ordinary lifecycle boundary;
+            // discard any stale pending transaction before publication.
+            parameterCoordinator.prepareOrdinaryLoad(target)
+        }
+        val nativeLoadJson = parameterCoordinator.nativeLoadJson(target)
+        runCatching { runner.requestStop() }
+        runCatching { runner.unloadModel() }
+        parameterCoordinator.markUnloaded()
+        _stats.value = RuntimeStats(
+            loaded = false,
+            modelPath = session.modelPath,
+            backend = session.runtime.backendId,
+            nThreads = (target.hotExecutionValues.value("n_threads") as? Number)?.toInt()
+                ?: session.params.nThreads,
+            nCtx = (target.resolvedLoadBoundValues.value("n_ctx") as? Number)?.toInt()
+                ?: session.params.nCtx,
+            lastError = "Reloading verified model execution profile."
+        )
+        val started = System.currentTimeMillis()
+        val rc = withContext(io) { runner.loadModel(session.modelPath, nativeLoadJson) }
+        if (rc != 0) {
+            val nativeError = runCatching {
+                JSONObject(nativeStatsJson()).optString("lastError").takeIf { it.isNotBlank() }
+            }.getOrNull()
+            activeLoadSession = null
+            val message = buildString {
+                append("受控模型重载失败：").append(rc)
+                if (!nativeError.isNullOrBlank()) append("；").append(nativeError)
+            }
+            _stats.value = _stats.value.copy(loaded = false, lastError = message)
+            return message
+        }
+        if (session.runtime == LocalChatRuntime.GENIEX_QAIRT) {
+            val nativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
+            if (nativeStats == null || !hasQairtNpuExecutionEvidence(nativeStats)) {
+                runCatching { runner.requestStop() }
+                runCatching { runner.unloadModel() }
+                parameterCoordinator.markUnloaded()
+                activeLoadSession = null
+                val message = "QAIRT 受控重载未取得 NPU 执行证据，拒绝发布 execution profile。"
+                _stats.value = _stats.value.copy(loaded = false, lastError = message)
+                return message
+            }
+        }
+        runCatching {
+            parameterCoordinator.publishLoaded(target, nativeStatsJson(), authorization)
+            if (commitAfterLoad) parameterCoordinator.commit(target)
+        }.getOrElse { signatureError ->
+            runCatching { runner.requestStop() }
+            runCatching { runner.unloadModel() }
+            parameterCoordinator.markUnloaded()
+            activeLoadSession = null
+            val message = "受控重载后的参数回读不一致：${signatureError.message}"
+            _stats.value = _stats.value.copy(loaded = false, lastError = message)
+            return message
+        }
+        val resolvedParams = session.params.copy(
+            nCtx = (target.resolvedLoadBoundValues.value("n_ctx") as? Number)?.toInt()
+                ?: session.params.nCtx,
+            nThreads = (target.hotExecutionValues.value("n_threads") as? Number)?.toInt()
+                ?: session.params.nThreads,
+            mmap = target.resolvedLoadBoundValues.value("mmap") as? Boolean ?: session.params.mmap,
+            mlock = target.resolvedLoadBoundValues.value("mlock") as? Boolean ?: session.params.mlock
+        )
+        activeLoadSession = LoadedModelSession(
+            modelPath = session.modelPath,
+            runtime = session.runtime,
+            params = resolvedParams,
+            runtimeIdentity = target.runtimeIdentity,
+            executionProfile = target,
+            nativeLoadParamsJson = nativeLoadJson
+        )
+        mnnSessionNeedsReloadBeforeNextRequest = false
+        _stats.value = loadedStatsFromNative(
+            modelPath = session.modelPath,
+            runtime = session.runtime,
+            params = resolvedParams,
+            loadMs = System.currentTimeMillis() - started
+        )
+        return null
+    }
+
+    /** Called only while [mutex] is held. A failed transaction is restored once. */
+    private suspend fun rollbackAuthorizedPendingLocked(
+        rollback: PendingRollbackContext
+    ): String? {
+        val target = runCatching {
+            parameterCoordinator.rollbackTargetFor(rollback.authorization)
+        }.getOrElse { error ->
+            return error.message ?: "pending rollback target is unavailable"
+        }
+        val session = activeLoadSession ?: rollback.baseSession
+        return runCatching {
+            reloadCoordinatedProfileLocked(
+                session = session,
+                target = target,
+                authorization = null,
+                commitAfterLoad = true
+            )
+        }.getOrElse { error ->
+            error.message ?: error::class.java.simpleName
+        }
+    }
+
+    private fun loadedStatsFromNative(
+        modelPath: String,
+        runtime: LocalChatRuntime,
+        params: LoadParams,
+        loadMs: Long
+    ): RuntimeStats {
+        val memory = telemetry.memorySnapshotDetailed()
+        val nativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
+        return RuntimeStats(
+            loaded = true,
+            modelPath = modelPath,
+            backend = nativeStats?.optString("backend")?.takeIf { it.isNotBlank() } ?: runtime.backendId,
+            loadMs = loadMs,
+            nThreads = nativeStats?.optInt("nThreads") ?: params.nThreads,
+            nThreadsBatch = nativeStats?.optInt("nThreadsBatch") ?: params.nThreads,
+            nBatch = nativeStats?.optInt("nBatch") ?: 0,
+            nUbatch = nativeStats?.optInt("nUbatch") ?: 0,
+            nCtx = nativeStats?.optInt("nCtx")?.takeIf { it > 0 } ?: params.nCtx,
+            maxAllTokens = nativeStats?.optInt("maxAllTokens")?.takeIf { it > 0 } ?: params.nCtx,
+            maxNewTokens = nativeStats?.optInt("maxNewTokens")?.takeIf { it > 0 } ?: 0,
+            backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: "[]"
+        ).withMemory(memory)
+    }
+
+    private fun qairtExecutionAdmissionForLoad(
+        modelPath: String,
+        runtime: LocalChatRuntime,
+        memory: MemorySnapshot,
+        bundleSha256: String?
+    ): QairtExecutionAdmission? {
+        if (runtime != LocalChatRuntime.GENIEX_QAIRT) return null
+        val totalRamBytes = memory.totalMemKb.takeIf { it > 0L }
+            ?.times(1024L)
+            ?: memory.advertisedMemKb.takeIf { it > 0L }?.times(1024L)
+            ?: 0L
+        val availableRamBytes = memory.availMemKb.coerceAtLeast(0L).times(1024L)
+        val observedIdentity = qairtIdentityProvider(bundleSha256)
+        return QairtBundleRiskAnalyzer.analyze(File(modelPath))
+            .admissionForDeviceMemory(
+                totalRamBytes = totalRamBytes,
+                availableRamBytes = availableRamBytes,
+                observedIdentity = observedIdentity,
+                verifiedIdentities = qairtVerificationStore.verifiedIdentities()
+            )
+    }
+
+    /**
+     * Normal app loads are intentionally stricter than download eligibility.
+     * Static metadata can never prove a QAIRT context will create safely, so an
+     * unknown exact identity must first go through the explicitly isolated
+     * smoke process.  Conversely, an already verified exact identity is not
+     * needlessly re-blocked by an advisory KV/RAM profile.
+     */
+    private fun requireQairtExecutionPurpose(
+        runtime: LocalChatRuntime,
+        purpose: QairtExecutionPurpose,
+        bundleSha256: String?,
+        admission: QairtExecutionAdmission?
+    ) {
+        if (runtime != LocalChatRuntime.GENIEX_QAIRT) {
+            require(purpose == QairtExecutionPurpose.NORMAL) {
+                "Only QAIRT may use the isolated dry-run execution purpose."
+            }
+            return
+        }
+        if (purpose == QairtExecutionPurpose.ISOLATED_DRY_RUN) {
+            check(qairtDryRunProcessVerifier()) {
+                "QAIRT 隔离验收只能在 :qairt_smoke 独立进程中运行。"
+            }
+            check(qairtIdentityProvider(bundleSha256)?.isComplete == true) {
+                "QAIRT 隔离验收需要已注册且完整的模型包哈希、芯片和运行时身份。"
+            }
+            return
+        }
+        if (admission?.requiresIsolatedDryRun == true) {
+            throw QairtIsolatedDryRunRequiredException(admission)
+        }
+    }
+
+    private fun hasQairtNpuExecutionEvidence(nativeStats: JSONObject): Boolean {
+        if (!nativeStats.optString("backend").equals(LocalChatRuntime.GENIEX_QAIRT.backendId, ignoreCase = true)) {
+            return false
+        }
+        val devices = nativeStats.opt("backendDevices")?.toString().orEmpty().lowercase()
+        return "qairt" in devices && ("npu" in devices || "htp" in devices)
+    }
 
     private fun protectContext(request: ChatRequest): ContextProtection {
         val nCtx = request.params.nCtx.coerceAtLeast(MIN_CONTEXT_TOKENS)
@@ -362,6 +1618,7 @@ class McaInferenceService(
         val turnMessages = request.messages.filterNot { it.role == Role.SYSTEM }
         val systemTokens = systemMessages.sumOf { estimateTokens(it.content) } +
             estimateTokens(request.params.systemPrompt) +
+            estimateTokens(request.runtimeSystemContext) +
             REASONING_INSTRUCTION_ESTIMATE_TOKENS
         val latestTurn = turnMessages.lastOrNull()
         if (latestTurn != null && systemTokens + estimateTokens(latestTurn.content) > promptBudget) {
@@ -427,6 +1684,9 @@ class McaInferenceService(
             nThreadsBatch = nativeStats?.optInt("nThreadsBatch") ?: base.nThreadsBatch,
             nBatch = nativeStats?.optInt("nBatch") ?: base.nBatch,
             nUbatch = nativeStats?.optInt("nUbatch") ?: base.nUbatch,
+            nCtx = nativeStats?.optInt("nCtx")?.takeIf { it > 0 } ?: base.nCtx,
+            maxAllTokens = nativeStats?.optInt("maxAllTokens")?.takeIf { it > 0 } ?: base.maxAllTokens,
+            maxNewTokens = nativeStats?.optInt("maxNewTokens")?.takeIf { it > 0 } ?: base.maxNewTokens,
             backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: base.backendDevices,
             lastError = null
         ).withMemory(memory)
@@ -456,6 +1716,108 @@ class McaInferenceService(
         val trimmedMessages: Int = 0
     )
 
+    private data class LoadedModelSession(
+        val modelPath: String,
+        val runtime: LocalChatRuntime,
+        val params: LoadParams,
+        val runtimeIdentity: ModelRuntimeIdentity,
+        val executionProfile: ModelExecutionProfile,
+        val nativeLoadParamsJson: String
+    )
+
+    private data class PendingRollbackContext(
+        val baseSession: LoadedModelSession,
+        val authorization: LoadAuthorization
+    )
+
+    private data class QairtDryRunWitness(
+        val identity: QairtBundleRuntimeIdentity,
+        val sawNpuExecution: Boolean,
+        val npuEvidence: String,
+        var sawVisibleCompletion: Boolean = false,
+        var destroyedCleanly: Boolean = false
+    )
+
+    private fun LocalChatRuntime.usesCoordinatedParameters(): Boolean =
+        true
+
+    private fun defaultRuntimeIdentity(
+        modelPath: String,
+        runtime: LocalChatRuntime,
+        params: LoadParams,
+        artifactFingerprintOverride: String? = null
+    ): ModelRuntimeIdentity {
+        val model = File(modelPath)
+        val artifactMetadata = buildString {
+            append(model.name).append('\n')
+            append(model.length()).append('\n')
+            append(model.lastModified()).append('\n')
+            if (model.isDirectory) {
+                model.listFiles().orEmpty()
+                    .sortedBy { it.name }
+                    .take(128)
+                    .forEach { file ->
+                        append(file.name).append(':').append(file.length()).append(':')
+                            .append(file.lastModified()).append('\n')
+                    }
+            }
+        }
+        val projectorFingerprint = params.visionProjectorPath
+            ?.takeIf { it.isNotBlank() }
+            ?.let { path ->
+                val projector = File(path)
+                parameterSha256("${projector.name}:${projector.length()}:${projector.lastModified()}")
+            }
+            .orEmpty()
+        return ModelRuntimeIdentity(
+            modelId = model.name.ifBlank { "local-model" },
+            artifactFingerprint = artifactFingerprintOverride ?: parameterSha256(artifactMetadata),
+            runtime = runtime,
+            runtimeVersion = when (runtime) {
+                LocalChatRuntime.MNN_CPU -> "mnn-embedded"
+                LocalChatRuntime.LLAMA_CPP -> "llama.cpp-embedded"
+                LocalChatRuntime.GENIEX_LLAMA_CPP,
+                LocalChatRuntime.GENIEX_QAIRT -> "geniex-embedded"
+            },
+            nativeLibrarySha256 = "embedded-unreported",
+            backendFingerprint = listOfNotNull(
+                runtime.backendId,
+                params.geniexComputeUnit?.takeIf { it.isNotBlank() }
+            ).joinToString(":"),
+            projectorFingerprint = projectorFingerprint,
+            deviceCapabilityFingerprint = parameterSha256(socInfo.toString()),
+            installationScopeId = parameterInstallationScopeId,
+            capabilities = if (runtime == LocalChatRuntime.MNN_CPU && isMnnVisualProfile(modelPath, params)) {
+                setOf("vision", "mnn_vision_v1")
+            } else {
+                emptySet()
+            }
+        )
+    }
+
+    private fun isMnnVisualProfile(modelPath: String, params: LoadParams): Boolean {
+        val advanced = runCatching { JSONObject(params.advancedJson) }.getOrNull()
+        if (advanced?.optString("visual_model")?.isNotBlank() == true ||
+            advanced?.optBoolean("is_visual", false) == true
+        ) return true
+
+        val selected = File(modelPath)
+        val config = when {
+            selected.isFile && selected.name.equals("config.json", ignoreCase = true) -> selected
+            selected.isDirectory -> File(selected, "config.json")
+            else -> selected.parentFile?.let { File(it, "config.json") }
+        } ?: return false
+        val root = runCatching {
+            if (!config.isFile || !config.canRead()) return@runCatching null
+            JSONObject(config.readText(Charsets.UTF_8))
+        }.getOrNull() ?: return false
+        return root.optBoolean("is_visual", false) || root.optString("visual_model").isNotBlank()
+    }
+
+    private fun parameterSha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
     private companion object {
         private const val MIN_CONTEXT_TOKENS = 512
         private const val CONTEXT_HEADROOM_TOKENS = 96
@@ -468,6 +1830,15 @@ class McaInferenceService(
         private const val HIDDEN_REASONING_PROGRESS_STEP_TOKENS = 16
         private const val STATS_SAMPLE_INTERVAL_MS = 250L
         private const val MEMORY_SAMPLE_INTERVAL_MS = 1000L
+        private val MNN_UNSAFE_STOP_REASONS = setOf(
+            "stop_requested",
+            "mnn_user_cancel",
+            "mnn_internal_error",
+            "mnn_timeout",
+            "runner_unavailable"
+        )
+        private val VISION_DIAGNOSTIC_TOKEN_PATTERN = Regex("[a-z0-9_.-]{1,64}")
+        private val VISION_DIAGNOSTIC_SHA256_PATTERN = Regex("[a-f0-9]{64}")
     }
 }
 

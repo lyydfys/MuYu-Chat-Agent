@@ -39,13 +39,16 @@ data class DeviceProfile(
     val reclaimableBytes: Long = 0,
     val swapFreeBytes: Long = 0,
     val swapTotalBytes: Long = 0,
-    val modelMemoryBudgetBytes: Long = 0
+    val modelMemoryBudgetBytes: Long = 0,
+    val accelerationProfile: DeviceAccelerationProfile = DeviceAccelerationProfile.CpuOnly
 ) {
     val socLabel: String
-        get() = listOf(socManufacturer, socModel)
-            .filter { it.isNotBlank() }
-            .joinToString(" ")
-            .ifBlank { socFamily.name }
+        get() = DeviceAccelerationAnalyzer.publicChipsetDisplayName(
+            chipsetIdentity = accelerationProfile.chipsetCode.ifBlank {
+                listOf(socManufacturer, socModel).filter(String::isNotBlank).joinToString(" ")
+            },
+            family = socFamily
+        )
 
     val displayTotalRamBytes: Long
         get() = advertisedRamBytes.takeIf { it > 0L } ?: totalRamBytes
@@ -78,6 +81,7 @@ data class DeviceProfile(
         .put("swapFreeBytes", swapFreeBytes)
         .put("swapTotalBytes", swapTotalBytes)
         .put("modelMemoryBudgetBytes", modelMemoryBudgetBytes)
+        .put("accelerationProfile", accelerationProfile.toJson())
 }
 
 enum class ThermalStatus {
@@ -99,6 +103,17 @@ class DeviceProfileReader(private val context: Context) {
         val memory = SystemMemoryReader.read(appContext)
         val battery = batteryInfo()
         val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        val chipsetCode = DeviceAccelerationAnalyzer.normalizeChipsetCode("${soc.manufacturer} ${soc.model}")
+        val acceleration = DeviceAccelerationAnalyzer.assess(
+            soc = soc,
+            totalRamBytes = memory.advertisedBytes.takeIf { it > 0L } ?: memory.totalBytes,
+            qnnRuntime = QnnRuntimeStatus.inspect(
+                searchDirectories = qnnRuntimeSearchDirectories(),
+                probeLibraries = true,
+                preferredHtpArchVersion = DeviceAccelerationAnalyzer
+                    .expectedQnnHtpArchVersionForChipsetCode(chipsetCode)
+            )
+        )
         return DeviceProfile(
             socManufacturer = soc.manufacturer,
             socModel = soc.model,
@@ -124,9 +139,41 @@ class DeviceProfileReader(private val context: Context) {
             reclaimableBytes = memory.reclaimableBytes,
             swapFreeBytes = memory.procSwapFreeBytes,
             swapTotalBytes = memory.procSwapTotalBytes,
-            modelMemoryBudgetBytes = memory.modelBudgetBytes
+            modelMemoryBudgetBytes = memory.modelBudgetBytes,
+            accelerationProfile = acceleration
         )
     }
+
+    private fun qnnRuntimeSearchDirectories(): List<File> =
+        buildList {
+            fun addPrivateRuntimeRoot(root: File) {
+                // Versioned content-addressed runtime stages live one level
+                // below their root. Add both layouts so existing private
+                // deployments keep working while image bundles can be staged
+                // atomically into code_cache.
+                add(root)
+                root.listFiles()
+                    ?.filter(File::isDirectory)
+                    ?.forEach(::add)
+            }
+
+            addPrivateRuntimeRoot(File(appContext.codeCacheDir, "qnn-image-runtime"))
+            addPrivateRuntimeRoot(File(appContext.filesDir, "qnnlibs"))
+            addPrivateRuntimeRoot(File(appContext.filesDir, "runtime_libs"))
+            add(File(appContext.applicationInfo.nativeLibraryDir))
+            // Do not discover QNN libraries from external storage or
+            // /data/local/tmp. Android's linker namespace/SELinux policy lets
+            // a debug shell inspect them but does not let an application map
+            // them. Selecting one would therefore make a coherent profile
+            // appear available and then fail deterministically at dlopen.
+            // App-private, packaged, and OEM runtime locations remain valid.
+            add(File("/vendor/lib64"))
+            add(File("/vendor/lib/rfsa/adsp"))
+            add(File("/odm/lib64"))
+            add(File("/system/lib64"))
+            add(File("/system_ext/lib64"))
+            add(File("/product/lib64"))
+        }
 
     private fun batteryInfo(): BatterySnapshot {
         val intent = appContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))

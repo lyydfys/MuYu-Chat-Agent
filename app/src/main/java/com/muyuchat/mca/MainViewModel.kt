@@ -16,10 +16,15 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.os.Build
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.muyuchat.api.local.LocalApiRuntime
+import com.muyuchat.api.local.LocalApiBusyState
+import com.muyuchat.api.local.LocalApiControlPlane
+import com.muyuchat.api.local.LocalApiPreflightRequest
+import com.muyuchat.api.local.LocalApiPreflightResult
 import com.muyuchat.api.local.McaLoopbackServer
 import com.muyuchat.core.advisor.AgentAdvisor
 import com.muyuchat.core.advisor.AgentDecisionLog
@@ -34,49 +39,123 @@ import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.deviceprofile.DeviceProfileReader
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.download.ModelScopeHubModel
+import com.muyuchat.core.download.ImageEngineAccelerator
 import com.muyuchat.core.download.ImageEngineBundleComponentRole
+import com.muyuchat.core.download.ImageEngineBundleSpec
+import com.muyuchat.core.download.ImageEngineBundleRuntime
+import com.muyuchat.core.download.ImageEngineMinDeviceTier
 import com.muyuchat.core.download.LocalImageEngineTier
+import com.muyuchat.core.download.BundleComponentDownloader
+import com.muyuchat.core.download.MnnModelBundleComponentRole
+import com.muyuchat.core.download.ModelBundleInstaller
 import com.muyuchat.core.download.ModelRepositoryProvider
 import com.muyuchat.core.download.ModelScopeRecommendedModel
 import com.muyuchat.core.download.RemoteModelFile
+import com.muyuchat.core.download.RemoteModelFileKind
+import com.muyuchat.core.download.RecommendedChatRuntime
+import com.muyuchat.core.download.RecommendedModelStatus
+import com.muyuchat.core.download.downloadEligibilityFor
 import com.muyuchat.core.download.DownloadStatus
 import com.muyuchat.core.download.DownloadTaskSnapshot
 import com.muyuchat.core.download.ResumableDownloader
+import com.muyuchat.core.download.VisionModelAccelerator
+import com.muyuchat.core.download.VisionModelBundleSpec
+import com.muyuchat.core.download.VisionModelBundleRuntime
+import com.muyuchat.core.download.VisionModelBundleComponentRole
+import com.muyuchat.core.download.fileKind
 import com.muyuchat.core.download.isImageModelCandidate
 import com.muyuchat.core.download.kindLabel
+import com.muyuchat.core.download.stagedTransformer
 import com.muyuchat.core.engine.ChatImageAttachment
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
+import com.muyuchat.core.engine.AuthorizedPendingSignatureVerification
+import com.muyuchat.core.engine.CanonicalParameterSet
 import com.muyuchat.core.engine.GenerateEvent
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LoadParams
+import com.muyuchat.core.engine.LocalChatExecutionContext
+import com.muyuchat.core.engine.LocalChatRuntime
+import com.muyuchat.core.engine.ModelExecutionProfile
+import com.muyuchat.core.engine.ModelRuntimeIdentity
 import com.muyuchat.core.engine.McaInferenceService
+import com.muyuchat.core.engine.CompletionPreflight
 import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
+import com.muyuchat.core.engine.QairtExecutionVerificationStore
+import com.muyuchat.core.engine.qairtRuntimeIdentityFor
+import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.modelstore.ModelSource
 import com.muyuchat.core.modelstore.ModelStoreRepository
+import com.muyuchat.core.modelstore.QairtBundleRuntimeIdentity
+import com.muyuchat.core.nativebridge.NativeMnnDiffusionBridge
+import com.muyuchat.core.nativebridge.NativeQnnBridge
 import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
+import com.muyuchat.core.tuning.AdaptiveTuningRecommendation
+import com.muyuchat.core.tuning.CandidateHardGate
+import com.muyuchat.core.tuning.CandidateScore
+import com.muyuchat.core.tuning.CandidateScorer
+import com.muyuchat.core.tuning.CandidateSelectionPolicy
+import com.muyuchat.core.tuning.ExecutionProfileKind
+import com.muyuchat.core.tuning.HotExecutionParams
+import com.muyuchat.core.tuning.LoadBoundExecutionParams
+import com.muyuchat.core.tuning.MeasurementPoint
+import com.muyuchat.core.tuning.MeasurementEnvelope
+import com.muyuchat.core.tuning.ModelKnowledgeLevel
+import com.muyuchat.core.tuning.ModelTuningCapabilities
+import com.muyuchat.core.tuning.MinimumTextCanaryPolicy
+import com.muyuchat.core.tuning.ProfileVerificationLevel
+import com.muyuchat.core.tuning.PerformanceSample
+import com.muyuchat.core.tuning.SafeBaselineFactory
+import com.muyuchat.core.tuning.SafetyEnvelope
+import com.muyuchat.core.tuning.TuningExecutionProfile
+import com.muyuchat.core.tuning.TuningCandidatePolicy
+import com.muyuchat.core.tuning.toAdaptive
+import com.muyuchat.feature.agent.AgentCandidateProgress
+import com.muyuchat.feature.agent.AgentEngineLifecycle
+import com.muyuchat.feature.agent.AgentPendingProfile
+import com.muyuchat.feature.agent.AgentProfileRecordState
+import com.muyuchat.feature.agent.AgentProfileVerification
+import com.muyuchat.feature.agent.AgentRollbackProfile
+import com.muyuchat.feature.agent.AgentTuningMode
+import com.muyuchat.feature.agent.AgentTuningJobState
+import com.muyuchat.core.telemetry.SocFamily
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.net.ServerSocket
+import java.net.Socket
+import java.security.MessageDigest
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.UUID
+import java.util.zip.ZipInputStream
 
 enum class AppTab(val title: String) {
     CHAT("聊天"),
@@ -198,6 +277,129 @@ private data class PreparedChatInput(
     val imageAttachments: List<ChatImageAttachment>
 )
 
+internal const val EMPTY_ASSISTANT_COMPLETION_MESSAGE =
+    "本次生成没有返回可见正文。请重试；如果问题持续，请重新加载当前模型。"
+
+internal fun List<ChatMessage>.withVisibleAssistantCompletionFallback(): List<ChatMessage> {
+    val index = indexOfLast { it.role == Role.ASSISTANT }
+    if (index < 0 || this[index].content.isNotBlank()) return this
+    return toMutableList().also { messages ->
+        messages[index] = messages[index].copy(content = EMPTY_ASSISTANT_COMPLETION_MESSAGE)
+    }
+}
+
+/**
+ * validateForLoad may refresh a QAIRT manifest fingerprint after inspecting a
+ * changed bundle directory.  Always pass that refreshed value into the exact
+ * bundle/chipset/runtime admission check; the caller's stale manifest must not
+ * inherit a previous bundle's certification.
+ */
+internal fun currentQairtBundleSha256(
+    requested: ModelManifest,
+    persistedModels: List<ModelManifest>
+): String? {
+    if (requested.runtime != ChatModelRuntime.GENIEX_QAIRT) return null
+    val current = persistedModels.firstOrNull {
+        it.id == requested.id && it.runtime == ChatModelRuntime.GENIEX_QAIRT
+    } ?: requested
+    return current.sha256.trim().lowercase().takeIf { it.isNotBlank() }
+}
+
+/**
+ * UI-facing readiness must never trust a persisted QNN "passed" bit by
+ * itself.  The caller supplies the current-stamp result calculated on IO; an
+ * absent result is intentionally fail-closed while the check is in flight.
+ */
+internal fun LocalImageModelRecord.localImageReadinessForUi(
+    qnnVerificationCurrent: Boolean?
+): String? {
+    if (runtime == LocalImageRuntime.QNN_HTP && qnnVerificationCurrent != true) {
+        return "NPU 校验状态已过期，请重新校验。"
+    }
+    return localImageReadinessMessage()
+}
+
+internal fun LocalImageModelRecord.localImageReadinessLabelForUi(
+    qnnVerificationCurrent: Boolean?
+): String =
+    if (runtime == LocalImageRuntime.QNN_HTP && qnnVerificationCurrent != true) {
+        "NPU 校验过期"
+    } else {
+        localImageReadinessLabel()
+    }
+
+internal fun isExactQairtExecutionVerified(
+    identity: QairtBundleRuntimeIdentity?,
+    verifiedIdentities: Set<QairtBundleRuntimeIdentity>
+): Boolean = identity
+    ?.takeIf(QairtBundleRuntimeIdentity::isComplete)
+    ?.let { it in verifiedIdentities }
+    ?: false
+
+private data class LocalGenerationSmokeResult(
+    val visibleChars: Int,
+    val completionTokens: Int,
+    val decodeTps: Double
+)
+
+private data class BootstrapCanaryResult(
+    val passed: Boolean,
+    val detail: String,
+    val stats: RuntimeStats = RuntimeStats()
+)
+
+private data class CandidateCanaryResult(
+    val passed: Boolean,
+    val output: String,
+    val stats: RuntimeStats,
+    val detail: String,
+    val measurement: MeasurementEnvelope,
+    val safetyPassed: Boolean,
+    val signatureVerification: AuthorizedPendingSignatureVerification?
+)
+
+/**
+ * A completed request releases the GENERATING lifecycle even when the final
+ * RuntimeStats emission happened just before the ViewModel cleared isGenerating.
+ */
+internal fun RuntimeStats.lifecycleAfterGeneration(): AgentEngineLifecycle = when {
+    loaded -> AgentEngineLifecycle.READY
+    lastError?.isNotBlank() == true -> AgentEngineLifecycle.ERROR
+    else -> AgentEngineLifecycle.UNLOADED
+}
+
+internal fun MainUiState.afterClearChatGenerationStopped(stats: RuntimeStats): MainUiState = copy(
+    messages = emptyList(),
+    input = "",
+    activeChatSessionId = null,
+    isGenerating = false,
+    engineLifecycle = stats.lifecycleAfterGeneration(),
+    statusMessage = "已清空对话，上下文已重置"
+)
+
+internal fun MainUiState.afterBackgroundGenerationStopped(stats: RuntimeStats): MainUiState = copy(
+    isGenerating = false,
+    engineLifecycle = stats.lifecycleAfterGeneration(),
+    statusMessage = "应用进入后台，已停止生成以降低发热和耗电。"
+)
+
+internal fun MainUiState.afterGenerationStarted(): MainUiState = copy(
+    isGenerating = true,
+    engineLifecycle = AgentEngineLifecycle.GENERATING
+)
+
+internal fun MainUiState.afterGenerationCompleted(stats: RuntimeStats): MainUiState = copy(
+    isGenerating = false,
+    stats = stats,
+    engineLifecycle = stats.lifecycleAfterGeneration()
+)
+
+private data class LocalApiStreamSmokeResult(
+    val visibleContentSeen: Boolean,
+    val doneSeen: Boolean,
+    val stopCalls: Int
+)
+
 private data class LocalApiPreferences(
     val apiEnabled: Boolean,
     val restEnabled: Boolean
@@ -217,6 +419,14 @@ data class MainUiState(
     val files: List<FileAssetRecord> = emptyList(),
     val imageJobs: List<ImageGenerationJobRecord> = emptyList(),
     val localImageModels: List<LocalImageModelRecord> = emptyList(),
+    /**
+     * Calculated on Dispatchers.IO from each exact QNN stamp.  An absent entry
+     * is deliberately treated as not current by UI callers.
+     */
+    val qnnImageVerificationCurrentByModelId: Map<String, Boolean> = emptyMap(),
+    /** Exact bundle SHA + chipset + runtime allow-list only. */
+    val qairtVerifiedLocalModelIds: Set<String> = emptySet(),
+    val qairtVerifiedRecommendationIds: Set<String> = emptySet(),
     val selectedLocalImageModelId: String? = null,
     val selectedImageBackend: ImageBackend = ImageBackend.CLOUD,
     val cloudApiConfig: CloudApiConfig = CloudApiConfig(),
@@ -230,10 +440,11 @@ data class MainUiState(
     val input: String = "",
     val isGenerating: Boolean = false,
     val models: List<ModelManifest> = emptyList(),
+    val mnnRuntimeAvailable: Boolean = false,
     val remoteFiles: List<RemoteModelFile> = emptyList(),
     val recommendedRemoteModels: List<ModelScopeRecommendedModel> = emptyList(),
     val hubModels: List<ModelScopeHubModel> = emptyList(),
-    val hubQuery: String = "Qwen3.5 GGUF Q4_K_M",
+    val hubQuery: String = "Qwen3.5 MNN",
     val hubPage: Int = 1,
     val hubTotalCount: Int = 0,
     val repoInput: String = "",
@@ -257,7 +468,20 @@ data class MainUiState(
     val benchmarkHistory: List<BenchmarkHistoryRecord> = emptyList(),
     val autoTuningInProgress: Boolean = false,
     val lastAutoTuningSummary: String? = null,
+    val localStabilitySmokeSummary: String? = null,
     val rollbackParams: GenerationParams? = null,
+    val profileId: String? = null,
+    val revision: Long? = null,
+    val profileRecordState: AgentProfileRecordState = AgentProfileRecordState.NONE,
+    val verification: AgentProfileVerification = AgentProfileVerification.UNKNOWN,
+    val engineLifecycle: AgentEngineLifecycle = AgentEngineLifecycle.UNLOADED,
+    val tuningJobState: AgentTuningJobState = AgentTuningJobState.IDLE,
+    val reloadRequired: Boolean = false,
+    val pendingProfile: AgentPendingProfile? = null,
+    val rollbackProfile: AgentRollbackProfile? = null,
+    val tuningEtaSeconds: Long? = null,
+    val tuningPhase: String? = null,
+    val tuningCandidateProgress: AgentCandidateProgress = AgentCandidateProgress(),
     val diagnosticReport: String = "",
     val preference: UserPreference = UserPreference(),
     val apiEnabled: Boolean = false,
@@ -277,6 +501,16 @@ data class MainUiState(
 private sealed interface DownloadedModelRegistration {
     data class Chat(val model: ModelManifest) : DownloadedModelRegistration
     data class Image(val model: LocalImageModelRecord) : DownloadedModelRegistration
+    data class VisionProjector(val model: ModelManifest, val shouldReload: Boolean) : DownloadedModelRegistration
+}
+
+private sealed interface VisionBundleDownloadResult {
+    data class ChatModel(val model: ModelManifest) : VisionBundleDownloadResult
+    data class EngineBundle(
+        val displayName: String,
+        val bundleDir: File,
+        val report: LocalVisionNpuReport
+    ) : VisionBundleDownloadResult
 }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -293,9 +527,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private val modelStore = ModelStoreRepository(application)
+    private val runtimeProfileStore = ModelRuntimeProfileStore(application)
+    private val installationScopeId = runBlocking(Dispatchers.IO) {
+        runtimeProfileStore.installationScopeId()
+    }
     private val modelScopeClient = ModelScopeClient()
     private val downloader = ResumableDownloader()
-    private val engine = McaInferenceService(application)
+    private val engine = McaInferenceService(
+        context = application,
+        installationScopeId = installationScopeId
+    )
     private val apiKey = loadOrCreateApiKey(application)
     private val initialApiPreferences = loadApiPreferences(application)
     private var apiServer: McaLoopbackServer? = null
@@ -309,7 +550,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val webSearchDiagnosticStore = WebSearchDiagnosticStore(application)
     private val webSearchProvider = WebSearchProvider()
     private val localImageModelStore = LocalImageModelStore(application)
-    private val localImageProvider = LocalImageProvider(application)
+    private val localImageWorkerClient = LocalImageWorkerClient(application)
     private val deviceProfileReader = DeviceProfileReader(application)
     private val advisor = AgentAdvisor()
     private val benchmarkRunner = BenchmarkRunner(engine, deviceProfileReader)
@@ -330,8 +571,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val initialEffectiveParams = initialSelectedAssistant?.toGenerationParams(initialParams) ?: initialParams
     private val initialLocalImageModels = localImageModelStore.loadModels()
     private val initialSelectedLocalImageModelId = localImageModelStore.loadSelectedModelId()
-        ?.takeIf { id -> initialLocalImageModels.any { it.id == id && it.isReadyForLocalImageGeneration() } }
-        ?: initialLocalImageModels.firstOrNull { it.isReadyForLocalImageGeneration() }?.id
+        ?.takeIf { id ->
+            initialLocalImageModels.any {
+                it.id == id &&
+                    it.runtime != LocalImageRuntime.QNN_HTP &&
+                    it.isReadyForLocalImageGeneration()
+            }
+        }
+        ?: initialLocalImageModels.firstOrNull {
+            it.runtime != LocalImageRuntime.QNN_HTP && it.isReadyForLocalImageGeneration()
+        }?.id
     private val initialCloudModels = cloudApiStore.loadModels()
     private val initialSessionCloudChatModelId = initialChatSessions.firstOrNull()
         ?.takeIf { it.modelMode.equals("cloud", ignoreCase = true) }
@@ -357,7 +606,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val initialSelectedImageBackend = localImageModelStore.loadSelectedBackend()
     private var generationJob: Job? = null
     private var imageGenerationJob: Job? = null
+    private var adaptiveTuningJob: Job? = null
+    private val adaptiveTuningPauseRequested = AtomicBoolean(false)
+    private val adaptiveTuningCancelRequested = AtomicBoolean(false)
+    private var activeRuntimeIdentity: ModelRuntimeIdentity? = null
+    private var activeAdaptiveRecommendation: AdaptiveTuningRecommendation? = null
+    private var pendingAdaptiveRecommendation: AdaptiveTuningRecommendation? = null
+    private var pendingProfileTransactionId: String? = null
+    private var activeProfileTransactionId: String? = null
+    private var activeTuningJobId: String? = null
+    private var activeModelForRuntimeProfile: ModelManifest? = null
+    private val localApiIdempotencyJournalLock = Any()
+    private val pendingRuntimeRecoveries = linkedMapOf<String, RuntimeRecoveryPlan>()
     private var activeImageGenerationJobId: String? = null
+    private var activeImageGenerationBackend: ImageBackend? = null
 
     private val _uiState = MutableStateFlow(
         MainUiState(
@@ -384,7 +646,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ChatBackend.LOCAL
             },
             models = modelStore.listModels(),
-            recommendedRemoteModels = sortRecommendedModels(modelScopeClient.recommendedModels(), initialDeviceProfile),
+            mnnRuntimeAvailable = engine.isRuntimeAvailable(LocalChatRuntime.MNN_CPU),
+            recommendedRemoteModels = sortRecommendedModels(
+                modelScopeClient.userFacingRecommendedModels(),
+                initialDeviceProfile
+            ),
             params = initialEffectiveParams,
             agentLogs = agentLogger.recent(),
             benchmarkHistory = benchmarkHistoryLogger.recent(),
@@ -402,10 +668,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         LocalApiRuntime.engine = engine
+        LocalApiRuntime.streamChatWithContextProvider = { request, executionContext ->
+            engine.streamChat(request, executionContext)
+                .onStart {
+                    _uiState.update(MainUiState::afterGenerationStarted)
+                }
+                .onCompletion {
+                    _uiState.update { state ->
+                        state.afterGenerationCompleted(engine.stats.value)
+                    }
+                }
+        }
+        LocalApiRuntime.stopGenerationProvider = { engine.stopGeneration() }
         LocalApiRuntime.loadedModelJsonProvider = { loadedModelJson() }
-        LocalApiRuntime.paramsJsonProvider = { _uiState.value.params.toJson() }
-        LocalApiRuntime.generationParamsProvider = { _uiState.value.params }
+        LocalApiRuntime.paramsJsonProvider = { apiGenerationParams().toJson() }
+        LocalApiRuntime.generationParamsProvider = { apiGenerationParams() }
         LocalApiRuntime.modelsJsonProvider = { modelsJson() }
+        LocalApiRuntime.modelRuntimeStatesJsonProvider = { modelRuntimeStatesJson() }
         LocalApiRuntime.deviceProfileJsonProvider = { currentDeviceProfile().toJson().toString() }
         LocalApiRuntime.agentRecommendationJsonProvider = { requestJson ->
             val preference = UserPreference.fromJson(requestJson)
@@ -415,6 +694,476 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             benchmarkRunner.runCurrentParamsBenchmark(_uiState.value.params)
                 .toJson()
                 .toString()
+        }
+        LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+            override fun busyState(): LocalApiBusyState {
+                val state = _uiState.value
+                val busyCode = when {
+                    state.isGenerating || state.engineLifecycle == AgentEngineLifecycle.GENERATING ->
+                        "generation_in_progress"
+                    state.engineLifecycle == AgentEngineLifecycle.LOADING -> "model_loading"
+                    state.engineLifecycle == AgentEngineLifecycle.RELOADING -> "model_reloading"
+                    state.engineLifecycle == AgentEngineLifecycle.ROLLING_BACK -> "profile_rollback"
+                    state.tuningJobState in setOf(
+                        AgentTuningJobState.QUEUED,
+                        AgentTuningJobState.RUNNING,
+                        AgentTuningJobState.VALIDATING,
+                        AgentTuningJobState.CANCELING,
+                        AgentTuningJobState.RECOVERING
+                    ) -> "tuning_in_progress"
+                    state.busy && !state.isGenerating -> "runtime_busy"
+                    else -> return LocalApiBusyState.IDLE
+                }
+                return LocalApiBusyState(
+                    busy = true,
+                    code = busyCode,
+                    message = state.statusMessage ?: "本地模型运行时正在执行独占操作，请稍后重试。",
+                    retryAfterMs = 1_000L,
+                    detailsJson = tuningStateJson()
+                )
+            }
+
+            override fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult {
+                val state = _uiState.value
+                val requestedModel = request.requestedModel?.trim().orEmpty()
+                if (requestedModel.isNotBlank()) {
+                    val matches = requestedModel == state.loadedModelId ||
+                        requestedModel == state.loadedModelName ||
+                        state.models.firstOrNull { it.id == state.loadedModelId }?.let { model ->
+                            requestedModel == model.fileName || requestedModel == model.displayName
+                        } == true
+                    if (!matches) {
+                        return LocalApiPreflightResult.Rejected(
+                            httpStatus = 409,
+                            code = "model_mismatch",
+                            message = "请求的模型不是当前正式 MainActivity 已加载模型。",
+                            detailsJson = JSONObject()
+                                .put("requestedModel", requestedModel)
+                                .put("loadedModelId", state.loadedModelId)
+                                .put("loadedModelName", state.loadedModelName)
+                                .toString()
+                        )
+                    }
+                }
+                return when (val preflight = runBlocking(Dispatchers.IO) {
+                    engine.preflightChat(request.chatRequest)
+                }) {
+                    is CompletionPreflight.Ready -> LocalApiPreflightResult.Ready
+                    is CompletionPreflight.Rejected -> LocalApiPreflightResult.Rejected(
+                        httpStatus = 409,
+                        code = preflight.code,
+                        message = preflight.message,
+                        detailsJson = JSONObject()
+                            .put("changedFields", JSONArray(preflight.changedFields.toList().sorted()))
+                            .put("quarantinedOverrides", JSONArray().also { array ->
+                                preflight.quarantinedOverrides.forEach { value -> array.put(value.toString()) }
+                            })
+                            .put("profile", JSONObject(runtimeProfileJson()))
+                            .toString()
+                    )
+                }
+            }
+
+            override fun profileJson(): String = runtimeProfileJson()
+
+            override fun tuningJson(): String = tuningStateJson()
+
+            override fun tuningJob(jobId: String?): com.muyuchat.api.local.LocalApiControlResult {
+                val requested = jobId?.takeIf { it.isNotBlank() && !it.equals("current", ignoreCase = true) }
+                val job = if (requested == null) {
+                    val identityKey = activeRuntimeIdentity?.identityHash
+                    runBlocking(Dispatchers.IO) {
+                        activeTuningJobId?.let { runtimeProfileStore.tuningJob(it) }
+                            ?: identityKey?.let { runtimeProfileStore.activeTuningJob(it) }
+                    }
+                } else {
+                    runBlocking(Dispatchers.IO) { runtimeProfileStore.tuningJob(requested) }
+                }
+                if (requested == null) {
+                    val payload = JSONObject(tuningStateJson())
+                    if (job != null) {
+                        payload
+                            .put("jobId", job.jobId)
+                            .put("state", job.state.lowercase(Locale.ROOT))
+                            .put("phase", job.phase)
+                            .put("job", tuningJobPublicJson(job))
+                    }
+                    return com.muyuchat.api.local.LocalApiControlResult.Success(payload.toString())
+                }
+                job
+                    ?: return com.muyuchat.api.local.LocalApiControlResult.Rejected(
+                        httpStatus = 404,
+                        code = "tuning_job_not_found",
+                        message = "未找到调优任务：$requested"
+                    )
+                return com.muyuchat.api.local.LocalApiControlResult.Success(
+                    JSONObject(tuningStateJson())
+                        .put("job", tuningJobPublicJson(job))
+                        .toString()
+                )
+            }
+
+            override fun createTuningJob(
+                request: com.muyuchat.api.local.LocalApiTuningJobCreateRequest,
+                idempotencyKey: String
+            ): com.muyuchat.api.local.LocalApiControlResult {
+                val state = _uiState.value
+                val identity = activeRuntimeIdentity
+                    ?: return localApiTuningRejected(
+                        httpStatus = 409,
+                        code = "model_not_loaded",
+                        message = "请先通过正式 MainActivity 加载本地模型。"
+                    )
+                val model = activeModelForRuntimeProfile
+                    ?: return localApiTuningRejected(
+                        httpStatus = 409,
+                        code = "model_not_loaded",
+                        message = "当前模型没有可调优的本地运行身份。"
+                    )
+                if (engine.activeExecutionProfile() == null) {
+                    return localApiTuningRejected(
+                        httpStatus = 409,
+                        code = "profile_not_loaded",
+                        message = "当前模型尚未建立 active execution profile。"
+                    )
+                }
+                if (!localApiModelMatches(request.modelId, state, model)) {
+                    return localApiTuningRejected(
+                        httpStatus = 409,
+                        code = "model_mismatch",
+                        message = "调优请求的模型不是当前正式 MainActivity 已加载模型。",
+                        details = JSONObject()
+                            .put("requestedModel", request.modelId)
+                            .put("loadedModelId", state.loadedModelId)
+                            .put("loadedModelName", state.loadedModelName)
+                    )
+                }
+                val debugMode = localApiDebugMode(request.mode)
+                    ?: return localApiTuningRejected(
+                        httpStatus = 400,
+                        code = "invalid_tuning_mode",
+                        message = "mode 仅支持 quick、standard、deep 或 power_save。"
+                    )
+                val requestedPreference = localApiPerformancePreference(request.performancePreference)
+                if (!request.performancePreference.isNullOrBlank() && requestedPreference == null) {
+                    return localApiTuningRejected(
+                        httpStatus = 400,
+                        code = "invalid_performance_preference",
+                        message = "performancePreference 仅支持 balanced、speed、quality、long_context 或 power_save。"
+                    )
+                }
+                val preference = requestedPreference ?: if (debugMode == AgentDebugMode.PowerSave) {
+                    state.preference.copy(mode = PerformanceMode.PowerSave)
+                } else {
+                    state.preference
+                }
+                val existing = runCatching {
+                    runBlocking(Dispatchers.IO) { runtimeProfileStore.activeTuningJob(identity.identityHash) }
+                }.getOrElse { error ->
+                    return localApiTuningRejected(
+                        httpStatus = 409,
+                        code = "tuning_state_unavailable",
+                        message = error.message ?: "无法读取当前调优任务状态。"
+                    )
+                }
+                if (existing != null) {
+                    return localApiTuningConflict(
+                        action = "create",
+                        activeJobId = existing.jobId,
+                        message = "当前模型已有未结束的调优任务。"
+                    )
+                }
+                localApiExclusiveLifecycleConflict("create")?.let { return it }
+                val job = runCatching {
+                    runBlocking(Dispatchers.IO) {
+                        runtimeProfileStore.createTuningJob(
+                            identityKey = identity.identityHash,
+                            autoApplyLoadChanges = request.autoApply,
+                            phase = "QUEUED"
+                        )
+                    }
+                }.getOrElse { error ->
+                    return localApiTuningRejected(
+                        httpStatus = 409,
+                        code = "tuning_create_conflict",
+                        message = error.message ?: "调优任务创建失败。"
+                    )
+                }
+                activeTuningJobId = job.jobId
+                _uiState.update {
+                    it.copy(
+                        tuningJobState = AgentTuningJobState.QUEUED,
+                        tuningPhase = "等待取得调优生命周期",
+                        statusMessage = "Local API 已创建调优任务，正在进入安全候选搜索。"
+                    )
+                }
+                val started = startAgentTuning(
+                    debugMode = debugMode,
+                    autoApply = request.autoApply,
+                    precreatedJob = job,
+                    preferenceOverride = preference
+                )
+                if (!started) {
+                    val failed = runCatching {
+                        runBlocking(Dispatchers.IO) {
+                            runtimeProfileStore.transitionTuningJob(
+                                jobId = job.jobId,
+                                state = PersistedTuningJobState.FAILED,
+                                phase = "START_REJECTED",
+                                failureCode = "LIFECYCLE_CONFLICT",
+                                failureSummary = "调优任务未能取得运行时生命周期所有权。"
+                            )
+                        }
+                    }.getOrNull()
+                    activeTuningJobId = null
+                    _uiState.update {
+                        it.copy(
+                            tuningJobState = AgentTuningJobState.FAILED,
+                            tuningPhase = "启动冲突",
+                            statusMessage = "调优任务未能启动，运行时状态已变化。"
+                        )
+                    }
+                    return localApiTuningConflict(
+                        action = "create",
+                        activeJobId = failed?.jobId,
+                        message = "调优任务未能启动，运行时状态已变化。"
+                    )
+                }
+                return com.muyuchat.api.local.LocalApiControlResult.Success(
+                    json = JSONObject()
+                        .put("accepted", true)
+                        .put("job", tuningJobPublicJson(job))
+                        .put("idempotencyKeyAccepted", idempotencyKey.isNotBlank())
+                        .toString(),
+                    httpStatus = 202
+                )
+            }
+
+            override fun createTuningJob(
+                request: com.muyuchat.api.local.LocalApiTuningJobCreateRequest,
+                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
+            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+                createTuningJob(request, idempotency.key)
+            }
+
+            override fun pauseTuningJob(
+                jobId: String,
+                idempotencyKey: String
+            ): com.muyuchat.api.local.LocalApiControlResult = runTuningControl(jobId, "pause") {
+                adaptiveTuningPauseRequested.set(true)
+                runtimeProfileStore.pauseTuningJob(jobId)
+            }
+
+            override fun pauseTuningJob(
+                jobId: String,
+                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
+            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+                pauseTuningJob(jobId, idempotency.key)
+            }
+
+            override fun resumeTuningJob(
+                jobId: String,
+                idempotencyKey: String
+            ): com.muyuchat.api.local.LocalApiControlResult = runTuningControl(jobId, "resume") {
+                adaptiveTuningPauseRequested.set(false)
+                runtimeProfileStore.resumeTuningJob(jobId)
+            }
+
+            override fun resumeTuningJob(
+                jobId: String,
+                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
+            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+                resumeTuningJob(jobId, idempotency.key)
+            }
+
+            override fun cancelTuningJob(
+                jobId: String,
+                idempotencyKey: String
+            ): com.muyuchat.api.local.LocalApiControlResult = runTuningControl(jobId, "cancel") {
+                adaptiveTuningCancelRequested.set(true)
+                cancelPersistedTuningJob(jobId)
+            }
+
+            override fun cancelTuningJob(
+                jobId: String,
+                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
+            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+                cancelTuningJob(jobId, idempotency.key)
+            }
+
+            override fun applyTuningJob(
+                jobId: String,
+                idempotencyKey: String
+            ): com.muyuchat.api.local.LocalApiControlResult {
+                val identity = activeRuntimeIdentity
+                    ?: return localApiTuningRejected(409, "model_not_loaded", "当前没有已加载的本地模型。")
+                if (activeModelForRuntimeProfile == null) {
+                    return localApiTuningRejected(409, "model_not_loaded", "当前模型没有可应用的运行配置。")
+                }
+                val job = runCatching {
+                    runBlocking(Dispatchers.IO) { runtimeProfileStore.tuningJob(jobId) }
+                }.getOrNull() ?: return localApiTuningRejected(
+                    httpStatus = 404,
+                    code = "tuning_job_not_found",
+                    message = "未找到调优任务：$jobId"
+                )
+                if (job.identityKey != identity.identityHash) {
+                    return localApiTuningRejected(
+                        409,
+                        "tuning_job_model_mismatch",
+                        "该调优任务不属于当前已加载模型。"
+                    )
+                }
+                localApiExclusiveLifecycleConflict("apply", allowedStagedJobId = jobId)?.let { return it }
+                val pending = runCatching {
+                    runBlocking(Dispatchers.IO) { runtimeProfileStore.pendingTransaction(identity.identityHash) }
+                }.getOrElse { error ->
+                    return localApiTuningRejected(
+                        409,
+                        "pending_profile_unavailable",
+                        error.message ?: "无法读取 staged candidate。"
+                    )
+                }
+                if (pending == null || pending.journal.jobId != jobId) {
+                    return localApiTuningRejected(
+                        409,
+                        "staged_candidate_not_found",
+                        "该任务没有可应用的 staged candidate。"
+                    )
+                }
+                if (pending.journal.state != TuningJournalState.STAGED.name) {
+                    return localApiTuningRejected(
+                        409,
+                        "staged_candidate_not_ready",
+                        "候选事务当前处于 ${pending.journal.state.lowercase()}，不能重复应用。"
+                    )
+                }
+                if (job.state !in setOf(PersistedTuningJobState.PAUSED.name, PersistedTuningJobState.RUNNING.name)) {
+                    return localApiTuningRejected(
+                        409,
+                        "tuning_apply_state_conflict",
+                        "调优任务当前处于 ${job.state.lowercase()}，不能应用 staged candidate。"
+                    )
+                }
+                activeTuningJobId = jobId
+                adaptiveTuningCancelRequested.set(false)
+                adaptiveTuningPauseRequested.set(false)
+                _uiState.update {
+                    it.copy(
+                        busy = true,
+                        engineLifecycle = AgentEngineLifecycle.RELOADING,
+                        tuningJobState = AgentTuningJobState.VALIDATING,
+                        tuningPhase = "等待应用 staged candidate",
+                        statusMessage = "Local API 已接受 apply，正在取得运行时生命周期。"
+                    )
+                }
+                adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        applyPendingRuntimeTransaction(pending)
+                    } finally {
+                        activeTuningJobId = null
+                        adaptiveTuningJob = null
+                        adaptiveTuningCancelRequested.set(false)
+                        adaptiveTuningPauseRequested.set(false)
+                    }
+                }
+                return com.muyuchat.api.local.LocalApiControlResult.Success(
+                    json = JSONObject()
+                        .put("accepted", true)
+                        .put("action", "apply")
+                        .put("job", tuningJobPublicJson(job))
+                        .put("idempotencyKeyAccepted", idempotencyKey.isNotBlank())
+                        .toString(),
+                    httpStatus = 202
+                )
+            }
+
+            override fun applyTuningJob(
+                jobId: String,
+                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
+            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+                applyTuningJob(jobId, idempotency.key)
+            }
+
+            override fun rollbackTuning(
+                idempotencyKey: String
+            ): com.muyuchat.api.local.LocalApiControlResult {
+                val identity = activeRuntimeIdentity
+                    ?: return localApiTuningRejected(409, "model_not_loaded", "当前没有已加载的本地模型。")
+                val model = activeModelForRuntimeProfile
+                    ?: return localApiTuningRejected(409, "model_not_loaded", "当前模型没有可回滚的运行配置。")
+                val runtimeState = runCatching {
+                    runBlocking(Dispatchers.IO) { runtimeProfileStore.currentRuntimeState(identity.identityHash) }
+                }.getOrElse { error ->
+                    return localApiTuningRejected(409, "rollback_state_unavailable", error.message ?: "无法读取回滚状态。")
+                } ?: return localApiTuningRejected(409, "rollback_not_available", "当前运行配置尚未持久化。")
+                runtimeState.activeJob?.let { activeJob ->
+                    return localApiTuningConflict(
+                        action = "rollback",
+                        activeJobId = activeJob.jobId,
+                        message = "存在未结束的调优任务，不能并发回滚。"
+                    )
+                }
+                localApiExclusiveLifecycleConflict("rollback")?.let { return it }
+                val active = runtimeState.activeProfile
+                    ?: return localApiTuningRejected(409, "rollback_not_available", "当前没有 committed profile。")
+                val rollbackTarget = active.parentCommittedProfileId
+                    ?: runtimeState.pointers?.lastKnownGoodProfileId?.takeIf { it != active.profileId }
+                if (rollbackTarget == null) {
+                    return localApiTuningRejected(409, "rollback_not_available", "当前 profile 没有更早的稳定版本可回滚。")
+                }
+                _uiState.update {
+                    it.copy(
+                        busy = true,
+                        engineLifecycle = AgentEngineLifecycle.ROLLING_BACK,
+                        tuningJobState = AgentTuningJobState.RECOVERING,
+                        tuningPhase = "等待回滚生命周期",
+                        statusMessage = "Local API 已接受 rollback，正在取得运行时生命周期。"
+                    )
+                }
+                adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        rollbackCommittedRuntimeProfile(identity, model)
+                    } finally {
+                        adaptiveTuningJob = null
+                    }
+                }
+                return com.muyuchat.api.local.LocalApiControlResult.Success(
+                    json = JSONObject()
+                        .put("accepted", true)
+                        .put("action", "rollback")
+                        .put("targetProfileId", rollbackTarget)
+                        .put("idempotencyKeyAccepted", idempotencyKey.isNotBlank())
+                        .toString(),
+                    httpStatus = 202
+                )
+            }
+
+            override fun rollbackTuning(
+                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
+            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+                rollbackTuning(idempotency.key)
+            }
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            recoverInterruptedRuntimeProfiles()
+        }
+
+        // GenieX keeps successfully installed QAIRT packages in internal app
+        // storage. Recover a lost MCA product manifest in the background so a
+        // multi-gigabyte bundle is reused instead of downloaded again. Directory
+        // hashing must never run in the ViewModel constructor/main thread.
+        viewModelScope.launch(Dispatchers.IO) {
+            val recovered = modelStore.recoverInstalledQairtBundles()
+            if (recovered.isNotEmpty()) {
+                refreshManagedRuntimeReadiness()
+                _uiState.update { state ->
+                    state.copy(
+                        statusMessage = "已恢复 ${recovered.size} 个现有 QAIRT NPU 模型；请在模型页完成隔离验收。"
+                    )
+                }
+            }
         }
 
         if (initialApiPreferences.apiEnabled) {
@@ -435,15 +1184,166 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             engine.stats.collect { stats ->
-                _uiState.update {
-                    it.copy(stats = stats, nativeStatsJson = engine.nativeStatsJson())
+                _uiState.update { state ->
+                    val lifecycle = when {
+                        state.isGenerating -> AgentEngineLifecycle.GENERATING
+                        stats.loaded -> AgentEngineLifecycle.READY
+                        state.engineLifecycle in setOf(
+                            AgentEngineLifecycle.LOADING,
+                            AgentEngineLifecycle.RELOADING,
+                            AgentEngineLifecycle.ROLLING_BACK,
+                            AgentEngineLifecycle.STOPPING
+                        ) -> state.engineLifecycle
+                        stats.lastError?.isNotBlank() == true -> AgentEngineLifecycle.ERROR
+                        else -> AgentEngineLifecycle.UNLOADED
+                    }
+                    state.copy(
+                        stats = stats,
+                        nativeStatsJson = engine.nativeStatsJson(),
+                        engineLifecycle = lifecycle
+                    )
                 }
             }
+        }
+
+        // Stamp hashing walks the whole managed QNN bundle, so it must not run
+        // on the main thread.  Until this refresh finishes the UI treats every
+        // QNN image package as not ready.
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshManagedRuntimeReadiness()
         }
     }
 
     fun selectTab(tab: AppTab) {
         _uiState.update { it.copy(tab = tab) }
+        if (tab == AppTab.MODELS) {
+            viewModelScope.launch(Dispatchers.IO) {
+                refreshManagedRuntimeReadiness()
+            }
+        }
+    }
+
+    private fun LocalImageModelRecord.qnnBundleRootForVerification(): File? =
+        bundleRoot
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?.takeIf { it.isDirectory }
+            ?: File(path).parentFile?.takeIf { it.isDirectory }
+
+    /** Must be called from an IO coroutine. */
+    private fun currentQnnImageVerificationByModelId(
+        models: List<LocalImageModelRecord>
+    ): Map<String, Boolean> {
+        val context = getApplication<Application>()
+        return models
+            .asSequence()
+            .filter { it.runtime == LocalImageRuntime.QNN_HTP }
+            .associate { model ->
+                model.id to (model.qnnBundleRootForVerification()
+                    ?.let { root -> model.hasCurrentQnnVerificationStamp(context, root) }
+                    ?: false)
+            }
+    }
+
+    /** Must be called from an IO coroutine. */
+    private fun currentQairtVerifiedLocalModelIds(
+        models: List<ModelManifest>
+    ): Set<String> {
+        val context = getApplication<Application>()
+        val verifiedIdentities = QairtExecutionVerificationStore
+            .forContext(context)
+            .verifiedIdentities()
+        return models.asSequence()
+            .filter { it.runtime == ChatModelRuntime.GENIEX_QAIRT }
+            .filter { model ->
+                isExactQairtExecutionVerified(
+                    identity = qairtRuntimeIdentityFor(context, model.sha256),
+                    verifiedIdentities = verifiedIdentities
+                )
+            }
+            .map(ModelManifest::id)
+            .toSet()
+    }
+
+    private fun verifiedQairtRecommendationIds(
+        models: List<ModelManifest>,
+        verifiedLocalModelIds: Set<String>,
+        recommendations: List<ModelScopeRecommendedModel>
+    ): Set<String> {
+        val verifiedRepoIds = models.asSequence()
+            .filter { it.id in verifiedLocalModelIds }
+            .mapNotNull(ModelManifest::repoId)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        return recommendations.asSequence()
+            .filter { it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT }
+            .filter { it.repoId.trim() in verifiedRepoIds }
+            .map(ModelScopeRecommendedModel::id)
+            .toSet()
+    }
+
+    private fun LocalImageModelRecord.isReadyForManagedSelection(
+        qnnVerificationCurrentByModelId: Map<String, Boolean>
+    ): Boolean = localImageReadinessForUi(qnnVerificationCurrentByModelId[id]) == null
+
+    private fun LocalImageModelRecord.isCertifiedForAutomaticSelection(
+        qnnVerificationCurrentByModelId: Map<String, Boolean>
+    ): Boolean = isReadyForManagedSelection(qnnVerificationCurrentByModelId) &&
+        isCertifiedForAutomaticLocalImageSelection()
+
+    private fun selectedReadyLocalImageModelId(
+        models: List<LocalImageModelRecord>,
+        qnnVerificationCurrentByModelId: Map<String, Boolean>,
+        preferredId: String?
+    ): String? = preferredId
+        ?.takeIf { id ->
+            models.any { model ->
+                model.id == id && model.isReadyForManagedSelection(qnnVerificationCurrentByModelId)
+            }
+        }
+        ?: models.firstOrNull { it.isCertifiedForAutomaticSelection(qnnVerificationCurrentByModelId) }?.id
+
+    /**
+     * Refreshes product-facing readiness from durable state.  QNN and QAIRT
+     * records are fail-closed when their exact device/runtime identities are
+     * unknown or stale.
+     */
+    private fun refreshManagedRuntimeReadiness() {
+        val localImageModels = localImageModelStore.loadModels()
+        val localModels = modelStore.listModels()
+        val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(localImageModels)
+        val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(localModels)
+        val current = _uiState.value
+        val selectedImageModelId = selectedReadyLocalImageModelId(
+            models = localImageModels,
+            qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
+            preferredId = localImageModelStore.loadSelectedModelId()
+        )
+        val selectedImageBackend = when {
+            selectedImageModelId != null && localImageModelStore.loadSelectedBackend() == ImageBackend.LOCAL ->
+                ImageBackend.LOCAL
+            selectedImageModelId == null && current.selectedImageBackend == ImageBackend.LOCAL ->
+                ImageBackend.CLOUD
+            else -> current.selectedImageBackend
+        }
+        localImageModelStore.saveSelectedModelId(selectedImageModelId)
+        localImageModelStore.saveSelectedBackend(selectedImageBackend)
+        _uiState.update {
+            it.copy(
+                models = localModels,
+                localImageModels = localImageModels,
+                qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
+                qairtVerifiedLocalModelIds = qairtVerifiedLocalModelIds,
+                qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
+                    models = localModels,
+                    verifiedLocalModelIds = qairtVerifiedLocalModelIds,
+                    recommendations = it.recommendedRemoteModels
+                ),
+                selectedLocalImageModelId = selectedImageModelId,
+                selectedImageBackend = selectedImageBackend
+            )
+        }
     }
 
     fun onInputChange(value: String) {
@@ -583,6 +1483,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val jobId = "image-${UUID.randomUUID()}"
         val requestedBackend = _uiState.value.selectedImageBackend
         activeImageGenerationJobId = jobId
+        activeImageGenerationBackend = requestedBackend
+        if (requestedBackend == ImageBackend.LOCAL) {
+            _uiState.value.selectedLocalImageModel()?.let { model ->
+                localImageWorkerClient.begin(model.runtime)
+            }
+        }
         _uiState.update { state ->
             state.copy(
                 imageJobs = (
@@ -678,6 +1584,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 if (activeImageGenerationJobId == jobId) {
                     activeImageGenerationJobId = null
+                    activeImageGenerationBackend = null
                 }
                 imageGenerationJob = null
             }
@@ -690,9 +1597,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { state ->
                 val job = state.imageJobs.firstOrNull { it.id == jobId }
                 if (job?.status == ImageGenerationStatusRecord.QUEUED || job?.status == ImageGenerationStatusRecord.GENERATING) {
-                    val message = "本地生图超过 8 分钟仍未返回，任务可能卡住。建议降低尺寸/步数，或稍后等待 native 后端完成。"
+                    val message = "本地生图耗时超过 8 分钟，native 后端仍在运行。可点击停止，当前图执行结束后会退出。"
                     state.copy(
-                        imageJobs = state.imageJobs.updateImageJob(jobId, ImageGenerationStatusRecord.FAILED, message),
+                        imageJobs = state.imageJobs.updateImageJob(jobId, ImageGenerationStatusRecord.GENERATING, message),
                         statusMessage = message
                     )
                 } else {
@@ -704,21 +1611,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelImageGeneration() {
         viewModelScope.launch(Dispatchers.IO) {
-            localImageProvider.cancel()
-            imageGenerationJob?.cancel()
             val jobId = activeImageGenerationJobId
+            val localGeneration = activeImageGenerationBackend == ImageBackend.LOCAL
+            val nativeCancelRequested = if (localGeneration) localImageWorkerClient.cancel() else false
             if (jobId != null) {
                 _uiState.update { state ->
+                    val message = if (localGeneration && nativeCancelRequested) {
+                        "正在停止本地生图，当前图执行结束后退出"
+                    } else {
+                        "已停止图片生成"
+                    }
                     state.copy(
                         imageJobs = state.imageJobs.updateImageJob(
                             jobId,
-                            ImageGenerationStatusRecord.FAILED,
-                            "已停止图片生成"
+                            if (localGeneration && nativeCancelRequested) {
+                                ImageGenerationStatusRecord.GENERATING
+                            } else {
+                                ImageGenerationStatusRecord.FAILED
+                            },
+                            message
                         ),
-                        statusMessage = "已停止图片生成"
+                        statusMessage = message
                     )
                 }
+                if (!(localGeneration && nativeCancelRequested)) {
+                    imageGenerationJob?.cancel()
+                }
             } else {
+                imageGenerationJob?.cancel()
                 _uiState.update { state ->
                     val working = state.imageJobs.firstOrNull {
                         it.status == ImageGenerationStatusRecord.QUEUED || it.status == ImageGenerationStatusRecord.GENERATING
@@ -800,22 +1720,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun importLocalImageModel(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             busy("正在导入本地图像生成引擎...")
-            runCatching { localImageModelStore.importFromUri(uri) }
+            runCatching {
+                val imported = localImageModelStore.importFromUri(uri)
+                verifyLocalImageRuntimeIfNeeded(imported)
+            }
                 .onSuccess { model ->
-                    val models = localImageModelStore.loadModels()
-                    val readiness = model.localImageReadinessMessage()
-                    if (readiness == null) {
-                        localImageModelStore.saveSelectedModelId(model.id)
-                        localImageModelStore.saveSelectedBackend(ImageBackend.LOCAL)
-                    }
+                    val selection = settleLocalImageSelection(model)
+                    val readiness = model.localImageReadinessForUi(
+                        selection.qnnVerificationCurrentByModelId[model.id]
+                    )
                     _uiState.update {
                         it.copy(
-                            localImageModels = models,
-                            selectedLocalImageModelId = if (readiness == null) model.id else it.selectedLocalImageModelId,
-                            selectedImageBackend = if (readiness == null) ImageBackend.LOCAL else it.selectedImageBackend,
+                            localImageModels = selection.models,
+                            qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
+                            selectedLocalImageModelId = selection.selectedId,
+                            selectedImageBackend = selection.selectedBackend,
                             busy = false,
                             statusMessage = if (readiness == null) {
-                                "已导入本地图像生成引擎：${model.displayName}"
+                                if (model.runtime == LocalImageRuntime.MNN_DIFFUSION ||
+                                    model.runtime == LocalImageRuntime.QNN_HTP) {
+                                    "已导入并校验本地图像生成引擎：${model.displayName}"
+                                } else {
+                                    "已导入本地图像生成引擎：${model.displayName}"
+                                }
                             } else {
                                 "已导入 ${model.displayName}，但暂不能生成：$readiness"
                             }
@@ -829,23 +1756,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectLocalImageModel(modelId: String) {
-        val model = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
-        if (model == null) {
-            _uiState.update { it.copy(statusMessage = "未找到本地图像生成引擎") }
-            return
-        }
-        model.localImageReadinessMessage()?.let { message ->
-            _uiState.update { it.copy(statusMessage = message) }
-            return
-        }
-        localImageModelStore.saveSelectedModelId(model.id)
-        localImageModelStore.saveSelectedBackend(ImageBackend.LOCAL)
-        _uiState.update {
-            it.copy(
-                selectedLocalImageModelId = model.id,
-                selectedImageBackend = ImageBackend.LOCAL,
-                statusMessage = "图片页已切换到本地生图：${model.displayName}"
-            )
+        viewModelScope.launch(Dispatchers.IO) {
+            val model = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
+            if (model == null) {
+                _uiState.update { it.copy(statusMessage = "未找到本地图像生成引擎") }
+                return@launch
+            }
+            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(listOf(model))
+            model.localImageReadinessForUi(qnnVerificationCurrentByModelId[model.id])?.let { message ->
+                _uiState.update {
+                    it.copy(
+                        qnnImageVerificationCurrentByModelId = it.qnnImageVerificationCurrentByModelId +
+                            qnnVerificationCurrentByModelId,
+                        statusMessage = message
+                    )
+                }
+                return@launch
+            }
+            localImageModelStore.saveSelectedModelId(model.id)
+            localImageModelStore.saveSelectedBackend(ImageBackend.LOCAL)
+            _uiState.update {
+                it.copy(
+                    qnnImageVerificationCurrentByModelId = it.qnnImageVerificationCurrentByModelId +
+                        qnnVerificationCurrentByModelId,
+                    selectedLocalImageModelId = model.id,
+                    selectedImageBackend = ImageBackend.LOCAL,
+                    statusMessage = "图片页已切换到本地生图：${model.displayName}"
+                )
+            }
         }
     }
 
@@ -859,18 +1797,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             busy("正在校验 ${model.displayName}...")
             val primary = File(model.path)
             val readiness = model.localImageReadinessMessage()
+            val structuralReadiness = model.localImageStructuralReadinessMessage()
             val readable = model.configured && primary.isFile && primary.canRead()
-            val message = when {
-                !readable -> "图像引擎校验失败：主模型文件不可读，请重新导入或重新下载。"
-                readiness != null -> "图像引擎校验失败：$readiness"
+            var verification = when {
+                !readable -> false to "主模型文件不可读，请重新导入或重新下载。"
+                model.runtime == LocalImageRuntime.MNN_DIFFUSION && structuralReadiness != null ->
+                    false to structuralReadiness
+                model.runtime == LocalImageRuntime.MNN_DIFFUSION ->
+                    verifyMnnDiffusionImageRuntime(model)
+                model.runtime == LocalImageRuntime.QNN_HTP && structuralReadiness != null ->
+                    false to structuralReadiness
+                model.runtime == LocalImageRuntime.QNN_HTP ->
+                    verifyQnnImageRuntime(model)
+                readiness != null -> false to readiness
                 else -> {
                     val componentText = if (model.componentCount > 1) "，组件 ${model.componentCount} 个" else ""
-                    "图像引擎校验通过：主模型可读$componentText，可用于图片页本地生图。"
+                    true to "主模型可读$componentText，可用于图片页本地生图。"
                 }
+            }
+            val qnnPersistence = qnnVerificationPersistence(model, verification)
+            verification = qnnPersistence.verification
+            val verifiedModel = model.copy(
+                verificationStatus = verification.toLocalImageVerificationStatus(model.runtime, model.family),
+                verificationMessage = verification.second,
+                verifiedAt = System.currentTimeMillis(),
+                qnnVerificationStamp = qnnPersistence.stamp
+            )
+            val models = localImageModelStore.updateModel(verifiedModel)
+            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(models)
+            val selectedId = selectedReadyLocalImageModelId(
+                models = models,
+                qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
+                preferredId = localImageModelStore.loadSelectedModelId()
+            )
+            if (selectedId != localImageModelStore.loadSelectedModelId()) {
+                localImageModelStore.saveSelectedModelId(selectedId)
+            }
+            val message = if (verification.first) {
+                "图像引擎校验通过：${verification.second}"
+            } else {
+                "图像引擎校验失败：${verification.second}"
             }
             _uiState.update {
                 it.copy(
-                    localImageModels = localImageModelStore.loadModels(),
+                    localImageModels = models,
+                    qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
+                    selectedLocalImageModelId = selectedId,
+                    selectedImageBackend = if (selectedId == null && it.selectedImageBackend == ImageBackend.LOCAL) {
+                        ImageBackend.CLOUD
+                    } else {
+                        it.selectedImageBackend
+                    },
                     busy = false,
                     statusMessage = message
                 )
@@ -878,17 +1855,441 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun Pair<Boolean, String>.toLocalImageVerificationStatus(
+        runtime: LocalImageRuntime,
+        family: LocalImageModelFamily
+    ): LocalImageVerificationStatus =
+        when {
+            !first -> LocalImageVerificationStatus.FAILED
+            runtime == LocalImageRuntime.MNN_DIFFUSION -> LocalImageVerificationStatus.MNN_SMOKE_PASSED
+            runtime == LocalImageRuntime.QNN_HTP && family == LocalImageModelFamily.SDXL ->
+                LocalImageVerificationStatus.QNN_IMAGE_SMOKE_PASSED
+            else -> LocalImageVerificationStatus.PASSED
+        }
+
+    private data class QnnVerificationPersistence(
+        val verification: Pair<Boolean, String>,
+        val stamp: String
+    )
+
+    private fun qnnVerificationPersistence(
+        model: LocalImageModelRecord,
+        verification: Pair<Boolean, String>
+    ): QnnVerificationPersistence {
+        if (model.runtime != LocalImageRuntime.QNN_HTP || !verification.first) {
+            return QnnVerificationPersistence(verification, "")
+        }
+        return runCatching {
+            val bundleRoot = model.bundleRoot
+                ?.takeIf { it.isNotBlank() }
+                ?.let(::File)
+                ?: File(model.path).parentFile
+                ?: error("QNN 图像引擎缺少完整组件目录。")
+            QnnVerificationPersistence(
+                verification = verification,
+                stamp = qnnImageVerificationStampFor(getApplication<Application>(), bundleRoot)
+            )
+        }.getOrElse { error ->
+            QnnVerificationPersistence(
+                verification = false to "QNN 生图校验完成，但无法保存当前设备/运行时校验戳：${error.message ?: "未知错误"}",
+                stamp = ""
+            )
+        }
+    }
+
+    private suspend fun verifyQnnImageRuntime(model: LocalImageModelRecord): Pair<Boolean, String> =
+        LocalImageExecutionGate.withLease(getApplication<Application>()) {
+            verifyQnnImageRuntimeUnlocked(model)
+        }
+
+    private fun verifyQnnImageRuntimeUnlocked(model: LocalImageModelRecord): Pair<Boolean, String> =
+        runCatching {
+            val app = getApplication<Application>()
+            val bundleRoot = model.bundleRoot
+                ?.takeIf { it.isNotBlank() }
+                ?: File(model.path).parent.orEmpty()
+            if (bundleRoot.isBlank()) {
+                return@runCatching false to "QNN 图像引擎缺少完整组件目录。"
+            }
+            val bundleRootFile = File(bundleRoot)
+            val runtimeResolution = qnnRuntimeDirectoryResolutionFor(app, bundleRootFile)
+            if (runtimeResolution.stagingError != null) {
+                return@runCatching false to runtimeResolution.stagingError
+            }
+            val report = QnnHtpImageRunner(context = app).runSmoke(
+                device = deviceProfileReader.read(),
+                bundleRoot = bundleRootFile
+            )
+            if (report.state != LocalImageQnnState.NPU_ACTIVE) {
+                return@runCatching false to report.message
+            }
+            if (!NativeMnnDiffusionBridge.isAvailable) {
+                val reason = NativeMnnDiffusionBridge.loadError?.message.orEmpty()
+                return@runCatching false to "QNN 文本编码器依赖 MNN native 后端，当前未加载${if (reason.isBlank()) "" else "：$reason"}"
+            }
+            if (!NativeMnnDiffusionBridge.runnerReady) {
+                val stats = runCatching { JSONObject(NativeMnnDiffusionBridge().getRuntimeStatsJson()) }.getOrNull()
+                return@runCatching false to stats?.optString("lastError")
+                    .orEmpty()
+                    .ifBlank { "QNN 文本编码器所需 MNN native runner 未打包到当前 APK。" }
+            }
+            if (!NativeQnnBridge.isAvailable) {
+                val reason = NativeQnnBridge.loadError?.message.orEmpty()
+                return@runCatching false to "骁龙 NPU 后端未加载${if (reason.isBlank()) "" else "：$reason"}"
+            }
+            if (!NativeQnnBridge.runnerReady) {
+                val stats = runCatching { JSONObject(NativeQnnBridge().getRuntimeStatsJson()) }.getOrNull()
+                return@runCatching false to stats?.optString("lastError")
+                    .orEmpty()
+                    .ifBlank { "骁龙 NPU 生图组件未打包到当前 APK。" }
+            }
+
+            val outputDir = File(app.cacheDir, "qnn_image_verify").apply { mkdirs() }
+            val outputFile = File(outputDir, "verify-qnn-${System.currentTimeMillis()}.png")
+            val isSdxlQnn = model.family == LocalImageModelFamily.SDXL
+            val embeddingFile = File(
+                outputDir,
+                if (isSdxlQnn) {
+                    "${outputFile.nameWithoutExtension}.sdxl-conditioning.f32"
+                } else {
+                    "${outputFile.nameWithoutExtension}.sd15-embeddings.f32"
+                }
+            )
+            try {
+            val (width, height) = model.qnnVerifyDimensions()
+            val steps = if (isSdxlQnn) 1 else 4
+            val threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
+            val params = JSONObject()
+                .put("prompt", "a small white ceramic cup on a wooden desk, morning light, clean background, photo realistic")
+                .put("family", model.family.name)
+                .put("width", width)
+                .put("height", height)
+                .put("steps", steps)
+                .put("threads", threads)
+                .put("seed", 1234)
+                .put("cfgScale", 7.0)
+                .put("sampleMethod", "pndm")
+                .put("backendMode", "cpu")
+                .putQnnSemanticDefaultsForVerification(bundleRootFile)
+            if (isSdxlQnn) {
+                params.put("conditioningFormat", "sdxl_qnn_conditioning")
+                    .put("vaeLatentScale", 1.0 / 0.13025)
+            }
+
+            val mnnBridge = NativeMnnDiffusionBridge()
+            val qnnBridge = NativeQnnBridge()
+            val embeddingRaw = if (isSdxlQnn) {
+                mnnBridge.encodeSdxlPromptConditioning(
+                    bundleRootFile.absolutePath,
+                    params.optString("prompt"),
+                    embeddingFile.absolutePath,
+                    width,
+                    height,
+                    "cpu",
+                    threads
+                )
+            } else {
+                mnnBridge.encodeSd15PromptEmbeddings(
+                    bundleRootFile.absolutePath,
+                    params.optString("prompt"),
+                    embeddingFile.absolutePath,
+                    "cpu",
+                    threads,
+                    "auto"
+                )
+            }
+            val embedding = JSONObject(embeddingRaw)
+            if (!embedding.optBoolean("ok", false)) {
+                return@runCatching false to embedding.optString("error")
+                    .ifBlank { "QNN 语义生图校验未能完成文本编码。" }
+            }
+
+            val result = JSONObject(
+                qnnBridge.runImageSemanticGenerate(
+                    bundleRootFile.absolutePath,
+                    qnnRuntimeDirsJsonForVerification(app, bundleRootFile),
+                    params.toString(),
+                    embeddingFile.absolutePath,
+                    outputFile.absolutePath
+                )
+            )
+            val outputBytes = outputFile.takeIf { it.isFile }?.length() ?: 0L
+            val ok = result.optBoolean("ok", false) &&
+                result.optBoolean("npuActive", false) &&
+                outputBytes > 0L
+            val elapsedMs = result.optLong("elapsedMs")
+            val unetAvgMs = result.optInt("unetExecuteMsAvg")
+            if (ok) {
+                true to if (isSdxlQnn) {
+                    buildString {
+                        append("QNN SDXL 仅完成 1-step NPU/PNG 技术 smoke")
+                        if (elapsedMs > 0L) append("，耗时 ${elapsedMs}ms")
+                        if (unetAvgMs > 0) append("，UNet ${unetAvgMs}ms/step")
+                        append("；语义与多步质量未通过，不能设为默认引擎。")
+                    }
+                } else {
+                    buildString {
+                        append("QNN 语义生图校验通过：${width}x$height，${steps} step")
+                        if (elapsedMs > 0L) append("，耗时 ${elapsedMs}ms")
+                        if (unetAvgMs > 0) append("，UNet ${unetAvgMs}ms/step")
+                        append("，NPU active。")
+                    }
+                }
+            } else {
+                false to result.optString("message")
+                    .ifBlank { "QNN 语义生图校验未产出有效图片或未证明 NPU active。" }
+            }
+            } finally {
+                runCatching { embeddingFile.delete() }
+                runCatching { outputFile.delete() }
+            }
+        }.getOrElse { error ->
+            false to (error.message ?: "QNN 图像引擎校验异常。")
+        }
+
+    private fun LocalImageModelRecord.qnnVerifyDimensions(): Pair<Int, Int> {
+        val match = Regex("""(\d{2,4})\s*x\s*(\d{2,4})""").find(imageSize)
+        val width = match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 512
+        val height = match?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 512
+        if (family == LocalImageModelFamily.SDXL) return 1024 to 1024
+        return width.coerceIn(256, 768) to height.coerceIn(256, 768)
+    }
+
+    private fun JSONObject.putQnnSemanticDefaultsForVerification(bundleRoot: File): JSONObject {
+        val manifest = localImageBundleManifestFromRoot(bundleRoot)
+        val smokes = manifest?.qnnSmokeSpecs.orEmpty()
+        val unet = smokes.firstOrNull { spec ->
+            val lower = spec.contextBinary.lowercase()
+            "unet" in lower || "diffusion" in lower || spec.inputs.size >= 3
+        } ?: smokes.firstOrNull()
+        val vae = smokes.firstOrNull { spec ->
+            val lower = spec.contextBinary.lowercase()
+            "vae" in lower || "decoder" in lower || (spec.inputs.size == 1 && spec.outputs.any { it.shape.contains(3) })
+        }
+        put("unetContextBinary", unet?.contextBinary?.takeIf { it.isNotBlank() } ?: "unet.bin")
+        put("vaeDecoderContextBinary", vae?.contextBinary?.takeIf { it.isNotBlank() } ?: "vae_decoder.bin")
+        put("graphName", unet?.graphName?.takeIf { it.isNotBlank() } ?: "model")
+        return this
+    }
+
+    private fun qnnRuntimeDirsJsonForVerification(app: Application, bundleRoot: File): String {
+        return JSONArray(qnnRuntimeDirectoriesFor(app, bundleRoot)).toString()
+    }
+
+    private suspend fun verifyMnnDiffusionImageRuntime(model: LocalImageModelRecord): Pair<Boolean, String> =
+        LocalImageExecutionGate.withLease(getApplication<Application>()) {
+            verifyMnnDiffusionImageRuntimeUnlocked(model)
+        }
+
+    private fun verifyMnnDiffusionImageRuntimeUnlocked(model: LocalImageModelRecord): Pair<Boolean, String> =
+        runCatching {
+            val bridge = NativeMnnDiffusionBridge()
+            if (!NativeMnnDiffusionBridge.isAvailable) {
+                val reason = NativeMnnDiffusionBridge.loadError?.message.orEmpty()
+                return@runCatching false to "MNN-Diffusion native 后端未加载${if (reason.isBlank()) "" else "：$reason"}"
+            }
+            if (!NativeMnnDiffusionBridge.runnerReady) {
+                val stats = runCatching { JSONObject(bridge.getRuntimeStatsJson()) }.getOrNull()
+                return@runCatching false to stats?.optString("lastError")
+                    .orEmpty()
+                    .ifBlank { "MNN-Diffusion native runner 未打包到当前 APK。" }
+            }
+            val primaryFile = File(model.path)
+            val configuredRoot = model.bundleRoot
+                ?.takeIf { it.isNotBlank() }
+                ?.let(::File)
+                ?: primaryFile.parentFile
+            if (configuredRoot == null) {
+                return@runCatching false to "MNN-Diffusion 缺少完整组件目录。"
+            }
+            val manifest = sequenceOf(configuredRoot, primaryFile.parentFile)
+                .filterNotNull()
+                .mapNotNull { root -> runCatching { localImageBundleManifestFromRoot(root) }.getOrNull() }
+                .firstOrNull()
+            val route = mnnVerificationRoute(model.family, manifest)
+            val contract = LocalImageBundleContract.inspectMnnBundle(
+                bundleRoot = configuredRoot,
+                primaryFile = primaryFile,
+                family = route.family
+            )
+            contract.readinessMessage(route.family)?.let { message ->
+                return@runCatching false to message
+            }
+            val runtimeRoot = contract.root
+                ?: return@runCatching false to "MNN-Diffusion 缺少完整组件目录。"
+            val bundleRoot = runtimeRoot.absolutePath
+            val isSd15 = route.family == LocalImageModelFamily.SD15
+            val smokeBackend = if (isSd15) "opencl" else "cpu"
+            val smokeRunner = if (isSd15) "direct" else "sana_varp"
+            if (route.requiresUnetPreflight) {
+                prepareMnnDiffusionTokenizerIfPossible(runtimeRoot)
+                val unetPreflightResult = runCatching {
+                    JSONObject(bridge.runUnetSmoke(bundleRoot, smokeBackend))
+                }
+                if (unetPreflightResult.isFailure) {
+                    val message = unetPreflightResult.exceptionOrNull()?.message ?: "unknown error"
+                    return@runCatching false to "MNN-Diffusion UNet 预检异常：$message"
+                }
+                val unetPreflight = unetPreflightResult.getOrThrow()
+                if (!unetPreflight.optBoolean("ok", false)) {
+                    val preflightError = unetPreflight.optString("error")
+                        .ifBlank {
+                            "direct runCode=${unetPreflight.optInt("runCode", -1)}, " +
+                                "resizeStatusAfter=${unetPreflight.optInt("resizeStatusAfter", -1)}"
+                        }
+                    return@runCatching false to
+                        "MNN-Diffusion UNet 预检未通过，已阻止进入不稳定生成路径：$preflightError"
+                }
+            }
+            val outputDir = File(getApplication<Application>().cacheDir, "mnn_image_verify").apply { mkdirs() }
+            val outputFile = File(outputDir, "verify-${System.currentTimeMillis()}.png")
+            val params = JSONObject()
+                .put(
+                    "prompt",
+                    if (isSd15) {
+                        "A single red cube on a clean white background, studio lighting, no text."
+                    } else {
+                        "A small cartoon house in a clean illustration style, no text."
+                    }
+                )
+                .put("family", route.family.name)
+                .put("steps", route.steps)
+                .put("width", route.width)
+                .put("height", route.height)
+                .put("threads", Runtime.getRuntime().availableProcessors().coerceIn(1, 4))
+                .put("seed", 42)
+                .put("backendMode", smokeBackend)
+                .put("runner", smokeRunner)
+                .put("memoryMode", 0)
+            try {
+                val result = JSONObject(bridge.generate(bundleRoot, params.toString(), outputFile.absolutePath))
+                verifyMnnDiffusionExecutionContract(
+                    result = result,
+                    expectedRunner = smokeRunner,
+                    expectedBackend = smokeBackend,
+                    expectedSteps = route.steps,
+                    expectedWidth = route.width,
+                    expectedHeight = route.height
+                )
+                require(outputFile.isFile && outputFile.length() > 0L) {
+                    "MNN-Diffusion smoke did not write a PNG."
+                }
+                val signature = outputFile.inputStream().use { input -> ByteArray(8).also { bytes ->
+                    require(input.read(bytes) == bytes.size) { "MNN-Diffusion smoke PNG is truncated." }
+                } }
+                require(signature.contentEquals(byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a))) {
+                    "MNN-Diffusion smoke output is not a PNG."
+                }
+                val bitmap = requireNotNull(BitmapFactory.decodeFile(outputFile.absolutePath)) {
+                    "MNN-Diffusion smoke PNG cannot be decoded."
+                }
+                val quality = try {
+                    require(bitmap.width == route.width && bitmap.height == route.height) {
+                        "MNN-Diffusion smoke decoded ${bitmap.width}x${bitmap.height}, " +
+                            "expected ${route.width}x${route.height}."
+                    }
+                    val pixels = IntArray(bitmap.width * bitmap.height)
+                    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+                    evaluateLocalImageSmokePixels(bitmap.width, bitmap.height, pixels)
+                } finally {
+                    bitmap.recycle()
+                }
+                require(quality.passed) {
+                    "MNN-Diffusion PNG quality smoke failed: ${quality.message}."
+                }
+                true to "MNN-Diffusion ${route.family.label} ${smokeRunner}/${smokeBackend} " +
+                    "${route.width}x${route.height}、${route.steps}-step PNG smoke 通过；" +
+                    "该结果不代表多提示词语义认证，暂不能设为默认引擎。"
+            } finally {
+                runCatching { outputFile.delete() }
+            }
+        }.getOrElse { error ->
+            false to (error.message ?: "MNN-Diffusion 校验异常。")
+        }
+
+    private suspend fun verifyLocalImageRuntimeIfNeeded(model: LocalImageModelRecord): LocalImageModelRecord {
+        if (model.runtime != LocalImageRuntime.MNN_DIFFUSION && model.runtime != LocalImageRuntime.QNN_HTP) return model
+        val structuralReadiness = model.localImageStructuralReadinessMessage()
+        val verification = if (structuralReadiness != null) {
+            false to structuralReadiness
+        } else if (model.runtime == LocalImageRuntime.QNN_HTP) {
+            verifyQnnImageRuntime(model)
+        } else {
+            verifyMnnDiffusionImageRuntime(model)
+        }
+        val qnnPersistence = qnnVerificationPersistence(model, verification)
+        val verifiedModel = model.copy(
+            verificationStatus = qnnPersistence.verification.toLocalImageVerificationStatus(
+                model.runtime,
+                model.family
+            ),
+            verificationMessage = qnnPersistence.verification.second,
+            verifiedAt = System.currentTimeMillis(),
+            qnnVerificationStamp = qnnPersistence.stamp
+        )
+        localImageModelStore.updateModel(verifiedModel)
+        return verifiedModel
+    }
+
+    private data class LocalImageSelection(
+        val models: List<LocalImageModelRecord>,
+        val selectedId: String?,
+        val selectedBackend: ImageBackend,
+        val qnnVerificationCurrentByModelId: Map<String, Boolean>
+    )
+
+    /** Must be called from an IO coroutine. */
+    private fun settleLocalImageSelection(
+        preferred: LocalImageModelRecord
+    ): LocalImageSelection {
+        val models = localImageModelStore.loadModels()
+        val preferredModel = models.firstOrNull { it.id == preferred.id } ?: preferred
+        val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(models)
+        val currentSelectedId = localImageModelStore.loadSelectedModelId()
+        val currentBackend = localImageModelStore.loadSelectedBackend()
+        val currentReadyId = currentSelectedId?.takeIf { id ->
+            models.any {
+                it.id == id && it.isReadyForManagedSelection(qnnVerificationCurrentByModelId)
+            }
+        }
+        val preferredCertified = preferredModel.isCertifiedForAutomaticSelection(qnnVerificationCurrentByModelId)
+        val selectedId = when {
+            preferredCertified -> preferredModel.id
+            currentReadyId != null -> currentReadyId
+            else -> models.firstOrNull {
+                it.isCertifiedForAutomaticSelection(qnnVerificationCurrentByModelId)
+            }?.id
+        }
+        localImageModelStore.saveSelectedModelId(selectedId)
+        val selectedBackend = when {
+            preferredCertified -> ImageBackend.LOCAL
+            selectedId == null && currentBackend == ImageBackend.LOCAL -> ImageBackend.CLOUD
+            else -> currentBackend
+        }
+        localImageModelStore.saveSelectedBackend(selectedBackend)
+        return LocalImageSelection(
+            models = models,
+            selectedId = selectedId,
+            selectedBackend = selectedBackend,
+            qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId
+        )
+    }
+
     fun deleteLocalImageModel(modelId: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val removed = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
             val success = runCatching { localImageModelStore.deleteModel(modelId) }.getOrDefault(false)
             val models = localImageModelStore.loadModels()
-            val selectedId = localImageModelStore.loadSelectedModelId()
-                ?.takeIf { id -> models.any { it.id == id && it.isReadyForLocalImageGeneration() } }
-                ?: models.firstOrNull { it.isReadyForLocalImageGeneration() }?.id
+            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(models)
+            val selectedId = selectedReadyLocalImageModelId(
+                models = models,
+                qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
+                preferredId = localImageModelStore.loadSelectedModelId()
+            )
             _uiState.update {
                 it.copy(
                     localImageModels = models,
+                    qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
                     selectedLocalImageModelId = selectedId,
                     selectedImageBackend = if (selectedId == null && it.selectedImageBackend == ImageBackend.LOCAL) ImageBackend.CLOUD else it.selectedImageBackend,
                     statusMessage = if (success) "已删除本地图像生成引擎：${removed?.displayName ?: "模型"}" else "未找到本地图像生成引擎"
@@ -923,7 +2324,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         persistGenerationParams(params)
         val updatedAssistants = updatedAssistantsWithParams(params)
         assistantStore.saveAssistants(updatedAssistants)
-        _uiState.update { it.copy(params = params, assistants = updatedAssistants) }
+        val reloadRequired = executionProfileDiffers(params, engine.activeExecutionProfile())
+        _uiState.update { state ->
+            state.copy(
+                params = params,
+                assistants = updatedAssistants,
+                reloadRequired = reloadRequired,
+                statusMessage = if (reloadRequired) {
+                    "加载/执行参数已变化，需要先建立候选配置并重新加载；sampling、模板和输出长度不会被静默改写。"
+                } else {
+                    state.statusMessage
+                }
+            )
+        }
     }
 
     fun saveAssistantProfile(
@@ -936,7 +2349,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         defaultModelId: String?,
         temperature: Float,
         topP: Float,
-        nCtx: Int,
         nPredict: Int,
         reasoningMode: ReasoningMode,
         memoryEnabled: Boolean,
@@ -965,11 +2377,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 systemPrompt = cleanPrompt,
                 temperature = temperature.coerceIn(0f, 2f),
                 topP = topP.coerceIn(0f, 1f),
-                nCtx = nCtx.coerceIn(512, 262_144),
                 nPredict = nPredict.coerceIn(128, 65_536),
                 reasoningMode = reasoningMode,
                 hideReasoning = reasoningMode == ReasoningMode.OFF
-            ).toJson(),
+            ).toAssistantGenerationJson(),
             memoryEnabled = memoryEnabled,
             webSearchEnabled = webSearchEnabled,
             fileContextEnabled = fileContextEnabled,
@@ -1793,6 +3204,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateCloudSupportsVision(value: Boolean) {
+        _uiState.update { state ->
+            state.copy(cloudApiConfig = state.cloudApiConfig.copy(supportsVision = value))
+        }
+    }
+
     fun updateCloudImageModel(value: String) {
         _uiState.update { state ->
             state.copy(cloudApiConfig = state.cloudApiConfig.copy(imageModel = value))
@@ -1837,6 +3254,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             baseUrl = config.baseUrl,
             apiKey = config.apiKey,
             modelName = config.chatModel,
+            supportsVision = config.supportsVision,
             imageSize = config.imageSize,
             updatedAt = System.currentTimeMillis()
         ) ?: _uiState.value.cloudModels.matchingCloudModel(
@@ -1848,6 +3266,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             providerName = config.providerName,
             displayName = config.safeDisplayName(),
             apiKey = config.apiKey,
+            supportsVision = config.supportsVision,
             updatedAt = System.currentTimeMillis()
         ) ?: CloudModelRecord(
             kind = CloudModelKind.CHAT,
@@ -1857,6 +3276,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             baseUrl = config.baseUrl,
             apiKey = config.apiKey,
             modelName = config.chatModel,
+            supportsVision = config.supportsVision,
             imageSize = config.imageSize
         )
         val models = _uiState.value.cloudModels.upsertCloudModel(record)
@@ -2050,11 +3470,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateAgentPreference(preference: UserPreference) {
         val state = _uiState.value
         val recommendation = runCatching { buildRecommendation(preference) }.getOrNull()
-        val updatedParams = recommendation?.tuningPlan?.toGenerationParams(
-            systemPrompt = state.params.systemPrompt,
-            reasoningMode = state.params.reasoningMode,
-            hideReasoning = state.params.hideReasoning
-        )
+        val updatedParams = recommendation?.tuningPlan?.applyTo(state.params)
         if (updatedParams != null) persistGenerationParams(updatedParams)
         _uiState.update {
             it.copy(
@@ -2076,20 +3492,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshLocalModels() {
-        _uiState.update { it.copy(models = modelStore.listModels()) }
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshManagedRuntimeReadiness()
+        }
     }
 
     fun importModel(uri: Uri) {
+        importModel(listOf(uri))
+    }
+
+    fun importModel(uris: List<Uri>) {
         viewModelScope.launch(Dispatchers.IO) {
             busy("正在导入本地推理引擎...")
             runCatching {
-                modelStore.importFromUri(uri)
+                modelStore.importFromUris(uris)
             }.onSuccess { model ->
                 _uiState.update {
                     it.copy(
                         models = modelStore.listModels(),
                         busy = false,
-                            statusMessage = "已导入 GGUF：${model.displayName}"
+                        statusMessage = "已导入${model.runtime.label}：${model.displayName}"
                     )
                 }
             }.onFailure { error ->
@@ -2101,12 +3523,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun fetchRemoteFiles() {
         val input = _uiState.value.repoInput
         viewModelScope.launch(Dispatchers.IO) {
-            busy("正在查询 ModelScope GGUF 文件...")
+            busy("正在查询 ModelScope 本地推理文件...")
             runCatching {
-                modelScopeClient.listGgufFiles(input)
+                modelScopeClient.listEngineFiles(input)
             }.onSuccess { files ->
                 _uiState.update {
-                    it.copy(remoteFiles = files, busy = false, statusMessage = "找到 ${files.size} 个 GGUF 文件")
+                    it.copy(remoteFiles = files, busy = false, statusMessage = "找到 ${files.size} 个本地推理文件")
                 }
             }.onFailure { error ->
                 fail("查询失败：${error.message}")
@@ -2115,17 +3537,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun fetchRecommendedFiles(model: ModelScopeRecommendedModel) {
+        recommendedDownloadBlockReason(model)?.let { reason ->
+            _uiState.update { it.copy(statusMessage = reason) }
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             busy("正在读取推荐模型：${model.title}...")
             runCatching {
-                modelScopeClient.listRecommendedFiles(model)
+                modelScopeClient.listRecommendedFiles(
+                    model = model,
+                    preferredQairtChipsets = preferredQairtChipsets(currentDeviceProfile())
+                )
             }.onSuccess { files ->
                 _uiState.update {
                     it.copy(
                         repoInput = model.repoId,
                         remoteFiles = files,
                         busy = false,
-                        statusMessage = "已列出 ${model.title} 的 ${files.size} 个 GGUF 文件"
+                        statusMessage = "已列出 ${model.title} 的 ${files.size} 个模型组件"
                     )
                 }
             }.onFailure { error ->
@@ -2135,6 +3564,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun downloadRecommended(model: ModelScopeRecommendedModel) {
+        recommendedDownloadBlockReason(model)?.let { reason ->
+            _uiState.update { it.copy(statusMessage = reason) }
+            return
+        }
+        if (model.mnnModelBundle != null) {
+            downloadRecommendedMnnBundle(model)
+            return
+        }
+        if (model.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT) {
+            downloadRecommendedQairtChatBundle(model)
+            return
+        }
+        if (model.visionModelBundle != null) {
+            downloadRecommendedVisionBundle(model)
+            return
+        }
         if (model.imageEngineBundle != null) {
             downloadRecommendedImageBundle(model)
             return
@@ -2149,6 +3594,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fail("推荐模型下载准备失败：${error.message}")
             }
         }
+    }
+
+    private fun recommendedDownloadBlockReason(model: ModelScopeRecommendedModel): String? {
+        val deviceChipset = _uiState.value.deviceProfile
+            ?.accelerationProfile
+            ?.chipsetCode
+            .orEmpty()
+        val deviceIsSnapdragon = _uiState.value.deviceProfile?.socFamily == SocFamily.Snapdragon
+        return model.downloadEligibilityFor(deviceChipset, deviceIsSnapdragon).blockedReason
     }
 
     fun attachVisionProjector(modelId: String, uri: Uri) {
@@ -2179,63 +3633,176 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun downloadRecommendedImageBundle(model: ModelScopeRecommendedModel) {
+    private fun downloadRecommendedQairtChatBundle(model: ModelScopeRecommendedModel) {
         viewModelScope.launch(Dispatchers.IO) {
-            val bundle = model.imageEngineBundle ?: return@launch
-            busy("正在准备下载生图引擎包：${bundle.title}...")
+            busy("正在准备下载 QNN 聊天引擎：${model.title}...")
             runCatching {
-                val components = modelScopeClient.recommendedImageBundleFiles(model)
-                val primary = components.firstOrNull { it.bundleRole == ImageEngineBundleComponentRole.DIFFUSION }
-                    ?: error("生图引擎包缺少 diffusion 主模型。")
-                val bundleDir = localImageModelStore.managedBundleDirFor(bundle.id)
-                val targets = components.map { remote ->
-                    remote to localImageModelStore.managedBundleFileFor(bundleDir, remote.name)
-                }
-                val bytesToDownload = targets.sumOf { (remote, finalFile) ->
-                    val expected = remote.sizeBytes ?: 0L
-                    if (
-                        finalFile.exists() && (expected <= 0L || finalFile.length() == expected)
-                    ) {
-                        0L
-                    } else {
-                        expected
-                    }
-                }
-                val knownTotalBytes = targets.sumOf { (remote, finalFile) ->
-                    val expected = remote.sizeBytes ?: 0L
-                    when {
-                        finalFile.exists() && expected <= 0L -> finalFile.length()
-                        else -> expected
-                    }
-                }
-                val usableSpace = bundleDir.usableSpace
-                if (bytesToDownload > 0L && usableSpace in 1 until bytesToDownload) {
-                    error("存储空间不足：引擎包还需 ${formatBytes(bytesToDownload)}，请清理空间后重试。")
+                val remote = modelScopeClient.recommendedQairtChatFile(
+                    model = model,
+                    preferredChipsets = preferredQairtChipsets(currentDeviceProfile())
+                )
+                val bundleId = remote.name.removeSuffix(".zip").ifBlank { model.id }
+                val bundleDir = modelStore.managedBundleDirFor(bundleId)
+                val finalZip = modelStore.managedBundleFileFor(bundleDir, remote.name)
+                val expected = remote.sizeBytes ?: 0L
+                if (expected > 0L && bundleDir.usableSpace in 1 until expected) {
+                    error("存储空间不足：QAIRT 引擎包还需 ${formatBytes(expected)}，请清理空间后重试。")
                 }
                 val tempDir = getApplication<Application>().externalCacheDir ?: getApplication<Application>().cacheDir
-                var completedBytes = targets.sumOf { (remote, finalFile) ->
-                    val expected = remote.sizeBytes ?: 0L
-                    when {
-                        finalFile.exists() && (expected <= 0L || finalFile.length() == expected) -> finalFile.length()
-                        else -> 0L
+                val tempFile = File(tempDir, "${bundleId}-${remote.name}.part".replace(Regex("[^A-Za-z0-9._-]"), "_"))
+                downloader.download(remote, tempFile, finalZip) { snapshot ->
+                    _uiState.update {
+                        it.copy(
+                            downloadFileName = snapshot.fileName,
+                            downloadedBytes = snapshot.downloadedBytes,
+                            downloadTotalBytes = snapshot.expectedLength,
+                            downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
+                            downloadRemainingSeconds = snapshot.remainingSeconds,
+                            downloadStatus = snapshot.status,
+                            statusMessage = "正在下载 QNN 聊天引擎：${snapshot.fileName}"
+                        )
                     }
                 }
-                targets.forEachIndexed { index, (remote, finalFile) ->
-                    val expected = remote.sizeBytes ?: 0L
-                    if (
-                        finalFile.exists() && (expected <= 0L || finalFile.length() == expected)
-                    ) {
-                        _uiState.update {
-                            it.copy(
-                                downloadFileName = remote.name,
-                                downloadedBytes = completedBytes,
-                                downloadTotalBytes = knownTotalBytes,
-                                downloadStatus = DownloadStatus.RUNNING,
-                                statusMessage = "已存在组件 ${index + 1}/${targets.size}：${remote.kindLabel()}"
-                            )
-                        }
-                        return@forEachIndexed
+                clearBundleDirectoryExcept(bundleDir, finalZip)
+                unzipIntoDirectory(finalZip, bundleDir)
+                finalZip.delete()
+                val qairtBundleRoot = modelStore.resolveQairtBundleRoot(bundleDir)
+                modelStore.registerDownloadedQairtBundle(
+                    displayName = model.title,
+                    bundleDir = qairtBundleRoot,
+                    repoId = model.repoId,
+                    revision = model.revision,
+                    source = remote.provider.toModelSource(),
+                    quant = model.quant,
+                    architecture = recommendedQairtArchitecture(model)
+                )
+            }.onSuccess { registered ->
+                val localModels = modelStore.listModels()
+                val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(localModels)
+                _uiState.update {
+                    it.copy(
+                        models = localModels,
+                        qairtVerifiedLocalModelIds = qairtVerifiedIds,
+                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
+                            models = localModels,
+                            verifiedLocalModelIds = qairtVerifiedIds,
+                            recommendations = it.recommendedRemoteModels
+                        ),
+                        busy = false,
+                        downloadStatus = DownloadStatus.DONE,
+                        downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
+                        downloadSpeedBytesPerSecond = 0L,
+                        downloadRemainingSeconds = null,
+                        statusMessage = "已下载 QNN 聊天引擎：${registered.displayName}。请在本地模型中加载后执行真机 smoke test；通过前不宣传为已跑通。"
+                    )
+                }
+            }.onFailure { error ->
+                fail("QNN 聊天引擎下载失败：${downloadFailureAdvice(error.message)}")
+            }
+        }
+    }
+
+    private fun downloadRecommendedMnnBundle(model: ModelScopeRecommendedModel) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val bundle = model.mnnModelBundle ?: return@launch
+            busy("正在准备下载 MNN 高速引擎：${bundle.title}...")
+            runCatching {
+                val components = modelScopeClient.recommendedMnnBundleFiles(model)
+                val config = components.firstOrNull {
+                    it.mnnBundleRole == MnnModelBundleComponentRole.CONFIG
+                } ?: error("MNN 模型包缺少 config.json。")
+                val bundleDir = modelStore.managedBundleDirFor(bundle.id)
+                val installer = ModelBundleInstaller(
+                    BundleComponentDownloader { remote, tempFile, stagedFile, onProgress ->
+                        downloader.download(remote, tempFile, stagedFile, onProgress)
                     }
+                )
+                val plan = installer.plan(bundleDir, components)
+                val knownTotalBytes = components.sumOf { remote -> remote.sizeBytes ?: 0L }
+                val usableSpace = bundleDir.usableSpace
+                if (knownTotalBytes > 0L && usableSpace in 1 until knownTotalBytes) {
+                    error("存储空间不足：MNN 引擎包约需 ${formatBytes(knownTotalBytes)}，请清理空间后重试。")
+                }
+                val downloadedBytesByPath = mutableMapOf<String, Long>()
+                val installed = installer.install(
+                    bundleRoot = bundleDir,
+                    components = components,
+                    stagedTransformer = bundle.installProfile.stagedTransformer()
+                ) { snapshot ->
+                    val targetIndex = plan.targets.indexOfFirst { target ->
+                        target.finalFile.canonicalFile == snapshot.finalFile.canonicalFile
+                    }
+                    val target = plan.targets.getOrNull(targetIndex)
+                    val progressPath = target?.relativePath ?: snapshot.fileName
+                    downloadedBytesByPath[progressPath] = snapshot.downloadedBytes
+                    _uiState.update {
+                        it.copy(
+                            downloadFileName = progressPath,
+                            downloadedBytes = downloadedBytesByPath.values.sum(),
+                            downloadTotalBytes = knownTotalBytes.takeIf { total -> total > 0L } ?: snapshot.expectedLength,
+                            downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
+                            downloadRemainingSeconds = snapshot.remainingSeconds,
+                            downloadStatus = snapshot.status,
+                            statusMessage = "正在下载 MNN 组件 ${(targetIndex + 1).coerceAtLeast(1)}/${plan.targets.size}：${target?.remote?.kindLabel() ?: "组件"} · $progressPath"
+                        )
+                    }
+                }
+                require(installer.verifyInstalledBundle(installed.bundleRoot).isVerified) {
+                    "MNN 模型包安装后的组件校验失败，请重新下载。"
+                }
+                modelStore.registerDownloadedMnnBundle(
+                    displayName = model.title,
+                    bundleDir = installed.bundleRoot,
+                    repoId = bundle.repoId,
+                    revision = bundle.revision,
+                    license = config.license,
+                    source = bundle.provider.toModelSource(),
+                    quant = model.quant,
+                    architecture = model.title.substringBefore(' ').lowercase().takeIf { it.isNotBlank() },
+                    requiredFiles = bundle.requiredComponents.map { it.relativePath }
+                )
+            }.onSuccess { registered ->
+                _uiState.update {
+                    it.copy(
+                        models = modelStore.listModels(),
+                        busy = false,
+                        downloadStatus = DownloadStatus.DONE,
+                        downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
+                        downloadSpeedBytesPerSecond = 0L,
+                        downloadRemainingSeconds = null,
+                        statusMessage = "已下载 MNN 高速引擎包：${registered.displayName}。可在本地模型中加载；GGUF / llama.cpp 继续作为兼容引擎。"
+                    )
+                }
+            }.onFailure { error ->
+                fail("MNN 高速引擎下载失败：${downloadFailureAdvice(error.message)}")
+            }
+        }
+    }
+
+    private fun downloadRecommendedVisionBundle(model: ModelScopeRecommendedModel) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val bundle = model.visionModelBundle ?: return@launch
+            busy("正在准备下载多模态模型包：${bundle.title}...")
+            runCatching {
+                val components = modelScopeClient.recommendedVisionBundleFiles(model)
+                val primary = components.firstOrNull {
+                    it.visionBundleRole == VisionModelBundleComponentRole.MAIN_MODEL
+                } ?: error("多模态模型包缺少主模型。")
+                val projector = components.firstOrNull {
+                    it.visionBundleRole == VisionModelBundleComponentRole.PROJECTOR
+                }
+                val bundleDir = modelStore.managedBundleDirFor(bundle.id)
+                val targets = components.map { remote ->
+                    remote to modelStore.managedBundleFileFor(bundleDir, remote.path)
+                }
+                val bytesToDownload = targets.sumOf { (remote, _) -> remote.sizeBytes ?: 0L }
+                val usableSpace = targets.firstOrNull()?.second?.parentFile?.usableSpace ?: 0L
+                if (bytesToDownload > 0L && usableSpace in 1 until bytesToDownload) {
+                    error("存储空间不足：多模态模型包约需 ${formatBytes(bytesToDownload)}，请清理空间后重试。")
+                }
+                val tempDir = getApplication<Application>().externalCacheDir ?: getApplication<Application>().cacheDir
+                var completedBytes = 0L
+                targets.forEachIndexed { index, (remote, finalFile) ->
                     val tempFile = File(tempDir, "${bundle.id}-${remote.name}.part".replace(Regex("[^A-Za-z0-9._-]"), "_"))
                     val completedBefore = completedBytes
                     downloader.download(remote, tempFile, finalFile) { snapshot ->
@@ -2243,37 +3810,194 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             it.copy(
                                 downloadFileName = snapshot.fileName,
                                 downloadedBytes = completedBefore + snapshot.downloadedBytes,
-                                downloadTotalBytes = knownTotalBytes.takeIf { total -> total > 0L } ?: snapshot.expectedLength,
+                                downloadTotalBytes = bytesToDownload.takeIf { total -> total > 0L } ?: snapshot.expectedLength,
                                 downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
                                 downloadRemainingSeconds = snapshot.remainingSeconds,
                                 downloadStatus = snapshot.status,
-                                statusMessage = "正在下载生图组件 ${index + 1}/${targets.size}：${remote.kindLabel()} · ${snapshot.fileName}"
+                                statusMessage = "正在下载多模态组件 ${index + 1}/${targets.size}：${remote.kindLabel()} · ${snapshot.fileName}"
                             )
                         }
                     }
                     completedBytes += finalFile.length()
                 }
                 val primaryFile = targets.firstOrNull { it.first == primary }?.second
-                    ?: error("生图引擎包主模型下载目标不存在。")
-                localImageModelStore.registerDownloadedBundle(
+                    ?: error("多模态模型包主模型下载目标不存在。")
+                writeDownloadedVisionBundleManifest(
                     displayName = model.title,
                     bundleDir = bundleDir,
-                    primaryFile = primaryFile,
-                    primaryRemote = primary,
-                    componentCount = components.size
+                    bundle = bundle,
+                    targets = targets
                 )
-            }.onSuccess { record ->
+                if (bundle.runtime == VisionModelBundleRuntime.GGUF_MMPROJ) {
+                    val projectorRemote = projector ?: error("多模态模型包缺少 mmproj / projector。")
+                    val projectorFile = targets.firstOrNull { it.first == projectorRemote }?.second
+                        ?: error("多模态模型包 projector 下载目标不存在。")
+                    val registered = modelStore.registerDownloadedModel(
+                        file = primaryFile,
+                        repoId = primary.repoId,
+                        revision = primary.revision,
+                        license = primary.license,
+                        source = primary.provider.toModelSource()
+                    )
+                    VisionBundleDownloadResult.ChatModel(
+                        modelStore.attachVisionProjectorFile(registered.id, projectorFile, projectorRemote.name)
+                    )
+                } else {
+                    val report = LiteRtQnnVisionRunner().health(
+                        device = currentDeviceProfile(),
+                        bundleRoot = bundleDir
+                    )
+                    VisionBundleDownloadResult.EngineBundle(
+                        displayName = model.title,
+                        bundleDir = bundleDir,
+                        report = report
+                    )
+                }
+            }.onSuccess { result ->
                 _uiState.update {
+                    val status = when (result) {
+                        is VisionBundleDownloadResult.ChatModel ->
+                            "已下载多模态聊天模型：${result.model.displayName}，并绑定视觉投影器。加载后可直接聊天和识图。"
+                        is VisionBundleDownloadResult.EngineBundle ->
+                            "已下载本地图片理解候选包：${result.displayName}。${result.report.message}"
+                    }
                     it.copy(
-                        localImageModels = localImageModelStore.loadModels(),
-                        selectedLocalImageModelId = record.id,
-                        selectedImageBackend = ImageBackend.LOCAL,
+                        models = modelStore.listModels(),
                         busy = false,
                         downloadStatus = DownloadStatus.DONE,
                         downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
                         downloadSpeedBytesPerSecond = 0L,
                         downloadRemainingSeconds = null,
-                        statusMessage = "已下载完整本地生图引擎包：${record.displayName}"
+                        statusMessage = status
+                    )
+                }
+            }.onFailure { error ->
+                fail("多模态模型下载失败：${downloadFailureAdvice(error.message)}")
+            }
+        }
+    }
+
+    private fun downloadRecommendedImageBundle(model: ModelScopeRecommendedModel) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val bundle = model.imageEngineBundle ?: return@launch
+            busy("正在准备下载生图引擎包：${bundle.title}...")
+            runCatching {
+                val components = modelScopeClient.recommendedImageBundleFiles(
+                    model = model,
+                    preferredQairtChipsets = preferredQairtChipsets(currentDeviceProfile())
+                )
+                val primary = components.firstOrNull { it.bundleRole == ImageEngineBundleComponentRole.DIFFUSION }
+                    ?: error("生图引擎包缺少 diffusion 主模型。")
+                val bundleDir = localImageModelStore.managedBundleDirFor(bundle.id)
+                val candidateDir = File(bundleDir.parentFile, ".${bundleDir.name}.candidate")
+                val installer = ModelBundleInstaller(
+                    BundleComponentDownloader { remote, tempFile, finalFile, onProgress ->
+                        downloader.download(remote, tempFile, finalFile, onProgress)
+                    }
+                )
+                val plan = installer.plan(candidateDir, components)
+                val knownTotalBytes = components.sumOf { it.sizeBytes ?: 0L }
+                val usableSpace = bundleDir.usableSpace
+                if (knownTotalBytes > 0L && usableSpace in 1 until knownTotalBytes) {
+                    error("存储空间不足：引擎包约需 ${formatBytes(knownTotalBytes)}，请清理空间后重试。")
+                }
+                val downloadedBytesByPath = mutableMapOf<String, Long>()
+                installer.install(candidateDir, components) { snapshot ->
+                    val targetIndex = plan.targets.indexOfFirst { target ->
+                        target.finalFile.canonicalFile == snapshot.finalFile.canonicalFile
+                    }
+                    val target = plan.targets.getOrNull(targetIndex)
+                    val progressPath = target?.relativePath ?: snapshot.fileName
+                    downloadedBytesByPath[progressPath] = snapshot.downloadedBytes
+                    _uiState.update {
+                        it.copy(
+                            downloadFileName = progressPath,
+                            downloadedBytes = downloadedBytesByPath.values.sum(),
+                            downloadTotalBytes = knownTotalBytes.takeIf { total -> total > 0L } ?: snapshot.expectedLength,
+                            downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
+                            downloadRemainingSeconds = snapshot.remainingSeconds,
+                            downloadStatus = snapshot.status,
+                            statusMessage = "正在下载生图组件 ${(targetIndex + 1).coerceAtLeast(1)}/${plan.targets.size}：${target?.remote?.kindLabel() ?: "组件"} · $progressPath"
+                        )
+                    }
+                }
+                var promoted = false
+                var previousBundleBackup: File? = null
+                try {
+                    val primaryFile = plan.targets.firstOrNull { it.remote == primary }?.finalFile
+                        ?: error("生图引擎包主模型下载目标不存在。")
+                    if (primaryFile.extension.equals("zip", ignoreCase = true)) {
+                        extractImageBundleZipIntoDirectory(primaryFile, candidateDir)
+                        check(primaryFile.delete()) { "无法清理已展开的引擎 ZIP：${primaryFile.name}" }
+                    }
+                    prepareMnnDiffusionTokenizerIfPossible(candidateDir)
+                    val resolvedPrimary = localImageBundleManifestFromRoot(candidateDir)?.primaryFile
+                        ?: findPrimaryImageModel(candidateDir)
+                        ?: error("生图引擎包内没有可注册的 diffusion 主模型。")
+                    val manifestTargets = expandedImageBundleManifestTargets(
+                        bundleDir = candidateDir,
+                        resolvedPrimary = resolvedPrimary,
+                        targets = plan.targets.map { it.remote to it.finalFile }
+                    )
+                    writeDownloadedImageBundleManifest(
+                        displayName = model.title,
+                        bundleDir = candidateDir,
+                        bundle = bundle,
+                        targets = manifestTargets
+                    )
+                    previousBundleBackup = promoteImageBundleCandidate(candidateDir, bundleDir)
+                    promoted = true
+                    val finalPrimary = File(bundleDir, resolvedPrimary.relativeTo(candidateDir).path)
+                    require(finalPrimary.isFile) { "生图引擎主模型在提交后不存在：${resolvedPrimary.name}" }
+                    val registered = localImageModelStore.registerDownloadedBundle(
+                        displayName = model.title,
+                        bundleDir = bundleDir,
+                        primaryFile = finalPrimary,
+                        primaryRemote = primary,
+                        componentCount = components.size,
+                        runtimeOverride = bundle.runtime.toLocalImageRuntime(),
+                        imageSizeOverride = "${bundle.smokeSpec.width}x${bundle.smokeSpec.height}"
+                    )
+                    val verified = if (model.status == RecommendedModelStatus.RECOMMENDED) {
+                        verifyLocalImageRuntimeIfNeeded(registered)
+                    } else {
+                        registered
+                    }
+                    previousBundleBackup?.deleteRecursively()
+                    verified
+                } catch (error: Throwable) {
+                    if (promoted) {
+                        restoreImageBundleBackup(bundleDir, previousBundleBackup)
+                    }
+                    candidateDir.deleteRecursively()
+                    throw error
+                }
+            }.onSuccess { record ->
+                val selection = settleLocalImageSelection(record)
+                val readiness = record.localImageReadinessForUi(
+                    selection.qnnVerificationCurrentByModelId[record.id]
+                )
+                _uiState.update {
+                    it.copy(
+                        localImageModels = selection.models,
+                        qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
+                        selectedLocalImageModelId = selection.selectedId,
+                        selectedImageBackend = selection.selectedBackend,
+                        busy = false,
+                        downloadStatus = DownloadStatus.DONE,
+                        downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
+                        downloadSpeedBytesPerSecond = 0L,
+                        downloadRemainingSeconds = null,
+                        statusMessage = if (readiness == null) {
+                            if (record.runtime == LocalImageRuntime.MNN_DIFFUSION ||
+                                record.runtime == LocalImageRuntime.QNN_HTP) {
+                                "已下载并校验完整本地生图引擎包：${record.displayName}"
+                            } else {
+                                "已下载完整本地生图引擎包：${record.displayName}"
+                            }
+                        } else {
+                            "已下载完整本地生图引擎包：${record.displayName}，但暂不能生成：$readiness"
+                        }
                     )
                 }
             }.onFailure { error ->
@@ -2284,7 +4008,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun searchHubModels(reset: Boolean = true) {
         val state = _uiState.value
-        val query = state.hubQuery.ifBlank { "gguf" }
+        val query = state.hubQuery.ifBlank { "MNN Qwen3.5" }
         val nextPage = if (reset) 1 else state.hubPage + 1
         viewModelScope.launch(Dispatchers.IO) {
             busy("正在从魔塔 API 拉取模型列表...")
@@ -2309,16 +4033,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun fetchHubModelFiles(model: ModelScopeHubModel) {
         _uiState.update { it.copy(repoInput = model.id) }
         viewModelScope.launch(Dispatchers.IO) {
-            busy("正在读取 ${model.displayName} 的 GGUF 文件...")
+            busy("正在读取 ${model.displayName} 的本地推理文件...")
             runCatching {
-                modelScopeClient.listGgufFiles(model.id)
+                modelScopeClient.listEngineFiles(model.id)
             }.onSuccess { files ->
                 _uiState.update {
                     it.copy(
                         repoInput = model.id,
                         remoteFiles = files,
                         busy = false,
-                        statusMessage = "已列出 ${model.displayName} 的 ${files.size} 个 GGUF 文件"
+                        statusMessage = "已列出 ${model.displayName} 的 ${files.size} 个本地推理文件"
                     )
                 }
             }.onFailure { error ->
@@ -2353,12 +4077,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             runCatching {
-                val imageModel = remote.isImageModelCandidate()
-                val finalFile = if (imageModel) {
-                    localImageModelStore.managedFileFor(remote.name)
-                } else {
-                    modelStore.managedFileFor(remote.name)
+                val remoteKind = remote.fileKind()
+                if (remoteKind == RemoteModelFileKind.MNN_COMPONENT) {
+                    error("MNN 组件需要作为完整高速引擎包下载或多选导入。请回到推荐卡片点击“下载 MNN”，或一次选择完整组件。")
                 }
+                val imageModel = remote.isImageModelCandidate()
+                val targetVisionModel = if (remoteKind == RemoteModelFileKind.PROJECTOR) {
+                    val currentState = _uiState.value
+                    currentState.models.firstOrNull { it.id == currentState.loadedModelId }
+                        ?: error("请先加载要启用识图的本地多模态主模型，再下载 mmproj / projector。")
+                } else {
+                    null
+                }
+                val finalFile = if (imageModel) localImageModelStore.managedFileFor(remote.name) else modelStore.managedFileFor(remote.name)
                 val tempDir = getApplication<Application>().externalCacheDir ?: getApplication<Application>().cacheDir
                 val tempFile = File(tempDir, "${remote.name}.part")
                 val expectedBytes = remote.sizeBytes ?: 0L
@@ -2381,6 +4112,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (imageModel) {
                     DownloadedModelRegistration.Image(localImageModelStore.registerDownloadedModel(finalFile, remote))
+                } else if (remoteKind == RemoteModelFileKind.PROJECTOR && targetVisionModel != null) {
+                    DownloadedModelRegistration.VisionProjector(
+                        model = modelStore.attachVisionProjectorFile(targetVisionModel.id, finalFile, remote.name),
+                        shouldReload = _uiState.value.loadedModelId == targetVisionModel.id &&
+                            _uiState.value.selectedChatBackend == ChatBackend.LOCAL
+                    )
                 } else {
                     DownloadedModelRegistration.Chat(
                         modelStore.registerDownloadedModel(
@@ -2393,6 +4130,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }.onSuccess { registration ->
+                val registeredImageModels = if (registration is DownloadedModelRegistration.Image) {
+                    localImageModelStore.loadModels()
+                } else {
+                    emptyList()
+                }
+                val registeredImageQnnVerification = if (registeredImageModels.isNotEmpty()) {
+                    currentQnnImageVerificationByModelId(registeredImageModels)
+                } else {
+                    emptyMap()
+                }
                 _uiState.update {
                     when (registration) {
                         is DownloadedModelRegistration.Chat -> it.copy(
@@ -2404,10 +4151,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             downloadRemainingSeconds = null,
                             statusMessage = "已下载推理模型：${registration.model.displayName}"
                         )
+                        is DownloadedModelRegistration.VisionProjector -> it.copy(
+                            models = modelStore.listModels(),
+                            busy = false,
+                            downloadStatus = DownloadStatus.DONE,
+                            downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
+                            downloadSpeedBytesPerSecond = 0L,
+                            downloadRemainingSeconds = null,
+                            statusMessage = if (registration.shouldReload) {
+                                "已下载并绑定视觉投影器：${registration.model.visionProjectorFileName ?: "mmproj"}，正在重新加载模型以启用本地识图。"
+                            } else {
+                                "已下载并绑定视觉投影器：${registration.model.visionProjectorFileName ?: "mmproj"}，加载该模型后可本地识图。"
+                            }
+                        )
                         is DownloadedModelRegistration.Image -> {
-                            val readiness = registration.model.localImageReadinessMessage()
+                            val readiness = registration.model.localImageReadinessForUi(
+                                registeredImageQnnVerification[registration.model.id]
+                            )
                             it.copy(
-                                localImageModels = localImageModelStore.loadModels(),
+                                localImageModels = registeredImageModels,
+                                qnnImageVerificationCurrentByModelId = registeredImageQnnVerification,
                                 selectedLocalImageModelId = if (readiness == null) {
                                     it.selectedLocalImageModelId ?: registration.model.id
                                 } else {
@@ -2426,6 +4189,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             )
                         }
                     }
+                }
+                if (registration is DownloadedModelRegistration.VisionProjector && registration.shouldReload) {
+                    loadModel(registration.model)
                 }
             }.onFailure { error ->
                 fail("下载失败：${downloadFailureAdvice(error.message)}")
@@ -2485,30 +4251,137 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             generationJob?.cancel()
             engine.stopGeneration()
-            busy("正在加载 ${model.displayName}...")
+            _uiState.update {
+                it.copy(
+                    busy = true,
+                    engineLifecycle = AgentEngineLifecycle.LOADING,
+                    statusMessage = "正在加载 ${model.displayName}..."
+                )
+            }
             val preflight = modelStore.validateForLoad(model.id)
             if (!preflight.canLoad) {
                 fail("加载前检查失败：${preflight.message}")
                 return@launch
+            }
+            if (model.runtime == ChatModelRuntime.GENIEX_QAIRT) {
+                val verifiedIds = currentQairtVerifiedLocalModelIds(modelStore.listModels())
+                if (model.id !in verifiedIds) {
+                    fail("该 QAIRT 模型尚未通过当前芯片与运行时的隔离验收，不能正常加载。模型包仍可保留；请先完成 create/generate/destroy dry-run。")
+                    return@launch
+                }
             }
             loadMemoryBlocker(model)?.let { message ->
                 fail("加载前内存检查失败：$message")
                 return@launch
             }
             val params = _uiState.value.params
-            val visionProjectorPath = model.visionProjectorPath
-                ?.takeIf { it.isNotBlank() }
-                ?.takeIf { File(it).isFile }
+            val runtime = model.runtime.toLocalChatRuntime()
+            val qairtBundleSha256 = currentQairtBundleSha256(
+                requested = model,
+                persistedModels = modelStore.listModels()
+            )
+            val device = currentDeviceProfile()
+            val qairtAdmissionPassed = model.runtime == ChatModelRuntime.GENIEX_QAIRT &&
+                model.id in currentQairtVerifiedLocalModelIds(modelStore.listModels())
+            val identity = RuntimeIdentityFactory.create(
+                context = getApplication(),
+                model = model,
+                runtime = runtime,
+                device = device,
+                installationScopeId = installationScopeId,
+                qairtAdmissionPassed = qairtAdmissionPassed
+            )
+            activeRuntimeIdentity = identity
+            runtimeProfileStore.upsertIdentity(identity.toRuntimeIdentityEntity())
+
+            val persistedState = runtimeProfileStore.currentRuntimeState(identity.identityHash)
+            val recoveryPlan = synchronized(pendingRuntimeRecoveries) {
+                pendingRuntimeRecoveries[identity.identityHash]
+            }
+            val persistedProfile = recoveryPlan?.rollbackProfileId?.let {
+                runtimeProfileStore.reconstructedProfile(it)
+            } ?: persistedState?.activeExecutionProfile
+            val capabilities = modelTuningCapabilities(model, identity, qairtAdmissionPassed)
+            val adaptive = buildAdaptiveTuningRecommendation(model, identity, device, capabilities)
+            var bootstrapProfile = persistedProfile ?: adaptive.executionProfile.engineProfile
+            if (persistedProfile == null && runtimeProfileStore.profile(bootstrapProfile.profileId)
+                    ?.recordState == PersistedProfileRecordState.REJECTED.name
+            ) {
+                bootstrapProfile = bootstrapProfile.copy(
+                    profileId = "${bootstrapProfile.profileId}-retry-${UUID.randomUUID().toString().take(8)}",
+                    revision = bootstrapProfile.revision + 1
+                )
+            }
+            val loadParams = model.toLoadParams(params, bootstrapProfile)
+            activeModelForRuntimeProfile = model
             engine.loadModel(
                 modelPath = model.path,
-                params = LoadParams(
-                    nCtx = params.nCtx,
-                    nThreads = params.nThreads,
-                    visionProjectorPath = visionProjectorPath
-                )
+                runtime = runtime,
+                params = loadParams,
+                qairtBundleSha256 = qairtBundleSha256,
+                runtimeIdentity = identity,
+                executionProfile = bootstrapProfile
             ).onSuccess {
+                val effectiveParams = mergeExecutionProfile(params, engine.activeExecutionProfile() ?: bootstrapProfile)
+                _uiState.update { state ->
+                    state.copy(
+                        params = effectiveParams,
+                        reloadRequired = false,
+                        engineLifecycle = AgentEngineLifecycle.READY,
+                        statusMessage = "正在完成安全基线正确性校准…"
+                    )
+                }
+                val needsBootstrapCommit = persistedState?.activeExecutionProfile == null ||
+                    persistedState.activeProfile?.recordState != PersistedProfileRecordState.COMMITTED.name
+                val canary = runCatching {
+                    runBootstrapCorrectnessCanary(effectiveParams)
+                }.getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    engine.unloadModel()
+                    _uiState.update {
+                        it.copy(
+                            busy = false,
+                            engineLifecycle = AgentEngineLifecycle.ERROR,
+                            nativeStatsJson = engine.nativeStatsJson(),
+                            logs = engine.recentLogs(),
+                            statusMessage = "安全基线正确性校准失败：${error.message ?: error::class.java.simpleName}"
+                        )
+                    }
+                    return@onSuccess
+                }
+                if (!canary.passed) {
+                    engine.unloadModel()
+                    _uiState.update {
+                        it.copy(
+                            busy = false,
+                            engineLifecycle = AgentEngineLifecycle.ERROR,
+                            nativeStatsJson = engine.nativeStatsJson(),
+                            logs = engine.recentLogs(),
+                            statusMessage = "安全基线正确性校准未通过：${canary.detail}"
+                        )
+                    }
+                    return@onSuccess
+                }
+                if (needsBootstrapCommit) {
+                    persistBootstrapProfile(
+                        profile = engine.activeExecutionProfile() ?: bootstrapProfile,
+                        sourceSummary = JSONObject()
+                            .put("kind", "bootstrap")
+                            .put("canary", canary.detail)
+                            .toString()
+                    )
+                }
+                if (recoveryPlan != null) {
+                    runtimeProfileStore.completeRecovery(
+                        transactionId = recoveryPlan.transactionId,
+                        restoredProfileId = recoveryPlan.rollbackProfileId
+                    )
+                    synchronized(pendingRuntimeRecoveries) {
+                        pendingRuntimeRecoveries.remove(identity.identityHash)
+                    }
+                }
                 modelStore.markLoaded(model.id)
-                val device = currentDeviceProfile()
+                activeAdaptiveRecommendation = adaptive
                 val recommendation = runCatching {
                     advisor.recommend(
                         device = device,
@@ -2518,6 +4391,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }.getOrNull()
                 var sessionsToPersist: List<ChatSessionRecord> = emptyList()
+                val profileState = runtimeProfileStore.currentRuntimeState(identity.identityHash)
+                val pendingTransaction = runtimeProfileStore.pendingTransaction(identity.identityHash)
                 _uiState.update { state ->
                     cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
                     sessionsToPersist = state.chatSessions.bindSession(
@@ -2536,12 +4411,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         autoTuningInProgress = false,
                         deviceProfile = device,
                         agentRecommendation = recommendation ?: state.agentRecommendation,
+                        profileId = engine.activeExecutionProfile()?.profileId,
+                        revision = engine.activeExecutionProfile()?.revision,
+                        profileRecordState = if (profileState?.activeProfile != null) {
+                            AgentProfileRecordState.COMMITTED
+                        } else {
+                            AgentProfileRecordState.NONE
+                        },
+                        verification = profileState?.activeProfile?.verificationLevel
+                            ?.let(::agentVerification)
+                            ?: AgentProfileVerification.SAFE,
+                        pendingProfile = pendingTransaction?.let { pending ->
+                            AgentPendingProfile(
+                                profileId = pending.pendingProfile.profileId,
+                                revision = pending.pendingProfile.revision,
+                                summary = "${pending.journal.stage} · ${pending.pendingProfile.resolvedLoadSignature.take(12)}",
+                                readyToApply = pending.journal.state in setOf(
+                                    TuningJournalState.STAGED.name,
+                                    TuningJournalState.VALIDATING.name
+                                )
+                            )
+                        },
+                        rollbackProfile = profileState?.pointers?.rollbackTargetProfileId?.let { targetId ->
+                            AgentRollbackProfile(targetId, null, "事务锁定的稳定回退目标", true)
+                        },
+                        tuningJobState = profileState?.activeJob?.let(::agentJobState)
+                            ?: if (pendingTransaction != null) AgentTuningJobState.VALIDATING else AgentTuningJobState.IDLE,
+                        tuningPhase = pendingTransaction?.journal?.stage,
+                        tuningCandidateProgress = AgentCandidateProgress(),
                         logs = engine.recentLogs(),
                         nativeStatsJson = engine.nativeStatsJson(),
                         statusMessage = buildString {
                             append("已加载：").append(model.displayName)
-                            if (visionProjectorPath != null) append("，本地识图已启用")
-                            append("。已使用当前参数，可直接聊天；需要优化时到 Agent 页手动运行智能调试。")
+                            if (JSONObject(engine.nativeStatsJson()).optBoolean("visionReady", false)) {
+                                append("，本地视觉组件已就绪")
+                            }
+                            append("。安全基线和正确性校准通过，可直接聊天；性能调优可在 Agent 页单独启动。")
                         },
                         tab = AppTab.CHAT
                     )
@@ -2549,7 +4454,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 persistChatSessions(sessionsToPersist)
             }.onFailure { error ->
                 val nativeStats = engine.nativeStatsJson()
-                fail("加载失败：${loadFailureAdvice(error.message, nativeStats)}；Native stats=$nativeStats")
+                val failure = LocalModelLoadFailureClassifier.classify(error.message, nativeStats)
+                _uiState.update {
+                    it.copy(
+                        busy = false,
+                        engineLifecycle = AgentEngineLifecycle.ERROR,
+                        nativeStatsJson = nativeStats,
+                        logs = engine.recentLogs()
+                    )
+                }
+                fail("加载失败：${failure.userMessage}")
             }
         }
     }
@@ -2558,10 +4472,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             busy("正在校验 ${model.displayName}...")
             val result = modelStore.validateForLoad(model.id)
+            val qairtDryRun = if (
+                result.canLoad &&
+                model.runtime == ChatModelRuntime.GENIEX_QAIRT &&
+                model.id !in currentQairtVerifiedLocalModelIds(modelStore.listModels())
+            ) {
+                _uiState.update {
+                    it.copy(statusMessage = "模型包校验通过，正在独立进程执行 QAIRT create/generate/destroy 验收…")
+                }
+                runCatching {
+                    val params = _uiState.value.params
+                    QairtDryRunWorkerClient(getApplication<Application>()).certify(
+                        modelId = model.id,
+                        nCtx = params.nCtx,
+                        nThreads = params.nThreads
+                    ) { progress ->
+                        _uiState.update { state ->
+                            if (state.busy) state.copy(statusMessage = progress.message) else state
+                        }
+                    }
+                }
+            } else {
+                null
+            }
+            val localModels = modelStore.listModels()
+            val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(localModels)
+            val qairtVerified = model.id in qairtVerifiedIds
             _uiState.update {
                 it.copy(
                     busy = false,
-                    statusMessage = if (result.canLoad) "模型校验通过：${result.message}" else "模型校验失败：${result.message}"
+                    models = localModels,
+                    qairtVerifiedLocalModelIds = qairtVerifiedIds,
+                    qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
+                        models = localModels,
+                        verifiedLocalModelIds = qairtVerifiedIds,
+                        recommendations = it.recommendedRemoteModels
+                    ),
+                    statusMessage = when {
+                        !result.canLoad -> "模型校验失败：${result.message}"
+                        qairtDryRun?.isFailure == true ->
+                            "QAIRT 隔离验收失败：${qairtDryRun.exceptionOrNull()?.message.orEmpty()}。模型未认证，不能正常加载。"
+                        qairtDryRun?.isSuccess == true && !qairtVerified ->
+                            "QAIRT 隔离验收未写入当前芯片与运行时的认证记录；模型保持未认证。"
+                        model.runtime == ChatModelRuntime.GENIEX_QAIRT && !qairtVerified ->
+                            "模型包完整性校验通过；尚未完成当前芯片与运行时的隔离验收，不能正常加载。"
+                        qairtDryRun?.isSuccess == true ->
+                            "QAIRT 隔离验收通过：已确认骁龙 NPU、固定回答与干净卸载。"
+                        model.runtime == ChatModelRuntime.GENIEX_QAIRT ->
+                            "模型包完整性校验通过，且已通过当前设备的隔离验收。"
+                        else -> "模型校验通过：${result.message}"
+                    }
                 )
             }
         }
@@ -2762,6 +4722,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             val state = _uiState.value
             val hasImageAttachments = requestMessages.any { it.imageAttachments.isNotEmpty() }
+            var localUiRequestId: String? = null
             val stream = if (state.selectedChatBackend == ChatBackend.CLOUD) {
                 val cloudConfig = state.selectedChatCloudConfig()?.normalized()
                 if (cloudConfig == null) {
@@ -2770,10 +4731,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     persistChatSessions()
                     return@launch
                 }
+                if (hasImageAttachments && !cloudConfig.supportsVision) {
+                    appendAssistant("\n当前云端推理引擎未开启图片输入。请在模型管理中编辑该云端推理引擎，打开“支持图片输入”后再发送图片。")
+                    _uiState.update { it.copy(isGenerating = false, statusMessage = "云端识图未启用") }
+                    persistChatSessions()
+                    return@launch
+                }
                 val cloudMessages = runCatching {
                     requestMessages.withInlineImageDataForCloud()
                 }.getOrElse { error ->
-                    appendAssistant("\n图片读取失败：${error.message ?: "无法读取图片"}")
+                    appendAssistant("\n图片读取失败：无法读取或压缩这张图片。请换一张本地图片，或检查文件权限。${error.message?.let { "\n原因：$it" } ?: ""}")
                     _uiState.update { it.copy(isGenerating = false, statusMessage = "图片读取失败") }
                     persistChatSessions()
                     return@launch
@@ -2781,9 +4748,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 cloudChatProvider.streamChat(cloudConfig, ChatRequest(cloudMessages, requestParams))
             } else {
                 if (hasImageAttachments && !localVisionRunnerAvailable()) {
-                    appendAssistant(
-                        "\n当前本地聊天模型未启用视觉识图。请加载本地多模态模型包（主 GGUF + 对应 mmproj/视觉投影器）后再试，或先切换到 MiMo v2.5 等云端多模态模型。"
-                    )
+                    appendAssistant("\n${state.localVisionUnavailableMessage()}")
                     _uiState.update { it.copy(isGenerating = false, statusMessage = "本地视觉 runner 未启用") }
                     persistChatSessions()
                     return@launch
@@ -2791,7 +4756,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val localMessages = if (hasImageAttachments) {
                     runCatching { requestMessages.withLocalImageFilesForVision() }
                         .getOrElse { error ->
-                            appendAssistant("\n本地图片预处理失败：${error.message ?: "无法读取图片"}")
+                            appendAssistant("\n本地图片预处理失败：图片压缩或缓存失败，请换一张本地图片后重试。${error.message?.let { "\n原因：$it" } ?: ""}")
                             _uiState.update { it.copy(isGenerating = false, statusMessage = "本地图片预处理失败") }
                             persistChatSessions()
                             return@launch
@@ -2799,7 +4764,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     requestMessages
                 }
-                engine.streamChat(ChatRequest(localMessages, requestParams))
+                val uiRequestId = "ui-${UUID.randomUUID().toString().replace("-", "")}"
+                localUiRequestId = uiRequestId
+                val executionContext = LocalChatExecutionContext(requestId = uiRequestId)
+                LocalApiRuntime.streamChat(
+                    ChatRequest(localMessages, requestParams),
+                    executionContext
+                ) ?: engine.streamChat(ChatRequest(localMessages, requestParams), executionContext)
             }
             stream.collect { event ->
                 when (event) {
@@ -2812,22 +4783,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _uiState.update { it.copy(stats = event.stats) }
                     }
                     is GenerateEvent.Done -> {
+                        val requestId = localUiRequestId
+                        if (requestId != null) LocalApiRuntime.generationSequence()?.let { sequence ->
+                            // Pair the UI-owned request id with the native
+                            // sequence for the redacted acceptance trace.
+                            // The context id is also the one registered by
+                            // LocalApiRuntime.streamChat above.
+                            LocalApiRuntime.recordGenerationSequence(requestId, sequence)
+                        }
                         val citationAudit = applyWebSearchAnswerGuardsToLastAssistant()
                         if (citationAudit != null) {
                             recordWebSearchCitationAudit(webSearchTurn.diagnostic?.id, citationAudit)
                         }
+                        ensureVisibleAssistantReplyAfterCompletion()
                         _uiState.update {
                             it.copy(
                                 isGenerating = false,
                                 stats = event.stats,
+                                engineLifecycle = event.stats.lifecycleAfterGeneration(),
                                 logs = if (state.selectedChatBackend == ChatBackend.LOCAL) engine.recentLogs() else it.logs
                             )
                         }
                         persistChatSessions()
                     }
                     is GenerateEvent.Error -> {
+                        val requestId = localUiRequestId
+                        if (requestId != null) LocalApiRuntime.generationSequence()?.let { sequence ->
+                            LocalApiRuntime.recordGenerationSequence(requestId, sequence)
+                        }
                         appendAssistant("\n${event.message}")
-                        _uiState.update { it.copy(isGenerating = false, stats = event.stats, statusMessage = event.message) }
+                        _uiState.update {
+                            it.copy(
+                                isGenerating = false,
+                                stats = event.stats,
+                                engineLifecycle = event.stats.lifecycleAfterGeneration(),
+                                statusMessage = event.message
+                            )
+                        }
                         persistChatSessions()
                     }
                 }
@@ -2839,7 +4831,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             engine.stopGeneration()
             generationJob?.cancel()
-            _uiState.update { it.copy(isGenerating = false, statusMessage = "已停止生成") }
+            _uiState.update {
+                it.copy(
+                    isGenerating = false,
+                    engineLifecycle = engine.stats.value.lifecycleAfterGeneration(),
+                    statusMessage = "已停止生成"
+                )
+            }
             persistChatSessions()
         }
     }
@@ -3011,22 +5009,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             engine.stopGeneration()
             generationJob?.cancel()
-            _uiState.update { it.copy(messages = emptyList(), input = "", activeChatSessionId = null, isGenerating = false, statusMessage = "已清空对话，上下文已重置") }
+            _uiState.update { it.afterClearChatGenerationStopped(engine.stats.value) }
             persistChatSessions()
         }
     }
 
     fun onAppBackgrounded() {
+        if (adaptiveTuningJob?.isActive == true) {
+            pauseAgentTuning()
+        }
         if (!_uiState.value.isGenerating) return
         viewModelScope.launch {
             engine.stopGeneration()
             generationJob?.cancel()
-            _uiState.update {
-                it.copy(
-                    isGenerating = false,
-                    statusMessage = "应用进入后台，已停止生成以降低发热和耗电。"
-                )
-            }
+            _uiState.update { it.afterBackgroundGenerationStopped(engine.stats.value) }
             persistChatSessions()
         }
     }
@@ -3107,12 +5103,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 val device = currentDeviceProfile()
                 val recommendation = buildRecommendation(_uiState.value.preference, device)
+                activeRuntimeIdentity?.let { identity ->
+                    val loaded = _uiState.value.models.firstOrNull { it.id == _uiState.value.loadedModelId }
+                    if (loaded != null) {
+                        activeAdaptiveRecommendation = buildAdaptiveTuningRecommendation(
+                            loaded,
+                            identity,
+                            device,
+                            modelTuningCapabilities(
+                                loaded,
+                                identity,
+                                loaded.runtime == ChatModelRuntime.GENIEX_QAIRT
+                            )
+                        )
+                    }
+                }
                 agentLogger.append(device, recommendation)
                 _uiState.update {
                     it.copy(
                         deviceProfile = device,
                         agentRecommendation = recommendation,
-                        recommendedRemoteModels = sortRecommendedModels(modelScopeClient.recommendedModels(), device),
+                        recommendedRemoteModels = sortRecommendedModels(
+                            modelScopeClient.userFacingRecommendedModels(),
+                            device
+                        ),
                         agentLogs = agentLogger.recent(),
                         busy = false,
                         statusMessage = recommendation.explanation
@@ -3128,10 +5142,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = _uiState.value
         val recommendation = state.agentRecommendation ?: return
         val previousParams = state.params
-        val updatedParams = recommendation.tuningPlan.toGenerationParams(
-            systemPrompt = state.params.systemPrompt,
-            reasoningMode = state.params.reasoningMode,
-            hideReasoning = state.params.hideReasoning
+        val generationRecommendation = activeAdaptiveRecommendation?.generationRecommendation
+        val updatedParams = generationRecommendation?.applyTo(state.params) ?: state.params.copy(
+            nPredict = recommendation.tuningPlan.nPredict,
+            temperature = recommendation.tuningPlan.temperature,
+            topK = recommendation.tuningPlan.topK,
+            topP = recommendation.tuningPlan.topP,
+            minP = recommendation.tuningPlan.minP,
+            repeatPenalty = recommendation.tuningPlan.repeatPenalty,
+            presencePenalty = recommendation.tuningPlan.presencePenalty,
+            frequencyPenalty = recommendation.tuningPlan.frequencyPenalty,
+            seed = recommendation.tuningPlan.seed ?: state.params.seed
         )
         val device = state.deviceProfile ?: currentDeviceProfile()
         agentLogger.append(
@@ -3147,7 +5168,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 params = updatedParams,
                 rollbackParams = previousParams,
                 agentLogs = agentLogger.recent(),
-                statusMessage = "已应用 Agent 参数：n_ctx=${updatedParams.nCtx}, threads=${updatedParams.nThreads}"
+                statusMessage = "已应用助手生成建议；模型加载、线程、模板和 native 参数未被静默修改。"
             )
         }
     }
@@ -3159,7 +5180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 params = previous,
                 rollbackParams = null,
-                statusMessage = "已回退到上一次手动/加载前参数：n_ctx=${previous.nCtx}, threads=${previous.nThreads}"
+                statusMessage = "已回退到上一次助手生成参数；模型执行 profile 保持不变。"
             )
         }
     }
@@ -3181,7 +5202,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun runAgentBenchmark() {
         viewModelScope.launch(Dispatchers.IO) {
-            val currentParams = _uiState.value.params
+            val currentParams = apiGenerationParams()
             busy("正在按当前参数测速...")
             runCatching {
                 val device = currentDeviceProfile()
@@ -3203,16 +5224,903 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun runAgentStabilitySmoke() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val initialState = _uiState.value
+            if (initialState.isGenerating) {
+                _uiState.update { it.copy(statusMessage = "请先停止当前生成，再运行稳定性自检") }
+                return@launch
+            }
+            val model = initialState.models.firstOrNull { it.id == initialState.loadedModelId }
+            if (model == null) {
+                _uiState.update { it.copy(statusMessage = "请先加载一个本地推理模型，再运行稳定性自检") }
+                return@launch
+            }
+            busy("正在运行稳定性自检...")
+            runCatching {
+                generationJob?.cancel()
+                engine.stopGeneration()
+                val preflight = modelStore.validateForLoad(model.id)
+                if (!preflight.canLoad) error("加载前检查失败：${preflight.message}")
+                loadMemoryBlocker(model)?.let { error("加载前内存检查失败：$it") }
+
+                val runtime = model.runtime.toLocalChatRuntime()
+                val loadParams = model.toLoadParams(initialState.params)
+                val firstLoadMs = timedLoadModel(model, runtime, loadParams)
+                val secondLoadMs = timedLoadModel(model, runtime, loadParams)
+                val generation = runLocalGenerationSmoke(initialState.params)
+                val apiGuard = runLoopbackApiStreamSmoke()
+                val apiEngine = runLoopbackEngineStreamSmoke(initialState.params)
+                val nativeStats = engine.nativeStatsJson()
+                val summary = buildString {
+                    append("Reload ").append(firstLoadMs).append("ms / ").append(secondLoadMs).append("ms")
+                    append(" · Stream ").append(generation.visibleChars).append(" 字")
+                    append(" · API 防截断 ").append(if (apiGuard.stopCalls == 0 && apiGuard.visibleContentSeen && apiGuard.doneSeen) "通过" else "需排查")
+                    append(" · HTTP 实流 ").append(if (apiEngine.visibleContentSeen && apiEngine.doneSeen) "通过" else "需排查")
+                    append(" · n_ctx ").append(JSONObject(nativeStats).optInt("nCtx", initialState.params.nCtx))
+                }
+                modelStore.markLoaded(model.id)
+                cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
+                _uiState.update { state ->
+                    state.copy(
+                        loadedModelId = model.id,
+                        loadedModelName = model.displayName,
+                        selectedChatBackend = ChatBackend.LOCAL,
+                        models = modelStore.listModels(),
+                        busy = false,
+                        nativeStatsJson = nativeStats,
+                        logs = engine.recentLogs(),
+                        localStabilitySmokeSummary = summary,
+                        diagnosticReport = buildDiagnosticReport(),
+                        statusMessage = "稳定性自检通过：$summary"
+                    )
+                }
+            }.onFailure { error ->
+                val message = "稳定性自检失败：${error.message ?: "未知错误"}"
+                _uiState.update {
+                    it.copy(
+                        busy = false,
+                        nativeStatsJson = engine.nativeStatsJson(),
+                        localStabilitySmokeSummary = message,
+                        diagnosticReport = buildDiagnosticReport(),
+                        statusMessage = message
+                    )
+                }
+            }
+        }
+    }
+
+    fun startAgentTuning() {
+        startAgentTuning(AgentDebugMode.Quick)
+    }
+
+    fun startAgentTuning(mode: AgentTuningMode, autoApply: Boolean) {
+        val debugMode = when (mode) {
+            AgentTuningMode.QUICK -> AgentDebugMode.Quick
+            AgentTuningMode.STANDARD -> AgentDebugMode.Standard
+            AgentTuningMode.DEEP -> AgentDebugMode.Deep
+            AgentTuningMode.POWER_SAVE -> AgentDebugMode.PowerSave
+        }
+        if (mode == AgentTuningMode.POWER_SAVE) {
+            _uiState.update { it.copy(preference = it.preference.copy(mode = PerformanceMode.PowerSave)) }
+        }
+        startAgentTuning(debugMode = debugMode, autoApply = autoApply)
+    }
+
+    fun pauseAgentTuning() {
+        adaptiveTuningPauseRequested.set(true)
+        val jobId = activeTuningJobId
+        if (jobId != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { runtimeProfileStore.pauseTuningJob(jobId) }
+                    .onSuccess {
+                        _uiState.update { state ->
+                            state.copy(
+                                tuningJobState = AgentTuningJobState.PAUSED,
+                                tuningPhase = "等待用户续跑",
+                                statusMessage = "调优已暂停；不会提交新的候选。"
+                            )
+                        }
+                    }
+            }
+        } else {
+            _uiState.update { it.copy(tuningJobState = AgentTuningJobState.PAUSED, tuningPhase = "等待任务") }
+        }
+    }
+
+    fun resumeAgentTuning() {
+        adaptiveTuningPauseRequested.set(false)
+        val jobId = activeTuningJobId
+        if (jobId != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { runtimeProfileStore.resumeTuningJob(jobId) }
+                    .onSuccess {
+                        _uiState.update { state ->
+                            state.copy(
+                                tuningJobState = AgentTuningJobState.RUNNING,
+                                tuningPhase = "继续执行",
+                                statusMessage = "调优已继续。"
+                            )
+                        }
+                    }
+            }
+        } else {
+            _uiState.update { it.copy(tuningJobState = AgentTuningJobState.IDLE) }
+        }
+    }
+
+    fun cancelAgentTuning() {
+        adaptiveTuningCancelRequested.set(true)
+        val jobId = activeTuningJobId
+        if (jobId != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { cancelPersistedTuningJob(jobId) }
+                    .onSuccess { canceled ->
+                        _uiState.update {
+                            it.copy(
+                                tuningJobState = agentJobState(canceled),
+                                tuningPhase = canceled.phase,
+                                statusMessage = if (canceled.state == PersistedTuningJobState.FAILED.name) {
+                                    "调优已取消，稳定 profile 已保留。"
+                                } else {
+                                    "正在取消调优并恢复当前稳定配置…"
+                                }
+                            )
+                        }
+                    }
+            }
+        } else {
+            _uiState.update { it.copy(tuningJobState = AgentTuningJobState.IDLE, statusMessage = "当前没有运行中的调优任务。") }
+        }
+    }
+
+    fun queryAgentTuningJob() {
+        val identity = activeRuntimeIdentity ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { runtimeProfileStore.currentRuntimeState(identity.identityHash) }
+                .onSuccess { snapshot ->
+                    val job = snapshot?.activeJob
+                    _uiState.update { state ->
+                        state.copy(
+                            tuningJobState = job?.let(::agentJobState) ?: state.tuningJobState,
+                            tuningPhase = job?.phase ?: state.tuningPhase,
+                            statusMessage = job?.let { "调优任务 ${it.jobId.take(8)}：${it.phase}" }
+                                ?: state.statusMessage
+                        )
+                    }
+                }
+        }
+    }
+
+    fun applyPendingAgentProfile() {
+        val identity = activeRuntimeIdentity ?: return
+        if (adaptiveTuningJob?.isActive == true) {
+            _uiState.update { it.copy(statusMessage = "运行时正在执行其他调优生命周期操作。") }
+            return
+        }
+        adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val pending = runCatching { runtimeProfileStore.pendingTransaction(identity.identityHash) }
+                    .getOrNull()
+                if (pending == null) {
+                    _uiState.update { it.copy(statusMessage = "当前没有可应用的 pending profile。") }
+                    return@launch
+                }
+                applyPendingRuntimeTransaction(pending)
+            } finally {
+                activeTuningJobId = null
+                adaptiveTuningJob = null
+            }
+        }
+    }
+
+    fun rollbackAgentProfile() {
+        val identity = activeRuntimeIdentity ?: return
+        val model = activeModelForRuntimeProfile ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            rollbackCommittedRuntimeProfile(identity, model)
+        }
+    }
+
     fun runAgentQuickDebug() {
-        runAgentDebug(AgentDebugMode.Quick, _uiState.value.preference)
+        startAgentTuning(AgentDebugMode.Quick)
+    }
+
+    fun runAgentStandardDebug() {
+        startAgentTuning(AgentDebugMode.Standard)
     }
 
     fun runAgentDeepDebug() {
-        runAgentDebug(AgentDebugMode.Deep, _uiState.value.preference)
+        startAgentTuning(AgentDebugMode.Deep)
     }
 
     fun runAgentPowerDebug() {
-        runAgentDebug(AgentDebugMode.PowerSave, _uiState.value.preference.copy(mode = PerformanceMode.PowerSave))
+        _uiState.update { it.copy(preference = it.preference.copy(mode = PerformanceMode.PowerSave)) }
+        startAgentTuning(AgentDebugMode.PowerSave)
+    }
+
+    private fun startAgentTuning(
+        debugMode: AgentDebugMode,
+        autoApply: Boolean = true,
+        precreatedJob: TuningJobEntity? = null,
+        preferenceOverride: UserPreference? = null
+    ): Boolean {
+        if (adaptiveTuningJob?.isActive == true) {
+            _uiState.update { it.copy(statusMessage = "已有调优任务在运行。") }
+            return false
+        }
+        val identity = activeRuntimeIdentity
+        val model = activeModelForRuntimeProfile
+        val committed = engine.activeExecutionProfile()
+        if (identity == null || model == null || committed == null) {
+            _uiState.update { it.copy(statusMessage = "请先通过正式模型页加载本地模型，再开始智能调参。") }
+            return false
+        }
+        require(precreatedJob == null || precreatedJob.identityKey == identity.identityHash) {
+            "预创建调优任务不属于当前 runtime identity"
+        }
+        require(precreatedJob == null || precreatedJob.autoApplyLoadChanges == autoApply) {
+            "预创建调优任务的 autoApply 授权不匹配"
+        }
+        adaptiveTuningPauseRequested.set(false)
+        adaptiveTuningCancelRequested.set(false)
+        activeTuningJobId = precreatedJob?.jobId
+        adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
+            var jobId: String? = precreatedJob?.jobId
+            var transactionId: String? = null
+            var staged = false
+            var retainStagedJob = false
+            var lease: com.muyuchat.core.engine.EngineLifecycleLease? = null
+            try {
+                val device = currentDeviceProfile()
+                val capabilities = modelTuningCapabilities(
+                    model,
+                    identity,
+                    model.runtime == ChatModelRuntime.GENIEX_QAIRT
+                )
+                val recommendation = buildAdaptiveTuningRecommendation(
+                    model = model,
+                    identity = identity,
+                    device = device,
+                    capabilities = capabilities,
+                    preference = preferenceOverride ?: _uiState.value.preference
+                )
+                activeAdaptiveRecommendation = recommendation
+                val proposedThreads = when (debugMode) {
+                    AgentDebugMode.PowerSave -> recommendation.executionProfile.hotExecution.nThreads.coerceAtMost(4).coerceAtLeast(2)
+                    AgentDebugMode.Deep -> recommendation.executionProfile.hotExecution.nThreads
+                    AgentDebugMode.Standard -> recommendation.executionProfile.hotExecution.nThreads
+                    AgentDebugMode.Quick -> recommendation.executionProfile.hotExecution.nThreads
+                }
+                val initialCandidateProfile = recommendation.executionProfile.withThreadCandidate(
+                    nThreads = proposedThreads,
+                    profileId = "candidate-${UUID.randomUUID().toString().replace("-", "").take(20)}",
+                    revision = committed.revision + 1
+                )
+                if (precreatedJob == null &&
+                    initialCandidateProfile.engineProfile.resolvedLoadSignature.digest == committed.resolvedLoadSignature.digest &&
+                    initialCandidateProfile.engineProfile.committedExecutionSignature.digest == committed.committedExecutionSignature.digest
+                ) {
+                    _uiState.update {
+                        it.copy(
+                            tuningJobState = AgentTuningJobState.SUCCEEDED,
+                            tuningPhase = "安全基线已是当前偏好的稳定配置",
+                            tuningCandidateProgress = AgentCandidateProgress(completed = 1, total = 1, passed = 1),
+                            busy = false,
+                            autoTuningInProgress = false,
+                            statusMessage = "当前模型已处于安全稳定配置，无需重复重载。"
+                        )
+                    }
+                    return@launch
+                }
+                val safety = SafetyEnvelope.forDevice(device).assess(measurementPoint(device))
+                if (!safety.passed) error(safety.violations.joinToString("；") { it.message })
+                val job = precreatedJob ?: runtimeProfileStore.createTuningJob(
+                    identityKey = identity.identityHash,
+                    autoApplyLoadChanges = autoApply,
+                    phase = "QUEUED"
+                )
+                jobId = job.jobId
+                activeTuningJobId = job.jobId
+                runtimeProfileStore.transitionTuningJob(job.jobId, PersistedTuningJobState.RUNNING, "DISCOVERY")
+                awaitTuningBoundary(job.jobId)
+                _uiState.update {
+                    it.copy(
+                        busy = true,
+                        autoTuningInProgress = true,
+                        tuningJobState = AgentTuningJobState.RUNNING,
+                        tuningPhase = "候选搜索",
+                        tuningEtaSeconds = estimateTuningEtaSeconds(model, debugMode),
+                        tuningCandidateProgress = AgentCandidateProgress(
+                            total = tuningThreadCandidateLimit(debugMode),
+                            currentCandidate = proposedThreads.toString()
+                        ),
+                        pendingProfile = null,
+                        statusMessage = "${debugMode.label}：正在执行有界候选搜索…"
+                    )
+                }
+                // Probe a bounded set of real runtime candidates. Each probe
+                // is authorized, measured, correctness-gated, and rolled back
+                // before the next candidate, so only the selected candidate is
+                // persisted as active/LKG. This keeps tuning deterministic and
+                // prevents a fast but unsafe candidate from winning by speed
+                // alone.
+                val candidateThreads = threadSweepCandidates(
+                    device = device,
+                    recommendedThreads = proposedThreads,
+                    debugMode = debugMode
+                ).take(tuningThreadCandidateLimit(debugMode))
+                val probeCanaryParams = recommendation.canaryParams.copy(
+                    maxOutputTokens = recommendation.canaryParams.maxOutputTokens.coerceIn(32, 48)
+                )
+                val measuredCandidates = mutableListOf<Pair<TuningExecutionProfile, CandidateCanaryResult>>()
+                var eligibleCandidates = 0
+                var completedCandidates = 0
+                var rejectedCandidates = 0
+                for ((index, threads) in candidateThreads.withIndex()) {
+                    awaitTuningBoundary(job.jobId)
+                    if (adaptiveTuningCancelRequested.get()) error("用户取消调优")
+                    val probe = recommendation.executionProfile.withThreadCandidate(
+                        nThreads = threads,
+                        profileId = "probe-${job.jobId.replace("-", "").take(12)}-$index",
+                        revision = committed.revision + 1
+                    )
+                    var probeLease: com.muyuchat.core.engine.EngineLifecycleLease? = null
+                    try {
+                        probeLease = engine.acquireExclusiveLifecycleLease()
+                        val authorization = engine.stagePendingExecutionProfile(
+                            transactionId = "probe-${job.jobId}-$index-${UUID.randomUUID()}",
+                            profile = probe.engineProfile,
+                            rollbackTargetProfileId = committed.profileId
+                        )
+                        val result = runCandidateCanary(
+                            candidate = probe,
+                            canaryParams = probeCanaryParams,
+                            authorization = authorization,
+                            disposition = com.muyuchat.core.engine.PendingProfileDisposition.DEFER_TO_LEASE_HOLDER,
+                            lifecycleLease = probeLease
+                        )
+                        measuredCandidates += probe to result
+                        if (tuningCandidateScore(result).eligible) {
+                            eligibleCandidates++
+                        } else {
+                            rejectedCandidates++
+                        }
+                    } finally {
+                        runCatching { probeLease?.release() }
+                        probeLease = null
+                        // A deferred probe must leave the committed session
+                        // active before the next candidate begins.
+                        if (engine.activeExecutionProfile()?.profileId != committed.profileId) {
+                            restoreExactRuntimeProfile(model, committed)
+                        }
+                    }
+                    completedCandidates++
+                    _uiState.update {
+                        it.copy(
+                            tuningCandidateProgress = AgentCandidateProgress(
+                                completed = completedCandidates,
+                                total = candidateThreads.size,
+                                currentCandidate = threads.toString(),
+                                passed = eligibleCandidates,
+                                rejected = rejectedCandidates
+                            ),
+                            tuningPhase = "候选搜索 ${completedCandidates}/${candidateThreads.size}",
+                            statusMessage = "${debugMode.label}：已验证 ${completedCandidates}/${candidateThreads.size} 个线程候选。"
+                        )
+                    }
+                }
+                val selectedCandidate = CandidateSelectionPolicy.selectBestEligible(measuredCandidates) { (_, result) ->
+                    tuningCandidateScore(result)
+                } ?: error("没有候选同时通过正确性、安全、签名和稳定性门槛")
+                val candidateProfile = selectedCandidate.first
+                val selectedProbeResult = selectedCandidate.second
+                val selectedThreads = candidateProfile.hotExecution.nThreads
+                transactionId = "tuning-${job.jobId}"
+                val snapshot = candidateProfile.engineProfile.toPersistedExecutionProfileSnapshot(
+                    parentCommittedProfileId = committed.profileId,
+                    verificationLevel = PersistedProfileVerificationLevel.COMPATIBLE,
+                    sourceSummaryJson = JSONObject()
+                        .put("mode", debugMode.name)
+                        .put("source", "adaptive_candidate")
+                        .put("candidateCount", candidateThreads.size)
+                        .put("passedCount", eligibleCandidates)
+                        .put("selectedThreads", selectedThreads)
+                        .toString()
+                )
+                runtimeProfileStore.stageCandidate(
+                    snapshot = snapshot,
+                    transactionId = transactionId,
+                    rollbackTargetProfileId = committed.profileId,
+                    job = job.copy(state = PersistedTuningJobState.RUNNING.name, phase = "DISCOVERY")
+                )
+                staged = true
+                runtimeProfileStore.recordMeasurement(
+                    candidateMeasurement(
+                        profileId = candidateProfile.profileId,
+                        jobId = job.jobId,
+                        phase = "BOUNDED_PROBE",
+                        result = selectedProbeResult
+                    )
+                )
+                if (adaptiveTuningCancelRequested.get()) error("用户取消调优")
+                if (!job.autoApplyLoadChanges) {
+                    val pausedJob = runtimeProfileStore.transitionTuningJob(
+                        jobId = job.jobId,
+                        state = PersistedTuningJobState.PAUSED,
+                        phase = "STAGED_AWAITING_APPLY"
+                    )
+                    activeAdaptiveRecommendation = recommendation.copy(executionProfile = candidateProfile)
+                    retainStagedJob = true
+                    _uiState.update { state ->
+                        state.copy(
+                            tuningJobState = agentJobState(pausedJob),
+                            tuningPhase = "候选已暂存，等待应用",
+                            tuningEtaSeconds = null,
+                            tuningCandidateProgress = AgentCandidateProgress(
+                                completed = candidateThreads.size,
+                                total = candidateThreads.size,
+                                currentCandidate = selectedThreads.toString(),
+                                passed = eligibleCandidates,
+                                rejected = candidateThreads.size - eligibleCandidates
+                            ),
+                            pendingProfile = AgentPendingProfile(
+                                profileId = candidateProfile.profileId,
+                                revision = candidateProfile.revision,
+                                summary = "已通过候选探测 · ${candidateProfile.engineProfile.resolvedLoadSignature.digest.take(12)}",
+                                readyToApply = true
+                            ),
+                            busy = false,
+                            autoTuningInProgress = false,
+                            statusMessage = "候选已通过硬门槛并暂存；autoApply=false，等待显式 apply。"
+                        )
+                    }
+                    return@launch
+                }
+                runtimeProfileStore.updateJournalStage(transactionId, TuningJournalState.APPLYING, "CANDIDATE_APPLYING")
+                lease = engine.acquireExclusiveLifecycleLease()
+                val authorization = engine.stagePendingExecutionProfile(
+                    transactionId = transactionId,
+                    profile = candidateProfile.engineProfile,
+                    rollbackTargetProfileId = committed.profileId
+                )
+                runtimeProfileStore.updateJournalStage(transactionId, TuningJournalState.VALIDATING, "CORRECTNESS_CANARY")
+                runtimeProfileStore.transitionTuningJob(job.jobId, PersistedTuningJobState.VALIDATING, "CORRECTNESS_CANARY")
+                val result = runCandidateCanary(
+                    candidate = candidateProfile,
+                    canaryParams = recommendation.canaryParams,
+                    authorization = authorization,
+                    disposition = com.muyuchat.core.engine.PendingProfileDisposition.DEFER_TO_LEASE_HOLDER,
+                    lifecycleLease = lease
+                )
+                runtimeProfileStore.recordMeasurement(
+                    candidateMeasurement(
+                        profileId = candidateProfile.profileId,
+                        jobId = job.jobId,
+                        phase = "COMMIT_CANARY",
+                        result = result
+                    )
+                )
+                if (adaptiveTuningCancelRequested.get()) {
+                    error("用户取消调优")
+                }
+                val commitScore = tuningCandidateScore(result)
+                if (!commitScore.eligible) {
+                    error(commitScore.reason ?: result.detail)
+                }
+                engine.commitDeferredPendingExecutionProfile(authorization, lease ?: error("调优 lease 已释放"))
+                activeAdaptiveRecommendation = recommendation.copy(executionProfile = candidateProfile)
+                val signatures = engine.parameterSignatureSnapshot()
+                    ?: error("候选提交缺少签名快照")
+                runtimeProfileStore.commitCandidate(
+                    transactionId = transactionId,
+                    verificationLevel = PersistedProfileVerificationLevel.COMPATIBLE,
+                    activeLoadedSignature = signatures.active?.digest ?: signatures.resolved.digest,
+                    effectiveExecutionSignature = signatures.effective?.digest ?: signatures.committed.digest
+                )
+                val benchmark = BenchmarkResult(
+                    ttftMs = result.stats.ttftMs,
+                    genTokens = result.stats.completionTokens,
+                    decodeMs = result.stats.decodeMs,
+                    decodeTps = result.stats.decodeTps,
+                    e2eTps = result.stats.e2eTps,
+                    nativePssKb = result.stats.nativePssKb,
+                    processRssKb = result.stats.processRssKb,
+                    availMemKb = result.stats.availMemKb,
+                    totalMemKb = result.stats.totalMemKb,
+                    modelMemoryBudgetKb = result.stats.modelMemoryBudgetKb,
+                    bestThreadCount = selectedThreads,
+                    stable = true
+                )
+                appendBenchmarkHistory(device, benchmark, mergeExecutionProfile(_uiState.value.params, candidateProfile.engineProfile))
+                modelStore.markLoaded(model.id)
+                val profileState = runtimeProfileStore.currentRuntimeState(identity.identityHash)
+                _uiState.update { state ->
+                    state.copy(
+                        params = mergeExecutionProfile(state.params, candidateProfile.engineProfile),
+                        benchmark = benchmark,
+                        benchmarkHistory = benchmarkHistoryLogger.recent(),
+                        profileId = candidateProfile.profileId,
+                        revision = candidateProfile.revision,
+                        profileRecordState = AgentProfileRecordState.COMMITTED,
+                        verification = AgentProfileVerification.COMPATIBLE,
+                        reloadRequired = false,
+                        pendingProfile = null,
+                        rollbackProfile = profileState?.activeProfile?.parentCommittedProfileId?.let {
+                            AgentRollbackProfile(it, null, "可回退到上一稳定 profile", true)
+                        },
+                        tuningJobState = AgentTuningJobState.SUCCEEDED,
+                        tuningPhase = "已提交 active/LKG",
+                        tuningEtaSeconds = 0L,
+                        tuningCandidateProgress = AgentCandidateProgress(
+                            completed = candidateThreads.size,
+                            total = candidateThreads.size,
+                            currentCandidate = selectedThreads.toString(),
+                            passed = eligibleCandidates,
+                            rejected = candidateThreads.size - eligibleCandidates
+                        ),
+                        busy = false,
+                        autoTuningInProgress = false,
+                        lastAutoTuningSummary = "${debugMode.label}通过正确性与安全门槛，已提交本机 profile。",
+                        nativeStatsJson = engine.nativeStatsJson(),
+                        logs = engine.recentLogs(),
+                        statusMessage = "智能调参完成：候选通过正确性、安全和签名核对，已原子提交。"
+                    )
+                }
+            } catch (error: Throwable) {
+                val message = error.message ?: "调优失败"
+                val canceled = adaptiveTuningCancelRequested.get() || error is CancellationException
+                withContext(NonCancellable) {
+                    if (staged && transactionId != null) {
+                        runCatching {
+                            val recovery = runtimeProfileStore.rejectCandidate(
+                                transactionId = transactionId,
+                                failureStage = "TUNING",
+                                failureCode = if (canceled) "USER_CANCELED" else "CANDIDATE_REJECTED",
+                                failureSummary = message
+                            )
+                            lease?.release()
+                            lease = null
+                            val restoredProfileId = recovery.rollbackProfileId?.let { rollbackId ->
+                                val rollback = runtimeProfileStore.reconstructedProfile(rollbackId)
+                                    ?: committed.takeIf { it.profileId == rollbackId }
+                                if (rollback != null && restoreExactRuntimeProfile(model, rollback)) rollbackId else null
+                            }
+                            runtimeProfileStore.completeRecovery(transactionId, restoredProfileId)
+                        }
+                    }
+                    jobId?.let { persistedJobId ->
+                        runCatching {
+                            val persisted = runtimeProfileStore.tuningJob(persistedJobId)
+                            if (persisted != null && persisted.state !in setOf(
+                                    PersistedTuningJobState.SUCCEEDED.name,
+                                    PersistedTuningJobState.FAILED.name
+                                )
+                            ) {
+                                runtimeProfileStore.transitionTuningJob(
+                                    jobId = persistedJobId,
+                                    state = PersistedTuningJobState.FAILED,
+                                    phase = if (canceled) "USER_CANCELED" else "FAILED",
+                                    failureCode = if (canceled) "USER_CANCELED" else "TUNING_FAILED",
+                                    failureSummary = message
+                                )
+                            }
+                        }
+                    }
+                }
+                _uiState.update {
+                    it.copy(
+                        busy = false,
+                        autoTuningInProgress = false,
+                        tuningJobState = AgentTuningJobState.FAILED,
+                        tuningPhase = "已恢复稳定 profile",
+                        tuningEtaSeconds = null,
+                        tuningCandidateProgress = it.tuningCandidateProgress.copy(rejected = it.tuningCandidateProgress.rejected + 1),
+                        statusMessage = if (canceled) "调优已取消，稳定 profile 已恢复。" else "调优未通过：$message"
+                    )
+                }
+            } finally {
+                runCatching { lease?.release() }
+                if (!retainStagedJob) activeTuningJobId = null
+                adaptiveTuningJob = null
+                adaptiveTuningPauseRequested.set(false)
+                adaptiveTuningCancelRequested.set(false)
+            }
+        }
+        return true
+    }
+
+    private suspend fun awaitTuningBoundary(jobId: String) {
+        while (adaptiveTuningPauseRequested.get() && !adaptiveTuningCancelRequested.get()) {
+            runCatching { runtimeProfileStore.pauseTuningJob(jobId) }
+            _uiState.update { it.copy(tuningJobState = AgentTuningJobState.PAUSED, tuningPhase = "等待续跑") }
+            delay(250L)
+        }
+        if (adaptiveTuningCancelRequested.get()) error("用户取消调优")
+        runCatching { runtimeProfileStore.resumeTuningJob(jobId) }
+    }
+
+    private fun agentJobState(job: TuningJobEntity): AgentTuningJobState = when {
+        job.cancellationRequested -> AgentTuningJobState.CANCELING
+        else -> when (job.state.uppercase(Locale.ROOT)) {
+            PersistedTuningJobState.QUEUED.name -> AgentTuningJobState.QUEUED
+            PersistedTuningJobState.RUNNING.name -> AgentTuningJobState.RUNNING
+            PersistedTuningJobState.PAUSED.name -> AgentTuningJobState.PAUSED
+            PersistedTuningJobState.CANCELING.name -> AgentTuningJobState.CANCELING
+            PersistedTuningJobState.VALIDATING.name -> AgentTuningJobState.VALIDATING
+            PersistedTuningJobState.SUCCEEDED.name -> AgentTuningJobState.SUCCEEDED
+            PersistedTuningJobState.RECOVERING.name -> AgentTuningJobState.RECOVERING
+            else -> AgentTuningJobState.FAILED
+        }
+    }
+
+    private fun estimateTuningEtaSeconds(model: ModelManifest, mode: AgentDebugMode): Long {
+        val history = _uiState.value.benchmarkHistory
+            .filter { it.modelId == model.id }
+        val previous = history.firstOrNull()?.result?.loadMs?.takeIf { it > 0 }
+        val multiplier = when (mode) {
+            AgentDebugMode.Quick -> 1.5
+            AgentDebugMode.Standard -> 2.0
+            AgentDebugMode.Deep -> 2.5
+            AgentDebugMode.PowerSave -> 1.8
+        }
+        return ((previous ?: 30_000L) * multiplier / 1000.0).toLong().coerceAtLeast(15L)
+    }
+
+    private suspend fun applyPendingRuntimeTransaction(pending: PendingRuntimeProfileTransaction) {
+        val model = activeModelForRuntimeProfile
+            ?: error("当前没有可用于 pending profile 的已加载模型")
+        var lease: com.muyuchat.core.engine.EngineLifecycleLease? = null
+        val transactionId = pending.journal.transactionId
+        try {
+            _uiState.update {
+                it.copy(
+                    busy = true,
+                    engineLifecycle = AgentEngineLifecycle.RELOADING,
+                    tuningJobState = AgentTuningJobState.VALIDATING,
+                    tuningPhase = "应用 pending profile",
+                    statusMessage = "正在重新加载并验证 pending profile…"
+                )
+            }
+            runtimeProfileStore.updateJournalStage(transactionId, TuningJournalState.VALIDATING, "USER_APPLY")
+            pending.journal.jobId?.let { jobId ->
+                val persistedJob = runtimeProfileStore.tuningJob(jobId)
+                    ?: error("pending profile 对应的调优任务不存在")
+                if (persistedJob.state == PersistedTuningJobState.PAUSED.name) {
+                    runtimeProfileStore.resumeTuningJob(jobId, "USER_APPLY_RESUMED")
+                }
+                runtimeProfileStore.transitionTuningJob(
+                    jobId,
+                    PersistedTuningJobState.VALIDATING,
+                    "USER_APPLY"
+                )
+            }
+            val candidate = pending.pendingExecutionProfile.asTuningExecutionProfile(
+                kind = ExecutionProfileKind.BALANCED,
+                verificationLevel = ProfileVerificationLevel.UNVERIFIED,
+                reason = "用户应用已验证的 pending profile"
+            )
+            lease = engine.acquireExclusiveLifecycleLease()
+            val authorization = engine.stagePendingExecutionProfile(
+                transactionId = transactionId,
+                profile = pending.pendingExecutionProfile,
+                rollbackTargetProfileId = pending.journal.rollbackTargetProfileId
+            )
+            val result = runCandidateCanary(
+                candidate = candidate,
+                canaryParams = com.muyuchat.core.tuning.CanaryEvaluationParams(),
+                authorization = authorization,
+                disposition = com.muyuchat.core.engine.PendingProfileDisposition.DEFER_TO_LEASE_HOLDER,
+                lifecycleLease = lease
+            )
+            runtimeProfileStore.recordMeasurement(
+                candidateMeasurement(
+                    profileId = pending.pendingExecutionProfile.profileId,
+                    jobId = pending.journal.jobId,
+                    phase = "USER_APPLY_CANARY",
+                    result = result
+                )
+            )
+            val applyScore = tuningCandidateScore(result)
+            if (!applyScore.eligible) error(applyScore.reason ?: result.detail)
+            engine.commitDeferredPendingExecutionProfile(authorization, lease ?: error("pending apply lease 已释放"))
+            val signatures = engine.parameterSignatureSnapshot() ?: error("pending profile 缺少签名快照")
+            runtimeProfileStore.commitCandidate(
+                transactionId = transactionId,
+                verificationLevel = PersistedProfileVerificationLevel.COMPATIBLE,
+                activeLoadedSignature = signatures.active?.digest ?: signatures.resolved.digest,
+                effectiveExecutionSignature = signatures.effective?.digest ?: signatures.committed.digest
+            )
+            _uiState.update { state ->
+                state.copy(
+                    params = mergeExecutionProfile(state.params, pending.pendingExecutionProfile),
+                    profileId = pending.pendingExecutionProfile.profileId,
+                    revision = pending.pendingExecutionProfile.revision,
+                    profileRecordState = AgentProfileRecordState.COMMITTED,
+                    verification = AgentProfileVerification.COMPATIBLE,
+                    pendingProfile = null,
+                    reloadRequired = false,
+                    engineLifecycle = AgentEngineLifecycle.READY,
+                    tuningJobState = AgentTuningJobState.SUCCEEDED,
+                    tuningPhase = "pending 已提交",
+                    busy = false,
+                    statusMessage = "pending profile 已通过正确性与签名核对并提交。"
+                )
+            }
+        } catch (error: Throwable) {
+            lease?.release()
+            lease = null
+            val recovery = runCatching {
+                runtimeProfileStore.rejectCandidate(
+                    transactionId = transactionId,
+                    failureStage = "USER_APPLY",
+                    failureCode = "PENDING_APPLY_FAILED",
+                    failureSummary = error.message ?: "pending apply failed"
+                )
+            }.getOrNull()
+            val restoredId = recovery?.rollbackProfileId?.let { rollbackId ->
+                val rollback = runtimeProfileStore.reconstructedProfile(rollbackId)
+                if (rollback != null && restoreExactRuntimeProfile(model, rollback)) rollbackId else null
+            }
+            if (recovery != null) runCatching { runtimeProfileStore.completeRecovery(transactionId, restoredId) }
+            _uiState.update {
+                it.copy(
+                    busy = false,
+                    engineLifecycle = if (restoredId != null) AgentEngineLifecycle.READY else AgentEngineLifecycle.ERROR,
+                    tuningJobState = AgentTuningJobState.FAILED,
+                    tuningPhase = "pending 应用失败",
+                    pendingProfile = null,
+                    statusMessage = "pending profile 应用失败：${error.message ?: "未知错误"}"
+                )
+            }
+        } finally {
+            runCatching { lease?.release() }
+        }
+    }
+
+    private suspend fun rollbackCommittedRuntimeProfile(
+        identity: ModelRuntimeIdentity,
+        model: ModelManifest
+    ) {
+        val current = runtimeProfileStore.currentRuntimeState(identity.identityHash)
+            ?: error("当前运行配置未持久化")
+        val activeEntity = current.activeProfile ?: error("当前没有 active profile")
+        val parentId = activeEntity.parentCommittedProfileId
+            ?: current.pointers?.lastKnownGoodProfileId?.takeIf { it != activeEntity.profileId }
+        if (parentId == null) {
+            _uiState.update { it.copy(statusMessage = "当前 profile 没有更早的稳定版本可回退。") }
+            return
+        }
+        val parentEntity = runtimeProfileStore.profile(parentId) ?: error("回退目标不存在")
+        val target = runtimeProfileStore.reconstructedProfile(parentId) ?: error("回退目标无法重建")
+        val rollbackCandidate = target.copy(
+            profileId = "rollback-${UUID.randomUUID().toString().replace("-", "").take(20)}",
+            revision = activeEntity.revision + 1,
+            resolvedAt = System.currentTimeMillis()
+        )
+        val transactionId = "rollback-${UUID.randomUUID()}"
+        var lease: com.muyuchat.core.engine.EngineLifecycleLease? = null
+        try {
+            _uiState.update {
+                it.copy(
+                    busy = true,
+                    engineLifecycle = AgentEngineLifecycle.ROLLING_BACK,
+                    tuningJobState = AgentTuningJobState.RECOVERING,
+                    tuningPhase = "回退到上一稳定 profile",
+                    statusMessage = "正在回退并重新验证…"
+                )
+            }
+            runtimeProfileStore.stageCandidate(
+                snapshot = rollbackCandidate.toPersistedExecutionProfileSnapshot(
+                    parentCommittedProfileId = parentEntity.parentCommittedProfileId,
+                    verificationLevel = PersistedProfileVerificationLevel.COMPATIBLE,
+                    sourceSummaryJson = JSONObject().put("source", "user_rollback").put("target", parentId).toString()
+                ),
+                transactionId = transactionId,
+                rollbackTargetProfileId = activeEntity.profileId
+            )
+            runtimeProfileStore.updateJournalStage(transactionId, TuningJournalState.APPLYING, "ROLLBACK_APPLYING")
+            lease = engine.acquireExclusiveLifecycleLease()
+            val authorization = engine.stagePendingExecutionProfile(
+                transactionId = transactionId,
+                profile = rollbackCandidate,
+                rollbackTargetProfileId = activeEntity.profileId
+            )
+            runtimeProfileStore.updateJournalStage(transactionId, TuningJournalState.VALIDATING, "ROLLBACK_VALIDATING")
+            val wrapper = rollbackCandidate.asTuningExecutionProfile(
+                ExecutionProfileKind.BALANCED,
+                ProfileVerificationLevel.UNVERIFIED,
+                "用户回退"
+            )
+            val result = runCandidateCanary(
+                wrapper,
+                com.muyuchat.core.tuning.CanaryEvaluationParams(),
+                authorization,
+                com.muyuchat.core.engine.PendingProfileDisposition.DEFER_TO_LEASE_HOLDER,
+                lease
+            )
+            runtimeProfileStore.recordMeasurement(
+                candidateMeasurement(
+                    profileId = rollbackCandidate.profileId,
+                    jobId = null,
+                    phase = "ROLLBACK_CANARY",
+                    result = result
+                )
+            )
+            val rollbackScore = tuningCandidateScore(result)
+            if (!rollbackScore.eligible) error(rollbackScore.reason ?: result.detail)
+            engine.commitDeferredPendingExecutionProfile(authorization, lease ?: error("rollback lease 已释放"))
+            val signatures = engine.parameterSignatureSnapshot() ?: error("回退缺少签名快照")
+            runtimeProfileStore.commitCandidate(
+                transactionId,
+                PersistedProfileVerificationLevel.COMPATIBLE,
+                signatures.active?.digest ?: signatures.resolved.digest,
+                signatures.effective?.digest ?: signatures.committed.digest
+            )
+            _uiState.update { state ->
+                state.copy(
+                    params = mergeExecutionProfile(state.params, rollbackCandidate),
+                    profileId = rollbackCandidate.profileId,
+                    revision = rollbackCandidate.revision,
+                    profileRecordState = AgentProfileRecordState.COMMITTED,
+                    verification = AgentProfileVerification.COMPATIBLE,
+                    engineLifecycle = AgentEngineLifecycle.READY,
+                    tuningJobState = AgentTuningJobState.SUCCEEDED,
+                    tuningPhase = "回退完成",
+                    busy = false,
+                    rollbackProfile = parentEntity.parentCommittedProfileId?.let {
+                        AgentRollbackProfile(it, null, "可继续回退", true)
+                    },
+                    statusMessage = "已回退到上一稳定配置并完成正确性验证。"
+                )
+            }
+        } catch (error: Throwable) {
+            lease?.release()
+            lease = null
+            val recovery = runCatching {
+                runtimeProfileStore.rejectCandidate(
+                    transactionId,
+                    "ROLLBACK",
+                    "ROLLBACK_FAILED",
+                    error.message ?: "rollback failed"
+                )
+            }.getOrNull()
+            val restoredId = recovery?.rollbackProfileId?.let { rollbackId ->
+                val previous = runtimeProfileStore.reconstructedProfile(rollbackId)
+                if (previous != null && restoreExactRuntimeProfile(model, previous)) rollbackId else null
+            }
+            if (recovery != null) runCatching { runtimeProfileStore.completeRecovery(transactionId, restoredId) }
+            _uiState.update {
+                it.copy(
+                    busy = false,
+                    engineLifecycle = if (restoredId != null) AgentEngineLifecycle.READY else AgentEngineLifecycle.ERROR,
+                    tuningJobState = AgentTuningJobState.FAILED,
+                    statusMessage = "回退失败：${error.message ?: "未知错误"}"
+                )
+            }
+        } finally {
+            runCatching { lease?.release() }
+        }
+    }
+
+    private suspend fun restoreExactRuntimeProfile(
+        model: ModelManifest,
+        profile: ModelExecutionProfile
+    ): Boolean {
+        val active = engine.activeExecutionProfile()
+        if (active?.profileId == profile.profileId &&
+            active.resolvedLoadSignature.digest == profile.resolvedLoadSignature.digest &&
+            active.committedExecutionSignature.digest == profile.committedExecutionSignature.digest
+        ) return true
+        val qairtSha = currentQairtBundleSha256(model, modelStore.listModels())
+        return engine.loadModel(
+            modelPath = model.path,
+            runtime = model.runtime.toLocalChatRuntime(),
+            params = model.toLoadParams(_uiState.value.params, profile),
+            qairtBundleSha256 = qairtSha,
+            runtimeIdentity = profile.runtimeIdentity,
+            executionProfile = profile
+        ).isSuccess
     }
 
     fun showAgentDebugExplanation() {
@@ -3239,11 +6147,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val recommendation = buildRecommendation(preference, device, result.decodeTps)
                     .withBenchmarkThread(result)
                 val previousParams = _uiState.value.params
-                val updatedParams = recommendation.tuningPlan.toGenerationParams(
-                    systemPrompt = _uiState.value.params.systemPrompt,
-                    reasoningMode = _uiState.value.params.reasoningMode,
-                    hideReasoning = _uiState.value.params.hideReasoning
-                )
+                val updatedParams = recommendation.tuningPlan.applyTo(_uiState.value.params)
                 appendBenchmarkHistory(device, result, updatedParams)
                 agentLogger.append(
                     device = device,
@@ -3296,11 +6200,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 lastDecodeTps = result.decodeTps.takeIf { it > 0.0 }
             ).withBenchmarkThread(result)
             val previousParams = _uiState.value.params
-            val updatedParams = recommendation.tuningPlan.toGenerationParams(
-                systemPrompt = _uiState.value.params.systemPrompt,
-                reasoningMode = _uiState.value.params.reasoningMode,
-                hideReasoning = _uiState.value.params.hideReasoning
-            )
+            val updatedParams = recommendation.tuningPlan.applyTo(_uiState.value.params)
             appendBenchmarkHistory(device, result, updatedParams)
             agentLogger.append(
                 device = device,
@@ -3396,6 +6296,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopApiServer()
         LocalApiForegroundService.stop(getApplication())
         LocalApiRuntime.engine = null
+        LocalApiRuntime.streamChatWithContextProvider = null
+        LocalApiRuntime.stopGenerationProvider = null
+        LocalApiRuntime.controlPlane = null
+        localImageWorkerClient.close()
         super.onCleared()
     }
 
@@ -3454,6 +6358,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         return citationAudit
+    }
+
+    private fun ensureVisibleAssistantReplyAfterCompletion() {
+        _uiState.update { state ->
+            val updated = state.messages.withVisibleAssistantCompletionFallback()
+            if (updated === state.messages) return@update state
+            val sessionId = state.activeChatSessionId
+            state.copy(
+                messages = updated,
+                chatSessions = if (sessionId == null) {
+                    state.chatSessions
+                } else {
+                    state.chatSessions.upsertSession(
+                        sessionId = sessionId,
+                        messages = updated,
+                        assistantId = state.selectedAssistantId,
+                        modelMode = state.selectedChatBackend.bindingValue(),
+                        modelId = state.currentChatModelId()
+                    )
+                }
+            )
+        }
     }
 
     private fun recordWebSearchCitationAudit(recordId: String?, audit: WebSearchCitationAudit) {
@@ -4039,7 +6965,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ): ImageAssetRecord {
         val app = getApplication<Application>()
         val imageDir = File(app.filesDir, "image_assets").apply { mkdirs() }
-        val result = localImageProvider.generate(model, prompt, onProgress)
+        val result = localImageWorkerClient.generate(model, prompt, onProgress = onProgress)
         val extension = imageExtensionForMime(result.mimeType)
         val outputFile = File(imageDir, "local-image-${System.currentTimeMillis()}.$extension")
         outputFile.writeBytes(result.bytes)
@@ -4199,14 +7125,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadGenerationParams(application: Application): GenerationParams {
         val prefs = application.getSharedPreferences("mca_generation_params", Context.MODE_PRIVATE)
         val json = prefs.getString("params_json", null) ?: return GenerationParams()
-        return GenerationParams.fromJson(json)
+        val parsed = GenerationParams.fromJson(json)
+        return assistantGenerationParamsFromJson(
+            json = json,
+            defaults = GenerationParams(),
+            systemPrompt = parsed.systemPrompt
+        )
     }
 
     private fun persistGenerationParams(params: GenerationParams) {
         getApplication<Application>()
             .getSharedPreferences("mca_generation_params", Context.MODE_PRIVATE)
             .edit()
-            .putString("params_json", params.toJson())
+            .putString("params_json", params.toAssistantGenerationJson())
             .apply()
     }
 
@@ -4217,7 +7148,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (assistant.id == selectedId) {
                 assistant.copy(
                     systemPrompt = params.systemPrompt,
-                    paramsJson = params.toJson(),
+                    paramsJson = params.toAssistantGenerationJson(),
                     updatedAt = System.currentTimeMillis()
                 )
             } else {
@@ -4266,7 +7197,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
     private fun AssistantRecord.toGenerationParams(defaults: GenerationParams): GenerationParams =
-        GenerationParams.fromJson(paramsJson, defaults).copy(systemPrompt = systemPrompt)
+        assistantGenerationParamsFromJson(paramsJson, defaults, systemPrompt)
 
     private fun MainUiState.selectedAssistant(): AssistantRecord? =
         assistants.firstOrNull { it.id == selectedAssistantId } ?: assistants.firstOrNull()
@@ -4355,14 +7286,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
     private fun ChatImageAttachment.withCompressedFileForLocalVision(): ChatImageAttachment {
-        val uri = Uri.parse(uriString)
-        val resolver = getApplication<Application>().contentResolver
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-        val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
-        val bitmap = resolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, BitmapFactory.Options().apply { inSampleSize = sampleSize })
-        } ?: error("无法读取图片：${name.ifBlank { uriString }}")
+        val bitmap = decodeBitmapForLocalVision()
         val prepared = bitmap.scaledToMaxEdge(MAX_VISION_IMAGE_EDGE)
         val visionDir = File(getApplication<Application>().cacheDir, "vision_inputs").apply { mkdirs() }
         val outputFile = File(visionDir, "vision-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(8)}.jpg")
@@ -4378,6 +7302,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             height = prepared.height,
             sizeBytes = outputFile.length()
         )
+    }
+
+    private fun ChatImageAttachment.decodeBitmapForLocalVision(): Bitmap {
+        if (hasInlineData) {
+            val bytes = runCatching {
+                Base64.decode(plainBase64(), Base64.DEFAULT)
+            }.getOrElse {
+                error("无法解析内联图片：${name.ifBlank { "api-image" }}")
+            }
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
+            return BitmapFactory.decodeByteArray(
+                bytes,
+                0,
+                bytes.size,
+                BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            ) ?: error("无法读取内联图片：${name.ifBlank { "api-image" }}")
+        }
+        val uri = Uri.parse(uriString)
+        val resolver = getApplication<Application>().contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
+        return resolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, BitmapFactory.Options().apply { inSampleSize = sampleSize })
+        } ?: error("无法读取图片：${name.ifBlank { uriString }}")
     }
 
     private fun ChatImageAttachment.withCompressedInlineData(): ChatImageAttachment {
@@ -4425,10 +7376,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return sample.coerceAtLeast(1)
     }
 
-    private fun localVisionRunnerAvailable(): Boolean =
-        runCatching {
+    private fun localVisionRunnerAvailable(): Boolean {
+        val nativeVisionReady = runCatching {
             JSONObject(engine.nativeStatsJson()).optBoolean("visionReady", false)
         }.getOrDefault(false)
+        val model = _uiState.value.models.firstOrNull { it.id == _uiState.value.loadedModelId }
+        return model?.acceptsImageInput(nativeVisionReady) == true
+    }
+
+    private fun MainUiState.localVisionUnavailableMessage(): String {
+        val model = models.firstOrNull { it.id == loadedModelId }
+        return when {
+            model == null ->
+                "当前未加载本地模型。请在模型管理加载支持视觉的多模态 GGUF，或切换到支持图片输入的云端模型。"
+            model.runtime == ChatModelRuntime.MNN ->
+                "当前 MNN 模型没有就绪的视觉组件。请加载包含可读 visual.mnn 的完整多模态包后重试。"
+            model.visionProjectorPath.isNullOrBlank() ->
+                "当前本地模型未启用识图。纯文本 GGUF 不能直接看图，请在模型管理为多模态模型绑定匹配的 mmproj / projector 文件后重新加载。"
+            else ->
+                "已绑定视觉投影器，但本地视觉 runner 还未就绪。请重新加载当前模型；如果仍失败，请更换与主模型匹配的 mmproj / projector。"
+        }
+    }
 
     private fun currentOpenApiAddress(): String =
         apiUrl(detectLanIpAddress() ?: "本机局域网IP")
@@ -4457,10 +7425,288 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return if (gb >= 1.0) "%.2f GB".format(gb) else "%.1f MB".format(mb)
     }
 
+    private fun ModelManifest.toLoadParams(params: GenerationParams): LoadParams =
+        LoadParams(
+            nCtx = params.nCtx,
+            nThreads = params.nThreads,
+            advancedJson = params.advancedJson,
+            visionProjectorPath = if (runtime == ChatModelRuntime.LLAMA_CPP) {
+                visionProjectorPath
+                    ?.takeIf { it.isNotBlank() }
+                    ?.takeIf { File(it).isFile }
+            } else {
+                null
+            }
+        )
+
+    private fun ModelManifest.toLoadParams(
+        params: GenerationParams,
+        profile: ModelExecutionProfile
+    ): LoadParams {
+        val effective = profile.resolvedLoadBoundValues
+            .plus(profile.hotExecutionValues)
+            .plus(profile.modelBehaviorValues)
+            .toJsonObject()
+        return LoadParams.fromJson(effective.toString(), toLoadParams(params)).copy(
+            visionProjectorPath = if (runtime == ChatModelRuntime.LLAMA_CPP) {
+                visionProjectorPath
+                    ?.takeIf { it.isNotBlank() }
+                    ?.takeIf { File(it).isFile }
+            } else {
+                null
+            }
+        )
+    }
+
+    private fun mergeExecutionProfile(
+        generation: GenerationParams,
+        profile: ModelExecutionProfile
+    ): GenerationParams = GenerationParams.fromJson(
+        profile.resolvedLoadBoundValues
+            .plus(profile.hotExecutionValues)
+            .plus(profile.modelBehaviorValues)
+            .toJsonObject(),
+        generation
+    )
+
+    private fun executionProfileDiffers(
+        requested: GenerationParams,
+        active: ModelExecutionProfile?
+    ): Boolean {
+        active ?: return false
+        val requestedLoad = LoadParams(
+            nCtx = requested.nCtx,
+            nThreads = requested.nThreads,
+            advancedJson = requested.advancedJson
+        ).toJson().let(::JSONObject)
+        val effective = active.resolvedLoadBoundValues
+            .plus(active.hotExecutionValues)
+            .plus(active.modelBehaviorValues)
+            .toJsonObject()
+        val governedFields = active.resolvedLoadBoundValues.fields +
+            active.hotExecutionValues.fields + active.modelBehaviorValues.fields
+        return governedFields.any { field ->
+            requestedLoad.has(field) &&
+                canonicalJsonValue(requestedLoad.opt(field)) != canonicalJsonValue(effective.opt(field))
+        }
+    }
+
+    private fun canonicalJsonValue(value: Any?): String = when (value) {
+        null, JSONObject.NULL -> "null"
+        is Number -> value.toString().toBigDecimalOrNull()?.stripTrailingZeros()?.toPlainString() ?: value.toString()
+        is Boolean -> value.toString()
+        is JSONObject -> value.toString()
+        is JSONArray -> value.toString()
+        else -> value.toString().trim()
+    }
+
+    private suspend fun timedLoadModel(
+        model: ModelManifest,
+        runtime: LocalChatRuntime,
+        loadParams: LoadParams
+    ): Long {
+        // Stability smoke reloads must use the same identity/profile as the
+        // formal model-page load. Falling back to McaInferenceService's legacy
+        // identity builder here would key the reload by mtime/length and make
+        // a tuning candidate appear to belong to a different model.
+        val activeProfile = engine.activeExecutionProfile()
+            ?.takeIf {
+                it.runtimeIdentity.modelId == model.id &&
+                    it.runtimeIdentity.runtime == runtime
+            }
+        val activeIdentity = activeRuntimeIdentity
+            ?.takeIf {
+                it.modelId == model.id && it.runtime == runtime
+            }
+        val identity = activeIdentity
+            ?: activeProfile?.runtimeIdentity
+            ?: RuntimeIdentityFactory.create(
+                context = getApplication(),
+                model = model,
+                runtime = runtime,
+                device = currentDeviceProfile(),
+                installationScopeId = installationScopeId,
+                qairtAdmissionPassed = model.runtime == ChatModelRuntime.GENIEX_QAIRT &&
+                    model.id in currentQairtVerifiedLocalModelIds(modelStore.listModels())
+            )
+        val profile = activeProfile
+            ?.takeIf { it.runtimeIdentity.identityHash == identity.identityHash }
+        val started = System.currentTimeMillis()
+        engine.loadModel(
+            modelPath = model.path,
+            runtime = runtime,
+            params = loadParams,
+            qairtBundleSha256 = currentQairtBundleSha256(
+                requested = model,
+                persistedModels = modelStore.listModels()
+            ),
+            runtimeIdentity = identity,
+            executionProfile = profile
+        ).getOrThrow()
+        return System.currentTimeMillis() - started
+    }
+
+    private suspend fun runLocalGenerationSmoke(params: GenerationParams): LocalGenerationSmokeResult {
+        val smokeParams = params.copy(
+            nPredict = 32,
+            reasoningMode = ReasoningMode.OFF,
+            hideReasoning = true,
+            systemPrompt = "你是 MCA 稳定性自检助手。请只输出简短中文结果。"
+        )
+        val text = StringBuilder()
+        var finalStats = RuntimeStats()
+        var errorMessage: String? = null
+        withTimeout(60_000L) {
+            engine.streamChat(
+                ChatRequest(
+                    messages = listOf(ChatMessage(Role.USER, "用一句中文回答：稳定性自检完成。")),
+                    params = smokeParams
+                )
+            ).collect { event ->
+                when (event) {
+                    is GenerateEvent.Chunk -> {
+                        text.append(event.text)
+                        finalStats = event.stats
+                    }
+                    is GenerateEvent.Done -> finalStats = event.stats
+                    is GenerateEvent.Error -> errorMessage = event.message
+                }
+            }
+        }
+        errorMessage?.let { error(it) }
+        if (text.isBlank()) error("短流式生成没有产生可见正文")
+        return LocalGenerationSmokeResult(
+            visibleChars = text.length,
+            completionTokens = finalStats.completionTokens,
+            decodeTps = finalStats.decodeTps
+        )
+    }
+
+    private suspend fun runLoopbackApiStreamSmoke(): LocalApiStreamSmokeResult = withContext(Dispatchers.IO) {
+        val previousStreamProvider = LocalApiRuntime.streamChatProvider
+        val previousStopProvider = LocalApiRuntime.stopGenerationProvider
+        val stopCalls = AtomicInteger(0)
+        val port = freeLoopbackPort()
+        val server = McaLoopbackServer(port = port, bindHost = "127.0.0.1", apiKey = "")
+        try {
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk(
+                        text = "",
+                        stats = RuntimeStats(completionTokens = 128),
+                        hiddenReasoning = true
+                    ),
+                    GenerateEvent.Chunk(
+                        text = "visible answer",
+                        stats = RuntimeStats(completionTokens = 130)
+                    ),
+                )
+            }
+            LocalApiRuntime.stopGenerationProvider = { stopCalls.incrementAndGet() }
+            server.start()
+            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true,"hide_reasoning":true}"""
+            val response = rawHttp(
+                port = port,
+                request = "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n\r\n" +
+                    body
+            )
+            val visibleSeen = response.contains("visible answer")
+            val doneSeen = response.contains("data: [DONE]")
+            if (!response.startsWith("HTTP/1.1 200 OK")) error("本机 API smoke 返回异常")
+            if (!visibleSeen) error("本机 API smoke 未收到可见正文")
+            if (!doneSeen) error("本机 API smoke 未收到 [DONE] 终止帧")
+            if (response.contains("[MCA 提示]")) error("本机 API smoke 仍出现隐藏思考占位提示")
+            if (stopCalls.get() != 0) error("本机 API smoke 触发了 stopGeneration")
+            LocalApiStreamSmokeResult(
+                visibleContentSeen = true,
+                doneSeen = true,
+                stopCalls = stopCalls.get()
+            )
+        } finally {
+            server.shutdown()
+            LocalApiRuntime.streamChatProvider = previousStreamProvider
+            LocalApiRuntime.stopGenerationProvider = previousStopProvider
+        }
+    }
+
+    private suspend fun runLoopbackEngineStreamSmoke(params: GenerationParams): LocalApiStreamSmokeResult = withContext(Dispatchers.IO) {
+        val port = freeLoopbackPort()
+        val server = McaLoopbackServer(port = port, bindHost = "127.0.0.1", apiKey = "")
+        try {
+            server.start()
+            val body = JSONObject()
+                .put("model", "mca-local")
+                .put("stream", true)
+                .put("hide_reasoning", true)
+                .put("reasoning_mode", "off")
+                .put("max_tokens", 32)
+                .put("n_ctx", params.nCtx)
+                .put("temperature", 0)
+                .put(
+                    "messages",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("content", "用一句中文回答：本机 API 实流自检完成。")
+                    )
+                )
+                .toString()
+            val response = withTimeout(90_000L) {
+                rawHttp(
+                    port = port,
+                    request = "POST /v1/chat/completions HTTP/1.1\r\n" +
+                        "Host: 127.0.0.1\r\n" +
+                        "Content-Type: application/json\r\n" +
+                        "Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n\r\n" +
+                        body,
+                    readTimeoutMs = 90_000
+                )
+            }
+            if (!response.startsWith("HTTP/1.1 200 OK")) {
+                error("本机 API 实流 smoke 返回异常：${response.lineSequence().firstOrNull().orEmpty()}")
+            }
+            if (!response.contains("data: [DONE]")) error("本机 API 实流 smoke 未收到 [DONE] 终止帧")
+            if (response.contains("[MCA 提示]")) error("本机 API 实流 smoke 仍出现隐藏思考占位提示")
+            val visibleSeen = Regex(""""content"\s*:\s*"(?!")""").containsMatchIn(response)
+            if (!visibleSeen) error("本机 API 实流 smoke 未收到可见正文")
+            LocalApiStreamSmokeResult(
+                visibleContentSeen = true,
+                doneSeen = true,
+                stopCalls = 0
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    private fun freeLoopbackPort(): Int =
+        ServerSocket(0).use { it.localPort }
+
+    private fun rawHttp(port: Int, request: String, readTimeoutMs: Int = 15_000): String =
+        Socket("127.0.0.1", port).use { socket ->
+            socket.soTimeout = readTimeoutMs
+            socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
+            socket.getOutputStream().flush()
+            socket.shutdownOutput()
+            socket.getInputStream().readBytes().toString(Charsets.UTF_8)
+        }
+
     private fun loadMemoryBlocker(model: ModelManifest): String? {
         val device = deviceProfileReader.read()
         val totalRam = device.displayTotalRamBytes
         val availableRam = device.availableRamBytes
+        if (model.runtime == ChatModelRuntime.GENIEX_QAIRT) {
+            // QAIRT context binaries own their KV allocation in the NPU runtime.  The
+            // static bundle/RAM estimate is useful diagnostics, but it cannot safely
+            // predict whether this exact chipset/runtime combination can create its
+            // handle.  Do not turn it (or the generic file-size heuristic below) into
+            // a pre-handle deny: McaInferenceService records an advisory and lets the
+            // isolated QAIRT smoke / native create result decide the outcome.
+            return null
+        }
         val modelBudget = device.modelMemoryBudgetBytes.takeIf { it > 0L }
             ?: maxOf(availableRam, (device.totalRamBytes * 0.70).toLong())
         val estimatedNeed = (model.sizeBytes * 1.18).toLong() + 768L * 1024L * 1024L
@@ -4472,21 +7718,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             estimatedNeed > modelBudget && availableRam < 2L * 1024L * 1024L * 1024L ->
                 "当前系统可用内存约 ${formatBytes(availableRam)}，运行预算偏紧。建议关闭后台应用，或先用短基准确认。"
             else -> null
-        }
-    }
-
-    private fun loadFailureAdvice(message: String?, nativeStats: String): String {
-        val raw = listOfNotNull(message, nativeStats).joinToString(" ")
-        return when {
-            "no backends are loaded" in raw ->
-                "llama.cpp 后端未加载。请安装最新 APK，并确认 native stats 里 backendReady=true。"
-            "llama_init_from_model returned null" in raw || "out of memory" in raw.lowercase() ->
-                "上下文或模型占用过高。建议降低 n_ctx，关闭后台应用，或换 1B/2B/4B Q4 模型。"
-            "not readable" in raw ->
-                "模型文件不可读。请重新校验/重新下载，确认文件仍在 APP 模型目录。"
-            "invalid magic" in raw.lowercase() || "gguf" in raw.lowercase() && "failed" in raw.lowercase() ->
-                "模型文件可能不完整或不是主模型 GGUF。请点“校验”，必要时删除后断点重下。"
-            else -> message ?: "未知加载错误。请刷新诊断报告查看 native stats。"
         }
     }
 
@@ -4537,17 +7768,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .put("lastBenchmark", state.benchmark?.toJson())
             .put("benchmarkHistory", JSONArray(state.benchmarkHistory.take(10).map { it.toJson() }))
             .put("lastAutoTuningSummary", state.lastAutoTuningSummary)
+            .put("localStabilitySmokeSummary", state.localStabilitySmokeSummary)
             .toString(2)
     }
 
     private enum class AgentDebugMode(val label: String) {
         Quick("快速调试"),
+        Standard("标准调试"),
         Deep("深度调试"),
         PowerSave("省电调试")
     }
 
+    private fun tuningThreadCandidateLimit(debugMode: AgentDebugMode): Int = when (debugMode) {
+        AgentDebugMode.Quick -> TuningCandidatePolicy.QUICK_MAX_CANDIDATES
+        AgentDebugMode.Standard -> 6
+        AgentDebugMode.Deep -> 8
+        AgentDebugMode.PowerSave -> 3
+    }
+
     private fun AgentDebugMode.sweepConfig(): BenchmarkSweepConfig = when (this) {
         AgentDebugMode.Quick -> BenchmarkSweepConfig.quick()
+        AgentDebugMode.Standard -> BenchmarkSweepConfig.quick()
         AgentDebugMode.Deep -> BenchmarkSweepConfig.deep()
         AgentDebugMode.PowerSave -> BenchmarkSweepConfig.powerSave()
     }
@@ -4559,24 +7800,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ): List<Int> {
         val cores = device.cpuCores.coerceAtLeast(1)
         val bigCores = device.estimatedBigCores.coerceIn(1, cores)
-        val speedCandidates = listOf(
-            1,
-            2,
-            3,
-            4,
-            5,
-            6,
-            7,
-            8,
-            bigCores - 1,
-            bigCores,
-            bigCores + 1,
-            recommendedThreads ?: bigCores
+        val quickCandidates = TuningCandidatePolicy.quickThreadCandidates(
+            cpuCores = cores,
+            estimatedBigCores = bigCores,
+            recommendedThreads = recommendedThreads
         )
+        val standardCandidates = quickCandidates + listOf(
+            (recommendedThreads ?: bigCores) - 2,
+            (recommendedThreads ?: bigCores) + 2,
+            bigCores - 2,
+            bigCores + 2
+        ) + (1..cores)
         val base = when (debugMode) {
-            AgentDebugMode.Quick -> speedCandidates
-            AgentDebugMode.Deep -> (1..cores).toList() + listOf(recommendedThreads ?: bigCores, bigCores - 1, bigCores, bigCores + 1)
-            AgentDebugMode.PowerSave -> listOf(1, 2, 3, 4, bigCores.coerceAtMost(4), recommendedThreads?.coerceAtMost(4) ?: bigCores.coerceAtMost(4))
+            AgentDebugMode.Quick -> quickCandidates
+            AgentDebugMode.Standard -> standardCandidates
+            AgentDebugMode.Deep -> listOf(
+                recommendedThreads ?: bigCores,
+                bigCores,
+                bigCores - 1,
+                bigCores + 1
+            ) + (1..cores)
+            AgentDebugMode.PowerSave -> listOf(
+                recommendedThreads?.coerceAtMost(4) ?: bigCores.coerceAtMost(4),
+                bigCores.coerceAtMost(4),
+                2,
+                1,
+                3,
+                4
+            )
         }
         return base
             .map { it.coerceIn(1, cores) }
@@ -4584,7 +7835,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .filter { debugMode != AgentDebugMode.PowerSave || it <= 4 }
             .take(
                 when (debugMode) {
-                    AgentDebugMode.Quick -> 8
+                    AgentDebugMode.Quick -> TuningCandidatePolicy.QUICK_MAX_CANDIDATES
+                    AgentDebugMode.Standard -> 6
                     AgentDebugMode.Deep -> 12
                     AgentDebugMode.PowerSave -> 4
                 }
@@ -4625,20 +7877,821 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private suspend fun recoverInterruptedRuntimeProfiles() {
+        runCatching {
+            val plans = runtimeProfileStore.recoverInterruptedTransactions()
+            synchronized(pendingRuntimeRecoveries) {
+                pendingRuntimeRecoveries.clear()
+                plans.forEach { plan -> pendingRuntimeRecoveries[plan.identityKey] = plan }
+            }
+            runtimeProfileStore.pruneRejectedProfiles()
+            runtimeProfileStore.pruneTerminalHistory()
+            if (plans.isNotEmpty()) {
+                _uiState.update { state ->
+                    state.copy(
+                        tuningJobState = AgentTuningJobState.RECOVERING,
+                        engineLifecycle = if (state.loadedModelId == null) {
+                            AgentEngineLifecycle.UNLOADED
+                        } else {
+                            state.engineLifecycle
+                        },
+                        tuningPhase = "等待对应模型加载后恢复 LKG",
+                        statusMessage = "检测到 ${plans.size} 个中断的调参事务；加载对应模型时将最多回滚一次。"
+                    )
+                }
+            }
+        }.onFailure { error ->
+            _uiState.update { state ->
+                state.copy(
+                    tuningJobState = AgentTuningJobState.FAILED,
+                    tuningPhase = "启动恢复检查失败",
+                    statusMessage = "运行配置恢复检查失败：${error.message ?: "未知错误"}"
+                )
+            }
+        }
+    }
+
+    private fun modelTuningCapabilities(
+        model: ModelManifest,
+        identity: ModelRuntimeIdentity,
+        qairtAdmissionPassed: Boolean
+    ): ModelTuningCapabilities {
+        val metadataReadable = model.path.isNotBlank() && File(model.path).exists()
+        val architectureKnown = !model.architecture.isNullOrBlank()
+        val known = metadataReadable && architectureKnown && model.sha256.isNotBlank()
+        val llama = identity.runtime == LocalChatRuntime.LLAMA_CPP ||
+            identity.runtime == LocalChatRuntime.GENIEX_LLAMA_CPP
+        val capabilities = identity.capabilities
+        return ModelTuningCapabilities(
+            runtime = when (identity.runtime) {
+                LocalChatRuntime.MNN_CPU -> com.muyuchat.core.tuning.TuningRuntime.MNN
+                LocalChatRuntime.GENIEX_QAIRT -> com.muyuchat.core.tuning.TuningRuntime.QAIRT
+                LocalChatRuntime.LLAMA_CPP,
+                LocalChatRuntime.GENIEX_LLAMA_CPP -> com.muyuchat.core.tuning.TuningRuntime.LLAMA_CPP
+            },
+            knowledgeLevel = if (known) ModelKnowledgeLevel.KNOWN else ModelKnowledgeLevel.UNKNOWN,
+            metadataReadable = metadataReadable,
+            chatTemplateReady = metadataReadable,
+            maxContextTokens = null,
+            supportsBatchTuning = llama && known,
+            supportsQuantizedKv = llama && known,
+            supportsFlashAttention = llama && known,
+            supportsGpuOffload = llama && known && "gpu_offload" in capabilities,
+            supportsCpuMoeTuning = llama && known && "cpu_moe" in capabilities,
+            supportsSpeculativeMtp = llama && known && "draft_mtp" in capabilities,
+            qairtAdmissionPassed = qairtAdmissionPassed
+        )
+    }
+
+    private fun buildAdaptiveTuningRecommendation(
+        model: ModelManifest,
+        identity: ModelRuntimeIdentity,
+        device: DeviceProfile,
+        capabilities: ModelTuningCapabilities,
+        preference: UserPreference = _uiState.value.preference
+    ): AdaptiveTuningRecommendation {
+        val legacy = buildRecommendation(preference, device, null).tuningPlan
+        return legacy.toAdaptive(
+            runtimeIdentity = identity,
+            capabilities = capabilities,
+            profileKind = profileKindFor(preference),
+            device = device
+        )
+    }
+
+    private fun profileKindFor(preference: UserPreference): ExecutionProfileKind = when (preference.mode) {
+        PerformanceMode.PowerSave -> ExecutionProfileKind.POWER_SAVE
+        PerformanceMode.Speed -> ExecutionProfileKind.SPEED
+        PerformanceMode.Quality -> ExecutionProfileKind.QUALITY
+        PerformanceMode.LongContext -> ExecutionProfileKind.LONG_CONTEXT
+        PerformanceMode.Balanced -> ExecutionProfileKind.BALANCED
+    }
+
+    private suspend fun persistBootstrapProfile(
+        profile: ModelExecutionProfile,
+        sourceSummary: String
+    ) {
+        val existing = runtimeProfileStore.profile(profile.profileId)
+        if (existing?.recordState == PersistedProfileRecordState.COMMITTED.name) return
+        val transactionId = "bootstrap-${profile.runtimeIdentity.identityHash.take(24)}-${profile.revision}"
+        val snapshot = profile.toPersistedExecutionProfileSnapshot(
+            parentCommittedProfileId = null,
+            verificationLevel = PersistedProfileVerificationLevel.SAFE,
+            sourceSummaryJson = sourceSummary
+        )
+        val actualTransaction = transactionId
+        runtimeProfileStore.stageCandidate(
+            snapshot = snapshot,
+            transactionId = actualTransaction,
+            rollbackTargetProfileId = null
+        )
+        runtimeProfileStore.updateJournalStage(actualTransaction, TuningJournalState.VALIDATING, "BOOTSTRAP_VALIDATING")
+        val signatures = engine.parameterSignatureSnapshot()
+            ?: error("安全基线缺少参数签名快照")
+        runtimeProfileStore.commitCandidate(
+            transactionId = actualTransaction,
+            verificationLevel = PersistedProfileVerificationLevel.SAFE,
+            activeLoadedSignature = signatures.active?.digest ?: signatures.resolved.digest,
+            effectiveExecutionSignature = signatures.effective?.digest ?: signatures.committed.digest
+        )
+    }
+
+    private fun agentVerification(value: String): AgentProfileVerification = when {
+        value.equals(PersistedProfileVerificationLevel.DEVICE_VERIFIED.name, ignoreCase = true) ->
+            AgentProfileVerification.DEVICE_VERIFIED
+        value.equals(PersistedProfileVerificationLevel.COMPATIBLE.name, ignoreCase = true) ->
+            AgentProfileVerification.COMPATIBLE
+        value.equals(PersistedProfileVerificationLevel.SAFE.name, ignoreCase = true) ->
+            AgentProfileVerification.SAFE
+        else -> AgentProfileVerification.UNKNOWN
+    }
+
+    private suspend fun runBootstrapCorrectnessCanary(params: GenerationParams): BootstrapCanaryResult {
+        val canaryParams = params.copy(
+            nPredict = minOf(params.nPredict.coerceAtLeast(32), 96),
+            temperature = 0.0f,
+            topK = 1,
+            topP = 1.0f,
+            minP = 0.0f,
+            repeatPenalty = 1.0f,
+            presencePenalty = 0.0f,
+            frequencyPenalty = 0.0f,
+            reasoningMode = ReasoningMode.OFF,
+            hideReasoning = true,
+            systemPrompt = "你是 MCA 正确性校准器，只按用户要求输出，不要解释。"
+        )
+        val output = StringBuilder()
+        var stats = RuntimeStats()
+        var errorMessage: String? = null
+        withTimeout(120_000L) {
+            engine.streamChat(
+                ChatRequest(
+                    messages = listOf(
+                        ChatMessage(
+                            Role.USER,
+                            MinimumTextCanaryPolicy.prompt
+                        )
+                    ),
+                    params = canaryParams
+                )
+            ).collect { event ->
+                when (event) {
+                    is GenerateEvent.Chunk -> {
+                        output.append(event.text)
+                        stats = event.stats
+                    }
+                    is GenerateEvent.Done -> stats = event.stats
+                    is GenerateEvent.Error -> {
+                        errorMessage = event.message
+                        stats = event.stats
+                    }
+                }
+            }
+        }
+        val text = output.toString()
+        val passed = errorMessage == null && MinimumTextCanaryPolicy.matches(text)
+        return BootstrapCanaryResult(
+            passed = passed,
+            detail = errorMessage ?: if (passed) {
+                "minimum-text-v1 通过（${text.length} 字，decode ${"%.2f".format(stats.decodeTps)} token/s）"
+            } else {
+                "输出未满足 minimum-text-v1 标记/模板/清洁度要求：${text.take(160)}"
+            },
+            stats = stats
+        )
+    }
+
+    private suspend fun runCandidateCanary(
+        candidate: TuningExecutionProfile,
+        canaryParams: com.muyuchat.core.tuning.CanaryEvaluationParams,
+        authorization: com.muyuchat.core.engine.LoadAuthorization,
+        disposition: com.muyuchat.core.engine.PendingProfileDisposition =
+            com.muyuchat.core.engine.PendingProfileDisposition.ROLLBACK_AFTER_REQUEST,
+        lifecycleLease: com.muyuchat.core.engine.EngineLifecycleLease? = null
+    ): CandidateCanaryResult {
+        val startPoint = measurementPoint()
+        val output = StringBuilder()
+        var stats = RuntimeStats()
+        var errorMessage: String? = null
+        val request = ChatRequest(
+            messages = listOf(
+                ChatMessage(
+                    Role.USER,
+                    MinimumTextCanaryPolicy.prompt
+                )
+            ),
+            params = canaryParams.toGenerationParams(candidate)
+        )
+        withTimeout(120_000L) {
+            engine.streamChat(
+                request,
+                com.muyuchat.core.engine.LocalChatExecutionContext(
+                    requestId = "tuning-${UUID.randomUUID()}",
+                    loadAuthorization = authorization,
+                    pendingProfileDisposition = disposition,
+                    lifecycleLease = lifecycleLease
+                )
+            ).collect { event ->
+                when (event) {
+                    is GenerateEvent.Chunk -> {
+                        output.append(event.text)
+                        stats = event.stats
+                    }
+                    is GenerateEvent.Done -> stats = event.stats
+                    is GenerateEvent.Error -> {
+                        errorMessage = event.message
+                        stats = event.stats
+                    }
+                }
+            }
+        }
+        val text = output.toString()
+        val passed = errorMessage == null && MinimumTextCanaryPolicy.matches(text)
+        val signatureVerification = engine.authorizedPendingSignatureVerification(authorization)
+        val measuredEnd = measurementPoint()
+        val endPoint = measuredEnd.copy(
+            availableMemoryBytes = stats.availMemKb
+                .takeIf { it > 0L }
+                ?.times(1024L)
+                ?: measuredEnd.availableMemoryBytes,
+            pssBytes = stats.nativePssKb.coerceAtLeast(0L) * 1024L,
+            rssBytes = stats.processRssKb.coerceAtLeast(0L) * 1024L,
+            lowMemoryTriggered = measuredEnd.lowMemoryTriggered || stats.isLowMemory
+        )
+        val decodeTps = stats.decodeTps
+            .takeIf { it.isFinite() && it >= 0.0 }
+            ?: stats.e2eTps.coerceAtLeast(0.0)
+        val measurement = MeasurementEnvelope(
+            start = startPoint,
+            end = endPoint,
+            samples = listOf(
+                PerformanceSample(
+                    ttftMs = stats.ttftMs.coerceAtLeast(0L),
+                    decodeTps = decodeTps,
+                    pssBytes = endPoint.pssBytes,
+                    rssBytes = endPoint.rssBytes,
+                    availableMemoryBytes = endPoint.availableMemoryBytes
+                )
+            )
+        )
+        val safetyPassed = SafetyEnvelope.forDevice(currentDeviceProfile()).assess(measurement).passed
+        return CandidateCanaryResult(
+            passed = passed,
+            output = text,
+            stats = stats,
+            detail = errorMessage ?: if (passed) "candidate correctness passed" else "candidate output failed correctness",
+            measurement = measurement,
+            safetyPassed = safetyPassed,
+            signatureVerification = signatureVerification
+        )
+    }
+
+    private fun tuningCandidateHardGate(result: CandidateCanaryResult): CandidateHardGate {
+        return CandidateHardGate(
+            correctnessPassed = result.passed && result.stats.lastError == null,
+            crashCount = 0,
+            anrCount = 0,
+            nativeFatalSignalCount = 0,
+            lowMemoryTriggered = result.stats.isLowMemory ||
+                result.measurement.start.lowMemoryTriggered ||
+                result.measurement.end.lowMemoryTriggered,
+            outputVisible = result.output.isNotBlank(),
+            templateValid = result.passed,
+            safetyPassed = result.safetyPassed,
+            signaturesMatch = result.signatureVerification?.strictlyMatches == true
+        )
+    }
+
+    private fun tuningCandidateScore(result: CandidateCanaryResult): CandidateScore =
+        CandidateScorer.score(tuningCandidateHardGate(result), result.measurement)
+
+    private fun candidateMeasurement(
+        profileId: String,
+        jobId: String?,
+        phase: String,
+        result: CandidateCanaryResult
+    ): CandidateMeasurementEntity {
+        val gate = tuningCandidateHardGate(result)
+        val score = CandidateScorer.score(gate, result.measurement)
+        val failureCode = when {
+            score.eligible -> null
+            result.stats.lastError != null -> "RUNTIME_ERROR"
+            !gate.correctnessPassed || !gate.templateValid || !gate.outputVisible -> "CORRECTNESS_GATE_FAILED"
+            !gate.safetyPassed -> "SAFETY_GATE_FAILED"
+            gate.lowMemoryTriggered -> "LOW_MEMORY"
+            !gate.signaturesMatch -> "SIGNATURE_MISMATCH"
+            else -> "CANDIDATE_REJECTED"
+        }
+        val metrics = JSONObject()
+            .put("phase", phase)
+            .put("eligible", score.eligible)
+            .put("score", score.value)
+            .put("correctnessPassed", gate.correctnessPassed)
+            .put("templateValid", gate.templateValid)
+            .put("outputVisible", gate.outputVisible)
+            .put("safetyPassed", gate.safetyPassed)
+            .put("signatureStrictlyMatched", gate.signaturesMatch)
+            .put("lowMemoryTriggered", gate.lowMemoryTriggered)
+            .put("ttftMs", result.stats.ttftMs.coerceAtLeast(0L))
+            .put("decodeMs", result.stats.decodeMs.coerceAtLeast(0L))
+            .put("decodeTps", result.stats.decodeTps.takeIf { it.isFinite() })
+            .put("completionTokens", result.stats.completionTokens.coerceAtLeast(0))
+            .put("nativePssKb", result.stats.nativePssKb.coerceAtLeast(0L))
+            .put("processRssKb", result.stats.processRssKb.coerceAtLeast(0L))
+            .put("minimumAvailableMemoryBytes", result.measurement.minimumAvailableMemoryBytes.coerceAtLeast(0L))
+            .put("signatures", JSONObject().apply {
+                result.signatureVerification?.signatures?.let { signatures ->
+                    put("desired", signatures.desired.digest)
+                    put("resolvedLoad", signatures.resolved.digest)
+                    put("activeLoaded", signatures.active?.digest)
+                    put("committedExecution", signatures.committed.digest)
+                    put("runtimeOverride", signatures.override.digest)
+                    put("effectiveExecution", signatures.effective?.digest)
+                }
+            })
+        return CandidateMeasurementEntity(
+            measurementId = "measurement-${UUID.randomUUID()}",
+            profileId = profileId,
+            jobId = jobId,
+            correctnessPassed = gate.correctnessPassed,
+            safetyPassed = gate.safetyPassed,
+            effectiveSignatureMatched = gate.signaturesMatch,
+            accepted = score.eligible,
+            metricsJson = metrics.toString(),
+            failureCode = failureCode,
+            createdAt = System.currentTimeMillis()
+        )
+    }
+
+    private fun TuningExecutionProfile.withThreadCandidate(
+        nThreads: Int,
+        profileId: String,
+        revision: Long
+    ): TuningExecutionProfile {
+        val patch = CanonicalParameterSet.of(mapOf("n_threads" to nThreads.coerceAtLeast(1)))
+        val updatedEngineProfile = engineProfile.copy(
+            hotExecutionValues = engineProfile.hotExecutionValues.plus(patch),
+            desiredHotExecutionValues = engineProfile.desiredHotExecutionValues.plus(patch),
+            profileId = profileId,
+            revision = revision,
+            resolvedAt = System.currentTimeMillis()
+        )
+        return copy(
+            engineProfile = updatedEngineProfile,
+            hotExecution = hotExecution.copy(nThreads = nThreads.coerceAtLeast(1)),
+            verificationLevel = ProfileVerificationLevel.UNVERIFIED
+        )
+    }
+
+    private fun ModelExecutionProfile.asTuningExecutionProfile(
+        kind: ExecutionProfileKind,
+        verificationLevel: ProfileVerificationLevel,
+        reason: String
+    ): TuningExecutionProfile {
+        fun intValue(field: String): Int? =
+            (resolvedLoadBoundValues.value(field) as? Number)?.toInt()
+                ?: (hotExecutionValues.value(field) as? Number)?.toInt()
+        fun stringValue(field: String): String? =
+            resolvedLoadBoundValues.value(field)?.toString()
+        fun boolValue(field: String): Boolean? =
+            resolvedLoadBoundValues.value(field) as? Boolean
+        return TuningExecutionProfile(
+            engineProfile = this,
+            kind = kind,
+            loadBound = LoadBoundExecutionParams(
+                nCtx = intValue("n_ctx") ?: _uiState.value.params.nCtx,
+                nBatch = intValue("n_batch"),
+                nUbatch = intValue("n_ubatch"),
+                cacheTypeK = stringValue("cache_type_k"),
+                cacheTypeV = stringValue("cache_type_v"),
+                flashAttention = stringValue("flash_attn"),
+                gpuLayers = intValue("n_gpu_layers"),
+                mainGpu = intValue("main_gpu"),
+                cpuMoeLayers = intValue("n_cpu_moe"),
+                speculativeType = stringValue("spec_type"),
+                speculativeDraftMax = intValue("spec_draft_n_max"),
+                nParallel = intValue("n_parallel") ?: 1,
+                mmap = boolValue("mmap") ?: true,
+                mlock = boolValue("mlock") ?: false,
+                backend = stringValue("backend") ?: runtimeIdentity.runtime.backendId
+            ),
+            hotExecution = HotExecutionParams(
+                nThreads = intValue("n_threads") ?: _uiState.value.params.nThreads,
+                nThreadsBatch = intValue("n_threads_batch")
+            ),
+            verificationLevel = verificationLevel,
+            reason = reason
+        )
+    }
+
+    private fun measurementPoint(device: DeviceProfile = currentDeviceProfile()): MeasurementPoint {
+        val stats = _uiState.value.stats
+        return MeasurementPoint(
+            thermalStatus = device.thermalStatus,
+            batteryPercent = device.batteryPercent,
+            isCharging = device.isCharging,
+            availableMemoryBytes = device.availableRamBytes,
+            pssBytes = stats.nativePssKb.coerceAtLeast(0L) * 1024L,
+            rssBytes = stats.processRssKb.coerceAtLeast(0L) * 1024L,
+            lowMemoryTriggered = device.isLowMemory || stats.isLowMemory,
+            appInForeground = _uiState.value.engineLifecycle != AgentEngineLifecycle.STOPPING
+        )
+    }
+
+    private fun runtimeProfileJson(): String {
+        val state = _uiState.value
+        val profile = engine.activeExecutionProfile()
+        val signatures = engine.parameterSignatureSnapshot()
+        return JSONObject()
+            .put("modelId", state.loadedModelId)
+            .put("modelName", state.loadedModelName)
+            .put("identityHash", activeRuntimeIdentity?.identityHash)
+            .put("profileId", state.profileId ?: profile?.profileId)
+            .put("revision", state.revision ?: profile?.revision)
+            .put("recordState", state.profileRecordState.name.lowercase())
+            .put("verification", state.verification.name.lowercase())
+            .put("engineLifecycle", state.engineLifecycle.name.lowercase())
+            .put("reloadRequired", state.reloadRequired)
+            .put("signatures", JSONObject().apply {
+                signatures?.let { value ->
+                    put("desired", value.desired.digest)
+                    put("resolvedLoad", value.resolved.digest)
+                    put("activeLoaded", value.active?.digest)
+                    put("committedExecution", value.committed.digest)
+                    put("runtimeOverride", value.override.digest)
+                    put("effectiveExecution", value.effective?.digest)
+                }
+            })
+            .put("pending", state.pendingProfile?.let { pending ->
+                JSONObject()
+                    .put("profileId", pending.profileId)
+                    .put("revision", pending.revision)
+                    .put("summary", pending.summary)
+                    .put("readyToApply", pending.readyToApply)
+            } ?: JSONObject.NULL)
+            .put("rollback", state.rollbackProfile?.let { rollback ->
+                JSONObject()
+                    .put("profileId", rollback.targetProfileId)
+                    .put("revision", rollback.targetRevision)
+                    .put("summary", rollback.summary)
+                    .put("available", rollback.available)
+            } ?: JSONObject.NULL)
+            .toString()
+    }
+
+    private fun apiGenerationParams(): GenerationParams {
+        val state = _uiState.value
+        val active = engine.activeExecutionProfile()
+        return if (active == null) state.params else mergeExecutionProfile(state.params, active)
+    }
+
+    private fun localApiModelMatches(
+        requestedModel: String,
+        state: MainUiState,
+        model: ModelManifest
+    ): Boolean {
+        val requested = requestedModel.trim()
+        return requested.isNotEmpty() && (
+            requested == state.loadedModelId ||
+                requested == state.loadedModelName ||
+                requested == model.id ||
+                requested == model.fileName ||
+                requested == model.displayName
+            )
+    }
+
+    /**
+     * Durable, app-owned idempotency journal for Local API control mutations.
+     *
+     * Only a SHA-256 of the caller key, the server-supplied request fingerprint, and the already
+     * redacted structured response are persisted. A crash after the pending marker is committed
+     * fails closed on replay instead of executing a possibly completed lifecycle mutation twice.
+     */
+    private fun runDurableLocalApiControl(
+        idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext,
+        operation: () -> com.muyuchat.api.local.LocalApiControlResult
+    ): com.muyuchat.api.local.LocalApiControlResult = synchronized(localApiIdempotencyJournalLock) {
+        if (idempotency.key.isBlank() || idempotency.requestFingerprint.isBlank()) {
+            return@synchronized localApiTuningRejected(
+                httpStatus = 400,
+                code = "invalid_idempotency_context",
+                message = "Idempotency-Key 或请求指纹无效。"
+            )
+        }
+        val preferences = getApplication<Application>().getSharedPreferences(
+            "mca_local_api_idempotency_journal",
+            Context.MODE_PRIVATE
+        )
+        val storageKey = "entry_${localApiIdempotencyKeyHash(idempotency.key)}"
+        preferences.getString(storageKey, null)?.let { persisted ->
+            val entry = runCatching { JSONObject(persisted) }.getOrNull()
+                ?: return@synchronized localApiTuningRejected(
+                    409,
+                    "idempotency_journal_corrupt",
+                    "该 Idempotency-Key 的持久记录不可读；为避免重复执行，已拒绝重放。"
+                )
+            if (entry.optString("requestFingerprint") != idempotency.requestFingerprint) {
+                return@synchronized localApiTuningRejected(
+                    409,
+                    "idempotency_key_conflict",
+                    "同一 Idempotency-Key 不能用于不同请求。"
+                )
+            }
+            if (entry.optString("state") == "completed") {
+                return@synchronized decodeDurableLocalApiResult(entry)
+            }
+            return@synchronized localApiTuningRejected(
+                409,
+                "idempotency_recovery_required",
+                "该写操作曾开始但未持久化最终响应；请先查询任务/profile 状态，系统不会自动重复执行。"
+            )
+        }
+        val pending = JSONObject()
+            .put("formatVersion", 1)
+            .put("requestFingerprint", idempotency.requestFingerprint)
+            .put("state", "pending")
+            .put("updatedAt", System.currentTimeMillis())
+        if (!preferences.edit().putString(storageKey, pending.toString()).commit()) {
+            return@synchronized localApiTuningRejected(
+                503,
+                "idempotency_journal_unavailable",
+                "无法持久化幂等事务，写操作未执行。"
+            )
+        }
+        val result = runCatching(operation).getOrElse {
+            com.muyuchat.api.local.LocalApiControlResult.Rejected(
+                httpStatus = 500,
+                code = "control_plane_failure",
+                message = "本地运行时控制面执行失败。"
+            )
+        }
+        val completed = encodeDurableLocalApiResult(idempotency.requestFingerprint, result)
+        // The pending marker is already durable. If this replacement fails, returning the actual
+        // response is safe; a later retry fails closed with recovery_required instead of mutating
+        // the runtime twice.
+        preferences.edit().putString(storageKey, completed.toString()).commit()
+        result
+    }
+
+    private fun localApiIdempotencyKeyHash(value: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(Locale.ROOT, byte.toInt() and 0xff) }
+
+    private fun encodeDurableLocalApiResult(
+        requestFingerprint: String,
+        result: com.muyuchat.api.local.LocalApiControlResult
+    ): JSONObject = JSONObject()
+        .put("formatVersion", 1)
+        .put("requestFingerprint", requestFingerprint)
+        .put("state", "completed")
+        .put("updatedAt", System.currentTimeMillis())
+        .apply {
+            when (result) {
+                is com.muyuchat.api.local.LocalApiControlResult.Success -> {
+                    put("resultType", "success")
+                    put("httpStatus", result.httpStatus)
+                    put("retryAfterMs", result.retryAfterMs)
+                    put("json", result.json)
+                }
+                is com.muyuchat.api.local.LocalApiControlResult.Rejected -> {
+                    put("resultType", "rejected")
+                    put("httpStatus", result.httpStatus)
+                    put("retryAfterMs", result.retryAfterMs)
+                    put("code", result.code)
+                    put("message", result.message)
+                    put("detailsJson", result.detailsJson)
+                }
+            }
+        }
+
+    private fun decodeDurableLocalApiResult(
+        entry: JSONObject
+    ): com.muyuchat.api.local.LocalApiControlResult = when (entry.optString("resultType")) {
+        "success" -> com.muyuchat.api.local.LocalApiControlResult.Success(
+            json = entry.optString("json", "{}"),
+            httpStatus = entry.optInt("httpStatus", 200),
+            retryAfterMs = entry.optLong("retryAfterMs", 0L).coerceAtLeast(0L)
+        )
+        "rejected" -> com.muyuchat.api.local.LocalApiControlResult.Rejected(
+            httpStatus = entry.optInt("httpStatus", 409),
+            code = entry.optString("code", "control_plane_rejected"),
+            message = entry.optString("message", "本地运行时控制面拒绝了该请求。"),
+            detailsJson = entry.optString("detailsJson", "{}"),
+            retryAfterMs = entry.optLong("retryAfterMs", 0L).coerceAtLeast(0L)
+        )
+        else -> localApiTuningRejected(
+            409,
+            "idempotency_journal_corrupt",
+            "该 Idempotency-Key 的最终响应记录不可读；为避免重复执行，已拒绝重放。"
+        )
+    }
+
+    private fun localApiDebugMode(value: String): AgentDebugMode? = when (
+        value.trim().lowercase(Locale.ROOT).replace("-", "_")
+    ) {
+        "quick" -> AgentDebugMode.Quick
+        "standard" -> AgentDebugMode.Standard
+        "deep", "full" -> AgentDebugMode.Deep
+        "power", "power_save", "powersave" -> AgentDebugMode.PowerSave
+        else -> null
+    }
+
+    private fun localApiPerformancePreference(value: String?): UserPreference? {
+        if (value.isNullOrBlank()) return null
+        val mode = when (value.trim().lowercase(Locale.ROOT).replace("-", "_").replace(" ", "_")) {
+            "balanced" -> PerformanceMode.Balanced
+            "speed" -> PerformanceMode.Speed
+            "quality" -> PerformanceMode.Quality
+            "long_context", "longcontext" -> PerformanceMode.LongContext
+            "power", "power_save", "powersave" -> PerformanceMode.PowerSave
+            else -> return null
+        }
+        return _uiState.value.preference.copy(mode = mode)
+    }
+
+    private fun localApiExclusiveLifecycleConflict(
+        action: String,
+        allowedStagedJobId: String? = null
+    ): com.muyuchat.api.local.LocalApiControlResult.Rejected? {
+        val state = _uiState.value
+        val selectedStagedJobIsAllowed = allowedStagedJobId != null &&
+            (activeTuningJobId == null || activeTuningJobId == allowedStagedJobId) &&
+            state.tuningJobState in setOf(AgentTuningJobState.PAUSED, AgentTuningJobState.RUNNING) &&
+            adaptiveTuningJob?.isActive != true
+        val tuningConflict = !selectedStagedJobIsAllowed && (
+            adaptiveTuningJob?.isActive == true ||
+                state.tuningJobState in setOf(
+                    AgentTuningJobState.QUEUED,
+                    AgentTuningJobState.RUNNING,
+                    AgentTuningJobState.PAUSED,
+                    AgentTuningJobState.CANCELING,
+                    AgentTuningJobState.VALIDATING,
+                    AgentTuningJobState.RECOVERING
+                )
+            )
+        val engineConflict = state.engineLifecycle != AgentEngineLifecycle.READY ||
+            state.busy ||
+            state.isGenerating
+        if (!tuningConflict && !engineConflict) return null
+        return localApiTuningConflict(
+            action = action,
+            activeJobId = activeTuningJobId,
+            message = "运行时正在执行独占生命周期操作，不能并发执行 tuning $action。"
+        )
+    }
+
+    private fun localApiTuningConflict(
+        action: String,
+        activeJobId: String?,
+        message: String
+    ): com.muyuchat.api.local.LocalApiControlResult.Rejected = localApiTuningRejected(
+        httpStatus = 409,
+        code = "tuning_${action}_conflict",
+        message = message,
+        details = JSONObject()
+            .put("activeJobId", activeJobId)
+            .put("tuningJobState", _uiState.value.tuningJobState.name.lowercase())
+            .put("engineLifecycle", _uiState.value.engineLifecycle.name.lowercase())
+            .put("activeProfileId", engine.activeExecutionProfile()?.profileId)
+    )
+
+    private fun localApiTuningRejected(
+        httpStatus: Int,
+        code: String,
+        message: String,
+        details: JSONObject = JSONObject()
+    ): com.muyuchat.api.local.LocalApiControlResult.Rejected =
+        com.muyuchat.api.local.LocalApiControlResult.Rejected(
+            httpStatus = httpStatus,
+            code = code,
+            message = message,
+            detailsJson = details.toString(),
+            retryAfterMs = if (httpStatus == 409) 1_000L else 0L
+        )
+
+    private fun tuningJobPublicJson(job: TuningJobEntity): JSONObject = JSONObject()
+        .put("jobId", job.jobId)
+        .put("state", job.state.lowercase(Locale.ROOT))
+        .put("phase", job.phase)
+        .put("candidateProfileId", job.candidateProfileId)
+        .put("autoApply", job.autoApplyLoadChanges)
+        .put("cancellationRequested", job.cancellationRequested)
+        .put("failureCode", job.failureCode)
+        .put("failureSummary", job.failureSummary)
+        .put("createdAt", job.createdAt)
+        .put("updatedAt", job.updatedAt)
+        .put("lastHeartbeatAt", job.lastHeartbeatAt)
+
+    private suspend fun cancelPersistedTuningJob(jobId: String): TuningJobEntity {
+        var canceled = runtimeProfileStore.requestTuningJobCancellation(jobId)
+        engine.stopGeneration()
+        if (adaptiveTuningJob?.isActive != true) {
+            val pending = runCatching { runtimeProfileStore.pendingTransaction(canceled.identityKey) }.getOrNull()
+            if (pending?.journal?.jobId == jobId) {
+                val recovery = runtimeProfileStore.rejectCandidate(
+                    transactionId = pending.journal.transactionId,
+                    failureStage = "USER_CANCEL",
+                    failureCode = "USER_CANCELED",
+                    failureSummary = "用户取消了等待应用的 staged candidate。"
+                )
+                recovery.rollbackProfileId?.let { rollbackProfileId ->
+                    runtimeProfileStore.completeRecovery(
+                        transactionId = pending.journal.transactionId,
+                        restoredProfileId = rollbackProfileId
+                    )
+                }
+                canceled = runtimeProfileStore.tuningJob(jobId) ?: canceled
+                _uiState.update { it.copy(pendingProfile = null) }
+            } else if (canceled.state !in setOf(
+                    PersistedTuningJobState.SUCCEEDED.name,
+                    PersistedTuningJobState.FAILED.name
+                )
+            ) {
+                canceled = runtimeProfileStore.transitionTuningJob(
+                    jobId = jobId,
+                    state = PersistedTuningJobState.FAILED,
+                    phase = "USER_CANCELED",
+                    failureCode = "USER_CANCELED",
+                    failureSummary = "用户取消了调优任务。"
+                )
+            }
+            if (activeTuningJobId == jobId) activeTuningJobId = null
+        }
+        return canceled
+    }
+
+    private fun tuningStateJson(): String {
+        val state = _uiState.value
+        return JSONObject()
+            .put("jobId", activeTuningJobId)
+            .put("state", state.tuningJobState.name.lowercase())
+            .put("phase", state.tuningPhase)
+            .put("etaSeconds", state.tuningEtaSeconds)
+            .put("autoTuningInProgress", state.autoTuningInProgress)
+            .put("cancelRequested", adaptiveTuningCancelRequested.get())
+            .put("pauseRequested", adaptiveTuningPauseRequested.get())
+            .put("progress", JSONObject()
+                .put("completed", state.tuningCandidateProgress.completed)
+                .put("total", state.tuningCandidateProgress.total)
+                .put("currentCandidate", state.tuningCandidateProgress.currentCandidate)
+                .put("passed", state.tuningCandidateProgress.passed)
+                .put("rejected", state.tuningCandidateProgress.rejected))
+            .put("profile", JSONObject(runtimeProfileJson()))
+            .toString()
+    }
+
+    private fun runTuningControl(
+        jobId: String,
+        action: String,
+        operation: suspend () -> TuningJobEntity
+    ): com.muyuchat.api.local.LocalApiControlResult = runCatching {
+        val job = runBlocking(Dispatchers.IO) { operation() }
+        _uiState.update { state ->
+            state.copy(
+                tuningJobState = agentJobState(job),
+                tuningPhase = job.phase,
+                statusMessage = "Local API 已请求调优任务 ${action}。"
+            )
+        }
+        com.muyuchat.api.local.LocalApiControlResult.Success(tuningStateJson())
+    }.getOrElse { error ->
+        com.muyuchat.api.local.LocalApiControlResult.Rejected(
+            httpStatus = 409,
+            code = "tuning_${action}_rejected",
+            message = error.message ?: "调优任务操作失败"
+        )
+    }
+
     private fun loadedModelJson(): String {
         val state = _uiState.value
+        val loadedModel = state.models.firstOrNull { it.id == state.loadedModelId }
         val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrElse { JSONObject() }
+        val visionReady = nativeStats.optBoolean("visionReady", false)
+        // Backward-compatible API alias. Product admission is based on native
+        // visual readiness across all compatible devices.
+        val visionValidated = visionReady
         return JSONObject()
             .put("id", state.loadedModelId)
             .put("name", state.loadedModelName)
-            .put("runtime", state.models.firstOrNull { it.id == state.loadedModelId }?.runtime?.storageValue)
+            .put("displayName", state.loadedModelName)
+            .put("runtime", loadedModel?.runtime?.storageValue)
+            .put("vision_ready", visionReady)
+            .put("vision_validated", visionValidated)
+            .put("visionValidated", visionValidated)
+            .put("vision_projector", loadedModel?.visionProjectorFileName)
             .put("stats", nativeStats)
             .toString()
     }
 
     private fun modelsJson(): String {
         val array = JSONArray()
-        _uiState.value.models.forEach { model ->
+        val state = _uiState.value
+        val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrElse { JSONObject() }
+        state.models.forEach { model ->
+            val selected = model.id == state.loadedModelId
+            val visionReady = selected && nativeStats.optBoolean("visionReady", false)
+            val visionValidated = visionReady
             array.put(
                 JSONObject()
                     .put("id", model.id)
@@ -4646,47 +8699,144 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .put("owned_by", "local")
                     .put("display_name", model.displayName)
                     .put("runtime", model.runtime.storageValue)
-                    .put("path", model.path)
+                    .put("vision_projector", model.visionProjectorFileName)
+                    .put("vision_ready", visionReady)
+                    .put("vision_validated", visionValidated)
             )
         }
         return JSONObject().put("object", "list").put("data", array).toString()
     }
 
+    private fun modelRuntimeStatesJson(): String {
+        val models = _uiState.value.models
+        val states = runBlocking(Dispatchers.IO) {
+            runtimeProfileStore.modelRuntimeSummaries(models.map { it.id })
+        }
+        val root = JSONObject()
+        states.forEach { runtimeState ->
+            val modelId = runtimeState.modelId
+            val profile = runtimeState.activeProfile
+            val activeJob = runtimeState.activeJob
+            val isLoaded = modelId == _uiState.value.loadedModelId
+            root.put(
+                modelId,
+                JSONObject()
+                    .put("profileId", profile?.profileId)
+                    .put("profileRecordState", profile?.recordState?.lowercase(Locale.ROOT) ?: "none")
+                    .put(
+                        "profileVerificationLevel",
+                        profile?.verificationLevel?.lowercase(Locale.ROOT) ?: "unknown"
+                    )
+                    .put("reloadRequired", runtimeState.pendingProfile != null)
+                    .put(
+                        "engineLifecycle",
+                        if (isLoaded) _uiState.value.engineLifecycle.name.lowercase(Locale.ROOT) else "unloaded"
+                    )
+                    .put("tuningJobState", activeJob?.state?.lowercase(Locale.ROOT) ?: "idle")
+            )
+        }
+        return root.toString()
+    }
+
     private fun currentDeviceProfile(): DeviceProfile =
         deviceProfileReader.read()
+
+    private fun preferredQairtChipsets(device: DeviceProfile): List<String> =
+        when (device.accelerationProfile.chipsetCode.trim().uppercase(Locale.US)) {
+            "SM8850", "SM8850P" -> listOf("qualcomm-snapdragon-8-elite-gen5")
+            "SM8750", "SM8750P" -> listOf("qualcomm-snapdragon-8-elite")
+            else -> emptyList()
+        }
+
+    private fun clearBundleDirectoryExcept(bundleDir: File, keepFile: File) {
+        val root = runCatching { bundleDir.canonicalFile }.getOrNull() ?: return
+        val keep = runCatching { keepFile.canonicalFile }.getOrNull()
+        bundleDir.listFiles()?.forEach { child ->
+            val candidate = runCatching { child.canonicalFile }.getOrNull() ?: return@forEach
+            if (keep != null && candidate.absolutePath == keep.absolutePath) return@forEach
+            if (candidate.absolutePath.startsWith(root.absolutePath + File.separator)) {
+                child.deleteRecursively()
+            }
+        }
+    }
+
+    private fun promoteImageBundleCandidate(candidateDir: File, bundleDir: File): File? {
+        val candidate = candidateDir.canonicalFile
+        val destination = bundleDir.canonicalFile
+        val parent = destination.parentFile ?: throw IOException("生图引擎包目录没有父目录：$destination")
+        val backup = File(parent, ".${destination.name}.backup").canonicalFile
+        require(candidate.isDirectory) { "生图引擎候选目录不存在：$candidate" }
+        if (backup.exists() && !backup.deleteRecursively()) {
+            throw IOException("无法清理旧的生图引擎备份：$backup")
+        }
+
+        val hadExistingBundle = destination.exists()
+        if (hadExistingBundle && !destination.renameTo(backup)) {
+            throw IOException("无法备份现有生图引擎包：$destination")
+        }
+        if (!candidate.renameTo(destination)) {
+            if (hadExistingBundle && !destination.exists() && !backup.renameTo(destination)) {
+                throw IOException("无法提交新的生图引擎包，也无法恢复旧包：$backup")
+            }
+            throw IOException("无法提交生图引擎候选包：$candidate")
+        }
+        return backup.takeIf { hadExistingBundle }
+    }
+
+    private fun restoreImageBundleBackup(bundleDir: File, backup: File?) {
+        if (bundleDir.exists() && !bundleDir.deleteRecursively()) {
+            throw IOException("无法移除失败的生图引擎包：$bundleDir")
+        }
+        if (backup != null && backup.exists() && !backup.renameTo(bundleDir)) {
+            throw IOException("无法恢复先前的生图引擎包：$backup")
+        }
+    }
+
+    private fun unzipIntoDirectory(zipFile: File, targetDir: File) {
+        require(zipFile.isFile && zipFile.length() > 0L) { "QAIRT zip 包为空或不存在：${zipFile.name}" }
+        targetDir.mkdirs()
+        val root = targetDir.canonicalFile
+        ZipInputStream(zipFile.inputStream()).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                val entryName = entry.name.replace('\\', '/').trimStart('/')
+                if (entryName.isBlank()) {
+                    zip.closeEntry()
+                    continue
+                }
+                val target = File(root, entryName).canonicalFile
+                require(target.absolutePath.startsWith(root.absolutePath + File.separator)) {
+                    "QAIRT zip 包包含不安全路径：${entry.name}"
+                }
+                if (entry.isDirectory) {
+                    target.mkdirs()
+                } else {
+                    target.parentFile?.mkdirs()
+                    target.outputStream().use { output -> zip.copyTo(output) }
+                }
+                zip.closeEntry()
+            }
+        }
+    }
 
     private fun sortRecommendedModels(
         models: List<ModelScopeRecommendedModel>,
         device: DeviceProfile
     ): List<ModelScopeRecommendedModel> {
-        val ramGb = device.displayTotalRamBytes / 1024.0 / 1024.0 / 1024.0
-        return models.sortedWith(
+        return models.filter { it.visibleInRecommendations }.sortedWith(
             compareBy<ModelScopeRecommendedModel> { model ->
                 model.group.ordinal
-            }.thenByDescending { model ->
-                if (model.kind == com.muyuchat.core.download.ModelScopeRecommendedKind.IMAGE) {
-                    localImageDeviceFitScore(model, device)
-                } else {
-                    0
-                }
             }.thenBy { model ->
                 model.priority
-            }.thenByDescending { model ->
-                when {
-                    ramGb <= 0.0 -> 0
-                    model.minRamGb <= ramGb && model.minRamGb >= ramGb - 4.0 -> 4
-                    model.minRamGb <= ramGb -> 3
-                    model.minRamGb <= ramGb + 2.0 -> 2
-                    else -> 1
-                }
             }.thenBy { model ->
-                kotlin.math.abs(model.minRamGb - ramGb)
+                model.id
             }
         )
     }
 
     private fun localImageDeviceFitScore(model: ModelScopeRecommendedModel, device: DeviceProfile): Int {
         val engineTier = model.localImageEngineTier ?: return 0
+        val bundle = model.imageEngineBundle
         val ramGb = device.displayTotalRamBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
         val memoryFit = when {
             ramGb <= 0.0 -> 0
@@ -4694,14 +8844,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             model.minRamGb <= ramGb + 2.0 -> 2
             else -> 0
         }
-        val tierFit = when (engineTier) {
-            LocalImageEngineTier.QUICK -> 5
-            LocalImageEngineTier.STANDARD -> 4
-            LocalImageEngineTier.COMPACT_QUALITY -> 3
-            LocalImageEngineTier.LARGE_QUALITY -> 1
-            LocalImageEngineTier.HEAVY_EXPERIMENTAL -> 0
+        val qualityFit = when {
+            bundle?.accelerator == ImageEngineAccelerator.QNN_HTP &&
+                bundle.minDeviceTier == ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN3 -> 8
+            bundle?.accelerator == ImageEngineAccelerator.QNN_HTP &&
+                bundle.minDeviceTier == ImageEngineMinDeviceTier.SNAPDRAGON_8_ELITE -> 8
+            engineTier == LocalImageEngineTier.COMPACT_QUALITY -> 6
+            engineTier == LocalImageEngineTier.HEAVY_EXPERIMENTAL -> 5
+            engineTier == LocalImageEngineTier.LARGE_QUALITY -> 4
+            engineTier == LocalImageEngineTier.STANDARD -> 3
+            engineTier == LocalImageEngineTier.QUICK -> 2
+            else -> 0
         }
-        return memoryFit + tierFit
+        val acceleration = device.accelerationProfile
+        val npuFit = if (bundle?.accelerator == ImageEngineAccelerator.QNN_HTP) {
+            when {
+                !acceleration.localImage.deviceCapable -> -4
+                !bundle.minDeviceTier.supportedBy(device) -> -2
+                bundle.requiresQnnRuntime && acceleration.qnnRuntime.usableForSmoke -> 6
+                bundle.requiresQnnRuntime -> 3
+                else -> 1
+            }
+        } else {
+            0
+        }
+        val runtimeReadyBonus = if (acceleration.qnnRuntime.usableForSmoke && npuFit > 0) 2 else 0
+        return memoryFit + qualityFit + npuFit + runtimeReadyBonus
+    }
+
+private fun ImageEngineMinDeviceTier.supportedBy(device: DeviceProfile): Boolean {
+        val acceleration = device.accelerationProfile
+        return when (this) {
+            ImageEngineMinDeviceTier.ANY -> true
+            ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN1 -> acceleration.stableDiffusion15NpuCandidate
+            ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN2 -> acceleration.stableDiffusion15NpuCandidate
+            ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN3 -> acceleration.sdxlNpuCandidate
+            ImageEngineMinDeviceTier.SNAPDRAGON_8_ELITE -> acceleration.sdxlNpuCandidate &&
+                acceleration.chipsetCode in setOf("SM8750", "SM8750P", "SM8850", "SM8850P")
+        }
     }
 
     private fun buildRecommendation(
@@ -4719,10 +8899,265 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
 }
 
+internal fun recommendedQairtArchitecture(model: ModelScopeRecommendedModel): String = when (model.id) {
+    "qwen3_vl_4b_qairt_w4a16" -> "qwen3-vl"
+    "qwen25_vl_7b_qairt_w4a16" -> "qwen2.5-vl"
+    else -> "qwen3"
+}
+
+internal fun downloadedImageBundleManifestJson(
+    displayName: String,
+    bundle: ImageEngineBundleSpec,
+    targets: List<Pair<RemoteModelFile, File>>
+): JSONObject {
+    val primary = targets.firstOrNull { it.first.bundleRole == ImageEngineBundleComponentRole.DIFFUSION }
+    val familyHint = "${bundle.id}/$displayName/${primary?.second?.name.orEmpty()}"
+    val family = bundle.modelFamily
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: LocalImageModelFamily.infer(familyHint).name
+    val components = JSONArray()
+    targets.forEach { (remote, file) ->
+        val role = remote.bundleRole ?: ImageEngineBundleComponentRole.OPTIONAL
+        components.put(
+            JSONObject()
+                .put("role", role.name)
+                .put("path", remote.relativePath)
+                .put("fileName", remote.relativePath)
+                .put("sourceRepo", remote.repoId)
+                .put("sourcePath", remote.path)
+                .put("provider", remote.provider.name)
+                .put("required", role != ImageEngineBundleComponentRole.OPTIONAL)
+        )
+    }
+    val manifest = JSONObject()
+        .put("schema", "mca.image_engine.bundle.v1")
+        .put("id", bundle.id)
+        .put("title", displayName)
+        .put("runtime", bundle.runtime.name)
+        .put("accelerator", bundle.accelerator.name)
+        .put("minDeviceTier", bundle.minDeviceTier.name)
+        .put("family", family)
+        .put("requiresQnnRuntime", bundle.requiresQnnRuntime)
+        .put("requiresSmokeTest", bundle.requiresSmokeTest)
+        .put("imageSize", "${bundle.smokeSpec.width}x${bundle.smokeSpec.height}")
+        .put(
+            "smoke",
+            JSONObject()
+                .put("width", bundle.smokeSpec.width)
+                .put("height", bundle.smokeSpec.height)
+                .put("steps", bundle.smokeSpec.steps)
+                .put("timeoutSeconds", bundle.smokeSpec.timeoutSeconds)
+                .put("prompt", bundle.smokeSpec.prompt)
+                .put("expectedOutputMime", bundle.smokeSpec.expectedOutputMime)
+        )
+        .put("components", components)
+    bundle.requiredRuntimeProfile?.let { profile ->
+        manifest.put(
+            "requiredRuntimeProfile",
+            JSONObject()
+                .put("qnnSdk", profile.qnnSdk)
+                .put("htpArch", profile.htpArch)
+                .put("completeBundleRuntime", profile.completeBundleRuntime)
+        )
+    }
+    if (bundle.qnnSmokeSpecs.isNotEmpty()) {
+        manifest.put(
+            "smokes",
+            JSONArray(
+                bundle.qnnSmokeSpecs.map { smoke ->
+                    JSONObject()
+                        .put("width", smoke.width)
+                        .put("height", smoke.height)
+                        .put("steps", smoke.steps)
+                        .put("timeoutSeconds", smoke.timeoutSeconds)
+                        .put("prompt", smoke.prompt)
+                        .put("graphName", smoke.graphName)
+                        .put("contextBinary", smoke.contextBinary)
+                        .put(
+                            "inputs",
+                            JSONArray(
+                                smoke.inputs.map { tensor ->
+                                    JSONObject()
+                                        .put("name", tensor.name)
+                                        .put("role", tensor.role)
+                                        .put("dataType", tensor.dataType)
+                                        .put("shape", JSONArray(tensor.shape))
+                                        .put("fill", tensor.fill)
+                                }
+                            )
+                        )
+                        .put(
+                            "outputs",
+                            JSONArray(
+                                smoke.outputs.map { tensor ->
+                                    JSONObject()
+                                        .put("name", tensor.name)
+                                        .put("role", tensor.role)
+                                        .put("dataType", tensor.dataType)
+                                        .put("shape", JSONArray(tensor.shape))
+                                        .put("fill", tensor.fill)
+                                }
+                            )
+                        )
+                }
+            )
+        )
+    }
+    return manifest
+}
+
+private fun expandedImageBundleManifestTargets(
+    bundleDir: File,
+    resolvedPrimary: File,
+    targets: List<Pair<RemoteModelFile, File>>
+): List<Pair<RemoteModelFile, File>> {
+    val root = bundleDir.canonicalFile
+    val primaryFile = resolvedPrimary.canonicalFile
+    val archiveTarget = targets.firstOrNull { (remote, file) ->
+        remote.bundleRole == ImageEngineBundleComponentRole.DIFFUSION &&
+            file.extension.equals("zip", ignoreCase = true)
+    }
+    if (archiveTarget == null) return targets
+    val archiveRemote = archiveTarget.first
+    val existingTargetsByPath = targets
+        .filterNot { it === archiveTarget }
+        .mapNotNull { (remote, file) ->
+            runCatching { file.canonicalFile }.getOrNull()
+                ?.takeIf(File::isFile)
+                ?.let { it.path to remote }
+        }
+        .toMap()
+    return root.walkTopDown()
+        .filter(File::isFile)
+        .filterNot { it.name == "manifest.json" || it.name.endsWith(".part") }
+        .map { file ->
+            val canonical = file.canonicalFile
+            val relative = canonical.relativeTo(root).invariantSeparatorsPath
+            val existingRemote = existingTargetsByPath[canonical.path]
+            val remote = when {
+                existingRemote != null -> existingRemote.copy(relativePath = relative)
+                canonical == primaryFile -> archiveRemote.copy(
+                    path = "${archiveRemote.path}!/$relative",
+                    name = canonical.name,
+                    bundleRole = ImageEngineBundleComponentRole.DIFFUSION,
+                    relativePath = relative
+                )
+                else -> archiveRemote.copy(
+                    path = "${archiveRemote.path}!/$relative",
+                    name = canonical.name,
+                    sizeBytes = canonical.length(),
+                    sha256 = null,
+                    bundleRole = ImageEngineBundleComponentRole.CONFIG,
+                    relativePath = relative
+                )
+            }
+            remote to canonical
+        }
+        .toList()
+}
+
+private fun writeDownloadedImageBundleManifest(
+    displayName: String,
+    bundleDir: File,
+    bundle: ImageEngineBundleSpec,
+    targets: List<Pair<RemoteModelFile, File>>
+) {
+    bundleDir.mkdirs()
+    File(bundleDir, "manifest.json").writeText(
+        downloadedImageBundleManifestJson(
+            displayName = displayName,
+            bundle = bundle,
+            targets = targets
+        ).toString(2),
+        Charsets.UTF_8
+    )
+}
+
+internal fun downloadedVisionBundleManifestJson(
+    displayName: String,
+    bundle: VisionModelBundleSpec,
+    targets: List<Pair<RemoteModelFile, File>>
+): JSONObject {
+    val components = JSONArray()
+    targets.forEach { (remote, file) ->
+        val role = remote.visionBundleRole ?: VisionModelBundleComponentRole.OPTIONAL
+        components.put(
+            JSONObject()
+                .put("role", role.name)
+                .put("path", file.relativePathFromCommonRoot(targets))
+                .put("fileName", file.name)
+                .put("sourceRepo", remote.repoId)
+                .put("sourcePath", remote.path)
+                .put("provider", remote.provider.name)
+                .put("required", role != VisionModelBundleComponentRole.OPTIONAL)
+        )
+    }
+    return JSONObject()
+        .put("schema", "mca.vision_engine.bundle.v1")
+        .put("id", bundle.id)
+        .put("title", displayName)
+        .put("runtime", bundle.runtime.name)
+        .put("accelerator", bundle.accelerator.name)
+        .put("minDeviceTier", bundle.minDeviceTier.name)
+        .put("requiresQnnRuntime", bundle.requiresQnnRuntime)
+        .put("requiresSmokeTest", bundle.requiresSmokeTest)
+        .put(
+            "smoke",
+            JSONObject()
+                .put("imageWidth", bundle.smokeSpec.imageWidth)
+                .put("imageHeight", bundle.smokeSpec.imageHeight)
+                .put("prompt", bundle.smokeSpec.prompt)
+                .put("timeoutSeconds", bundle.smokeSpec.timeoutSeconds)
+        )
+        .put("npuActive", false)
+        .put("components", components)
+}
+
+private fun writeDownloadedVisionBundleManifest(
+    displayName: String,
+    bundleDir: File,
+    bundle: VisionModelBundleSpec,
+    targets: List<Pair<RemoteModelFile, File>>
+) {
+    bundleDir.mkdirs()
+    File(bundleDir, "manifest.json").writeText(
+        downloadedVisionBundleManifestJson(
+            displayName = displayName,
+            bundle = bundle,
+            targets = targets
+        ).toString(2),
+        Charsets.UTF_8
+    )
+}
+
+private fun File.relativePathFromCommonRoot(targets: List<Pair<RemoteModelFile, File>>): String {
+    val root = targets.firstOrNull()?.second?.parentFile ?: parentFile
+    return if (root != null) {
+        runCatching { relativeTo(root).invariantSeparatorsPath }.getOrDefault(name)
+    } else {
+        name
+    }
+}
+
 private fun ModelRepositoryProvider.toModelSource(): ModelSource =
     when (this) {
         ModelRepositoryProvider.MODELSCOPE -> ModelSource.MODELSCOPE
         ModelRepositoryProvider.HUGGING_FACE -> ModelSource.HUGGING_FACE
+    }
+
+private fun ChatModelRuntime.toLocalChatRuntime(): LocalChatRuntime =
+    when (this) {
+        ChatModelRuntime.MNN -> LocalChatRuntime.MNN_CPU
+        ChatModelRuntime.LLAMA_CPP -> LocalChatRuntime.LLAMA_CPP
+        ChatModelRuntime.GENIEX_QAIRT -> LocalChatRuntime.GENIEX_QAIRT
+    }
+
+private fun ImageEngineBundleRuntime.toLocalImageRuntime(): LocalImageRuntime =
+    when (this) {
+        ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP -> LocalImageRuntime.STABLE_DIFFUSION_CPP
+        ImageEngineBundleRuntime.MNN_DIFFUSION -> LocalImageRuntime.MNN_DIFFUSION
+        ImageEngineBundleRuntime.QNN_HTP -> LocalImageRuntime.QNN_HTP
     }
 
 private fun String.toFilePreview(): String =
