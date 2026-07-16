@@ -133,6 +133,54 @@ class LocalImageQnnRunnerTest {
     }
 
     @Test
+    fun semanticQnnBundleWithoutManualGraphMetadataReachesRealSemanticGenerationGate() {
+        val bundle = semanticQnnImageBundle()
+        val bridge = RecordingImageSmokeBridge()
+        val runner = QnnHtpImageRunner(runnerReady = true, smokeBridge = bridge)
+
+        val health = runner.health(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+        val smoke = runner.runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_REQUIRED, health.state)
+        assertEquals(LocalImageQnnState.SMOKE_REQUIRED, smoke.state)
+        assertFalse(health.npuActive)
+        assertFalse(smoke.npuActive)
+        assertTrue(health.message.contains("real QNN text encoder, UNet, and VAE graphs"))
+        assertEquals(0, bridge.specs.size)
+    }
+
+    @Test
+    fun semanticQnnBundleRequiresEveryNonEmptyNativeContext() {
+        listOf("text_encoder.bin", "unet.bin", "vae.bin").forEach { missingName ->
+            val missingBundle = semanticQnnImageBundle(missingName = missingName)
+            val missingReport = QnnHtpImageRunner(runnerReady = true).health(
+                device = snapdragonElite(qnnReady = true),
+                bundleRoot = missingBundle
+            )
+
+            assertEquals(missingName, LocalImageQnnState.BUNDLE_INCOMPLETE, missingReport.state)
+            assertFalse(missingName, missingReport.npuActive)
+            assertTrue(missingName, missingReport.message.contains(missingName))
+
+            val emptyBundle = semanticQnnImageBundle(emptyName = missingName)
+            val emptyReport = QnnHtpImageRunner(runnerReady = true).health(
+                device = snapdragonElite(qnnReady = true),
+                bundleRoot = emptyBundle
+            )
+
+            assertEquals(missingName, LocalImageQnnState.BUNDLE_INCOMPLETE, emptyReport.state)
+            assertFalse(missingName, emptyReport.npuActive)
+            assertTrue(missingName, emptyReport.message.contains(missingName))
+        }
+    }
+
+    @Test
     fun validSmokeSuiteOverridesLegacyPipelineSmokeWithoutGraphMetadata() {
         val bundle = qnnImageBundle()
         val manifestFile = File(bundle, "manifest.json")
@@ -617,6 +665,46 @@ class LocalImageQnnRunnerTest {
         return root
     }
 
+    private fun semanticQnnImageBundle(
+        missingName: String? = null,
+        emptyName: String? = null
+    ): File {
+        val root = Files.createTempDirectory("qnn-semantic-image-bundle").toFile()
+        listOf("text_encoder.bin", "unet.bin", "vae.bin").forEach { name ->
+            if (name != missingName) {
+                root.touch("graphs/$name", if (name == emptyName) "" else "context-$name")
+            }
+        }
+        root.touch("tokenizer/vocab.json", "{}")
+        root.touch("tokenizer/merges.txt", "#version: 0.2")
+        File(root, "manifest.json").writeText(
+            """
+            {
+              "schema": "mca.image_engine.bundle.v1",
+              "id": "official-semantic-qnn",
+              "title": "Official semantic QNN",
+              "runtime": "QNN_HTP",
+              "family": "SD15",
+              "requiresQnnRuntime": true,
+              "requiresSmokeTest": true,
+              "components": [
+                {"role": "DIFFUSION", "path": "graphs/unet.bin"},
+                {"role": "VAE", "path": "graphs/vae.bin"},
+                {"role": "TEXT_ENCODER", "path": "graphs/text_encoder.bin"}
+              ],
+              "smoke": {
+                "width": 512,
+                "height": 512,
+                "steps": 1,
+                "timeoutSeconds": 300
+              }
+            }
+            """.trimIndent(),
+            Charsets.UTF_8
+        )
+        return root
+    }
+
     private fun snapdragonElite(qnnReady: Boolean): DeviceProfile =
         snapdragonDevice("SM8750", qnnReady)
 
@@ -707,6 +795,20 @@ class LocalImageQnnRunnerTest {
             runtimeDirs: List<String>,
             smokeSpec: QnnSmokeSpec
         ): NativeQnnSmokeResult = result
+    }
+
+    private class RecordingImageSmokeBridge : LocalImageQnnSmokeBridge {
+        override val runnerReady: Boolean = true
+        val specs = mutableListOf<QnnSmokeSpec>()
+
+        override fun runImageSmoke(
+            bundleRoot: File,
+            runtimeDirs: List<String>,
+            smokeSpec: QnnSmokeSpec
+        ): NativeQnnSmokeResult {
+            specs += smokeSpec
+            error("Static graph smoke must not run for a semantic-discovery bundle.")
+        }
     }
 
     private val Int.gb: Long

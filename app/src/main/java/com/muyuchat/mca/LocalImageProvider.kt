@@ -433,6 +433,12 @@ class LocalImageProvider(context: Context) {
                 qnnHealth.message
             }
             val isSdxlQnn = model.family == LocalImageModelFamily.SDXL
+            // Qualcomm's Gen5 archives include a native QNN CLIP graph.  Keep
+            // legacy QNN archives on their existing MNN-embedding path, but
+            // pass token IDs to the native graph when the archive explicitly
+            // supplies text_encoder.bin.
+            val usesQnnClipTokenIds = !isSdxlQnn &&
+                qnnNativeTextEncoderContextPath(bundleRoot) != null
             val conditioningRoot = if (isSdxlQnn) {
                 resolveSdxlQnnConditioningRoot(bundleRoot)
             } else {
@@ -448,6 +454,8 @@ class LocalImageProvider(context: Context) {
                 outputDir,
                 if (isSdxlQnn) {
                     "${outputFile.nameWithoutExtension}.sdxl-conditioning.f32"
+                } else if (usesQnnClipTokenIds) {
+                    "${outputFile.nameWithoutExtension}.qnn-clip-token-ids.i32"
                 } else {
                     "${outputFile.nameWithoutExtension}.sd15-embeddings.f32"
                 }
@@ -520,6 +528,8 @@ class LocalImageProvider(context: Context) {
             if (isSdxlQnn) {
                 params.put("conditioningFormat", "sdxl_qnn_conditioning")
                     .put("vaeLatentScale", 1.0 / 0.13025)
+            } else if (usesQnnClipTokenIds) {
+                params.put("conditioningFormat", "qnn_clip_token_ids_i32")
             }
 
             try {
@@ -540,6 +550,13 @@ class LocalImageProvider(context: Context) {
                         height,
                         contract.backendMode,
                         threads
+                    )
+                } else if (usesQnnClipTokenIds) {
+                    encodeQnnClipPromptTokenIds(
+                        bridge = mnnDiffusionBridge,
+                        bundleRoot = bundleRoot,
+                        prompt = prompt.trim(),
+                        outputFile = embeddingFile
                     )
                 } else {
                     mnnDiffusionBridge.encodeSd15PromptEmbeddings(
@@ -1006,12 +1023,100 @@ class LocalImageProvider(context: Context) {
             val lower = spec.contextBinary.lowercase()
             "vae" in lower || "decoder" in lower || (spec.inputs.size == 1 && spec.outputs.any { it.shape.contains(3) })
         }
-        put("unetContextBinary", unet?.contextBinary?.takeIf { it.isNotBlank() } ?: "unet.bin")
-        put("vaeDecoderContextBinary", vae?.contextBinary?.takeIf { it.isNotBlank() } ?: "vae_decoder.bin")
+        val textEncoderContext = qnnNativeTextEncoderContextPath(bundleRoot)
+        put(
+            "unetContextBinary",
+            unet?.contextBinary?.takeIf { it.isNotBlank() }
+                ?: qnnFirstContextPath(bundleRoot, "unet.bin")
+                ?: "unet.bin"
+        )
+        put(
+            "vaeDecoderContextBinary",
+            vae?.contextBinary?.takeIf { it.isNotBlank() }
+                ?: qnnFirstContextPath(bundleRoot, "vae.bin", "vae_decoder.bin")
+                ?: "vae_decoder.bin"
+        )
+        textEncoderContext?.let { put("textEncoderContextBinary", it) }
         put("graphName", unet?.graphName?.takeIf { it.isNotBlank() } ?: "model")
         return this
     }
 }
+
+/**
+ * Returns the exact bundle-relative QNN text-encoder context path.  Presence
+ * of this graph selects the token-ID contract; it is a package capability,
+ * never a device admission rule.
+ */
+internal fun qnnNativeTextEncoderContextPath(bundleRoot: File): String? =
+    qnnFirstContextPath(bundleRoot, "text_encoder.bin")
+
+internal fun qnnFirstContextPath(bundleRoot: File, vararg names: String): String? {
+    val expected = names.map(String::lowercase).toSet()
+    val root = runCatching { bundleRoot.canonicalFile }.getOrNull() ?: return null
+    return root.walkTopDown()
+        .firstOrNull { file -> file.isFile && file.name.lowercase() in expected }
+        ?.let { file ->
+            runCatching { file.canonicalFile.relativeTo(root).invariantSeparatorsPath }.getOrNull()
+        }
+}
+
+/** Locates the MNN tokenizer sidecar consumed by [MtokTokenizer]. */
+internal fun qnnClipTokenizerRoot(bundleRoot: File): File? {
+    val root = runCatching { bundleRoot.canonicalFile }.getOrNull() ?: return null
+    return root.walkTopDown()
+        .filter { file ->
+            file.isFile &&
+                file.length() > 0L &&
+                file.name.equals("tokenizer.mtok", ignoreCase = true)
+        }
+        .mapNotNull(File::getParentFile)
+        .firstOrNull()
+        ?.let { parent -> runCatching { parent.canonicalFile }.getOrNull() }
+}
+
+/** Writes unconditional then conditional CLIP token IDs as 154 little-endian int32 values. */
+internal fun encodeQnnClipPromptTokenIds(
+    bridge: NativeMnnDiffusionBridge,
+    bundleRoot: File,
+    prompt: String,
+    outputFile: File
+): String = runCatching {
+    val tokenizerRoot = qnnClipTokenizerRoot(bundleRoot)
+    val tokenIds = if (tokenizerRoot != null) {
+        bridge.tokenizePromptTokenIdsWithConfig(
+            bundleRoot = bundleRoot.absolutePath,
+            prompt = prompt,
+            tokenizerRoot = tokenizerRoot.absolutePath,
+            bosId = 49406,
+            eosId = 49407,
+            maxTokens = 77
+        )
+    } else {
+        bridge.tokenizePromptTokenIds(bundleRoot.absolutePath, prompt)
+    }
+    require(tokenIds.size == QNN_CLIP_TOKEN_ID_COUNT) {
+        "QNN CLIP tokenizer returned ${tokenIds.size} IDs; expected $QNN_CLIP_TOKEN_ID_COUNT."
+    }
+    outputFile.parentFile?.mkdirs()
+    val bytes = java.nio.ByteBuffer
+        .allocate(tokenIds.size * Int.SIZE_BYTES)
+        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    tokenIds.forEach(bytes::putInt)
+    outputFile.writeBytes(bytes.array())
+    JSONObject()
+        .put("ok", true)
+        .put("conditioningFormat", "qnn_clip_token_ids_i32")
+        .put("tokenCount", tokenIds.size)
+        .put("outputPath", outputFile.absolutePath)
+        .toString()
+}.getOrElse { error ->
+    JSONObject()
+        .put("ok", false)
+        .put("error", error.message ?: "Failed to tokenize QNN CLIP prompt.")
+        .toString()
+}
+
+private const val QNN_CLIP_TOKEN_ID_COUNT = 154
 
 internal fun qnnImageExecutionMetadata(
     nativeRequestId: String,
@@ -1025,7 +1130,12 @@ internal fun qnnImageExecutionMetadata(
     .put("qnnGraphExecution", nativeResult.optBoolean("qnnGraphExecution", false))
     .put("nativeExecution", nativeResult.optBoolean("nativeExecution", false))
     .put("fallback", nativeResult.optBoolean("fallback", true))
+    .put("nativeGenerationSequence", nativeResult.optLong("nativeGenerationSequence"))
+    .put("nativeStartedAtMonotonicMs", nativeResult.optLong("nativeStartedAtMonotonicMs"))
+    .put("nativeStageMask", nativeResult.optLong("nativeStageMask"))
+    .put("nativeDetailStageMask", nativeResult.optLong("nativeDetailStageMask"))
     .put("runtimeSessionMode", nativeResult.optString("runtimeSessionMode"))
+    .put("conditioningFormat", nativeResult.optString("conditioningFormat"))
     .put("archiveContextHtpArch", nativeResult.optInt("archiveContextHtpArch"))
     .put("transportHtpArch", nativeResult.optInt("transportHtpArch"))
     .put("unetWorkerPid", nativeResult.optInt("unetWorkerPid"))
@@ -1043,10 +1153,28 @@ internal fun qnnImageExecutionMetadata(
     .put("elapsedMs", nativeResult.optLong("elapsedMs"))
     .put("unetContextLoadMs", nativeResult.optLong("unetContextLoadMs"))
     .put("unetExecuteMsTotal", nativeResult.optLong("unetExecuteMsTotal"))
+    .put("unetExecuteMsAvg", nativeResult.optLong("unetExecuteMsAvg"))
     .put("vaeContextLoadMs", nativeResult.optLong("vaeContextLoadMs"))
     .put("vaeExecuteMs", nativeResult.optLong("vaeExecuteMs"))
+    .put("textEncoderGraph", nativeResult.optString("textEncoderGraph"))
+    .put("textEncoderContextLoadMs", nativeResult.optLong("textEncoderContextLoadMs"))
+    .put("textEncoderExecuteMsTotal", nativeResult.optLong("textEncoderExecuteMsTotal"))
+    .put("textEncoderEmbeddingWidth", nativeResult.optLong("textEncoderEmbeddingWidth"))
     .put("latentSha256", nativeResult.optString("latentSha256"))
     .put("outputBytes", outputBytes)
+    .also { metadata ->
+        nativeResult.optJSONObject("runtime")?.let { runtime ->
+            metadata
+                .put("selectedHtpArch", runtime.optInt("htpArchVersion"))
+                .put("runtimeLoadable", runtime.optBoolean("loadable", false))
+                .put("qnnInterfacePresent", runtime.optBoolean("qnnInterfacePresent", false))
+            runtime.optJSONObject("compile")?.let { compile ->
+                metadata
+                    .put("sdkHeadersPresent", compile.optBoolean("sdkHeadersPresent", false))
+                    .put("typedGraphBindingsCompiled", compile.optBoolean("typedGraphBindingsCompiled", false))
+            }
+        }
+    }
 
 internal data class QnnImageGenerationContract(
     val width: Int,

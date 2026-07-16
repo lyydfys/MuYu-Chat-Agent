@@ -17,6 +17,17 @@ class ModelScopeClientTest {
     private val client = ModelScopeClient()
 
     @Test
+    fun ignoresGitBlobSha1WhenAComponentRequiresSha256() {
+        assertNull(normalizedRemoteSha256OrNull("82d05b0e688d7ea94675678646c427907419346e"))
+        assertEquals(
+            "699cce92eb7c122e2eb7dfdea78e6187fda76a5ed4a8e42319b85610e620e091",
+            normalizedRemoteSha256OrNull(
+                "699cce92eb7c122e2eb7dfdea78e6187fda76a5ed4a8e42319b85610e620e091"
+            )
+        )
+    }
+
+    @Test
     fun parsesPlainRepoId() {
         assertEquals(
             "lmstudio-community/Qwen3.5-0.8B-GGUF",
@@ -556,7 +567,18 @@ class ModelScopeClientTest {
         )
         val gen5Images = npuImage.filter { it.id in gen5ImageIds }
         assertEquals(3, gen5Images.size)
-        assertTrue(gen5Images.all { it.status == RecommendedModelStatus.PENDING_INTEGRATION })
+        assertEquals(
+            RecommendedModelStatus.RECOMMENDED,
+            gen5Images.single { it.id == "qualcomm_sd15_gen5_qnn" }.status
+        )
+        assertEquals(
+            RecommendedModelStatus.RECOMMENDED,
+            gen5Images.single { it.id == "qualcomm_sd21_gen5_qnn" }.status
+        )
+        assertEquals(
+            RecommendedModelStatus.PENDING_INTEGRATION,
+            gen5Images.single { it.id == "qualcomm_controlnet_canny_gen5_qnn" }.status
+        )
         assertTrue(gen5Images.all { it.downloadable })
         assertTrue(gen5Images.all { it.supportedChipsetCodes == setOf("SM8850", "SM8850P") })
         assertEquals(

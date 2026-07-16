@@ -195,7 +195,12 @@ class SdxlImagePhaseProtocolTest {
                 .put("qnnGraphExecution", true)
                 .put("nativeExecution", true)
                 .put("fallback", false)
+                .put("nativeGenerationSequence", 7L)
+                .put("nativeStartedAtMonotonicMs", 123_456L)
+                .put("nativeStageMask", 255L)
+                .put("nativeDetailStageMask", 1023L)
                 .put("runtimeSessionMode", "isolated_unet_then_vae_same_transport")
+                .put("conditioningFormat", "sdxl_qnn_conditioning")
                 .put("archiveContextHtpArch", 75)
                 .put("transportHtpArch", 79)
                 .put("unetWorkerPid", 14149)
@@ -204,7 +209,20 @@ class SdxlImagePhaseProtocolTest {
                 .put("vaeWorkerPid", 14242)
                 .put("vaeRuntimeProfile", "V79")
                 .put("vaeTransportHtpArch", 79)
-                .put("vaeProcessDeathConfirmed", true),
+                .put("vaeProcessDeathConfirmed", true)
+                .put(
+                    "runtime",
+                    JSONObject()
+                        .put("htpArchVersion", 79)
+                        .put("loadable", true)
+                        .put("qnnInterfacePresent", true)
+                        .put(
+                            "compile",
+                            JSONObject()
+                                .put("sdkHeadersPresent", true)
+                                .put("typedGraphBindingsCompiled", true)
+                        )
+                ),
             outputBytes = 2_834_965L
         )
 
@@ -215,6 +233,14 @@ class SdxlImagePhaseProtocolTest {
         assertTrue(metadata.getBoolean("unetProcessDeathConfirmed"))
         assertTrue(metadata.getBoolean("vaeProcessDeathConfirmed"))
         assertFalse(metadata.getBoolean("fallback"))
+        assertEquals(7L, metadata.getLong("nativeGenerationSequence"))
+        assertEquals(123_456L, metadata.getLong("nativeStartedAtMonotonicMs"))
+        assertEquals("sdxl_qnn_conditioning", metadata.getString("conditioningFormat"))
+        assertEquals(79, metadata.getInt("selectedHtpArch"))
+        assertTrue(metadata.getBoolean("runtimeLoadable"))
+        assertTrue(metadata.getBoolean("qnnInterfacePresent"))
+        assertTrue(metadata.getBoolean("sdkHeadersPresent"))
+        assertTrue(metadata.getBoolean("typedGraphBindingsCompiled"))
     }
 
     @Test

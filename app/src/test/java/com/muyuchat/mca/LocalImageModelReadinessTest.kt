@@ -1237,6 +1237,36 @@ class LocalImageModelReadinessTest {
         assertEquals(root.canonicalFile, resolveSdxlQnnConditioningRoot(root))
     }
 
+    @Test
+    fun qnnNativeTextEncoderAndVaePathsPreserveNestedArchiveLayout() {
+        val root = Files.createTempDirectory("gen5-qnn-context-paths").toFile()
+        try {
+            root.touch("graphs/unet.bin")
+            root.touch("graphs/text_encoder.bin")
+            root.touch("graphs/vae.bin")
+
+            assertEquals("graphs/unet.bin", qnnFirstContextPath(root, "unet.bin"))
+            assertEquals("graphs/text_encoder.bin", qnnNativeTextEncoderContextPath(root))
+            assertEquals("graphs/vae.bin", qnnFirstContextPath(root, "vae.bin", "vae_decoder.bin"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun qnnClipTokenizerRootSelectsMtokInsteadOfRawPublisherVocabulary() {
+        val root = Files.createTempDirectory("gen5-qnn-tokenizer-root").toFile()
+        try {
+            root.touch("publisher/tokenizer/vocab.json")
+            root.touch("publisher/tokenizer/merges.txt")
+            root.touch("prepared/tokenizer.mtok", "mnn-tokenizer")
+
+            assertEquals(File(root, "prepared").canonicalFile, qnnClipTokenizerRoot(root))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     private fun localImageRecord(
         root: File,
         primary: File,

@@ -71,6 +71,7 @@ std::atomic<int> g_qnn_image_generation_phase{kQnnImageIdle};
 std::atomic<int> g_qnn_image_generation_step{0};
 std::atomic<int> g_qnn_image_generation_steps{0};
 std::atomic<long long> g_qnn_image_generation_started_ms{0};
+std::atomic<long long> g_qnn_image_generation_sequence{0};
 std::atomic<uint32_t> g_qnn_image_generation_stage_mask{0};
 std::atomic<uint64_t> g_qnn_image_generation_detail_stage_mask{0};
 std::timed_mutex g_qnn_context_execution_mutex;
@@ -178,6 +179,7 @@ bool qnn_image_generation_try_begin(int steps, const std::string& journal_path) 
     g_qnn_image_generation_step.store(0);
     g_qnn_image_generation_steps.store(std::max(1, steps));
     g_qnn_image_generation_started_ms.store(monotonic_millis());
+    g_qnn_image_generation_sequence.fetch_add(1);
     persist_qnn_image_generation_journal();
     return true;
 }
@@ -3040,16 +3042,69 @@ bool qnn_write_int32_tensor(QnnTensorBinding* binding, int32_t value, std::strin
         return false;
     }
     const uint64_t element_count = qnn_tensor_element_count(binding->tensor);
-    if (element_count == 0 || binding->buffer.size() < sizeof(int32_t)) {
+    if (element_count == 0) {
         *error = "Invalid int32 tensor buffer for " + binding->name;
         return false;
     }
-    if (qnn_tensor_data_type(binding->tensor) != QNN_DATATYPE_INT_32) {
-        *error = "Timestep tensor is not int32: " + binding->name;
+    const Qnn_DataType_t type = qnn_tensor_data_type(binding->tensor);
+    if (type == QNN_DATATYPE_INT_32) {
+        const size_t bytes = static_cast<size_t>(element_count) * sizeof(int32_t);
+        if (binding->buffer.size() < bytes) {
+            *error = "Int32 tensor buffer is too small for " + binding->name;
+            return false;
+        }
+        auto* out = reinterpret_cast<int32_t*>(binding->buffer.data());
+        for (uint64_t i = 0; i < element_count; ++i) out[i] = value;
+        return true;
+    }
+    if (type == QNN_DATATYPE_UFIXED_POINT_16 || type == QNN_DATATYPE_UINT_16) {
+        const size_t bytes = static_cast<size_t>(element_count) * sizeof(uint16_t);
+        if (binding->buffer.size() < bytes) {
+            *error = "Quantized timestep tensor buffer is too small for " + binding->name;
+            return false;
+        }
+        int64_t quantized = qnn_quantize_value(binding->tensor, static_cast<float>(value));
+        quantized = std::max<int64_t>(0, std::min<int64_t>(65535, quantized));
+        auto* out = reinterpret_cast<uint16_t*>(binding->buffer.data());
+        for (uint64_t i = 0; i < element_count; ++i) {
+            out[i] = static_cast<uint16_t>(quantized);
+        }
+        return true;
+    }
+    *error = "Unsupported scalar integer tensor dtype for " + binding->name +
+        ": " + qnn_data_type_name(type);
+    return false;
+}
+
+bool qnn_write_int32_vector_tensor(
+        QnnTensorBinding* binding,
+        const int32_t* values,
+        size_t count,
+        std::string* error) {
+    if (binding == nullptr || values == nullptr) {
+        *error = "Null int32 tensor binding or source.";
         return false;
     }
-    auto* out = reinterpret_cast<int32_t*>(binding->buffer.data());
-    for (uint64_t i = 0; i < element_count; ++i) out[i] = value;
+    const uint64_t element_count = qnn_tensor_element_count(binding->tensor);
+    if (element_count == 0 || count < element_count) {
+        std::ostringstream message;
+        message << "Not enough int32 values for tensor " << binding->name
+                << ". Need " << element_count << ", got " << count << ".";
+        *error = message.str();
+        return false;
+    }
+    const Qnn_DataType_t type = qnn_tensor_data_type(binding->tensor);
+    if (type != QNN_DATATYPE_INT_32) {
+        *error = "Token tensor is not int32: " + binding->name +
+            " (dtype=" + qnn_data_type_name(type) + ")";
+        return false;
+    }
+    const size_t bytes = static_cast<size_t>(element_count) * sizeof(int32_t);
+    if (binding->buffer.size() < bytes) {
+        *error = "Int32 vector tensor buffer is too small for " + binding->name;
+        return false;
+    }
+    std::memcpy(binding->buffer.data(), values, bytes);
     return true;
 }
 
@@ -4010,6 +4065,33 @@ bool read_float_binary_file(
     return true;
 }
 
+bool read_int32_binary_file(
+        const std::string& path,
+        std::vector<int32_t>* values,
+        std::string* error) {
+    const long long bytes = file_size_or_zero(path);
+    if (bytes <= 0 || bytes % static_cast<long long>(sizeof(int32_t)) != 0) {
+        *error = "Token file is missing, empty, or not int32 aligned: " + path;
+        return false;
+    }
+    std::ifstream input(path.c_str(), std::ios::binary);
+    if (!input.good()) {
+        *error = "Failed to open token file: " + path;
+        return false;
+    }
+    values->assign(
+        static_cast<size_t>(bytes / static_cast<long long>(sizeof(int32_t))),
+        0);
+    input.read(
+        reinterpret_cast<char*>(values->data()),
+        static_cast<std::streamsize>(bytes));
+    if (!input.good()) {
+        *error = "Failed to read token file: " + path;
+        return false;
+    }
+    return true;
+}
+
 std::vector<float> sd15_pndm_alphas() {
     constexpr int train_timesteps = 1000;
     constexpr float beta_start = 0.00085f;
@@ -4119,6 +4201,31 @@ bool qnn_run_unet_once(
     return qnn_read_float_tensor(unet.outputs[0], output, error);
 }
 
+bool qnn_run_text_encoder_once(
+        QnnExecutableGraph& text_encoder,
+        int token_index,
+        int embedding_index,
+        const int32_t* tokens,
+        size_t token_count,
+        std::vector<float>* embeddings,
+        long long* execute_ms,
+        std::string* error) {
+    if (!qnn_write_int32_vector_tensor(
+            &text_encoder.inputs[static_cast<size_t>(token_index)],
+            tokens,
+            token_count,
+            error)) {
+        return false;
+    }
+    if (!text_encoder.execute(execute_ms, error)) {
+        return false;
+    }
+    return qnn_read_float_tensor(
+        text_encoder.outputs[static_cast<size_t>(embedding_index)],
+        embeddings,
+        error);
+}
+
 bool qnn_run_sdxl_unet_once(
         QnnExecutableGraph& unet,
         int sample_index,
@@ -4170,27 +4277,53 @@ std::string qnn_semantic_generate_json(
         return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"bundle_missing\",\"message\":\"QNN bundle root is missing.\"}";
     }
 
+    const std::string conditioning_format = string_field(params_json, "conditioningFormat");
+    const bool qnn_token_conditioning =
+        contains_lower(conditioning_format, "qnn_clip_token_ids_i32");
     const std::string unet_binary = string_field(params_json, "unetContextBinary").empty()
         ? "unet.bin"
         : string_field(params_json, "unetContextBinary");
     const std::string vae_binary = string_field(params_json, "vaeDecoderContextBinary").empty()
         ? "vae_decoder.bin"
         : string_field(params_json, "vaeDecoderContextBinary");
+    const std::string text_encoder_binary =
+        string_field(params_json, "textEncoderContextBinary").empty()
+            ? "text_encoder.bin"
+            : string_field(params_json, "textEncoderContextBinary");
     const std::string graph_name = string_field(params_json, "graphName").empty()
         ? "model"
         : string_field(params_json, "graphName");
+    const std::string text_encoder_graph_name =
+        string_field(params_json, "textEncoderGraphName").empty()
+            ? graph_name
+            : string_field(params_json, "textEncoderGraphName");
     const std::string unet_path = join_path(bundle_root, unet_binary);
     const std::string vae_path = join_path(bundle_root, vae_binary);
+    const std::string text_encoder_path = join_path(bundle_root, text_encoder_binary);
     if (!exists_file(unet_path) || !exists_file(vae_path)) {
         return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"context_missing\",\"message\":") +
-            quote("QNN semantic generation requires unet.bin and vae_decoder.bin in the bundle root.") + "}";
+            quote("QNN semantic generation context is missing. Expected " +
+                unet_binary + " and " + vae_binary + " in the bundle root.") + "}";
+    }
+    if (qnn_token_conditioning && !exists_file(text_encoder_path)) {
+        return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_context_missing\",\"message\":") +
+            quote("QNN token conditioning requires " + text_encoder_binary +
+                " in the bundle root.") + "}";
     }
 
     std::vector<float> embeddings;
+    std::vector<int32_t> token_ids;
     std::string error;
-    if (!read_float_binary_file(embeddings_path, &embeddings, &error)) {
-        return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"embedding_read_failed\",\"message\":") +
-            quote(error) + "}";
+    if (qnn_token_conditioning) {
+        if (!read_int32_binary_file(embeddings_path, &token_ids, &error)) {
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"token_read_failed\",\"message\":") +
+                quote(error) + "}";
+        }
+    } else {
+        if (!read_float_binary_file(embeddings_path, &embeddings, &error)) {
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"embedding_read_failed\",\"message\":") +
+                quote(error) + "}";
+        }
     }
 
     const int requested_steps_hint = static_cast<int>(std::max<long long>(
@@ -4229,6 +4362,121 @@ std::string qnn_semantic_generate_json(
             quote(primary_error) + "}";
     }
     if (generation.cancelled()) return qnn_image_generation_cancelled_json();
+
+    long long text_encoder_context_load_ms = 0;
+    long long text_encoder_execute_ms_total = 0;
+    uint64_t text_encoder_embedding_width = 0;
+    std::string loaded_text_encoder_graph;
+    std::string text_encoder_inputs_debug = "[]";
+    std::string text_encoder_outputs_debug = "[]";
+    if (qnn_token_conditioning) {
+        QnnExecutableGraph text_encoder;
+        if (!text_encoder.load_in_session(
+                &runtime_session,
+                runtime,
+                text_encoder_path,
+                text_encoder_graph_name,
+                false)) {
+            const std::string primary_error = text_encoder.message;
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_load_failed\",\"message\":") +
+                quote(primary_error) + "}";
+        }
+        text_encoder_context_load_ms = text_encoder.context_load_ms;
+        loaded_text_encoder_graph = text_encoder.graph_name;
+        if (generation.cancelled()) return qnn_image_generation_cancelled_json();
+
+        int token_index = tensor_index_by_name(
+            text_encoder.inputs,
+            {"tokens", "token", "input_ids", "input"});
+        if (token_index < 0 && text_encoder.inputs.size() == 1) token_index = 0;
+        int embedding_index = tensor_index_by_name(
+            text_encoder.outputs,
+            {"text_embedding", "text_emb", "embedding", "hidden"});
+        if (embedding_index < 0 && text_encoder.outputs.size() == 1) embedding_index = 0;
+        if (token_index < 0 || embedding_index < 0) {
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_tensor_layout_unsupported\",\"message\":") +
+                quote("QNN text encoder requires one int32 token input and one embedding output. inputs=" +
+                    qnn_tensor_list_debug_json(text_encoder.inputs) + ", outputs=" +
+                    qnn_tensor_list_debug_json(text_encoder.outputs)) + "}";
+        }
+        text_encoder_inputs_debug = qnn_tensor_list_debug_json(text_encoder.inputs);
+        text_encoder_outputs_debug = qnn_tensor_list_debug_json(text_encoder.outputs);
+
+        const uint64_t token_elements = qnn_tensor_element_count(
+            text_encoder.inputs[static_cast<size_t>(token_index)].tensor);
+        const uint64_t embedding_elements = qnn_tensor_element_count(
+            text_encoder.outputs[static_cast<size_t>(embedding_index)].tensor);
+        if (token_elements != 77 || token_ids.size() != static_cast<size_t>(token_elements * 2u)) {
+            std::ostringstream message;
+            message << "QNN CLIP token conditioning requires exactly two 77-token int32 sequences. "
+                    << "Graph token elements=" << token_elements
+                    << ", file token elements=" << token_ids.size() << ".";
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_token_shape_unsupported\",\"message\":") +
+                quote(message.str()) + "}";
+        }
+        if (embedding_elements == 0 || embedding_elements % token_elements != 0) {
+            std::ostringstream message;
+            message << "QNN text encoder output shape is incompatible with its token sequence. "
+                    << "Token elements=" << token_elements
+                    << ", embedding elements=" << embedding_elements << ".";
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_output_shape_unsupported\",\"message\":") +
+                quote(message.str()) + "}";
+        }
+        text_encoder_embedding_width = embedding_elements / token_elements;
+
+        std::vector<float> negative_embeddings;
+        std::vector<float> positive_embeddings;
+        long long execute_ms = 0;
+        if (!qnn_run_text_encoder_once(
+                text_encoder,
+                token_index,
+                embedding_index,
+                token_ids.data(),
+                static_cast<size_t>(token_elements),
+                &negative_embeddings,
+                &execute_ms,
+                &error)) {
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_uncond_failed\",\"message\":") +
+                quote(error) + "}";
+        }
+        text_encoder_execute_ms_total += execute_ms;
+        if (generation.cancelled()) return qnn_image_generation_cancelled_json();
+        if (!qnn_run_text_encoder_once(
+                text_encoder,
+                token_index,
+                embedding_index,
+                token_ids.data() + static_cast<size_t>(token_elements),
+                static_cast<size_t>(token_elements),
+                &positive_embeddings,
+                &execute_ms,
+                &error)) {
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_cond_failed\",\"message\":") +
+                quote(error) + "}";
+        }
+        text_encoder_execute_ms_total += execute_ms;
+        if (negative_embeddings.size() != static_cast<size_t>(embedding_elements) ||
+            positive_embeddings.size() != static_cast<size_t>(embedding_elements)) {
+            std::ostringstream message;
+            message << "QNN text encoder returned an unexpected output size. Expected "
+                    << embedding_elements << " per prompt, got "
+                    << negative_embeddings.size() << " and "
+                    << positive_embeddings.size() << ".";
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_output_shape_unsupported\",\"message\":") +
+                quote(message.str()) + "}";
+        }
+        embeddings.reserve(negative_embeddings.size() + positive_embeddings.size());
+        embeddings.insert(
+            embeddings.end(),
+            negative_embeddings.begin(),
+            negative_embeddings.end());
+        embeddings.insert(
+            embeddings.end(),
+            positive_embeddings.begin(),
+            positive_embeddings.end());
+        text_encoder.close();
+        if (generation.cancelled()) return qnn_image_generation_cancelled_json();
+    }
+
     QnnExecutableGraph vae;
     if (!vae.load_in_session(&runtime_session, runtime, vae_path, graph_name, true)) {
         const std::string primary_error = vae.message;
@@ -4237,7 +4485,6 @@ std::string qnn_semantic_generate_json(
     }
     if (generation.cancelled()) return qnn_image_generation_cancelled_json();
 
-    const std::string conditioning_format = string_field(params_json, "conditioningFormat");
     const std::string family = string_field(params_json, "family");
     const bool request_sdxl =
         contains_lower(conditioning_format, "sdxl") ||
@@ -4414,6 +4661,10 @@ std::string qnn_semantic_generate_json(
             << "\"nativeExecution\":true,"
             << "\"fallback\":false,"
             << "\"executionStage\":\"sdxl_semantic_generation_passed\","
+            << "\"nativeGenerationSequence\":" << g_qnn_image_generation_sequence.load() << ","
+            << "\"nativeStartedAtMonotonicMs\":" << g_qnn_image_generation_started_ms.load() << ","
+            << "\"nativeStageMask\":" << g_qnn_image_generation_stage_mask.load() << ","
+            << "\"nativeDetailStageMask\":" << g_qnn_image_generation_detail_stage_mask.load() << ","
             << "\"runtimeSessionMode\":\"shared_unet_vae\","
             << "\"message\":\"QNN SDXL semantic generation completed with MNN CLIP conditioning, CFG sampling, QNN UNet, and QNN VAE decoder.\","
             << "\"conditioningFormat\":\"sdxl_qnn_conditioning\","
@@ -4471,6 +4722,16 @@ std::string qnn_semantic_generate_json(
     const uint64_t vae_input_elements = qnn_tensor_element_count(vae.inputs[0].tensor);
     if (latent_elements == 0 || text_elements == 0 || vae_input_elements != latent_elements) {
         return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"tensor_shape_unsupported\",\"message\":\"QNN UNet and VAE latent tensor shapes are not compatible.\"}";
+    }
+    if (qnn_token_conditioning &&
+        embeddings.size() != static_cast<size_t>(text_elements * 2)) {
+        std::ostringstream message;
+        message << "QNN text encoder output does not match the UNet conditioning input. "
+                << "Encoder produced " << (embeddings.size() / 2u)
+                << " elements per prompt (width=" << text_encoder_embedding_width
+                << "), UNet expects " << text_elements << ".";
+        return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_unet_shape_mismatch\",\"message\":") +
+            quote(message.str()) + "}";
     }
     if (embeddings.size() < static_cast<size_t>(text_elements * 2)) {
         std::ostringstream message;
@@ -4597,7 +4858,18 @@ std::string qnn_semantic_generate_json(
         << "\"nativeExecution\":true,"
         << "\"fallback\":false,"
         << "\"executionStage\":\"semantic_generation_passed\","
-        << "\"message\":\"QNN SD1.5 semantic generation completed with MNN text embeddings, PNDM scheduler, QNN UNet, and QNN VAE decoder.\","
+        << "\"nativeGenerationSequence\":" << g_qnn_image_generation_sequence.load() << ","
+        << "\"nativeStartedAtMonotonicMs\":" << g_qnn_image_generation_started_ms.load() << ","
+        << "\"nativeStageMask\":" << g_qnn_image_generation_stage_mask.load() << ","
+        << "\"nativeDetailStageMask\":" << g_qnn_image_generation_detail_stage_mask.load() << ","
+        << "\"runtimeSessionMode\":"
+        << quote(qnn_token_conditioning ? "shared_text_unet_vae" : "shared_unet_vae") << ","
+        << "\"message\":" << quote(qnn_token_conditioning
+            ? "QNN semantic generation completed with QNN CLIP text encoding, PNDM scheduler, QNN UNet, and QNN VAE decoder."
+            : "QNN SD1.5 semantic generation completed with MNN text embeddings, PNDM scheduler, QNN UNet, and QNN VAE decoder.") << ","
+        << "\"conditioningFormat\":" << quote(qnn_token_conditioning
+            ? "qnn_clip_token_ids_i32"
+            : conditioning_format) << ","
         << "\"steps\":" << steps << ","
         << "\"seed\":" << seed << ","
         << "\"cfgScale\":" << cfg_scale << ","
@@ -4606,6 +4878,9 @@ std::string qnn_semantic_generate_json(
         << "\"elapsedMs\":" << elapsed << ","
         << "\"unetContextLoadMs\":" << unet.context_load_ms << ","
         << "\"vaeContextLoadMs\":" << vae.context_load_ms << ","
+        << "\"textEncoderContextLoadMs\":" << text_encoder_context_load_ms << ","
+        << "\"textEncoderExecuteMsTotal\":" << text_encoder_execute_ms_total << ","
+        << "\"textEncoderEmbeddingWidth\":" << text_encoder_embedding_width << ","
         << "\"unetExecuteMsTotal\":" << unet_execute_ms_total << ","
         << "\"unetExecuteMsAvg\":" << (steps > 0 ? (unet_execute_ms_total / (steps * 2)) : 0) << ","
         << "\"vaeExecuteMs\":" << vae_execute_ms << ","
@@ -4615,11 +4890,14 @@ std::string qnn_semantic_generate_json(
         << "\"pixelChecksum\":" << checksum_float_vector(pixels) << ","
         << "\"outputPath\":" << quote(output_path) << ","
         << "\"outputBytes\":" << output_bytes << ","
+        << "\"textEncoderGraph\":" << quote(loaded_text_encoder_graph) << ","
         << "\"unetGraph\":" << quote(unet.graph_name) << ","
         << "\"vaeGraph\":" << quote(vae.graph_name) << ","
         << "\"debug\":{"
         << "\"timestepFirst\":" << (timesteps.empty() ? 0 : timesteps.front()) << ","
         << "\"timestepLast\":" << (timesteps.empty() ? 0 : timesteps.back()) << ","
+        << "\"textEncoderInputs\":" << text_encoder_inputs_debug << ","
+        << "\"textEncoderOutputs\":" << text_encoder_outputs_debug << ","
         << "\"unetInputs\":" << qnn_tensor_list_debug_json(unet.inputs) << ","
         << "\"unetOutputs\":" << qnn_tensor_list_debug_json(unet.outputs) << ","
         << "\"vaeInputs\":" << qnn_tensor_list_debug_json(vae.inputs) << ","

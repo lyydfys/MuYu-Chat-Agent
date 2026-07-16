@@ -140,12 +140,24 @@ internal class QnnHtpImageRunner(
                 message = "Device supports Snapdragon NPU acceleration, but the complete runtime is not load-verified."
             )
         }
-        val missing = qnnMissingComponents(bundleRoot, manifest)
+        val declaredSmokeSpecs = manifest.qnnSmokeSpecs.ifEmpty {
+            listOfNotNull(manifest.qnnSmokeSpec.takeIf(QnnSmokeSpec::hasStaticGraphMetadata))
+        }
+        val usesSemanticGraphDiscovery = declaredSmokeSpecs.none(QnnSmokeSpec::hasStaticGraphMetadata)
+        val missing = if (usesSemanticGraphDiscovery) {
+            qnnSemanticGraphBundleMissingComponents(bundleRoot)
+        } else {
+            qnnMissingComponents(bundleRoot, manifest)
+        }
         if (missing.isNotEmpty()) {
             return manifest.report(
                 state = LocalImageQnnState.BUNDLE_INCOMPLETE,
                 backend = backendLabel,
-                message = "QNN image bundle is incomplete: ${missing.joinToString(", ")}."
+                message = if (usesSemanticGraphDiscovery) {
+                    "QNN semantic image bundle is incomplete: ${missing.joinToString(", ")} must exist and be non-empty."
+                } else {
+                    "QNN image bundle is incomplete: ${missing.joinToString(", ")}."
+                }
             )
         }
         if (!runnerReady) {
@@ -155,14 +167,18 @@ internal class QnnHtpImageRunner(
                 message = "QNN image bridge is not packaged yet; NPU image generation remains inactive."
             )
         }
-        val smokeSpecs = manifest.qnnSmokeSpecs.ifEmpty { listOf(manifest.qnnSmokeSpec) }
-        if (smokeSpecs.isEmpty()) {
+        if (usesSemanticGraphDiscovery) {
             return manifest.report(
-                state = LocalImageQnnState.SMOKE_METADATA_INVALID,
+                state = LocalImageQnnState.SMOKE_REQUIRED,
                 backend = backendLabel,
-                message = "QNN image smoke metadata is invalid: at least one smoke graph is required."
+                message = if (smokeRequested) {
+                    "This QNN semantic bundle has no static graph smoke schema; the real text encoder, UNet, and VAE generation must provide native graph proof."
+                } else {
+                    "Runtime and semantic bundle are ready; the next generation will run the real QNN text encoder, UNet, and VAE graphs."
+                }
             )
         }
+        val smokeSpecs = declaredSmokeSpecs
         val invalidSmoke = smokeSpecs.firstOrNull { !it.validation.readyForNativeSmoke }
         if (invalidSmoke != null) {
             val smokeValidation = invalidSmoke.validation
@@ -288,3 +304,36 @@ private fun qnnMissingComponents(root: File, manifest: LocalImageBundleManifest)
         if (!hasAny("text_encoder", "clip", "t5", "tokenizer", "qwen", "llm")) add("text encoder/tokenizer")
     }
 }
+
+/**
+ * Static graph-smoke metadata is optional for official semantic QNN bundles.
+ * Partially declared graph metadata remains explicit and must pass the strict
+ * path and tensor validation; it must never be bypassed by dynamic discovery.
+ */
+private fun QnnSmokeSpec.hasStaticGraphMetadata(): Boolean =
+    graphName.isNotBlank() ||
+        contextBinary.isNotBlank() ||
+        inputs.isNotEmpty() ||
+        outputs.isNotEmpty()
+
+internal fun qnnSemanticGraphBundleMissingComponents(root: File): List<String> =
+    buildList {
+        if (root.nonEmptyQnnContextPath("text_encoder.bin") == null) add("text_encoder.bin")
+        if (root.nonEmptyQnnContextPath("unet.bin") == null) add("unet.bin")
+        if (root.nonEmptyQnnContextPath("vae.bin", "vae_decoder.bin") == null) {
+            add("vae.bin (or vae_decoder.bin)")
+        }
+    }
+
+internal fun hasCompleteQnnSemanticGraphBundle(root: File): Boolean =
+    qnnSemanticGraphBundleMissingComponents(root).isEmpty()
+
+private fun File.nonEmptyQnnContextPath(vararg names: String): String? =
+    qnnFirstContextPath(this, *names)?.takeIf { relativePath ->
+        val rootCanonical = runCatching { canonicalFile }.getOrNull() ?: return@takeIf false
+        val candidate = runCatching { File(rootCanonical, relativePath).canonicalFile }.getOrNull()
+            ?: return@takeIf false
+        candidate.isFile &&
+            candidate.length() > 0L &&
+            candidate.path.startsWith(rootCanonical.path + File.separator)
+    }

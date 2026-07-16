@@ -8,6 +8,9 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 
+internal fun normalizedRemoteSha256OrNull(value: String?): String? =
+    value?.trim()?.takeIf { it.matches(Regex("^[0-9a-fA-F]{64}$")) }
+
 class ModelScopeClient(
     private val client: OkHttpClient = OkHttpClient(),
     private val endpoints: List<String> = DEFAULT_ENDPOINTS,
@@ -293,7 +296,12 @@ class ModelScopeClient(
                         }
                     }
                 }
-                val remoteSha256 = remote.sha256?.takeIf { it.isNotBlank() }
+                // Hugging Face returns a 40-character Git blob SHA-1 for
+                // ordinary (non-LFS) files.  It is not comparable with the
+                // repository-owned SHA-256 contract below.  Only accept a
+                // real 64-hex publisher digest as remote SHA-256; otherwise
+                // retain the pinned component SHA-256 as the install check.
+                val remoteSha256 = normalizedRemoteSha256OrNull(remote.sha256)
                 component.sha256?.let { expected ->
                     remoteSha256?.let { actual ->
                         require(actual.equals(expected, ignoreCase = true)) {
@@ -1805,7 +1813,7 @@ class ModelScopeClient(
                 title = "Qualcomm Stable Diffusion 1.5 · 骁龙 8 Elite Gen 5",
                 repoId = "qualcomm/Stable-Diffusion-v1.5",
                 revision = "1815ed2af65018733338c37efacf62310e74bc94",
-                description = "骁龙 8 Elite Gen 5 写实与通用生图官方包，MCA 运行管线待适配。",
+                description = "骁龙 8 Elite Gen 5 写实与通用生图官方包；MCA 已完成 text encoder、UNet 与 VAE 的真实 QNN HTP 生图回归。",
                 recommendedFileName = "stable_diffusion_v1_5-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
                 parameterScale = "SD1.5",
                 quant = "w8a16 QAIRT 2.45",
@@ -1813,7 +1821,7 @@ class ModelScopeClient(
                 tags = listOf("写实", "通用生图", "Gen5", "QNN", "骁龙 NPU", "Qualcomm"),
                 priority = 0,
                 kind = ModelScopeRecommendedKind.IMAGE,
-                status = RecommendedModelStatus.PENDING_INTEGRATION,
+                status = RecommendedModelStatus.RECOMMENDED,
                 supportedChipsetCodes = GEN5_QNN_CHIPSETS,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 downloadable = true,
@@ -1831,7 +1839,7 @@ class ModelScopeClient(
                 title = "Qualcomm Stable Diffusion 2.1 · 骁龙 8 Elite Gen 5",
                 repoId = "qualcomm/Stable-Diffusion-v2.1",
                 revision = "5c79668b496a31d4570b06d5b2919ea393166b36",
-                description = "骁龙 8 Elite Gen 5 通用与艺术风格官方生图包，MCA 运行管线待适配。",
+                description = "骁龙 8 Elite Gen 5 通用与艺术风格官方生图包；MCA 已完成 text encoder、UNet 与 VAE 的真实 QNN HTP 生图回归。",
                 recommendedFileName = "stable_diffusion_v2_1-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
                 parameterScale = "SD2.1",
                 quant = "w8a16 QAIRT 2.45",
@@ -1839,7 +1847,7 @@ class ModelScopeClient(
                 tags = listOf("艺术风格", "通用生图", "Gen5", "QNN", "骁龙 NPU", "Qualcomm"),
                 priority = 1,
                 kind = ModelScopeRecommendedKind.IMAGE,
-                status = RecommendedModelStatus.PENDING_INTEGRATION,
+                status = RecommendedModelStatus.RECOMMENDED,
                 supportedChipsetCodes = GEN5_QNN_CHIPSETS,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 downloadable = true,

@@ -4889,6 +4889,102 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_runUnetSmoke(
     return utf8_to_jstring(env, out);
 }
 
+#if MCA_WITH_MNN_DIFFUSION
+// Tokenizer-only bridge used by QNN Stable Diffusion bundles. QNN's
+// text_encoder.bin consumes CLIP ids, while the MNN text encoder path can
+// remain unchanged. The pair layout is [negative(77), positive(77)].
+jintArray tokenize_prompt_token_ids(
+        JNIEnv* env,
+        const std::string& bundleRoot,
+        const std::string& prompt,
+        const std::string& tokenizerRoot,
+        jint bosId,
+        jint eosId,
+        jint maxTokens) {
+    if (env == nullptr || maxTokens <= 0 || maxTokens > 4096) {
+        return env == nullptr ? nullptr : env->NewIntArray(0);
+    }
+    auto root = tokenizerRoot.empty() ? bundleRoot : tokenizerRoot;
+    if (!file_exists(root + "/tokenizer.mtok") && file_exists(bundleRoot + "/tokenizer.mtok")) {
+        root = bundleRoot;
+    }
+    if (root.empty()) {
+        return env->NewIntArray(0);
+    }
+    MNN::DIFFUSION::MtokTokenizer tokenizer(
+            MNN::DIFFUSION::MtokTokenizer::Style::kPair,
+            static_cast<int>(bosId),
+            static_cast<int>(eosId));
+    if (!tokenizer.load(root)) {
+        return env->NewIntArray(0);
+    }
+    const auto ids = tokenizer.encode(prompt, static_cast<int>(maxTokens));
+    const size_t expectedCount = static_cast<size_t>(maxTokens) * 2U;
+    if (ids.size() != expectedCount || expectedCount > static_cast<size_t>(std::numeric_limits<jsize>::max())) {
+        return env->NewIntArray(0);
+    }
+    const auto result = env->NewIntArray(static_cast<jsize>(expectedCount));
+    if (result == nullptr) {
+        return nullptr;
+    }
+    std::vector<jint> values;
+    values.reserve(expectedCount);
+    for (const int id : ids) {
+        values.push_back(static_cast<jint>(id));
+    }
+    env->SetIntArrayRegion(result, 0, static_cast<jsize>(values.size()), values.data());
+    if (env->ExceptionCheck()) {
+        env->DeleteLocalRef(result);
+        return nullptr;
+    }
+    return result;
+}
+#endif
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIds(
+        JNIEnv* env,
+        jobject,
+        jstring bundleRoot,
+        jstring prompt) {
+#if MCA_WITH_MNN_DIFFUSION
+    return tokenize_prompt_token_ids(
+            env,
+            normalize_mnn_model_path(jstring_to_std(env, bundleRoot)),
+            jstring_to_std(env, prompt),
+            "",
+            49406,
+            49407,
+            77);
+#else
+    return env == nullptr ? nullptr : env->NewIntArray(0);
+#endif
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIdsWithConfig(
+        JNIEnv* env,
+        jobject,
+        jstring bundleRoot,
+        jstring prompt,
+        jstring tokenizerRoot,
+        jint bosId,
+        jint eosId,
+        jint maxTokens) {
+#if MCA_WITH_MNN_DIFFUSION
+    return tokenize_prompt_token_ids(
+            env,
+            normalize_mnn_model_path(jstring_to_std(env, bundleRoot)),
+            jstring_to_std(env, prompt),
+            normalize_mnn_model_path(jstring_to_std(env, tokenizerRoot)),
+            bosId,
+            eosId,
+            maxTokens);
+#else
+    return env == nullptr ? nullptr : env->NewIntArray(0);
+#endif
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmbeddings(
         JNIEnv* env,

@@ -2012,7 +2012,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 device = deviceProfileReader.read(),
                 bundleRoot = bundleRootFile
             )
-            if (report.state != LocalImageQnnState.NPU_ACTIVE) {
+            val semanticGraphVerificationRequired =
+                report.state == LocalImageQnnState.SMOKE_REQUIRED &&
+                    hasCompleteQnnSemanticGraphBundle(bundleRootFile)
+            if (report.state != LocalImageQnnState.NPU_ACTIVE && !semanticGraphVerificationRequired) {
                 return@runCatching false to report.message
             }
             if (!NativeMnnDiffusionBridge.isAvailable) {
@@ -2039,10 +2042,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val outputDir = File(app.cacheDir, "qnn_image_verify").apply { mkdirs() }
             val outputFile = File(outputDir, "verify-qnn-${System.currentTimeMillis()}.png")
             val isSdxlQnn = model.family == LocalImageModelFamily.SDXL
+            val usesQnnClipTokenIds = !isSdxlQnn &&
+                qnnNativeTextEncoderContextPath(bundleRootFile) != null
             val embeddingFile = File(
                 outputDir,
                 if (isSdxlQnn) {
                     "${outputFile.nameWithoutExtension}.sdxl-conditioning.f32"
+                } else if (usesQnnClipTokenIds) {
+                    "${outputFile.nameWithoutExtension}.qnn-clip-token-ids.i32"
                 } else {
                     "${outputFile.nameWithoutExtension}.sd15-embeddings.f32"
                 }
@@ -2066,6 +2073,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (isSdxlQnn) {
                 params.put("conditioningFormat", "sdxl_qnn_conditioning")
                     .put("vaeLatentScale", 1.0 / 0.13025)
+            } else if (usesQnnClipTokenIds) {
+                params.put("conditioningFormat", "qnn_clip_token_ids_i32")
             }
 
             val mnnBridge = NativeMnnDiffusionBridge()
@@ -2079,6 +2088,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     height,
                     "cpu",
                     threads
+                )
+            } else if (usesQnnClipTokenIds) {
+                encodeQnnClipPromptTokenIds(
+                    bridge = mnnBridge,
+                    bundleRoot = bundleRootFile,
+                    prompt = params.optString("prompt"),
+                    outputFile = embeddingFile
                 )
             } else {
                 mnnBridge.encodeSd15PromptEmbeddings(
@@ -2158,8 +2174,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val lower = spec.contextBinary.lowercase()
             "vae" in lower || "decoder" in lower || (spec.inputs.size == 1 && spec.outputs.any { it.shape.contains(3) })
         }
-        put("unetContextBinary", unet?.contextBinary?.takeIf { it.isNotBlank() } ?: "unet.bin")
-        put("vaeDecoderContextBinary", vae?.contextBinary?.takeIf { it.isNotBlank() } ?: "vae_decoder.bin")
+        val textEncoderContext = qnnNativeTextEncoderContextPath(bundleRoot)
+        put(
+            "unetContextBinary",
+            unet?.contextBinary?.takeIf { it.isNotBlank() }
+                ?: qnnFirstContextPath(bundleRoot, "unet.bin")
+                ?: "unet.bin"
+        )
+        put(
+            "vaeDecoderContextBinary",
+            vae?.contextBinary?.takeIf { it.isNotBlank() }
+                ?: qnnFirstContextPath(bundleRoot, "vae.bin", "vae_decoder.bin")
+                ?: "vae_decoder.bin"
+        )
+        textEncoderContext?.let { put("textEncoderContextBinary", it) }
         put("graphName", unet?.graphName?.takeIf { it.isNotBlank() } ?: "model")
         return this
     }
