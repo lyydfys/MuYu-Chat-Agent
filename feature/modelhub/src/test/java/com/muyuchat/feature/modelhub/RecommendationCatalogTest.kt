@@ -4,7 +4,6 @@ import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.download.RecommendedModelSection
 import com.muyuchat.core.download.RecommendedModelStatus
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -70,21 +69,22 @@ class RecommendationCatalogTest {
             visibleIds.none {
                 it.startsWith("bitcpm") ||
                     it == "glm47_flash_tq1" ||
-                    it == "meinamix_sd15_qnn228" ||
                     it == "mnn_sana_edit_v2" ||
                     it == "flux2_klein_4b_q4"
             }
         )
+        assertTrue("meinamix_sd15_qnn228" in visibleIds)
     }
 
     @Test
-    fun npuImageDownloadsAreExperimentalOnAnySnapdragonButBlockedElsewhere() {
+    fun npuImageDownloadsStayOpenOnUnmatchedAndUnknownDevices() {
         val cyberRealistic = recommendations.first { it.id == "cyberrealistic_sd15_qnn228" }
 
         assertTrue(recommendationDownloadAccess(cyberRealistic, "SM8550", deviceIsSnapdragon = true).canDownload)
         assertTrue(recommendationDownloadAccess(cyberRealistic, "SM8850", deviceIsSnapdragon = true).canDownload)
-        assertTrue(recommendationDownloadAccess(cyberRealistic, "SM8850", deviceIsSnapdragon = true).experimental)
-        assertFalse(recommendationDownloadAccess(cyberRealistic, "MT6989", deviceIsSnapdragon = false).canDownload)
+        assertTrue(recommendationDownloadAccess(cyberRealistic, "MT6989", deviceIsSnapdragon = false).canDownload)
+        assertTrue(recommendationDownloadAccess(cyberRealistic, "MT6989", deviceIsSnapdragon = false).experimental)
+        assertTrue(recommendationDownloadAccess(cyberRealistic, "", deviceIsSnapdragon = false).canDownload)
     }
 
     @Test
@@ -148,12 +148,29 @@ class RecommendationCatalogTest {
     }
 
     @Test
-    fun npuChatRequiresAnExactSupportedChipset() {
+    fun gemma4TwentySixBCardStaysDownloadableAndPointsAtItsRealRepository() {
+        val gemma = recommendations.first { it.id == "google_gemma4_26b_a4b_iq2_xxs" }
+        val access = recommendationDownloadAccess(gemma, "")
+
+        assertTrue(catalogFor("").qualityChat.any { it.id == gemma.id })
+        assertTrue(access.canDownload)
+        assertTrue(access.experimental)
+        assertEquals("实验下载", recommendationDownloadCtaLabel(gemma, access.canDownload, access.experimental))
+        assertEquals(
+            "https://hf-mirror.com/bartowski/google_gemma-4-26B-A4B-it-GGUF",
+            gemma.modelPageUrl
+        )
+    }
+
+    @Test
+    fun npuChatChipsetMatchIsAdvisoryAndNeverBlocksDownload() {
         val qwenVl = recommendations.first { it.id == "qwen3_vl_4b_qairt_w4a16" }
 
         assertTrue(recommendationDownloadAccess(qwenVl, "SM8750").canDownload)
-        assertFalse(recommendationDownloadAccess(qwenVl, "SM8550").canDownload)
-        assertFalse(recommendationDownloadAccess(qwenVl, "MT6989").canDownload)
+        assertTrue(recommendationDownloadAccess(qwenVl, "SM8550").canDownload)
+        assertTrue(recommendationDownloadAccess(qwenVl, "MT6989").canDownload)
+        assertTrue(recommendationDownloadAccess(qwenVl, "").canDownload)
+        assertTrue(recommendationDownloadAccess(qwenVl, "SM8550").experimental)
     }
 
     @Test
@@ -271,7 +288,8 @@ class RecommendationCatalogTest {
             listOf(
                 "cyberrealistic_sd15_qnn228",
                 "realisticvisionhyper_sd15_qnn228",
-                "dreamshaper_sd15_qnn228"
+                "dreamshaper_sd15_qnn228",
+                "meinamix_sd15_qnn228"
             ),
             catalog.npuImageSd15.map { it.id }
         )
@@ -292,6 +310,6 @@ class RecommendationCatalogTest {
             ),
             catalog.npuImageGen5.map { it.id }
         )
-        assertEquals(10, catalog.npuImage.size)
+        assertEquals(11, catalog.npuImage.size)
     }
 }

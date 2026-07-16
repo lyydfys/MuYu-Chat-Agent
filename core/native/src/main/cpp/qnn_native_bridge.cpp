@@ -1010,21 +1010,7 @@ bool select_qnn_runtime_profile_for_context(
         uint32_t context_soc_model) {
     if (runtime == nullptr) return false;
     const int context_htp_arch = htp_arch_version_for_soc_model(context_soc_model);
-    if (context_htp_arch == 0) {
-        // Unknown metadata stays on the coherent runtime selected during probe;
-        // never substitute a newer HTP architecture as a generic fallback.
-        return true;
-    }
     const int device_htp_arch = physical_device_htp_arch_version();
-    // A context compiled for an older Snapdragon generation still executes
-    // through the physical device's transport Skel/Stub on a newer chip.  The
-    // host and transport libraries must remain one coherent profile; selecting
-    // the context's older Skel on the newer device produces incompatible binary
-    // errors before contextCreateFromBinary.  Same-generation devices keep the
-    // exact profile, preserving the Gen2 V73 fix.
-    const int htp_arch = device_htp_arch > context_htp_arch
-        ? device_htp_arch
-        : context_htp_arch;
 
     struct HostCandidate {
         std::string directory;
@@ -1038,7 +1024,6 @@ bool select_qnn_runtime_profile_for_context(
         std::string stub;
     };
     std::vector<HostCandidate> hosts;
-    std::vector<DspCandidate> dsps;
     for (const auto& dir : runtime->search_directories) {
         if (dir.empty()) continue;
         const std::string system = join_path(dir, "libQnnSystem.so");
@@ -1046,14 +1031,48 @@ bool select_qnn_runtime_profile_for_context(
         if (exists_file(system) && exists_file(htp)) {
             hosts.push_back({dir, system, htp, join_path(dir, "libcdsprpc.so")});
         }
-        const std::string skel = htp_library_for_arch_in_dir(dir, htp_arch, "Skel.so");
-        const std::string stub = htp_library_for_arch_in_dir(dir, htp_arch, "Stub.so");
-        if (!skel.empty() && !stub.empty()) {
-            dsps.push_back({dir, skel, stub});
-        }
     }
 
-    auto select_profile = [&](const HostCandidate& host, const DspCandidate& dsp) {
+    // Device detection ranks the preferred transport but is never an admission
+    // list. Try the physical transport first, then the context's declared
+    // transport, then the coherent profile selected by the generic runtime
+    // probe, and finally every complete packaged profile. A newer device with
+    // only an older complete package therefore reaches real context/graph load
+    // instead of failing at a static chipset table.
+    std::vector<int> candidate_arches;
+    auto append_arch = [&](int arch) {
+        if (arch <= 0) return;
+        if (std::find(candidate_arches.begin(), candidate_arches.end(), arch) == candidate_arches.end()) {
+            candidate_arches.push_back(arch);
+        }
+    };
+    append_arch(device_htp_arch);
+    append_arch(context_htp_arch);
+    append_arch(runtime->htp_arch_version);
+
+    std::vector<int> packaged_arches;
+    for (const auto& dir : runtime->search_directories) {
+        DIR* handle = opendir(dir.c_str());
+        if (handle == nullptr) continue;
+        while (dirent* entry = readdir(handle)) {
+            const std::string name(entry->d_name);
+            if (name.find("libQnnHtpV") != 0 ||
+                (!ends_with(name, "Skel.so") && !ends_with(name, "Stub.so"))) {
+                continue;
+            }
+            const int version = htp_library_version(name);
+            if (version > 0 && std::find(packaged_arches.begin(), packaged_arches.end(), version) == packaged_arches.end()) {
+                packaged_arches.push_back(version);
+            }
+        }
+        closedir(handle);
+    }
+    std::sort(packaged_arches.begin(), packaged_arches.end(), [](int left, int right) {
+        return left > right;
+    });
+    for (const int arch : packaged_arches) append_arch(arch);
+
+    auto select_profile = [&](const HostCandidate& host, const DspCandidate& dsp, int htp_arch) {
         runtime->system_present = true;
         runtime->htp_present = true;
         runtime->skel_present = true;
@@ -1094,22 +1113,39 @@ bool select_qnn_runtime_profile_for_context(
             runtime->stub_path.c_str());
     };
 
-    for (const auto& host : hosts) {
-        for (const auto& dsp : dsps) {
-            if (!may_pair_qnn_runtime_directories(host.directory, dsp.directory)) continue;
-            select_profile(host, dsp);
-            return true;
+    for (const int htp_arch : candidate_arches) {
+        std::vector<DspCandidate> dsps;
+        for (const auto& dir : runtime->search_directories) {
+            if (dir.empty()) continue;
+            const std::string skel = htp_library_for_arch_in_dir(dir, htp_arch, "Skel.so");
+            const std::string stub = htp_library_for_arch_in_dir(dir, htp_arch, "Stub.so");
+            if (!skel.empty() && !stub.empty()) {
+                dsps.push_back({dir, skel, stub});
+            }
+        }
+        for (const auto& host : hosts) {
+            for (const auto& dsp : dsps) {
+                if (!may_pair_qnn_runtime_directories(host.directory, dsp.directory)) continue;
+                select_profile(host, dsp, htp_arch);
+                return true;
+            }
         }
     }
 
     std::ostringstream message;
     message << "No coherent QNN runtime profile for context socModel=" << context_soc_model
             << " (context HTP V" << context_htp_arch
-            << ", device HTP V" << device_htp_arch
-            << ", selected HTP V" << htp_arch
-            << "): libQnnSystem.so, libQnnHtp.so, libQnnHtpV" << htp_arch
-            << "Skel.so, and libQnnHtpV" << htp_arch
-            << "Stub.so must be installed as one side-loaded bundle or as compatible OEM host/RFSA runtime directories.";
+            << ", device HTP V" << device_htp_arch << ", attempted=";
+    if (candidate_arches.empty()) {
+        message << "none";
+    } else {
+        for (size_t i = 0; i < candidate_arches.size(); ++i) {
+            if (i > 0) message << ",";
+            message << "V" << candidate_arches[i];
+        }
+    }
+    message << "): a coherent libQnnSystem.so/libQnnHtp.so plus matching Skel/Stub profile "
+            << "must be installed as one side-loaded bundle or compatible OEM host/RFSA directories.";
     runtime->message = message.str();
     return false;
 }

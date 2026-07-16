@@ -16,6 +16,40 @@ import org.junit.Test
 
 class LocalVisionNpuRunnerTest {
     @Test
+    fun discoveredRuntimeOnUnknownDeviceFamilyStillReachesRealSmoke() {
+        val bundle = qnnVisionBundle()
+        val runtime = readyRuntime()
+        val acceleration = DeviceAccelerationAnalyzer.assess(
+            soc = SocInfo("MediaTek", "Dimensity 9400", SocFamily.Dimensity),
+            totalRamBytes = 16.gb,
+            qnnRuntime = runtime
+        )
+        val device = DeviceProfile(
+            socManufacturer = "MediaTek",
+            socModel = "Dimensity 9400",
+            socFamily = SocFamily.Dimensity,
+            cpuCores = 8,
+            estimatedBigCores = 4,
+            totalRamBytes = 16.gb,
+            availableRamBytes = 10.gb,
+            storageFreeBytes = 64.gb,
+            androidApi = 35,
+            thermalStatus = ThermalStatus.None,
+            batteryPercent = 80,
+            isCharging = true,
+            supportedAbis = listOf("arm64-v8a"),
+            primaryAbi = "arm64-v8a",
+            advertisedRamBytes = 16.gb,
+            accelerationProfile = acceleration
+        )
+
+        val report = LiteRtQnnVisionRunner(runnerReady = true).health(device, bundle)
+
+        assertEquals(LocalVisionNpuState.SMOKE_REQUIRED, report.state)
+        assertFalse(report.npuActive)
+    }
+
+    @Test
     fun qnnVisionBundleDoesNotBecomeActiveWhenRuntimeIsMissing() {
         val bundle = qnnVisionBundle()
         val report = LiteRtQnnVisionRunner(runnerReady = true).health(
@@ -222,7 +256,7 @@ class LocalVisionNpuRunnerTest {
     }
 
     @Test
-    fun sm8550ContextBinaryIsRejectedOnSm8750VisionDevice() {
+    fun nativeContextLoadFailureIsReportedWithoutADeviceAdmissionDecision() {
         val bundle = qnnVisionBundle()
         val report = LiteRtQnnVisionRunner(
             runnerReady = true,
@@ -260,11 +294,44 @@ class LocalVisionNpuRunnerTest {
 
         assertEquals(LocalVisionNpuState.SMOKE_FAILED, report.state)
         assertFalse(report.npuActive)
-        assertTrue(report.message.contains("骁龙 8 Gen 2"))
-        assertTrue(report.message.contains("骁龙 8 Elite"))
-        assertFalse(report.message.contains("SM8550"))
-        assertFalse(report.message.contains("SM8750"))
+        assertTrue(report.message.contains("invalid config"))
         assertEquals(43, report.qnnDiagnostics.binaryMetadata.socModel)
+    }
+
+    @Test
+    fun realVisionGraphExecutionWinsOverStaticSocMetadata() {
+        val bundle = qnnVisionBundle()
+        val report = LiteRtQnnVisionRunner(
+            runnerReady = true,
+            smokeBridge = FakeVisionSmokeBridge(
+                NativeQnnSmokeResult(
+                    message = "graph execute ok",
+                    runnerReady = true,
+                    graphRunnerReady = true,
+                    graphExecute = true,
+                    npuActive = true,
+                    smokePassed = true,
+                    elapsedMs = 690,
+                    executionStage = "graph_execute_passed",
+                    binaryMetadata = QnnBinaryMetadataDiagnostics(
+                        attempted = true,
+                        parsed = true,
+                        version = 3,
+                        socModel = 43,
+                        graphCount = 1,
+                        graphNames = listOf("fastvlm")
+                    )
+                )
+            )
+        ).runSmoke(
+            device = snapdragonElite(qnnReady = true),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalVisionNpuState.NPU_ACTIVE, report.state)
+        assertTrue(report.npuActive)
+        assertTrue(report.smokePassed)
+        assertTrue(report.graphExecute)
     }
 
     @Test

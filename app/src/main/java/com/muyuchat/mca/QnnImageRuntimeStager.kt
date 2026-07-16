@@ -1,6 +1,8 @@
 package com.muyuchat.mca
 
 import android.content.Context
+import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
+import com.muyuchat.core.deviceprofile.DeviceProfileReader
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -71,9 +73,29 @@ internal fun stageQnnImageBundleRuntime(
     } else {
         bundleRoot?.let(::coherentQnnImageBundleRuntimeProfileOrNull)
     } ?: return QnnImageRuntimeStagingResult()
-    return QnnImageRuntimeStager(
+    val stager = QnnImageRuntimeStager(
         destinationRoot = File(context.applicationContext.codeCacheDir, QNN_IMAGE_RUNTIME_STAGE_DIRECTORY)
-    ).stage(profile)
+    )
+    if (bundleRoot == null || requiredRuntimeProfile?.completeBundleRuntime != true) {
+        return stager.stage(profile)
+    }
+    val device = runCatching { DeviceProfileReader(context.applicationContext).read() }.getOrNull()
+    val chipsetCode = device?.let { profile ->
+        profile.accelerationProfile.chipsetCode.ifBlank { profile.socModel }
+    }.orEmpty()
+    val deviceArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(chipsetCode)
+        ?: device?.accelerationProfile?.qnnRuntime?.htpArchVersion?.takeIf { it > 0 }
+        ?: return stager.stage(profile)
+    val transport = qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, deviceArch)
+        // A device/profile comparison is a transport hint, never an admission
+        // gate. If no exact physical transport is packaged, stage the verified
+        // generic context and let the real NPU smoke decide.
+        ?: return stager.stage(profile)
+    return if (transport.htpArchVersion == profile.htpArchVersion) {
+        stager.stage(profile)
+    } else {
+        stager.stage(QnnImageRuntimeStagePlan(contextProfile = profile, transportProfile = transport))
+    }
 }
 
 /** Extracted for deterministic JVM tests; production callers use the Context wrapper above. */
@@ -101,9 +123,10 @@ internal class QnnImageRuntimeStager(
     ): QnnImageRuntimeStagingResult {
         var stagingDirectory: File? = null
         return runCatching {
-            val sourceFiles = sourceFiles(contextProfile, transportProfile)
+            val qnnSdk = qnnSdkForRuntimeProfile(contextProfile)
+            val sourceFiles = sourceFiles(contextProfile, transportProfile, qnnSdk)
             val sdkBuildId = if (requireSdkBuildIdentity) {
-                verifyOneQnnSdkBuild(contextProfile, transportProfile)
+                verifyOneQnnSdkBuild(contextProfile, transportProfile, qnnSdk)
             } else {
                 null
             }
@@ -190,13 +213,14 @@ internal class QnnImageRuntimeStager(
 
     private fun sourceFiles(
         contextProfile: QnnImageBundleRuntimeProfile,
-        transportProfile: QnnImageBundleRuntimeProfile
+        transportProfile: QnnImageBundleRuntimeProfile,
+        qnnSdk: String?
     ): List<SourceRuntimeFile> {
         val selected = linkedMapOf<String, SourceRuntimeFile>()
         qnnImageRuntimeFileNames(contextProfile.htpArchVersion).forEach { name ->
             selected[name] = sourceFile(contextProfile, name)
         }
-        qnnImageTransportRuntimeFileNames(transportProfile.htpArchVersion).forEach { name ->
+        qnnImageTransportRuntimeFileNames(transportProfile.htpArchVersion, qnnSdk).forEach { name ->
             selected.putIfAbsent(name, sourceFile(transportProfile, name))
         }
         return selected.values.toList()
@@ -224,14 +248,15 @@ internal class QnnImageRuntimeStager(
 
     private fun verifyOneQnnSdkBuild(
         contextProfile: QnnImageBundleRuntimeProfile,
-        transportProfile: QnnImageBundleRuntimeProfile
+        transportProfile: QnnImageBundleRuntimeProfile,
+        qnnSdk: String?
     ): String {
         val files = buildList {
             qnnImageRuntimeFileNames(contextProfile.htpArchVersion).forEach { name ->
                 add(sourceFile(contextProfile, name).file)
             }
             (qnnImageRuntimeFileNames(transportProfile.htpArchVersion) +
-                qnnImageTransportRuntimeFileNames(transportProfile.htpArchVersion)).forEach { name ->
+                qnnImageTransportRuntimeFileNames(transportProfile.htpArchVersion, qnnSdk)).forEach { name ->
                 add(sourceFile(transportProfile, name).file)
             }
         }.distinctBy { file -> file.canonicalPath }

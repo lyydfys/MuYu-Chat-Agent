@@ -12,6 +12,38 @@ import org.junit.Test
 
 class QnnImageRuntimeResolverTest {
     @Test
+    fun pinnedGenericArchiveCreatesVerifiableRuntimeMetadataForAllDeviceProfiles() {
+        val root = Files.createTempDirectory("qnn-pinned-generic-runtime").toFile()
+        try {
+            val runtime = File(root, "runtime").apply { mkdirs() }
+            listOf(68, 69, 73, 75, 79, 81).forEach { completeProfile(runtime, it) }
+
+            val metadataFile = writePinnedQnnRuntimeMetadata(
+                bundleRoot = root,
+                qnnSdk = "2.28",
+                contextHtpArch = 68,
+                sourceArchiveSha256 = "a".repeat(64)
+            )
+            val metadata = org.json.JSONObject(metadataFile.readText(Charsets.UTF_8))
+
+            assertEquals("2.28", metadata.getString("qnnSdk"))
+            assertEquals(68, metadata.getInt("htpArch"))
+            assertEquals(listOf(68, 69, 73, 75, 79, 81), buildList {
+                val values = metadata.getJSONArray("availableHtpArchs")
+                for (index in 0 until values.length()) add(values.getInt(index))
+            })
+            assertNull(
+                qnnRequiredBundleRuntimeReadinessMessage(
+                    root,
+                    LocalImageQnnRuntimeProfile("2.28", 68, completeBundleRuntime = true)
+                )
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun completeBundleProfileComesBeforeGenericApkRuntime() {
         val root = Files.createTempDirectory("qnn-bundle-runtime").toFile()
         val generic = Files.createTempDirectory("qnn-generic-runtime").toFile()

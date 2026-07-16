@@ -82,7 +82,12 @@ data class QnnRuntimeProfile(
         }
 }
 
-/** Selects an exact, internally coherent QNN profile for a public chipset. */
+/**
+ * Selects an internally coherent QNN profile. The preferred HTP architecture
+ * is only the first transport candidate: if it is absent, keep the feature
+ * open and fall back to another complete profile so native context/graph load
+ * can make the real compatibility decision.
+ */
 object QnnRuntimeProfileSelector {
     fun htpArchVersionForChipsetCode(chipsetCode: String): Int? =
         when (chipsetCode.trim().uppercase(Locale.US)) {
@@ -121,11 +126,15 @@ object QnnRuntimeProfileSelector {
         }
         if (hosts.isEmpty()) return null
 
-        val versions = preferredHtpArchVersion?.let(::listOf) ?: dirs
+        val availableVersions = dirs
             .flatMap { directory -> directory.listFiles()?.asList().orEmpty() }
             .mapNotNull { file -> htpLibraryVersion(file.name) }
             .distinct()
             .sortedDescending()
+        val versions = buildList {
+            preferredHtpArchVersion?.let(::add)
+            addAll(availableVersions)
+        }.distinct()
 
         versions.forEach { archVersion ->
             val dspCandidates = dirs.mapNotNull { directory ->
@@ -289,7 +298,9 @@ data class QnnRuntimeStatus(
                 !probeLibraries -> QnnRuntimeProbeState.NOT_REQUESTED to "QNN runtime files were found; native load probe was not requested."
                 else -> runCatching {
                     // Keep libQnnHtp unloaded until native code has read the
-                    // context metadata and selected its exact HTP profile.
+                    // context metadata and selected the best coherent HTP
+                    // profile, including generic fallback when the preferred
+                    // device transport is not packaged.
                     libraryLoader(requireNotNull(profile).systemLibrary.absolutePath)
                 }.fold(
                     onSuccess = {
@@ -436,28 +447,16 @@ object DeviceAccelerationAnalyzer {
         totalRamBytes: Long,
         qnnRuntime: QnnRuntimeStatus = QnnRuntimeStatus.Missing
     ): DeviceAccelerationProfile {
-        if (soc.family != SocFamily.Snapdragon) {
-            return DeviceAccelerationProfile.CpuOnly.copy(
-                notes = listOf("非骁龙设备暂不展示 QNN/NPU 路线。")
-            )
-        }
-
+        val isSnapdragon = soc.family == SocFamily.Snapdragon
         val code = normalizeChipsetCode("${soc.manufacturer} ${soc.model}")
-        val tier = snapdragonTierFor(code)
+        val tier = if (isSnapdragon) snapdragonTierFor(code) else SnapdragonAccelerationTier.NONE
         val htp = qnnHtpGenerationFor(tier)
-        val ramGb = totalRamBytes / GB.toDouble()
-        val sd15Candidate = tier in setOf(
-            SnapdragonAccelerationTier.SNAPDRAGON_8_GEN1,
-            SnapdragonAccelerationTier.SNAPDRAGON_8_GEN2,
-            SnapdragonAccelerationTier.SNAPDRAGON_8_GEN3,
-            SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE,
-            SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE_GEN5
-        )
-        val sdxlCandidate = tier in setOf(
-            SnapdragonAccelerationTier.SNAPDRAGON_8_GEN3,
-            SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE,
-            SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE_GEN5
-        )
+        // The exact Snapdragon tier is a recommendation and transport hint,
+        // never an admission list. A non-Snapdragon/unknown family keeps any
+        // coherent QNN runtime that was actually discovered and may proceed to
+        // native load/graph smoke; the candidate flags below remain advisory.
+        val sd15Candidate = isSnapdragon
+        val sdxlCandidate = isSnapdragon
         val runtimeStatus = when {
             !qnnRuntime.ready -> AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_MISSING
             qnnRuntime.probeState == QnnRuntimeProbeState.LOAD_FAILED ->
@@ -479,40 +478,25 @@ object DeviceAccelerationAnalyzer {
                 status = AccelerationCapabilityStatus.READY,
                 reason = "本地聊天继续以 MNN CPU 为主线，GGUF 作为兼容补充。"
             ),
-            localVision = if (tier == SnapdragonAccelerationTier.SNAPDRAGON_OTHER) {
-                AccelerationCapability(
-                    label = "本地识图 CPU 兼容",
-                    backend = "llama.cpp,mnn_cpu",
-                    status = AccelerationCapabilityStatus.READY,
-                    reason = "未命中 MCA 的骁龙 NPU 白名单，默认使用本地 CPU 识图。"
-                )
-            } else {
-                AccelerationCapability(
-                    label = "LiteRT-LM / QNN 视觉实验",
-                    backend = "litert_qualcomm_npu,qnn_htp",
-                    status = runtimeStatus,
-                    reason = when {
-                        !qnnRuntime.ready ->
-                            "设备具备 NPU 路线，等待打包 QNN/QAIRT runtime 和 LiteRT-LM 模型包。"
-                        qnnRuntime.probeState == QnnRuntimeProbeState.LOAD_FAILED ->
-                            "QNN runtime files were found, but native load probe failed: ${qnnRuntime.probeMessage}"
-                        !qnnRuntime.loadable ->
-                            "QNN runtime files were found, but native load probe has not passed yet."
-                        qnnRuntime.transportDependencyBlocked ->
-                            "The Snapdragon NPU runtime loads, but its device transport is blocked: ${qnnRuntime.cdspRpcMessage}"
-                        else ->
-                            "设备和 QNN runtime 已满足 NPU 识图实验入口，需模型包 smoke test 后开放。"
-                    },
-                    minRamGb = 8
-                )
-            },
+            localVision = AccelerationCapability(
+                label = if (isSnapdragon) "LiteRT-LM / QNN 视觉实验" else "QNN/NPU 视觉实验",
+                backend = "litert_qualcomm_npu,qnn_htp",
+                status = runtimeStatus,
+                reason = when {
+                    !qnnRuntime.ready ->
+                        "QNN 视觉入口已开放；加载完整 runtime 与模型包后由真实执行确认。"
+                    qnnRuntime.probeState == QnnRuntimeProbeState.LOAD_FAILED ->
+                        "QNN runtime files were found, but native load probe failed: ${qnnRuntime.probeMessage}"
+                    !qnnRuntime.loadable ->
+                        "QNN runtime files were found, but native load probe has not passed yet."
+                    qnnRuntime.transportDependencyBlocked ->
+                        "The NPU runtime loads, but its device transport is blocked: ${qnnRuntime.cdspRpcMessage}"
+                    else ->
+                        "QNN 视觉入口已开放；以模型包真实 graph smoke 结果为准。"
+                },
+                minRamGb = 8
+            ),
             localImage = when {
-                !sd15Candidate -> AccelerationCapability(
-                    label = "本地生图 CPU 兼容",
-                    backend = "stable-diffusion.cpp",
-                    status = AccelerationCapabilityStatus.READY,
-                    reason = "该骁龙档位暂不作为 QNN 生图目标，使用 CPU 兼容生图。"
-                )
                 !qnnRuntime.ready -> AccelerationCapability(
                     label = if (sdxlCandidate) "SD1.5 / SDXL QNN 生图" else "SD1.5 QNN 生图",
                     backend = "qnn_htp",
@@ -538,26 +522,26 @@ object DeviceAccelerationAnalyzer {
                     label = if (sdxlCandidate) "SD1.5 / SDXL QNN image" else "SD1.5 QNN image",
                     backend = "qnn_htp",
                     status = AccelerationCapabilityStatus.DEVICE_CAPABLE_HTP_TRANSPORT_BLOCKED,
-                    reason = "The Snapdragon NPU runtime loads, but its device transport is blocked: ${qnnRuntime.cdspRpcMessage}",
+                    reason = "The NPU runtime loads, but its device transport is blocked: ${qnnRuntime.cdspRpcMessage}",
                     minRamGb = if (sdxlCandidate) 12 else 8
                 )
                 else -> AccelerationCapability(
                     label = if (sdxlCandidate) "SD1.5 / SDXL QNN 生图" else "SD1.5 QNN 生图",
                     backend = "qnn_htp",
                     status = AccelerationCapabilityStatus.EXPERIMENTAL_READY,
-                    reason = "设备和 QNN runtime 就绪；仍需每个生图包通过 1-step smoke test 后才可选择。",
+                    reason = "QNN 生图入口已开放；以当前模型包真实 1-step graph smoke 结果为准。",
                     minRamGb = if (sdxlCandidate) 12 else 8
                 )
             },
             stableDiffusion15NpuCandidate = sd15Candidate,
-            sdxlNpuCandidate = sdxlCandidate && ramGb >= 10.0,
+            sdxlNpuCandidate = sdxlCandidate,
             notes = buildList {
                 if (code.isNotBlank()) add("SoC: ${publicChipsetDisplayName(code, SocFamily.Snapdragon)}")
                 if (htp.isNotBlank()) add("NPU：${publicChipsetDisplayName(code, SocFamily.Snapdragon)}")
-                if (sdxlCandidate && ramGb < 10.0) add("SDXL NPU route hidden until memory is at least about 12GB.")
+                if (!isSnapdragon) add("设备族仅用于推荐；若存在完整 coherent QNN runtime，仍交由真实 native graph smoke 判定。")
                 if (!qnnRuntime.ready) add("QNN runtime is not packaged yet; do not claim active NPU execution.")
                 if (qnnRuntime.ready && !qnnRuntime.loadable) add("QNN runtime is not load-verified yet; do not enter NPU smoke.")
-                if (qnnRuntime.transportDependencyBlocked) add("Snapdragon NPU device transport is blocked; keep NPU hidden until graph smoke passes.")
+                if (qnnRuntime.transportDependencyBlocked) add("Snapdragon NPU device transport is blocked; keep the entry visible and report the real graph smoke result.")
             }
         )
     }

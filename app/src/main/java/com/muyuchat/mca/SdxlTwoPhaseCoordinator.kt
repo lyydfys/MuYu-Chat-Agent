@@ -195,20 +195,29 @@ internal class SdxlTwoPhaseCoordinator(
         val device = DeviceProfileReader(appContext).read()
         val transportArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(
             device.accelerationProfile.chipsetCode
-        ) ?: error("Unable to determine the physical Snapdragon NPU transport profile.")
-        val transportProfile = qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, transportArch)
-            ?: error("SDXL bundle is missing the physical HTP V$transportArch transport profile.")
+        ) ?: device.accelerationProfile.qnnRuntime.htpArchVersion.takeIf { it > 0 }
+        val transportProfile = transportArch?.let { arch ->
+            qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, arch)
+        }
         fun stage(arch: Int): String {
             val contextProfile = qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, arch)
                 ?: error("SDXL bundle is missing a complete HTP V$arch runtime profile.")
-            val result = stager.stage(
-                QnnImageRuntimeStagePlan(
-                    contextProfile = contextProfile,
-                    transportProfile = transportProfile
+            // Unknown devices or bundles without an exact transport profile
+            // keep the execution path by using the context's coherent generic
+            // transport. The real phase process is the compatibility test.
+            val selectedTransport = transportProfile ?: contextProfile
+            val result = if (selectedTransport.htpArchVersion == contextProfile.htpArchVersion) {
+                stager.stage(contextProfile)
+            } else {
+                stager.stage(
+                    QnnImageRuntimeStagePlan(
+                        contextProfile = contextProfile,
+                        transportProfile = selectedTransport
+                    )
                 )
-            )
+            }
             require(!result.failed && result.runtime != null) {
-                result.error ?: "Unable to stage HTP V$arch context with V$transportArch transport."
+                result.error ?: "Unable to stage the HTP V$arch runtime for real execution."
             }
             return requireNotNull(result.runtime).directory.canonicalPath
         }

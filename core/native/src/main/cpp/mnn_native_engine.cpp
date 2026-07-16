@@ -4098,7 +4098,7 @@ json build_mnn_config(const std::string& config_path, const std::string& params_
         if (params.is_discarded() || !params.is_object()) params = json::object();
     }
     json config = json::object();
-    const int n_ctx = std::max(512, opt_int(params, "n_ctx", 8192));
+    const int n_ctx = std::max(1, opt_int(params, "n_ctx", 8192));
     const int n_threads = std::max(1, opt_int(params, "n_threads", 4));
     config["backend_type"] = "cpu";
     config["thread_num"] = n_threads;
@@ -4198,8 +4198,8 @@ json build_mnn_config(const std::string& config_path, const std::string& params_
             config["system_prompt"] = "";
         }
     }
-    config["max_all_tokens"] = std::max(512, opt_int(config, "max_all_tokens", n_ctx));
-    config["n_ctx"] = std::max(512, opt_int(config, "n_ctx", config.value("max_all_tokens", n_ctx)));
+    config["max_all_tokens"] = std::max(1, opt_int(config, "max_all_tokens", n_ctx));
+    config["n_ctx"] = std::max(1, opt_int(config, "n_ctx", config.value("max_all_tokens", n_ctx)));
     config["thread_num"] = std::max(1, opt_int(config, "thread_num", n_threads));
     if (!for_load) {
         config["max_new_tokens"] = std::max(1, opt_int(config, "max_new_tokens", 512));
@@ -4561,7 +4561,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_loadModel(
             return kMnnLoadFailed;
         }
         const auto config = build_mnn_config(g_model_path, params, true);
-        g_max_all_tokens = std::max(512, config.value("max_all_tokens", 8192));
+        g_max_all_tokens = std::max(1, config.value("max_all_tokens", 8192));
         g_n_threads = std::max(1, config.value("thread_num", 4));
         g_loaded_config_json = config.dump();
         g_last_config_json = g_loaded_config_json;
@@ -4669,7 +4669,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
                 opt_int(config, "chunk", 0));
         configure_mnn_stop_markers_locked(parsed_params);
         g_max_new_tokens = std::max(1, config.value("max_new_tokens", 512));
-        g_max_all_tokens = std::max(512, config.value("max_all_tokens", 8192));
+        g_max_all_tokens = std::max(1, config.value("max_all_tokens", 8192));
         g_n_threads = std::max(1, config.value("thread_num", 4));
         g_last_config_json = config.dump();
         g_generated_steps = 0;

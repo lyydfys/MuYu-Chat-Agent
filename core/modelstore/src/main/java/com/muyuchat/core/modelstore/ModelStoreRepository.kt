@@ -84,14 +84,14 @@ class ModelStoreRepository(private val context: Context) {
         allowMnnZip: Boolean
     ): ModelManifest {
         val providedName = displayNameOverride?.takeIf { it.isNotBlank() } ?: queryDisplayName(uri)
-        val expectedSize = querySize(uri).reliableProviderSize()
+        val providerReportedSize = querySize(uri)
         return appContext.contentResolver.openInputStream(uri).use { rawInput ->
             requireNotNull(rawInput) { "无法读取所选文件。" }
             val source = PushbackInputStream(rawInput.buffered(), IMPORT_MAGIC_BYTES)
             val header = source.readPrefix(IMPORT_MAGIC_BYTES)
             if (header.isNotEmpty()) source.unread(header)
             when (classifyModelImport(providedName, header)) {
-                ModelImportKind.GGUF -> importGgufFromStreamLocked(source, providedName, expectedSize)
+                ModelImportKind.GGUF -> importGgufFromStreamLocked(source, providedName, providerReportedSize)
                 ModelImportKind.MNN_ZIP -> {
                     require(allowMnnZip) { "请选择有效的 GGUF 模型文件。" }
                     importMnnBundleFromZipStream(
@@ -109,7 +109,7 @@ class ModelStoreRepository(private val context: Context) {
     private fun importGgufFromStreamLocked(
         source: InputStream,
         providedName: String?,
-        expectedSize: Long?
+        providerReportedSize: Long?
     ): ModelManifest {
         val fileName = normalizedGgufImportName(providedName)
 
@@ -121,9 +121,7 @@ class ModelStoreRepository(private val context: Context) {
         var ownsTarget = false
         try {
             val sourceDigest = copyWithSha256(source, staging)
-            expectedSize?.let { size ->
-                require(staging.length() == size) { "GGUF 文件复制不完整：源文件大小与导入结果不一致。" }
-            }
+            verifyProviderCopyAgainstAdvisorySize(providerReportedSize, staging.length())
             val copiedMetadata = GgufMetadataReader.read(staging)
             require(copiedMetadata.isGguf) { "GGUF 文件复制后文件头校验失败。" }
             require(sha256(staging).equals(sourceDigest, ignoreCase = true)) {
@@ -193,9 +191,7 @@ class ModelStoreRepository(private val context: Context) {
                     requireNotNull(input) { "无法读取 MNN 组件：$name" }
                     copyWithSha256(input, target)
                 }
-                querySize(uri).reliableProviderSize()?.let { expectedSize ->
-                    require(target.length() == expectedSize) { "MNN 组件复制不完整：$name" }
-                }
+                verifyProviderCopyAgainstAdvisorySize(querySize(uri), target.length())
                 require(sha256(target).equals(sourceDigest, ignoreCase = true)) { "MNN 组件复制校验失败：$name" }
                 val importedKind = target.inputStream().use { input ->
                     classifyModelImport(name, input.readPrefix(IMPORT_MAGIC_BYTES))
@@ -367,25 +363,27 @@ class ModelStoreRepository(private val context: Context) {
     fun resolveQairtBundleRoot(bundleDir: File): File = findQairtBundleRoot(bundleDir)
         ?: error("QAIRT 模型包根目录不明确或不完整：${bundleDir.absolutePath}")
 
-    fun deleteModel(id: String): Boolean {
+    fun deleteModel(id: String): Boolean = synchronized(MODEL_IMPORT_LOCK) {
         val models = listModels()
-        val target = models.firstOrNull { it.id == id } ?: return false
-        runCatching {
-            val file = File(target.path)
-            val bundleDir = file.takeIf { it.isDirectory } ?: file.parentFile?.takeIf { it.isMcaManagedBundleDir() }
-            if (bundleDir != null) bundleDir.deleteRecursively() else file.delete()
-        }
-        runCatching {
-            val projector = target.visionProjectorPath?.let(::File)
-            if (projector != null &&
-                projector.parentFile?.absolutePath == managedModelDir.absolutePath &&
-                projector.exists()
-            ) {
-                projector.delete()
+        val target = models.firstOrNull { it.id == id } ?: return@synchronized false
+        val modelPath = File(target.path)
+        val deletionTarget = modelPath.takeIf { it.isDirectory }
+            ?: modelPath.parentFile?.takeIf { it.isMcaManagedBundleDir() }
+            ?: modelPath
+        val ownedProjector = target.visionProjectorPath
+            ?.let(::File)
+            ?.takeIf { projector ->
+                projector.parentFile?.absolutePath == managedModelDir.absolutePath
             }
+
+        deleteModelArtifactsBeforeManifestUpdate(
+            modelPath = modelPath,
+            mainDeletionTarget = deletionTarget,
+            ownedProjectorPath = ownedProjector
+        ) {
+            save(models.filterNot { it.id == id })
         }
-        save(models.filterNot { it.id == id })
-        return true
+        true
     }
 
     fun attachVisionProjector(modelId: String, uri: Uri, displayNameOverride: String? = null): ModelManifest =
@@ -404,9 +402,7 @@ class ModelStoreRepository(private val context: Context) {
                     requireNotNull(input) { "无法读取所选视觉文件。" }
                     copyWithSha256(input, staging)
                 }
-                querySize(uri).reliableProviderSize()?.let { expectedSize ->
-                    require(staging.length() == expectedSize) { "视觉投影器复制不完整。" }
-                }
+                verifyProviderCopyAgainstAdvisorySize(querySize(uri), staging.length())
                 val copiedMetadata = GgufMetadataReader.read(staging)
                 require(copiedMetadata.isGguf && isVisionProjectorCandidate(fileName, copiedMetadata)) {
                     "视觉投影器复制后文件头或类型校验失败。"
@@ -1033,6 +1029,87 @@ class ModelStoreRepository(private val context: Context) {
 }
 
 /**
+ * Deletes repository-owned artifacts before committing the manifest update.
+ *
+ * The standalone projector is removed first so a projector failure leaves the
+ * primary text model intact. The main model/bundle is removed next, and every
+ * owned path is checked again before [updateManifest] is allowed to run.
+ */
+internal fun deleteModelArtifactsBeforeManifestUpdate(
+    modelPath: File,
+    mainDeletionTarget: File,
+    ownedProjectorPath: File?,
+    deleteFile: (File) -> Boolean = { path -> path.delete() },
+    deleteRecursively: (File) -> Boolean = { path -> path.deleteRecursively() },
+    updateManifest: () -> Unit
+) {
+    val projectorCoveredByMainDeletion = ownedProjectorPath?.let { projector ->
+        projector.isSameAsOrUnder(mainDeletionTarget)
+    } == true
+
+    if (ownedProjectorPath != null && !projectorCoveredByMainDeletion) {
+        deleteRepositoryPathOrThrow(
+            path = ownedProjectorPath,
+            recursive = false,
+            description = "视觉投影器",
+            deleteFile = deleteFile,
+            deleteRecursively = deleteRecursively
+        )
+    }
+    deleteRepositoryPathOrThrow(
+        path = mainDeletionTarget,
+        recursive = mainDeletionTarget.isDirectory,
+        description = if (mainDeletionTarget.isDirectory) "模型目录" else "模型文件",
+        deleteFile = deleteFile,
+        deleteRecursively = deleteRecursively
+    )
+
+    requireRepositoryPathAbsent(modelPath, "模型路径")
+    ownedProjectorPath?.let { requireRepositoryPathAbsent(it, "视觉投影器路径") }
+    updateManifest()
+}
+
+private fun deleteRepositoryPathOrThrow(
+    path: File,
+    recursive: Boolean,
+    description: String,
+    deleteFile: (File) -> Boolean,
+    deleteRecursively: (File) -> Boolean
+) {
+    if (!path.exists()) return
+    val operation = if (recursive) "deleteRecursively()" else "delete()"
+    val deleted = try {
+        if (recursive) deleteRecursively(path) else deleteFile(path)
+    } catch (error: Exception) {
+        throw IllegalStateException(
+            "删除${description}失败：$operation 抛出 ${error.javaClass.simpleName}" +
+                error.message?.let { "：$it" }.orEmpty() +
+                "；路径=${path.absolutePath}",
+            error
+        )
+    }
+    if (!deleted) {
+        val state = if (path.exists()) "路径仍存在" else "路径随后不存在"
+        throw IllegalStateException(
+            "删除${description}失败：$operation 返回 false，$state；路径=${path.absolutePath}"
+        )
+    }
+    requireRepositoryPathAbsent(path, description)
+}
+
+private fun requireRepositoryPathAbsent(path: File, description: String) {
+    check(!path.exists()) {
+        "删除${description}失败：删除操作返回成功，但路径仍存在；路径=${path.absolutePath}"
+    }
+}
+
+private fun File.isSameAsOrUnder(root: File): Boolean = runCatching {
+    val candidatePath = absoluteFile.toPath().normalize()
+    val rootPath = root.absoluteFile.toPath().normalize()
+    candidatePath == rootPath || candidatePath.startsWith(rootPath)
+}.getOrDefault(false)
+
+/**
  * A visual acceptance result belongs to one exact MNN bundle fingerprint.
  * Re-fingerprinting a changed bundle must never carry that acceptance forward,
  * even when all required files remain readable and the text runtime can load it.
@@ -1235,7 +1312,22 @@ internal fun cleanupStaleAtomicImports(
     }
 }
 
-internal fun Long?.reliableProviderSize(): Long? = this?.takeIf { it > 0L }
+/**
+ * `OpenableColumns.SIZE` is advisory SAF metadata. Cloud drives and OEM file
+ * providers may return an estimate, a stale value, or the encoded object size;
+ * none proves whether the stream reached EOF. Import completeness is therefore
+ * established by reading to EOF, hashing the copied bytes, and validating the
+ * resulting GGUF/MNN payload. A provider-size mismatch must never reject an
+ * otherwise valid import.
+ */
+internal fun verifyProviderCopyAgainstAdvisorySize(
+    providerReportedSize: Long?,
+    copiedSize: Long
+) {
+    require(copiedSize >= 0L) { "Copied byte count cannot be negative." }
+    @Suppress("UNUSED_VARIABLE")
+    val diagnosticOnly = providerReportedSize?.takeIf { it >= 0L }
+}
 
 private val SAFE_IMPORT_TRANSACTION_ID = Regex("[A-Za-z0-9._-]{1,128}")
 private const val UUID_PATTERN = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"

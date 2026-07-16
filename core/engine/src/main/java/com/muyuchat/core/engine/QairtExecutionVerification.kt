@@ -13,10 +13,9 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 /**
- * QAIRT packages are allowed to create a handle in the product process only
- * after the exact bundle/chipset/runtime identity has passed a separate smoke
- * process.  The explicit purpose keeps a future call site from accidentally
- * treating a normal load as a validation run.
+ * QAIRT packages use an automatic isolated canary before an unknown native
+ * context is created in the product process. This is crash containment, not a
+ * chipset admission list; the real create/generate/destroy result is decisive.
  */
 enum class QairtExecutionPurpose {
     NORMAL,
@@ -26,15 +25,13 @@ enum class QairtExecutionPurpose {
 class QairtIsolatedDryRunRequiredException(
     val admission: QairtExecutionAdmission
 ) : IllegalStateException(
-    "该 QAIRT 模型包尚未通过当前芯片与运行时的隔离验收；" +
-        "请先运行 create/generate/destroy dry-run。${admission.message}"
+    "该 QAIRT 模型包需要先完成自动隔离安全启动。${admission.message}"
 )
 
 /**
- * The debug smoke activity is declared in this secondary process.  Checking
- * the process here is intentionally defence in depth: passing
- * [QairtExecutionPurpose.ISOLATED_DRY_RUN] from the normal app process must
- * never turn an unknown QAIRT bundle into an allowed product load.
+ * The canary activity is declared in this secondary process. Checking the
+ * process here ensures only the worker records isolated execution evidence;
+ * normal product availability never depends on a model-name or chipset list.
  */
 internal fun isQairtIsolatedDryRunProcess(context: Context): Boolean {
     val expected = "${context.packageName}:qairt_smoke"
@@ -51,9 +48,9 @@ internal fun isQairtIsolatedDryRunProcess(context: Context): Boolean {
 }
 
 /**
- * Persistent record of QAIRT combinations that completed a real, isolated
- * create/generate/destroy smoke.  This is intentionally an allow-list for a
- * precise bundle + chipset + runtime identity, never a block-list.
+ * Persistent evidence that an exact runtime combination completed a real,
+ * isolated create/generate/destroy canary. It skips repeated canaries but is
+ * never populated from a static device list.
  */
 class QairtExecutionVerificationStore(
     private val file: File
@@ -193,7 +190,7 @@ fun qairtRuntimeIdentityFor(
  * Version names are not sufficient for a locally patched or rebuilt runtime:
  * Android can replace an APK without changing versionCode/versionName. Bind a
  * QAIRT smoke result to the native binaries that actually cross the JNI and
- * QNN boundaries so an old allow-list entry cannot authorize changed code.
+ * QNN boundaries so stale canary evidence is not attributed to changed code.
  */
 internal fun qairtRuntimeBinaryFingerprint(nativeLibraryDir: File): String {
     val digest = MessageDigest.getInstance("SHA-256")

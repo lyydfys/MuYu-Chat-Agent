@@ -65,6 +65,27 @@ internal data class RuntimeIdentityEntity(
     val updatedAt: Long
 )
 
+/**
+ * Allocates a revision above both the currently committed profile and every retained history row.
+ *
+ * Rejected/superseded candidates remain in Room for crash and rollback audit, so using only
+ * `active.revision + 1` can reuse an already occupied `(identityKey, revision)` pair.  Keep the
+ * allocation rule pure so every UI/load path can share it and regression tests do not need a
+ * device database.
+ */
+internal fun nextExecutionProfileRevision(
+    committedRevision: Long,
+    persistedRevisions: Iterable<Long>
+): Long {
+    require(committedRevision >= 0L) { "Committed profile revision must be non-negative." }
+    val latest = persistedRevisions.fold(committedRevision) { current, revision ->
+        require(revision >= 0L) { "Persisted profile revision must be non-negative." }
+        maxOf(current, revision)
+    }
+    check(latest < Long.MAX_VALUE) { "Execution profile revision space is exhausted." }
+    return latest + 1L
+}
+
 @Entity(
     tableName = "execution_profile",
     indices = [
@@ -265,6 +286,15 @@ internal object RuntimeProfilePersistencePolicy {
             TuningJournalState.VALIDATING -> to == TuningJournalState.VALIDATING
             else -> false
         }
+
+    fun canCompleteIsolatedProbe(journal: TuningJournalEntity): Boolean =
+        journal.transactionId.startsWith("probe-") &&
+            journal.jobId == null &&
+            journal.state in setOf(
+                TuningJournalState.STAGED.name,
+                TuningJournalState.APPLYING.name,
+                TuningJournalState.VALIDATING.name
+            )
 
     fun canTransitionTuningJob(
         from: PersistedTuningJobState,
@@ -1454,6 +1484,62 @@ internal class ModelRuntimeProfileStore(context: Context) {
             )
         }
         committedPointers
+    }
+
+    /**
+     * Closes a disposable probe journal without promoting its temporary profile.
+     *
+     * Probe profiles deliberately remain terminal audit records. The active/LKG pointers never
+     * move: the main process restores the exact committed profile before calling this method.
+     */
+    suspend fun completeIsolatedProbe(
+        transactionId: String,
+        passed: Boolean,
+        summary: String,
+        now: Long = System.currentTimeMillis()
+    ): ProfilePointersEntity = database.withTransaction {
+        val journal = requireNotNull(dao.journal(transactionId)) { "Unknown tuning transaction." }
+        require(RuntimeProfilePersistencePolicy.canCompleteIsolatedProbe(journal)) {
+            "Only an unfinished jobless probe transaction can be completed here."
+        }
+        val profile = requireNotNull(dao.profile(journal.pendingProfileId)) {
+            "Pending probe profile is missing."
+        }
+        require(profile.identityKey == journal.identityKey)
+        require(profile.recordState == PersistedProfileRecordState.STAGED.name)
+        val pointers = requireNotNull(dao.pointers(journal.identityKey)) {
+            "Probe profile pointers are missing."
+        }
+        require(pointers.pendingProfileId == profile.profileId) {
+            "Pending probe pointer does not match the journal."
+        }
+        check(
+            dao.updateProfile(
+                profile.copy(
+                    recordState = PersistedProfileRecordState.REJECTED.name,
+                    failureStage = "ISOLATED_PROBE",
+                    failureCode = if (passed) "PROBE_EVIDENCE_RETAINED" else "PROBE_REJECTED",
+                    failureSummary = RuntimeProfilePersistencePolicy.sanitizeFailureSummary(summary),
+                    updatedAt = now
+                )
+            ) == 1
+        ) { "Probe profile terminal update was lost." }
+        val completed = pointers.copy(
+            pendingProfileId = null,
+            rollbackTargetProfileId = null,
+            updatedAt = now
+        )
+        dao.upsertPointers(completed)
+        check(
+            dao.updateJournal(
+                journal.copy(
+                    state = TuningJournalState.REJECTED.name,
+                    stage = if (passed) "PROBE_PASSED" else "PROBE_REJECTED",
+                    updatedAt = now
+                )
+            ) == 1
+        ) { "Probe journal terminal update was lost." }
+        completed
     }
 
     suspend fun rejectCandidate(

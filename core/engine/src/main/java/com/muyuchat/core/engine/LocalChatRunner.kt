@@ -670,7 +670,7 @@ internal class GenieXChatRunner(
             } else {
                 val threads = loadParams.nThreads.coerceAtLeast(1)
                 ModelConfig(
-                    nCtx = loadParams.nCtx.coerceAtLeast(512),
+                    nCtx = loadParams.nCtx.coerceAtLeast(1),
                     nThreads = threads,
                     nThreadsBatch = threads,
                     nBatch = 512,

@@ -4,7 +4,9 @@ import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.GenerateEvent
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LocalChatExecutionContext
+import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
+import com.muyuchat.core.engine.localContextWindowBudget
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
@@ -629,9 +631,9 @@ class McaLoopbackServer(
                 is GenerateEvent.Error -> {
                     output.write(
                         "data: ${errorJson(
-                            "generation_failed",
+                            generationErrorCode(event),
                             event.message,
-                            generationTraceJson(requestId, generationSequence).toString()
+                            generationErrorDetails(event, requestId, generationSequence).toString()
                         )}\n\n"
                     )
                     writeTerminalFrame(includeEmptyVisibleError = false)
@@ -663,7 +665,7 @@ class McaLoopbackServer(
         val created = System.currentTimeMillis() / 1000
         val builder = StringBuilder()
         val reasoningBuilder = StringBuilder()
-        var errorMessage: String? = null
+        var generationError: GenerateEvent.Error? = null
         var finalStats: RuntimeStats? = null
         var generationSequence: Long? = null
         stream.collect { event ->
@@ -679,17 +681,17 @@ class McaLoopbackServer(
                     if (event.reasoning.isNotBlank()) reasoningBuilder.append(event.reasoning)
                 }
                 is GenerateEvent.Done -> finalStats = event.stats
-                is GenerateEvent.Error -> errorMessage = event.message
+                is GenerateEvent.Error -> generationError = event
             }
         }
-        if (errorMessage != null) {
-            val message = errorMessage.orEmpty()
+        if (generationError != null) {
+            val error = requireNotNull(generationError)
             writeError(
                 socket,
-                generationErrorStatus(message),
-                "generation_failed",
-                message,
-                generationTraceJson(requestId, generationSequence).toString()
+                generationErrorStatus(error),
+                generationErrorCode(error),
+                error.message,
+                generationErrorDetails(error, requestId, generationSequence).toString()
             )
             return
         }
@@ -895,15 +897,73 @@ class McaLoopbackServer(
             )
         }
         return when (coordinatorResult) {
-            LocalApiPreflightResult.Ready -> PreparedGenerationRequest.Ready(request)
-            is LocalApiPreflightResult.Rejected -> PreparedGenerationRequest.Rejected(
-                httpStatus = coordinatorResult.httpStatus.coerceIn(400, 599),
-                code = coordinatorResult.code,
-                message = coordinatorResult.message,
-                retryAfterMs = coordinatorResult.retryAfterMs,
-                detailsJson = coordinatorResult.detailsJson
-            )
+            LocalApiPreflightResult.Ready ->
+                request.contextLengthRejection() ?: PreparedGenerationRequest.Ready(request)
+            is LocalApiPreflightResult.Rejected -> {
+                val contextExceeded = coordinatorResult.isContextLengthExceeded()
+                PreparedGenerationRequest.Rejected(
+                    httpStatus = if (contextExceeded) 413 else coordinatorResult.httpStatus.coerceIn(400, 599),
+                    code = if (contextExceeded) CONTEXT_LENGTH_EXCEEDED_CODE else coordinatorResult.code,
+                    message = coordinatorResult.message,
+                    retryAfterMs = coordinatorResult.retryAfterMs,
+                    detailsJson = coordinatorResult.detailsJson
+                )
+            }
         }
+    }
+
+    private fun ChatRequest.contextLengthRejection(): PreparedGenerationRequest.Rejected? {
+        val contextLength = params.nCtx.takeIf { it > 0 } ?: return null
+        val budget = localContextWindowBudget(contextLength)
+        val promptBudget = budget.promptBudgetTokens
+        val systemTokens = messages.asSequence()
+            .filter { it.role == Role.SYSTEM }
+            .sumOf { estimateLocalApiTokens(it.content) } +
+            estimateLocalApiTokens(params.systemPrompt) +
+            estimateLocalApiTokens(runtimeSystemContext) +
+            REASONING_INSTRUCTION_ESTIMATE_TOKENS
+        val latestTurn = messages.lastOrNull { it.role != Role.SYSTEM }
+        val latestTurnTokens = latestTurn?.let { estimateLocalApiTokens(it.content) } ?: 0L
+        val requiredPromptTokens = systemTokens + latestTurnTokens
+        if (
+            promptBudget >= budget.minimumPromptBudgetTokens &&
+            requiredPromptTokens <= promptBudget.toLong()
+        ) {
+            return null
+        }
+        val details = JSONObject()
+            .put("n_ctx", contextLength)
+            .put("context_length", contextLength)
+            .put("max_context_length", contextLength)
+            .put("estimated_prompt_tokens", requiredPromptTokens)
+            .put("prompt_token_budget", promptBudget.coerceAtLeast(0))
+        return PreparedGenerationRequest.Rejected(
+            httpStatus = 413,
+            code = CONTEXT_LENGTH_EXCEEDED_CODE,
+            message = "The request exceeds the active local model context length. Shorten the latest input or reload the model with a larger n_ctx.",
+            detailsJson = details.toString()
+        )
+    }
+
+    /** Mirrors the engine's conservative fallback estimate before a tokenizer is available. */
+    private fun estimateLocalApiTokens(text: String): Long {
+        if (text.isEmpty()) return 1L
+        var denseTokens = 0L
+        var sparseCharacters = 0L
+        var index = 0
+        while (index < text.length) {
+            val codePoint = Character.codePointAt(text, index)
+            when {
+                codePoint in 0x3400..0x9FFF ||
+                    codePoint in 0xF900..0xFAFF ||
+                    codePoint in 0x3040..0x30FF ||
+                    codePoint in 0xAC00..0xD7AF -> denseTokens += 1L
+                Character.isSupplementaryCodePoint(codePoint) -> denseTokens += 2L
+                else -> sparseCharacters += 1L
+            }
+            index += Character.charCount(codePoint)
+        }
+        return (denseTokens + (sparseCharacters + 2L) / 3L).coerceAtLeast(1L)
     }
 
     private fun writePreflightRejection(socket: Socket, rejection: PreparedGenerationRequest.Rejected) {
@@ -1038,6 +1098,17 @@ class McaLoopbackServer(
                 generationSequence?.let { put("generationSequence", it) }
             }
 
+    private fun generationErrorDetails(
+        error: GenerateEvent.Error,
+        requestId: String,
+        generationSequence: Long?
+    ): JSONObject = generationTraceJson(requestId, generationSequence).apply {
+        error.action?.let { put("action", it) }
+        if (error.changedFields.isNotEmpty()) {
+            put("changedFields", JSONArray(error.changedFields.sorted()))
+        }
+    }
+
     private fun currentModelName(): String =
         runCatching {
             val json = JSONObject(LocalApiRuntime.loadedModelJsonProvider())
@@ -1144,7 +1215,20 @@ class McaLoopbackServer(
             normalized.startsWith("mnn-")
     }
 
-    private fun generationErrorStatus(message: String): String {
+    private fun generationErrorStatus(error: GenerateEvent.Error): String {
+        if (error.isContextLengthExceeded()) return "413 Payload Too Large"
+        if (error.code in setOf(
+                "model_mismatch",
+                "active_profile_drift",
+                "model_reload_required",
+                "model_reload_required_authorized",
+                "execution_override_forbidden",
+                "model_behavior_override_forbidden"
+            )
+        ) {
+            return "409 Conflict"
+        }
+        val message = error.message
         val normalized = message.lowercase()
         return if (
             "请先在模型页加载" in message ||
@@ -1156,6 +1240,33 @@ class McaLoopbackServer(
         } else {
             "500 Internal Server Error"
         }
+    }
+
+    private fun generationErrorCode(error: GenerateEvent.Error): String =
+        if (error.isContextLengthExceeded()) CONTEXT_LENGTH_EXCEEDED_CODE
+        else error.code ?: "generation_failed"
+
+    private fun GenerateEvent.Error.isContextLengthExceeded(): Boolean =
+        code.equals(CONTEXT_LENGTH_EXCEEDED_CODE, ignoreCase = true) ||
+            message.isContextLengthExceededMessage()
+
+    private fun LocalApiPreflightResult.Rejected.isContextLengthExceeded(): Boolean =
+        code.equals(CONTEXT_LENGTH_EXCEEDED_CODE, ignoreCase = true) ||
+            message.isContextLengthExceededMessage()
+
+    private fun String.isContextLengthExceededMessage(): Boolean {
+        val normalized = lowercase()
+        return "上下文预算过小" in this ||
+            "超过本机安全上下文预算" in this ||
+            "历史上下文过长" in this ||
+            "超出上下文" in this ||
+            "超过上下文" in this ||
+            "context_length_exceeded" in normalized ||
+            "context length exceeded" in normalized ||
+            "maximum context length" in normalized ||
+            ("context window" in normalized && ("exceed" in normalized || "too long" in normalized)) ||
+            ("prompt" in normalized && "too long" in normalized) ||
+            "too many tokens" in normalized
     }
 
     private fun emptyVisibleOutputMessage(stats: RuntimeStats?, params: GenerationParams): String {
@@ -1302,6 +1413,8 @@ class McaLoopbackServer(
         private val TUNING_PREFERENCE_PATTERN = Regex("[A-Za-z0-9_.:-]+")
         private const val MAX_IDEMPOTENCY_KEY_LENGTH = 256
         private const val MAX_IDEMPOTENCY_RECORDS = 1024
+        private const val CONTEXT_LENGTH_EXCEEDED_CODE = "context_length_exceeded"
+        private const val REASONING_INSTRUCTION_ESTIMATE_TOKENS = 96L
         private const val HEX_CHARS = "0123456789abcdef"
         private val IDEMPOTENCY_KEY_PATTERN = Regex("[\u0021-\u007E]{1,256}")
         private val TUNING_JOB_ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")

@@ -59,7 +59,7 @@ class QairtDryRunWorkerService : Service() {
                         callback,
                         requestId = requestIdFromMalformedPayload(requestJson),
                         code = "invalid_request",
-                        message = error.message ?: "无效的 QAIRT 隔离验收请求。"
+                        message = error.message ?: "无效的 QAIRT 隔离安全启动请求。"
                     )
                     return false
                 }
@@ -71,7 +71,7 @@ class QairtDryRunWorkerService : Service() {
                 }
             }
             if (!accepted) {
-                sendError(callback, request.requestId, "worker_busy", "已有 QAIRT 隔离验收正在运行。")
+                sendError(callback, request.requestId, "worker_busy", "已有 QAIRT 隔离安全启动正在运行。")
                 return false
             }
             next.deathRecipient = IBinder.DeathRecipient { cancelForDeadClient(next) }
@@ -106,7 +106,7 @@ class QairtDryRunWorkerService : Service() {
                         request.requestId,
                         code = "dry_run_failed",
                         message = error.message?.take(MAX_ERROR_MESSAGE_CHARS)
-                            ?: "QAIRT 隔离验收失败。"
+                            ?: "QAIRT 隔离安全启动失败。"
                     )
                 } finally {
                     handler.removeCallbacks(hardWatchdog)
@@ -146,16 +146,16 @@ class QairtDryRunWorkerService : Service() {
     private suspend fun execute(activeRequest: ActiveRequest, startedAt: Long): QairtDryRunWorkerProtocol.Result {
         val request = activeRequest.request
         val initialModel = modelStore.getModel(request.modelId)
-            ?: error("未找到待验收的 QAIRT 本地模型。")
+            ?: error("未找到待自动安全启动的 QAIRT 本地模型。")
         require(initialModel.runtime == ChatModelRuntime.GENIEX_QAIRT) {
-            "隔离验收只适用于 QAIRT NPU 模型。"
+            "隔离安全启动只适用于 QAIRT NPU 模型。"
         }
         val preflight = modelStore.validateForLoad(initialModel.id)
         require(preflight.canLoad) { "模型包校验失败：${preflight.message}" }
         // validateForLoad may refresh the directory fingerprint.  Re-read before
         // creating a handle so an old SHA can never inherit a newer bundle's pass.
         val model = modelStore.getModel(initialModel.id) ?: initialModel
-        require(model.sha256.isNotBlank()) { "QAIRT 模型包没有可认证的 SHA-256。" }
+        require(model.sha256.isNotBlank()) { "QAIRT 模型包缺少安全启动所需的 SHA-256。" }
         val engine = McaInferenceService(applicationContext)
         var loaded = false
         var imageFile: File? = null
@@ -179,18 +179,18 @@ class QairtDryRunWorkerService : Service() {
                     "QAIRT 图文模型未报告 visionReady=true。"
                 }
             }
-            emit(activeRequest, startedAt, "npu_ready", "已确认 QAIRT 骁龙 NPU 执行证据，正在生成固定验收回答…")
+            emit(activeRequest, startedAt, "npu_ready", "已确认 QAIRT 骁龙 NPU 执行证据，正在生成固定检查回答…")
             val answer = withTimeout(GENERATION_TIMEOUT_MS) {
                 generateFixedAnswer(engine, model, visionChecked, request.nCtx).also { value ->
                     ensureActive()
-                    require(value.isNotBlank()) { "QAIRT 隔离验收没有产生可见正文。" }
+                    require(value.isNotBlank()) { "QAIRT 隔离安全启动没有产生可见正文。" }
                     if (visionChecked) {
                         require(QairtDryRunPolicy.visionAnswerPasses(value)) {
-                            "QAIRT 图文验收未正确识别蓝色方块。"
+                            "QAIRT 图文安全检查未正确识别蓝色方块。"
                         }
                     } else {
                         require(QairtDryRunPolicy.textAnswerPasses(value)) {
-                            "QAIRT 文本验收没有正确回答固定算术题。"
+                            "QAIRT 文本安全检查没有正确回答固定算术题。"
                         }
                     }
                 }
@@ -199,10 +199,10 @@ class QairtDryRunWorkerService : Service() {
             withTimeout(UNLOAD_TIMEOUT_MS) { engine.unloadModel() }
             loaded = false
             require(engine.recordVerifiedQairtDryRun(model.sha256)) {
-                "QAIRT 验收未满足 NPU、可见回答和干净销毁的认证条件。"
+                "QAIRT 安全启动未满足 NPU、可见回答和干净销毁条件。"
             }
             val evidence = loadedStats.opt("backendDevices")?.toString().orEmpty()
-            emit(activeRequest, startedAt, "verified", "QAIRT 隔离验收已通过。")
+            emit(activeRequest, startedAt, "verified", "QAIRT 隔离安全启动已通过。")
             return QairtDryRunWorkerProtocol.Result(
                 requestId = request.requestId,
                 bundleSha256 = model.sha256,
@@ -280,7 +280,7 @@ class QairtDryRunWorkerService : Service() {
             val inset = VISUAL_IMAGE_SIZE / 4f
             canvas.drawRect(inset, inset, VISUAL_IMAGE_SIZE - inset, VISUAL_IMAGE_SIZE - inset, paint)
             file.outputStream().use { output ->
-                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) { "无法写入 QAIRT 图文验收图片。" }
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) { "无法写入 QAIRT 图文安全检查图片。" }
             }
         } finally {
             bitmap.recycle()

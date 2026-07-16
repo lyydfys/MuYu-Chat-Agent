@@ -1,7 +1,6 @@
 package com.muyuchat.mca
 
 import com.muyuchat.core.deviceprofile.DeviceProfile
-import com.muyuchat.core.download.ImageEngineMinDeviceTier
 import com.muyuchat.core.download.VisionModelAccelerator
 import com.muyuchat.core.download.VisionModelBundleRuntime
 import java.io.File
@@ -9,7 +8,6 @@ import org.json.JSONObject
 
 internal enum class LocalVisionNpuState {
     NOT_QNN_BUNDLE,
-    DEVICE_UNSUPPORTED,
     QNN_RUNTIME_MISSING,
     QNN_TRANSPORT_BLOCKED,
     BUNDLE_MISSING,
@@ -91,13 +89,9 @@ internal class LiteRtQnnVisionRunner(
                 message = "This vision bundle is not a LiteRT / QNN NPU bundle."
             )
         }
-        if (!manifest.minDeviceTier.supportedBy(device)) {
-            return LocalVisionNpuReport(
-                state = LocalVisionNpuState.DEVICE_UNSUPPORTED,
-                backend = backendLabel,
-                message = "当前设备未达到该视觉 NPU 包要求的最低骁龙档位。"
-            )
-        }
+        // minDeviceTier remains a recommendation hint only. Do not turn an
+        // unknown or untested device into a product-level denial; native load
+        // and the real graph smoke below are the source of truth.
         if (manifest.requiresQnnRuntime && device.accelerationProfile.qnnRuntime.transportDependencyBlocked) {
             return LocalVisionNpuReport(
                 state = LocalVisionNpuState.QNN_TRANSPORT_BLOCKED,
@@ -176,29 +170,20 @@ internal class LiteRtQnnVisionRunner(
             device = device,
             binaryMetadata = diagnostics.binaryMetadata
         )
-        val passed = smoke.provesNpuExecution && compatibilityMessage == null
+        val passed = smoke.provesNpuExecution
         return LocalVisionNpuReport(
             state = if (passed) LocalVisionNpuState.NPU_ACTIVE else LocalVisionNpuState.SMOKE_FAILED,
             backend = smoke.backend.ifBlank { backendLabel },
-            message = compatibilityMessage ?: smoke.message,
+            message = if (passed) {
+                smoke.message
+            } else {
+                smoke.message.ifBlank { compatibilityMessage ?: "QNN graph execution did not complete." }
+            },
             npuActive = passed,
             smokePassed = passed,
             smokeElapsedMs = smoke.elapsedMs,
             graphExecute = smoke.graphExecute,
             qnnDiagnostics = diagnostics
         )
-    }
-}
-
-private fun ImageEngineMinDeviceTier?.supportedBy(device: DeviceProfile): Boolean {
-    val tier = this ?: ImageEngineMinDeviceTier.ANY
-    val acceleration = device.accelerationProfile
-    return when (tier) {
-        ImageEngineMinDeviceTier.ANY -> true
-        ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN1 -> acceleration.stableDiffusion15NpuCandidate
-        ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN2 -> acceleration.stableDiffusion15NpuCandidate
-        ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN3 -> acceleration.sdxlNpuCandidate
-        ImageEngineMinDeviceTier.SNAPDRAGON_8_ELITE -> acceleration.sdxlNpuCandidate &&
-            acceleration.chipsetCode in setOf("SM8750", "SM8750P", "SM8850", "SM8850P")
     }
 }

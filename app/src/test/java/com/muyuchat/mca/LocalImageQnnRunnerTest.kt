@@ -18,6 +18,40 @@ import org.junit.Test
 
 class LocalImageQnnRunnerTest {
     @Test
+    fun discoveredRuntimeOnUnknownDeviceFamilyStillReachesRealSmoke() {
+        val bundle = qnnImageBundle()
+        val runtime = readyRuntime()
+        val acceleration = DeviceAccelerationAnalyzer.assess(
+            soc = SocInfo("MediaTek", "Dimensity 9400", SocFamily.Dimensity),
+            totalRamBytes = 16.gb,
+            qnnRuntime = runtime
+        )
+        val device = DeviceProfile(
+            socManufacturer = "MediaTek",
+            socModel = "Dimensity 9400",
+            socFamily = SocFamily.Dimensity,
+            cpuCores = 8,
+            estimatedBigCores = 4,
+            totalRamBytes = 16.gb,
+            availableRamBytes = 10.gb,
+            storageFreeBytes = 64.gb,
+            androidApi = 35,
+            thermalStatus = ThermalStatus.None,
+            batteryPercent = 80,
+            isCharging = true,
+            supportedAbis = listOf("arm64-v8a"),
+            primaryAbi = "arm64-v8a",
+            advertisedRamBytes = 16.gb,
+            accelerationProfile = acceleration
+        )
+
+        val report = QnnHtpImageRunner(runnerReady = true).health(device, bundle)
+
+        assertEquals(LocalImageQnnState.SMOKE_REQUIRED, report.state)
+        assertFalse(report.npuActive)
+    }
+
+    @Test
     fun qnnImageBundleDoesNotBecomeActiveWhenRuntimeIsMissing() {
         val bundle = qnnImageBundle()
         val report = QnnHtpImageRunner(runnerReady = true).health(
@@ -420,7 +454,7 @@ class LocalImageQnnRunnerTest {
     }
 
     @Test
-    fun newerSm8750ContextIsStillRejectedOnSm8550AfterGraphExecution() {
+    fun realGraphExecutionWinsOverStaticSocMetadataOnAnyDevice() {
         val bundle = qnnImageBundle()
         val report = QnnHtpImageRunner(
             runnerReady = true,
@@ -449,13 +483,11 @@ class LocalImageQnnRunnerTest {
             bundleRoot = bundle
         )
 
-        assertEquals(LocalImageQnnState.SMOKE_FAILED, report.state)
-        assertFalse(report.npuActive)
+        assertEquals(LocalImageQnnState.NPU_ACTIVE, report.state)
+        assertTrue(report.npuActive)
+        assertTrue(report.smokePassed)
         assertTrue(report.graphExecute)
-        assertTrue(report.message.contains("骁龙 8 Elite"))
-        assertTrue(report.message.contains("骁龙 8 Gen 2"))
-        assertFalse(report.message.contains("SM8750"))
-        assertFalse(report.message.contains("SM8550"))
+        assertEquals("graph_execute_passed", report.qnnDiagnostics.executionStage)
     }
 
     @Test
@@ -518,14 +550,14 @@ class LocalImageQnnRunnerTest {
     }
 
     @Test
-    fun qnnImageBundleHonorsMinimumDeviceTier() {
+    fun minimumDeviceTierIsAdvisoryAndNeverBlocksTheRunPath() {
         val bundle = qnnImageBundle(minDeviceTier = "SNAPDRAGON_8_ELITE")
         val report = QnnHtpImageRunner(runnerReady = true).health(
             device = snapdragonGen2(qnnReady = true),
             bundleRoot = bundle
         )
 
-        assertEquals(LocalImageQnnState.DEVICE_UNSUPPORTED, report.state)
+        assertEquals(LocalImageQnnState.SMOKE_REQUIRED, report.state)
         assertFalse(report.npuActive)
     }
 

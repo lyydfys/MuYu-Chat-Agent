@@ -573,7 +573,7 @@ internal object RuntimeIdentityFactory {
         }
         // A future QAIRT package may use a different HTP generation. Include
         // the generation selected by the device profile without guessing a
-        // chipset allow-list; missing files remain explicit in the digest.
+        // exact chipset-name table; missing files remain explicit in the digest.
         val generation = Regex("v(\\d+)", RegexOption.IGNORE_CASE)
             .find(device.accelerationProfile.qnnHtpGeneration)
             ?.groupValues

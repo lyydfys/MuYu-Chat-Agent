@@ -28,6 +28,62 @@ import org.junit.Test
 
 class LocalImageModelReadinessTest {
     @Test
+    fun universalQnnArchivePersistsTheExactLocalTransportProfile() {
+        val root = Files.createTempDirectory("qnn-universal-installed-profile").toFile()
+        try {
+            val runtime = File(root, "runtime").apply { mkdirs() }
+            File(runtime, "libQnnSystem.so").writeText("system")
+            File(runtime, "libQnnHtp.so").writeText("htp")
+            listOf(68, 79).forEach { arch ->
+                File(runtime, "libQnnHtpV${arch}Skel.so").writeText("skel-$arch")
+                File(runtime, "libQnnHtpV${arch}Stub.so").writeText("stub-$arch")
+            }
+            val bundle = ImageEngineBundleSpec(
+                id = "generic-qnn",
+                title = "Generic QNN",
+                components = emptyList(),
+                requiredRuntimeProfile = ImageEngineQnnRuntimeProfileSpec(
+                    qnnSdk = "2.28",
+                    htpArch = 68,
+                    completeBundleRuntime = true
+                )
+            )
+
+            val elite = resolveInstalledQnnRuntimeProfile(root, bundle, preferredHtpArch = 79)
+            val unknownFuture = resolveInstalledQnnRuntimeProfile(root, bundle, preferredHtpArch = 83)
+
+            assertEquals(79, elite.requiredRuntimeProfile?.htpArch)
+            assertEquals(68, unknownFuture.requiredRuntimeProfile?.htpArch)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun graphOnlyQnnArchiveDoesNotInventACompleteRuntimeContract() {
+        val root = Files.createTempDirectory("qnn-graph-only-installed-profile").toFile()
+        try {
+            val bundle = ImageEngineBundleSpec(
+                id = "graph-only-qnn",
+                title = "Graph-only QNN",
+                components = emptyList(),
+                requiredRuntimeProfile = ImageEngineQnnRuntimeProfileSpec(
+                    qnnSdk = "2.28",
+                    htpArch = 68,
+                    completeBundleRuntime = false
+                )
+            )
+
+            val resolved = resolveInstalledQnnRuntimeProfile(root, bundle, preferredHtpArch = 79)
+
+            assertEquals(bundle.requiredRuntimeProfile, resolved.requiredRuntimeProfile)
+            assertFalse(requireNotNull(resolved.requiredRuntimeProfile).completeBundleRuntime)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun qnnRuntimeUsesPublicSnapdragonLabel() {
         assertEquals("骁龙 NPU", LocalImageRuntime.QNN_HTP.label)
     }
@@ -95,7 +151,7 @@ class LocalImageModelReadinessTest {
     }
 
     @Test
-    fun completeMnnDiffusionStableLayoutRequiresRuntimeVerification() {
+    fun completeMnnDiffusionStableLayoutCanRunBeforeVerification() {
         val root = Files.createTempDirectory("mnn-diffusion-sd").toFile()
         val primary = root.touch("unet.mnn")
         root.touch("text_encoder.mnn")
@@ -111,15 +167,15 @@ class LocalImageModelReadinessTest {
             runtime = LocalImageRuntime.MNN_DIFFUSION
         )
 
-        val message = record.localImageReadinessMessage()
-
         assertNull(record.localImageStructuralReadinessMessage())
-        assertNotNull(message)
-        assertTrue(message!!.contains("20-step"))
+        assertNull(record.localImageReadinessMessage())
+        assertTrue(record.isReadyForLocalImageGeneration())
+        assertEquals("未验证·可尝试", record.localImageReadinessLabel())
+        assertTrue(record.localImageVerificationDiagnosticMessage()!!.contains("可直接尝试"))
     }
 
     @Test
-    fun unverifiedStableDiffusionCppEngineCannotBecomeReadyForAutomaticSelection() {
+    fun unverifiedStableDiffusionCppEngineCanBeManuallySelectedAndRun() {
         val root = Files.createTempDirectory("sdcpp-unverified").toFile()
         try {
             val checkpoint = root.touch("sd_turbo.safetensors")
@@ -131,9 +187,11 @@ class LocalImageModelReadinessTest {
             )
 
             assertNull(record.localImageStructuralReadinessMessage())
-            assertFalse(record.isReadyForLocalImageGeneration())
-            assertEquals("待校验", record.localImageReadinessLabel())
-            assertTrue(record.localImageReadinessMessage()!!.contains("smoke"))
+            assertTrue(record.isReadyForLocalImageGeneration())
+            assertNull(record.localImageReadinessMessage())
+            assertEquals("未验证·可尝试", record.localImageReadinessLabel())
+            assertTrue(record.localImageVerificationDiagnosticMessage()!!.contains("native 执行"))
+            assertFalse(record.isCertifiedForAutomaticLocalImageSelection())
         } finally {
             root.deleteRecursively()
         }
@@ -154,6 +212,57 @@ class LocalImageModelReadinessTest {
 
             assertTrue(record.isReadyForLocalImageGeneration())
             assertEquals("可用", record.localImageReadinessLabel())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun failedStableDiffusionCppExecutionKeepsRetryPathOpen() {
+        val root = Files.createTempDirectory("sdcpp-failed-retry").toFile()
+        try {
+            val checkpoint = root.touch("sd_turbo.safetensors")
+            val record = localImageRecord(
+                root = root,
+                primary = checkpoint,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.SD_TURBO
+            ).copy(
+                verificationStatus = LocalImageVerificationStatus.FAILED,
+                verificationMessage = "native graph execution failed",
+                verifiedAt = System.currentTimeMillis()
+            )
+
+            assertNull(record.localImageReadinessMessage())
+            assertTrue(record.isReadyForLocalImageGeneration())
+            assertEquals("上次失败·可重试", record.localImageReadinessLabel())
+            assertTrue(record.localImageVerificationDiagnosticMessage()!!.contains("仍可直接重试"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun legacyFailedBitWithoutExecutionEvidenceIsNotReportedAsCurrentFailure() {
+        val root = Files.createTempDirectory("sdcpp-legacy-failed").toFile()
+        try {
+            val checkpoint = root.touch("sd_turbo.safetensors")
+            val record = localImageRecord(
+                root = root,
+                primary = checkpoint,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.SD_TURBO
+            ).copy(
+                verificationStatus = LocalImageVerificationStatus.FAILED,
+                verificationMessage = "stale certification failure",
+                verifiedAt = 0L
+            )
+
+            assertNull(record.localImageReadinessMessage())
+            assertTrue(record.isReadyForLocalImageGeneration())
+            assertEquals("可直接尝试", record.localImageReadinessLabel())
+            assertFalse(record.hasCurrentLocalImageExecutionFailure())
+            assertTrue(record.localImageVerificationDiagnosticMessage()!!.contains("没有当前执行证据"))
         } finally {
             root.deleteRecursively()
         }
@@ -208,7 +317,7 @@ class LocalImageModelReadinessTest {
     }
 
     @Test
-    fun failedMnnDiffusionRuntimeVerificationBlocksGenerationReadiness() {
+    fun failedMnnDiffusionRuntimeVerificationIsDiagnosticAndAllowsRetry() {
         val root = Files.createTempDirectory("mnn-diffusion-runtime-failed").toFile()
         val primary = root.touch("unet.mnn")
         root.touch("text_encoder.mnn")
@@ -224,14 +333,18 @@ class LocalImageModelReadinessTest {
             runtime = LocalImageRuntime.MNN_DIFFUSION
         ).copy(
             verificationStatus = LocalImageVerificationStatus.FAILED,
-            verificationMessage = "UNet smoke 未通过"
+            verificationMessage = "UNet smoke 未通过",
+            verifiedAt = System.currentTimeMillis()
         )
 
-        val message = record.localImageReadinessMessage()
+        val diagnostic = record.localImageVerificationDiagnosticMessage()
 
-        assertNotNull(message)
-        assertTrue(message!!.contains("运行校验未通过"))
-        assertTrue(message.contains("UNet smoke 未通过"))
+        assertNull(record.localImageReadinessMessage())
+        assertTrue(record.isReadyForLocalImageGeneration())
+        assertEquals("上次失败·可重试", record.localImageReadinessLabel())
+        assertNotNull(diagnostic)
+        assertTrue(diagnostic!!.contains("UNet smoke 未通过"))
+        assertTrue(diagnostic.contains("直接重试"))
     }
 
     @Test
@@ -283,7 +396,8 @@ class LocalImageModelReadinessTest {
 
         assertTrue(File(root, "tokenizer.txt").isFile)
         assertNull(record.localImageStructuralReadinessMessage())
-        assertNotNull(record.localImageReadinessMessage())
+        assertNull(record.localImageReadinessMessage())
+        assertTrue(record.isReadyForLocalImageGeneration())
     }
 
     @Test
@@ -387,7 +501,7 @@ class LocalImageModelReadinessTest {
     }
 
     @Test
-    fun completeSanaMnnDiffusionBundleRequiresRuntimeVerification() {
+    fun completeSanaMnnDiffusionBundleCanRunBeforeVerification() {
         val root = Files.createTempDirectory("mnn-diffusion-sana").toFile()
         val primary = root.createCompleteSanaBundle()
 
@@ -398,14 +512,14 @@ class LocalImageModelReadinessTest {
             family = LocalImageModelFamily.SANA
         )
 
-        val message = record.localImageReadinessMessage()
         assertNull(record.localImageStructuralReadinessMessage())
-        assertNotNull(message)
-        assertTrue(message!!.contains("至少 2-step"))
+        assertNull(record.localImageReadinessMessage())
+        assertTrue(record.isReadyForLocalImageGeneration())
+        assertEquals("未验证·可尝试", record.localImageReadinessLabel())
     }
 
     @Test
-    fun sanaManifestFamilyOverridesStaleSd15RecordForReadiness() {
+    fun sanaManifestFamilyDoesNotCreateAVerificationAdmissionGate() {
         val root = Files.createTempDirectory("mnn-diffusion-sana-manifest").toFile()
         val primary = root.createCompleteSanaBundle()
         File(root, "manifest.json").writeText(
@@ -426,7 +540,8 @@ class LocalImageModelReadinessTest {
         )
 
         assertNull(record.localImageStructuralReadinessMessage())
-        assertTrue(record.localImageReadinessMessage()!!.contains("2-step"))
+        assertNull(record.localImageReadinessMessage())
+        assertTrue(record.isReadyForLocalImageGeneration())
     }
 
     @Test
@@ -597,7 +712,7 @@ class LocalImageModelReadinessTest {
     }
 
     @Test
-    fun completeQnnImageBundleRequiresSmokeVerificationBeforeUse() {
+    fun completeQnnImageBundleKeepsRunPathOpenBeforeSmokeVerification() {
         val root = Files.createTempDirectory("qnn-sd15").toFile()
         val primary = root.touch("sd15_qnn_context.bin")
         root.touch("unet_qnn_context.bin")
@@ -611,16 +726,14 @@ class LocalImageModelReadinessTest {
             runtime = LocalImageRuntime.QNN_HTP
         )
 
-        val message = record.localImageReadinessMessage()
-
         assertNull(record.localImageStructuralReadinessMessage())
-        assertNotNull(message)
-        assertTrue(message!!.contains("QNN"))
-        assertTrue(message.contains("1-step"))
+        assertNull(record.localImageReadinessMessage())
+        assertTrue(record.isReadyForLocalImageGeneration())
+        assertEquals("NPU 待校验", record.localImageReadinessLabel())
     }
 
     @Test
-    fun qnnSmokePassedStaysDiagnosticUntilSemanticGenerationPasses() {
+    fun qnnSmokeEvidenceIsDiagnosticAndDoesNotGateUse() {
         val root = Files.createTempDirectory("qnn-sd15-smoke-passed").toFile()
         val primary = root.touch("sd15_qnn_context.bin")
         root.touch("unet_qnn_context.bin")
@@ -636,9 +749,8 @@ class LocalImageModelReadinessTest {
             verificationMessage = "QNN smoke passed"
         )
 
-        val message = record.localImageReadinessMessage()
-
-        assertNotNull(message)
+        assertNull(record.localImageReadinessMessage())
+        assertTrue(record.isReadyForLocalImageGeneration())
         assertEquals("NPU smoke", record.localImageReadinessLabel())
     }
 
@@ -666,7 +778,7 @@ class LocalImageModelReadinessTest {
     }
 
     @Test
-    fun qnnPipelineProbePassedStaysDiagnosticUntilSemanticGenerationPasses() {
+    fun qnnPipelineProbeEvidenceIsDiagnosticAndDoesNotGateUse() {
         val root = Files.createTempDirectory("qnn-sd15-pipeline-probe").toFile()
         val primary = root.touch("sd15_qnn_context.bin")
         root.touch("unet_qnn_context.bin")
@@ -682,9 +794,8 @@ class LocalImageModelReadinessTest {
             verificationMessage = "QNN pipeline probe passed"
         )
 
-        val message = record.localImageReadinessMessage()
-
-        assertNotNull(message)
+        assertNull(record.localImageReadinessMessage())
+        assertTrue(record.isReadyForLocalImageGeneration())
         assertEquals("NPU probe", record.localImageReadinessLabel())
     }
 
@@ -746,7 +857,7 @@ class LocalImageModelReadinessTest {
     }
 
     @Test
-    fun mnnManifestUsesSmokeSpecAndRequiresRuntimeVerification() {
+    fun mnnManifestUsesSmokeSpecWithoutRequiringRuntimeCertification() {
         val root = Files.createTempDirectory("mnn-manifest-sd15").toFile()
         val primary = root.touch("unet.mnn")
         root.touch("text_encoder.mnn")
@@ -783,7 +894,8 @@ class LocalImageModelReadinessTest {
         assertEquals(LocalImageRuntime.MNN_DIFFUSION, manifest.runtime)
         assertEquals("512x512", manifest.imageSize)
         assertNull(record.localImageStructuralReadinessMessage())
-        assertNotNull(record.localImageReadinessMessage())
+        assertNull(record.localImageReadinessMessage())
+        assertTrue(record.isReadyForLocalImageGeneration())
     }
 
     @Test

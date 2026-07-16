@@ -305,6 +305,7 @@ object LocalApiRuntime {
         val activeModelId = profile?.firstString("modelId")
             .orEmpty()
             .ifBlank { loaded?.firstString("id", "modelId").orEmpty() }
+        val activeContextLength = activeContextLength(loaded)
         val result = org.json.JSONArray()
 
         for (index in 0 until source.length()) {
@@ -373,13 +374,35 @@ object LocalApiRuntime {
             item.put("verification", item.optString("profileVerificationLevel"))
             item.put("lifecycle", item.optString("engineLifecycle"))
             val lifecycle = item.optString("engineLifecycle").lowercase()
-            item.put("loaded", active && lifecycle !in NON_LOADED_LIFECYCLES)
+            val isLoaded = active && lifecycle !in NON_LOADED_LIFECYCLES
+            item.put("loaded", isLoaded)
+            if (isLoaded && activeContextLength != null) {
+                // These aliases intentionally expose the user's logical context window. llama.cpp
+                // may pad the native allocation (for example 8190 -> 8192), but replacing the
+                // configured value with that transport detail would silently rewrite custom n_ctx.
+                item.put("n_ctx", activeContextLength)
+                item.put("context_length", activeContextLength)
+                item.put("max_context_length", activeContextLength)
+            }
             result.put(item)
         }
         return JSONObject()
             .put("object", root?.optString("object").orEmpty().ifBlank { "list" })
             .put("data", result)
             .toString()
+    }
+
+    private fun activeContextLength(loaded: JSONObject?): Int? {
+        val configured = runCatching { generationParamsProvider().nCtx }
+            .getOrNull()
+            ?.takeIf { it > 0 }
+        if (configured != null) return configured
+
+        return loaded?.firstPositiveInt("n_ctx", "context_length", "max_context_length")
+            ?: loaded?.optJSONObject("stats")
+                ?.firstPositiveInt("nCtx", "n_ctx", "maxAllTokens", "max_all_tokens")
+            ?: nativeStatsObject()
+                ?.firstPositiveInt("nCtx", "n_ctx", "maxAllTokens", "max_all_tokens")
     }
 
     fun generationSequence(): Long? {
@@ -637,6 +660,19 @@ object LocalApiRuntime {
     private fun JSONObject.firstBoolean(vararg keys: String): Boolean? {
         for (key in keys) {
             if (has(key) && !isNull(key)) return optBoolean(key)
+        }
+        return null
+    }
+
+    private fun JSONObject.firstPositiveInt(vararg keys: String): Int? {
+        for (key in keys) {
+            if (!has(key) || isNull(key)) continue
+            val value = when (val raw = opt(key)) {
+                is Number -> raw.toInt()
+                is String -> raw.trim().toIntOrNull()
+                else -> null
+            }
+            if (value != null && value > 0) return value
         }
         return null
     }

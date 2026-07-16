@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.PushbackInputStream
 import kotlin.math.min
@@ -44,6 +45,38 @@ class GgufMetadataReaderTest {
         val metadata = GgufMetadataReader.read(ByteArrayInputStream("GGU".toByteArray()), "model.gguf")
 
         assertFalse(metadata.isGguf)
+    }
+
+    @Test
+    fun readsTheExactArchitectureContextLength() {
+        val metadata = GgufMetadataReader.read(
+            ByteArrayInputStream(ggufWithContext("qwen35moe", 262_144)),
+            "renamed-model.gguf"
+        )
+
+        assertTrue(metadata.isGguf)
+        assertEquals("qwen35moe", metadata.architecture)
+        assertEquals(262_144, metadata.contextLength)
+    }
+
+    private fun ggufWithContext(architecture: String, contextLength: Int): ByteArray =
+        ByteArrayOutputStream().apply {
+            write("GGUF".toByteArray())
+            write(uint32Le(3L))
+            write(uint64Le(0L))
+            write(uint64Le(2L))
+            writeGgufString("general.architecture")
+            write(uint32Le(8))
+            writeGgufString(architecture)
+            writeGgufString("$architecture.context_length")
+            write(uint32Le(4))
+            write(uint32Le(contextLength.toLong()))
+        }.toByteArray()
+
+    private fun ByteArrayOutputStream.writeGgufString(value: String) {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        write(uint64Le(bytes.size.toLong()))
+        write(bytes)
     }
 
     private fun minimalGguf(version: Int): ByteArray = buildList<Byte> {

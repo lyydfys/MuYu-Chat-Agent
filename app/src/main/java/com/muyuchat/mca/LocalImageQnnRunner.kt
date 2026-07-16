@@ -2,13 +2,11 @@ package com.muyuchat.mca
 
 import android.content.Context
 import com.muyuchat.core.deviceprofile.DeviceProfile
-import com.muyuchat.core.download.ImageEngineMinDeviceTier
 import java.io.File
 import org.json.JSONObject
 
 internal enum class LocalImageQnnState {
     NOT_QNN_BUNDLE,
-    DEVICE_UNSUPPORTED,
     QNN_RUNTIME_MISSING,
     QNN_TRANSPORT_BLOCKED,
     BUNDLE_MISSING,
@@ -99,13 +97,9 @@ internal class QnnHtpImageRunner(
                 message = "This image engine is not a Snapdragon NPU bundle."
             )
         }
-        if (!manifest.minDeviceTier.supportedByImageQnn(device)) {
-            return manifest.report(
-                state = LocalImageQnnState.DEVICE_UNSUPPORTED,
-                backend = backendLabel,
-                message = "当前设备未达到该 QNN 生图包要求的最低骁龙档位。"
-            )
-        }
+        // minDeviceTier is a package recommendation, not an admission gate.
+        // Unknown/future devices retain the run path and the real native load
+        // plus graph smoke below determines whether this package works.
         qnnRequiredBundleRuntimeReadinessMessage(bundleRoot, manifest.requiredRuntimeProfile)?.let { message ->
             return manifest.report(
                 state = LocalImageQnnState.QNN_RUNTIME_MISSING,
@@ -123,14 +117,23 @@ internal class QnnHtpImageRunner(
                 message = runtimeResolution.stagingError
             )
         }
-        if (manifest.requiresQnnRuntime && device.accelerationProfile.qnnRuntime.transportDependencyBlocked) {
+        val bundleRuntimeReady = runtimeResolution?.stagedRuntime != null
+        if (
+            manifest.requiresQnnRuntime &&
+            !bundleRuntimeReady &&
+            device.accelerationProfile.qnnRuntime.transportDependencyBlocked
+        ) {
             return manifest.report(
                 state = LocalImageQnnState.QNN_TRANSPORT_BLOCKED,
                 backend = backendLabel,
                 message = "The Snapdragon NPU runtime loads, but its device transport is blocked: ${device.accelerationProfile.qnnRuntime.cdspRpcMessage}"
             )
         }
-        if (manifest.requiresQnnRuntime && !device.accelerationProfile.qnnRuntime.usableForSmoke) {
+        if (
+            manifest.requiresQnnRuntime &&
+            !bundleRuntimeReady &&
+            !device.accelerationProfile.qnnRuntime.usableForSmoke
+        ) {
             return manifest.report(
                 state = LocalImageQnnState.QNN_RUNTIME_MISSING,
                 backend = backendLabel,
@@ -226,8 +229,10 @@ internal class QnnHtpImageRunner(
                 binaryMetadata = diagnostics.binaryMetadata,
                 allowKnownForwardCompatibility = true
             )
-            if (!smoke.provesNpuExecution || compatibilityMessage != null) {
-                failureMessage = compatibilityMessage ?: smoke.message
+            if (!smoke.provesNpuExecution) {
+                failureMessage = smoke.message.ifBlank {
+                    compatibilityMessage ?: "QNN graph execution did not complete."
+                }
                 break
             }
         }
@@ -281,17 +286,5 @@ private fun qnnMissingComponents(root: File, manifest: LocalImageBundleManifest)
         }
         if (!hasAny("vae", "decoder", "ae")) add("VAE/AE decoder")
         if (!hasAny("text_encoder", "clip", "t5", "tokenizer", "qwen", "llm")) add("text encoder/tokenizer")
-    }
-}
-
-private fun ImageEngineMinDeviceTier.supportedByImageQnn(device: DeviceProfile): Boolean {
-    val acceleration = device.accelerationProfile
-    return when (this) {
-        ImageEngineMinDeviceTier.ANY -> true
-        ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN1 -> acceleration.stableDiffusion15NpuCandidate
-        ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN2 -> acceleration.stableDiffusion15NpuCandidate
-        ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN3 -> acceleration.sdxlNpuCandidate
-        ImageEngineMinDeviceTier.SNAPDRAGON_8_ELITE -> acceleration.sdxlNpuCandidate &&
-            acceleration.chipsetCode in setOf("SM8750", "SM8750P", "SM8850", "SM8850P")
     }
 }

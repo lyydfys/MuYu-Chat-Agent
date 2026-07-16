@@ -20,6 +20,19 @@ import org.junit.Test
 
 class McaInferenceServiceLoadRecoveryTest {
     @Test
+    fun generateErrorKeepsLegacyConstructorDefaults() {
+        val stats = RuntimeStats()
+
+        val error = GenerateEvent.Error("测试错误", stats)
+
+        assertEquals("测试错误", error.message)
+        assertEquals(stats, error.stats)
+        assertEquals(null, error.code)
+        assertTrue(error.changedFields.isEmpty())
+        assertEquals(null, error.action)
+    }
+
+    @Test
     fun exactVerifiedQairtIdentityAllowsNormalHandleCreation() = runBlocking {
         val qairtRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.GENIEX_QAIRT)
         val bundle = qairtBundle(kvSpan = 4_095)
@@ -57,7 +70,7 @@ class McaInferenceServiceLoadRecoveryTest {
     }
 
     @Test
-    fun constrainedRamFullKvQairtGraphUsesIsolatedDryRunInsteadOfStaticBlock() = runBlocking {
+    fun constrainedRamFullKvQairtGraphRequestsIsolatedCanaryInsteadOfStaticDeviceBlock() = runBlocking {
         val mnnRunner = FakeLocalChatRunner()
         val qairtRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.GENIEX_QAIRT)
         val bundle = qairtBundle(kvSpan = 4_095)
@@ -83,7 +96,7 @@ class McaInferenceServiceLoadRecoveryTest {
     }
 
     @Test
-    fun constrainedRamAllowsSegmentedQairtGraph() = runBlocking {
+    fun constrainedRamSegmentedQairtGraphAlsoRequestsIsolatedCanary() = runBlocking {
         val mnnRunner = FakeLocalChatRunner()
         val qairtRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.GENIEX_QAIRT)
         val bundle = qairtBundle(kvSpan = 1_023)
@@ -108,7 +121,7 @@ class McaInferenceServiceLoadRecoveryTest {
     }
 
     @Test
-    fun unknownDeviceMemoryUsesIsolatedDryRunInsteadOfStaticBlock() = runBlocking {
+    fun unknownDeviceMemoryRequestsRealIsolatedCanary() = runBlocking {
         val qairtRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.GENIEX_QAIRT)
         val service = McaInferenceService(
             context = FakeContext(),
@@ -132,7 +145,7 @@ class McaInferenceServiceLoadRecoveryTest {
     }
 
     @Test
-    fun lowAvailableMemoryUsesIsolatedDryRunInsteadOfStaticBlock() = runBlocking {
+    fun lowAvailableMemoryRequestsRealIsolatedCanary() = runBlocking {
         val qairtRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.GENIEX_QAIRT)
         val service = McaInferenceService(
             context = FakeContext(),
@@ -414,6 +427,37 @@ class McaInferenceServiceLoadRecoveryTest {
         assertEquals(1, runner.loadCalls)
         assertEquals(2, runner.beginCalls)
         assertEquals(1, runner.unloadCalls)
+    }
+
+    @Test
+    fun systemOnlyRequestOverExactContextBudgetFailsBeforeNativeGeneration() = runBlocking {
+        val runner = FakeLocalChatRunner()
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(LocalChatRuntime.MNN_CPU to runner)
+        )
+        service.loadModel(
+            modelPath = "/models/qwen/config.json",
+            runtime = LocalChatRuntime.MNN_CPU,
+            params = LoadParams(nCtx = 512, nThreads = 4)
+        ).getOrThrow()
+
+        val events = service.streamChat(
+            ChatRequest(
+                messages = listOf(ChatMessage(Role.SYSTEM, "system ".repeat(600))),
+                params = GenerationParams(
+                    nCtx = 512,
+                    nPredict = 8,
+                    nThreads = 4,
+                    systemPrompt = "",
+                    reasoningMode = ReasoningMode.OFF,
+                    hideReasoning = true
+                )
+            )
+        ).toList()
+
+        assertTrue(events.any { it is GenerateEvent.Error && it.message.contains("系统提示") })
+        assertEquals(0, runner.beginCalls)
     }
 
     @Test
@@ -941,6 +985,64 @@ class McaInferenceServiceLoadRecoveryTest {
         assertEquals(7L, service.activeExecutionProfile()?.revision)
         assertEquals(4096, service.stats.value.nCtx)
         assertEquals(4, service.stats.value.nThreads)
+    }
+
+    @Test
+    fun parameterPreflightRejectionEmitsStructuredChineseError() = runBlocking {
+        val identity = ModelRuntimeIdentity(
+            modelId = "structured-preflight-model",
+            artifactFingerprint = "sha256:structured-preflight-model",
+            runtime = LocalChatRuntime.MNN_CPU,
+            runtimeVersion = "mnn-test",
+            nativeLibrarySha256 = "native-test",
+            installationScopeId = "installation-test"
+        )
+        val coordinator = ParameterCoordinator()
+        val profile = coordinator.resolveProfile(
+            identity = identity,
+            requestedParamsJson = "{\"n_ctx\":4096,\"n_threads\":4}",
+            profileId = "structured-preflight-profile"
+        ).profile
+        val runner = FakeLocalChatRunner()
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(LocalChatRuntime.MNN_CPU to runner),
+            parameterCoordinator = coordinator
+        )
+        service.loadModel(
+            modelPath = "/models/structured-preflight/config.json",
+            runtime = LocalChatRuntime.MNN_CPU,
+            params = LoadParams(nCtx = 4096, nThreads = 4),
+            runtimeIdentity = identity,
+            executionProfile = profile
+        ).getOrThrow()
+
+        val events = service.streamChat(
+            ChatRequest(
+                messages = listOf(ChatMessage(Role.USER, "hello")),
+                params = GenerationParams(
+                    nCtx = 8192,
+                    nPredict = 8,
+                    nThreads = 4,
+                    reasoningMode = ReasoningMode.OFF,
+                    hideReasoning = true
+                )
+            )
+        ).toList()
+
+        val error = events.filterIsInstance<GenerateEvent.Error>().single()
+        assertEquals("model_reload_required", error.code)
+        assertEquals(setOf("n_ctx"), error.changedFields)
+        assertEquals("apply_and_reload", error.action)
+        assertEquals(
+            "本次请求修改了需要重新加载模型的参数，请先应用参数并重新加载模型。",
+            error.message
+        )
+        assertEquals(error.message, error.stats.lastError)
+        assertFalse(error.message.contains("changed_fields"))
+        assertFalse(error.message.contains("Load-bound"))
+        assertEquals(0, runner.beginCalls)
+        assertFalse(events.any { it is GenerateEvent.Done })
     }
 
     @Test

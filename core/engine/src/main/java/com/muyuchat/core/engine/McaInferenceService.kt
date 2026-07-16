@@ -187,6 +187,23 @@ class McaInferenceService(
         parameterCoordinator.committedProfile()
 
     /**
+     * Resolves a user-authored parameter document against the exact runtime
+     * identity without mutating the active model. Persistence/UI code uses the
+     * returned profile to build a field-level pending transaction.
+     */
+    fun resolveExecutionProfile(
+        identity: ModelRuntimeIdentity,
+        requestedParamsJson: String,
+        profileId: String = UUID.randomUUID().toString(),
+        revision: Long = 1
+    ): ParameterResolution = parameterCoordinator.resolveProfile(
+        identity = identity,
+        requestedParamsJson = requestedParamsJson,
+        profileId = profileId,
+        revision = revision
+    )
+
+    /**
      * Engine-owned candidate/apply boundary. The returned authorization is
      * opaque and binds transactionId + profile identity/revision/all signatures.
      */
@@ -468,7 +485,7 @@ class McaInferenceService(
                             runCatching { runner.unloadModel() }
                             parameterCoordinator.markUnloaded()
                             activeLoadSession = null
-                            error("QAIRT 隔离验收缺少完整模型包哈希、芯片或运行时身份。")
+                            error("QAIRT 隔离安全启动缺少完整模型包哈希、芯片或运行时身份。")
                         }
                     val nativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
                     if (nativeStats == null || !hasQairtNpuExecutionEvidence(nativeStats)) {
@@ -483,9 +500,9 @@ class McaInferenceService(
                             nThreads = effectiveLoadParams.nThreads,
                             nCtx = effectiveLoadParams.nCtx,
                             maxAllTokens = effectiveLoadParams.nCtx,
-                            lastError = "QAIRT 隔离验收未取得 NPU 执行证据。"
+                            lastError = "QAIRT 隔离安全启动未取得 NPU 执行证据。"
                         )
-                        error("QAIRT 隔离验收未取得 NPU 执行证据，拒绝认证该模型包。")
+                        error("QAIRT 隔离安全启动未取得 NPU 执行证据。")
                     }
                     qairtDryRunWitness = QairtDryRunWitness(
                         identity = identity,
@@ -671,16 +688,18 @@ class McaInferenceService(
                         }
                     }
                     is CompletionPreflight.Rejected -> {
-                        val message = buildString {
-                            append(preflight.message)
-                            if (preflight.changedFields.isNotEmpty()) {
-                                append(" changed_fields=")
-                                append(preflight.changedFields.sorted().joinToString(","))
-                            }
-                        }
-                        val errorStats = current.copy(lastError = message)
+                        val presentation = preflight.userFacingPresentation()
+                        val errorStats = current.copy(lastError = presentation.message)
                         _stats.value = errorStats
-                        emit(GenerateEvent.Error(message, errorStats))
+                        emit(
+                            GenerateEvent.Error(
+                                message = presentation.message,
+                                stats = errorStats,
+                                code = preflight.code,
+                                changedFields = preflight.changedFields.toSortedSet(),
+                                action = presentation.action
+                            )
+                        )
                         return@lifecycle
                     }
                 }
@@ -1223,14 +1242,13 @@ class McaInferenceService(
 
     private fun estimateTokens(text: String): Int = estimateLocalPromptTokens(text)
 
-    private fun estimatePromptTokens(request: ChatRequest): Int =
-        request.messages.sumOf { estimateTokens(it.content) } +
-            estimateTokens(request.params.systemPrompt) +
-            estimateTokens(request.runtimeSystemContext) +
-            REASONING_INSTRUCTION_ESTIMATE_TOKENS
-
-    private fun promptReserveTokens(nCtx: Int): Int =
-        (nCtx / 8).coerceIn(MIN_RESERVED_OUTPUT_TOKENS, MAX_PROMPT_RESERVE_TOKENS)
+    private fun estimatePromptTokens(request: ChatRequest): Int {
+        val estimated = request.messages.sumOf { estimateTokens(it.content).toLong() } +
+            estimateTokens(request.params.systemPrompt).toLong() +
+            estimateTokens(request.runtimeSystemContext).toLong() +
+            REASONING_INSTRUCTION_ESTIMATE_TOKENS.toLong()
+        return estimated.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
 
     private fun ChatRequest.hasImageAttachments(): Boolean =
         messages.any { it.imageAttachments.isNotEmpty() }
@@ -1563,11 +1581,11 @@ class McaInferenceService(
     }
 
     /**
-     * Normal app loads are intentionally stricter than download eligibility.
-     * Static metadata can never prove a QAIRT context will create safely, so an
-     * unknown exact identity must first go through the explicitly isolated
-     * smoke process.  Conversely, an already verified exact identity is not
-     * needlessly re-blocked by an advisory KV/RAM profile.
+     * This is process isolation, not a device allowlist. Unknown QAIRT native
+     * contexts must execute once in the isolated worker before the product
+     * process creates them. The app launches that canary automatically from
+     * the normal Load action; concrete create/generate/destroy results are the
+     * only authority.
      */
     private fun requireQairtExecutionPurpose(
         runtime: LocalChatRuntime,
@@ -1583,10 +1601,10 @@ class McaInferenceService(
         }
         if (purpose == QairtExecutionPurpose.ISOLATED_DRY_RUN) {
             check(qairtDryRunProcessVerifier()) {
-                "QAIRT 隔离验收只能在 :qairt_smoke 独立进程中运行。"
+                "QAIRT 隔离安全启动只能在 :qairt_smoke 独立进程中运行。"
             }
             check(qairtIdentityProvider(bundleSha256)?.isComplete == true) {
-                "QAIRT 隔离验收需要已注册且完整的模型包哈希、芯片和运行时身份。"
+                "QAIRT 隔离安全启动需要已注册且完整的模型包哈希、芯片和运行时身份。"
             }
             return
         }
@@ -1604,10 +1622,10 @@ class McaInferenceService(
     }
 
     private fun protectContext(request: ChatRequest): ContextProtection {
-        val nCtx = request.params.nCtx.coerceAtLeast(MIN_CONTEXT_TOKENS)
-        val reservedOutput = promptReserveTokens(nCtx)
-        val promptBudget = nCtx - reservedOutput - CONTEXT_HEADROOM_TOKENS
-        if (promptBudget < MIN_PROMPT_BUDGET_TOKENS) {
+        val budget = localContextWindowBudget(request.params.nCtx)
+        val nCtx = budget.contextLength
+        val promptBudget = budget.promptBudgetTokens
+        if (promptBudget < budget.minimumPromptBudgetTokens) {
             return ContextProtection(
                 request = request,
                 error = "上下文预算过小：n_ctx=$nCtx。请提高 n_ctx，或缩短上传文件/历史对话。"
@@ -1616,26 +1634,32 @@ class McaInferenceService(
 
         val systemMessages = request.messages.filter { it.role == Role.SYSTEM }
         val turnMessages = request.messages.filterNot { it.role == Role.SYSTEM }
-        val systemTokens = systemMessages.sumOf { estimateTokens(it.content) } +
-            estimateTokens(request.params.systemPrompt) +
-            estimateTokens(request.runtimeSystemContext) +
-            REASONING_INSTRUCTION_ESTIMATE_TOKENS
+        val systemTokens = systemMessages.sumOf { estimateTokens(it.content).toLong() } +
+            estimateTokens(request.params.systemPrompt).toLong() +
+            estimateTokens(request.runtimeSystemContext).toLong() +
+            REASONING_INSTRUCTION_ESTIMATE_TOKENS.toLong()
+        if (systemTokens > promptBudget.toLong()) {
+            return ContextProtection(
+                request = request,
+                error = "系统提示和运行时上下文约 $systemTokens token，超过 n_ctx=$nCtx 的安全提示预算。请缩短系统提示，或提高 n_ctx。"
+            )
+        }
         val latestTurn = turnMessages.lastOrNull()
-        if (latestTurn != null && systemTokens + estimateTokens(latestTurn.content) > promptBudget) {
+        if (latestTurn != null && systemTokens + estimateTokens(latestTurn.content).toLong() > promptBudget.toLong()) {
             return ContextProtection(
                 request = request,
                 error = "当前输入约 ${estimateTokens(latestTurn.content)} token，超过本机安全上下文预算。请缩短上传文件/问题，或在参数页提高 n_ctx。"
             )
         }
 
-        val estimated = systemTokens + turnMessages.sumOf { estimateTokens(it.content) }
-        if (estimated <= promptBudget) return ContextProtection(request)
+        val estimated = systemTokens + turnMessages.sumOf { estimateTokens(it.content).toLong() }
+        if (estimated <= promptBudget.toLong()) return ContextProtection(request)
 
         var used = systemTokens
         val keptReversed = mutableListOf<ChatMessage>()
         for (message in turnMessages.asReversed()) {
-            val cost = estimateTokens(message.content)
-            if (used + cost <= promptBudget) {
+            val cost = estimateTokens(message.content).toLong()
+            if (used + cost <= promptBudget.toLong()) {
                 keptReversed += message
                 used += cost
             }
@@ -1710,10 +1734,51 @@ class McaInferenceService(
         modelMemoryBudgetKb = memory.modelMemoryBudgetKb
     )
 
+    private fun CompletionPreflight.Rejected.userFacingPresentation(): PreflightRejectionPresentation =
+        when (code) {
+            "model_not_loaded" -> PreflightRejectionPresentation(
+                message = "模型运行参数尚未就绪，请重新加载当前模型后再试。",
+                action = "load_model"
+            )
+            "model_mismatch" -> PreflightRejectionPresentation(
+                message = "请求的模型与当前已加载模型不一致，请切换到正确的模型后再试。",
+                action = "select_model"
+            )
+            "active_profile_drift" -> PreflightRejectionPresentation(
+                message = "当前模型的实际运行参数与已保存配置不一致，请重新加载当前模型后再试。",
+                action = "reload_model"
+            )
+            "model_reload_required" -> PreflightRejectionPresentation(
+                message = "本次请求修改了需要重新加载模型的参数，请先应用参数并重新加载模型。",
+                action = "apply_and_reload"
+            )
+            "model_reload_required_authorized" -> PreflightRejectionPresentation(
+                message = "新模型参数已获授权，但模型尚未完成重新加载，请重新加载后再试。",
+                action = "reload_model"
+            )
+            "execution_override_forbidden" -> PreflightRejectionPresentation(
+                message = "本次请求包含不允许临时修改的运行参数，请在模型参数中应用后再试。",
+                action = "review_parameters"
+            )
+            "model_behavior_override_forbidden" -> PreflightRejectionPresentation(
+                message = "本次请求包含模板或模型行为参数，请通过受信任的模型配置应用并完成校验。",
+                action = "review_parameters"
+            )
+            else -> PreflightRejectionPresentation(
+                message = "模型参数校验未通过，请检查模型参数后重试。",
+                action = "review_parameters"
+            )
+        }
+
     private data class ContextProtection(
         val request: ChatRequest,
         val error: String? = null,
         val trimmedMessages: Int = 0
+    )
+
+    private data class PreflightRejectionPresentation(
+        val message: String,
+        val action: String
     )
 
     private data class LoadedModelSession(
@@ -1819,12 +1884,7 @@ class McaInferenceService(
         .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private companion object {
-        private const val MIN_CONTEXT_TOKENS = 512
-        private const val CONTEXT_HEADROOM_TOKENS = 96
-        private const val MIN_RESERVED_OUTPUT_TOKENS = 64
-        private const val MIN_PROMPT_BUDGET_TOKENS = 256
         private const val REASONING_INSTRUCTION_ESTIMATE_TOKENS = 96
-        private const val MAX_PROMPT_RESERVE_TOKENS = 1024
         private const val LOW_MEMORY_START_GUARD_KB = 384L * 1024L
         private const val LOW_MEMORY_RUNTIME_STOP_KB = 256L * 1024L
         private const val HIDDEN_REASONING_PROGRESS_STEP_TOKENS = 16

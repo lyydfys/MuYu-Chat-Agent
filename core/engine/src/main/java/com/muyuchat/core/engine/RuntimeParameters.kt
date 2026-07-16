@@ -589,7 +589,12 @@ class LlamaCppRuntimeParameterAdapter(
             val requestedCtx = (requestedLoad["n_ctx"] as? Number)?.toInt() ?: 4096
             val requestedBatch = (requestedLoad["n_batch"] as? Number)?.toInt() ?: 512
             val requestedUbatch = (requestedLoad["n_ubatch"] as? Number)?.toInt() ?: 512
-            normalizeLoad("n_ctx", requestedCtx.coerceIn(512, 4096), "this sparse MoE is running in the <=16GB memory tier")
+            // Sparse-MoE weights remain file-backed, so total parameter count is
+            // not a valid reason to silently replace a user-selected context.
+            // Admission and the real load can still reject an unsafe value, but
+            // an explicit 8K/16K request must reach native unchanged so users can
+            // trade available memory for context on 12/16 GB devices.
+            normalizeLoad("n_ctx", requestedCtx.coerceAtLeast(1), "context must be a positive token count")
             normalizeLoad("n_batch", requestedBatch.coerceIn(1, 2048), "this sparse MoE is running in the <=16GB memory tier")
             normalizeLoad("n_ubatch", requestedUbatch.coerceIn(1, 256), "this sparse MoE is running in the <=16GB memory tier")
             normalizeLoad("n_parallel", 1, "the <=16GB sparse-MoE tier keeps one sequence")
@@ -646,12 +651,45 @@ class LlamaCppRuntimeParameterAdapter(
             // sanitized create JSON is the strongest available P0 evidence.
             return ActiveLoadedSignature.of(identity, expected.values)
         }
-        return super.activeLoadedSignature(identity, nativeStatsJson, expected)
+        super.activeLoadedSignature(identity, nativeStatsJson, expected)?.let { return it }
+
+        // llama.cpp keeps the caller's logical context limit, but pads the
+        // physical context allocation to a 256-token boundary. Preserve the
+        // user's exact n_ctx in desired/resolved/active signatures and accept
+        // only that deterministic native realization. Every other load-bound
+        // field remains fail-closed and must read back exactly.
+        if (expected.identityHash != identity.identityHash) return null
+        val root = runCatching { JSONObject(nativeStatsJson) }.getOrNull() ?: return null
+        if (!root.optBoolean("loaded", true)) return null
+        val raw = activeValuesFromStats(root) ?: return null
+        val observed = partition(identity, raw.toString()).loadBound.only(expected.values.fields)
+        val observedSafe = signatureSafeValues(identity, observed)
+        if (observedSafe.fields != expected.values.fields) return null
+        val differences = observedSafe.differences(expected.values)
+        if (differences.any { it != "n_ctx" }) return null
+        if ("n_ctx" in differences) {
+            val requestedCtx = (expected.values.value("n_ctx") as? Number)?.toInt() ?: return null
+            val nativeCtx = (observedSafe.value("n_ctx") as? Number)?.toInt() ?: return null
+            if (nativeCtx != nativeAlignedContext(requestedCtx)) return null
+        }
+        return ActiveLoadedSignature.of(identity, expected.values)
     }
 
     override fun isLoadSignatureMismatch(beginReturnCode: Int, nativeError: String?): Boolean =
         beginReturnCode == NativeRuntimeErrorCodes.LOAD_SIGNATURE_MISMATCH ||
             nativeError.orEmpty().contains("load-bound fields", ignoreCase = true)
+
+    private companion object {
+        const val LLAMA_CONTEXT_ALIGNMENT = 256
+
+        fun nativeAlignedContext(nCtx: Int): Int {
+            if (nCtx <= 0 || nCtx % LLAMA_CONTEXT_ALIGNMENT == 0) return nCtx
+            return (((nCtx.toLong() + LLAMA_CONTEXT_ALIGNMENT - 1L) / LLAMA_CONTEXT_ALIGNMENT) *
+                LLAMA_CONTEXT_ALIGNMENT)
+                .coerceAtMost(Int.MAX_VALUE.toLong())
+                .toInt()
+        }
+    }
 }
 
 class MnnRuntimeParameterAdapter(

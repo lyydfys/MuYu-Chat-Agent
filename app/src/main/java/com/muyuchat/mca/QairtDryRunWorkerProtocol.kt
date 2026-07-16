@@ -78,7 +78,7 @@ internal object QairtDryRunWorkerProtocol {
         return Progress(
             requestId = json.requiredString("requestId"),
             stage = json.optString("stage").ifBlank { "working" },
-            message = json.optString("message").ifBlank { "正在执行 QAIRT 隔离验收。" },
+            message = json.optString("message").ifBlank { "正在执行 QAIRT 隔离安全启动。" },
             elapsedMs = json.optLong("elapsedMs").coerceAtLeast(0L)
         )
     }
@@ -124,7 +124,7 @@ internal object QairtDryRunWorkerProtocol {
         return Error(
             requestId = json.optString("requestId"),
             code = json.optString("code").ifBlank { "worker_error" },
-            message = json.optString("message").ifBlank { "QAIRT 隔离验收失败。" }
+            message = json.optString("message").ifBlank { "QAIRT 隔离安全启动失败。" }
         )
     }
 

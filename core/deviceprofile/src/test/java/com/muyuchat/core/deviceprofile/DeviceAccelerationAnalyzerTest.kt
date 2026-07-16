@@ -91,7 +91,7 @@ class DeviceAccelerationAnalyzerTest {
     }
 
     @Test
-    fun snapdragon8Gen2AllowsSd15ButNotSdxlByDefault() {
+    fun snapdragon8Gen2KeepsBothQnnImageRoutesOpen() {
         val profile = DeviceAccelerationAnalyzer.assess(
             soc = snapdragon("qcom", "SM8550"),
             totalRamBytes = 12.gb,
@@ -101,12 +101,28 @@ class DeviceAccelerationAnalyzerTest {
         assertEquals(SnapdragonAccelerationTier.SNAPDRAGON_8_GEN2, profile.snapdragonTier)
         assertEquals("HTP v73 class", profile.qnnHtpGeneration)
         assertTrue(profile.stableDiffusion15NpuCandidate)
-        assertFalse(profile.sdxlNpuCandidate)
+        assertTrue(profile.sdxlNpuCandidate)
         assertEquals(AccelerationCapabilityStatus.EXPERIMENTAL_READY, profile.localImage.status)
     }
 
     @Test
-    fun nonSnapdragonFallsBackToCpuProfile() {
+    fun unknownFutureSnapdragonIsNotBlockedByMissingTierProfile() {
+        val profile = DeviceAccelerationAnalyzer.assess(
+            soc = snapdragon("Qualcomm", "SM9999"),
+            totalRamBytes = 12.gb,
+            qnnRuntime = readyRuntime()
+        )
+
+        assertEquals(SnapdragonAccelerationTier.SNAPDRAGON_OTHER, profile.snapdragonTier)
+        assertTrue(profile.stableDiffusion15NpuCandidate)
+        assertTrue(profile.sdxlNpuCandidate)
+        assertEquals(AccelerationCapabilityStatus.EXPERIMENTAL_READY, profile.localVision.status)
+        assertEquals(AccelerationCapabilityStatus.EXPERIMENTAL_READY, profile.localImage.status)
+        assertFalse(profile.localVision.reason.contains("白名单"))
+    }
+
+    @Test
+    fun nonSnapdragonKeepsDiscoveredQnnRuntimeForRealSmoke() {
         val profile = DeviceAccelerationAnalyzer.assess(
             soc = SocInfo("MediaTek", "Dimensity 9400", SocFamily.Dimensity),
             totalRamBytes = 16.gb,
@@ -118,7 +134,10 @@ class DeviceAccelerationAnalyzerTest {
         assertFalse(profile.stableDiffusion15NpuCandidate)
         assertFalse(profile.sdxlNpuCandidate)
         assertEquals(AccelerationCapabilityStatus.READY, profile.localChat.status)
-        assertEquals(AccelerationCapabilityStatus.READY, profile.localImage.status)
+        assertTrue(profile.qnnRuntime.usableForSmoke)
+        assertEquals(AccelerationCapabilityStatus.EXPERIMENTAL_READY, profile.localVision.status)
+        assertEquals(AccelerationCapabilityStatus.EXPERIMENTAL_READY, profile.localImage.status)
+        assertTrue(profile.notes.any { it.contains("真实 native graph smoke") })
     }
 
     @Test
@@ -262,6 +281,25 @@ class DeviceAccelerationAnalyzerTest {
     }
 
     @Test
+    fun qnnRuntimeInspectorFallsBackWhenPreferredTransportIsNotPackaged() {
+        val gen2Dir = Files.createTempDirectory("qnn-runtime-v73-fallback").toFile()
+        gen2Dir.resolve("libQnnSystem.so").writeText("v73-system")
+        gen2Dir.resolve("libQnnHtp.so").writeText("v73-htp")
+        gen2Dir.resolve("libQnnHtpV73Skel.so").writeText("v73-skel")
+        gen2Dir.resolve("libQnnHtpV73Stub.so").writeText("v73-stub")
+
+        val status = QnnRuntimeStatus.inspect(
+            searchDirectories = listOf(gen2Dir),
+            preferredHtpArchVersion = 79
+        )
+
+        assertTrue(status.ready)
+        assertEquals(73, status.htpArchVersion)
+        assertTrue(status.htpSkelLibraryPath!!.endsWith("libQnnHtpV73Skel.so"))
+        assertTrue(status.htpStubLibraryPath!!.endsWith("libQnnHtpV73Stub.so"))
+    }
+
+    @Test
     fun qnnRuntimeInspectorReportsNativeLoadFailureWithoutClaimingLoadable() {
         val dir = Files.createTempDirectory("qnn-runtime-probe-fail").toFile()
         dir.resolve("libQnnSystem.so").writeText("x")
@@ -398,6 +436,7 @@ class DeviceAccelerationAnalyzerTest {
             qnnSystemLibraryPresent = true,
             qnnHtpLibraryPresent = true,
             htpSkelLibraryPresent = true,
+            htpStubLibraryPresent = true,
             searchDirectories = listOf("/data/local/tmp/qnn"),
             probeState = QnnRuntimeProbeState.LOADABLE,
             probeMessage = "mock load ok"

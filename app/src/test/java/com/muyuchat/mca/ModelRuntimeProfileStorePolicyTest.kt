@@ -13,6 +13,13 @@ import org.junit.Test
 
 class ModelRuntimeProfileStorePolicyTest {
     @Test
+    fun nextRevisionSkipsRejectedAndSupersededHistory() {
+        assertEquals(6L, nextExecutionProfileRevision(2L, listOf(1L, 2L, 3L, 4L, 5L)))
+        assertEquals(8L, nextExecutionProfileRevision(7L, listOf(1L, 2L, 3L)))
+        assertEquals(1L, nextExecutionProfileRevision(0L, emptyList()))
+    }
+
+    @Test
     fun identitySnapshotRoundTripsEveryIdentityDimension() {
         val identity = identity()
 
@@ -225,6 +232,40 @@ class ModelRuntimeProfileStorePolicyTest {
         assertEquals(
             PersistedTuningJobState.SUCCEEDED,
             RuntimeProfilePersistencePolicy.cancellationTuningJobTarget(PersistedTuningJobState.SUCCEEDED)
+        )
+    }
+
+    @Test
+    fun onlyJoblessProbeJournalsCanUseTheDisposableProbeTerminalPath() {
+        val base = TuningJournalEntity(
+            transactionId = "probe-transaction-1",
+            identityKey = "identity-1",
+            jobId = null,
+            pendingProfileId = "profile-1",
+            rollbackTargetProfileId = "committed-1",
+            resolvedLoadSignature = "resolved-1",
+            state = TuningJournalState.VALIDATING.name,
+            stage = "ISOLATED_NATIVE_PROBE",
+            recoveryAttempts = 0,
+            createdAt = 1L,
+            updatedAt = 2L
+        )
+
+        assertTrue(RuntimeProfilePersistencePolicy.canCompleteIsolatedProbe(base))
+        assertFalse(
+            RuntimeProfilePersistencePolicy.canCompleteIsolatedProbe(
+                base.copy(transactionId = "tuning-production-1")
+            )
+        )
+        assertFalse(
+            RuntimeProfilePersistencePolicy.canCompleteIsolatedProbe(
+                base.copy(jobId = "job-1")
+            )
+        )
+        assertFalse(
+            RuntimeProfilePersistencePolicy.canCompleteIsolatedProbe(
+                base.copy(state = TuningJournalState.COMMITTED.name)
+            )
         )
     }
 

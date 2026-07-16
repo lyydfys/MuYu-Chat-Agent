@@ -351,13 +351,17 @@ class ModelScopeClient(
 
     fun recommendedVisionBundleFiles(model: ModelScopeRecommendedModel): List<RemoteModelFile> {
         val bundle = model.visionModelBundle ?: error("${model.title} 没有配置多模态模型包。")
+        val fileListCache = mutableMapOf<String, List<RemoteModelFile>>()
         return bundle.components.map { component ->
-            val files = listModelFiles(
-                input = component.repoId,
-                revision = component.revision,
-                provider = component.provider,
-                extensions = MODEL_FILE_EXTENSIONS
-            )
+            val cacheKey = "${component.provider.name}:${component.repoId}:${component.revision}"
+            val files = fileListCache.getOrPut(cacheKey) {
+                listModelFiles(
+                    input = component.repoId,
+                    revision = component.revision,
+                    provider = component.provider,
+                    extensions = MODEL_FILE_EXTENSIONS
+                )
+            }
             val match = files.firstOrNull { it.path.equals(component.fileName, ignoreCase = true) } ?:
                 files.firstOrNull { it.name.equals(component.fileName.substringAfterLast('/'), ignoreCase = true) }
             if (match == null && component.required) {
@@ -679,9 +683,6 @@ class ModelScopeClient(
             .filter { it.isNotBlank() }
             .flatMap { chipset -> listOf("$chipset-for-galaxy", chipset) }
             .distinct()
-        require(requested.isNotEmpty()) {
-            "未提供当前设备的 QNN 芯片标识，已拒绝自动选择其它芯片包。"
-        }
         for (chipset in requested) {
             val downloadUrl = chipsetAssets.optJSONObject(chipset)
                 ?.optJSONObject("qnn_context_binary")
@@ -694,10 +695,16 @@ class ModelScopeClient(
             val keys = chipsetAssets.keys()
             while (keys.hasNext()) add(keys.next())
         }
-        error(
-            "release_assets.json 没有与当前设备精确匹配的 qnn_context_binary w8a16 芯片包。" +
-                "请求：${requested.joinToString(", ")}；可用：${available.sorted().joinToString(", ")}"
-        )
+        return available
+            .sortedWith(qairtFallbackChipsetComparator())
+            .firstNotNullOfOrNull { chipset ->
+                chipsetAssets.optJSONObject(chipset)
+                    ?.optJSONObject("qnn_context_binary")
+                    ?.optString("download_url")
+                    ?.takeIf { it.startsWith("http") }
+                    ?.let { QairtReleaseAsset(chipset, it) }
+            }
+            ?: error("release_assets.json 没有可下载的 qnn_context_binary w8a16 芯片包。")
     }
 
     private fun JSONObject.selectGenieXQairtAsset(preferredChipsets: List<String>): QairtReleaseAsset {
@@ -713,9 +720,6 @@ class ModelScopeClient(
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .distinct()
-        require(chipsetOrder.isNotEmpty()) {
-            "未提供当前设备的 QAIRT 芯片标识，已拒绝自动选择其它芯片包。"
-        }
         for (chipset in chipsetOrder) {
             val asset = chipsetAssets.optJSONObject(chipset)
                 ?.optJSONObject("geniex_qairt")
@@ -724,11 +728,33 @@ class ModelScopeClient(
                 ?: continue
             return QairtReleaseAsset(chipset, downloadUrl)
         }
-        error(
-            "release_assets.json 没有与当前设备精确匹配的 geniex_qairt w4a16 芯片包。" +
-                "请求：${chipsetOrder.joinToString(", ")}；可用：${available.sorted().joinToString(", ")}"
-        )
+        return available
+            .sortedWith(qairtFallbackChipsetComparator())
+            .firstNotNullOfOrNull { chipset ->
+                chipsetAssets.optJSONObject(chipset)
+                    ?.optJSONObject("geniex_qairt")
+                    ?.optString("download_url")
+                    ?.takeIf { it.startsWith("http") }
+                    ?.let { QairtReleaseAsset(chipset, it) }
+            }
+            ?: error("release_assets.json 没有可下载的 geniex_qairt w4a16 芯片包。")
     }
+
+    private fun qairtFallbackChipsetComparator(): Comparator<String> =
+        compareBy<String> { chipset ->
+            // Generic packages are preferable to vendor-bin variants when no
+            // exact device key exists.
+            if (chipset.endsWith("-for-galaxy")) 1 else 0
+        }.thenBy { chipset ->
+            // Prefer the oldest published 8-series target as the broadest
+            // forward-compatible baseline; exact requested matches already
+            // won above this fallback.
+            when {
+                "elite-gen5" in chipset -> 2
+                "elite" in chipset -> 1
+                else -> 0
+            }
+        }.thenBy { it }
 
     companion object {
         private val QAIRT_IMAGE_RELEASE_ASSET_MODEL_IDS = setOf(
@@ -1037,11 +1063,15 @@ class ModelScopeClient(
             title: String,
             repoId: String,
             fileName: String,
-            minDeviceTier: ImageEngineMinDeviceTier = ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN2
+            revision: String = "main",
+            expectedSizeBytes: Long? = null,
+            sha256: String? = null,
+            completeBundleRuntime: Boolean = true,
+            minDeviceTier: ImageEngineMinDeviceTier = ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN1
         ): ImageEngineBundleSpec = ImageEngineBundleSpec(
             id = id,
             title = title,
-            components = qnnZipComponent(repoId, fileName),
+            components = qnnZipComponent(repoId, fileName, revision, expectedSizeBytes, sha256),
             runtime = ImageEngineBundleRuntime.QNN_HTP,
             accelerator = ImageEngineAccelerator.QNN_HTP,
             minDeviceTier = minDeviceTier,
@@ -1051,8 +1081,13 @@ class ModelScopeClient(
             qnnSmokeSpecs = sd15QnnSmokeSpecs(),
             requiredRuntimeProfile = ImageEngineQnnRuntimeProfileSpec(
                 qnnSdk = "2.28",
-                htpArch = 73,
-                completeBundleRuntime = true
+                // The `min` context targets the publisher's broadest hardware
+                // baseline. A self-contained archive may also carry several
+                // physical-device transports; installation resolves the exact
+                // local HTP profile instead of treating this fallback as a
+                // device-admission rule.
+                htpArch = 68,
+                completeBundleRuntime = completeBundleRuntime
             )
         )
 
@@ -1145,7 +1180,14 @@ class ModelScopeClient(
         }
 
         private val QAIRT_MOBILE_CHIPSETS = setOf("SM8750", "SM8750P", "SM8850", "SM8850P")
-        private val SD15_QNN_CHIPSETS = setOf("SM8550", "SM8550P", "SM8750", "SM8750P")
+        private val SD15_QNN_CHIPSETS = setOf(
+            "SM8350",
+            "SM8450", "SM8475",
+            "SM8550", "SM8550P", "QCS8550", "QCM8550",
+            "SM8635", "SM8650", "SM8650P",
+            "SM8750", "SM8750P",
+            "SM8850", "SM8850P"
+        )
         private val SDXL_QNN_CHIPSETS = setOf("SM8650", "SM8650P", "SM8750", "SM8750P")
         private val GEN5_QNN_CHIPSETS = setOf("SM8850", "SM8850P")
 
@@ -1493,7 +1535,7 @@ class ModelScopeClient(
                 priority = 2,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
-                provider = ModelRepositoryProvider.MODELSCOPE,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
                 chatRuntime = RecommendedChatRuntime.GGUF,
                 visionModelBundle = VisionModelBundleSpec(
                     id = "gemma4_26b_a4b_iq2_xxs_vision_bundle",
@@ -1503,6 +1545,7 @@ class ModelScopeClient(
                     minDeviceTier = ImageEngineMinDeviceTier.ANY,
                     requiresQnnRuntime = false,
                     requiresSmokeTest = true,
+                    downloadProjectorByDefault = false,
                     smokeSpec = VisionModelSmokeSpec(
                         imageWidth = 896,
                         imageHeight = 896,
@@ -1514,14 +1557,14 @@ class ModelScopeClient(
                             role = VisionModelBundleComponentRole.MAIN_MODEL,
                             repoId = "bartowski/google_gemma-4-26B-A4B-it-GGUF",
                             revision = "fabed3e586120477355eea23b92644540a79ce2f",
-                            provider = ModelRepositoryProvider.MODELSCOPE,
+                            provider = ModelRepositoryProvider.HUGGING_FACE,
                             fileName = "google_gemma-4-26B-A4B-it-IQ2_XXS.gguf"
                         ),
                         VisionModelBundleComponentSpec(
                             role = VisionModelBundleComponentRole.PROJECTOR,
                             repoId = "bartowski/google_gemma-4-26B-A4B-it-GGUF",
                             revision = "fabed3e586120477355eea23b92644540a79ce2f",
-                            provider = ModelRepositoryProvider.MODELSCOPE,
+                            provider = ModelRepositoryProvider.HUGGING_FACE,
                             fileName = "mmproj-google_gemma-4-26B-A4B-it-f16.gguf"
                         )
                     )
@@ -1531,9 +1574,9 @@ class ModelScopeClient(
                 id = "cyberrealistic_sd15_qnn228",
                 title = "CyberRealistic SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/CyberRealistic_Final-SD1.5-qnn2.28",
-                revision = "main",
+                revision = "162fe0a46cb3f9017b9e2bc003eb168e8bbf4b04",
                 description = "已在 MCA 真机链路跑通的骁龙 NPU 生图基准包。下载后会解包为 QNN context、VAE decoder、CLIP 文本编码器资源，并先执行 smoke test，成功后才可在图片页选择。",
-                recommendedFileName = "cyberrealistic_final_qnn2.28_8gen2.zip",
+                recommendedFileName = "cyberrealistic_final_qnn2.28_min.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
                 minRamGb = 8,
@@ -1548,16 +1591,24 @@ class ModelScopeClient(
                     id = "cyberrealistic_sd15_qnn228",
                     title = "CyberRealistic SD1.5 QNN 2.28",
                     repoId = "Mr-J-369/CyberRealistic_Final-SD1.5-qnn2.28",
-                    fileName = "cyberrealistic_final_qnn2.28_8gen2.zip"
+                    fileName = "cyberrealistic_final_qnn2.28_min.zip",
+                    revision = "162fe0a46cb3f9017b9e2bc003eb168e8bbf4b04",
+                    expectedSizeBytes = 1_007_066_161L,
+                    sha256 = "9daf0e4d80d14ae93c774faf5366702c58b0cdb71618d5e5130b54226936bf3f",
+                    // This pinned archive contains the portable model graphs
+                    // but no QNN host/Skel/Stub files. Runtime discovery must
+                    // therefore use the app/OEM generic path and let the real
+                    // isolated graph smoke decide compatibility.
+                    completeBundleRuntime = false
                 )
             ),
             ModelScopeRecommendedModel(
                 id = "realisticvisionhyper_sd15_qnn228",
                 title = "RealisticVision Hyper SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/RealisticVisionHyper-SD1.5-qnn2.28",
-                revision = "main",
+                revision = "92a2e40d65a47a6b8aa3ee86ffffdc0ed2b0b66b",
                 description = "写实人像和生活摄影方向的 SD1.5 QNN 包。已完成产品 worker 20-step、三次冷启动和三次复用真机回归，仍作为可手动选择的实验模型。",
-                recommendedFileName = "realisticVisionV60B1_v51HyperVAE_qnn2.28_8gen2.zip",
+                recommendedFileName = "RealisticVisionHyper-qnn2.28-min.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
                 minRamGb = 8,
@@ -1573,16 +1624,19 @@ class ModelScopeClient(
                     id = "realisticvisionhyper_sd15_qnn228",
                     title = "RealisticVision Hyper SD1.5 QNN 2.28",
                     repoId = "Mr-J-369/RealisticVisionHyper-SD1.5-qnn2.28",
-                    fileName = "realisticVisionV60B1_v51HyperVAE_qnn2.28_8gen2.zip"
+                    fileName = "RealisticVisionHyper-qnn2.28-min.zip",
+                    revision = "92a2e40d65a47a6b8aa3ee86ffffdc0ed2b0b66b",
+                    expectedSizeBytes = 1_258_546_529L,
+                    sha256 = "7f552ad7f9070f1e482d93d3785ceedd6f3fc1d437db9c5da00d81d9edd34b86"
                 )
             ),
             ModelScopeRecommendedModel(
                 id = "dreamshaper_sd15_qnn228",
                 title = "DreamShaper SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/DreamShaper-SD1.5-qnn2.28",
-                revision = "main",
+                revision = "2338d013c60981b3bd565ce39d4a731bcf9ebfef",
                 description = "通用创意风格 SD1.5 QNN 包，覆盖插画、概念图和轻写实场景。已完成产品 worker 20-step、三次冷启动和三次复用真机回归。",
-                recommendedFileName = "dreamshaper_8_qnn2.28_8gen2.zip",
+                recommendedFileName = "DreamShaperV8-qnn2.28-min.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
                 minRamGb = 8,
@@ -1598,7 +1652,10 @@ class ModelScopeClient(
                     id = "dreamshaper_sd15_qnn228",
                     title = "DreamShaper SD1.5 QNN 2.28",
                     repoId = "Mr-J-369/DreamShaper-SD1.5-qnn2.28",
-                    fileName = "dreamshaper_8_qnn2.28_8gen2.zip"
+                    fileName = "DreamShaperV8-qnn2.28-min.zip",
+                    revision = "2338d013c60981b3bd565ce39d4a731bcf9ebfef",
+                    expectedSizeBytes = 1_258_568_521L,
+                    sha256 = "e4fbd2a28db64b038372d1847d82b66f2f754ed0e95d412a283104b9382ae59c"
                 )
             ),
             ModelScopeRecommendedModel(
@@ -1611,16 +1668,13 @@ class ModelScopeClient(
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
                 minRamGb = 8,
-                tags = listOf("本地生图", "骁龙 NPU", "QNN", "动漫插画", "待验证"),
+                tags = listOf("本地生图", "骁龙 NPU", "QNN", "动漫插画", "实验"),
                 priority = 4,
                 kind = ModelScopeRecommendedKind.IMAGE,
-                status = RecommendedModelStatus.NOT_RECOMMENDED,
-                visibleInRecommendations = false,
+                status = RecommendedModelStatus.EXPERIMENTAL,
                 supportedChipsetCodes = SD15_QNN_CHIPSETS,
                 downloadPolicy = RecommendedModelDownloadPolicy.ANY_SNAPDRAGON,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
-                downloadable = false,
-                downloadBlockReason = "真机语义回归未达到推荐标准，暂不开放一键下载。",
                 localImageEngineTier = LocalImageEngineTier.COMPACT_QUALITY,
                 imageEngineBundle = sd15QnnBundle(
                     id = "meinamix_sd15_qnn228",

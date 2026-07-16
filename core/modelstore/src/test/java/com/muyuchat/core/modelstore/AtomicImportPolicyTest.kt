@@ -46,11 +46,11 @@ class AtomicImportPolicyTest {
     }
 
     @Test
-    fun providerSizeTreatsZeroNegativeAndMissingValuesAsUnknown() {
-        assertEquals(null, null.reliableProviderSize())
-        assertEquals(null, 0L.reliableProviderSize())
-        assertEquals(null, (-1L).reliableProviderSize())
-        assertEquals(42L, 42L.reliableProviderSize())
+    fun providerReportedSizeNeverRejectsACompleteSafStream() {
+        verifyProviderCopyAgainstAdvisorySize(null, copiedSize = 42L)
+        verifyProviderCopyAgainstAdvisorySize(0L, copiedSize = 42L)
+        verifyProviderCopyAgainstAdvisorySize(-1L, copiedSize = 42L)
+        verifyProviderCopyAgainstAdvisorySize(4_096L, copiedSize = 42L)
     }
 
     @Test

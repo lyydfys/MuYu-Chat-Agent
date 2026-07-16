@@ -12,6 +12,32 @@ import org.junit.Test
 
 class QnnImageRuntimeStagerTest {
     @Test
+    fun stagesGenericQnn228ContextOnExactV79DeviceTransportWithoutVersionedHostLibrary() {
+        val sourceRoot = Files.createTempDirectory("qnn-stage-228-v68-v79-source").toFile()
+        val destinationRoot = Files.createTempDirectory("qnn-stage-228-v68-v79-destination").toFile()
+        try {
+            val runtime = File(sourceRoot, "runtime").apply { mkdirs() }
+            writeProfile(runtime, arch = 68, buildId = QNN_228_BUILD)
+            writeProfile(runtime, arch = 79, buildId = QNN_228_BUILD)
+            File(runtime, "libQnnHtpV79.so").delete()
+            writeRuntimeMetadata(runtime, qnnSdk = "2.28", arch = 68)
+
+            val staged = requireNotNull(stagePlan(sourceRoot, destinationRoot, 68, 79).runtime)
+
+            assertTrue(staged.directory.name.startsWith("v68-on-v79-"))
+            assertEquals(68, staged.htpArchVersion)
+            assertEquals(79, staged.transportHtpArchVersion)
+            assertEquals(6, staged.files.size)
+            assertFalse(File(staged.directory, "libQnnHtpV79.so").exists())
+            assertTrue(File(staged.directory, "libQnnHtpV79Skel.so").isFile)
+            assertTrue(File(staged.directory, "libQnnHtpV79Stub.so").isFile)
+        } finally {
+            sourceRoot.deleteRecursively()
+            destinationRoot.deleteRecursively()
+        }
+    }
+
+    @Test
     fun stagesV75ContextWithV79PhysicalTransportFromOneSdkBuild() {
         val sourceRoot = Files.createTempDirectory("qnn-stage-v75-v79-source").toFile()
         val destinationRoot = Files.createTempDirectory("qnn-stage-v75-v79-destination").toFile()
@@ -389,6 +415,7 @@ class QnnImageRuntimeStagerTest {
             .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private companion object {
+        const val QNN_228_BUILD = "v2.28.0.240101010101_1"
         const val QNN_239_BUILD = "v2.39.0.250925215840_163802"
         const val QNN_245_BUILD = "v2.45.0.260326154327"
     }

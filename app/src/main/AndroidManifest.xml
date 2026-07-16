@@ -54,6 +54,14 @@
             android:exported="false"
             android:process=":qairt_smoke" />
 
+        <!-- Every load-bound smart-tuning candidate is reconstructed from a
+             persisted pending journal and executed in this disposable process. -->
+        <service
+            android:name=".TuningProbeWorkerService"
+            android:exported="false"
+            android:process=":tuning"
+            android:stopWithTask="true" />
+
         <service
             android:name=".LocalApiForegroundService"
             android:exported="false"

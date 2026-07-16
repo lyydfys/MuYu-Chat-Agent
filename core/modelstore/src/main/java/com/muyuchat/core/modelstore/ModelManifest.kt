@@ -125,5 +125,7 @@ data class GgufMetadata(
     val quant: String? = null,
     val fileType: Int? = null,
     val causalAttention: Boolean? = null,
-    val poolingType: Int? = null
+    val poolingType: Int? = null,
+    /** Model-declared training/runtime context limit from `<arch>.context_length`. */
+    val contextLength: Int? = null
 )

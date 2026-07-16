@@ -41,6 +41,8 @@ internal fun buildRecommendationCatalog(
         visibleModels.filter { it.section == section }.sortedWith(comparator)
 
     val cpuChat = modelsIn(RecommendedModelSection.CPU_CHAT)
+    // Device discovery ranks packages and marks an unmatched package as an
+    // experiment; it never removes a user-visible model from the catalog.
     val npuImage = modelsIn(RecommendedModelSection.NPU_IMAGE)
     return RecommendationCatalog(
         lightChat = cpuChat.filter { it.group == ModelScopeRecommendedGroup.LIGHT_CHAT },
@@ -86,9 +88,9 @@ internal data class RecommendationDownloadAccess(
 )
 
 /**
- * The fast-experiment catalog keeps visibility separate from download access.
- * CPU packages are device-agnostic. QAIRT chat remains an exact-chipset route,
- * while QNN image packages are exposed experimentally on any Snapdragon SoC.
+ * The catalog keeps visibility and device-fit advice separate from download
+ * access. An exact chipset match can improve the recommendation label, but a
+ * missing match never removes the user's ability to download and try a model.
  */
 internal fun recommendationDownloadAccess(
     model: ModelScopeRecommendedModel,
@@ -99,7 +101,8 @@ internal fun recommendationDownloadAccess(
     val exactChipsetMatch = model.matchesChipset(normalizedDevice)
     val eligibility = model.downloadEligibilityFor(deviceChipsetCode, deviceIsSnapdragon)
     val experimental = model.status != RecommendedModelStatus.RECOMMENDED ||
-        (model.section == RecommendedModelSection.NPU_IMAGE && !exactChipsetMatch)
+        (model.section in setOf(RecommendedModelSection.NPU_CHAT, RecommendedModelSection.NPU_IMAGE) &&
+            !exactChipsetMatch)
     return RecommendationDownloadAccess(
         canDownload = eligibility.canDownload,
         experimental = experimental
@@ -137,11 +140,11 @@ internal fun recommendationVerificationLine(
     model.id == "qwen3_vl_4b_qairt_w4a16" && qairtVerified ->
         "验证状态：当前设备冷态、连续图文、Local API 与取消恢复已通过"
     model.id == "qwen3_vl_4b_qairt_w4a16" ->
-        "验证状态：已有骁龙 8 Elite 完整图文回归证据；当前设备仍需隔离验收"
+        "验证状态：已有骁龙 8 Elite 完整图文回归证据；兼容设备默认开放并以真实运行结果为准"
     model.id == "qwen3_4b_2507_qairt_w4a16" && qairtVerified ->
         "验证状态：当前设备十轮文本、Local API 与二次加载已通过"
     model.id == "qwen3_4b_2507_qairt_w4a16" ->
-        "验证状态：已有骁龙 8 Elite 正式文本回归证据；当前设备仍需隔离验收"
+        "验证状态：已有骁龙 8 Elite 正式文本回归证据；兼容设备默认开放并以真实运行结果为准"
     model.id == "cyberrealisticxl_qnn228" ->
         "工程状态：双进程阶段执行已通过；当前模型包 VAE shape 不匹配"
     model.id in VERIFIED_QNN_SD15_EXPERIMENT_IDS ->
@@ -151,7 +154,7 @@ internal fun recommendationVerificationLine(
     model.id.startsWith("gemma4_") ->
         "验证状态：文本隔离方案待产品验收；完整图文包兼容性待验证"
     model.status == RecommendedModelStatus.RECOMMENDED ->
-        "验证状态：已验证；不同设备仍建议本机复测"
+        "验证状态：代表设备已验证；兼容设备默认开放"
     model.status == RecommendedModelStatus.PENDING_INTEGRATION ->
         "工程状态：待接入；组件包开放实验下载，当前版本未验证可运行"
     else ->
@@ -175,7 +178,7 @@ internal fun recommendationDownloadCtaLabel(
     canDownload: Boolean,
     experimental: Boolean = model.status != RecommendedModelStatus.RECOMMENDED
 ): String = when {
-    !canDownload -> "芯片不支持"
+    !canDownload -> "暂不可下载"
     experimental -> "实验下载"
     else -> "下载"
 }

@@ -228,6 +228,14 @@ data class VisionModelBundleSpec(
     val minDeviceTier: ImageEngineMinDeviceTier = ImageEngineMinDeviceTier.ANY,
     val requiresQnnRuntime: Boolean = false,
     val requiresSmokeTest: Boolean = true,
+    /**
+     * Whether the recommendation card's primary download action installs every
+     * required vision component. Large GGUF models may keep their projector in
+     * this bundle for discovery while downloading only the chat model by
+     * default; the projector remains available from the file list for an
+     * explicit download-and-bind action.
+     */
+    val downloadProjectorByDefault: Boolean = true,
     val smokeSpec: VisionModelSmokeSpec = VisionModelSmokeSpec()
 ) {
     val requiredComponents: List<VisionModelBundleComponentSpec>
@@ -433,9 +441,9 @@ enum class RecommendedModelStatus(val label: String) {
 enum class RecommendedModelDownloadPolicy {
     /** CPU and other portable packages can be downloaded on every device. */
     ALL_DEVICES,
-    /** Only the explicitly listed chipset codes expose a download action. */
+    /** Listed chipset codes are recommendation hints only; unmatched devices keep the download action. */
     LISTED_CHIPSETS,
-    /** Community QNN packages are downloadable on Snapdragon devices as an experiment. */
+    /** Snapdragon detection ranks QNN packages; unknown and non-matching devices remain downloadable. */
     ANY_SNAPDRAGON
 }
 
@@ -496,8 +504,9 @@ data class ModelScopeRecommendedModel(
 
 /**
  * Download access is deliberately separate from the device-fit hint shown in
- * the UI.  RAM is advisory only: a user may still download a large package.
- * Chipset matching remains a hard boundary. Integration state is displayed
+ * the UI. RAM and chipset matching are advisory only: hardware discovery may
+ * recommend a better package, but an unknown or unmatched device must never
+ * lose the download/import/load/run path. Integration state is displayed
  * separately: a fully configured component package may be downloaded for
  * user testing even while its execution path is still marked pending.
  */
@@ -521,22 +530,15 @@ fun ModelScopeRecommendedModel.downloadEligibilityFor(
         RecommendedModelDownloadPolicy.ANY_SNAPDRAGON ->
             deviceIsSnapdragon || normalizedDevice.isSnapdragonChipsetCode()
     }
-    if (!chipsetMatched) {
-        return RecommendedModelDownloadEligibility(
-            chipsetMatched = false,
-            canDownload = false,
-            blockedReason = "当前芯片不支持此 NPU 模型，未提供下载入口。"
-        )
-    }
     if (!downloadable) {
         return RecommendedModelDownloadEligibility(
-            chipsetMatched = true,
+            chipsetMatched = chipsetMatched,
             canDownload = false,
             blockedReason = downloadBlockReason ?: "该模型暂不提供下载。"
         )
     }
     return RecommendedModelDownloadEligibility(
-        chipsetMatched = true,
+        chipsetMatched = chipsetMatched,
         canDownload = true
     )
 }

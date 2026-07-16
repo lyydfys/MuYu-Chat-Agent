@@ -427,6 +427,12 @@ sealed interface GenerateEvent {
         val hiddenReasoning: Boolean = false
     ) : GenerateEvent
     data class Done(val stats: RuntimeStats) : GenerateEvent
-    data class Error(val message: String, val stats: RuntimeStats) : GenerateEvent
+    data class Error(
+        val message: String,
+        val stats: RuntimeStats,
+        val code: String? = null,
+        val changedFields: Set<String> = emptySet(),
+        val action: String? = null
+    ) : GenerateEvent
 }
 

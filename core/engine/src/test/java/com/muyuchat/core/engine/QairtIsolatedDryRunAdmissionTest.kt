@@ -17,7 +17,7 @@ import org.junit.Test
 
 class QairtIsolatedDryRunAdmissionTest {
     @Test
-    fun unknownExactIdentityIsRejectedNormallyThenCertifiedOnlyAfterCreateVisibleGenerateAndDestroy() = runBlocking {
+    fun unknownExactIdentityRequiresRealIsolatedCanaryBeforeNormalLoad() = runBlocking {
         val bundle = qairtBundle()
         val identity = QairtBundleRuntimeIdentity(
             bundleSha256 = "qwen3-vl-4b-exact-bundle",

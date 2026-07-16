@@ -26,6 +26,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoFixHigh
@@ -68,6 +69,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.advisor.AgentCandidate
@@ -83,6 +85,52 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 private const val MAX_VISIBLE_BENCHMARK_HISTORY = 10
+internal const val MIN_CUSTOM_CONTEXT_LENGTH = 128
+internal const val MAX_CUSTOM_CONTEXT_LENGTH = 1_048_576
+private const val MIN_CONTEXT_SHORTCUT_EXPONENT = 7
+private const val MAX_CONTEXT_SHORTCUT_EXPONENT = 20
+private const val CONTEXT_SHORTCUT_STEP_COUNT =
+    MAX_CONTEXT_SHORTCUT_EXPONENT - MIN_CONTEXT_SHORTCUT_EXPONENT + 1
+
+internal data class ContextLengthInputValidation(
+    val value: Int? = null,
+    val error: String? = null
+) {
+    val isValid: Boolean
+        get() = value != null && error == null
+}
+
+internal fun validateContextLengthInput(raw: String): ContextLengthInputValidation {
+    val normalized = raw.trim()
+    if (normalized.isEmpty()) {
+        return ContextLengthInputValidation(error = "请输入上下文长度")
+    }
+    val parsed = normalized.toLongOrNull()
+        ?: return ContextLengthInputValidation(error = "请输入完整整数")
+    if (parsed !in MIN_CUSTOM_CONTEXT_LENGTH.toLong()..MAX_CUSTOM_CONTEXT_LENGTH.toLong()) {
+        return ContextLengthInputValidation(
+            error = "可用范围为 $MIN_CUSTOM_CONTEXT_LENGTH–$MAX_CUSTOM_CONTEXT_LENGTH"
+        )
+    }
+    return ContextLengthInputValidation(value = parsed.toInt())
+}
+
+internal fun contextLengthShortcutValue(step: Int): Int =
+    1 shl (MIN_CONTEXT_SHORTCUT_EXPONENT + step.coerceIn(0, CONTEXT_SHORTCUT_STEP_COUNT - 1))
+
+internal fun nearestContextLengthShortcutStep(value: Int): Int {
+    val clamped = value.coerceIn(MIN_CUSTOM_CONTEXT_LENGTH, MAX_CUSTOM_CONTEXT_LENGTH)
+    var bestStep = 0
+    var bestDistance = Long.MAX_VALUE
+    repeat(CONTEXT_SHORTCUT_STEP_COUNT) { step ->
+        val distance = kotlin.math.abs(contextLengthShortcutValue(step).toLong() - clamped.toLong())
+        if (distance < bestDistance) {
+            bestStep = step
+            bestDistance = distance
+        }
+    }
+    return bestStep
+}
 
 data class AgentUiState(
     val deviceProfile: DeviceProfile? = null,
@@ -234,6 +282,7 @@ fun AgentScreen(
     onCancelTuning: (() -> Unit)? = null,
     onQueryTuningJob: (() -> Unit)? = null,
     onApplyPendingProfile: (() -> Unit)? = null,
+    onDiscardPendingProfile: (() -> Unit)? = null,
     onRollbackProfile: (() -> Unit)? = null
 ) {
     var infoDialog by rememberSaveable { mutableStateOf<AgentInfoDialog?>(null) }
@@ -289,9 +338,10 @@ fun AgentScreen(
                     onPauseTuning = onPauseTuning,
                     onResumeTuning = onResumeTuning,
                     onCancelTuning = onCancelTuning,
-                    onQueryTuningJob = onQueryTuningJob,
-                    onApplyPendingProfile = onApplyPendingProfile,
-                    onRollbackProfile = onRollbackProfile
+                onQueryTuningJob = onQueryTuningJob,
+                onApplyPendingProfile = onApplyPendingProfile,
+                onDiscardPendingProfile = onDiscardPendingProfile,
+                onRollbackProfile = onRollbackProfile
                 )
             }
 
@@ -790,6 +840,7 @@ private fun RuntimeProfileCard(
     onCancelTuning: (() -> Unit)?,
     onQueryTuningJob: (() -> Unit)?,
     onApplyPendingProfile: (() -> Unit)?,
+    onDiscardPendingProfile: (() -> Unit)?,
     onRollbackProfile: (() -> Unit)?
 ) {
     var selectedMode by rememberSaveable { mutableStateOf(AgentTuningMode.QUICK) }
@@ -804,6 +855,7 @@ private fun RuntimeProfileCard(
         onCancelTuning,
         onQueryTuningJob,
         onApplyPendingProfile,
+        onDiscardPendingProfile,
         onRollbackProfile
     ).any { it != null }
 
@@ -949,7 +1001,8 @@ private fun RuntimeProfileCard(
                 }
                 OutlinedButton(
                     onClick = { onPauseTuning?.invoke() },
-                    enabled = onPauseTuning != null && jobState.canPause,
+                    enabled = onPauseTuning != null &&
+                        jobState.canPauseSearch(pending?.readyToApply == true),
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(8.dp)
                 ) {
@@ -959,7 +1012,8 @@ private fun RuntimeProfileCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(
                     onClick = { onResumeTuning?.invoke() },
-                    enabled = onResumeTuning != null && jobState.canResume,
+                    enabled = onResumeTuning != null &&
+                        jobState.canResumeSearch(pending?.readyToApply == true),
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(8.dp)
                 ) {
@@ -967,7 +1021,8 @@ private fun RuntimeProfileCard(
                 }
                 OutlinedButton(
                     onClick = { onCancelTuning?.invoke() },
-                    enabled = onCancelTuning != null && jobState.canCancel,
+                    enabled = onCancelTuning != null &&
+                        jobState.canCancelSearch(pending?.readyToApply == true),
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(8.dp)
                 ) {
@@ -980,20 +1035,28 @@ private fun RuntimeProfileCard(
                     enabled = onApplyPendingProfile != null &&
                         pending?.readyToApply == true &&
                         !state.isBusy &&
-                        !jobState.isActive,
+                        jobState.canApplyPendingWhenIdle,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text("应用并重载")
                 }
                 OutlinedButton(
-                    onClick = { onRollbackProfile?.invoke() },
-                    enabled = onRollbackProfile != null && rollback?.available == true && !state.isBusy,
+                    onClick = { onDiscardPendingProfile?.invoke() },
+                    enabled = onDiscardPendingProfile != null && pending?.readyToApply == true && !state.isBusy,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("回滚稳定配置")
+                    Text("撤销修改")
                 }
+            }
+            OutlinedButton(
+                onClick = { onRollbackProfile?.invoke() },
+                enabled = onRollbackProfile != null && rollback?.available == true && !state.isBusy,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("回滚稳定配置")
             }
             TextButton(
                 onClick = { onQueryTuningJob?.invoke() },
@@ -1321,7 +1384,7 @@ private fun AdvancedParamsCard(
                 title = "加载参数",
                 description = "上下文、batch、KV、GPU/MoE、MTP、mmap/mlock 等会进入加载签名，修改后需要受控重载。"
             )
-            CompactIntSlider("上下文长度 n_ctx", params.nCtx, 1024f..65536f) {
+            ContextLengthEditor(params.nCtx) {
                 onParamsChange(params.copy(nCtx = it))
             }
             Text(
@@ -1629,6 +1692,62 @@ private fun CompactIntSlider(
 }
 
 @Composable
+private fun ContextLengthEditor(
+    value: Int,
+    onValue: (Int) -> Unit
+) {
+    var exactText by remember { mutableStateOf(value.toString()) }
+    val validation = validateContextLengthInput(exactText)
+
+    LaunchedEffect(value) {
+        if (validation.value != value) exactText = value.toString()
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        OutlinedTextField(
+            value = exactText,
+            onValueChange = { input ->
+                exactText = input
+                validateContextLengthInput(input).value?.let { parsed ->
+                    if (parsed != value) onValue(parsed)
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            isError = validation.error != null,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            label = { Text("上下文长度 n_ctx（精确值）") },
+            supportingText = {
+                Text(
+                    validation.error
+                        ?: "精确值会原样保存；llama.cpp 如需内部分配对齐，不会改写这里的逻辑值。"
+                )
+            }
+        )
+        Text(
+            "快捷值：${contextLengthShortcutValue(nearestContextLengthShortcutStep(value))}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Slider(
+            value = nearestContextLengthShortcutStep(value).toFloat(),
+            onValueChange = { position ->
+                val shortcut = contextLengthShortcutValue(position.roundToInt())
+                exactText = shortcut.toString()
+                if (shortcut != value) onValue(shortcut)
+            },
+            valueRange = 0f..(CONTEXT_SHORTCUT_STEP_COUNT - 1).toFloat(),
+            steps = CONTEXT_SHORTCUT_STEP_COUNT - 2
+        )
+        Text(
+            "滑杆提供 128、256、512…1048576 的 2 倍快捷值；也可在上方输入范围内任意整数，例如 8190。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
 private fun CompactFloatSlider(
     title: String,
     value: Float,
@@ -1740,6 +1859,27 @@ private val AgentTuningJobState.isActive: Boolean
         AgentTuningJobState.FAILED -> false
     }
 
+/**
+ * A staged candidate deliberately uses PAUSED while it waits for explicit user
+ * approval. After process recreation the same persisted pending transaction is
+ * surfaced as VALIDATING even though no validation coroutine is running. Busy
+ * remains the concurrency guard; these idle states must therefore keep the
+ * explicit "apply and reload" action available.
+ */
+internal val AgentTuningJobState.canApplyPendingWhenIdle: Boolean
+    get() = when (this) {
+        AgentTuningJobState.IDLE,
+        AgentTuningJobState.PAUSED,
+        AgentTuningJobState.VALIDATING,
+        AgentTuningJobState.SUCCEEDED,
+        AgentTuningJobState.FAILED -> true
+
+        AgentTuningJobState.QUEUED,
+        AgentTuningJobState.RUNNING,
+        AgentTuningJobState.CANCELING,
+        AgentTuningJobState.RECOVERING -> false
+    }
+
 private val AgentTuningJobState.canStart: Boolean
     get() = this == AgentTuningJobState.IDLE ||
         this == AgentTuningJobState.SUCCEEDED ||
@@ -1748,8 +1888,14 @@ private val AgentTuningJobState.canStart: Boolean
 private val AgentTuningJobState.canPause: Boolean
     get() = this == AgentTuningJobState.RUNNING || this == AgentTuningJobState.VALIDATING
 
+internal fun AgentTuningJobState.canPauseSearch(hasReadyPendingProfile: Boolean): Boolean =
+    canPause && !hasReadyPendingProfile
+
 private val AgentTuningJobState.canResume: Boolean
     get() = this == AgentTuningJobState.PAUSED
+
+internal fun AgentTuningJobState.canResumeSearch(hasReadyPendingProfile: Boolean): Boolean =
+    canResume && !hasReadyPendingProfile
 
 private val AgentTuningJobState.canCancel: Boolean
     get() = when (this) {
@@ -1764,6 +1910,9 @@ private val AgentTuningJobState.canCancel: Boolean
         AgentTuningJobState.SUCCEEDED,
         AgentTuningJobState.FAILED -> false
     }
+
+internal fun AgentTuningJobState.canCancelSearch(hasReadyPendingProfile: Boolean): Boolean =
+    canCancel && !hasReadyPendingProfile
 
 private fun riskText(label: String): String = when (label.lowercase()) {
     "low" -> "低"

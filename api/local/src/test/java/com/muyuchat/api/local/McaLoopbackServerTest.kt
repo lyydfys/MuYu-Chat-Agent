@@ -2,6 +2,7 @@ package com.muyuchat.api.local
 
 import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.GenerateEvent
+import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LocalChatExecutionContext
 import com.muyuchat.core.engine.RuntimeStats
 import kotlinx.coroutines.flow.emptyFlow
@@ -307,6 +308,12 @@ class McaLoopbackServerTest {
     fun modelsRouteRedactsPathsAndKeepsProfileStateScopedToEachModel() {
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.loadedModelJsonProvider = { """{"id":"active-model"}""" }
+            LocalApiRuntime.generationParamsProvider = {
+                GenerationParams(nCtx = 8190, nPredict = 64, systemPrompt = "")
+            }
+            LocalApiRuntime.nativeStatsJsonProvider = {
+                """{"backend":"llama_cpp","loaded":true,"nCtx":8192,"maxAllTokens":8192}"""
+            }
             LocalApiRuntime.modelsJsonProvider = {
                 """{"object":"list","data":[
                     {"id":"active-model","path":"D:\\models\\active.gguf","n_ctx":32768,"context_length":32768,"max_output_tokens":4096},
@@ -332,8 +339,9 @@ class McaLoopbackServerTest {
             assertFalse(response.contains("D:\\models"))
             assertFalse(response.contains("/storage/emulated"))
             assertFalse(active.has("path"))
-            assertFalse(active.has("n_ctx"))
-            assertFalse(active.has("context_length"))
+            assertEquals(8190, active.getInt("n_ctx"))
+            assertEquals(8190, active.getInt("context_length"))
+            assertEquals(8190, active.getInt("max_context_length"))
             assertFalse(active.has("max_output_tokens"))
             assertEquals("active-profile", active.getString("profileId"))
             assertEquals("device_verified", active.getString("profileVerificationLevel"))
@@ -343,6 +351,105 @@ class McaLoopbackServerTest {
             assertTrue(other.getBoolean("reloadRequired"))
             assertFalse(other.toString().contains("active-profile"))
             assertFalse(other.toString().contains("wrong-global-profile"))
+            assertFalse(other.has("n_ctx"))
+            assertFalse(other.has("context_length"))
+            assertFalse(other.has("max_context_length"))
+
+            val metrics = responseJson(rawHttp(port, authenticatedGet("/metrics")))
+            assertEquals(8192, metrics.getInt("nCtx"))
+        }
+    }
+
+    @Test
+    fun oversizedStreamingPromptReturns413BeforeSseOrGenerationStarts() {
+        val generationCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.generationParamsProvider = {
+                GenerationParams(nCtx = 512, nPredict = 16, systemPrompt = "")
+            }
+            LocalApiRuntime.streamChatProvider = {
+                generationCalls.incrementAndGet()
+                flowOf(GenerateEvent.Chunk("should not run", RuntimeStats()))
+            }
+            val body = JSONObject()
+                .put("stream", true)
+                .put(
+                    "messages",
+                    org.json.JSONArray().put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("content", "长".repeat(400))
+                    )
+                )
+                .toString()
+
+            val response = rawHttp(port, chatRequest(body))
+            val error = responseJson(response).getJSONObject("error")
+
+            assertTrue(response.startsWith("HTTP/1.1 413 Payload Too Large"))
+            assertEquals("context_length_exceeded", error.getString("code"))
+            assertEquals(512, error.getJSONObject("details").getInt("n_ctx"))
+            assertEquals(512, error.getJSONObject("details").getInt("context_length"))
+            assertFalse(response.contains("Content-Type: text/event-stream"))
+            assertFalse(response.contains("data: [DONE]"))
+            assertEquals(0, generationCalls.get())
+        }
+    }
+
+    @Test
+    fun compactCustomContextIsGuardedAgainstItsExactNativeSize() {
+        val generationCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.generationParamsProvider = {
+                GenerationParams(nCtx = 128, nPredict = 8, systemPrompt = "")
+            }
+            LocalApiRuntime.streamChatProvider = {
+                generationCalls.incrementAndGet()
+                flowOf(GenerateEvent.Chunk("should not run", RuntimeStats()))
+            }
+            val body = JSONObject()
+                .put(
+                    "messages",
+                    org.json.JSONArray().put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("content", "x".repeat(600))
+                    )
+                )
+                .toString()
+
+            val response = rawHttp(port, chatRequest(body))
+            val details = responseJson(response).getJSONObject("error").getJSONObject("details")
+
+            assertTrue(response.startsWith("HTTP/1.1 413 Payload Too Large"))
+            assertEquals(128, details.getInt("n_ctx"))
+            assertEquals(128, details.getInt("context_length"))
+            assertEquals(0, generationCalls.get())
+        }
+    }
+
+    @Test
+    fun downstreamContextOverflowIsNormalizedToStructured413() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.generationParamsProvider = {
+                GenerationParams(nCtx = 8190, nPredict = 16, systemPrompt = "")
+            }
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Error(
+                        "当前输入约 9000 token，超过本机安全上下文预算。请缩短输入。",
+                        RuntimeStats()
+                    )
+                )
+            }
+            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":false}"""
+
+            val response = rawHttp(port, chatRequest(body))
+            val error = responseJson(response).getJSONObject("error")
+
+            assertTrue(response.startsWith("HTTP/1.1 413 Payload Too Large"))
+            assertEquals("context_length_exceeded", error.getString("code"))
+            assertFalse(response.contains("generation_failed"))
         }
     }
 
@@ -1166,6 +1273,40 @@ class McaLoopbackServerTest {
     }
 
     @Test
+    fun nonStreamingLoadBoundErrorReturnsStructuredConflict() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Error(
+                        message = "本次请求修改了需要重新加载模型的参数，请先应用参数并重新加载模型。",
+                        stats = RuntimeStats(),
+                        code = "model_reload_required",
+                        changedFields = setOf("n_ctx"),
+                        action = "apply_and_reload"
+                    )
+                )
+            }
+            val body = """{"messages":[{"role":"user","content":"hi"}]}"""
+            val response = rawHttp(
+                port,
+                "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Authorization: Bearer secret\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(response.contains("model_reload_required"))
+            assertTrue(response.contains("apply_and_reload"))
+            assertTrue(response.contains("changedFields"))
+            assertTrue(response.contains("n_ctx"))
+            assertFalse(response.contains("Load-bound request fields"))
+        }
+    }
+
+    @Test
     fun streamingChatClosesWithDoneForEmptyProviderFlow() {
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.streamChatProvider = { emptyFlow() }
@@ -1347,6 +1488,7 @@ class McaLoopbackServerTest {
             LocalApiRuntime.controlPlane = null
             LocalApiRuntime.clearRequestTrace()
             LocalApiRuntime.loadedModelJsonProvider = { "{}" }
+            LocalApiRuntime.generationParamsProvider = { GenerationParams() }
             LocalApiRuntime.modelsJsonProvider = { """{"object":"list","data":[]}""" }
             LocalApiRuntime.modelRuntimeStatesJsonProvider = { "{}" }
             server.start()
@@ -1360,6 +1502,7 @@ class McaLoopbackServerTest {
             LocalApiRuntime.controlPlane = null
             LocalApiRuntime.clearRequestTrace()
             LocalApiRuntime.loadedModelJsonProvider = { "{}" }
+            LocalApiRuntime.generationParamsProvider = { GenerationParams() }
             LocalApiRuntime.modelsJsonProvider = { """{"object":"list","data":[]}""" }
             LocalApiRuntime.modelRuntimeStatesJsonProvider = { "{}" }
             server.shutdown()

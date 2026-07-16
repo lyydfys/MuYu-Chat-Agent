@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -203,6 +204,17 @@ private enum class ModelHubSection(val title: String) {
     FILES("文件")
 }
 
+private enum class LocalModelPendingAction {
+    UNLOAD,
+    DELETE
+}
+
+private data class PendingLocalModelAction(
+    val modelId: String,
+    val action: LocalModelPendingAction,
+    val statusAtStart: String?
+)
+
 @Composable
 fun ModelHubScreen(
     state: ModelHubUiState,
@@ -217,6 +229,7 @@ fun ModelHubScreen(
     onOpenModelPage: (String) -> Unit,
     onDownload: (RemoteModelFile) -> Unit,
     onLoad: (ModelManifest) -> Unit,
+    onUnload: (ModelManifest) -> Unit,
     onVerify: (ModelManifest) -> Unit,
     onDelete: (ModelManifest) -> Unit,
     onAttachVisionProjector: (ModelManifest) -> Unit,
@@ -272,6 +285,7 @@ fun ModelHubScreen(
                     state = state,
                     onImportClick = onImportClick,
                     onLoad = onLoad,
+                    onUnload = onUnload,
                     onVerify = onVerify,
                     onDelete = onDelete,
                     onAttachVisionProjector = onAttachVisionProjector,
@@ -450,7 +464,7 @@ private fun ModelHubHeader(
         }
 
         state.statusMessage?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            StatusMessageCard(message = it)
         }
         if (state.downloadFileName != null) {
             DownloadProgressPanel(state)
@@ -503,6 +517,7 @@ private fun LocalModelsSection(
     state: ModelHubUiState,
     onImportClick: () -> Unit,
     onLoad: (ModelManifest) -> Unit,
+    onUnload: (ModelManifest) -> Unit,
     onVerify: (ModelManifest) -> Unit,
     onDelete: (ModelManifest) -> Unit,
     onAttachVisionProjector: (ModelManifest) -> Unit,
@@ -512,11 +527,56 @@ private fun LocalModelsSection(
     onDeleteLocalImageModel: (String) -> Unit,
     modifier: Modifier
 ) {
+    var pendingAction by remember { mutableStateOf<PendingLocalModelAction?>(null) }
+    var pendingObservedBusy by remember { mutableStateOf(false) }
+    var localActionError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(
+        state.isBusy,
+        state.loadedModelId,
+        state.localModels,
+        state.statusMessage,
+        pendingAction
+    ) {
+        val pending = pendingAction ?: return@LaunchedEffect
+        if (state.isBusy) pendingObservedBusy = true
+        val actionCompleted = when (pending.action) {
+            LocalModelPendingAction.UNLOAD -> state.loadedModelId != pending.modelId
+            LocalModelPendingAction.DELETE -> state.localModels.none { it.id == pending.modelId }
+        }
+        val statusCompleted = state.statusMessage != pending.statusAtStart && !state.isBusy
+        val busyCompleted = pendingObservedBusy && !state.isBusy
+        if (actionCompleted || statusCompleted || busyCompleted) {
+            pendingAction = null
+            pendingObservedBusy = false
+        }
+    }
+
+    fun submitLocalModelAction(
+        model: ModelManifest,
+        action: LocalModelPendingAction,
+        callback: () -> Unit
+    ) {
+        if (state.isBusy || pendingAction != null) return
+        localActionError = null
+        pendingObservedBusy = false
+        pendingAction = PendingLocalModelAction(
+            modelId = model.id,
+            action = action,
+            statusAtStart = state.statusMessage
+        )
+        runCatching(callback).onFailure { error ->
+            pendingAction = null
+            localActionError = "操作失败：${error.message ?: error::class.java.simpleName}"
+        }
+    }
+
     LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             CardBox {
                 Text("本地推理引擎", fontWeight = FontWeight.Bold)
                 Text("高速引擎优先使用 MNN；兼容引擎继续支持 GGUF / llama.cpp 生态。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                localActionError?.let { StatusMessageCard(message = it) }
                 Button(
                     onClick = onImportClick,
                     enabled = !state.isBusy,
@@ -537,10 +597,22 @@ private fun LocalModelsSection(
                             isLoaded = model.id == state.loadedModelId,
                             mnnRuntimeAvailable = state.mnnRuntimeAvailable,
                             qairtVerified = model.id in state.qairtVerifiedLocalModelIds,
-                            enabled = !state.isBusy,
+                            enabled = !state.isBusy && pendingAction == null,
+                            pendingAction = pendingAction
+                                ?.takeIf { it.modelId == model.id }
+                                ?.action,
                             onLoad = { onLoad(model) },
+                            onUnload = {
+                                submitLocalModelAction(model, LocalModelPendingAction.UNLOAD) {
+                                    onUnload(model)
+                                }
+                            },
                             onVerify = { onVerify(model) },
-                            onDelete = { onDelete(model) },
+                            onDelete = {
+                                submitLocalModelAction(model, LocalModelPendingAction.DELETE) {
+                                    onDelete(model)
+                                }
+                            },
                             onAttachVisionProjector = { onAttachVisionProjector(model) }
                         )
                     }
@@ -853,7 +925,7 @@ private fun CloudModelEditorPage(
             item {
                 val status = cloudDialogStatusMessage(statusMessage)
                 if (status != null) {
-                    CloudDialogStatusCard(message = status)
+                    StatusMessageCard(message = status)
                 } else {
                     CardBox {
                         Text("状态反馈", fontWeight = FontWeight.Bold)
@@ -1072,8 +1144,13 @@ private fun CloudModelRow(
 }
 
 @Composable
-private fun CloudDialogStatusCard(message: String) {
-    val isError = message.contains("失败") || message.contains("错误") || message.contains("error", ignoreCase = true)
+private fun StatusMessageCard(message: String) {
+    val isError = message.contains("失败") ||
+        message.contains("错误") ||
+        message.contains("无法") ||
+        message.contains("未找到") ||
+        message.contains("不能") ||
+        message.contains("error", ignoreCase = true)
     val isSuccess = message.contains("成功") || message.contains("success", ignoreCase = true)
     val background = when {
         isError -> MaterialTheme.colorScheme.errorContainer
@@ -1255,7 +1332,7 @@ private fun RecommendedModelsSection(
                 item(key = "npu-chat-header") {
                     RecommendationSectionHeader(
                         title = "NPU 图文聊天",
-                        body = "全部模型均可查看；仅匹配的骁龙芯片提供 QAIRT 下载入口。"
+                        body = "全部机型开放下载；芯片识别只用于优先选择 QAIRT 包，未知机型使用确定性兼容回退。"
                     )
                 }
                 val key = "npu-chat"
@@ -1331,7 +1408,7 @@ private fun RecommendedModelsSection(
                 item(key = "npu-image-header") {
                     RecommendationSectionHeader(
                         title = "NPU 生图",
-                        body = "骁龙设备允许实验下载；未验证芯片可能遇到 QNN Context 不兼容。"
+                        body = "全部机型开放下载和尝试运行；芯片识别只用于推荐合适包，不作为使用门槛。"
                     )
                 }
                 npuImageGroups.forEach { (key, title, models) ->
@@ -1759,11 +1836,14 @@ private fun LocalModelCard(
     mnnRuntimeAvailable: Boolean,
     qairtVerified: Boolean,
     enabled: Boolean,
+    pendingAction: LocalModelPendingAction?,
     onLoad: () -> Unit,
+    onUnload: () -> Unit,
     onVerify: () -> Unit,
     onDelete: () -> Unit,
     onAttachVisionProjector: () -> Unit
 ) {
+    var confirmDelete by rememberSaveable(model.id) { mutableStateOf(false) }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
@@ -1774,7 +1854,7 @@ private fun LocalModelCard(
             val isMnnRuntime = model.runtime == ChatModelRuntime.MNN
             val isQairtRuntime = model.runtime == ChatModelRuntime.GENIEX_QAIRT
             val canLoadRuntime = !isMnnRuntime || mnnRuntimeAvailable
-            val canNormalLoad = canLoadRuntime && (!isQairtRuntime || qairtVerified)
+            val canNormalLoad = canLoadRuntime
             Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     shortName(model.displayName),
@@ -1806,8 +1886,8 @@ private fun LocalModelCard(
             Text(
                 when {
                     isMnnRuntime -> "MNN CPU 高速路径"
-                    isQairtRuntime && qairtVerified -> "已通过当前设备的 QAIRT 隔离验收"
-                    isQairtRuntime -> "需完成当前芯片与运行时的隔离验收后才能正常加载"
+                    isQairtRuntime && qairtVerified -> "已通过 QAIRT 自动隔离安全启动"
+                    isQairtRuntime -> "QAIRT 已开放加载；首次点击会自动在隔离进程安全启动"
                     else -> "GGUF / llama.cpp 兼容路径"
                 },
                 style = MaterialTheme.typography.bodySmall,
@@ -1841,22 +1921,41 @@ private fun LocalModelCard(
                     color = MaterialTheme.colorScheme.primary
                 )
             }
+            if (pendingAction != null) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text(
+                    text = when (pendingAction) {
+                        LocalModelPendingAction.UNLOAD -> "正在卸载 ${shortName(model.displayName)}…"
+                        LocalModelPendingAction.DELETE -> if (isLoaded) {
+                            "正在卸载并删除 ${shortName(model.displayName)}…"
+                        } else {
+                            "正在删除 ${shortName(model.displayName)}…"
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Button(
-                    onClick = onLoad,
-                    enabled = enabled && !isLoaded && canNormalLoad,
+                    onClick = { if (isLoaded) onUnload() else onLoad() },
+                    enabled = enabled && (isLoaded || canNormalLoad),
                     modifier = Modifier.weight(1f).height(44.dp),
                     shape = RoundedCornerShape(999.dp),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                 ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(
+                        imageVector = if (isLoaded) Icons.Default.Close else Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
                     Spacer(Modifier.width(4.dp))
-                    if (!canLoadRuntime) {
+                    if (isLoaded) {
+                        Text("卸载", maxLines = 1, softWrap = false)
+                    } else if (!canLoadRuntime) {
                         Text("引擎未启用", maxLines = 1, softWrap = false)
-                    } else if (isQairtRuntime && !qairtVerified) {
-                        Text("待验收", maxLines = 1, softWrap = false)
                     } else {
-                        Text(if (isLoaded) "已加载" else "加载", maxLines = 1, softWrap = false)
+                        Text("加载", maxLines = 1, softWrap = false)
                     }
                 }
                 OutlinedButton(
@@ -1868,7 +1967,7 @@ private fun LocalModelCard(
                 ) {
                     Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text(if (isQairtRuntime) "隔离验收" else "校验", maxLines = 1, softWrap = false)
+                    Text(if (isQairtRuntime) "重新诊断" else "校验", maxLines = 1, softWrap = false)
                 }
                 OutlinedButton(
                     onClick = onAttachVisionProjector,
@@ -1881,12 +1980,78 @@ private fun LocalModelCard(
                     Spacer(Modifier.width(4.dp))
                     Text(if (model.hasVisionProjector) "更换" else "绑定", maxLines = 1, softWrap = false)
                 }
-                IconButton(onClick = onDelete, enabled = enabled, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Default.Delete, contentDescription = "删除")
+                IconButton(onClick = { confirmDelete = true }, enabled = enabled, modifier = Modifier.size(44.dp)) {
+                    Icon(Icons.Default.Delete, contentDescription = "删除本地模型")
                 }
             }
         }
     }
+    if (confirmDelete) {
+        LocalModelDeleteDialog(
+            model = model,
+            isLoaded = isLoaded,
+            enabled = enabled,
+            onDismiss = { confirmDelete = false },
+            onUnload = {
+                confirmDelete = false
+                onUnload()
+            },
+            onDelete = {
+                confirmDelete = false
+                onDelete()
+            }
+        )
+    }
+}
+
+@Composable
+private fun LocalModelDeleteDialog(
+    model: ModelManifest,
+    isLoaded: Boolean,
+    enabled: Boolean,
+    onDismiss: () -> Unit,
+    onUnload: () -> Unit,
+    onDelete: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { if (enabled) onDismiss() },
+        title = {
+            Text(
+                text = if (isLoaded) "卸载或删除模型" else "删除本地模型",
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Text(
+                if (isLoaded) {
+                    "「${shortName(model.displayName)}」正在运行。可以只释放当前运行时，也可以在安全卸载后一并删除本地模型文件。"
+                } else {
+                    "确定删除「${shortName(model.displayName)}」吗？这会移除 MCA 中的模型记录和本地模型文件，且无法撤销。"
+                }
+            )
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (isLoaded) {
+                    TextButton(onClick = onUnload, enabled = enabled) {
+                        Text("仅卸载")
+                    }
+                }
+                TextButton(
+                    onClick = onDelete,
+                    enabled = enabled,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text(if (isLoaded) "卸载并删除" else "删除")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = enabled) {
+                Text("取消")
+            }
+        }
+    )
 }
 
 @Composable

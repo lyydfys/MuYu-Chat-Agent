@@ -30,7 +30,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
     private var remoteBinder: IBinder? = null
     private var remoteDeathRecipient: IBinder.DeathRecipient? = null
     private var connectionDeferred: CompletableDeferred<ILocalImageWorker>? = null
-    private var bindIssued = false
+    private val bindingLifecycle = LocalImageWorkerBindingLifecycle()
     private var closed = false
     private var preparation: Preparation? = null
     private var activeRequest: ActiveRequest? = null
@@ -55,7 +55,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             val deferred: CompletableDeferred<ILocalImageWorker>?
             val shouldUnbind: Boolean
             synchronized(stateLock) {
-                shouldUnbind = closed
+                shouldUnbind = closed || !bindingLifecycle.bindIssued
                 if (shouldUnbind) {
                     deferred = null
                 } else {
@@ -209,10 +209,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             request.handshake.markFinished()
             if (!request.watchdogTimedOut) request.watchdogJob?.cancel()
             request.deliveredOutputPath?.let(::deleteResultIfSafe)
-            synchronized(stateLock) {
-                if (activeRequest === request) activeRequest = null
-                if (preparation?.runtime == model.runtime) preparation = null
-            }
+            releaseBindingAfterRequest(request, model.runtime)
         }
     }
 
@@ -229,11 +226,10 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             request = activeRequest
             pendingConnection = connectionDeferred
             pendingPreparation = preparation
-            shouldUnbind = bindIssued
+            shouldUnbind = bindingLifecycle.release()
             activeRequest = null
             preparation = null
             connectionDeferred = null
-            bindIssued = false
             unlinkRemoteDeathRecipientLocked()
             remote = null
             remoteBinder = null
@@ -345,8 +341,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             deferred = connectionDeferred ?: CompletableDeferred<ILocalImageWorker>().also {
                 connectionDeferred = it
             }
-            shouldBind = !bindIssued
-            if (shouldBind) bindIssued = true
+            shouldBind = bindingLifecycle.issueBind()
         }
         if (shouldBind) {
             val bound = runCatching {
@@ -368,7 +363,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
 
     private fun failBinding(error: Throwable) {
         val deferred = synchronized(stateLock) {
-            bindIssued = false
+            bindingLifecycle.release()
             connectionDeferred.also { connectionDeferred = null }
         }
         deferred?.completeExceptionally(remoteFailure(error))
@@ -389,13 +384,43 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             active = activeRequest
             pendingPreparation = preparation
             preparation = null
-            shouldUnbind = bindingDied && bindIssued
-            if (bindingDied) bindIssued = false
+            shouldUnbind = bindingDied && bindingLifecycle.release()
         }
         pendingConnection?.completeExceptionally(failure)
         pendingPreparation?.ready?.completeExceptionally(failure)
         active?.completion?.completeExceptionally(failure)
         if (shouldUnbind) runCatching { appContext.unbindService(connection) }
+    }
+
+    /**
+     * A bound worker is a lease for exactly one generation. Keep [activeRequest]
+     * installed until unbind finishes so a second caller cannot issue a new bind
+     * that an older terminal cleanup could accidentally tear down.
+     */
+    private fun releaseBindingAfterRequest(request: ActiveRequest, runtime: LocalImageRuntime) {
+        val pendingConnection: CompletableDeferred<ILocalImageWorker>?
+        val shouldUnbind: Boolean
+        synchronized(stateLock) {
+            if (activeRequest !== request) return
+            if (preparation?.runtime == runtime) preparation = null
+            pendingConnection = connectionDeferred
+            connectionDeferred = null
+            shouldUnbind = bindingLifecycle.release()
+            unlinkRemoteDeathRecipientLocked()
+            remote = null
+            remoteBinder = null
+        }
+
+        pendingConnection?.completeExceptionally(
+            LocalImageWorkerDisconnectedException(
+                "Local image worker request finished before its pending connection completed."
+            )
+        )
+        if (shouldUnbind) runCatching { appContext.unbindService(connection) }
+
+        synchronized(stateLock) {
+            if (activeRequest === request) activeRequest = null
+        }
     }
 
     private fun cancelRemote(request: ActiveRequest): Boolean {
@@ -560,6 +585,28 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
 
     companion object {
         private const val WATCHDOG_POLL_INTERVAL_MS = 1_000L
+    }
+}
+
+/**
+ * Binding admission state kept free of Android dependencies so terminal-release
+ * and rebind behavior can be covered by local JVM tests. Callers serialize access
+ * with their own connection-state lock.
+ */
+internal class LocalImageWorkerBindingLifecycle {
+    var bindIssued: Boolean = false
+        private set
+
+    fun issueBind(): Boolean {
+        if (bindIssued) return false
+        bindIssued = true
+        return true
+    }
+
+    fun release(): Boolean {
+        val shouldUnbind = bindIssued
+        bindIssued = false
+        return shouldUnbind
     }
 }
 

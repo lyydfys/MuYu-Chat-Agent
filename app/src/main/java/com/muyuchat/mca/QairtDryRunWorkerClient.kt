@@ -36,7 +36,7 @@ internal class QairtDryRunWorkerClient(context: Context) {
                 val recipient = IBinder.DeathRecipient {
                     if (!completed.isCompleted) {
                         completed.completeExceptionally(
-                            QairtDryRunWorkerException("QAIRT 隔离进程已退出；本次验收未被记录。")
+                            QairtDryRunWorkerException("QAIRT 隔离进程已退出；本次安全启动未完成。")
                         )
                     }
                 }
@@ -125,7 +125,7 @@ internal class QairtDryRunWorkerClient(context: Context) {
                 connection,
                 qairtDryRunBindingFlags()
             )
-            check(bound) { "无法连接 QAIRT 隔离验收服务。" }
+            check(bound) { "无法连接 QAIRT 隔离安全启动服务。" }
             val service = withTimeout(CONNECTION_TIMEOUT_MS) { connected.await() }
             val accepted = try {
                 service.start(
@@ -135,12 +135,12 @@ internal class QairtDryRunWorkerClient(context: Context) {
             } catch (error: RemoteException) {
                 throw QairtDryRunWorkerException("QAIRT 隔离服务调用失败。", error)
             }
-            check(accepted) { "QAIRT 隔离验收服务正忙，请稍后重试。" }
+            check(accepted) { "QAIRT 隔离安全启动服务正忙，请稍后重试。" }
             return withTimeout(RUN_TIMEOUT_MS) { completed.await() }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: DeadObjectException) {
-            throw QairtDryRunWorkerException("QAIRT 隔离进程已退出；本次验收未被记录。", error)
+            throw QairtDryRunWorkerException("QAIRT 隔离进程已退出；本次安全启动未完成。", error)
         } finally {
             runCatching { remote?.cancel(QairtDryRunWorkerProtocol.cancel(requestId)) }
             deathRecipient?.let { recipient -> runCatching { binder?.unlinkToDeath(recipient, 0) } }

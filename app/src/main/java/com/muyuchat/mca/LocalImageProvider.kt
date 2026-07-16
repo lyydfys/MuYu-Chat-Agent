@@ -432,10 +432,6 @@ class LocalImageProvider(context: Context) {
             require(qnnHealth.state == LocalImageQnnState.SMOKE_REQUIRED) {
                 qnnHealth.message
             }
-            require(model.hasCurrentQnnVerificationStamp(appContext, bundleRoot)) {
-                "QNN 生图验证状态已过期：设备、系统、应用 native runtime 或模型包发生变化。请先在模型管理中重新校验。"
-            }
-
             val isSdxlQnn = model.family == LocalImageModelFamily.SDXL
             val outputDir = File(
                 appContext.cacheDir,
@@ -657,7 +653,7 @@ class LocalImageProvider(context: Context) {
                     .ifBlank { "MNN-Diffusion native runner is not packaged in this APK." }
             }
             model.bundleRoot?.let(::File)?.let { prepareMnnDiffusionTokenizerIfPossible(it) }
-            model.localImageReadinessMessage()?.let { message -> error(message) }
+            model.localImageStructuralReadinessMessage()?.let { message -> error(message) }
             val outputDir = File(appContext.cacheDir, "local_image_outputs").apply { mkdirs() }
             val outputFile = File(outputDir, "mnn-diffusion-${System.currentTimeMillis()}.png")
             val runner = resolveMnnDiffusionRunner(model.family, options.runner)
@@ -791,7 +787,7 @@ class LocalImageProvider(context: Context) {
             val reason = NativeStableDiffusionBridge.loadError?.message.orEmpty()
             "stable-diffusion.cpp 本地后端加载失败${if (reason.isBlank()) "" else "：$reason"}"
         }
-        model.localImageReadinessMessage()?.let { message -> error(message) }
+        model.localImageStructuralReadinessMessage()?.let { message -> error(message) }
         val componentSelection = resolveStableDiffusionComponentSelection(model)
         val effectiveFamily = componentSelection.family
 
@@ -1239,11 +1235,7 @@ class LocalImageModelStore(context: Context) {
                     (it.sha256.equals(record.sha256, ignoreCase = true) && it.imageSize == record.imageSize)
             }
         )
-        if (
-            record.runtime != LocalImageRuntime.MNN_DIFFUSION &&
-            record.runtime != LocalImageRuntime.QNN_HTP &&
-            record.isReadyForLocalImageGeneration()
-        ) {
+        if (record.isReadyForLocalImageGeneration()) {
             saveSelectedModelId(record.id)
             saveSelectedBackend(ImageBackend.LOCAL)
         }
@@ -1343,8 +1335,6 @@ class LocalImageModelStore(context: Context) {
             saveModels(listOf(record) + loadModels().filterNot { it.id == record.id })
             if (
                 loadSelectedModelId() == null &&
-                record.runtime != LocalImageRuntime.MNN_DIFFUSION &&
-                record.runtime != LocalImageRuntime.QNN_HTP &&
                 record.isReadyForLocalImageGeneration()
             ) {
                 saveSelectedModelId(record.id)
@@ -1752,60 +1742,49 @@ private val QNN_RUNTIME_LIBRARY_KEYS = listOf(
 )
 
 fun LocalImageModelRecord.localImageReadinessMessage(): String? {
-    localImageStructuralReadinessMessage()?.let { return it }
-    if (runtime == LocalImageRuntime.QNN_HTP && verificationStatus == LocalImageVerificationStatus.PASSED) {
-        return null
+    // Persisted verification is diagnostic evidence from an earlier attempt,
+    // not a certificate.  A complete bundle must always be allowed to reach
+    // the real native load/graph/generation path, including UNKNOWN and FAILED
+    // records.  Concrete package/format/runtime structure remains the only
+    // pre-execution admission check.
+    return localImageStructuralReadinessMessage()
+}
+
+/**
+ * Returns true only when FAILED is backed by a result recorded for the current
+ * model record.  Legacy/stale FAILED bits must not be presented as a current
+ * native failure and never participate in admission.
+ */
+internal fun LocalImageModelRecord.hasCurrentLocalImageExecutionFailure(): Boolean =
+    verificationStatus == LocalImageVerificationStatus.FAILED &&
+        verificationMessage.isNotBlank() &&
+        verifiedAt > 0L &&
+        localImageStructuralReadinessMessage() == null
+
+/** Advisory text only; callers must never use this value to block selection or execution. */
+fun LocalImageModelRecord.localImageVerificationDiagnosticMessage(): String? {
+    if (localImageStructuralReadinessMessage() != null) return null
+    val runtimeName = when (runtime) {
+        LocalImageRuntime.MNN_DIFFUSION -> "MNN-Diffusion"
+        LocalImageRuntime.STABLE_DIFFUSION_CPP -> "stable-diffusion.cpp"
+        else -> return null
     }
-    if (runtime == LocalImageRuntime.QNN_HTP) {
-        return when (verificationStatus) {
-            LocalImageVerificationStatus.PASSED -> null
-            LocalImageVerificationStatus.MNN_SMOKE_PASSED ->
-                "QNN 生图验证状态无效，请重新校验。"
-            LocalImageVerificationStatus.QNN_IMAGE_SMOKE_PASSED -> null
-            LocalImageVerificationStatus.QNN_PIPELINE_PROBE_PASSED ->
-                "QNN NPU 已通过 UNet + VAE 链式 probe，但完整文生图还需要接入文本编码器和正式 scheduler。"
-            LocalImageVerificationStatus.QNN_SMOKE_PASSED ->
-                "QNN NPU 子图 smoke test 已通过，但完整文生图还需要通过 pipeline probe、文本编码器和正式 scheduler。"
-            LocalImageVerificationStatus.FAILED ->
-                "骁龙 NPU 生图 smoke test 未通过：${verificationMessage.ifBlank { "请确认芯片、NPU 运行环境和模型包版本匹配。" }}"
-            LocalImageVerificationStatus.UNKNOWN ->
-                "QNN 生图需要先完成设备 runtime 检测和真实 1-step smoke test，通过后才能用于图片页。"
+    return when (verificationStatus) {
+        LocalImageVerificationStatus.UNKNOWN ->
+            "$runtimeName 尚未记录真实运行结果，可直接尝试；本次 native 执行结果将作为诊断依据。"
+        LocalImageVerificationStatus.FAILED -> if (hasCurrentLocalImageExecutionFailure()) {
+            "$runtimeName 上次真实执行失败：${verificationMessage.trim()}；仍可直接重试，以本次执行结果为准。"
+        } else {
+            "$runtimeName 的历史失败状态没有当前执行证据，不会阻止使用；可直接重新尝试。"
         }
+        LocalImageVerificationStatus.PASSED -> null
+        LocalImageVerificationStatus.MNN_SMOKE_PASSED ->
+            if (runtime == LocalImageRuntime.MNN_DIFFUSION) null else "$runtimeName 可直接尝试，历史验证类型与当前引擎不匹配。"
+        LocalImageVerificationStatus.QNN_SMOKE_PASSED,
+        LocalImageVerificationStatus.QNN_IMAGE_SMOKE_PASSED,
+        LocalImageVerificationStatus.QNN_PIPELINE_PROBE_PASSED ->
+            "$runtimeName 可直接尝试，历史验证类型与当前引擎不匹配。"
     }
-    if (runtime == LocalImageRuntime.MNN_DIFFUSION) {
-        val effectiveFamily = resolvedMnnFamily()
-        return when (verificationStatus) {
-            LocalImageVerificationStatus.PASSED -> null
-            LocalImageVerificationStatus.MNN_SMOKE_PASSED -> null
-            LocalImageVerificationStatus.FAILED ->
-                "MNN-Diffusion 运行校验未通过：${verificationMessage.ifBlank { "请重新校验，或更换完整的图像引擎包。" }}"
-            LocalImageVerificationStatus.UNKNOWN -> if (effectiveFamily == LocalImageModelFamily.SANA) {
-                "MNN-Diffusion Sana 需要先完成真实至少 2-step 运行校验，通过后才能用于图片页。请点击校验。"
-            } else {
-                "MNN-Diffusion 需要先完成 direct + OpenCL 512×512、20-step PNG smoke，通过后才能手动用于图片页。请点击校验。"
-            }
-            LocalImageVerificationStatus.QNN_SMOKE_PASSED,
-            LocalImageVerificationStatus.QNN_IMAGE_SMOKE_PASSED,
-            LocalImageVerificationStatus.QNN_PIPELINE_PROBE_PASSED ->
-                "MNN-Diffusion 需要重新完成本机运行校验。"
-        }
-    }
-    if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
-        return when (verificationStatus) {
-            LocalImageVerificationStatus.PASSED -> null
-            LocalImageVerificationStatus.MNN_SMOKE_PASSED ->
-                "stable-diffusion.cpp 验证状态无效，请重新校验。"
-            LocalImageVerificationStatus.FAILED ->
-                "stable-diffusion.cpp 运行校验未通过：${verificationMessage.ifBlank { "请重新运行真实生图 smoke。" }}"
-            LocalImageVerificationStatus.UNKNOWN ->
-                "stable-diffusion.cpp 需要先完成真实生图 smoke，通过后才能用于图片页或设为默认引擎。"
-            LocalImageVerificationStatus.QNN_SMOKE_PASSED,
-            LocalImageVerificationStatus.QNN_IMAGE_SMOKE_PASSED,
-            LocalImageVerificationStatus.QNN_PIPELINE_PROBE_PASSED ->
-                "stable-diffusion.cpp 需要重新完成本机运行校验。"
-        }
-    }
-    return null
 }
 
 fun LocalImageModelRecord.localImageStructuralReadinessMessage(): String? {
@@ -1852,14 +1831,33 @@ internal fun LocalImageModelRecord.isCertifiedForAutomaticLocalImageSelection():
     verificationStatus == LocalImageVerificationStatus.PASSED
 
 fun LocalImageModelRecord.localImageReadinessLabel(): String {
-    if (
-        runtime == LocalImageRuntime.MNN_DIFFUSION &&
-        localImageStructuralReadinessMessage() == null &&
-        verificationStatus == LocalImageVerificationStatus.MNN_SMOKE_PASSED
-    ) {
-        return "MNN smoke"
+    val structuralReady = localImageStructuralReadinessMessage() == null
+    if (!structuralReady) return "缺少组件"
+    if (runtime == LocalImageRuntime.MNN_DIFFUSION) {
+        return when (verificationStatus) {
+            LocalImageVerificationStatus.PASSED -> "可用"
+            LocalImageVerificationStatus.MNN_SMOKE_PASSED -> "MNN smoke"
+            LocalImageVerificationStatus.UNKNOWN -> "未验证·可尝试"
+            LocalImageVerificationStatus.FAILED ->
+                if (hasCurrentLocalImageExecutionFailure()) "上次失败·可重试" else "可直接尝试"
+            LocalImageVerificationStatus.QNN_SMOKE_PASSED,
+            LocalImageVerificationStatus.QNN_IMAGE_SMOKE_PASSED,
+            LocalImageVerificationStatus.QNN_PIPELINE_PROBE_PASSED -> "可直接尝试"
+        }
     }
-    if (runtime == LocalImageRuntime.QNN_HTP && localImageStructuralReadinessMessage() == null) {
+    if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+        return when (verificationStatus) {
+            LocalImageVerificationStatus.PASSED -> "可用"
+            LocalImageVerificationStatus.UNKNOWN -> "未验证·可尝试"
+            LocalImageVerificationStatus.FAILED ->
+                if (hasCurrentLocalImageExecutionFailure()) "上次失败·可重试" else "可直接尝试"
+            LocalImageVerificationStatus.MNN_SMOKE_PASSED,
+            LocalImageVerificationStatus.QNN_SMOKE_PASSED,
+            LocalImageVerificationStatus.QNN_IMAGE_SMOKE_PASSED,
+            LocalImageVerificationStatus.QNN_PIPELINE_PROBE_PASSED -> "可直接尝试"
+        }
+    }
+    if (runtime == LocalImageRuntime.QNN_HTP) {
         return when (verificationStatus) {
             LocalImageVerificationStatus.MNN_SMOKE_PASSED -> "MNN smoke"
             LocalImageVerificationStatus.QNN_IMAGE_SMOKE_PASSED -> "NPU 1-step smoke"
@@ -1870,38 +1868,7 @@ fun LocalImageModelRecord.localImageReadinessLabel(): String {
             LocalImageVerificationStatus.PASSED -> "可用"
         }
     }
-    if (localImageReadinessMessage() == null) return "可用"
-    val structuralReady = localImageStructuralReadinessMessage() == null
-    return when {
-        runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP &&
-            structuralReady &&
-            verificationStatus == LocalImageVerificationStatus.UNKNOWN -> "待校验"
-        runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP &&
-            structuralReady &&
-            verificationStatus == LocalImageVerificationStatus.FAILED -> "校验失败"
-        runtime == LocalImageRuntime.MNN_DIFFUSION &&
-            structuralReady &&
-            verificationStatus == LocalImageVerificationStatus.MNN_SMOKE_PASSED -> "MNN smoke"
-        runtime == LocalImageRuntime.MNN_DIFFUSION &&
-            structuralReady &&
-            verificationStatus == LocalImageVerificationStatus.UNKNOWN -> "待校验"
-        runtime == LocalImageRuntime.MNN_DIFFUSION &&
-            structuralReady &&
-            verificationStatus == LocalImageVerificationStatus.FAILED -> "校验失败"
-        runtime == LocalImageRuntime.QNN_HTP &&
-            structuralReady &&
-            verificationStatus == LocalImageVerificationStatus.QNN_PIPELINE_PROBE_PASSED -> "NPU probe"
-        runtime == LocalImageRuntime.QNN_HTP &&
-            structuralReady &&
-            verificationStatus == LocalImageVerificationStatus.QNN_SMOKE_PASSED -> "NPU smoke"
-        runtime == LocalImageRuntime.QNN_HTP &&
-            structuralReady &&
-            verificationStatus == LocalImageVerificationStatus.UNKNOWN -> "NPU 待校验"
-        runtime == LocalImageRuntime.QNN_HTP &&
-            structuralReady &&
-            verificationStatus == LocalImageVerificationStatus.FAILED -> "NPU 校验失败"
-        else -> "缺少组件"
-    }
+    return "可用"
 }
 
 private fun LocalImageModelRecord.qnnImageBundleReadinessMessage(): String? {

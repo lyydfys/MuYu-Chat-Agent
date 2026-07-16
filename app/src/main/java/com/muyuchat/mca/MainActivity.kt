@@ -223,10 +223,6 @@ private fun McaApp(
                         )
                         addAll(
                             state.models
-                                .filter { model ->
-                                    model.runtime != com.muyuchat.core.modelstore.ChatModelRuntime.GENIEX_QAIRT ||
-                                        model.id in state.qairtVerifiedLocalModelIds
-                                }
                                 .sortedWith(
                                     compareByDescending<com.muyuchat.core.modelstore.ModelManifest> {
                                         if (it.id == state.loadedModelId) 1 else 0
@@ -549,6 +545,7 @@ private fun McaApp(
                 onCancelTuning = viewModel::cancelAgentTuning,
                 onQueryTuningJob = viewModel::queryAgentTuningJob,
                 onApplyPendingProfile = viewModel::applyPendingAgentProfile,
+                onDiscardPendingProfile = viewModel::discardPendingAgentProfile,
                 onRollbackProfile = viewModel::rollbackAgentProfile,
                 onAgentInfo = viewModel::showAgentDebugExplanation,
                 onParamsChange = viewModel::updateParams,
@@ -661,6 +658,7 @@ private fun McaApp(
                 onOpenModelPage = viewModel::openModelScopePage,
                 onDownload = viewModel::download,
                 onLoad = viewModel::loadModel,
+                onUnload = viewModel::unloadModel,
                 onVerify = viewModel::verifyModel,
                 onDelete = viewModel::deleteModel,
                 onAttachVisionProjector = { model -> onAttachVisionProjector(model.id) },
@@ -1087,19 +1085,19 @@ private fun DeviceProfile.deviceImagePolicy(): String {
     val image = acceleration.localImage
     val runtimeText = when (image.status) {
         AccelerationCapabilityStatus.EXPERIMENTAL_READY ->
-            "当前设备可进入 QNN 生图实验入口，但每个生图包仍必须通过 1-step 校验后才可选择。"
+            "QNN 生图入口已开放；1-step graph smoke 用于报告真实运行结果。"
         AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_MISSING ->
-            "当前设备满足 NPU 生图候选条件；待打包 QNN/QAIRT runtime 与认证生图包后启用。"
+            "QNN 生图入口保持可见；加载完整 QNN/QAIRT runtime 与模型包后可直接尝试。"
         AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED ->
-            "当前设备已找到 QNN runtime 文件，但原生加载探测尚未通过；暂不进入 NPU 生图 smoke。"
+            "已找到 QNN runtime 文件；可直接尝试，原生加载与 graph smoke 结果会如实显示。"
         AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_LOAD_FAILED ->
-            "当前设备已找到 QNN runtime 文件，但原生加载探测失败；修复 runtime 打包前不会启用 NPU 生图。"
+            "QNN runtime 原生加载探测失败；入口不封禁，修复包后可再次直接尝试。"
         AccelerationCapabilityStatus.DEVICE_CAPABLE_HTP_TRANSPORT_BLOCKED ->
-            "当前设备可加载骁龙 NPU 运行环境，但设备通信依赖被系统限制；图执行验证通过前隐藏 NPU 生图入口。"
+            "设备通信依赖当前受限；QNN 生图入口保持可见并报告真实 graph 执行结果。"
         AccelerationCapabilityStatus.READY ->
             "当前稳定路径为 stable-diffusion.cpp / MNN CPU，NPU 生图不会被宣传为已启用。"
         AccelerationCapabilityStatus.UNSUPPORTED ->
-            "当前设备不展示 QNN 生图入口，默认使用 CPU 兼容生图。"
+            "未识别到已知 QNN 能力档案；入口仍开放，默认也保留 CPU 兼容生图。"
     }
     val visionText = when (acceleration.localVision.status) {
         AccelerationCapabilityStatus.EXPERIMENTAL_READY ->
@@ -1107,15 +1105,15 @@ private fun DeviceProfile.deviceImagePolicy(): String {
         AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_MISSING ->
             "本地视觉 NPU 仍属 LiteRT-LM / QNN 实验路线，当前等待 runtime 和模型包。"
         AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED ->
-            "本地识图已找到 QNN runtime 文件，但原生加载探测尚未通过，暂不进入 NPU smoke。"
+            "本地识图已找到 QNN runtime 文件；入口开放并以真实 NPU smoke 为准。"
         AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_LOAD_FAILED ->
-            "本地识图已找到 QNN runtime 文件，但原生加载探测失败，暂不进入 NPU smoke。"
+            "本地识图 QNN runtime 原生加载探测失败；入口不封禁，可在修复包后重试。"
         AccelerationCapabilityStatus.DEVICE_CAPABLE_HTP_TRANSPORT_BLOCKED ->
-            "本地识图可加载骁龙 NPU 运行环境，但设备通信依赖被系统限制，暂不进入 NPU 验证。"
+            "本地识图设备通信依赖受限；入口保持开放并报告真实 NPU 执行结果。"
         AccelerationCapabilityStatus.READY ->
             "本地识图使用 GGUF mmproj / MNN 兼容路径。"
         AccelerationCapabilityStatus.UNSUPPORTED ->
-            "本地识图不启用 NPU 路线。"
+            "未识别到已知 NPU 档案；本地识图入口仍开放。"
     }
     return "$visionText $runtimeText"
 }

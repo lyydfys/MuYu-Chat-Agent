@@ -3,6 +3,7 @@ package com.muyuchat.mca
 import com.muyuchat.core.deviceprofile.QnnRuntimeStatus
 import java.io.File
 import java.security.MessageDigest
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -154,6 +155,55 @@ internal fun qnnRequiredBundleRuntimeResolution(
     return QnnRequiredBundleRuntimeResolution(runtimeProfile = runtimeProfile)
 }
 
+/**
+ * Publisher archives do not contain MCA's verification sidecar. For a catalog
+ * archive whose size and SHA-256 were pinned and verified before extraction,
+ * create the sidecar from the extracted runtime bytes. Subsequent readiness
+ * and staging still verify every library digest, so the generated metadata is
+ * not a bypass for mutable or manually imported bundles.
+ */
+internal fun writePinnedQnnRuntimeMetadata(
+    bundleRoot: File,
+    qnnSdk: String,
+    contextHtpArch: Int,
+    sourceArchiveSha256: String
+): File {
+    require(QNN_SHA256.matches(sourceArchiveSha256.lowercase())) {
+        "A pinned source archive SHA-256 is required before creating QNN runtime metadata."
+    }
+    val profile = qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, contextHtpArch)
+        ?: error("The downloaded QNN package is missing its generic context runtime profile.")
+    val files = JSONObject()
+    qnnImageRuntimeFileNames(contextHtpArch).forEach { name ->
+        val file = File(profile.directory, name)
+        require(file.isFile && file.length() > 0L) { "Missing QNN runtime file: $name" }
+        files.put(name, file.qnnRuntimeSha256())
+    }
+    val availableProfiles = qnnImageBundleRuntimeCandidateDirectories(bundleRoot).asSequence()
+        .flatMap { directory ->
+            directory.listFiles().orEmpty().asSequence().mapNotNull { file ->
+                HTP_SKEL_NAME.matchEntire(file.name)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?.takeIf { arch -> File(directory, "libQnnHtpV${arch}Stub.so").isFile }
+            }
+        }
+        .distinct()
+        .sorted()
+        .toList()
+    val metadata = JSONObject()
+        .put("schema", QNN_RUNTIME_METADATA_SCHEMA)
+        .put("qnnSdk", qnnSdk)
+        .put("htpArch", contextHtpArch)
+        .put("sourceArchiveSha256", sourceArchiveSha256.lowercase())
+        .put("availableHtpArchs", JSONArray(availableProfiles))
+        .put("files", files)
+    val target = File(profile.directory, QNN_RUNTIME_METADATA_FILE)
+    val partial = File(profile.directory, ".$QNN_RUNTIME_METADATA_FILE.part")
+    partial.writeText(metadata.toString(2), Charsets.UTF_8)
+    if (target.exists()) require(target.delete()) { "Unable to replace stale QNN runtime metadata." }
+    require(partial.renameTo(target)) { "Unable to publish QNN runtime metadata." }
+    return target
+}
+
 private fun qnnImageBundleRuntimeCandidateDirectories(bundleRoot: File): Set<File> {
     val root = runCatching { bundleRoot.canonicalFile }.getOrNull()
         ?.takeIf(File::isDirectory)
@@ -227,11 +277,36 @@ internal fun qnnImageRuntimeFileNames(htpArchVersion: Int): List<String> = listO
 )
 
 internal fun qnnImageTransportRuntimeFileNames(htpArchVersion: Int): List<String> = buildList {
-    // QAIRT 2.39/2.45 packages use a versioned host-side transport library on
-    // V79+ devices. Older V73/V75 packages carry only their Skel/Stub pair.
-    if (htpArchVersion >= 79) add("libQnnHtpV${htpArchVersion}.so")
+    addAll(qnnImageTransportRuntimeFileNames(htpArchVersion, qnnSdk = null))
+}
+
+internal fun qnnImageTransportRuntimeFileNames(
+    htpArchVersion: Int,
+    qnnSdk: String?
+): List<String> = buildList {
+    // QAIRT 2.39/2.45 packages require a versioned host-side transport
+    // library on V79+ devices. The publisher's generic QNN 2.28 archive uses
+    // the common libQnnHtp.so plus an exact device Skel/Stub pair.
+    val requiresVersionedTransport = htpArchVersion >= 79 &&
+        (qnnSdk == null || qnnSdkVersionAtLeast(qnnSdk, major = 2, minor = 39))
+    if (requiresVersionedTransport) add("libQnnHtpV${htpArchVersion}.so")
     add("libQnnHtpV${htpArchVersion}Skel.so")
     add("libQnnHtpV${htpArchVersion}Stub.so")
+}
+
+internal fun qnnSdkForRuntimeProfile(profile: QnnImageBundleRuntimeProfile): String? =
+    runCatching {
+        JSONObject(File(profile.directory, QNN_RUNTIME_METADATA_FILE).readText(Charsets.UTF_8))
+            .optString("qnnSdk")
+            .trim()
+            .takeIf(String::isNotEmpty)
+    }.getOrNull()
+
+private fun qnnSdkVersionAtLeast(value: String, major: Int, minor: Int): Boolean {
+    val parts = value.split('.', '-', '_')
+    val actualMajor = parts.getOrNull(0)?.toIntOrNull() ?: return true
+    val actualMinor = parts.getOrNull(1)?.toIntOrNull() ?: return true
+    return actualMajor > major || (actualMajor == major && actualMinor >= minor)
 }
 
 private fun File.qnnRuntimeSha256(): String =

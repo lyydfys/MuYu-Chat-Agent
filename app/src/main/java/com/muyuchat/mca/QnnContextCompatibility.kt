@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
 import com.muyuchat.core.deviceprofile.DeviceProfile
+import com.muyuchat.core.deviceprofile.QnnRuntimeProfileSelector
 
 internal fun qnnContextSocCompatibilityMessage(
     device: DeviceProfile,
@@ -14,13 +15,12 @@ internal fun qnnContextSocCompatibilityMessage(
         .expectedQnnSocModelForChipsetCode(currentChipset)
         ?: return null
     if (binaryMetadata.socModel == expectedSocModel) return null
-    // SD1.5 QNN 2.28 contexts exported for SM8550 have been verified on
-    // SM8750. They remain eligible only when the caller also proves a real
-    // graph execution; reverse compatibility is deliberately not assumed.
-    if (allowKnownForwardCompatibility &&
-        binaryMetadata.socModel == 43 &&
-        expectedSocModel == 69
-    ) {
+    // A context built for an older HTP architecture can run on a newer
+    // physical transport. This function supplies diagnostics only; callers
+    // must never override a successful real graph execution with this hint.
+    val contextArch = QnnRuntimeProfileSelector.htpArchVersionForSocModel(binaryMetadata.socModel)
+    val deviceArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(currentChipset)
+    if (allowKnownForwardCompatibility && contextArch != null && deviceArch != null && deviceArch >= contextArch) {
         return null
     }
     val bundleChipset = DeviceAccelerationAnalyzer.userFacingQnnSocModelName(binaryMetadata.socModel)

@@ -132,7 +132,70 @@ class RuntimeParametersTest {
     }
 
     @Test
-    fun lowMemorySparseMoeUsesBoundedContextBatchAndQuantizedKv() {
+    fun llamaContextKeepsExactCustomValueWhileAcceptingOnlyNativePadding() {
+        val identity = identity(LocalChatRuntime.LLAMA_CPP)
+        val adapter = LlamaCppRuntimeParameterAdapter()
+        val resolution = adapter.resolveLoadProfile(
+            identity,
+            """{"n_ctx":8190,"advanced_json":{"n_batch":512}}"""
+        )
+
+        assertEquals(8190, resolution.profile.desiredLoadBoundValues.value("n_ctx"))
+        assertEquals(8190, resolution.profile.resolvedLoadBoundValues.value("n_ctx"))
+        assertEquals("requested-profile", resolution.sourceByField["n_ctx"])
+        assertFalse(resolution.warnings.any { "n_ctx normalized" in it })
+
+        val nativeReadback = resolution.profile.resolvedLoadBoundValues.toJsonObject()
+            .put("n_ctx", 8192)
+        val stats = JSONObject()
+            .put("loaded", true)
+            .put("effectiveConfig", nativeReadback)
+
+        val active = adapter.activeLoadedSignature(
+            identity,
+            stats.toString(),
+            resolution.profile.resolvedLoadSignature
+        )
+        assertNotNull(active)
+        assertEquals(8190, active!!.values.value("n_ctx"))
+
+        val mismatchedOtherField = JSONObject(nativeReadback.toString()).put("n_batch", 256)
+        val mismatchedStats = JSONObject()
+            .put("loaded", true)
+            .put("effectiveConfig", mismatchedOtherField)
+        assertNull(
+            adapter.activeLoadedSignature(
+                identity,
+                mismatchedStats.toString(),
+                resolution.profile.resolvedLoadSignature
+            )
+        )
+
+        val wrongPadding = JSONObject(nativeReadback.toString()).put("n_ctx", 8448)
+        assertNull(
+            adapter.activeLoadedSignature(
+                identity,
+                JSONObject().put("loaded", true).put("effectiveConfig", wrongPadding).toString(),
+                resolution.profile.resolvedLoadSignature
+            )
+        )
+    }
+
+    @Test
+    fun llamaContextAlreadyAlignedValueAlsoRemainsExact() {
+        val resolution = LlamaCppRuntimeParameterAdapter().resolveLoadProfile(
+            identity(LocalChatRuntime.LLAMA_CPP),
+            """{"n_ctx":8192}"""
+        )
+
+        assertEquals(8192, resolution.profile.desiredLoadBoundValues.value("n_ctx"))
+        assertEquals(8192, resolution.profile.resolvedLoadBoundValues.value("n_ctx"))
+        assertEquals("requested-profile", resolution.sourceByField["n_ctx"])
+        assertFalse(resolution.warnings.any { it.startsWith("n_ctx normalized") })
+    }
+
+    @Test
+    fun lowMemorySparseMoePreservesCustomContextWhileBoundingBatchAndQuantizedKv() {
         val identity = identity(
             LocalChatRuntime.LLAMA_CPP,
             capabilities = setOf(
@@ -162,7 +225,7 @@ class RuntimeParametersTest {
         )
         val resolved = resolution.resolved.values.toJsonObject()
 
-        assertEquals(4096, resolved.getInt("n_ctx"))
+        assertEquals(32768, resolved.getInt("n_ctx"))
         assertEquals(2048, resolved.getInt("n_batch"))
         assertEquals(256, resolved.getInt("n_ubatch"))
         assertEquals("q4_0", resolved.getString("cache_type_k"))
@@ -176,7 +239,23 @@ class RuntimeParametersTest {
     }
 
     @Test
-    fun genericSparseMoeTierKeepsQualityKvDefaultsWhileBoundingWorkingSet() {
+    fun lowMemorySparseMoePreservesCompactCustomContextExactly() {
+        val identity = identity(
+            LocalChatRuntime.LLAMA_CPP,
+            capabilities = setOf("sparse_moe", "sparse_moe_16gb_tier")
+        )
+        val resolution = LlamaCppRuntimeParameterAdapter().resolveLoadProfile(
+            identity,
+            """{"n_ctx":128,"advanced_json":{"n_batch":128,"n_ubatch":64}}"""
+        )
+
+        assertEquals(128, resolution.profile.desiredLoadBoundValues.value("n_ctx"))
+        assertEquals(128, resolution.profile.resolvedLoadBoundValues.value("n_ctx"))
+        assertFalse(resolution.warnings.any { "n_ctx normalized" in it })
+    }
+
+    @Test
+    fun genericSparseMoeTierKeepsCustomContextAndQualityKvWhileBoundingBatch() {
         val identity = identity(
             LocalChatRuntime.LLAMA_CPP,
             capabilities = setOf("sparse_moe", "sparse_moe_16gb_tier")
@@ -196,7 +275,7 @@ class RuntimeParametersTest {
         )
         val resolved = resolution.resolved.values.toJsonObject()
 
-        assertEquals(4096, resolved.getInt("n_ctx"))
+        assertEquals(32768, resolved.getInt("n_ctx"))
         assertEquals(2048, resolved.getInt("n_batch"))
         assertEquals(256, resolved.getInt("n_ubatch"))
         assertEquals("f16", resolved.getString("cache_type_k"))

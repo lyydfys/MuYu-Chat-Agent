@@ -1,7 +1,11 @@
 package com.muyuchat.core.download
 
 import java.util.concurrent.atomic.AtomicInteger
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -149,18 +153,27 @@ class ModelScopeClientTest {
         assertEquals("mudler/Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-APEX-MTP-GGUF", recommendations.first { it.id == "qwen35_35b_a3b_iq2_xxs" }.repoId)
         assertEquals("cc768c55deb10d6d08727cf66b856e9950ef0720", recommendations.first { it.id == "qwen35_35b_a3b_iq2_xxs" }.revision)
         assertEquals("bartowski/google_gemma-4-26B-A4B-it-GGUF", recommendations.first { it.id == "google_gemma4_26b_a4b_iq2_xxs" }.repoId)
+        assertEquals(
+            ModelRepositoryProvider.HUGGING_FACE,
+            recommendations.first { it.id == "google_gemma4_26b_a4b_iq2_xxs" }.provider
+        )
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "minicpm_v46_q4" }.chatRuntime)
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "bitcpm4_cann_1b_tq2" }.chatRuntime)
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "bitcpm4_cann_3b_tq2" }.chatRuntime)
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "bitcpm4_cann_8b_tq2" }.chatRuntime)
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "glm47_flash_tq1" }.chatRuntime)
         assertTrue(recommendations.any { it.group == ModelScopeRecommendedGroup.LOCAL_IMAGE && it.downloadable })
-        assertEquals(3, recommendations.count { !it.downloadable })
+        assertEquals(2, recommendations.count { !it.downloadable })
         assertEquals("qwen-image-2512-Q2_K.gguf", recommendations.first { it.id == "qwen_image_2512_q2" }.recommendedFileName)
         assertEquals("unet.mnn", recommendations.first { it.id == "sd15_mnn_512_quality" }.recommendedFileName)
         assertEquals("sd_turbo.safetensors", recommendations.first { it.id == "sd_turbo_512_experimental" }.recommendedFileName)
         assertEquals("GLM-4.7-Flash-UD-TQ1_0.gguf", recommendations.first { it.id == "glm47_flash_tq1" }.recommendedFileName)
         assertEquals("google_gemma-4-26B-A4B-it-IQ2_XXS.gguf", recommendations.first { it.id == "google_gemma4_26b_a4b_iq2_xxs" }.recommendedFileName)
+        assertFalse(
+            recommendations.first { it.id == "google_gemma4_26b_a4b_iq2_xxs" }
+                .visionModelBundle!!
+                .downloadProjectorByDefault
+        )
         assertNotNull(
             recommendations.first { it.id == "gemma4_e2b_iq4" }
                 .mnnModelBundle!!
@@ -179,7 +192,8 @@ class ModelScopeClientTest {
         assertTrue(
             recommendations.filter { it.kind != ModelScopeRecommendedKind.IMAGE }.all {
                 it.provider == ModelRepositoryProvider.MODELSCOPE ||
-                    it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT
+                    it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT ||
+                    it.id == "google_gemma4_26b_a4b_iq2_xxs"
             }
         )
         assertTrue(recommendations.any { it.provider == ModelRepositoryProvider.HUGGING_FACE && it.imageEngineBundle?.accelerator == ImageEngineAccelerator.QNN_HTP })
@@ -221,25 +235,29 @@ class ModelScopeClientTest {
         assertTrue(imageRecommendations.all { it.imageEngineBundle!!.runtime in ImageEngineBundleRuntime.entries })
         val cyberRealisticQnn = recommendations.first { it.id == "cyberrealistic_sd15_qnn228" }
         assertEquals(ModelRepositoryProvider.HUGGING_FACE, cyberRealisticQnn.provider)
-        assertEquals("cyberrealistic_final_qnn2.28_8gen2.zip", cyberRealisticQnn.recommendedFileName)
+        assertEquals("cyberrealistic_final_qnn2.28_min.zip", cyberRealisticQnn.recommendedFileName)
         assertEquals(LocalImageEngineTier.QUICK, cyberRealisticQnn.localImageEngineTier)
         assertEquals(ImageEngineBundleRuntime.QNN_HTP, cyberRealisticQnn.imageEngineBundle!!.runtime)
         assertEquals(ImageEngineAccelerator.QNN_HTP, cyberRealisticQnn.imageEngineBundle!!.accelerator)
         assertEquals("骁龙 NPU", ImageEngineBundleRuntime.QNN_HTP.label)
         assertEquals("骁龙 NPU", ImageEngineAccelerator.QNN_HTP.label)
-        assertEquals(ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN2, cyberRealisticQnn.imageEngineBundle!!.minDeviceTier)
+        assertEquals(ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN1, cyberRealisticQnn.imageEngineBundle!!.minDeviceTier)
         assertTrue(cyberRealisticQnn.imageEngineBundle!!.requiresQnnRuntime)
         listOf(
-            "cyberrealistic_sd15_qnn228",
             "realisticvisionhyper_sd15_qnn228",
             "dreamshaper_sd15_qnn228"
         ).forEach { id ->
             val profile = recommendations.first { it.id == id }.imageEngineBundle!!.requiredRuntimeProfile
             assertNotNull(profile)
             assertEquals("2.28", profile!!.qnnSdk)
-            assertEquals(73, profile.htpArch)
+            assertEquals(68, profile.htpArch)
             assertTrue(profile.completeBundleRuntime)
         }
+        val cyberProfile = cyberRealisticQnn.imageEngineBundle!!.requiredRuntimeProfile
+        assertNotNull(cyberProfile)
+        assertEquals("2.28", cyberProfile!!.qnnSdk)
+        assertEquals(68, cyberProfile.htpArch)
+        assertFalse(cyberProfile.completeBundleRuntime)
         assertNull(
             recommendations.first { it.id == "meinamix_sd15_qnn228" }
                 .imageEngineBundle!!
@@ -369,11 +387,31 @@ class ModelScopeClientTest {
     }
 
     @Test
+    fun chipsetPoliciesRemainAdvisoryAndNeverBlockUserDownload() {
+        val npuModels = client.userFacingRecommendedModels().filter { model ->
+            model.supportedChipsetCodes.isNotEmpty() ||
+                model.downloadPolicy == RecommendedModelDownloadPolicy.ANY_SNAPDRAGON
+        }
+
+        assertTrue(npuModels.isNotEmpty())
+        npuModels.forEach { model ->
+            listOf("SM8550", "SM8750", "SM8850", "MT6989", "").forEach { chipset ->
+                val eligibility = model.downloadEligibilityFor(
+                    deviceChipsetCode = chipset,
+                    deviceIsSnapdragon = chipset.startsWith("SM")
+                )
+                assertTrue("${model.id} must stay downloadable on '$chipset'", eligibility.canDownload)
+                assertNull(eligibility.blockedReason)
+            }
+        }
+    }
+
+    @Test
     fun userFacingRecommendationsMatchApprovedFourSectionCatalog() {
         val allRecommendations = client.recommendedModels()
         val recommendations = client.userFacingRecommendedModels()
 
-        assertEquals(28, recommendations.size)
+        assertEquals(29, recommendations.size)
         assertTrue(recommendations.all { it.visibleInRecommendations })
 
         val cpuChat = recommendations.filter {
@@ -398,7 +436,7 @@ class ModelScopeClientTest {
         assertEquals(9, cpuChat.size)
         assertEquals(4, npuChat.size)
         assertEquals(5, cpuImage.size)
-        assertEquals(10, npuImage.size)
+        assertEquals(11, npuImage.size)
 
         fun cpuChatIds(group: ModelScopeRecommendedGroup): List<String> = cpuChat
             .filter { it.group == group }
@@ -442,6 +480,7 @@ class ModelScopeClientTest {
                 "cyberrealistic_sd15_qnn228",
                 "realisticvisionhyper_sd15_qnn228",
                 "dreamshaper_sd15_qnn228",
+                "meinamix_sd15_qnn228",
                 "sdxl_base_qnn228",
                 "realismsdxl_dmd2_alt_qnn228",
                 "animagine_xl_v4_qnn228",
@@ -460,7 +499,6 @@ class ModelScopeClientTest {
                 "bitcpm4_cann_3b_tq2",
                 "bitcpm4_cann_8b_tq2",
                 "glm47_flash_tq1",
-                "meinamix_sd15_qnn228",
                 "mnn_sana_edit_v2",
                 "flux2_klein_4b_q4"
             ),
@@ -470,6 +508,11 @@ class ModelScopeClientTest {
         assertTrue(allRecommendations.none { it.id == "sd15_mnn_384_fast" })
 
         assertTrue(recommendations.all { it.downloadable })
+        val meinaMix = recommendations.single { it.id == "meinamix_sd15_qnn228" }
+        assertEquals(RecommendedModelStatus.EXPERIMENTAL, meinaMix.status)
+        assertTrue(meinaMix.visibleInRecommendations)
+        assertTrue(meinaMix.downloadEligibilityFor("", deviceIsSnapdragon = false).canDownload)
+        assertNull(meinaMix.downloadBlockReason)
 
         val gen5ImageIds = setOf(
             "qualcomm_sd15_gen5_qnn",
@@ -490,8 +533,8 @@ class ModelScopeClientTest {
             gen5Images.sortedBy { it.priority }.map { it.id }
         )
 
-        val legacySd15NpuImages = npuImage.filter {
-            it.supportedChipsetCodes == setOf("SM8550", "SM8550P", "SM8750", "SM8750P")
+        val genericSd15NpuImages = npuImage.filter {
+            it.imageEngineBundle?.requiredRuntimeProfile?.htpArch == 68
         }
         assertEquals(
             listOf(
@@ -499,8 +542,10 @@ class ModelScopeClientTest {
                 "realisticvisionhyper_sd15_qnn228",
                 "dreamshaper_sd15_qnn228"
             ),
-            legacySd15NpuImages.sortedBy { it.priority }.map { it.id }
+            genericSd15NpuImages.sortedBy { it.priority }.map { it.id }
         )
+        assertTrue(genericSd15NpuImages.all { it.recommendedFileName.contains("min", ignoreCase = true) })
+        assertTrue(genericSd15NpuImages.all { it.downloadPolicy == RecommendedModelDownloadPolicy.ANY_SNAPDRAGON })
     }
 
     @Test
@@ -699,6 +744,67 @@ class ModelScopeClientTest {
     }
 
     @Test
+    fun gemma4TwentySixBRecommendationResolvesMainModelAndProjectorFromHuggingFace() {
+        val requestedUrls = mutableListOf<String>()
+        val fileTree = """
+            [
+              {
+                "type": "file",
+                "path": "google_gemma-4-26B-A4B-it-IQ2_XXS.gguf",
+                "size": 10800000000
+              },
+              {
+                "type": "file",
+                "path": "mmproj-google_gemma-4-26B-A4B-it-f16.gguf",
+                "size": 900000000
+              }
+            ]
+        """.trimIndent()
+        val networkClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request()
+                requestedUrls += request.url.toString()
+                Response.Builder()
+                    .request(request)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(fileTree.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+        val resolvingClient = ModelScopeClient(
+            client = networkClient,
+            endpoints = listOf("https://modelscope.invalid"),
+            huggingFaceEndpoints = listOf("https://hf-mirror.com", "https://huggingface.co")
+        )
+        val recommendation = resolvingClient.recommendedModels()
+            .single { it.id == "google_gemma4_26b_a4b_iq2_xxs" }
+
+        val files = resolvingClient.listRecommendedFiles(recommendation)
+        val primaryDownload = resolvingClient.recommendedFile(recommendation)
+
+        assertEquals(2, files.size)
+        assertEquals("google_gemma-4-26B-A4B-it-IQ2_XXS.gguf", primaryDownload.name)
+        assertEquals(VisionModelBundleComponentRole.MAIN_MODEL, primaryDownload.visionBundleRole)
+        assertEquals(
+            listOf(VisionModelBundleComponentRole.MAIN_MODEL, VisionModelBundleComponentRole.PROJECTOR),
+            files.map { it.visionBundleRole }
+        )
+        assertTrue(files.all { it.provider == ModelRepositoryProvider.HUGGING_FACE })
+        assertTrue(files.all { it.downloadUrl.startsWith("https://hf-mirror.com/bartowski/") })
+        assertEquals(2, requestedUrls.size)
+        assertTrue(requestedUrls.all {
+            it.startsWith(
+                "https://hf-mirror.com/api/models/" +
+                    "bartowski/google_gemma-4-26B-A4B-it-GGUF/tree/" +
+                    "fabed3e586120477355eea23b92644540a79ce2f"
+            )
+        })
+        assertTrue(requestedUrls.none { "modelscope" in it })
+    }
+
+    @Test
     fun buildsModelPageUrlForRepoId() {
         assertEquals(
             "https://www.modelscope.cn/models/lmstudio-community/Qwen3.5-2B-GGUF/summary",
@@ -733,7 +839,7 @@ class ModelScopeClientTest {
     }
 
     @Test
-    fun qairtAssetSelectionRequiresAnExactDeviceChipset() {
+    fun qairtAssetSelectionPrefersExactAndFallsBackDeterministically() {
         val releaseAssets = """
             {
               "precisions": {
@@ -759,11 +865,13 @@ class ModelScopeClientTest {
             "qualcomm-snapdragon-8-elite-gen5",
             client.selectedQairtChipsetForTest(releaseAssets, listOf("qualcomm-snapdragon-8-elite-gen5"))
         )
-        assertTrue(runCatching { client.selectedQairtChipsetForTest(releaseAssets, emptyList()) }.isFailure)
-        assertTrue(
-            runCatching {
-                client.selectedQairtChipsetForTest(releaseAssets, listOf("qualcomm-qcs9075"))
-            }.isFailure
+        assertEquals(
+            "qualcomm-snapdragon-8-elite",
+            client.selectedQairtChipsetForTest(releaseAssets, emptyList())
+        )
+        assertEquals(
+            "qualcomm-snapdragon-8-elite",
+            client.selectedQairtChipsetForTest(releaseAssets, listOf("qualcomm-qcs9075"))
         )
     }
 
@@ -793,13 +901,12 @@ class ModelScopeClientTest {
                 listOf("qualcomm-snapdragon-8-elite-gen5")
             )
         )
-        assertTrue(
-            runCatching {
-                client.selectedQnnImageChipsetForTest(
-                    releaseAssets,
-                    listOf("qualcomm-snapdragon-8gen3")
-                )
-            }.isFailure
+        assertEquals(
+            "qualcomm-snapdragon-8-elite-for-galaxy",
+            client.selectedQnnImageChipsetForTest(
+                releaseAssets,
+                listOf("qualcomm-snapdragon-8gen3")
+            )
         )
     }
 

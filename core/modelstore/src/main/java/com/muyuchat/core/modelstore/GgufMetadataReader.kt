@@ -32,7 +32,8 @@ object GgufMetadataReader {
                 quant = inferQuant(fileName),
                 fileType = null,
                 causalAttention = null,
-                poolingType = null
+                poolingType = null,
+                contextLength = null
             )
         }
         return GgufMetadata(
@@ -42,7 +43,8 @@ object GgufMetadataReader {
             quant = parsed.quant ?: inferQuant(fileName),
             fileType = parsed.fileType,
             causalAttention = parsed.causalAttention,
-            poolingType = parsed.poolingType
+            poolingType = parsed.poolingType,
+            contextLength = parsed.contextLength
         )
     }
 
@@ -53,6 +55,7 @@ object GgufMetadataReader {
         var fileType: Int? = null
         val causalAttentionByArchitecture = mutableMapOf<String, Boolean>()
         val poolingTypeByArchitecture = mutableMapOf<String, Int>()
+        val contextLengthByArchitecture = mutableMapOf<String, Int>()
 
         for (index in 0 until metadataCount.toInt()) {
             val key = input.readGgufString()
@@ -77,6 +80,13 @@ object GgufMetadataReader {
                     val owner = key.removeSuffix(POOLING_TYPE_SUFFIX)
                     poolingTypeByArchitecture[owner] = input.readIntegerValue(type).toInt()
                 }
+                key.endsWith(CONTEXT_LENGTH_SUFFIX) && type.isIntegerType() -> {
+                    val owner = key.removeSuffix(CONTEXT_LENGTH_SUFFIX)
+                    input.readIntegerValue(type)
+                        .takeIf { it in MIN_CONTEXT_LENGTH.toLong()..MAX_CONTEXT_LENGTH.toLong() }
+                        ?.toInt()
+                        ?.let { contextLengthByArchitecture[owner] = it }
+                }
                 else -> input.skipGgufValue(type)
             }
         }
@@ -85,13 +95,16 @@ object GgufMetadataReader {
             ?: causalAttentionByArchitecture.values.singleOrNull()
         val poolingType = architecture?.let(poolingTypeByArchitecture::get)
             ?: poolingTypeByArchitecture.values.singleOrNull()
+        val contextLength = architecture?.let(contextLengthByArchitecture::get)
+            ?: contextLengthByArchitecture.values.singleOrNull()
 
         return ParsedGgufMetadata(
             architecture = architecture,
             quant = fileType?.let(::fileTypeToQuant) ?: inferQuant(fileName),
             fileType = fileType,
             causalAttention = causalAttention,
-            poolingType = poolingType
+            poolingType = poolingType,
+            contextLength = contextLength
         )
     }
 
@@ -264,14 +277,18 @@ object GgufMetadataReader {
         val quant: String?,
         val fileType: Int?,
         val causalAttention: Boolean?,
-        val poolingType: Int?
+        val poolingType: Int?,
+        val contextLength: Int?
     )
 
-    private const val MAX_METADATA_KEYS = 128L
+    private const val MAX_METADATA_KEYS = 4_096L
     private const val MAX_STRING_BYTES = 2L * 1024L * 1024L
     private const val MAX_ARRAY_ITEMS_TO_SKIP = 2_000_000L
     private const val ATTENTION_CAUSAL_SUFFIX = ".attention.causal"
     private const val POOLING_TYPE_SUFFIX = ".pooling_type"
+    private const val CONTEXT_LENGTH_SUFFIX = ".context_length"
+    private const val MIN_CONTEXT_LENGTH = 128
+    private const val MAX_CONTEXT_LENGTH = 1_048_576
 
     private const val GGUF_TYPE_UINT8 = 0
     private const val GGUF_TYPE_INT8 = 1
