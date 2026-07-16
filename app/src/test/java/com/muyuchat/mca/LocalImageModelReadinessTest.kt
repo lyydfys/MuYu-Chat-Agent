@@ -1160,6 +1160,83 @@ class LocalImageModelReadinessTest {
         assertTrue(File(root, "diffusion/unet_context.bin").isFile)
     }
 
+    @Test
+    fun downloadedQnnSmokeResolvesTheUniqueNestedContextArtifact() {
+        val root = Files.createTempDirectory("nested-qnn-context").toFile()
+        val unet = root.touch("output/qnn_models_sdxl_8gen3/unet.bin")
+        val vae = root.touch("output/qnn_models_sdxl_8gen3/vae_decoder.bin")
+        val targets = listOf(
+            remote("unet.bin", ImageEngineBundleComponentRole.DIFFUSION)
+                .copy(relativePath = unet.relativeTo(root).invariantSeparatorsPath) to unet,
+            remote("vae_decoder.bin", ImageEngineBundleComponentRole.VAE)
+                .copy(relativePath = vae.relativeTo(root).invariantSeparatorsPath) to vae
+        )
+
+        assertEquals(
+            "output/qnn_models_sdxl_8gen3/unet.bin",
+            resolvedDownloadedQnnContextPath("unet.bin", targets)
+        )
+        assertEquals(
+            "output/qnn_models_sdxl_8gen3/vae_decoder.bin",
+            resolvedDownloadedQnnContextPath("vae_decoder.bin", targets)
+        )
+        assertEquals("missing.bin", resolvedDownloadedQnnContextPath("missing.bin", targets))
+    }
+
+    @Test
+    fun sdxlConditioningRootFollowsNestedManifestComponentDirectory() {
+        val root = Files.createTempDirectory("nested-sdxl-conditioning").toFile()
+        val nested = File(root, "output/qnn_models_sdxl_8gen3").apply { mkdirs() }
+        val names = listOf(
+            "clip.mnn",
+            "clip_2.mnn",
+            "clip_2.mnn.weight",
+            "tokenizer.json",
+            "token_emb.bin",
+            "token_emb_2.bin",
+            "pos_emb.bin",
+            "pos_emb_2.bin"
+        )
+        names.forEach { name -> nested.touch(name) }
+        File(root, "manifest.json").writeText(
+            org.json.JSONObject()
+                .put(
+                    "components",
+                    org.json.JSONArray().apply {
+                        names.forEach { name ->
+                            put(
+                                org.json.JSONObject().put(
+                                    "path",
+                                    "output/qnn_models_sdxl_8gen3/$name"
+                                )
+                            )
+                        }
+                    }
+                )
+                .toString(),
+            Charsets.UTF_8
+        )
+
+        assertEquals(nested.canonicalFile, resolveSdxlQnnConditioningRoot(root))
+    }
+
+    @Test
+    fun sdxlConditioningRootKeepsFlatImportedBundlesCompatible() {
+        val root = Files.createTempDirectory("flat-sdxl-conditioning").toFile()
+        listOf(
+            "clip.mnn",
+            "clip_2.mnn",
+            "clip_2.mnn.weight",
+            "tokenizer.json",
+            "token_emb.bin",
+            "token_emb_2.bin",
+            "pos_emb.bin",
+            "pos_emb_2.bin"
+        ).forEach { name -> root.touch(name) }
+
+        assertEquals(root.canonicalFile, resolveSdxlQnnConditioningRoot(root))
+    }
+
     private fun localImageRecord(
         root: File,
         primary: File,

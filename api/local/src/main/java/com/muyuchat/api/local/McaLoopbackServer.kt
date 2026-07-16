@@ -148,6 +148,20 @@ class McaLoopbackServer(
                 }
                 method == "POST" && path == "/v1/mca/recommend" -> writeJson(client, LocalApiRuntime.agentRecommendationJsonProvider(body))
                 method == "POST" && path == "/v1/mca/benchmark" -> writeJson(client, LocalApiRuntime.benchmarkJsonProvider(body))
+                method == "POST" && path in IMAGE_GENERATION_PATHS -> {
+                    val requestId = "img-${UUID.randomUUID()}"
+                    val response = LocalApiRuntime.generateImage(requestId, body)
+                    if (response == null) {
+                        writeError(
+                            client,
+                            "503 Service Unavailable",
+                            "image_runtime_unavailable",
+                            "The local image runtime is not attached."
+                        )
+                    } else {
+                        writeJson(client, response)
+                    }
+                }
                 method == "GET" && path == "/metrics" -> writeText(client, LocalApiRuntime.metricsJson())
                 method == "POST" && path == "/v1/generate/stop" -> {
                     LocalApiRuntime.stopGeneration()
@@ -1398,6 +1412,7 @@ class McaLoopbackServer(
             ): Boolean = size > MAX_IDEMPOTENCY_RECORDS
         }
         private val GENERATION_PATHS = setOf("/v1/chat/completions", "/chat/completions", "/v1/completions", "/completion")
+        private val IMAGE_GENERATION_PATHS = setOf("/v1/images/generations", "/images/generations")
         private val CRLFCRLF = byteArrayOf('\r'.code.toByte(), '\n'.code.toByte(), '\r'.code.toByte(), '\n'.code.toByte())
         private val LFLF = byteArrayOf('\n'.code.toByte(), '\n'.code.toByte())
         private const val MAX_HEADER_BYTES = 64 * 1024

@@ -92,7 +92,7 @@ internal abstract class SdxlImagePhaseWorkerService(
         callback: ISdxlImagePhaseWorkerCallback
     ) {
         val pid = Process.myPid()
-        val profile = "V${request.expectedHtpArch}"
+        val requestedProfile = sdxlTransportProfile(request.expectedHtpArch)
         var poller: Job? = null
         var lastJournalProgress: LocalImageProgress? = null
         try {
@@ -105,7 +105,7 @@ internal abstract class SdxlImagePhaseWorkerService(
                 request,
                 LocalImageProgress(
                     phase = "${fixedPhase.wireName}_worker_started",
-                    message = "SDXL ${fixedPhase.wireName} worker started in isolated $profile process.",
+                    message = "SDXL ${fixedPhase.wireName} worker started in isolated $requestedProfile process.",
                     step = 0,
                     steps = 1,
                     elapsedMs = 0L,
@@ -152,7 +152,7 @@ internal abstract class SdxlImagePhaseWorkerService(
                         requestId = request.requestId,
                         latentFile = File(request.latentPath),
                         metadataFile = File(request.metadataPath),
-                        expectedProducerArch = SDXL_UNET_HTP_ARCH
+                        expectedProducerArch = request.expectedHtpArch
                     )
                     bridge.runSdxlVaePhase(
                         request.bundleRoot,
@@ -179,9 +179,12 @@ internal abstract class SdxlImagePhaseWorkerService(
             check(nativeResult.optBoolean("ok")) {
                 nativeResult.optString("message").ifBlank { "SDXL ${fixedPhase.wireName} phase failed." }
             }
-            check(nativeResult.optInt("htpArchVersion") == request.expectedHtpArch) {
-                "SDXL ${fixedPhase.wireName} native runtime profile mismatch."
-            }
+            val selectedHtpArch = validateSdxlNativeTransport(
+                phase = fixedPhase,
+                expectedHtpArch = request.expectedHtpArch,
+                nativeResult = nativeResult
+            )
+            val selectedProfile = sdxlTransportProfile(selectedHtpArch)
             val artifact = when (fixedPhase) {
                 SdxlImagePhase.UNET -> {
                     SdxlLatentArtifact.publishMetadata(
@@ -203,7 +206,7 @@ internal abstract class SdxlImagePhaseWorkerService(
                         requestId = request.requestId,
                         phase = fixedPhase,
                         workerPid = pid,
-                        runtimeProfile = profile,
+                        runtimeProfile = selectedProfile,
                         artifactPath = artifact.canonicalPath,
                         metadataPath = request.metadataPath,
                         nativeResultJson = nativeRaw
@@ -258,7 +261,7 @@ internal abstract class SdxlImagePhaseWorkerService(
                         requestId = request.requestId,
                         phase = fixedPhase,
                         workerPid = Process.myPid(),
-                        runtimeProfile = "V${request.expectedHtpArch}",
+                        runtimeProfile = sdxlTransportProfile(request.expectedHtpArch),
                         progress = progress
                     )
                 )
@@ -312,6 +315,6 @@ internal class SdxlUnetWorkerService : SdxlImagePhaseWorkerService(SdxlImagePhas
 internal class SdxlVaeWorkerService : SdxlImagePhaseWorkerService(SdxlImagePhase.VAE)
 
 internal const val SDXL_TWO_PHASE_DIRECTORY = "sdxl_two_phase"
-internal const val SDXL_UNET_HTP_ARCH = 75
-internal const val SDXL_VAE_HTP_ARCH = 73
+internal const val SDXL_ARCHIVE_CONTEXT_HTP_ARCH = 75
+internal const val SDXL_AUTO_TRANSPORT_HTP_ARCH = 0
 private const val SDXL_PHASE_EXIT_DELAY_MS = 150L

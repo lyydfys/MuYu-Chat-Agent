@@ -20,9 +20,9 @@ class SdxlImagePhaseProtocolTest {
         val request = SdxlImagePhaseRequest(
             requestId = "sdxl-1",
             phase = SdxlImagePhase.UNET,
-            expectedHtpArch = SDXL_UNET_HTP_ARCH,
+            expectedHtpArch = SDXL_AUTO_TRANSPORT_HTP_ARCH,
             bundleRoot = "/bundle",
-            runtimeDirsJson = "[\"/runtime-v75\",\"/runtime-v73\"]",
+            runtimeDirsJson = "[\"/packaged-qnn\"]",
             paramsJson = "{\"steps\":1}",
             embeddingsPath = "/cache/conditioning.f32",
             latentPath = "/cache/latent.f32",
@@ -34,7 +34,7 @@ class SdxlImagePhaseProtocolTest {
         val parsed = SdxlImagePhaseProtocol.parseRequest(SdxlImagePhaseProtocol.request(request))
 
         assertEquals(SdxlImagePhase.UNET, parsed.phase)
-        assertEquals(75, parsed.expectedHtpArch)
+        assertEquals(0, parsed.expectedHtpArch)
         assertFalse(parsed.paramsJson.contains("vae"))
     }
 
@@ -43,8 +43,8 @@ class SdxlImagePhaseProtocolTest {
         val envelope = SdxlImagePhaseProgress(
             requestId = "sdxl-2",
             phase = SdxlImagePhase.VAE,
-            workerPid = 7302,
-            runtimeProfile = "V73",
+            workerPid = 7502,
+            runtimeProfile = "V75",
             progress = LocalImageProgress(
                 phase = "graph_execute",
                 message = "decode",
@@ -63,8 +63,8 @@ class SdxlImagePhaseProtocolTest {
         val parsed = SdxlImagePhaseProtocol.parseProgress(SdxlImagePhaseProtocol.progress(envelope))
 
         assertEquals(SdxlImagePhase.VAE, parsed.phase)
-        assertEquals(7302, parsed.workerPid)
-        assertEquals("V73", parsed.runtimeProfile)
+        assertEquals(7502, parsed.workerPid)
+        assertEquals("V75", parsed.runtimeProfile)
         assertEquals(envelope.progress.stageTrace, parsed.progress.stageTrace)
     }
 
@@ -74,8 +74,8 @@ class SdxlImagePhaseProtocolTest {
         latent.writeBytes(ByteArray(4 * 2 * 2 * 4) { index -> index.toByte() })
         val metadataFile = File(temporaryFolder.root, "latent.json")
         val native = JSONObject()
-            .put("runtimeProfile", "V75")
-            .put("htpArchVersion", 75)
+            .put("runtimeProfile", "V79")
+            .put("htpArchVersion", 79)
             .put("latentDtype", "float32-le")
             .put("latentShape", JSONArray(listOf(1, 4, 2, 2)))
 
@@ -90,14 +90,14 @@ class SdxlImagePhaseProtocolTest {
             requestId = "sdxl-3",
             latentFile = latent,
             metadataFile = metadataFile,
-            expectedProducerArch = 75
+            expectedProducerArch = 79
         )
 
         assertEquals(published.sha256, validated.sha256)
         assertTrue(metadataFile.readText().contains("\"committed\":true"))
         latent.appendBytes(byteArrayOf(1))
         val failure = runCatching {
-            SdxlLatentArtifact.validate("sdxl-3", latent, metadataFile, 75)
+            SdxlLatentArtifact.validate("sdxl-3", latent, metadataFile, 79)
         }.exceptionOrNull()
         assertTrue(failure?.message.orEmpty().contains("byte size"))
     }
@@ -128,31 +128,93 @@ class SdxlImagePhaseProtocolTest {
         trace = SdxlTwoPhaseJournal.appendBoundary(
             trace, SdxlImagePhase.UNET, 75, "V75", "process_exit_confirmed"
         )
-        trace = SdxlTwoPhaseJournal.merge(trace, event(SdxlImagePhase.VAE, 73, "V73", "vae_graph_execute"))
+        trace = SdxlTwoPhaseJournal.merge(trace, event(SdxlImagePhase.VAE, 76, "V75", "vae_graph_execute"))
 
         assertTrue(trace.any { it == "unet[pid=75,profile=V75]:process_exit_confirmed" })
-        assertTrue(trace.any { it == "vae[pid=73,profile=V73]:vae_graph_execute" })
-        assertNotEquals(75, 73)
+        assertTrue(trace.any { it == "vae[pid=76,profile=V75]:vae_graph_execute" })
+        assertNotEquals(75, 76)
     }
 
     @Test
-    fun `each phase puts its own exact runtime profile first`() {
-        val fallback = listOf(
-            "/data/app/com.muyuchat.mca/lib/arm64",
-            "/data/user/0/com.muyuchat.mca/files/qnnlibs",
-            "/runtime/v75",
-            "/vendor/lib64"
-        )
-        val unet = JSONArray(orderedSdxlRuntimeDirs("/runtime/v75", fallback))
-        val vae = JSONArray(orderedSdxlRuntimeDirs("/runtime/v73", fallback))
+    fun `public archive uses one coherent packaged runtime in both disposable phases`() {
+        val incomplete = temporaryFolder.newFolder("incomplete-qnn")
+        File(incomplete, "libQnnSystem.so").writeBytes(byteArrayOf(1))
+        val coherent = temporaryFolder.newFolder("packaged-qnn")
+        listOf(
+            "libQnnSystem.so",
+            "libQnnHtp.so",
+            "libQnnHtpV79Skel.so",
+            "libQnnHtpV79Stub.so"
+        ).forEach { name -> File(coherent, name).writeBytes(byteArrayOf(1)) }
 
-        assertTrue(unet.getString(0).replace('\\', '/').endsWith("/runtime/v75"))
-        assertTrue(vae.getString(0).replace('\\', '/').endsWith("/runtime/v73"))
-        assertNotEquals(unet.getString(0), vae.getString(0))
-        assertEquals(1, unet.length())
-        assertEquals(1, vae.length())
-        assertFalse(unet.toString().contains("com.muyuchat.mca"))
-        assertFalse(vae.toString().contains("/runtime/v75"))
+        val selected = JSONArray(
+            isolatedSdxlPackagedRuntimeDirs(
+                JSONArray(listOf(incomplete.absolutePath, coherent.absolutePath)).toString()
+            )
+        )
+
+        assertEquals(1, selected.length())
+        assertEquals(coherent.canonicalPath, File(selected.getString(0)).canonicalPath)
+        assertEquals(75, SDXL_ARCHIVE_CONTEXT_HTP_ARCH)
+    }
+
+    @Test
+    fun `unet auto transport accepts native V79 and vae binds the same transport`() {
+        val native = JSONObject().put("htpArchVersion", 79)
+
+        assertEquals(
+            79,
+            validateSdxlNativeTransport(
+                SdxlImagePhase.UNET,
+                SDXL_AUTO_TRANSPORT_HTP_ARCH,
+                native
+            )
+        )
+        assertEquals(79, validateSdxlNativeTransport(SdxlImagePhase.VAE, 79, native))
+        assertEquals("V79", sdxlTransportProfile(79))
+        assertEquals("AUTO", sdxlTransportProfile(SDXL_AUTO_TRANSPORT_HTP_ARCH))
+        assertTrue(
+            runCatching {
+                validateSdxlNativeTransport(
+                    SdxlImagePhase.VAE,
+                    75,
+                    native
+                )
+            }.isFailure
+        )
+    }
+
+    @Test
+    fun `final execution metadata preserves dynamic transport and isolated process proof`() {
+        val metadata = qnnImageExecutionMetadata(
+            nativeRequestId = "qnn-native-1",
+            nativeResult = JSONObject()
+                .put("backend", "qnn_htp")
+                .put("executionStage", "sdxl_two_phase_passed")
+                .put("npuActive", true)
+                .put("qnnGraphExecution", true)
+                .put("nativeExecution", true)
+                .put("fallback", false)
+                .put("runtimeSessionMode", "isolated_unet_then_vae_same_transport")
+                .put("archiveContextHtpArch", 75)
+                .put("transportHtpArch", 79)
+                .put("unetWorkerPid", 14149)
+                .put("unetRuntimeProfile", "V79")
+                .put("unetProcessDeathConfirmed", true)
+                .put("vaeWorkerPid", 14242)
+                .put("vaeRuntimeProfile", "V79")
+                .put("vaeTransportHtpArch", 79)
+                .put("vaeProcessDeathConfirmed", true),
+            outputBytes = 2_834_965L
+        )
+
+        assertEquals(75, metadata.getInt("archiveContextHtpArch"))
+        assertEquals(79, metadata.getInt("transportHtpArch"))
+        assertEquals("V79", metadata.getString("unetRuntimeProfile"))
+        assertEquals("V79", metadata.getString("vaeRuntimeProfile"))
+        assertTrue(metadata.getBoolean("unetProcessDeathConfirmed"))
+        assertTrue(metadata.getBoolean("vaeProcessDeathConfirmed"))
+        assertFalse(metadata.getBoolean("fallback"))
     }
 
     @Test
@@ -175,7 +237,7 @@ class SdxlImagePhaseProtocolTest {
         assertTrue(manifest.contains(".SdxlUnetWorkerService"))
         assertTrue(manifest.contains("android:process=\":sdxl_unet_v75\""))
         assertTrue(manifest.contains(".SdxlVaeWorkerService"))
-        assertTrue(manifest.contains("android:process=\":sdxl_vae_v73\""))
+        assertTrue(manifest.contains("android:process=\":sdxl_vae_v75\""))
         assertFalse(manifest.contains("SdxlUnetWorkerService\"\n            android:exported=\"true"))
     }
 }

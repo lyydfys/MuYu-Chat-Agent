@@ -60,7 +60,8 @@ internal class SdxlTwoPhaseCoordinator(
         cleanupHandoff(latentFile, metadataFile, outputFile, unetJournal, vaeJournal)
         try {
             val phaseRuntimeDirs = stageBothRuntimeProfiles(
-                bundleRoot = bundleRoot
+                bundleRoot = bundleRoot,
+                packagedRuntimeDirsJson = runtimeDirsJson
             )
             check(!cancelled.get()) { "SDXL generation was cancelled." }
             val unet = runPhase(
@@ -68,7 +69,7 @@ internal class SdxlTwoPhaseCoordinator(
                 request = SdxlImagePhaseRequest(
                     requestId = requestId,
                     phase = SdxlImagePhase.UNET,
-                    expectedHtpArch = SDXL_UNET_HTP_ARCH,
+                    expectedHtpArch = SDXL_AUTO_TRANSPORT_HTP_ARCH,
                     bundleRoot = bundleRoot.canonicalPath,
                     runtimeDirsJson = phaseRuntimeDirs.unetDirsJson,
                     paramsJson = params.toString(),
@@ -82,11 +83,17 @@ internal class SdxlTwoPhaseCoordinator(
                 onProgress = ::report
             )
             check(unet.processDeathConfirmed) { "UNet phase process did not exit before VAE admission." }
+            val unetNative = JSONObject(unet.result.nativeResultJson)
+            val transportHtpArch = validateSdxlNativeTransport(
+                phase = SdxlImagePhase.UNET,
+                expectedHtpArch = SDXL_AUTO_TRANSPORT_HTP_ARCH,
+                nativeResult = unetNative
+            )
             val metadata = SdxlLatentArtifact.validate(
                 requestId = requestId,
                 latentFile = latentFile,
                 metadataFile = metadataFile,
-                expectedProducerArch = SDXL_UNET_HTP_ARCH
+                expectedProducerArch = transportHtpArch
             )
             mergedStages = SdxlTwoPhaseJournal.appendBoundary(
                 mergedStages,
@@ -101,7 +108,7 @@ internal class SdxlTwoPhaseCoordinator(
                 request = SdxlImagePhaseRequest(
                     requestId = requestId,
                     phase = SdxlImagePhase.VAE,
-                    expectedHtpArch = SDXL_VAE_HTP_ARCH,
+                    expectedHtpArch = transportHtpArch,
                     bundleRoot = bundleRoot.canonicalPath,
                     runtimeDirsJson = phaseRuntimeDirs.vaeDirsJson,
                     paramsJson = params.toString(),
@@ -115,6 +122,12 @@ internal class SdxlTwoPhaseCoordinator(
                 onProgress = ::report
             )
             check(vae.processDeathConfirmed) { "VAE phase process did not exit after PNG publication." }
+            val vaeNative = JSONObject(vae.result.nativeResultJson)
+            val vaeTransportHtpArch = validateSdxlNativeTransport(
+                phase = SdxlImagePhase.VAE,
+                expectedHtpArch = transportHtpArch,
+                nativeResult = vaeNative
+            )
             check(outputFile.isFile && outputFile.length() > 0L) { "VAE phase output is missing." }
             mergedStages = SdxlTwoPhaseJournal.appendBoundary(
                 mergedStages,
@@ -126,7 +139,7 @@ internal class SdxlTwoPhaseCoordinator(
             onProgress(
                 LocalImageProgress(
                     phase = "sdxl_two_phase_completed",
-                    message = "SDXL V75 UNet and V73 VAE completed in separate exited processes.",
+                    message = "SDXL UNet and VAE completed on HTP V$transportHtpArch in separate exited processes.",
                     step = 1,
                     steps = 1,
                     elapsedMs = 0L,
@@ -138,14 +151,28 @@ internal class SdxlTwoPhaseCoordinator(
                     stageTrace = mergedStages
                 )
             )
-            return JSONObject(vae.result.nativeResultJson)
-                .put("runtimeSessionMode", "isolated_unet_v75_then_vae_v73")
+            return vaeNative
+                .put("backend", "qnn_htp")
+                .put("npuActive", true)
+                .put("qnnGraphExecution", true)
+                .put("nativeExecution", true)
+                .put("fallback", false)
+                .put("executionStage", "sdxl_two_phase_passed")
+                .put("runtimeSessionMode", "isolated_unet_then_vae_same_transport")
+                .put("archiveContextHtpArch", SDXL_ARCHIVE_CONTEXT_HTP_ARCH)
+                .put("transportHtpArch", transportHtpArch)
                 .put("unetWorkerPid", unet.result.workerPid)
                 .put("unetRuntimeProfile", unet.result.runtimeProfile)
                 .put("unetProcessDeathConfirmed", true)
+                .put("unetGraph", params.optString("graphName", "model"))
+                .put("unetContextLoadMs", unetNative.optLong("unetContextLoadMs"))
+                .put("unetExecuteMsTotal", unetNative.optLong("unetExecuteMsTotal"))
                 .put("vaeWorkerPid", vae.result.workerPid)
                 .put("vaeRuntimeProfile", vae.result.runtimeProfile)
+                .put("vaeTransportHtpArch", vaeTransportHtpArch)
                 .put("vaeProcessDeathConfirmed", true)
+                .put("vaeGraph", params.optString("graphName", "model"))
+                .put("steps", params.optInt("steps", 1))
                 .put("latentSha256", metadata.sha256)
                 .put("stageTrace", org.json.JSONArray(mergedStages))
                 .toString()
@@ -187,48 +214,55 @@ internal class SdxlTwoPhaseCoordinator(
     }
 
     private fun stageBothRuntimeProfiles(
-        bundleRoot: File
+        bundleRoot: File,
+        packagedRuntimeDirsJson: String
     ): SdxlPhaseRuntimeDirectories {
-        val stager = QnnImageRuntimeStager(
-            File(appContext.codeCacheDir, "qnn-image-runtime-sdxl-phases")
+        val bundleContextProfile = qnnImageBundleRuntimeProfileForArchOrNull(
+            bundleRoot,
+            SDXL_ARCHIVE_CONTEXT_HTP_ARCH
         )
-        val device = DeviceProfileReader(appContext).read()
-        val transportArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(
-            device.accelerationProfile.chipsetCode
-        ) ?: device.accelerationProfile.qnnRuntime.htpArchVersion.takeIf { it > 0 }
-        val transportProfile = transportArch?.let { arch ->
-            qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, arch)
-        }
-        fun stage(arch: Int): String {
-            val contextProfile = qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, arch)
-                ?: error("SDXL bundle is missing a complete HTP V$arch runtime profile.")
-            // Unknown devices or bundles without an exact transport profile
-            // keep the execution path by using the context's coherent generic
-            // transport. The real phase process is the compatibility test.
-            val selectedTransport = transportProfile ?: contextProfile
-            val result = if (selectedTransport.htpArchVersion == contextProfile.htpArchVersion) {
-                stager.stage(contextProfile)
+        val isolatedRuntimeDirs = if (bundleContextProfile == null) {
+            // Public SDXL archives contain graph contexts and prompt encoders,
+            // but no host/Skel/Stub libraries. Use the APK's coherent runtime
+            // selected for this device. Chipset detection only orders the
+            // packaged transport; the real context load and graph execute in
+            // each disposable worker remain the compatibility decision.
+            isolatedSdxlPackagedRuntimeDirs(packagedRuntimeDirsJson)
+        } else {
+            val stager = QnnImageRuntimeStager(
+                File(appContext.codeCacheDir, "qnn-image-runtime-sdxl-phases")
+            )
+            val device = DeviceProfileReader(appContext).read()
+            val transportArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(
+                device.accelerationProfile.chipsetCode
+            ) ?: device.accelerationProfile.qnnRuntime.htpArchVersion.takeIf { it > 0 }
+            val selectedTransport = transportArch
+                ?.let { arch -> qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, arch) }
+                ?: bundleContextProfile
+            val result = if (selectedTransport.htpArchVersion == bundleContextProfile.htpArchVersion) {
+                stager.stage(bundleContextProfile)
             } else {
                 stager.stage(
                     QnnImageRuntimeStagePlan(
-                        contextProfile = contextProfile,
+                        contextProfile = bundleContextProfile,
                         transportProfile = selectedTransport
                     )
                 )
             }
             require(!result.failed && result.runtime != null) {
-                result.error ?: "Unable to stage the HTP V$arch runtime for real execution."
+                result.error ?: "Unable to stage the SDXL QNN runtime for real execution."
             }
-            return requireNotNull(result.runtime).directory.canonicalPath
+            orderedSdxlRuntimeDirs(
+                requireNotNull(result.runtime).directory.canonicalPath,
+                emptyList()
+            )
         }
-        val unetDirectory = stage(SDXL_UNET_HTP_ARCH)
-        val vaeDirectory = stage(SDXL_VAE_HTP_ARCH)
         // Each disposable process receives only its complete content-addressed
-        // stage. Native code adds platform ADSP paths for DSP discovery, but no
-        // APK/app-private QAIRT directory can be selected as a host fallback.
+        // runtime directory. Native code adds platform ADSP paths for DSP
+        // discovery, but cannot mix a second host profile into either process.
         return SdxlPhaseRuntimeDirectories(
-            unetDirsJson = orderedSdxlRuntimeDirs(unetDirectory, emptyList()),
-            vaeDirsJson = orderedSdxlRuntimeDirs(vaeDirectory, emptyList())
+            unetDirsJson = isolatedRuntimeDirs,
+            vaeDirsJson = isolatedRuntimeDirs
         )
     }
 }
@@ -241,6 +275,38 @@ internal data class SdxlPhaseRuntimeDirectories(
 @Suppress("UNUSED_PARAMETER")
 internal fun orderedSdxlRuntimeDirs(primary: String, fallback: List<String>): String =
     JSONArray(listOf(File(primary).canonicalPath)).toString()
+
+/**
+ * Selects one complete APK/app-private QNN runtime for an isolated SDXL phase.
+ * The directory may contain several physical-device transports; native context
+ * metadata selects the compatible one and a real graph execute decides support.
+ */
+internal fun isolatedSdxlPackagedRuntimeDirs(runtimeDirsJson: String): String {
+    val raw = JSONArray(runtimeDirsJson)
+    val directories = buildList {
+        for (index in 0 until raw.length()) {
+            raw.optString(index)
+                .takeIf(String::isNotBlank)
+                ?.let(::File)
+                ?.let { runCatching { it.canonicalFile }.getOrNull() }
+                ?.takeIf(File::isDirectory)
+                ?.let(::add)
+        }
+    }.distinctBy(File::getPath)
+    val coherent = directories.firstOrNull(File::hasCoherentSdxlQnnRuntime)
+        ?: error("The APK does not contain a complete QNN runtime for SDXL graph execution.")
+    return orderedSdxlRuntimeDirs(coherent.path, emptyList())
+}
+
+private fun File.hasCoherentSdxlQnnRuntime(): Boolean {
+    if (!File(this, "libQnnSystem.so").isFile || !File(this, "libQnnHtp.so").isFile) return false
+    return listFiles().orEmpty().any { skel ->
+        val arch = SDXL_HTP_SKEL.matchEntire(skel.name)?.groupValues?.getOrNull(1) ?: return@any false
+        File(this, "libQnnHtpV${arch}Stub.so").isFile
+    }
+}
+
+private val SDXL_HTP_SKEL = Regex("^libQnnHtpV(\\d+)Skel\\.so$")
 
 internal data class SdxlPhaseCompletion(
     val result: SdxlImagePhaseResult,

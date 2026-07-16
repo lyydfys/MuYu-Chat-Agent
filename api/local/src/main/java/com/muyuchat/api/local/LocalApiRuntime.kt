@@ -61,6 +61,13 @@ object LocalApiRuntime {
     @Volatile
     var benchmarkJsonProvider: suspend (String) -> String = { "{}" }
 
+    /** App-owned production image worker bridge used by the authenticated Images API. */
+    @Volatile
+    var imageGenerationProvider: (suspend (requestId: String, body: String) -> String)? = null
+
+    suspend fun generateImage(requestId: String, body: String): String? =
+        imageGenerationProvider?.invoke(requestId, body)
+
     /**
      * Optional app-owned coordinator bridge. Existing provider fields remain valid when this is
      * not attached, which keeps older integrations source and runtime compatible.

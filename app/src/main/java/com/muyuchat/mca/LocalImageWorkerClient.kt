@@ -147,10 +147,11 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         model: LocalImageModelRecord,
         prompt: String,
         options: LocalImageGenerationOptions = LocalImageGenerationOptions(),
+        requestId: String = UUID.randomUUID().toString(),
         onProgress: (LocalImageProgress) -> Unit = {}
     ): LocalImageResult {
         val request = ActiveRequest(
-            requestId = UUID.randomUUID().toString(),
+            requestId = requestId,
             runtime = model.runtime,
             onProgress = onProgress
         )

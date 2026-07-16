@@ -433,6 +433,11 @@ class LocalImageProvider(context: Context) {
                 qnnHealth.message
             }
             val isSdxlQnn = model.family == LocalImageModelFamily.SDXL
+            val conditioningRoot = if (isSdxlQnn) {
+                resolveSdxlQnnConditioningRoot(bundleRoot)
+            } else {
+                bundleRoot
+            }
             val outputDir = File(
                 appContext.cacheDir,
                 if (isSdxlQnn) SDXL_TWO_PHASE_DIRECTORY else "local_image_outputs"
@@ -528,7 +533,7 @@ class LocalImageProvider(context: Context) {
                 )
                 val embeddingRaw = if (isSdxlQnn) {
                     mnnDiffusionBridge.encodeSdxlPromptConditioning(
-                        bundleRoot.absolutePath,
+                        conditioningRoot.absolutePath,
                         prompt.trim(),
                         embeddingFile.absolutePath,
                         width,
@@ -623,7 +628,12 @@ class LocalImageProvider(context: Context) {
                 require(generated.exists() && generated.length() > 0L) { "Snapdragon NPU did not output a valid image." }
                 return@withContext LocalImageResult(
                     bytes = generated.readBytes(),
-                    mimeType = json.optString("mimeType", "image/png")
+                    mimeType = json.optString("mimeType", "image/png"),
+                    executionMetadataJson = qnnImageExecutionMetadata(
+                        nativeRequestId = requestToken,
+                        nativeResult = json,
+                        outputBytes = generated.length()
+                    ).toString()
                 )
             } finally {
                 runCatching { embeddingFile.delete() }
@@ -1002,6 +1012,41 @@ class LocalImageProvider(context: Context) {
         return this
     }
 }
+
+internal fun qnnImageExecutionMetadata(
+    nativeRequestId: String,
+    nativeResult: JSONObject,
+    outputBytes: Long
+): JSONObject = JSONObject()
+    .put("nativeRequestId", nativeRequestId)
+    .put("backend", nativeResult.optString("backend"))
+    .put("executionStage", nativeResult.optString("executionStage"))
+    .put("npuActive", nativeResult.optBoolean("npuActive", false))
+    .put("qnnGraphExecution", nativeResult.optBoolean("qnnGraphExecution", false))
+    .put("nativeExecution", nativeResult.optBoolean("nativeExecution", false))
+    .put("fallback", nativeResult.optBoolean("fallback", true))
+    .put("runtimeSessionMode", nativeResult.optString("runtimeSessionMode"))
+    .put("archiveContextHtpArch", nativeResult.optInt("archiveContextHtpArch"))
+    .put("transportHtpArch", nativeResult.optInt("transportHtpArch"))
+    .put("unetWorkerPid", nativeResult.optInt("unetWorkerPid"))
+    .put("unetRuntimeProfile", nativeResult.optString("unetRuntimeProfile"))
+    .put("unetProcessDeathConfirmed", nativeResult.optBoolean("unetProcessDeathConfirmed", false))
+    .put("unetGraph", nativeResult.optString("unetGraph"))
+    .put("vaeWorkerPid", nativeResult.optInt("vaeWorkerPid"))
+    .put("vaeRuntimeProfile", nativeResult.optString("vaeRuntimeProfile"))
+    .put("vaeTransportHtpArch", nativeResult.optInt("vaeTransportHtpArch"))
+    .put("vaeProcessDeathConfirmed", nativeResult.optBoolean("vaeProcessDeathConfirmed", false))
+    .put("vaeGraph", nativeResult.optString("vaeGraph"))
+    .put("steps", nativeResult.optInt("steps"))
+    .put("width", nativeResult.optInt("width"))
+    .put("height", nativeResult.optInt("height"))
+    .put("elapsedMs", nativeResult.optLong("elapsedMs"))
+    .put("unetContextLoadMs", nativeResult.optLong("unetContextLoadMs"))
+    .put("unetExecuteMsTotal", nativeResult.optLong("unetExecuteMsTotal"))
+    .put("vaeContextLoadMs", nativeResult.optLong("vaeContextLoadMs"))
+    .put("vaeExecuteMs", nativeResult.optLong("vaeExecuteMs"))
+    .put("latentSha256", nativeResult.optString("latentSha256"))
+    .put("outputBytes", outputBytes)
 
 internal data class QnnImageGenerationContract(
     val width: Int,
@@ -2028,6 +2073,69 @@ private fun File.safeDescendantOrNull(relativePath: String): File? {
     val candidate = File(rootCanonical, normalized).canonicalFile
     return candidate.takeIf { it.path == rootCanonical.path || it.path.startsWith(rootCanonical.path + File.separator) }
 }
+
+/**
+ * Public SDXL archives commonly keep all prompt-conditioning assets in a
+ * chipset-neutral nested directory. The manifest path is authoritative; a
+ * bounded unique-directory fallback keeps older imported bundles usable.
+ */
+internal fun resolveSdxlQnnConditioningRoot(bundleRoot: File): File {
+    val root = bundleRoot.canonicalFile
+    require(root.isDirectory) { "SDXL QNN bundle directory is missing." }
+    if (root.hasCompleteSdxlQnnConditioningAssets()) return root
+
+    val manifestFile = File(root, "manifest.json").takeIf(File::isFile)
+        ?: root.findDescendantFile("manifest.json")
+    val manifestDirectories = manifestFile
+        ?.let { file -> runCatching { JSONObject(file.readText(Charsets.UTF_8)) }.getOrNull() }
+        ?.optJSONArray("components")
+        ?.let { components ->
+            buildList {
+                for (index in 0 until components.length()) {
+                    val path = components.optJSONObject(index)
+                        ?.optString("path")
+                        ?.takeIf(String::isNotBlank)
+                        ?: continue
+                    val component = root.safeDescendantOrNull(path) ?: continue
+                    if (component.name in SDXL_QNN_CONDITIONING_ASSET_NAMES) {
+                        component.parentFile?.let(::add)
+                    }
+                }
+            }
+        }
+        .orEmpty()
+
+    val candidates = (manifestDirectories + root.walkTopDown()
+        .maxDepth(5)
+        .filter(File::isDirectory)
+        .filter(File::hasCompleteSdxlQnnConditioningAssets)
+        .toList())
+        .mapNotNull { runCatching { it.canonicalFile }.getOrNull() }
+        .filter { it.path.startsWith(root.path + File.separator) }
+        .distinctBy(File::getPath)
+        .filter(File::hasCompleteSdxlQnnConditioningAssets)
+        .sortedBy { it.relativeTo(root).invariantSeparatorsPath }
+
+    return candidates.firstOrNull()
+        ?: error(
+            "SDXL QNN bundle requires clip.mnn, clip_2.mnn(+weight), tokenizer.json, " +
+                "token_emb*.bin and pos_emb*.bin in one component directory."
+        )
+}
+
+private fun File.hasCompleteSdxlQnnConditioningAssets(): Boolean =
+    SDXL_QNN_CONDITIONING_ASSET_NAMES.all { name -> File(this, name).isFile }
+
+private val SDXL_QNN_CONDITIONING_ASSET_NAMES = setOf(
+    "clip.mnn",
+    "clip_2.mnn",
+    "clip_2.mnn.weight",
+    "tokenizer.json",
+    "token_emb.bin",
+    "token_emb_2.bin",
+    "pos_emb.bin",
+    "pos_emb_2.bin"
+)
 
 private val READINESS_MODEL_EXTENSIONS = setOf("gguf", "safetensors", "ckpt", "pth", "pt", "onnx", "sft", "mnn", "bin", "ctx", "qnn")
 

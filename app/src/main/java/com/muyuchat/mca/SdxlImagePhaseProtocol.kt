@@ -77,12 +77,17 @@ internal object SdxlImagePhaseProtocol {
 
     fun parseRequest(raw: String): SdxlImagePhaseRequest {
         val json = JSONObject(raw)
+        val phase = SdxlImagePhase.fromWire(json.requireString("phase"))
+        val expectedHtpArch = json.getInt("expectedHtpArch").also { arch ->
+            require(arch >= 0) { "expectedHtpArch must be non-negative." }
+            require(phase == SdxlImagePhase.UNET || arch > 0) {
+                "VAE expectedHtpArch must bind the UNet transport profile."
+            }
+        }
         return SdxlImagePhaseRequest(
             requestId = json.requireString("requestId"),
-            phase = SdxlImagePhase.fromWire(json.requireString("phase")),
-            expectedHtpArch = json.getInt("expectedHtpArch").also {
-                require(it > 0) { "expectedHtpArch must be positive." }
-            },
+            phase = phase,
+            expectedHtpArch = expectedHtpArch,
             bundleRoot = json.requireString("bundleRoot"),
             runtimeDirsJson = json.requireString("runtimeDirsJson"),
             paramsJson = json.requireString("paramsJson"),
@@ -189,6 +194,24 @@ internal object SdxlImagePhaseProtocol {
 
     private fun JSONObject.requireString(name: String): String =
         optString(name).takeIf(String::isNotBlank) ?: error("Missing $name.")
+}
+
+internal fun sdxlTransportProfile(htpArchVersion: Int): String =
+    if (htpArchVersion > 0) "V$htpArchVersion" else "AUTO"
+
+internal fun validateSdxlNativeTransport(
+    phase: SdxlImagePhase,
+    expectedHtpArch: Int,
+    nativeResult: JSONObject
+): Int {
+    val selectedHtpArch = nativeResult.optInt("htpArchVersion")
+    require(selectedHtpArch > 0) {
+        "SDXL ${phase.wireName} native runtime did not report a physical HTP transport."
+    }
+    require(expectedHtpArch <= 0 || selectedHtpArch == expectedHtpArch) {
+        "SDXL ${phase.wireName} selected HTP V$selectedHtpArch but expected transport V$expectedHtpArch."
+    }
+    return selectedHtpArch
 }
 
 internal data class SdxlLatentMetadata(

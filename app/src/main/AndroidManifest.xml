@@ -34,9 +34,9 @@
             android:exported="false"
             android:process=":local_image" />
 
-        <!-- SDXL contexts are intentionally split by runtime profile.  The
-             UNet process loads only V75 and must die before the V73 VAE
-             process is admitted; neither service may share a process. -->
+        <!-- SDXL V75 archive contexts are split into disposable processes.
+             Physical HTP transport is selected dynamically; UNet must die
+             before VAE starts, and neither graph shares an unload lifecycle. -->
         <service
             android:name=".SdxlUnetWorkerService"
             android:exported="false"
@@ -45,7 +45,7 @@
         <service
             android:name=".SdxlVaeWorkerService"
             android:exported="false"
-            android:process=":sdxl_vae_v73" />
+            android:process=":sdxl_vae_v75" />
 
         <!-- Unknown QAIRT bundle/chipset/runtime combinations may only create a
              handle here.  A crash/hang is contained to this disposable process. -->

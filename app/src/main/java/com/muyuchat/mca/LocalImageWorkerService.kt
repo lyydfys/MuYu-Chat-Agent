@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.IBinder
 import android.os.Process
 import android.os.RemoteException
+import android.util.Log
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -163,6 +164,19 @@ class LocalImageWorkerService : Service() {
                         outputFile = output,
                         mimeType = result.mimeType,
                         executionMetadataJson = result.executionMetadataJson
+                    )
+                    Log.i(
+                        "MCA-LocalImage",
+                        JSONObject()
+                            .put("requestId", request.requestId)
+                            .put("workerPid", Process.myPid())
+                            .put("outputBytes", output.length())
+                            .put("mimeType", result.mimeType)
+                            .put(
+                                "execution",
+                                runCatching { JSONObject(result.executionMetadataJson) }.getOrElse { JSONObject() }
+                            )
+                            .toString()
                     )
                     if (delivered) {
                         transferredOutput = null

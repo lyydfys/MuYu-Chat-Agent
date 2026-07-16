@@ -1025,35 +1025,35 @@ class ModelScopeClient(
             ImageEngineQnnSmokeSpec(
                 graphName = "model",
                 contextBinary = "unet.bin",
-                width = 512,
-                height = 512,
+                width = 1024,
+                height = 1024,
                 steps = 1,
                 timeoutSeconds = 300,
                 prompt = "a clean product photo of a ceramic cup on a wooden desk",
                 inputs = listOf(
-                    ImageEngineQnnSmokeTensorSpec("sample", "uint16", listOf(1, 4, 64, 64)),
-                    ImageEngineQnnSmokeTensorSpec("encoder_hidden_states", "uint16", listOf(1, 77, 2048)),
+                    ImageEngineQnnSmokeTensorSpec("sample", "float32", listOf(1, 4, 128, 128)),
+                    ImageEngineQnnSmokeTensorSpec("encoder_hidden_states", "float32", listOf(1, 77, 2048)),
                     ImageEngineQnnSmokeTensorSpec("timestamp", "int32", listOf(1)),
-                    ImageEngineQnnSmokeTensorSpec("time_ids", "uint16", listOf(1, 6)),
-                    ImageEngineQnnSmokeTensorSpec("text_embeds", "uint16", listOf(1, 1280))
+                    ImageEngineQnnSmokeTensorSpec("time_ids", "float32", listOf(1, 6)),
+                    ImageEngineQnnSmokeTensorSpec("text_embeds", "float32", listOf(1, 1280))
                 ),
                 outputs = listOf(
-                    ImageEngineQnnSmokeTensorSpec("output", "uint16", listOf(1, 4, 64, 64), role = "output")
+                    ImageEngineQnnSmokeTensorSpec("output", "float32", listOf(1, 4, 128, 128), role = "output")
                 )
             ),
             ImageEngineQnnSmokeSpec(
                 graphName = "model",
                 contextBinary = "vae_decoder.bin",
-                width = 512,
-                height = 512,
+                width = 1024,
+                height = 1024,
                 steps = 1,
                 timeoutSeconds = 300,
                 prompt = "sdxl vae decoder smoke",
                 inputs = listOf(
-                    ImageEngineQnnSmokeTensorSpec("input", "uint16", listOf(1, 4, 64, 64))
+                    ImageEngineQnnSmokeTensorSpec("input", "float32", listOf(1, 4, 128, 128))
                 ),
                 outputs = listOf(
-                    ImageEngineQnnSmokeTensorSpec("output", "uint16", listOf(1, 3, 512, 512), role = "output")
+                    ImageEngineQnnSmokeTensorSpec("output", "float32", listOf(1, 3, 1024, 1024), role = "output")
                 )
             )
         )
@@ -1773,10 +1773,10 @@ class ModelScopeClient(
             ModelScopeRecommendedModel(
                 id = "cyberrealisticxl_qnn228",
                 title = "CyberRealisticXL SDXL QNN 2.28",
-                repoId = "Mr-J-369/CyberRealisticXL-qnn2.28",
-                revision = "main",
-                description = "SDXL QNN 高端实验包。UNet 与 VAE 双进程隔离架构已触达真机执行，但当前公开包的 1024 UNet 与 512 VAE latent 形状不匹配，暂不可作为默认生图模型。",
-                recommendedFileName = "cyberrealisticXL_v10_qnn2.28_8gen3.zip",
+                repoId = "xororz/sdxl-qnn",
+                revision = "ead90f4635e21e7412b8200a5efd220b0193beeb",
+                description = "写实摄影方向的完整 1024×1024 SDXL QNN 包；UNet 与 VAE 使用独立进程执行，安装后以真实 native graph smoke 验证兼容性。",
+                recommendedFileName = "cyber_realistic_v10_qnn2.28_8gen3.zip",
                 parameterScale = "SDXL",
                 quant = "QNN 2.28",
                 minRamGb = 12,
@@ -1790,20 +1790,14 @@ class ModelScopeClient(
                 downloadable = true,
                 downloadBlockReason = null,
                 localImageEngineTier = LocalImageEngineTier.HEAVY_EXPERIMENTAL,
-                imageEngineBundle = ImageEngineBundleSpec(
+                imageEngineBundle = sdxlQnnBundle(
                     id = "cyberrealisticxl_qnn228",
                     title = "CyberRealisticXL QNN 2.28",
-                    components = qnnZipComponent(
-                        repoId = "Mr-J-369/CyberRealisticXL-qnn2.28",
-                        fileName = "cyberrealisticXL_v10_qnn2.28_8gen3.zip"
-                    ),
-                    runtime = ImageEngineBundleRuntime.QNN_HTP,
-                    accelerator = ImageEngineAccelerator.QNN_HTP,
-                    minDeviceTier = ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN3,
-                    requiresQnnRuntime = true,
-                    requiresSmokeTest = true,
-                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 1, timeoutSeconds = 300),
-                    qnnSmokeSpecs = sdxlQnnSmokeSpecs()
+                    repoId = "xororz/sdxl-qnn",
+                    fileName = "cyber_realistic_v10_qnn2.28_8gen3.zip",
+                    revision = "ead90f4635e21e7412b8200a5efd220b0193beeb",
+                    expectedSizeBytes = 3_745_235_842L,
+                    sha256 = "2af39e9c80629a27406112e91627657981b50f28b477e7adaf9415d886e08ea2"
                 )
             ),
             ModelScopeRecommendedModel(

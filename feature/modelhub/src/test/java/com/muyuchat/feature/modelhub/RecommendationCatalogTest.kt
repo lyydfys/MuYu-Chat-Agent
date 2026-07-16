@@ -104,7 +104,7 @@ class RecommendationCatalogTest {
         assertTrue(access.canDownload)
         assertEquals("实验下载", recommendationDownloadCtaLabel(sdxl, access.canDownload, access.experimental))
         assertEquals(
-            "工程状态：双进程阶段执行已通过；当前模型包 VAE shape 不匹配",
+            "工程状态：已切换完整 1024×1024 包；安装后执行 UNet/VAE 双图 native smoke",
             recommendationVerificationLine(sdxl, false)
         )
     }

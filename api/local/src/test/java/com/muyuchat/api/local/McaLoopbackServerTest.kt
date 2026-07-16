@@ -19,6 +19,60 @@ import java.util.concurrent.atomic.AtomicReference
 
 class McaLoopbackServerTest {
     @Test
+    fun authenticatedImagesApiUsesProductionProviderAndKeepsRequestIdentity() {
+        val capturedRequestId = AtomicReference<String>()
+        val capturedBody = AtomicReference<String>()
+        val body = """{"prompt":"a ceramic cup","size":"1024x1024","steps":1}"""
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                capturedRequestId.set(requestId)
+                capturedBody.set(requestBody)
+                JSONObject()
+                    .put("request_id", requestId)
+                    .put("execution", JSONObject().put("nativeExecution", true))
+                    .put("data", org.json.JSONArray())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost("/v1/images/generations", body = body)
+            )
+            val responseBody = responseJson(response)
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(capturedRequestId.get().startsWith("img-"))
+            assertEquals(capturedRequestId.get(), responseBody.getString("request_id"))
+            assertEquals(body, capturedBody.get())
+        }
+    }
+
+    @Test
+    fun imagesApiRequiresAuthenticationBeforeInvokingProvider() {
+        val calls = AtomicInteger(0)
+        val body = """{"prompt":"private prompt"}"""
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                calls.incrementAndGet()
+                "{}"
+            }
+
+            val response = rawHttp(
+                port,
+                "POST /v1/images/generations HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 401 Unauthorized"))
+            assertEquals(0, calls.get())
+            assertFalse(response.contains("private prompt"))
+        }
+    }
+
+    @Test
     fun idleRuntimeStateDoesNotClaimThatTheRuntimeIsBusy() {
         withServer(apiKey = "secret") { port ->
             val runtime = responseJson(rawHttp(port, authenticatedGet("/v1/mca/runtime")))
@@ -1485,6 +1539,7 @@ class McaLoopbackServerTest {
             LocalApiRuntime.streamChatProvider = null
             LocalApiRuntime.streamChatWithContextProvider = null
             LocalApiRuntime.stopGenerationProvider = null
+            LocalApiRuntime.imageGenerationProvider = null
             LocalApiRuntime.controlPlane = null
             LocalApiRuntime.clearRequestTrace()
             LocalApiRuntime.loadedModelJsonProvider = { "{}" }
@@ -1499,6 +1554,7 @@ class McaLoopbackServerTest {
             LocalApiRuntime.streamChatProvider = null
             LocalApiRuntime.streamChatWithContextProvider = null
             LocalApiRuntime.stopGenerationProvider = null
+            LocalApiRuntime.imageGenerationProvider = null
             LocalApiRuntime.controlPlane = null
             LocalApiRuntime.clearRequestTrace()
             LocalApiRuntime.loadedModelJsonProvider = { "{}" }

@@ -146,7 +146,7 @@ internal fun recommendationVerificationLine(
     model.id == "qwen3_4b_2507_qairt_w4a16" ->
         "验证状态：已有骁龙 8 Elite 正式文本回归证据；兼容设备默认开放并以真实运行结果为准"
     model.id == "cyberrealisticxl_qnn228" ->
-        "工程状态：双进程阶段执行已通过；当前模型包 VAE shape 不匹配"
+        "工程状态：已切换完整 1024×1024 包；安装后执行 UNet/VAE 双图 native smoke"
     model.id in VERIFIED_QNN_SD15_EXPERIMENT_IDS ->
         "验证状态：20-step 产品 worker 三次冷启动和三次复用已通过"
     model.id == "sd15_mnn_512_quality" ->

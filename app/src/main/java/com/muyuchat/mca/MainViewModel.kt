@@ -780,6 +780,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .toJson()
                 .toString()
         }
+        LocalApiRuntime.imageGenerationProvider = { requestId, body ->
+            generateLocalApiImage(requestId, body)
+        }
         LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
             override fun busyState(): LocalApiBusyState {
                 val state = _uiState.value
@@ -7177,6 +7180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         LocalApiRuntime.engine = null
         LocalApiRuntime.streamChatWithContextProvider = null
         LocalApiRuntime.stopGenerationProvider = null
+        LocalApiRuntime.imageGenerationProvider = null
         LocalApiRuntime.controlPlane = null
         localImageWorkerClient.close()
         super.onCleared()
@@ -7879,7 +7883,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val app = getApplication<Application>()
         val imageDir = File(app.filesDir, "image_assets").apply { mkdirs() }
         val result = try {
-            localImageWorkerClient.generate(model, prompt, onProgress = onProgress)
+            localImageWorkerClient.generate(
+                model = model,
+                prompt = prompt,
+                onProgress = onProgress,
+                requestId = "ui-img-${UUID.randomUUID()}"
+            )
         } catch (error: Throwable) {
             if (error !is CancellationException && error !is LocalImageWorkerCancelledException) {
                 recordLocalImageExecutionOutcome(model, error.message ?: "本地 native 生图执行失败。")
@@ -7903,6 +7912,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             height = bounds.outHeight.coerceAtLeast(0),
             chatSessionId = chatSessionId
         )
+    }
+
+    private suspend fun generateLocalApiImage(requestId: String, body: String): String {
+        val request = JSONObject(body)
+        val prompt = request.optString("prompt").trim()
+        require(prompt.isNotBlank()) { "prompt must not be blank." }
+        require(requestId.isNotBlank()) { "requestId must not be blank." }
+        val requestedModel = request.optString("model").trim()
+        val model = _uiState.value.localImageModels.firstOrNull {
+            requestedModel.isNotBlank() && it.id == requestedModel && it.configured
+        } ?: _uiState.value.selectedLocalImageModel()
+            ?: error("No configured local image model is selected.")
+        require(model.runtime == LocalImageRuntime.QNN_HTP) {
+            "The selected local image model is not a Snapdragon NPU engine."
+        }
+        val size = request.optString("size").trim()
+        val dimensions = Regex("""^(\d{2,4})[xX](\d{2,4})$""").matchEntire(size)
+        val options = LocalImageGenerationOptions(
+            width = dimensions?.groupValues?.getOrNull(1)?.toIntOrNull(),
+            height = dimensions?.groupValues?.getOrNull(2)?.toIntOrNull(),
+            steps = request.optInt("steps", 0).takeIf { it > 0 },
+            seed = request.optInt("seed", 0).takeIf { request.has("seed") },
+            cfgScale = request.optDouble("cfg_scale", Double.NaN).takeIf { it.isFinite() }
+        )
+        val result = localImageWorkerClient.generate(
+            model = model,
+            prompt = prompt,
+            options = options,
+            requestId = requestId
+        )
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(result.bytes, 0, result.bytes.size, bounds)
+        require(bounds.outWidth > 0 && bounds.outHeight > 0) {
+            "The local image worker returned an invalid image."
+        }
+        val execution = runCatching { JSONObject(result.executionMetadataJson) }.getOrElse { JSONObject() }
+        require(
+            execution.optBoolean("npuActive", false) &&
+                execution.optBoolean("qnnGraphExecution", false) &&
+                execution.optBoolean("nativeExecution", false) &&
+                !execution.optBoolean("fallback", true)
+        ) {
+            "The local image result did not prove native QNN graph execution."
+        }
+        return JSONObject()
+            .put("created", System.currentTimeMillis() / 1000L)
+            .put("request_id", requestId)
+            .put("model", model.id)
+            .put("execution", execution)
+            .put(
+                "data",
+                JSONArray().put(
+                    JSONObject()
+                        .put("b64_json", Base64.encodeToString(result.bytes, Base64.NO_WRAP))
+                        .put("mime_type", result.mimeType)
+                        .put("width", bounds.outWidth)
+                        .put("height", bounds.outHeight)
+                )
+            )
+            .toString()
     }
 
     /** Records actual worker execution only; this evidence is never an admission certificate. */
@@ -10200,7 +10269,10 @@ internal fun downloadedImageBundleManifestJson(
                         .put("timeoutSeconds", smoke.timeoutSeconds)
                         .put("prompt", smoke.prompt)
                         .put("graphName", smoke.graphName)
-                        .put("contextBinary", smoke.contextBinary)
+                        .put(
+                            "contextBinary",
+                            resolvedDownloadedQnnContextPath(smoke.contextBinary, targets)
+                        )
                         .put(
                             "inputs",
                             JSONArray(
@@ -10232,6 +10304,27 @@ internal fun downloadedImageBundleManifestJson(
         )
     }
     return manifest
+}
+
+/**
+ * Public QNN ZIPs often wrap graph binaries in a publisher-specific directory.
+ * Persist the extracted relative path instead of a root-only catalog basename;
+ * native workers then resolve the exact immutable artifact recorded in the
+ * component manifest. Ambiguous filenames deliberately remain unresolved so
+ * the structural/native smoke reports a concrete package error.
+ */
+internal fun resolvedDownloadedQnnContextPath(
+    requested: String,
+    targets: List<Pair<RemoteModelFile, File>>
+): String {
+    val normalized = requested.replace('\\', '/').trim().trimStart('/')
+    val paths = targets.map { it.first.relativePath.replace('\\', '/').trim().trimStart('/') }
+    paths.firstOrNull { it.equals(normalized, ignoreCase = true) }?.let { return it }
+    val requestedName = normalized.substringAfterLast('/')
+    val matchingNames = paths.filter {
+        it.substringAfterLast('/').equals(requestedName, ignoreCase = true)
+    }.distinct()
+    return matchingNames.singleOrNull() ?: normalized
 }
 
 private fun expandedImageBundleManifestTargets(

@@ -282,8 +282,8 @@ class ModelScopeClientTest {
         assertEquals(RecommendedModelStatus.EXPERIMENTAL, cyberRealisticXlQnn.status)
         assertTrue(cyberRealisticXlQnn.downloadable)
         assertNull(cyberRealisticXlQnn.downloadBlockReason)
-        assertTrue(cyberRealisticXlQnn.description.contains("双进程隔离"))
-        assertTrue(cyberRealisticXlQnn.description.contains("latent 形状不匹配"))
+        assertTrue(cyberRealisticXlQnn.description.contains("1024×1024"))
+        assertFalse(cyberRealisticXlQnn.description.contains("形状不匹配"))
         assertEquals(2, cyberRealisticXlQnn.imageEngineBundle!!.qnnSmokeSpecs.size)
         assertEquals("unet.bin", cyberRealisticXlQnn.imageEngineBundle!!.qnnSmokeSpecs.first().contextBinary)
         assertEquals(5, cyberRealisticXlQnn.imageEngineBundle!!.qnnSmokeSpecs.first().inputs.size)
@@ -404,6 +404,41 @@ class ModelScopeClientTest {
                 assertNull(eligibility.blockedReason)
             }
         }
+    }
+
+    @Test
+    fun sdxlRecommendationsUseTheReal1024Float32GraphContract() {
+        val sdxlIds = setOf(
+            "sdxl_base_qnn228",
+            "realismsdxl_dmd2_alt_qnn228",
+            "animagine_xl_v4_qnn228",
+            "cyberrealisticxl_qnn228"
+        )
+        val models = client.userFacingRecommendedModels().filter { it.id in sdxlIds }
+
+        assertEquals(sdxlIds, models.map { it.id }.toSet())
+        models.forEach { model ->
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val unet = bundle.qnnSmokeSpecs.single { it.contextBinary == "unet.bin" }
+            val vae = bundle.qnnSmokeSpecs.single { it.contextBinary == "vae_decoder.bin" }
+            assertEquals(1024, unet.width)
+            assertEquals(1024, unet.height)
+            assertEquals(listOf(1, 4, 128, 128), unet.inputs.single { it.name == "sample" }.shape)
+            assertTrue(unet.inputs.filterNot { it.name == "timestamp" }.all { it.dataType == "float32" })
+            assertEquals(listOf(1, 4, 128, 128), unet.outputs.single().shape)
+            assertEquals("float32", unet.outputs.single().dataType)
+            assertEquals(1024, vae.width)
+            assertEquals(1024, vae.height)
+            assertEquals(listOf(1, 4, 128, 128), vae.inputs.single().shape)
+            assertEquals("float32", vae.inputs.single().dataType)
+            assertEquals(listOf(1, 3, 1024, 1024), vae.outputs.single().shape)
+            assertEquals("float32", vae.outputs.single().dataType)
+        }
+
+        val cyber = models.single { it.id == "cyberrealisticxl_qnn228" }
+        assertEquals("xororz/sdxl-qnn", cyber.repoId)
+        assertEquals("cyber_realistic_v10_qnn2.28_8gen3.zip", cyber.recommendedFileName)
+        assertTrue(cyber.downloadEligibilityFor("", deviceIsSnapdragon = false).canDownload)
     }
 
     @Test

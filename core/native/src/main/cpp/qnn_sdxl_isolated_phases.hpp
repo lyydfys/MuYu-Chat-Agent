@@ -4,7 +4,7 @@
 // helpers are defined.  Each entry point intentionally leaks its one runtime
 // graph: the Android phase worker is disposable and exits immediately after
 // publishing its artifact, avoiding the RouterFastRPC unload hang observed
-// when V75 UNet and V73 VAE were switched inside one process.
+// when large SDXL UNet and VAE contexts were switched inside one process.
 
 bool write_sdxl_latent_atomic(
         const std::string& path,
