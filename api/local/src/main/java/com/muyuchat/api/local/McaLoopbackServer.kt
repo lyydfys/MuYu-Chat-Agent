@@ -149,18 +149,7 @@ class McaLoopbackServer(
                 method == "POST" && path == "/v1/mca/recommend" -> writeJson(client, LocalApiRuntime.agentRecommendationJsonProvider(body))
                 method == "POST" && path == "/v1/mca/benchmark" -> writeJson(client, LocalApiRuntime.benchmarkJsonProvider(body))
                 method == "POST" && path in IMAGE_GENERATION_PATHS -> {
-                    val requestId = "img-${UUID.randomUUID()}"
-                    val response = LocalApiRuntime.generateImage(requestId, body)
-                    if (response == null) {
-                        writeError(
-                            client,
-                            "503 Service Unavailable",
-                            "image_runtime_unavailable",
-                            "The local image runtime is not attached."
-                        )
-                    } else {
-                        writeJson(client, response)
-                    }
+                    handleImageGeneration(client, body)
                 }
                 method == "GET" && path == "/metrics" -> writeText(client, LocalApiRuntime.metricsJson())
                 method == "POST" && path == "/v1/generate/stop" -> {
@@ -183,6 +172,78 @@ class McaLoopbackServer(
                 else -> writeError(client, "404 Not Found", "not_found", "接口不存在：$path")
             }
         }
+    }
+
+    private suspend fun handleImageGeneration(socket: Socket, body: String) {
+        val request = try {
+            ImageGenerationApiContract.parseRequest(body)
+        } catch (error: ImageGenerationContractException) {
+            writeError(
+                socket,
+                "400 Bad Request",
+                error.code,
+                error.message
+            )
+            return
+        }
+
+        val busy = try {
+            LocalApiRuntime.busyState()
+        } catch (_: Throwable) {
+            writeError(
+                socket,
+                "503 Service Unavailable",
+                "image_control_plane_failed",
+                "The local runtime could not report image generation availability."
+            )
+            return
+        }
+        if (busy.busy) {
+            writeError(
+                socket,
+                "409 Conflict",
+                "image_generation_busy",
+                busy.message.ifBlank { "Another local runtime operation is in progress." },
+                detailsJson = busy.detailsJson,
+                retryAfterMs = busy.retryAfterMs.coerceAtLeast(0L)
+            )
+            return
+        }
+
+        val requestId = "img-${UUID.randomUUID()}"
+        val providerResponse = try {
+            LocalApiRuntime.generateImage(requestId, request.rawBody)
+        } catch (error: Throwable) {
+            writeError(
+                socket,
+                "500 Internal Server Error",
+                "image_generation_failed",
+                error.message ?: "Local image generation failed."
+            )
+            return
+        }
+        if (providerResponse == null) {
+            writeError(
+                socket,
+                "503 Service Unavailable",
+                "image_runtime_unavailable",
+                "The local image runtime is not attached."
+            )
+            return
+        }
+
+        val response = try {
+            ImageGenerationApiContract.parseResponse(requestId, providerResponse)
+        } catch (error: ImageGenerationContractException) {
+            writeError(
+                socket,
+                "502 Bad Gateway",
+                error.code,
+                error.message
+            )
+            return
+        }
+        writeJson(socket, response.rawBody)
     }
 
     /**

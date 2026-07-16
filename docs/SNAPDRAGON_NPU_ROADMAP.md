@@ -19,8 +19,8 @@ download flow, acceptance gates, and release language, see
   <https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk>
 - Qualcomm QAIRT overview:
   <https://docs.qualcomm.com/bundle/publicresource/topics/80-63442-50/introduction.html?product=1601111740009302>
-- Local Dream Android Stable Diffusion reference:
-  <https://github.com/xororz/local-dream>
+- External Android Stable Diffusion quality reference, used only as a local
+  behavior and output baseline; no source is copied into MCA.
 
 ## Device Tiers
 

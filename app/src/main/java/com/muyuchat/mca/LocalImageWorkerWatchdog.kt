@@ -12,10 +12,17 @@ internal data class LocalImageWorkerWatchdogPolicy(
  */
 internal fun localImageWorkerWatchdogPolicy(
     runtime: LocalImageRuntime,
-    family: LocalImageModelFamily
+    family: LocalImageModelFamily,
+    steps: Int? = null,
+    useCfg: Boolean? = null
 ): LocalImageWorkerWatchdogPolicy? =
     if (runtime == LocalImageRuntime.QNN_HTP && family == LocalImageModelFamily.SDXL) {
-        LocalImageWorkerWatchdogPolicy(timeoutMs = SDXL_QNN_WORKER_TIMEOUT_MS)
+        LocalImageWorkerWatchdogPolicy(
+            timeoutMs = sdxlWorkerTimeoutMs(
+                steps = (steps ?: SDXL_WATCHDOG_DEFAULT_STEPS).coerceIn(1, 100),
+                useCfg = useCfg ?: true
+            )
+        )
     } else {
         null
     }
@@ -56,4 +63,37 @@ internal fun accumulateNativeStageTrace(
 }
 
 internal const val LOCAL_IMAGE_WORKER_WATCHDOG_TIMEOUT_CODE = "qnn_sdxl_worker_timeout"
-internal const val SDXL_QNN_WORKER_TIMEOUT_MS = 6L * 60L * 1_000L
+internal const val SDXL_QNN_WORKER_TIMEOUT_MS = 21L * 60L * 1_000L
+private const val SDXL_WATCHDOG_DEFAULT_STEPS = 30
+private const val SDXL_UNET_BASE_TIMEOUT_MS = 3L * 60L * 1_000L
+private const val SDXL_PER_UNET_EXECUTION_TIMEOUT_MS = 12L * 1_000L
+private const val SDXL_UNET_MIN_TIMEOUT_MS = 4L * 60L * 1_000L
+private const val SDXL_UNET_MAX_TIMEOUT_MS = 30L * 60L * 1_000L
+private const val SDXL_VAE_BASE_TIMEOUT_MS = 90L * 1_000L
+private const val SDXL_VAE_PER_STEP_MARGIN_MS = 500L
+private const val SDXL_VAE_MAX_TIMEOUT_MS = 3L * 60L * 1_000L
+private const val SDXL_CONDITIONING_TIMEOUT_BUDGET_MS = 3L * 60L * 1_000L
+private const val SDXL_COORDINATION_TIMEOUT_MARGIN_MS = 70L * 1_000L
+private const val SDXL_WORKER_MAX_TIMEOUT_MS = 40L * 60L * 1_000L
+
+internal fun sdxlUnetPhaseTimeoutMs(unetExecutionCount: Int): Long =
+    (SDXL_UNET_BASE_TIMEOUT_MS +
+        unetExecutionCount.coerceAtLeast(1).toLong() * SDXL_PER_UNET_EXECUTION_TIMEOUT_MS)
+        .coerceIn(SDXL_UNET_MIN_TIMEOUT_MS, SDXL_UNET_MAX_TIMEOUT_MS)
+
+internal fun sdxlVaePhaseTimeoutMs(steps: Int): Long =
+    (SDXL_VAE_BASE_TIMEOUT_MS +
+        steps.coerceIn(1, 100).toLong() * SDXL_VAE_PER_STEP_MARGIN_MS)
+        .coerceAtMost(SDXL_VAE_MAX_TIMEOUT_MS)
+
+internal fun sdxlWorkerTimeoutMs(steps: Int, useCfg: Boolean): Long {
+    val boundedSteps = steps.coerceIn(1, 100)
+    val estimatedTimetableCount = boundedSteps + 1
+    val estimatedUnetExecutionCount = estimatedTimetableCount * if (useCfg) 2 else 1
+    return (
+        SDXL_CONDITIONING_TIMEOUT_BUDGET_MS +
+            sdxlUnetPhaseTimeoutMs(estimatedUnetExecutionCount) +
+            sdxlVaePhaseTimeoutMs(boundedSteps) +
+            SDXL_COORDINATION_TIMEOUT_MARGIN_MS
+        ).coerceAtMost(SDXL_WORKER_MAX_TIMEOUT_MS)
+}

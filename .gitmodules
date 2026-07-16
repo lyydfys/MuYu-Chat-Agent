@@ -6,3 +6,6 @@
 	path = third_party/stable-diffusion.cpp
 	url = https://github.com/leejet/stable-diffusion.cpp.git
 	ignore = dirty
+[submodule "third_party/tokenizers-cpp"]
+	path = third_party/tokenizers-cpp
+	url = https://github.com/mlc-ai/tokenizers-cpp.git

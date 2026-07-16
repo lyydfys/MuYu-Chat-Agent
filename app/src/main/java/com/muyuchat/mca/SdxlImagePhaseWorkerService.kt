@@ -97,6 +97,9 @@ internal abstract class SdxlImagePhaseWorkerService(
         var lastJournalProgress: LocalImageProgress? = null
         try {
             validatePrivatePaths(request)
+            val contract = SdxlImageExecutionContract.fromParams(request.paramsJson).also {
+                it.validateRequestIdentity(request)
+            }
             require(NativeQnnBridge.isAvailable && NativeQnnBridge.runnerReady) {
                 "QNN native phase runner is unavailable."
             }
@@ -106,13 +109,13 @@ internal abstract class SdxlImagePhaseWorkerService(
                 LocalImageProgress(
                     phase = "${fixedPhase.wireName}_worker_started",
                     message = "SDXL ${fixedPhase.wireName} worker started in isolated $requestedProfile process.",
-                    step = 0,
-                    steps = 1,
+                    step = if (fixedPhase == SdxlImagePhase.UNET) 0 else contract.steps,
+                    steps = contract.steps,
                     elapsedMs = 0L,
                     secondsPerStep = 0.0,
                     threads = 0,
-                    width = 1024,
-                    height = 1024,
+                    width = contract.width,
+                    height = contract.height,
                     cancelRequested = false
                 )
             )
@@ -125,17 +128,18 @@ internal abstract class SdxlImagePhaseWorkerService(
                         journal,
                         lastJournalProgress,
                         threads = 0,
-                        width = 1024,
-                        height = 1024
+                        width = contract.width,
+                        height = contract.height
                     )
-                    if (observed != null && observed != lastJournalProgress) {
-                        lastJournalProgress = observed
-                        sendProgress(callback, request, observed)
+                    val normalized = observed?.forSdxlPhase(fixedPhase, contract)
+                    if (normalized != null && normalized != lastJournalProgress) {
+                        lastJournalProgress = normalized
+                        sendProgress(callback, request, normalized)
                     }
                     delay(200L)
                 }
             }
-            val params = JSONObject(request.paramsJson)
+            val params = contract.paramsObject()
                 .put("expectedHtpArch", request.expectedHtpArch)
                 .put("progressJournalPath", request.journalPath)
                 .toString()
@@ -152,7 +156,8 @@ internal abstract class SdxlImagePhaseWorkerService(
                         requestId = request.requestId,
                         latentFile = File(request.latentPath),
                         metadataFile = File(request.metadataPath),
-                        expectedProducerArch = request.expectedHtpArch
+                        expectedProducerArch = request.expectedHtpArch,
+                        contract = contract
                     )
                     bridge.runSdxlVaePhase(
                         request.bundleRoot,
@@ -169,9 +174,10 @@ internal abstract class SdxlImagePhaseWorkerService(
                 journal,
                 lastJournalProgress,
                 threads = 0,
-                width = 1024,
-                height = 1024
-            )?.takeIf { it != lastJournalProgress }?.let { finalProgress ->
+                width = contract.width,
+                height = contract.height
+            )?.forSdxlPhase(fixedPhase, contract)
+                ?.takeIf { it != lastJournalProgress }?.let { finalProgress ->
                 lastJournalProgress = finalProgress
                 sendProgress(callback, request, finalProgress)
             }
@@ -185,11 +191,14 @@ internal abstract class SdxlImagePhaseWorkerService(
                 nativeResult = nativeResult
             )
             val selectedProfile = sdxlTransportProfile(selectedHtpArch)
+            val proof = SdxlNativePhaseProof.fromNativeResult(nativeResult, fixedPhase)
             val artifact = when (fixedPhase) {
                 SdxlImagePhase.UNET -> {
                     SdxlLatentArtifact.publishMetadata(
                         requestId = request.requestId,
                         producerPid = pid,
+                        contract = contract,
+                        proof = proof,
                         nativeResult = nativeResult,
                         latentFile = File(request.latentPath),
                         metadataFile = File(request.metadataPath)
@@ -197,6 +206,7 @@ internal abstract class SdxlImagePhaseWorkerService(
                     File(request.latentPath)
                 }
                 SdxlImagePhase.VAE -> File(request.outputPath).also {
+                    validateSdxlVaeNativeEvidence(contract, nativeResult)
                     require(it.isFile && it.length() > 0L) { "VAE phase did not publish a PNG." }
                 }
             }
@@ -209,6 +219,9 @@ internal abstract class SdxlImagePhaseWorkerService(
                         runtimeProfile = selectedProfile,
                         artifactPath = artifact.canonicalPath,
                         metadataPath = request.metadataPath,
+                        nativeGenerationSequence = proof.nativeGenerationSequence,
+                        nativeStageMask = proof.nativeStageMask,
+                        nativeDetailStageMask = proof.nativeDetailStageMask,
                         nativeResultJson = nativeRaw
                     )
                 )
@@ -309,6 +322,16 @@ internal abstract class SdxlImagePhaseWorkerService(
         )
     }
 }
+
+private fun LocalImageProgress.forSdxlPhase(
+    phase: SdxlImagePhase,
+    contract: SdxlImageExecutionContract
+): LocalImageProgress = copy(
+    step = if (phase == SdxlImagePhase.UNET) step.coerceIn(0, contract.steps) else contract.steps,
+    steps = contract.steps,
+    width = contract.width,
+    height = contract.height
+)
 
 internal class SdxlUnetWorkerService : SdxlImagePhaseWorkerService(SdxlImagePhase.UNET)
 

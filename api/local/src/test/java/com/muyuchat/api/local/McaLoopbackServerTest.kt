@@ -29,8 +29,8 @@ class McaLoopbackServerTest {
                 capturedBody.set(requestBody)
                 JSONObject()
                     .put("request_id", requestId)
-                    .put("execution", JSONObject().put("nativeExecution", true))
-                    .put("data", org.json.JSONArray())
+                    .put("execution", strictImageExecution(runtime = "STABLE_DIFFUSION_CPP"))
+                    .put("data", imageData())
                     .toString()
             }
 
@@ -44,6 +44,143 @@ class McaLoopbackServerTest {
             assertTrue(capturedRequestId.get().startsWith("img-"))
             assertEquals(capturedRequestId.get(), responseBody.getString("request_id"))
             assertEquals(body, capturedBody.get())
+        }
+    }
+
+    @Test
+    fun bothAuthenticatedImagesRoutesPreserveRequestedControlsAndExecutionEvidence() {
+        val capturedBodies = mutableListOf<JSONObject>()
+        val body = JSONObject()
+            .put("model", "image-model")
+            .put("prompt", "a ceramic robot")
+            .put("negative_prompt", "blur, low detail")
+            .put("size", "512x512")
+            .put("n", 1)
+            .put("response_format", "b64_json")
+            .put("seed", 20260717)
+            .put("steps", 20)
+            .put("cfg_scale", 7.0)
+            .put("sampler", "dpmpp_2m")
+            .toString()
+
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                capturedBodies += JSONObject(requestBody)
+                JSONObject()
+                    .put("request_id", requestId)
+                    .put("model", "image-model")
+                    .put(
+                        "execution",
+                        strictImageExecution(runtime = "QNN_HTP")
+                    )
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            listOf("/v1/images/generations", "/images/generations").forEach { path ->
+                val response = rawHttp(port, authenticatedPost(path, body = body))
+                val responseBody = responseJson(response)
+                val execution = responseBody.getJSONObject("execution")
+
+                assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+                assertTrue(responseBody.getString("request_id").startsWith("img-"))
+                assertEquals("dpmpp_2m", execution.getString("scheduler"))
+                assertEquals(20, execution.getInt("steps"))
+                assertEquals(7.0, execution.getDouble("cfgScale"), 0.0)
+                assertEquals(20260717, execution.getInt("seed"))
+                assertTrue(execution.getBoolean("nativeExecution"))
+                assertTrue(execution.getBoolean("qnnGraphExecution"))
+                assertFalse(execution.getBoolean("fallback"))
+            }
+
+            assertEquals(2, capturedBodies.size)
+            capturedBodies.forEach { captured ->
+                assertEquals("blur, low detail", captured.getString("negative_prompt"))
+                assertEquals("dpmpp_2m", captured.getString("sampler"))
+                assertEquals("512x512", captured.getString("size"))
+                assertEquals(20, captured.getInt("steps"))
+                assertEquals(7.0, captured.getDouble("cfg_scale"), 0.0)
+                assertEquals(20260717, captured.getInt("seed"))
+            }
+        }
+    }
+
+    @Test
+    fun imagesApiRejectsUnsupportedCountBeforeInvokingProvider() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                calls.incrementAndGet()
+                "{}"
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"one image","n":2}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("unsupported_image_count"))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun imagesApiReturnsDedicatedBusyConflictWithoutInvokingProvider() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                calls.incrementAndGet()
+                "{}"
+            }
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun busyState(): LocalApiBusyState = LocalApiBusyState(
+                    busy = true,
+                    code = "generation_in_progress",
+                    message = "A generation is already active.",
+                    retryAfterMs = 1500L
+                )
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/images/generations",
+                    body = """{"prompt":"wait for the active request"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(response.contains("image_generation_busy"))
+            assertTrue(response.contains("X-Retry-After-Ms: 1500"))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun imagesApiRejectsProviderResponseWithMismatchedIdentity() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                JSONObject()
+                    .put("request_id", "img-wrong")
+                    .put("execution", JSONObject())
+                    .put("data", org.json.JSONArray())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"identity check"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 502 Bad Gateway"))
+            assertTrue(response.contains("image_request_identity_mismatch"))
         }
     }
 
@@ -1595,6 +1732,51 @@ class McaLoopbackServerTest {
 
     private fun imageChatBody(stream: Boolean): String =
         """{"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}],"stream":$stream}"""
+
+    private fun strictImageExecution(runtime: String): JSONObject {
+        val nativeEffective = JSONObject()
+            .put("profileId", "profile.image.v1")
+            .put("profileRevision", 3)
+            .put("modelFingerprint", "sha256:abc")
+            .put("runtime", runtime)
+            .put("scheduler", "dpmpp_2m")
+            .put("predictionType", "epsilon")
+            .put("steps", 20)
+            .put("timetableCount", 20)
+            .put("unetExecutionCount", 40)
+            .put("cfgScale", 7.0)
+            .put("useCfg", true)
+            .put("unconditionalBranch", true)
+            .put("tokenizerBackend", "TOKENIZERS_CPP")
+            .put("tokenCount", 154)
+            .put("embeddingDiskDataType", "GRAPH_INTERNAL")
+            .put("vaeScalingLocation", "GRAPH_INTERNAL")
+            .put("vaeScalingFactor", 0.18215)
+            .put("width", 512)
+            .put("height", 512)
+            .put("seed", 20260717)
+            .put("graphName", "model")
+            .put("fallback", false)
+        return JSONObject(nativeEffective.toString())
+            .put("nativeEffective", nativeEffective)
+            .put("backend", if (runtime == "QNN_HTP") "qnn_htp" else "native")
+            .put("nativeGenerationSequence", 44L)
+            .put("workerPid", 4321)
+            .put("nativeExecution", true)
+            .put("fallback", false)
+            .put("npuActive", runtime == "QNN_HTP")
+            .put("qnnGraphExecution", runtime == "QNN_HTP")
+            .put("outputBytes", 1024L)
+    }
+
+    private fun imageData(): org.json.JSONArray =
+        org.json.JSONArray().put(
+            JSONObject()
+                .put("b64_json", "iVBORw0KGgo=")
+                .put("mime_type", "image/png")
+                .put("width", 512)
+                .put("height", 512)
+        )
 
     private fun rawHttp(port: Int, request: String): String {
         Socket("127.0.0.1", port).use { socket ->

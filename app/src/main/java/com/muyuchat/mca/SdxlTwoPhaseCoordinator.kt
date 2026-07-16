@@ -45,9 +45,57 @@ internal class SdxlTwoPhaseCoordinator(
         onProgress: (LocalImageProgress) -> Unit
     ): String {
         cancelled.set(false)
+        val contract = SdxlImageExecutionContract.fromParams(params.toString())
+        val executionJournalStore = ImageExecutionJournalStore(
+            File(metadataFile.parentFile, "request-journal")
+        )
+        val createdAtMs = System.currentTimeMillis().coerceAtLeast(1L)
+        var executionJournal = executionJournalStore.create(
+            ImageExecutionJournalEntry(
+                requestId = requestId,
+                modelFingerprint = contract.expected.modelFingerprint,
+                profileFingerprint = "${contract.expected.profileId}:${contract.expected.profileRevision}:${contract.expected.modelFingerprint}",
+                requestedSummaryJson = contract.expectedJson().toString(),
+                resolvedSummaryJson = contract.expectedJson().toString(),
+                phase = ImageExecutionPhase.PREPARING,
+                steps = contract.steps,
+                workerPid = Process.myPid(),
+                createdAtMs = createdAtMs,
+                latentTempPath = latentFile.canonicalPath,
+                outputTempPath = outputFile.canonicalPath
+            )
+        )
+        fun updateExecutionJournal(
+            phase: ImageExecutionPhase = executionJournal.phase,
+            step: Int = executionJournal.step,
+            nativeStageMask: Long = executionJournal.nativeStageMask,
+            nativeGenerationSequence: Long? = executionJournal.nativeGenerationSequence
+        ) {
+            if (executionJournal.phase.terminal) return
+            executionJournal = executionJournalStore.update(
+                executionJournal.copy(
+                    phase = phase,
+                    step = step.coerceAtLeast(executionJournal.step).coerceAtMost(contract.steps),
+                    nativeStageMask = nativeStageMask or executionJournal.nativeStageMask,
+                    nativeGenerationSequence = nativeGenerationSequence
+                        ?: executionJournal.nativeGenerationSequence,
+                    updatedAtMs = System.currentTimeMillis()
+                        .coerceAtLeast(executionJournal.updatedAtMs + 1L)
+                )
+            )
+        }
+        updateExecutionJournal(phase = ImageExecutionPhase.SAMPLING)
         var mergedStages = emptyList<String>()
         fun report(envelope: SdxlImagePhaseProgress) {
             mergedStages = SdxlTwoPhaseJournal.merge(mergedStages, envelope)
+            updateExecutionJournal(
+                phase = if (envelope.phase == SdxlImagePhase.UNET) {
+                    ImageExecutionPhase.SAMPLING
+                } else {
+                    ImageExecutionPhase.DECODING
+                },
+                step = envelope.progress.step
+            )
             onProgress(
                 envelope.progress.copy(
                     phase = "sdxl_${envelope.phase.wireName}:${envelope.progress.phase}",
@@ -70,6 +118,12 @@ internal class SdxlTwoPhaseCoordinator(
                     requestId = requestId,
                     phase = SdxlImagePhase.UNET,
                     expectedHtpArch = SDXL_AUTO_TRANSPORT_HTP_ARCH,
+                    profileId = contract.expected.profileId,
+                    profileRevision = contract.expected.profileRevision,
+                    modelFingerprint = contract.expected.modelFingerprint,
+                    steps = contract.steps,
+                    width = contract.width,
+                    height = contract.height,
                     bundleRoot = bundleRoot.canonicalPath,
                     runtimeDirsJson = phaseRuntimeDirs.unetDirsJson,
                     paramsJson = params.toString(),
@@ -79,7 +133,7 @@ internal class SdxlTwoPhaseCoordinator(
                     outputPath = "",
                     journalPath = unetJournal.canonicalPath
                 ),
-                timeoutMs = SDXL_UNET_PHASE_TIMEOUT_MS,
+                timeoutMs = sdxlUnetPhaseTimeoutMs(contract.expectedUnetExecutionCount),
                 onProgress = ::report
             )
             check(unet.processDeathConfirmed) { "UNet phase process did not exit before VAE admission." }
@@ -93,14 +147,27 @@ internal class SdxlTwoPhaseCoordinator(
                 requestId = requestId,
                 latentFile = latentFile,
                 metadataFile = metadataFile,
-                expectedProducerArch = transportHtpArch
+                expectedProducerArch = transportHtpArch,
+                contract = contract
             )
+            require(metadata.unetNativeGenerationSequence == unet.result.nativeGenerationSequence) {
+                "UNet result sequence does not match committed latent metadata."
+            }
+            require(metadata.unetNativeStageMask == unet.result.nativeStageMask) {
+                "UNet stage mask does not match committed latent metadata."
+            }
             mergedStages = SdxlTwoPhaseJournal.appendBoundary(
                 mergedStages,
                 SdxlImagePhase.UNET,
                 unet.result.workerPid,
                 unet.result.runtimeProfile,
                 "process_exit_confirmed"
+            )
+            updateExecutionJournal(
+                phase = ImageExecutionPhase.DECODING,
+                step = contract.steps,
+                nativeStageMask = unet.result.nativeStageMask,
+                nativeGenerationSequence = unet.result.nativeGenerationSequence
             )
             check(!cancelled.get()) { "SDXL generation was cancelled." }
             val vae = runPhase(
@@ -109,6 +176,12 @@ internal class SdxlTwoPhaseCoordinator(
                     requestId = requestId,
                     phase = SdxlImagePhase.VAE,
                     expectedHtpArch = transportHtpArch,
+                    profileId = contract.expected.profileId,
+                    profileRevision = contract.expected.profileRevision,
+                    modelFingerprint = contract.expected.modelFingerprint,
+                    steps = contract.steps,
+                    width = contract.width,
+                    height = contract.height,
                     bundleRoot = bundleRoot.canonicalPath,
                     runtimeDirsJson = phaseRuntimeDirs.vaeDirsJson,
                     paramsJson = params.toString(),
@@ -118,7 +191,7 @@ internal class SdxlTwoPhaseCoordinator(
                     outputPath = outputFile.canonicalPath,
                     journalPath = vaeJournal.canonicalPath
                 ),
-                timeoutMs = SDXL_VAE_PHASE_TIMEOUT_MS,
+                timeoutMs = sdxlVaePhaseTimeoutMs(contract.steps),
                 onProgress = ::report
             )
             check(vae.processDeathConfirmed) { "VAE phase process did not exit after PNG publication." }
@@ -128,6 +201,7 @@ internal class SdxlTwoPhaseCoordinator(
                 expectedHtpArch = transportHtpArch,
                 nativeResult = vaeNative
             )
+            validateSdxlVaeNativeEvidence(contract, vaeNative)
             check(outputFile.isFile && outputFile.length() > 0L) { "VAE phase output is missing." }
             mergedStages = SdxlTwoPhaseJournal.appendBoundary(
                 mergedStages,
@@ -136,46 +210,64 @@ internal class SdxlTwoPhaseCoordinator(
                 vae.result.runtimeProfile,
                 "process_exit_confirmed"
             )
+            updateExecutionJournal(
+                phase = ImageExecutionPhase.PUBLISHING,
+                step = contract.steps,
+                nativeStageMask = unet.result.nativeStageMask or vae.result.nativeStageMask
+            )
             onProgress(
                 LocalImageProgress(
                     phase = "sdxl_two_phase_completed",
                     message = "SDXL UNet and VAE completed on HTP V$transportHtpArch in separate exited processes.",
-                    step = 1,
-                    steps = 1,
+                    step = contract.steps,
+                    steps = contract.steps,
                     elapsedMs = 0L,
                     secondsPerStep = 0.0,
                     threads = 0,
-                    width = 1024,
-                    height = 1024,
+                    width = contract.width,
+                    height = contract.height,
                     cancelRequested = false,
                     stageTrace = mergedStages
                 )
             )
-            return vaeNative
-                .put("backend", "qnn_htp")
-                .put("npuActive", true)
-                .put("qnnGraphExecution", true)
-                .put("nativeExecution", true)
-                .put("fallback", false)
-                .put("executionStage", "sdxl_two_phase_passed")
-                .put("runtimeSessionMode", "isolated_unet_then_vae_same_transport")
-                .put("archiveContextHtpArch", SDXL_ARCHIVE_CONTEXT_HTP_ARCH)
-                .put("transportHtpArch", transportHtpArch)
-                .put("unetWorkerPid", unet.result.workerPid)
-                .put("unetRuntimeProfile", unet.result.runtimeProfile)
-                .put("unetProcessDeathConfirmed", true)
-                .put("unetGraph", params.optString("graphName", "model"))
-                .put("unetContextLoadMs", unetNative.optLong("unetContextLoadMs"))
-                .put("unetExecuteMsTotal", unetNative.optLong("unetExecuteMsTotal"))
-                .put("vaeWorkerPid", vae.result.workerPid)
-                .put("vaeRuntimeProfile", vae.result.runtimeProfile)
-                .put("vaeTransportHtpArch", vaeTransportHtpArch)
-                .put("vaeProcessDeathConfirmed", true)
-                .put("vaeGraph", params.optString("graphName", "model"))
-                .put("steps", params.optInt("steps", 1))
-                .put("latentSha256", metadata.sha256)
-                .put("stageTrace", org.json.JSONArray(mergedStages))
-                .toString()
+            val finalResult = mergeSdxlPhaseNativeResults(
+                contract = contract,
+                unetResult = unet.result,
+                unetNative = unetNative,
+                vaeResult = vae.result,
+                vaeNative = vaeNative,
+                metadata = metadata,
+                transportHtpArch = transportHtpArch,
+                vaeTransportHtpArch = vaeTransportHtpArch,
+                outputFile = outputFile,
+                stageTrace = mergedStages
+            )
+            executionJournal = executionJournalStore.markTerminal(
+                requestId = requestId,
+                phase = ImageExecutionPhase.COMPLETED
+            )
+            return finalResult.toString()
+        } catch (error: Throwable) {
+            if (!executionJournal.phase.terminal) {
+                if (cancelled.get()) {
+                    runCatching {
+                        executionJournal = executionJournalStore.finishCancelled(
+                            requestId = requestId,
+                            cleanupRoots = listOf(requireNotNull(metadataFile.parentFile))
+                        ).entry
+                    }
+                } else {
+                    runCatching {
+                        executionJournal = executionJournalStore.markTerminal(
+                            requestId = requestId,
+                            phase = ImageExecutionPhase.FAILED,
+                            errorCode = "SDXL_TWO_PHASE_FAILED",
+                            errorMessage = error.message.orEmpty()
+                        )
+                    }
+                }
+            }
+            throw error
         } finally {
             runCatching { latentFile.delete() }
             runCatching { File(latentFile.path + ".part").delete() }
@@ -265,6 +357,128 @@ internal class SdxlTwoPhaseCoordinator(
             vaeDirsJson = isolatedRuntimeDirs
         )
     }
+}
+
+internal fun mergeSdxlPhaseNativeResults(
+    contract: SdxlImageExecutionContract,
+    unetResult: SdxlImagePhaseResult,
+    unetNative: JSONObject,
+    vaeResult: SdxlImagePhaseResult,
+    vaeNative: JSONObject,
+    metadata: SdxlLatentMetadata,
+    transportHtpArch: Int,
+    vaeTransportHtpArch: Int,
+    outputFile: File,
+    stageTrace: List<String>
+): JSONObject {
+    require(unetResult.phase == SdxlImagePhase.UNET) { "Expected UNet phase result." }
+    require(vaeResult.phase == SdxlImagePhase.VAE) { "Expected VAE phase result." }
+    require(unetResult.requestId == vaeResult.requestId) { "SDXL phase request identity mismatch." }
+    require(unetNative.optBoolean("ok") && vaeNative.optBoolean("ok")) {
+        "SDXL phase native success proof is missing."
+    }
+    require(transportHtpArch > 0 && vaeTransportHtpArch == transportHtpArch) {
+        "SDXL phase transport mismatch."
+    }
+    require(unetNative.getInt("htpArchVersion") == transportHtpArch) { "UNet transport proof mismatch." }
+    require(vaeNative.getInt("htpArchVersion") == vaeTransportHtpArch) { "VAE transport proof mismatch." }
+    val unetEffective = contract.requireNativeEffective(unetNative, SdxlImagePhase.UNET)
+    contract.requireNativeEffective(
+        JSONObject().put("nativeEffective", JSONObject(metadata.nativeEffectiveJson)),
+        SdxlImagePhase.UNET
+    )
+    validateSdxlVaeNativeEvidence(contract, vaeNative)
+    require(metadata.unetNativeGenerationSequence == unetResult.nativeGenerationSequence) {
+        "Committed latent sequence mismatch."
+    }
+    require(File(unetResult.artifactPath).canonicalFile == File(metadata.latentPath).canonicalFile) {
+        "UNet artifact path does not match committed latent metadata."
+    }
+    require(outputFile.isFile && outputFile.length() > 0L) { "SDXL output is missing." }
+    require(File(vaeResult.artifactPath).canonicalFile == outputFile.canonicalFile) {
+        "VAE protocol artifact path mismatch."
+    }
+
+    val unetProof = SdxlNativePhaseProof.fromNativeResult(unetNative, SdxlImagePhase.UNET)
+    val vaeProof = SdxlNativePhaseProof.fromNativeResult(vaeNative, SdxlImagePhase.VAE)
+    require(unetProof.nativeGenerationSequence == unetResult.nativeGenerationSequence) {
+        "UNet protocol sequence mismatch."
+    }
+    require(unetProof.nativeStageMask == unetResult.nativeStageMask &&
+        unetProof.nativeDetailStageMask == unetResult.nativeDetailStageMask
+    ) { "UNet protocol stage proof mismatch." }
+    require(vaeProof.nativeGenerationSequence == vaeResult.nativeGenerationSequence) {
+        "VAE protocol sequence mismatch."
+    }
+    require(vaeProof.nativeStageMask == vaeResult.nativeStageMask &&
+        vaeProof.nativeDetailStageMask == vaeResult.nativeDetailStageMask
+    ) { "VAE protocol stage proof mismatch." }
+    val nativeOutput = File(vaeNative.getString("outputPath")).canonicalFile
+    require(nativeOutput == outputFile.canonicalFile) { "VAE output path proof mismatch." }
+    require(vaeNative.getLong("outputBytes") == outputFile.length()) { "VAE output byte proof mismatch." }
+    val mimeType = vaeNative.getString("mimeType")
+    require(mimeType == "image/png") { "VAE output MIME proof mismatch." }
+
+    val finalResult = unetEffective.toSdxlNativeEffectiveJson()
+    finalResult.put("nativeEffective", unetEffective.toSdxlNativeEffectiveJson())
+        .put("ok", true)
+        .put("backend", "qnn_htp")
+        .put("npuActive", true)
+        .put("qnnGraphExecution", true)
+        .put("nativeExecution", true)
+        .put("executionStage", "sdxl_two_phase_passed")
+        .put("runtimeSessionMode", "isolated_unet_then_vae_same_transport")
+        .put("archiveContextHtpArch", SDXL_ARCHIVE_CONTEXT_HTP_ARCH)
+        .put("transportHtpArch", transportHtpArch)
+        .put("unetWorkerPid", unetResult.workerPid)
+        .put("unetRuntimeProfile", unetResult.runtimeProfile)
+        .put("unetProcessDeathConfirmed", true)
+        .put("unetNativeGenerationSequence", unetProof.nativeGenerationSequence)
+        .put("unetNativeStageMask", unetProof.nativeStageMask)
+        .put("unetNativeDetailStageMask", unetProof.nativeDetailStageMask)
+        .put("vaeWorkerPid", vaeResult.workerPid)
+        .put("vaeRuntimeProfile", vaeResult.runtimeProfile)
+        .put("vaeTransportHtpArch", vaeTransportHtpArch)
+        .put("vaeProcessDeathConfirmed", true)
+        .put("vaeNativeGenerationSequence", vaeProof.nativeGenerationSequence)
+        .put("vaeNativeStageMask", vaeProof.nativeStageMask)
+        .put("vaeNativeDetailStageMask", vaeProof.nativeDetailStageMask)
+        .put("nativeGenerationSequence", unetProof.nativeGenerationSequence)
+        .put("nativeStageMask", unetProof.nativeStageMask or vaeProof.nativeStageMask)
+        .put(
+            "nativeDetailStageMask",
+            unetProof.nativeDetailStageMask or vaeProof.nativeDetailStageMask
+        )
+        .put("vaeScalingLocation", vaeNative.getString("vaeScalingLocation"))
+        .put("vaeScalingFactor", vaeNative.getDouble("vaeScalingFactor"))
+        .put("effectiveVaeHostScale", vaeNative.getDouble("effectiveVaeHostScale"))
+        .put("vaeExecutionCount", vaeNative.getInt("vaeExecutionCount"))
+        .put("outputPath", outputFile.canonicalPath)
+        .put("mimeType", mimeType)
+        .put("outputBytes", outputFile.length())
+        .put("latentSha256", metadata.sha256)
+        .put("stageTrace", JSONArray(stageTrace))
+
+    listOf(
+        "timesteps",
+        "sigmas",
+        "initNoiseSigma",
+        "scaleModelInput",
+        "unetContextLoadMs",
+        "unetExecuteMsTotal"
+    ).forEach { field ->
+        if (unetNative.has(field) && !unetNative.isNull(field)) {
+            finalResult.put(field, unetNative.get(field))
+        }
+    }
+    listOf("vaeContextLoadMs", "vaeExecuteMs", "pixelChecksum").forEach { field ->
+        if (vaeNative.has(field) && !vaeNative.isNull(field)) {
+            finalResult.put(field, vaeNative.get(field))
+        }
+    }
+    (vaeNative.optJSONObject("runtimeEvidence")
+        ?: vaeNative.optJSONObject("runtime"))?.let { finalResult.put("runtimeEvidence", it) }
+    return finalResult
 }
 
 internal data class SdxlPhaseRuntimeDirectories(
@@ -483,6 +697,4 @@ private class SdxlPhaseClient(
     }
 }
 
-internal const val SDXL_UNET_PHASE_TIMEOUT_MS = 4L * 60L * 1_000L
-internal const val SDXL_VAE_PHASE_TIMEOUT_MS = 90L * 1_000L
 private const val SDXL_PHASE_EXIT_CONFIRM_TIMEOUT_MS = 5L * 1_000L

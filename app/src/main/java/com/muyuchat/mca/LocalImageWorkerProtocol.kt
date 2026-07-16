@@ -57,23 +57,42 @@ internal object LocalImageWorkerProtocol {
         model: LocalImageModelRecord,
         prompt: String,
         options: LocalImageGenerationOptions = LocalImageGenerationOptions()
-    ): String = JSONObject()
-        .put("version", VERSION)
-        .put("requestId", requestId)
-        .put("model", model.toJson())
-        .put("prompt", prompt)
-        .put("options", options.toJson())
-        .toString()
+    ): String {
+        val optionJson = options.toJson().apply {
+            // sampler is the product/API term. sampleMethod remains in the payload for backward
+            // compatibility with workers that predate the shared execution profile.
+            options.sampleMethod?.let { put("sampler", it) }
+        }
+        return JSONObject()
+            .put("version", VERSION)
+            .put("requestId", requestId)
+            .put("model", model.toJson())
+            .put("prompt", prompt)
+            .put("options", optionJson)
+            .toString()
+    }
 
     fun parseGenerateRequest(raw: String): GenerateRequest {
         val json = JSONObject(raw)
+        val optionJson = json.optJSONObject("options")
+        val parsedOptions = LocalImageGenerationOptions.fromJson(optionJson)
+        val sampler = optionJson?.explicitString("sampler", preserveEmpty = true)
+        if (sampler != null && parsedOptions.sampleMethod != null) {
+            require(sampler == parsedOptions.sampleMethod) {
+                "sampler and sampleMethod must resolve to the same value."
+            }
+        }
         return GenerateRequest(
             requestId = json.requireString("requestId"),
             model = LocalImageModelRecord.fromJson(
                 json.optJSONObject("model") ?: kotlin.error("Missing local image model.")
             ),
             prompt = json.requireString("prompt"),
-            options = LocalImageGenerationOptions.fromJson(json.optJSONObject("options"))
+            options = if (sampler != null) {
+                parsedOptions.copy(sampleMethod = sampler)
+            } else {
+                parsedOptions
+            }
         )
     }
 
@@ -185,4 +204,13 @@ internal object LocalImageWorkerProtocol {
 
     private fun JSONObject.requireString(name: String): String =
         optString(name).takeIf { it.isNotBlank() } ?: kotlin.error("Missing $name.")
+
+    private fun JSONObject.explicitString(name: String, preserveEmpty: Boolean): String? {
+        if (!has(name)) return null
+        require(!isNull(name)) { "$name must be a string when specified." }
+        val raw = get(name)
+        require(raw is String) { "$name must be a string when specified." }
+        val value = raw.trim()
+        return value.takeIf { preserveEmpty || it.isNotEmpty() }
+    }
 }

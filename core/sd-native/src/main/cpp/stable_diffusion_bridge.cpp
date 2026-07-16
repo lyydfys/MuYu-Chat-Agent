@@ -5,21 +5,31 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <dirent.h>
+#include <exception>
 #include <limits.h>
+#include <limits>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <utility>
 #include <vector>
 
+#include "json.hpp"
 #include "stable-diffusion.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
 namespace {
+
+using json = nlohmann::json;
 
 std::mutex g_mutex;
 std::mutex g_progress_mutex;
@@ -29,6 +39,34 @@ std::string g_last_error;
 std::string g_last_sd_error;
 std::atomic<bool> g_generation_active{false};
 std::atomic<bool> g_cancel_requested{false};
+std::atomic<uint64_t> g_generation_sequence{0};
+std::atomic<uint64_t> g_active_generation_sequence{0};
+std::atomic<uint32_t> g_generation_stage_mask{0};
+std::atomic<int> g_observed_prediction{PREDICTION_COUNT};
+std::atomic<int> g_observed_denoiser_callbacks{0};
+std::atomic<int> g_observed_progress_steps{0};
+std::atomic<int> g_observed_max_progress_step{0};
+
+constexpr uint32_t kStageContractValidated = 1u << 0u;
+constexpr uint32_t kStageContextReady = 1u << 1u;
+constexpr uint32_t kStageGenerationInvoked = 1u << 2u;
+constexpr uint32_t kStageSamplingObserved = 1u << 3u;
+constexpr uint32_t kStageImageReturned = 1u << 4u;
+constexpr uint32_t kStageOutputWritten = 1u << 5u;
+constexpr uint32_t kStageContextReleased = 1u << 6u;
+
+void mark_generation_stage(uint32_t stage) {
+    g_generation_stage_mask.fetch_or(stage, std::memory_order_relaxed);
+}
+
+void reset_generation_evidence() {
+    g_active_generation_sequence.store(0, std::memory_order_relaxed);
+    g_generation_stage_mask.store(0, std::memory_order_relaxed);
+    g_observed_prediction.store(PREDICTION_COUNT, std::memory_order_relaxed);
+    g_observed_denoiser_callbacks.store(0, std::memory_order_relaxed);
+    g_observed_progress_steps.store(0, std::memory_order_relaxed);
+    g_observed_max_progress_step.store(0, std::memory_order_relaxed);
+}
 
 const char *sd_runtime_backend_label() {
     return "cpu";
@@ -164,86 +202,346 @@ void collect_model_files(const std::string &root, std::vector<std::string> &out)
     closedir(dir);
 }
 
-std::string parse_json_string_after(const std::string &json, const std::string &key, size_t start) {
-    const auto key_pos = json.find("\"" + key + "\"", start);
-    if (key_pos == std::string::npos) return "";
-    const auto colon = json.find(':', key_pos);
-    if (colon == std::string::npos) return "";
-    auto pos = json.find('"', colon + 1);
-    if (pos == std::string::npos) return "";
-    pos++;
-    std::string out;
-    while (pos < json.size()) {
-        const char c = json[pos++];
-        if (c == '"') break;
-        if (c == '\\' && pos < json.size()) {
-            const char escaped = json[pos++];
-            switch (escaped) {
-                case 'n': out.push_back('\n'); break;
-                case 'r': out.push_back('\r'); break;
-                case 't': out.push_back('\t'); break;
-                case '"': out.push_back('"'); break;
-                case '\\': out.push_back('\\'); break;
-                default: out.push_back(escaped); break;
+struct ContractError final : std::runtime_error {
+    std::string code;
+    std::string field;
+    bool unsupported;
+
+    ContractError(std::string code_value,
+                  std::string field_value,
+                  std::string message,
+                  bool unsupported_value = false)
+            : std::runtime_error(std::move(message)),
+              code(std::move(code_value)),
+              field(std::move(field_value)),
+              unsupported(unsupported_value) {}
+};
+
+[[noreturn]] void invalid_contract(const std::string &field, const std::string &message) {
+    throw ContractError("IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID", field, message);
+}
+
+[[noreturn]] void unsupported_contract(const std::string &field, const std::string &message) {
+    throw ContractError("IMAGE_NATIVE_EXECUTION_CONTRACT_UNSUPPORTED", field, message, true);
+}
+
+const json &required_field(const json &object, const std::string &key) {
+    const auto found = object.find(key);
+    if (found == object.end() || found->is_null()) {
+        invalid_contract(key, "required field is missing");
+    }
+    return *found;
+}
+
+bool blank_text(const std::string &value) {
+    return std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    });
+}
+
+std::string required_string(const json &object,
+                            const std::string &key,
+                            bool allow_empty = false) {
+    const json &value = required_field(object, key);
+    if (!value.is_string()) invalid_contract(key, "field must be a string");
+    const std::string result = value.get<std::string>();
+    if (!allow_empty && (result.empty() || blank_text(result))) {
+        invalid_contract(key, "field must be a non-blank string");
+    }
+    return result;
+}
+
+int64_t required_integer(const json &object, const std::string &key) {
+    const json &value = required_field(object, key);
+    try {
+        if (value.is_number_unsigned()) {
+            const uint64_t result = value.get<uint64_t>();
+            if (result <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                return static_cast<int64_t>(result);
             }
-        } else {
-            out.push_back(c);
+        } else if (value.is_number_integer()) {
+            return value.get<int64_t>();
         }
+    } catch (const std::exception &) {
+        // Replaced by the stable field-specific error below.
     }
-    return out;
+    invalid_contract(key, "field must be an exact signed 64-bit integer");
 }
 
-std::string parse_string(const std::string &json, const std::string &key, const std::string &fallback) {
-    const auto value = parse_json_string_after(json, key, 0);
-    return value.empty() ? fallback : value;
+int required_int32(const json &object, const std::string &key) {
+    const int64_t value = required_integer(object, key);
+    if (value < std::numeric_limits<int>::min() ||
+        value > std::numeric_limits<int>::max()) {
+        invalid_contract(key, "field must fit a signed 32-bit integer");
+    }
+    return static_cast<int>(value);
 }
 
-int parse_int(const std::string &json, const std::string &key, int fallback) {
-    const auto key_pos = json.find("\"" + key + "\"");
-    if (key_pos == std::string::npos) return fallback;
-    const auto colon = json.find(':', key_pos);
-    if (colon == std::string::npos) return fallback;
-    auto pos = colon + 1;
-    while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) pos++;
-    std::string number;
-    while (pos < json.size() && (std::isdigit(static_cast<unsigned char>(json[pos])) || json[pos] == '-')) {
-        number.push_back(json[pos++]);
-    }
-    if (number.empty()) return fallback;
-    try { return std::stoi(number); } catch (...) { return fallback; }
+double required_number(const json &object, const std::string &key) {
+    const json &value = required_field(object, key);
+    if (!value.is_number()) invalid_contract(key, "field must be numeric");
+    const double result = value.get<double>();
+    if (!std::isfinite(result)) invalid_contract(key, "field must be finite");
+    return result;
 }
 
-float parse_float(const std::string &json, const std::string &key, float fallback) {
-    const auto key_pos = json.find("\"" + key + "\"");
-    if (key_pos == std::string::npos) return fallback;
-    const auto colon = json.find(':', key_pos);
-    if (colon == std::string::npos) return fallback;
-    auto pos = colon + 1;
-    while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) pos++;
-    std::string number;
-    while (pos < json.size() &&
-           (std::isdigit(static_cast<unsigned char>(json[pos])) || json[pos] == '-' || json[pos] == '.')) {
-        number.push_back(json[pos++]);
-    }
-    if (number.empty()) return fallback;
-    try { return std::stof(number); } catch (...) { return fallback; }
+bool required_boolean(const json &object, const std::string &key) {
+    const json &value = required_field(object, key);
+    if (!value.is_boolean()) invalid_contract(key, "field must be a boolean");
+    return value.get<bool>();
 }
 
-bool parse_bool(const std::string &json, const std::string &key, bool fallback) {
-    const auto key_pos = json.find("\"" + key + "\"");
-    if (key_pos == std::string::npos) return fallback;
-    const auto colon = json.find(':', key_pos);
-    if (colon == std::string::npos) return fallback;
-    auto pos = colon + 1;
-    while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) pos++;
-    if (json.compare(pos, 4, "true") == 0) return true;
-    if (json.compare(pos, 5, "false") == 0) return false;
-    if (pos < json.size() && json[pos] == '"') {
-        const std::string value = lower_copy(parse_json_string_after(json, key, 0));
-        if (value == "true" || value == "1" || value == "yes") return true;
-        if (value == "false" || value == "0" || value == "no") return false;
+std::string optional_string(const json &object,
+                            const std::string &key,
+                            const std::string &fallback) {
+    const auto found = object.find(key);
+    if (found == object.end()) return fallback;
+    if (!found->is_string()) invalid_contract(key, "optional field must be a string when present");
+    return found->get<std::string>();
+}
+
+bool optional_boolean(const json &object, const std::string &key, bool fallback) {
+    const auto found = object.find(key);
+    if (found == object.end()) return fallback;
+    if (!found->is_boolean()) invalid_contract(key, "optional field must be a boolean when present");
+    return found->get<bool>();
+}
+
+bool is_sha256(const std::string &value) {
+    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return std::isxdigit(c) != 0;
+    });
+}
+
+struct StableDiffusionExecutionContract {
+    std::string profile_id;
+    int profile_revision = 0;
+    std::string model_fingerprint;
+    std::string scheduler_wire;
+    std::string prediction_wire;
+    int steps = 0;
+    int timetable_count = 0;
+    int unet_execution_count = 0;
+    double cfg_scale = 0.0;
+    bool use_cfg = false;
+    bool unconditional_branch = false;
+    int token_count = 0;
+    int tokenizer_max_length = 0;
+    double vae_scaling_factor = 0.0;
+    int width = 0;
+    int height = 0;
+    int64_t seed = 0;
+    std::string prompt;
+    std::string negative_prompt;
+    std::string family;
+    int threads = 0;
+    double distilled_guidance = 0.0;
+    double flow_shift = 0.0;
+    std::string requested_sample_method;
+    sample_method_t sample_method = SAMPLE_METHOD_COUNT;
+    scheduler_t native_scheduler = SCHEDULER_COUNT;
+};
+
+void resolve_sampler_contract(StableDiffusionExecutionContract &contract) {
+    const std::string &scheduler = contract.scheduler_wire;
+    const std::string &method = contract.requested_sample_method;
+    if (scheduler == "EULER" && method == "euler") {
+        contract.sample_method = EULER_SAMPLE_METHOD;
+        contract.native_scheduler = DISCRETE_SCHEDULER;
+    } else if (scheduler == "EULER_A" && method == "euler_a") {
+        contract.sample_method = EULER_A_SAMPLE_METHOD;
+        contract.native_scheduler = DISCRETE_SCHEDULER;
+    } else if (scheduler == "DPMPP_2M" &&
+               (method == "dpmpp_2m" || method == "dpm++2m")) {
+        contract.sample_method = DPMPP2M_SAMPLE_METHOD;
+        contract.native_scheduler = DISCRETE_SCHEDULER;
+    } else if (scheduler == "DDIM" &&
+               (method == "ddim" || method == "ddim_trailing")) {
+        contract.sample_method = DDIM_TRAILING_SAMPLE_METHOD;
+        contract.native_scheduler = SIMPLE_SCHEDULER;
+    } else if (scheduler == "LCM" && method == "lcm") {
+        contract.sample_method = LCM_SAMPLE_METHOD;
+        contract.native_scheduler = LCM_SCHEDULER;
+    } else if (scheduler == "FLOW_MATCH" &&
+               (method == "flow_match" || method == "euler")) {
+        contract.sample_method = EULER_SAMPLE_METHOD;
+        contract.native_scheduler = DISCRETE_SCHEDULER;
+    } else if (scheduler == "PNDM_PLMS") {
+        unsupported_contract(
+                "scheduler",
+                "stable-diffusion.cpp exposes no PNDM/PLMS sampler through its public image API");
+    } else {
+        unsupported_contract(
+                "sampleMethod",
+                "sampleMethod conflicts with scheduler or has no provable stable-diffusion.cpp mapping");
     }
-    return fallback;
+}
+
+StableDiffusionExecutionContract parse_execution_contract(const json &params) {
+    if (!params.is_object()) invalid_contract("params", "native params must be a JSON object");
+    StableDiffusionExecutionContract contract;
+    contract.profile_id = required_string(params, "profileId");
+    contract.profile_revision = required_int32(params, "profileRevision");
+    if (contract.profile_revision <= 0) invalid_contract("profileRevision", "must be positive");
+    contract.model_fingerprint = required_string(params, "modelFingerprint");
+    if (!is_sha256(contract.model_fingerprint)) {
+        invalid_contract("modelFingerprint", "must be a 64-character SHA-256 value");
+    }
+    if (required_string(params, "runtime") != "STABLE_DIFFUSION_CPP") {
+        unsupported_contract("runtime", "stable-diffusion bridge requires runtime=STABLE_DIFFUSION_CPP");
+    }
+
+    contract.scheduler_wire = required_string(params, "scheduler");
+    if (contract.scheduler_wire != "DPMPP_2M" &&
+        contract.scheduler_wire != "EULER" &&
+        contract.scheduler_wire != "EULER_A" &&
+        contract.scheduler_wire != "DDIM" &&
+        contract.scheduler_wire != "PNDM_PLMS" &&
+        contract.scheduler_wire != "LCM" &&
+        contract.scheduler_wire != "FLOW_MATCH") {
+        invalid_contract("scheduler", "unknown scheduler enum value");
+    }
+    contract.prediction_wire = required_string(params, "predictionType");
+    if (contract.prediction_wire == "SAMPLE") {
+        unsupported_contract(
+                "predictionType",
+                "stable-diffusion.cpp exposes no SAMPLE prediction override for image generation");
+    }
+    if (contract.prediction_wire != "EPSILON" &&
+        contract.prediction_wire != "V_PREDICTION" &&
+        contract.prediction_wire != "FLOW") {
+        invalid_contract("predictionType", "unknown predictionType enum value");
+    }
+    contract.steps = required_int32(params, "steps");
+    contract.timetable_count = required_int32(params, "timetableCount");
+    contract.unet_execution_count = required_int32(params, "unetExecutionCount");
+    if (contract.steps < 1 || contract.steps > 100) {
+        invalid_contract("steps", "must be in [1, 100]; native does not clamp it");
+    }
+    if (contract.timetable_count <= 0 || contract.timetable_count != contract.steps) {
+        unsupported_contract(
+                "timetableCount",
+                "the supported stable-diffusion.cpp samplers require timetableCount=steps");
+    }
+    const auto expected_timetable = params.find("expectedTimetableCount");
+    if (expected_timetable != params.end() &&
+        required_int32(params, "expectedTimetableCount") != contract.timetable_count) {
+        invalid_contract("expectedTimetableCount", "conflicts with timetableCount");
+    }
+
+    contract.cfg_scale = required_number(params, "cfgScale");
+    if (contract.cfg_scale < 0.0 || contract.cfg_scale > 30.0) {
+        invalid_contract("cfgScale", "must be in [0, 30]");
+    }
+    contract.use_cfg = required_boolean(params, "useCfg");
+    contract.unconditional_branch = required_boolean(params, "unconditionalBranch");
+    if (contract.unconditional_branch != contract.use_cfg) {
+        invalid_contract("unconditionalBranch", "must exactly match useCfg");
+    }
+    const bool runtime_uses_cfg = std::fabs(contract.cfg_scale - 1.0) > 1e-12;
+    if (runtime_uses_cfg != contract.use_cfg) {
+        unsupported_contract(
+                "useCfg",
+                "stable-diffusion.cpp executes an unconditional branch exactly when cfgScale differs from 1");
+    }
+    const int branches = contract.use_cfg ? 2 : 1;
+    if (contract.timetable_count > std::numeric_limits<int>::max() / branches ||
+        contract.unet_execution_count != contract.timetable_count * branches) {
+        invalid_contract(
+                "unetExecutionCount",
+                "must equal timetableCount multiplied by the actual CFG branch count");
+    }
+    const auto expected_unet = params.find("expectedUnetExecutionCount");
+    if (expected_unet != params.end() &&
+        required_int32(params, "expectedUnetExecutionCount") != contract.unet_execution_count) {
+        invalid_contract("expectedUnetExecutionCount", "conflicts with unetExecutionCount");
+    }
+
+    if (required_string(params, "tokenizerBackend") != "SDCPP_NATIVE") {
+        unsupported_contract("tokenizerBackend", "stable-diffusion.cpp uses its native tokenizer");
+    }
+    contract.token_count = required_int32(params, "tokenCount");
+    contract.tokenizer_max_length = required_int32(params, "tokenizerMaxLength");
+    if (contract.tokenizer_max_length <= 0 || contract.tokenizer_max_length > 4096) {
+        invalid_contract("tokenizerMaxLength", "must be in [1, 4096]");
+    }
+    if (contract.tokenizer_max_length > std::numeric_limits<int>::max() / 2 ||
+        contract.token_count != contract.tokenizer_max_length * 2) {
+        invalid_contract(
+                "tokenCount",
+                "must cover the native positive and negative conditioning capacities");
+    }
+    if (required_string(params, "embeddingDiskDataType") != "RUNTIME_NATIVE") {
+        unsupported_contract(
+                "embeddingDiskDataType",
+                "stable-diffusion.cpp owns conditioning storage and exposes it as RUNTIME_NATIVE");
+    }
+    if (required_string(params, "vaeScalingLocation") != "RUNTIME_NATIVE") {
+        unsupported_contract(
+                "vaeScalingLocation",
+                "stable-diffusion.cpp applies VAE scaling internally");
+    }
+    contract.vae_scaling_factor = required_number(params, "vaeScalingFactor");
+    if (std::fabs(contract.vae_scaling_factor - 1.0) > 1e-12) {
+        unsupported_contract(
+                "vaeScalingFactor",
+                "RUNTIME_NATIVE scaling requires the external contract factor to be 1");
+    }
+
+    contract.width = required_int32(params, "width");
+    contract.height = required_int32(params, "height");
+    if (contract.width < 64 || contract.height < 64 ||
+        contract.width > 8192 || contract.height > 8192 ||
+        contract.width % 8 != 0 || contract.height % 8 != 0) {
+        invalid_contract(
+                "width,height",
+                "dimensions must be multiples of 8 in [64, 8192]; native does not clamp them");
+    }
+    contract.seed = required_integer(params, "seed");
+    if (contract.seed < 0) invalid_contract("seed", "must be non-negative so the executed seed is exact");
+    if (required_string(params, "graphName") != "runtime-native") {
+        unsupported_contract("graphName", "stable-diffusion.cpp exposes graphName=runtime-native");
+    }
+    if (required_boolean(params, "fallback")) {
+        unsupported_contract("fallback", "strict native execution cannot claim a fallback path");
+    }
+
+    contract.prompt = required_string(params, "prompt");
+    contract.negative_prompt = required_string(params, "negativePrompt", true);
+    if (!contract.use_cfg && !contract.negative_prompt.empty()) {
+        unsupported_contract(
+                "negativePrompt",
+                "negativePrompt cannot affect pixels when useCfg=false");
+    }
+    contract.family = required_string(params, "family");
+    contract.threads = required_int32(params, "threads");
+    if (contract.threads < 1 || contract.threads > 64) {
+        invalid_contract("threads", "must be in [1, 64]; native does not clamp it");
+    }
+    contract.distilled_guidance = required_number(params, "distilledGuidance");
+    if (contract.distilled_guidance < 0.0 || contract.distilled_guidance > 30.0) {
+        invalid_contract("distilledGuidance", "must be in [0, 30]");
+    }
+    contract.flow_shift = required_number(params, "flowShift");
+    if (contract.flow_shift < -1.0 || contract.flow_shift > 100.0) {
+        invalid_contract("flowShift", "must be -1 (model default) or a value in [0, 100]");
+    }
+    contract.requested_sample_method = required_string(params, "sampleMethod");
+    if (required_string(params, "backendMode") != "cpu") {
+        unsupported_contract("backendMode", "Android stable-diffusion.cpp is built for backendMode=cpu");
+    }
+    resolve_sampler_contract(contract);
+    return contract;
+}
+
+json contract_failure_json(const ContractError &error) {
+    return json({
+            {"ok", false},
+            {"errorCode", error.code},
+            {"field", error.field},
+            {"unsupported", error.unsupported},
+            {"error", error.what()}
+    });
 }
 
 std::string escape_json(const std::string &value) {
@@ -336,13 +634,27 @@ std::string runtime_config_json() {
 }
 
 void set_progress_from_sd_log(const char *text) {
-    if (text == nullptr || text[0] == '\0' ||
-        !g_generation_active.load(std::memory_order_relaxed)) {
+    if (text == nullptr || text[0] == '\0') {
         return;
     }
 
     const std::string message(text);
     const std::string lower = lower_copy(message);
+    if (contains(lower, "running in v-prediction edm mode")) {
+        g_observed_prediction.store(EDM_V_PRED, std::memory_order_relaxed);
+    } else if (contains(lower, "running in v-prediction mode")) {
+        g_observed_prediction.store(V_PRED, std::memory_order_relaxed);
+    } else if (contains(lower, "running in eps-prediction mode")) {
+        g_observed_prediction.store(EPS_PRED, std::memory_order_relaxed);
+    } else if (contains(lower, "running in flux2 flow mode")) {
+        g_observed_prediction.store(FLUX2_FLOW_PRED, std::memory_order_relaxed);
+    } else if (contains(lower, "running in flux flow mode")) {
+        g_observed_prediction.store(FLUX_FLOW_PRED, std::memory_order_relaxed);
+    } else if (contains(lower, "running in flow mode") ||
+               contains(lower, "running in ltxav flow mode")) {
+        g_observed_prediction.store(FLOW_PRED, std::memory_order_relaxed);
+    }
+    if (!g_generation_active.load(std::memory_order_relaxed)) return;
     if (contains(lower, "get_learned_condition")) {
         set_progress_stage("conditioning", message);
     } else if (contains(lower, "encode_first_stage")) {
@@ -381,6 +693,21 @@ void sd_log_callback(sd_log_level_t level, const char *text, void *) {
 }
 
 void sd_progress_callback(int step, int steps, float time, void *) {
+    const bool generation_invoked =
+            (g_generation_stage_mask.load(std::memory_order_relaxed) &
+             kStageGenerationInvoked) != 0u;
+    if (step > 0 && generation_invoked) {
+        g_observed_denoiser_callbacks.fetch_add(1, std::memory_order_relaxed);
+        g_observed_progress_steps.store(steps, std::memory_order_relaxed);
+        int observed = g_observed_max_progress_step.load(std::memory_order_relaxed);
+        while (step > observed &&
+               !g_observed_max_progress_step.compare_exchange_weak(
+                       observed,
+                       step,
+                       std::memory_order_relaxed)) {
+        }
+        mark_generation_stage(kStageSamplingObserved);
+    }
     set_progress(
             g_cancel_requested.load(std::memory_order_relaxed) ? "cancelling" : "sampling",
             g_cancel_requested.load(std::memory_order_relaxed)
@@ -544,11 +871,11 @@ std::string component_selection_json(const ComponentPaths &paths) {
 bool resolve_component_paths(const std::string &model_path,
                              const std::string &bundle_root,
                              const std::string &family,
-                             const std::string &params_json,
+                             const json &params,
                              ComponentPaths &paths,
                              std::string &error) {
-    const std::string mode = parse_string(
-            params_json,
+    const std::string mode = optional_string(
+            params,
             "componentSelectionMode",
             "compatibility_inference");
     if (mode == "compatibility_inference") {
@@ -565,8 +892,8 @@ bool resolve_component_paths(const std::string &model_path,
     paths = ComponentPaths{};
     paths.selection_mode = mode;
     paths.selection_fallback = false;
-    const std::string requested_root = parse_string(
-            params_json,
+    const std::string requested_root = optional_string(
+            params,
             "componentBundleRoot",
             bundle_root);
     char requested_root_buffer[PATH_MAX] = {};
@@ -582,8 +909,8 @@ bool resolve_component_paths(const std::string &model_path,
         return false;
     }
     paths.bundle_root = requested_root_buffer;
-    paths.primary_slot = parse_string(params_json, "componentPrimarySlot", "");
-    const std::string requested_primary = parse_string(params_json, "componentPrimaryPath", "");
+    paths.primary_slot = optional_string(params, "componentPrimarySlot", "");
+    const std::string requested_primary = optional_string(params, "componentPrimaryPath", "");
     if (paths.primary_slot != "model" && paths.primary_slot != "diffusion") {
         error = "explicit primary component slot must be model or diffusion";
         return false;
@@ -614,16 +941,16 @@ bool resolve_component_paths(const std::string &model_path,
     }
 
     const bool require_vae = split_family ||
-                             parse_bool(params_json, "componentRequireVae", false);
-    const bool require_text_encoder = split_family || parse_bool(
-            params_json,
+                             optional_boolean(params, "componentRequireVae", false);
+    const bool require_text_encoder = split_family || optional_boolean(
+            params,
             "componentRequireTextEncoder",
             false);
-    const bool require_tokenizer = parse_bool(
-            params_json,
+    const bool require_tokenizer = optional_boolean(
+            params,
             "componentRequireTokenizer",
             false);
-    const std::string requested_vae = parse_string(params_json, "componentVaePath", "");
+    const std::string requested_vae = optional_string(params, "componentVaePath", "");
     if (!requested_vae.empty()) {
         if (!canonical_existing_file_within_root(
                 requested_vae,
@@ -637,12 +964,12 @@ bool resolve_component_paths(const std::string &model_path,
         return false;
     }
 
-    const std::string requested_text_encoder = parse_string(
-            params_json,
+    const std::string requested_text_encoder = optional_string(
+            params,
             "componentTextEncoderPath",
             "");
-    paths.text_encoder_slot = parse_string(
-            params_json,
+    paths.text_encoder_slot = optional_string(
+            params,
             "componentTextEncoderSlot",
             "");
     if (!requested_text_encoder.empty()) {
@@ -673,8 +1000,8 @@ bool resolve_component_paths(const std::string &model_path,
         return false;
     }
 
-    const std::string requested_tokenizer = parse_string(
-            params_json,
+    const std::string requested_tokenizer = optional_string(
+            params,
             "componentTokenizerPath",
             "");
     if (!requested_tokenizer.empty()) {
@@ -690,8 +1017,8 @@ bool resolve_component_paths(const std::string &model_path,
         return false;
     }
 
-    const std::string requested_manifest = parse_string(
-            params_json,
+    const std::string requested_manifest = optional_string(
+            params,
             "componentManifestPath",
             "");
     if (requested_manifest.empty() || !canonical_existing_file_within_root(
@@ -781,140 +1108,396 @@ sd_ctx_t *ensure_context(const ComponentPaths &paths,
     return g_ctx;
 }
 
+std::string observed_prediction_wire(int prediction) {
+    switch (prediction) {
+        case EPS_PRED: return "EPSILON";
+        case V_PRED:
+        case EDM_V_PRED: return "V_PREDICTION";
+        case FLOW_PRED:
+        case FLUX_FLOW_PRED:
+        case FLUX2_FLOW_PRED: return "FLOW";
+        default:
+            unsupported_contract(
+                    "predictionType",
+                    "stable-diffusion.cpp did not expose an observed prediction mode");
+    }
+}
+
+std::string observed_prediction_mode(int prediction) {
+    if (prediction < 0 || prediction >= PREDICTION_COUNT) return "unknown";
+    return sd_prediction_name(static_cast<prediction_t>(prediction));
+}
+
+[[noreturn]] void execution_mismatch(const std::string &field,
+                                     const std::string &message) {
+    throw ContractError("EXECUTION_CONTRACT_MISMATCH", field, message);
+}
+
+json runtime_failure(const std::string &code, const std::string &message) {
+    return json({
+            {"ok", false},
+            {"errorCode", code},
+            {"error", message}
+    });
+}
+
+json native_effective_json(const StableDiffusionExecutionContract &contract,
+                           const std::string &prediction_wire,
+                           int actual_steps,
+                           int actual_timetable_count,
+                           int actual_unet_execution_count,
+                           double actual_cfg_scale,
+                           bool actual_use_cfg,
+                           int actual_token_count,
+                           int actual_width,
+                           int actual_height) {
+    return json({
+            {"profileId", contract.profile_id},
+            {"profileRevision", contract.profile_revision},
+            {"modelFingerprint", lower_copy(contract.model_fingerprint)},
+            {"runtime", "STABLE_DIFFUSION_CPP"},
+            {"scheduler", contract.scheduler_wire},
+            {"predictionType", prediction_wire},
+            {"steps", actual_steps},
+            {"timetableCount", actual_timetable_count},
+            {"unetExecutionCount", actual_unet_execution_count},
+            {"cfgScale", actual_cfg_scale},
+            {"useCfg", actual_use_cfg},
+            {"unconditionalBranch", actual_use_cfg},
+            {"tokenizerBackend", "SDCPP_NATIVE"},
+            {"tokenCount", actual_token_count},
+            {"embeddingDiskDataType", "RUNTIME_NATIVE"},
+            {"vaeScalingLocation", "RUNTIME_NATIVE"},
+            {"vaeScalingFactor", 1.0},
+            {"width", actual_width},
+            {"height", actual_height},
+            {"seed", contract.seed},
+            {"graphName", "runtime-native"},
+            {"fallback", false}
+    });
+}
+
 std::string generate_impl(const std::string &model_path,
                           const std::string &bundle_root,
                           const std::string &params_json,
                           const std::string &output_path) {
-    if (!file_exists(model_path)) {
-        return "{\"ok\":false,\"error\":\"model file does not exist\"}";
-    }
-    if (output_path.empty()) {
-        return "{\"ok\":false,\"error\":\"output path is empty\"}";
-    }
-
-    const std::string prompt = parse_string(params_json, "prompt", "");
-    if (prompt.empty()) {
-        return "{\"ok\":false,\"error\":\"prompt is empty\"}";
-    }
-
-    const std::string family = parse_string(params_json, "family", "");
-    const int width = std::max(64, parse_int(params_json, "width", 512));
-    const int height = std::max(64, parse_int(params_json, "height", 512));
-    const int steps = std::max(1, parse_int(params_json, "steps", 8));
-    const int threads = std::max(1, parse_int(params_json, "threads", sd_get_num_physical_cores()));
-    const int seed = parse_int(params_json, "seed", -1);
-    const float cfg = parse_float(params_json, "cfgScale", 1.0f);
-    const float distilled_guidance = parse_float(params_json, "distilledGuidance", 3.5f);
-    const float flow_shift = parse_float(params_json, "flowShift", -1.0f);
-    const std::string negative_prompt = parse_string(params_json, "negativePrompt", "");
-    const std::string sample_method_name = parse_string(params_json, "sampleMethod", "euler");
-    const auto method = str_to_sample_method(sample_method_name.c_str());
-    if (method == SAMPLE_METHOD_COUNT) {
-        return "{\"ok\":false,\"error\":\"unsupported sample method: " +
-               escape_json(sample_method_name) + "\"}";
-    }
-    set_progress("initializing", "checking model bundle", 0, steps, 0.0f, width, height, threads);
-    if (g_cancel_requested.load(std::memory_order_relaxed)) {
-        return "{\"ok\":false,\"cancelled\":true,\"error\":\"cancelled\"}";
-    }
-    ComponentPaths paths;
-    std::string component_error;
-    if (!resolve_component_paths(
-            model_path,
-            bundle_root,
-            family,
-            params_json,
-            paths,
-            component_error)) {
-        set_progress("failed", component_error, 0, steps, 0.0f, width, height, threads);
-        return "{\"ok\":false,\"error\":\"" + escape_json(component_error) +
-               "\",\"componentSelection\":{\"mode\":\"" +
-               escape_json(parse_string(params_json, "componentSelectionMode", "compatibility_inference")) +
-               "\",\"fallback\":false}}";
-    }
-    const std::string selected_components_json = component_selection_json(paths);
-    set_progress_component_selection(selected_components_json);
-    const std::string ctx_key = make_context_key(paths, threads);
-    set_progress("loading", "loading stable-diffusion.cpp context", 0, steps, 0.0f, width, height, threads);
-    sd_ctx_t *ctx = ensure_context(paths, ctx_key, threads);
-    if (ctx == nullptr) {
-        set_progress("failed", g_last_error, 0, steps, 0.0f, width, height, threads);
-        return "{\"ok\":false,\"error\":\"" + escape_json(g_last_error) + "\"}";
-    }
-    if (g_cancel_requested.load(std::memory_order_relaxed)) {
-        set_progress("cancelled", "cancelled before sampling", 0, steps, 0.0f, width, height, threads);
-        return "{\"ok\":false,\"cancelled\":true,\"error\":\"cancelled\"}";
-    }
-
-    sd_img_gen_params_t gen;
-    sd_img_gen_params_init(&gen);
-    gen.prompt = prompt.c_str();
-    gen.negative_prompt = negative_prompt.empty() ? nullptr : negative_prompt.c_str();
-    gen.width = width;
-    gen.height = height;
-    gen.seed = seed;
-    gen.batch_count = 1;
-    gen.sample_params.sample_steps = steps;
-    gen.sample_params.guidance.txt_cfg = cfg;
-    gen.sample_params.guidance.distilled_guidance = distilled_guidance;
-    if (flow_shift > 0.0f) {
-        gen.sample_params.flow_shift = flow_shift;
-    }
-    gen.sample_params.sample_method = method;
-    gen.sample_params.scheduler = sd_get_default_scheduler(ctx, gen.sample_params.sample_method);
-
-    set_progress("preparing", "preparing image generation", 0, steps, 0.0f, width, height, threads);
-    sd_image_t *images = generate_image(ctx, &gen);
-    if (g_cancel_requested.load(std::memory_order_relaxed)) {
-        if (images != nullptr) {
-            if (images[0].data != nullptr) free(images[0].data);
-            free(images);
+    try {
+        if (!file_exists(model_path)) {
+            return runtime_failure("MODEL_FILE_MISSING", "model file does not exist").dump();
         }
-        set_progress("cancelled", "cancelled", 0, steps, 0.0f, width, height, threads);
-        return "{\"ok\":false,\"cancelled\":true,\"error\":\"cancelled\"}";
-    }
-    if (images == nullptr || images[0].data == nullptr) {
+        if (output_path.empty()) {
+            return runtime_failure("OUTPUT_PATH_INVALID", "output path is empty").dump();
+        }
+
+        json params;
+        try {
+            params = json::parse(params_json);
+        } catch (const json::exception &error) {
+            return contract_failure_json(ContractError(
+                    "IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID",
+                    "params",
+                    std::string("native params are not valid JSON: ") + error.what())).dump();
+        }
+        const StableDiffusionExecutionContract contract = parse_execution_contract(params);
+        mark_generation_stage(kStageContractValidated);
+
+        set_progress(
+                "initializing",
+                "checking model bundle",
+                0,
+                contract.steps,
+                0.0f,
+                contract.width,
+                contract.height,
+                contract.threads);
+        if (g_cancel_requested.load(std::memory_order_relaxed)) {
+            return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+        }
+
+        ComponentPaths paths;
+        std::string component_error;
+        if (!resolve_component_paths(
+                model_path,
+                bundle_root,
+                contract.family,
+                params,
+                paths,
+                component_error)) {
+            set_progress(
+                    "failed",
+                    component_error,
+                    0,
+                    contract.steps,
+                    0.0f,
+                    contract.width,
+                    contract.height,
+                    contract.threads);
+            return json({
+                    {"ok", false},
+                    {"errorCode", "COMPONENT_SELECTION_INVALID"},
+                    {"error", component_error},
+                    {"componentSelection", {
+                            {"mode", optional_string(
+                                    params,
+                                    "componentSelectionMode",
+                                    "compatibility_inference")},
+                            {"fallback", false}
+                    }}
+            }).dump();
+        }
+        const std::string selected_components_json = component_selection_json(paths);
+        set_progress_component_selection(selected_components_json);
+        const std::string ctx_key = make_context_key(paths, contract.threads);
+        set_progress(
+                "loading",
+                "loading stable-diffusion.cpp context",
+                0,
+                contract.steps,
+                0.0f,
+                contract.width,
+                contract.height,
+                contract.threads);
+        sd_ctx_t *ctx = ensure_context(paths, ctx_key, contract.threads);
+        if (ctx == nullptr) {
+            set_progress(
+                    "failed",
+                    g_last_error,
+                    0,
+                    contract.steps,
+                    0.0f,
+                    contract.width,
+                    contract.height,
+                    contract.threads);
+            return runtime_failure("NATIVE_CONTEXT_LOAD_FAILED", g_last_error).dump();
+        }
+        mark_generation_stage(kStageContextReady);
+
+        const int observed_prediction = g_observed_prediction.load(std::memory_order_relaxed);
+        const std::string prediction_wire = observed_prediction_wire(observed_prediction);
+        if (prediction_wire != contract.prediction_wire) {
+            execution_mismatch(
+                    "predictionType",
+                    "resolved predictionType=" + contract.prediction_wire +
+                    ", observed stable-diffusion.cpp prediction mode=" + prediction_wire);
+        }
+        if (g_cancel_requested.load(std::memory_order_relaxed)) {
+            set_progress(
+                    "cancelled",
+                    "cancelled before sampling",
+                    0,
+                    contract.steps,
+                    0.0f,
+                    contract.width,
+                    contract.height,
+                    contract.threads);
+            return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+        }
+
+        sd_img_gen_params_t gen;
+        sd_img_gen_params_init(&gen);
+        gen.prompt = contract.prompt.c_str();
+        gen.negative_prompt = contract.use_cfg ? contract.negative_prompt.c_str() : nullptr;
+        gen.width = contract.width;
+        gen.height = contract.height;
+        gen.seed = contract.seed;
+        gen.batch_count = 1;
+        gen.sample_params.sample_steps = contract.steps;
+        gen.sample_params.guidance.txt_cfg = static_cast<float>(contract.cfg_scale);
+        gen.sample_params.guidance.distilled_guidance =
+                static_cast<float>(contract.distilled_guidance);
+        if (contract.flow_shift >= 0.0) {
+            gen.sample_params.flow_shift = static_cast<float>(contract.flow_shift);
+        }
+        gen.sample_params.sample_method = contract.sample_method;
+        gen.sample_params.scheduler = contract.native_scheduler;
+
+        const uint64_t sequence =
+                g_generation_sequence.fetch_add(1, std::memory_order_relaxed) + 1u;
+        g_active_generation_sequence.store(sequence, std::memory_order_relaxed);
+        mark_generation_stage(kStageGenerationInvoked);
+        set_progress(
+                "preparing",
+                "preparing image generation",
+                0,
+                contract.steps,
+                0.0f,
+                contract.width,
+                contract.height,
+                contract.threads);
+        sd_image_t *images = generate_image(ctx, &gen);
+        if (g_cancel_requested.load(std::memory_order_relaxed)) {
+            if (images != nullptr) {
+                if (images[0].data != nullptr) free(images[0].data);
+                free(images);
+            }
+            set_progress(
+                    "cancelled",
+                    "cancelled",
+                    0,
+                    contract.steps,
+                    0.0f,
+                    contract.width,
+                    contract.height,
+                    contract.threads);
+            return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+        }
+        if (images == nullptr || images[0].data == nullptr) {
+            free(images);
+            set_progress(
+                    "failed",
+                    "stable-diffusion.cpp returned no image",
+                    0,
+                    contract.steps,
+                    0.0f,
+                    contract.width,
+                    contract.height,
+                    contract.threads);
+            return runtime_failure(
+                    "NATIVE_GENERATION_FAILED",
+                    "stable-diffusion.cpp returned no image").dump();
+        }
+        mark_generation_stage(kStageImageReturned);
+
+        const sd_image_t first = images[0];
+        const int actual_width = static_cast<int>(first.width);
+        const int actual_height = static_cast<int>(first.height);
+        const int actual_timetable_count =
+                g_observed_progress_steps.load(std::memory_order_relaxed);
+        const int observed_max_step =
+                g_observed_max_progress_step.load(std::memory_order_relaxed);
+        const int observed_denoiser_callbacks =
+                g_observed_denoiser_callbacks.load(std::memory_order_relaxed);
+        const bool actual_use_cfg =
+                std::fabs(static_cast<double>(gen.sample_params.guidance.txt_cfg) - 1.0) > 1e-6;
+        const int actual_branches = actual_use_cfg ? 2 : 1;
+        const int actual_token_count = contract.token_count;
+        if (observed_denoiser_callbacks > std::numeric_limits<int>::max() / actual_branches) {
+            free(first.data);
+            free(images);
+            execution_mismatch("unetExecutionCount", "observed native execution count overflowed int32");
+        }
+        const int actual_unet_execution_count =
+                observed_denoiser_callbacks * actual_branches;
+
+        auto release_images_and_mismatch = [&](const std::string &field,
+                                               const std::string &message) -> void {
+            free(first.data);
+            free(images);
+            execution_mismatch(field, message);
+        };
+        if (actual_width != contract.width || actual_height != contract.height) {
+            release_images_and_mismatch(
+                    "width,height",
+                    "stable-diffusion.cpp aligned the requested dimensions; strict execution rejects implicit alignment");
+        }
+        if (actual_timetable_count != contract.timetable_count ||
+            observed_max_step != contract.timetable_count) {
+            release_images_and_mismatch(
+                    "timetableCount",
+                    "observed scheduler progress differs from the resolved timetableCount");
+        }
+        if (actual_unet_execution_count != contract.unet_execution_count) {
+            release_images_and_mismatch(
+                    "unetExecutionCount",
+                    "observed denoiser callbacks multiplied by actual CFG branches differ from the contract");
+        }
+
+        const double actual_cfg_scale =
+                static_cast<double>(gen.sample_params.guidance.txt_cfg);
+        json native_effective = native_effective_json(
+                contract,
+                prediction_wire,
+                actual_timetable_count,
+                actual_timetable_count,
+                actual_unet_execution_count,
+                actual_cfg_scale,
+                actual_use_cfg,
+                actual_token_count,
+                actual_width,
+                actual_height);
+
+        set_progress(
+                "writing",
+                "writing png",
+                actual_timetable_count,
+                actual_timetable_count,
+                0.0f,
+                actual_width,
+                actual_height,
+                contract.threads);
+        const int stride = static_cast<int>(first.width * first.channel);
+        const int write_ok = stbi_write_png(
+                output_path.c_str(),
+                actual_width,
+                actual_height,
+                static_cast<int>(first.channel),
+                first.data,
+                stride);
+        free(first.data);
         free(images);
-        set_progress("failed", "stable-diffusion.cpp returned no image", 0, steps, 0.0f, width, height, threads);
-        return "{\"ok\":false,\"error\":\"stable-diffusion.cpp returned no image\"}";
-    }
+        if (write_ok == 0) {
+            std::remove(output_path.c_str());
+            set_progress(
+                    "failed",
+                    "failed to write png",
+                    actual_timetable_count,
+                    actual_timetable_count,
+                    0.0f,
+                    actual_width,
+                    actual_height,
+                    contract.threads);
+            return runtime_failure("OUTPUT_WRITE_FAILED", "failed to write png").dump();
+        }
+        mark_generation_stage(kStageOutputWritten);
+        set_progress(
+                "completed",
+                "image saved",
+                actual_timetable_count,
+                actual_timetable_count,
+                0.0f,
+                actual_width,
+                actual_height,
+                contract.threads);
 
-    const sd_image_t first = images[0];
-    set_progress("writing", "writing png", steps, steps, 0.0f, width, height, threads);
-    const int stride = static_cast<int>(first.width * first.channel);
-    const int write_ok = stbi_write_png(output_path.c_str(),
-                                        static_cast<int>(first.width),
-                                        static_cast<int>(first.height),
-                                        static_cast<int>(first.channel),
-                                        first.data,
-                                        stride);
-    free(first.data);
-    free(images);
-    if (write_ok == 0) {
-        set_progress("failed", "failed to write png", steps, steps, 0.0f, width, height, threads);
-        return "{\"ok\":false,\"error\":\"failed to write png\"}";
+        json out = native_effective;
+        out["ok"] = true;
+        out["nativeExecution"] = true;
+        out["executionStage"] = "semantic_generation_passed";
+        out["path"] = output_path;
+        out["mimeType"] = "image/png";
+        out["threads"] = contract.threads;
+        out["distilledGuidance"] =
+                static_cast<double>(gen.sample_params.guidance.distilled_guidance);
+        out["flowShift"] = contract.flow_shift;
+        out["sampleMethod"] = sd_sample_method_name(gen.sample_params.sample_method);
+        out["nativeScheduler"] = sd_scheduler_name(gen.sample_params.scheduler);
+        out["nativePredictionMode"] = observed_prediction_mode(observed_prediction);
+        out["observedDenoiserCallbackCount"] = observed_denoiser_callbacks;
+        out["observedProgressSteps"] = actual_timetable_count;
+        out["observedMaxProgressStep"] = observed_max_step;
+        out["cfgBranchCount"] = actual_branches;
+        out["negativePrompt"] = contract.negative_prompt;
+        out["backendMode"] = "cpu";
+        out["backend"] = "stable-diffusion.cpp";
+        out["runtimeBackend"] = sd_runtime_backend_label();
+        out["componentSelection"] = json::parse(selected_components_json);
+        out["systemInfo"] = sd_get_system_info();
+        out["nativeEffective"] = native_effective;
+        out["nativeGenerationSequence"] = sequence;
+        return out.dump();
+    } catch (const ContractError &error) {
+        set_progress("failed", error.what());
+        return contract_failure_json(error).dump();
+    } catch (const json::exception &error) {
+        set_progress("failed", error.what());
+        return contract_failure_json(ContractError(
+                "IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID",
+                "params",
+                error.what())).dump();
+    } catch (const std::exception &error) {
+        set_progress("failed", error.what());
+        return runtime_failure("NATIVE_BRIDGE_FAILURE", error.what()).dump();
     }
-    set_progress("completed", "image saved", steps, steps, 0.0f, width, height, threads);
-
-    std::ostringstream out;
-    out << "{\"ok\":true,"
-        << "\"path\":\"" << escape_json(output_path) << "\","
-        << "\"mimeType\":\"image/png\","
-        << "\"width\":" << first.width << ","
-        << "\"height\":" << first.height << ","
-        << "\"steps\":" << steps << ","
-        << "\"threads\":" << threads << ","
-        << "\"seed\":" << seed << ","
-        << "\"cfgScale\":" << cfg << ","
-        << "\"distilledGuidance\":" << distilled_guidance << ","
-        << "\"flowShift\":" << flow_shift << ","
-        << "\"sampleMethod\":\"" << escape_json(sd_sample_method_name(gen.sample_params.sample_method)) << "\","
-        << "\"backendMode\":\"cpu\","
-        << "\"backend\":\"stable-diffusion.cpp\","
-        << "\"runtimeBackend\":\"" << sd_runtime_backend_label() << "\","
-        << "\"componentSelection\":" << selected_components_json << ","
-        << "\"systemInfo\":\"" << escape_json(sd_get_system_info()) << "\"}";
-    return out.str();
 }
 
 } // namespace
@@ -930,6 +1513,7 @@ Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_generate(
     std::lock_guard<std::mutex> lock(g_mutex);
     g_cancel_requested.store(false, std::memory_order_relaxed);
     g_generation_active.store(true, std::memory_order_relaxed);
+    reset_generation_evidence();
     set_progress("initializing", "starting local image generation");
     set_progress_component_selection("{}");
     sd_set_log_callback(sd_log_callback, nullptr);
@@ -945,8 +1529,22 @@ Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_generate(
         g_ctx = nullptr;
         g_ctx_key.clear();
     }
-    if (!result.empty() && result.back() == '}') {
-        result.insert(result.size() - 1, ",\"contextReleased\":true");
+    mark_generation_stage(kStageContextReleased);
+    try {
+        json result_json = json::parse(result);
+        result_json["contextReleased"] = true;
+        const uint64_t sequence =
+                g_active_generation_sequence.load(std::memory_order_relaxed);
+        if (sequence > 0) result_json["nativeGenerationSequence"] = sequence;
+        result_json["nativeStageMask"] =
+                g_generation_stage_mask.load(std::memory_order_relaxed);
+        result_json["nativeDetailStageMask"] =
+                static_cast<uint64_t>(g_generation_stage_mask.load(std::memory_order_relaxed));
+        result = result_json.dump();
+    } catch (const json::exception &) {
+        if (!result.empty() && result.back() == '}') {
+            result.insert(result.size() - 1, ",\"contextReleased\":true");
+        }
     }
     g_generation_active.store(false, std::memory_order_relaxed);
     sd_set_cancel_callback(nullptr, nullptr);
@@ -983,6 +1581,7 @@ Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_shutdown(JNIEnv *, j
         g_ctx = nullptr;
         g_ctx_key.clear();
     }
+    mark_generation_stage(kStageContextReleased);
     g_generation_active.store(false, std::memory_order_relaxed);
     set_progress("idle", "native context released");
 }

@@ -958,6 +958,16 @@ class ModelScopeClient(
                     fileName = "merges.txt"
                 ),
                 ImageEngineBundleComponentSpec(
+                    role = ImageEngineBundleComponentRole.TOKENIZER,
+                    repoId = "openai/clip-vit-large-patch14",
+                    revision = "32bd64288804d66eefd0ccbe215aa642df71cc41",
+                    provider = ModelRepositoryProvider.HUGGING_FACE,
+                    fileName = "tokenizer.json",
+                    expectedSizeBytes = 2_224_003L,
+                    sha256 = "a83e0809aa4c3af7208b2df632a7a69668c6d48775b3c3fe4e1b1199d1f8b8f4",
+                    relativePath = "tokenizer.json"
+                ),
+                ImageEngineBundleComponentSpec(
                     role = ImageEngineBundleComponentRole.OPTIONAL,
                     repoId = repoId,
                     revision = revision,
@@ -1125,12 +1135,13 @@ class ModelScopeClient(
             title: String,
             repoId: String,
             fileName: String,
+            revision: String,
             useSd21Sidecars: Boolean = false,
             task: ImageEngineTask = ImageEngineTask.TEXT_TO_IMAGE
         ): ImageEngineBundleSpec = ImageEngineBundleSpec(
             id = id,
             title = title,
-            components = qnnZipComponent(repoId, fileName) + gen5TokenizerSidecars(useSd21Sidecars),
+            components = qnnZipComponent(repoId, fileName, revision) + gen5TokenizerSidecars(useSd21Sidecars),
             task = task,
             runtime = ImageEngineBundleRuntime.QNN_HTP,
             accelerator = ImageEngineAccelerator.QNN_HTP,
@@ -1173,9 +1184,13 @@ class ModelScopeClient(
                     Triple("tokenizer/vocab.json", 1_059_962L, "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349")
                 )
             }
-            return metadata.map { (path, size, sha) ->
+            val repositorySidecars = metadata.map { (path, size, sha) ->
                 ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.CONFIG,
+                    role = if (path.startsWith("tokenizer/")) {
+                        ImageEngineBundleComponentRole.TOKENIZER
+                    } else {
+                        ImageEngineBundleComponentRole.CONFIG
+                    },
                     repoId = repoId,
                     revision = revision,
                     provider = ModelRepositoryProvider.HUGGING_FACE,
@@ -1185,6 +1200,20 @@ class ModelScopeClient(
                     relativePath = path
                 )
             }
+            // The publisher repositories expose the legacy vocab/merges pair but not a
+            // complete tokenizer.json. Pin the canonical CLIP tokenizer contract so
+            // Android can execute normalization, pre-tokenization, BPE and post-processing
+            // through the standard tokenizer backend instead of a handwritten approximation.
+            return repositorySidecars + ImageEngineBundleComponentSpec(
+                role = ImageEngineBundleComponentRole.TOKENIZER,
+                repoId = "openai/clip-vit-large-patch14",
+                revision = "32bd64288804d66eefd0ccbe215aa642df71cc41",
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                fileName = "tokenizer.json",
+                expectedSizeBytes = 2_224_003L,
+                sha256 = "a83e0809aa4c3af7208b2df632a7a69668c6d48775b3c3fe4e1b1199d1f8b8f4",
+                relativePath = "tokenizer/tokenizer.json"
+            )
         }
 
         private val QAIRT_MOBILE_CHIPSETS = setOf("SM8750", "SM8750P", "SM8850", "SM8850P")
@@ -1831,7 +1860,8 @@ class ModelScopeClient(
                     id = "qualcomm_sd15_gen5_qnn_bundle",
                     title = "Qualcomm Stable Diffusion 1.5 Gen5 QNN",
                     repoId = "qualcomm/Stable-Diffusion-v1.5",
-                    fileName = "stable_diffusion_v1_5-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip"
+                    fileName = "stable_diffusion_v1_5-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
+                    revision = "1815ed2af65018733338c37efacf62310e74bc94"
                 )
             ),
             ModelScopeRecommendedModel(
@@ -1858,6 +1888,7 @@ class ModelScopeClient(
                     title = "Qualcomm Stable Diffusion 2.1 Gen5 QNN",
                     repoId = "qualcomm/Stable-Diffusion-v2.1",
                     fileName = "stable_diffusion_v2_1-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
+                    revision = "5c79668b496a31d4570b06d5b2919ea393166b36",
                     useSd21Sidecars = true
                 )
             ),
@@ -1885,6 +1916,7 @@ class ModelScopeClient(
                     title = "Qualcomm ControlNet Canny Gen5 QNN",
                     repoId = "qualcomm/ControlNet-Canny",
                     fileName = "controlnet_canny-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
+                    revision = "2e0b3bb550cad49caf0f2e135d1f67bced02e61e",
                     task = ImageEngineTask.IMAGE_EDIT
                 )
             ),

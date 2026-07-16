@@ -16,14 +16,21 @@ class SdxlImagePhaseProtocolTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
-    fun `request carries explicit phase and one expected runtime profile`() {
+    fun `request carries multi step size profile and one expected runtime profile`() {
+        val params = contractParams(steps = 30)
         val request = SdxlImagePhaseRequest(
             requestId = "sdxl-1",
             phase = SdxlImagePhase.UNET,
             expectedHtpArch = SDXL_AUTO_TRANSPORT_HTP_ARCH,
+            profileId = "generic.sdxl.test",
+            profileRevision = 3,
+            modelFingerprint = "a".repeat(64),
+            steps = 30,
+            width = 1024,
+            height = 1024,
             bundleRoot = "/bundle",
             runtimeDirsJson = "[\"/packaged-qnn\"]",
-            paramsJson = "{\"steps\":1}",
+            paramsJson = params.toString(),
             embeddingsPath = "/cache/conditioning.f32",
             latentPath = "/cache/latent.f32",
             metadataPath = "/cache/latent.json",
@@ -35,7 +42,12 @@ class SdxlImagePhaseProtocolTest {
 
         assertEquals(SdxlImagePhase.UNET, parsed.phase)
         assertEquals(0, parsed.expectedHtpArch)
-        assertFalse(parsed.paramsJson.contains("vae"))
+        assertEquals(30, parsed.steps)
+        assertEquals(1024, parsed.width)
+        assertEquals("generic.sdxl.test", parsed.profileId)
+
+        val tampered = JSONObject(SdxlImagePhaseProtocol.request(request)).put("steps", 1)
+        assertTrue(runCatching { SdxlImagePhaseProtocol.parseRequest(tampered.toString()) }.isFailure)
     }
 
     @Test
@@ -49,7 +61,7 @@ class SdxlImagePhaseProtocolTest {
                 phase = "graph_execute",
                 message = "decode",
                 step = 0,
-                steps = 1,
+                steps = 30,
                 elapsedMs = 500,
                 secondsPerStep = 0.0,
                 threads = 0,
@@ -74,14 +86,22 @@ class SdxlImagePhaseProtocolTest {
         latent.writeBytes(ByteArray(4 * 2 * 2 * 4) { index -> index.toByte() })
         val metadataFile = File(temporaryFolder.root, "latent.json")
         val native = JSONObject()
+            .putAll(contractParams(steps = 30))
             .put("runtimeProfile", "V79")
             .put("htpArchVersion", 79)
             .put("latentDtype", "float32-le")
             .put("latentShape", JSONArray(listOf(1, 4, 2, 2)))
+            .put("nativeGenerationSequence", 41L)
+            .put("nativeStageMask", 127L)
+            .put("nativeDetailStageMask", 511L)
+        val contract = SdxlImageExecutionContract.fromParams(contractParams(steps = 30).toString())
+        val proof = SdxlNativePhaseProof.fromNativeResult(native, SdxlImagePhase.UNET)
 
         val published = SdxlLatentArtifact.publishMetadata(
             requestId = "sdxl-3",
             producerPid = 7503,
+            contract = contract,
+            proof = proof,
             nativeResult = native,
             latentFile = latent,
             metadataFile = metadataFile
@@ -90,16 +110,58 @@ class SdxlImagePhaseProtocolTest {
             requestId = "sdxl-3",
             latentFile = latent,
             metadataFile = metadataFile,
-            expectedProducerArch = 79
+            expectedProducerArch = 79,
+            contract = contract
         )
 
         assertEquals(published.sha256, validated.sha256)
         assertTrue(metadataFile.readText().contains("\"committed\":true"))
         latent.appendBytes(byteArrayOf(1))
         val failure = runCatching {
-            SdxlLatentArtifact.validate("sdxl-3", latent, metadataFile, 79)
+            SdxlLatentArtifact.validate("sdxl-3", latent, metadataFile, 79, contract)
         }.exceptionOrNull()
         assertTrue(failure?.message.orEmpty().contains("byte size"))
+    }
+
+    @Test
+    fun `latent metadata rejects changed native execution contract`() {
+        val latent = temporaryFolder.newFile("contract-latent.f32")
+            .apply { writeBytes(ByteArray(4 * 2 * 2 * 4)) }
+        val metadataFile = File(temporaryFolder.root, "contract-latent.json")
+        val params = contractParams(steps = 30)
+        val contract = SdxlImageExecutionContract.fromParams(params.toString())
+        val native = JSONObject(params.toString())
+            .put("runtimeProfile", "V79")
+            .put("htpArchVersion", 79)
+            .put("latentDtype", "float32-le")
+            .put("latentShape", JSONArray(listOf(1, 4, 2, 2)))
+            .put("nativeGenerationSequence", 42L)
+            .put("nativeStageMask", 127L)
+            .put("nativeDetailStageMask", 511L)
+        SdxlLatentArtifact.publishMetadata(
+            requestId = "sdxl-contract",
+            producerPid = 7504,
+            contract = contract,
+            proof = SdxlNativePhaseProof.fromNativeResult(native, SdxlImagePhase.UNET),
+            nativeResult = native,
+            latentFile = latent,
+            metadataFile = metadataFile
+        )
+        val persisted = JSONObject(metadataFile.readText())
+        persisted.getJSONObject("nativeEffective").put("steps", 1)
+        metadataFile.writeText(persisted.toString())
+
+        assertTrue(
+            runCatching {
+                SdxlLatentArtifact.validate(
+                    "sdxl-contract",
+                    latent,
+                    metadataFile,
+                    79,
+                    contract
+                )
+            }.isFailure
+        )
     }
 
     @Test
@@ -114,7 +176,7 @@ class SdxlImagePhaseProtocolTest {
                     phase = stage,
                     message = stage,
                     step = 0,
-                    steps = 1,
+                    steps = 30,
                     elapsedMs = 0,
                     secondsPerStep = 0.0,
                     threads = 0,
@@ -186,9 +248,10 @@ class SdxlImagePhaseProtocolTest {
 
     @Test
     fun `final execution metadata preserves dynamic transport and isolated process proof`() {
+        val nativeExecution = contractParams(steps = 30)
         val metadata = qnnImageExecutionMetadata(
             nativeRequestId = "qnn-native-1",
-            nativeResult = JSONObject()
+            nativeResult = JSONObject(nativeExecution.toString())
                 .put("backend", "qnn_htp")
                 .put("executionStage", "sdxl_two_phase_passed")
                 .put("npuActive", true)
@@ -211,7 +274,7 @@ class SdxlImagePhaseProtocolTest {
                 .put("vaeTransportHtpArch", 79)
                 .put("vaeProcessDeathConfirmed", true)
                 .put(
-                    "runtime",
+                    "runtimeEvidence",
                     JSONObject()
                         .put("htpArchVersion", 79)
                         .put("loadable", true)
@@ -236,21 +299,119 @@ class SdxlImagePhaseProtocolTest {
         assertEquals(7L, metadata.getLong("nativeGenerationSequence"))
         assertEquals(123_456L, metadata.getLong("nativeStartedAtMonotonicMs"))
         assertEquals("sdxl_qnn_conditioning", metadata.getString("conditioningFormat"))
-        assertEquals(79, metadata.getInt("selectedHtpArch"))
-        assertTrue(metadata.getBoolean("runtimeLoadable"))
-        assertTrue(metadata.getBoolean("qnnInterfacePresent"))
-        assertTrue(metadata.getBoolean("sdkHeadersPresent"))
-        assertTrue(metadata.getBoolean("typedGraphBindingsCompiled"))
+        assertEquals(30, metadata.getInt("steps"))
     }
 
     @Test
-    fun `phase deadlines fit inside the outer disposable worker watchdog`() {
-        assertTrue(SDXL_UNET_PHASE_TIMEOUT_MS < SDXL_QNN_WORKER_TIMEOUT_MS)
-        assertTrue(SDXL_VAE_PHASE_TIMEOUT_MS < SDXL_QNN_WORKER_TIMEOUT_MS)
+    fun `multi step phase deadlines fit inside the step aware outer watchdog`() {
+        val unetTimeout = sdxlUnetPhaseTimeoutMs(unetExecutionCount = 60)
+        val vaeTimeout = sdxlVaePhaseTimeoutMs(steps = 30)
+        val outerTimeout = sdxlWorkerTimeoutMs(steps = 30, useCfg = true)
+
+        assertTrue(unetTimeout < outerTimeout)
+        assertTrue(vaeTimeout < outerTimeout)
         assertTrue(
-            SDXL_UNET_PHASE_TIMEOUT_MS + SDXL_VAE_PHASE_TIMEOUT_MS <
-                SDXL_QNN_WORKER_TIMEOUT_MS
+            unetTimeout + vaeTimeout < outerTimeout
         )
+    }
+
+    @Test
+    fun `two phase merge returns flat strict execution and native proofs`() {
+        val params = contractParams(steps = 30)
+        val contract = SdxlImageExecutionContract.fromParams(params.toString())
+        val latent = temporaryFolder.newFile("merge-latent.f32")
+            .apply { writeBytes(ByteArray(4 * 2 * 2 * 4)) }
+        val metadataFile = File(temporaryFolder.root, "merge-latent.json")
+        val output = temporaryFolder.newFile("merge-output.png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val unetNative = JSONObject(params.toString())
+            .put("ok", true)
+            .put("runtimeProfile", "V79")
+            .put("htpArchVersion", 79)
+            .put("latentDtype", "float32-le")
+            .put("latentShape", JSONArray(listOf(1, 4, 2, 2)))
+            .put("nativeGenerationSequence", 51L)
+            .put("nativeStageMask", 127L)
+            .put("nativeDetailStageMask", 511L)
+        val unetProof = SdxlNativePhaseProof.fromNativeResult(unetNative, SdxlImagePhase.UNET)
+        val committed = SdxlLatentArtifact.publishMetadata(
+            requestId = "sdxl-merge",
+            producerPid = 8101,
+            contract = contract,
+            proof = unetProof,
+            nativeResult = unetNative,
+            latentFile = latent,
+            metadataFile = metadataFile
+        )
+        val vaeNative = JSONObject()
+            .put("ok", true)
+            .put("runtimeProfile", "V79")
+            .put("htpArchVersion", 79)
+            .put("vaeScalingLocation", ImageVaeScalingLocation.HOST_BEFORE_GRAPH.name)
+            .put("vaeScalingFactor", 0.13025)
+            .put("effectiveVaeHostScale", 1.0 / 0.13025)
+            .put("vaeExecutionCount", 1)
+            .put("width", 1024)
+            .put("height", 1024)
+            .put("mimeType", "image/png")
+            .put("outputPath", output.canonicalPath)
+            .put("outputBytes", output.length())
+            .put("nativeGenerationSequence", 52L)
+            .put("nativeStageMask", 255L)
+            .put("nativeDetailStageMask", 1023L)
+        val unetResult = phaseResult(
+            requestId = "sdxl-merge",
+            phase = SdxlImagePhase.UNET,
+            pid = 8101,
+            proof = unetProof,
+            artifact = latent,
+            native = unetNative
+        )
+        val vaeProof = SdxlNativePhaseProof.fromNativeResult(vaeNative, SdxlImagePhase.VAE)
+        val vaeResult = phaseResult(
+            requestId = "sdxl-merge",
+            phase = SdxlImagePhase.VAE,
+            pid = 8102,
+            proof = vaeProof,
+            artifact = output,
+            native = vaeNative
+        )
+
+        val merged = mergeSdxlPhaseNativeResults(
+            contract = contract,
+            unetResult = unetResult,
+            unetNative = unetNative,
+            vaeResult = vaeResult,
+            vaeNative = vaeNative,
+            metadata = committed,
+            transportHtpArch = 79,
+            vaeTransportHtpArch = 79,
+            outputFile = output,
+            stageTrace = listOf("unet:completed", "vae:completed")
+        )
+
+        assertEquals(ImageExecutionProfileNativeContract.requiredFields, merged.keys().asSequence()
+            .filter { it in ImageExecutionProfileNativeContract.requiredFields }
+            .toSet())
+        assertEquals(30, merged.getInt("steps"))
+        assertEquals(60, merged.getInt("unetExecutionCount"))
+        assertEquals(51L, merged.getLong("nativeGenerationSequence"))
+        assertEquals(52L, merged.getLong("vaeNativeGenerationSequence"))
+        assertTrue(merged.getBoolean("nativeExecution"))
+        assertFalse(merged.getBoolean("fallback"))
+    }
+
+    @Test
+    fun `vae scaling mismatch fails before final publication`() {
+        val contract = SdxlImageExecutionContract.fromParams(contractParams(steps = 30).toString())
+        val wrongScale = JSONObject()
+            .put("vaeScalingLocation", ImageVaeScalingLocation.GRAPH_INTERNAL.name)
+            .put("vaeScalingFactor", 0.13025)
+            .put("effectiveVaeHostScale", 1.0)
+            .put("vaeExecutionCount", 1)
+            .put("width", 1024)
+            .put("height", 1024)
+
+        assertTrue(runCatching { validateSdxlVaeNativeEvidence(contract, wrongScale) }.isFailure)
     }
 
     @Test
@@ -266,4 +427,58 @@ class SdxlImagePhaseProtocolTest {
         assertTrue(manifest.contains("android:process=\":sdxl_vae_v75\""))
         assertFalse(manifest.contains("SdxlUnetWorkerService\"\n            android:exported=\"true"))
     }
+
+    private fun contractParams(steps: Int, useCfg: Boolean = true): JSONObject {
+        val timetableCount = steps
+        val unetExecutionCount = timetableCount * if (useCfg) 2 else 1
+        return JSONObject()
+            .put("profileId", "generic.sdxl.test")
+            .put("profileRevision", 3)
+            .put("modelFingerprint", "a".repeat(64))
+            .put("runtime", LocalImageRuntime.QNN_HTP.name)
+            .put("scheduler", ImageSchedulerAlgorithm.DPMPP_2M.name)
+            .put("predictionType", ImagePredictionType.EPSILON.name)
+            .put("steps", steps)
+            .put("timetableCount", timetableCount)
+            .put("unetExecutionCount", unetExecutionCount)
+            .put("expectedTimetableCount", timetableCount)
+            .put("expectedUnetExecutionCount", unetExecutionCount)
+            .put("cfgScale", 7.0)
+            .put("useCfg", useCfg)
+            .put("unconditionalBranch", useCfg)
+            .put("tokenizerBackend", ImageTokenizerBackend.TOKENIZERS_CPP.name)
+            .put("tokenCount", 154)
+            .put("embeddingDiskDataType", ImageEmbeddingDiskDataType.FP16.name)
+            .put("vaeScalingLocation", ImageVaeScalingLocation.HOST_BEFORE_GRAPH.name)
+            .put("vaeScalingFactor", 0.13025)
+            .put("width", 1024)
+            .put("height", 1024)
+            .put("seed", 1234L)
+            .put("graphName", "model")
+            .put("fallback", false)
+    }
+
+    private fun phaseResult(
+        requestId: String,
+        phase: SdxlImagePhase,
+        pid: Int,
+        proof: SdxlNativePhaseProof,
+        artifact: File,
+        native: JSONObject
+    ): SdxlImagePhaseResult = SdxlImagePhaseResult(
+        requestId = requestId,
+        phase = phase,
+        workerPid = pid,
+        runtimeProfile = "V79",
+        artifactPath = artifact.canonicalPath,
+        metadataPath = "",
+        nativeGenerationSequence = proof.nativeGenerationSequence,
+        nativeStageMask = proof.nativeStageMask,
+        nativeDetailStageMask = proof.nativeDetailStageMask,
+        nativeResultJson = native.toString()
+    )
+}
+
+private fun JSONObject.putAll(values: JSONObject): JSONObject = apply {
+    values.keys().forEach { key -> put(key, values.get(key)) }
 }

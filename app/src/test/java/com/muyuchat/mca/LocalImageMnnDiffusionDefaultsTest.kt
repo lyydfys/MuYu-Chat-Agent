@@ -23,7 +23,7 @@ class LocalImageMnnDiffusionDefaultsTest {
         val request = LocalImageWorkerProtocol.parseGenerateRequest(legacyRequestJson.toString())
 
         assertNull(request.options.steps)
-        assertEquals(20, resolveMnnDiffusionSteps(request.model.family, request.options.steps))
+        assertEquals(20, resolveMnnProfile().layers.resolved.steps)
     }
 
     @Test
@@ -39,26 +39,16 @@ class LocalImageMnnDiffusionDefaultsTest {
             )
         )
 
-        assertEquals(12, resolveMnnDiffusionSteps(request.model.family, request.options.steps))
-    }
-
-    @Test
-    fun `MNN defaults for other families retain their calibrated values`() {
-        assertEquals(5, resolveMnnDiffusionSteps(LocalImageModelFamily.SANA, null))
-        assertEquals(8, resolveMnnDiffusionSteps(LocalImageModelFamily.SDXL, null))
+        assertEquals(12, resolveMnnProfile(steps = request.options.steps).layers.resolved.steps)
     }
 
     @Test
     fun `MNN validates exact dimensions and step bounds before native execution`() {
-        val legacyRecord = sd15MnnModel().copy(imageSize = "384x384")
-        val productDefault = resolveMnnDiffusionProductDimensions(legacyRecord, runner = "direct")
-        assertEquals(512 to 512, productDefault)
-        assertEquals(384 to 384, resolveMnnDiffusionProductDimensions(legacyRecord, runner = "module"))
         assertEquals(
             512 to 512,
             resolveMnnDiffusionDimensions(
-                defaultWidth = productDefault.first,
-                defaultHeight = productDefault.second,
+                defaultWidth = 512,
+                defaultHeight = 512,
                 requestedWidth = null,
                 requestedHeight = null
             )
@@ -67,10 +57,6 @@ class LocalImageMnnDiffusionDefaultsTest {
         assertEquals(512 to 512, resolveMnnDiffusionDimensions(512, 512, null, null))
         assertInvalid { resolveMnnDiffusionDimensions(512, 512, 384, 512) }
         assertInvalid { resolveMnnDiffusionDimensions(512, 512, 512, 384) }
-        assertEquals(1, resolveMnnDiffusionSteps(LocalImageModelFamily.SD15, 1))
-        assertEquals(50, resolveMnnDiffusionSteps(LocalImageModelFamily.SD15, 50))
-        assertInvalid { resolveMnnDiffusionSteps(LocalImageModelFamily.SD15, 0) }
-        assertInvalid { resolveMnnDiffusionSteps(LocalImageModelFamily.SD15, 51) }
     }
 
     @Test
@@ -101,13 +87,6 @@ class LocalImageMnnDiffusionDefaultsTest {
         assertEquals(2, resolveMnnDiffusionMemoryMode(2))
         assertInvalid { resolveMnnDiffusionMemoryMode(-1) }
         assertInvalid { resolveMnnDiffusionMemoryMode(3) }
-        assertEquals("euler", resolveMnnDiffusionSampleMethod(null))
-        assertEquals("euler", resolveMnnDiffusionSampleMethod(" EULER "))
-        assertInvalid { resolveMnnDiffusionSampleMethod("") }
-        assertInvalid { resolveMnnDiffusionSampleMethod("dpm++") }
-        assertEquals("auto", resolveMnnDiffusionTokenEmbeddingMode(null))
-        assertInvalid { resolveMnnDiffusionTokenEmbeddingMode("") }
-        assertInvalid { resolveMnnDiffusionTokenEmbeddingMode("second_half") }
     }
 
     @Test
@@ -123,93 +102,60 @@ class LocalImageMnnDiffusionDefaultsTest {
         assertEquals("", parsed.sampleMethod)
         assertEquals("", parsed.tokenEmbeddingMode)
         assertEquals(3, parsed.memoryMode)
-        assertInvalid { resolveMnnDiffusionSampleMethod(parsed.sampleMethod) }
-        assertInvalid { resolveMnnDiffusionTokenEmbeddingMode(parsed.tokenEmbeddingMode) }
         assertInvalid { resolveMnnDiffusionMemoryMode(parsed.memoryMode) }
     }
 
     @Test
-    fun `native result controls are verified when present and audit remains explicit when absent`() {
-        val absent = JSONObject().put("ok", true)
-        verifyMnnDiffusionResultControlIfPresent(absent, "cfgScale", 7.0)
-
-        val matching = JSONObject()
-            .put("cfgScale", 7.0)
-            .put("flowShift", 0.0)
-            .put("useCfg", false)
-            .put("sampleMethod", "EULER")
-            .put("tokenEmbeddingMode", "auto")
-            .put("memoryMode", 0)
-        verifyMnnDiffusionResultControlIfPresent(matching, "cfgScale", 7.0)
-        verifyMnnDiffusionResultControlIfPresent(matching, "flowShift", 0.0)
-        verifyMnnDiffusionResultControlIfPresent(matching, "useCfg", false)
-        verifyMnnDiffusionResultControlIfPresent(matching, "sampleMethod", "euler")
-        verifyMnnDiffusionResultControlIfPresent(matching, "tokenEmbeddingMode", "auto")
-        verifyMnnDiffusionResultControlIfPresent(matching, "memoryMode", 0)
-
-        assertInvalid {
-            verifyMnnDiffusionResultControlIfPresent(
-                JSONObject().put("memoryMode", 2),
-                "memoryMode",
-                0
-            )
-        }
-
+    fun `MNN audit excludes prompt and obsolete token embedding mode`() {
         val audit = mnnDiffusionControlAuditJson(
             JSONObject()
                 .put("prompt", "must not leak")
                 .put("cfgScale", 7.0)
                 .put("sampleMethod", "euler")
+                .put("tokenEmbeddingMode", "auto")
                 .put("memoryMode", 0)
         )
         assertFalse(audit.has("prompt"))
+        assertFalse(audit.has("tokenEmbeddingMode"))
         assertEquals(7.0, audit.getDouble("cfgScale"), 0.0)
         assertEquals("euler", audit.getString("sampleMethod"))
         assertEquals(0, audit.getInt("memoryMode"))
     }
 
     @Test
-    fun `MNN product smoke requires exact direct OpenCL 512 twenty-step execution`() {
-        val matching = JSONObject()
-            .put("ok", true)
-            .put("runner", "direct")
-            .put("backendMode", "opencl")
-            .put("steps", 20)
-            .put("width", 512)
-            .put("height", 512)
+    fun `MNN graph conditioning wins over valid legacy token tables`() {
+        assertEquals(
+            ImageEmbeddingDiskDataType.GRAPH_INTERNAL,
+            resolveMnnConditioningDiskDataType(
+                graphInternal = true,
+                tokenEmbeddingByteSize = 75_890_688L
+            )
+        )
+        assertEquals(
+            ImageEmbeddingDiskDataType.GRAPH_INTERNAL,
+            resolveMnnConditioningDiskDataType(
+                graphInternal = true,
+                tokenEmbeddingByteSize = 151_781_376L
+            )
+        )
+    }
 
-        verifyMnnDiffusionExecutionContract(matching, "direct", "opencl", 20, 512, 512)
-
-        assertInvalid {
-            verifyMnnDiffusionExecutionContract(
-                JSONObject(matching.toString()).put("runner", "module"),
-                "direct",
-                "opencl",
-                20,
-                512,
-                512
-            )
-        }
-        assertInvalid {
-            verifyMnnDiffusionExecutionContract(
-                JSONObject(matching.toString()).put("backendMode", "cpu"),
-                "direct",
-                "opencl",
-                20,
-                512,
-                512
-            )
-        }
-        assertInvalid {
-            verifyMnnDiffusionExecutionContract(
-                JSONObject(matching.toString()).put("steps", 8),
-                "direct",
-                "opencl",
-                20,
-                512,
-                512
-            )
-        }
+    @Test
+    fun `MNN legacy token tables use exact disk precision contracts`() {
+        assertEquals(
+            ImageEmbeddingDiskDataType.FP16,
+            resolveMnnConditioningDiskDataType(false, 75_890_688L)
+        )
+        assertEquals(
+            ImageEmbeddingDiskDataType.FP32,
+            resolveMnnConditioningDiskDataType(false, 151_781_376L)
+        )
+        assertEquals(
+            ImageEmbeddingDiskDataType.RUNTIME_NATIVE,
+            resolveMnnConditioningDiskDataType(false, null)
+        )
+        assertInvalid { resolveMnnConditioningDiskDataType(true, 75_890_687L) }
+        assertInvalid { resolveMnnConditioningDiskDataType(false, 151_781_375L) }
     }
 
     @Test
@@ -256,6 +202,17 @@ class LocalImageMnnDiffusionDefaultsTest {
                 options = options
             )
         ).options
+
+    private fun resolveMnnProfile(steps: Int? = null): ImageExecutionProfileResolution =
+        ImageExecutionProfileResolver.resolve(
+            ImageExecutionProfileResolverInput(
+                modelFingerprint = "a".repeat(64),
+                runtime = LocalImageRuntime.MNN_DIFFUSION,
+                family = LocalImageModelFamily.SD15,
+                recommendationId = "sd15_mnn_512_quality",
+                userOverrides = ImageGenerationOverrides(steps = steps)
+            )
+        )
 
     private fun assertInvalid(block: () -> Unit) {
         try {

@@ -129,6 +129,69 @@ android {
     }
 }
 
+// The isolated image workers are instantiated in fresh processes, so every AIDL
+// interface and Stub must be present in the packaged dex.  Gradle can otherwise
+// accept a stale incremental Javac directory that is missing only some generated
+// AIDL classes.  Declare the concrete files as Javac outputs so a missing Stub
+// invalidates the task, then fail packaging if a rerun still did not produce it.
+val requiredWorkerAidlInterfaces = listOf(
+    "ILocalImageWorker",
+    "ILocalImageWorkerCallback",
+    "IQairtDryRunWorker",
+    "IQairtDryRunWorkerCallback",
+    "ISdxlImagePhaseWorker",
+    "ISdxlImagePhaseWorkerCallback",
+    "ITuningProbeWorker",
+    "ITuningProbeWorkerCallback"
+)
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        val variantName = variant.name
+        val variantTaskName = variantName.replaceFirstChar { character ->
+            if (character.isLowerCase()) character.titlecase() else character.toString()
+        }
+        val javacTaskName = "compile${variantTaskName}JavaWithJavac"
+        val classOutputRoot =
+            "intermediates/javac/$variantName/$javacTaskName/classes/com/muyuchat/mca"
+        val expectedClasses = requiredWorkerAidlInterfaces.flatMap { interfaceName ->
+            listOf(
+                layout.buildDirectory.file("$classOutputRoot/$interfaceName.class"),
+                layout.buildDirectory.file("$classOutputRoot/${interfaceName}\$Stub.class")
+            )
+        }
+
+        tasks.configureEach {
+            if (name == javacTaskName) {
+                outputs.files(expectedClasses)
+            }
+        }
+
+        val verifyWorkerAidl = tasks.register("verify${variantTaskName}WorkerAidlClasses") {
+            group = "verification"
+            description = "Verifies that every isolated worker AIDL interface and Stub was compiled."
+            dependsOn(javacTaskName)
+            inputs.files(expectedClasses)
+            doLast {
+                val missing = expectedClasses
+                    .map { it.get().asFile }
+                    .filterNot { it.isFile && it.length() > 0L }
+                check(missing.isEmpty()) {
+                    "Generated worker AIDL classes are missing: " +
+                        missing.joinToString { it.name } +
+                        ". Refusing to package an APK whose isolated worker will crash."
+                }
+            }
+        }
+
+        tasks.configureEach {
+            if (name == "package$variantTaskName") {
+                dependsOn(verifyWorkerAidl)
+            }
+        }
+    }
+}
+
 dependencies {
     if (mcaQnnRuntimeOverrideGenieX) {
         implementation(project(":core:native"))

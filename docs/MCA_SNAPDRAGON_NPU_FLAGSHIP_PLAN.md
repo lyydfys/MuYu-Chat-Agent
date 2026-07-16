@@ -31,8 +31,8 @@ image-generation files must stay CPU/MNN/stable-diffusion.cpp compatible paths.
 - Qualcomm AI Engine Direct / QAIRT / QNN: native Snapdragon NPU graph route.
 - Google LiteRT Qualcomm NPU delegate: productized Android route for supported
   LiteRT models and compiled models.
-- Local Dream: proof that Android Stable Diffusion-style generation can use
-  Snapdragon NPU with model-specific packages.
+- External Android diffusion quality reference: proof that Stable
+  Diffusion-style generation can use Snapdragon NPU with model-specific packages.
 - Qualcomm AI Hub: preferred source for QNN/LiteRT-ready examples and model
   conversion patterns.
 - ModelScope: preferred download source when an equivalent public bundle exists.
@@ -43,7 +43,6 @@ References:
 - <https://docs.qualcomm.com/bundle/publicresource/topics/80-63442-50/introduction.html?product=1601111740009302>
 - <https://developers.google.com/edge/litert/android/npu/qualcomm>
 - <https://developers.google.com/edge/litert/next/qualcomm>
-- <https://github.com/xororz/local-dream>
 - <https://github.com/qualcomm/ai-hub-models>
 
 ## Product Architecture
@@ -150,7 +149,7 @@ Required manifest fields:
 
 Use SD1.5-style QNN/QAIRT bundles first. This is the shortest path to real
 device proof because the graph shape, text encoder, UNet, VAE, and scheduler are
-well understood and Local Dream has already proven the product direction.
+well understood and an external quality baseline has already proven the product direction.
 
 Do not use FLUX, Z-Image, Qwen-Image, or other frontier architectures as the
 first NPU target. Keep them visible as advanced experiments after SD1.5 and SDXL

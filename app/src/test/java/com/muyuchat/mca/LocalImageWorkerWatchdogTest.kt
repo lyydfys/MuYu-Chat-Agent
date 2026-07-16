@@ -10,10 +10,12 @@ class LocalImageWorkerWatchdogTest {
     fun `hard watchdog applies only to qnn sdxl`() {
         val policy = localImageWorkerWatchdogPolicy(
             runtime = LocalImageRuntime.QNN_HTP,
-            family = LocalImageModelFamily.SDXL
+            family = LocalImageModelFamily.SDXL,
+            steps = 30,
+            useCfg = true
         )
 
-        assertEquals(SDXL_QNN_WORKER_TIMEOUT_MS, policy?.timeoutMs)
+        assertEquals(sdxlWorkerTimeoutMs(30, true), policy?.timeoutMs)
         assertEquals("qnn_sdxl_worker_timeout", LOCAL_IMAGE_WORKER_WATCHDOG_TIMEOUT_CODE)
         assertNull(
             localImageWorkerWatchdogPolicy(
@@ -31,8 +33,9 @@ class LocalImageWorkerWatchdogTest {
 
     @Test
     fun `timeout message preserves last phase and accumulated native stages`() {
+        val timeoutMs = sdxlWorkerTimeoutMs(30, true)
         val message = localImageWorkerWatchdogMessage(
-            timeoutMs = SDXL_QNN_WORKER_TIMEOUT_MS,
+            timeoutMs = timeoutMs,
             phase = "graph_execute",
             stageTrace = listOf(
                 "context_lock",
@@ -42,9 +45,21 @@ class LocalImageWorkerWatchdogTest {
             )
         )
 
-        assertTrue(message.contains("360s"))
+        assertTrue(message.contains("${timeoutMs / 1_000L}s"))
         assertTrue(message.contains("phase=graph_execute"))
         assertTrue(message.contains("context_binary_mmap -> context_create -> graph_execute"))
+    }
+
+    @Test
+    fun `watchdog budget scales with steps and cfg branches`() {
+        val oneStep = sdxlWorkerTimeoutMs(1, useCfg = false)
+        val thirtyStepsSingleBranch = sdxlWorkerTimeoutMs(30, useCfg = false)
+        val thirtyStepsCfg = sdxlWorkerTimeoutMs(30, useCfg = true)
+
+        assertTrue(thirtyStepsSingleBranch > oneStep)
+        assertTrue(thirtyStepsCfg > thirtyStepsSingleBranch)
+        assertTrue(sdxlUnetPhaseTimeoutMs(60) < thirtyStepsCfg)
+        assertTrue(sdxlVaePhaseTimeoutMs(30) < thirtyStepsCfg)
     }
 
     @Test

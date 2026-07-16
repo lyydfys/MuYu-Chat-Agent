@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.31.6)
+cmake_minimum_required(VERSION 3.22.1)
 project(mca_sd_native LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)

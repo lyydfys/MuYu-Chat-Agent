@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cctype>
 #include <cstdarg>
@@ -20,6 +21,7 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <mutex>
@@ -33,6 +35,7 @@
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#include "diffusion_scheduler.hpp"
 #include "jni_utf8_codec.hpp"
 #include "qnn_image_stage_trace.hpp"
 
@@ -178,8 +181,19 @@ bool qnn_image_generation_try_begin(int steps, const std::string& journal_path) 
     g_qnn_image_generation_stage_mask.fetch_or(qnn_image_generation_stage_bit(kQnnImageLoading));
     g_qnn_image_generation_step.store(0);
     g_qnn_image_generation_steps.store(std::max(1, steps));
-    g_qnn_image_generation_started_ms.store(monotonic_millis());
-    g_qnn_image_generation_sequence.fetch_add(1);
+    const long long started_ms = monotonic_millis();
+    g_qnn_image_generation_started_ms.store(started_ms);
+    // Isolated SDXL workers are short-lived, so a process-local 1,2,3 counter
+    // would restart at one for every UI/API request. Bind the sequence to the
+    // device monotonic clock and worker pid, while preserving monotonicity for
+    // repeated generations in a long-lived process.
+    const long long process_unique_sequence =
+        (started_ms << 16) | (static_cast<long long>(::getpid()) & 0xffffLL);
+    long long previous_sequence = g_qnn_image_generation_sequence.load();
+    const long long next_sequence = std::max(
+        process_unique_sequence,
+        previous_sequence + 1LL);
+    g_qnn_image_generation_sequence.store(next_sequence);
     persist_qnn_image_generation_journal();
     return true;
 }
@@ -215,10 +229,16 @@ public:
         if (active_) qnn_image_generation_record_stage(stage, phase);
     }
     void set_steps(int steps) const {
-        if (active_) g_qnn_image_generation_steps.store(std::max(1, steps));
+        if (active_) {
+            g_qnn_image_generation_steps.store(std::max(1, steps));
+            persist_qnn_image_generation_journal();
+        }
     }
     void set_step(int step) const {
-        if (active_) g_qnn_image_generation_step.store(std::max(0, step));
+        if (active_) {
+            g_qnn_image_generation_step.store(std::max(0, step));
+            persist_qnn_image_generation_journal();
+        }
     }
 
 private:
@@ -4092,90 +4112,871 @@ bool read_int32_binary_file(
     return true;
 }
 
-std::vector<float> sd15_pndm_alphas() {
-    constexpr int train_timesteps = 1000;
-    constexpr float beta_start = 0.00085f;
-    constexpr float beta_end = 0.012f;
-    std::vector<float> alphas(train_timesteps, 1.0f);
-    float product = 1.0f;
-    const float sqrt_start = std::sqrt(beta_start);
-    const float sqrt_end = std::sqrt(beta_end);
-    for (int i = 0; i < train_timesteps; ++i) {
-        const float t = train_timesteps <= 1
-            ? 0.0f
-            : static_cast<float>(i) / static_cast<float>(train_timesteps - 1);
-        const float beta_root = sqrt_start + (sqrt_end - sqrt_start) * t;
-        const float alpha = 1.0f - beta_root * beta_root;
-        product *= alpha;
-        alphas[static_cast<size_t>(i)] = product;
-    }
-    return alphas;
+enum class QnnVaeScalingLocation {
+    HostBeforeGraph,
+    GraphInternal,
+    None,
+};
+
+struct QnnSchedulerContract {
+    mca::diffusion::DiffusionSchedulerConfig config;
+    int steps = 0;
+    size_t expected_timetable_count = 0;
+    size_t expected_unet_execution_count = 0;
+    bool scale_model_input = false;
+    float eta = 0.0f;
+};
+
+struct QnnSemanticExecutionContract {
+    std::string profile_id;
+    int profile_revision = 0;
+    std::string model_fingerprint;
+    QnnSchedulerContract scheduler;
+    bool use_cfg = false;
+    float cfg_scale = 0.0f;
+    uint32_t seed = 0;
+    std::string tokenizer_backend;
+    size_t token_count = 0;
+    int tokenizer_max_length = 0;
+    std::string embedding_disk_data_type;
+    QnnVaeScalingLocation vae_scaling_location = QnnVaeScalingLocation::None;
+    double vae_scaling_factor = 1.0;
+    int width = 0;
+    int height = 0;
+    std::string graph_name;
+};
+
+struct QnnNativeEffectiveEvidence {
+    size_t timetable_count = 0;
+    size_t unet_execution_count = 0;
+    std::string tokenizer_backend;
+    size_t token_count = 0;
+    std::string embedding_disk_data_type;
+    int width = 0;
+    int height = 0;
+    std::string graph_name;
+};
+
+struct QnnConditioningEvidence {
+    std::string tokenizer_backend;
+    size_t token_count = 0;
+    std::string embedding_disk_data_type;
+};
+
+std::string normalized_contract_enum(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        if (c == '-' || c == ' ' || c == '.') return '_';
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
 }
 
-std::vector<float> qnn_pndm_step(
-        const std::vector<float>& sample,
-        std::vector<std::vector<float>>& ets,
-        const std::vector<float>& model_output,
-        int index,
-        const std::vector<int>& timesteps,
-        const std::vector<float>& alphas) {
-    int timestep = timesteps[static_cast<size_t>(index)];
-    int prev_timestep = 0;
-    if (index + 1 < static_cast<int>(timesteps.size())) {
-        prev_timestep = timesteps[static_cast<size_t>(index + 1)];
+bool qnn_json_value_start(
+        const std::string& json,
+        const std::string& key,
+        size_t* value_start,
+        std::string* error) {
+    const auto key_position = json.find("\"" + key + "\"");
+    if (key_position == std::string::npos) {
+        *error = "Missing required native execution field '" + key + "'.";
+        return false;
     }
-    std::vector<float> adjusted = model_output;
-    if (index != 1) {
-        if (ets.size() >= 4) {
-            ets.erase(ets.begin());
+    const auto colon = json.find(':', key_position + key.size() + 2u);
+    if (colon == std::string::npos) {
+        *error = "Native execution field '" + key + "' has no value.";
+        return false;
+    }
+    const auto start = json.find_first_not_of(" \t\r\n", colon + 1u);
+    if (start == std::string::npos) {
+        *error = "Native execution field '" + key + "' has no value.";
+        return false;
+    }
+    *value_start = start;
+    return true;
+}
+
+bool qnn_json_token_ends_at(const std::string& json, size_t end) {
+    const auto next = json.find_first_not_of(" \t\r\n", end);
+    return next == std::string::npos || json[next] == ',' || json[next] == '}' || json[next] == ']';
+}
+
+bool qnn_required_string_field(
+        const std::string& json,
+        const std::string& key,
+        std::string* value,
+        std::string* error) {
+    size_t start = 0;
+    if (!qnn_json_value_start(json, key, &start, error)) return false;
+    if (json[start] != '"') {
+        *error = "Native execution field '" + key + "' must be a string.";
+        return false;
+    }
+    value->clear();
+    bool escaped = false;
+    for (size_t index = start + 1u; index < json.size(); ++index) {
+        const char c = json[index];
+        if (escaped) {
+            switch (c) {
+                case 'n': value->push_back('\n'); break;
+                case 'r': value->push_back('\r'); break;
+                case 't': value->push_back('\t'); break;
+                default: value->push_back(c); break;
+            }
+            escaped = false;
+            continue;
         }
-        ets.push_back(model_output);
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '"') {
+            if (value->empty()) {
+                *error = "Native execution field '" + key + "' must not be blank.";
+                return false;
+            }
+            return true;
+        }
+        value->push_back(c);
+    }
+    *error = "Native execution string field '" + key + "' is unterminated.";
+    return false;
+}
+
+bool qnn_required_bool_field(
+        const std::string& json,
+        const std::string& key,
+        bool* value,
+        std::string* error) {
+    size_t start = 0;
+    if (!qnn_json_value_start(json, key, &start, error)) return false;
+    if (json.compare(start, 4u, "true") == 0 && qnn_json_token_ends_at(json, start + 4u)) {
+        *value = true;
+        return true;
+    }
+    if (json.compare(start, 5u, "false") == 0 && qnn_json_token_ends_at(json, start + 5u)) {
+        *value = false;
+        return true;
+    }
+    *error = "Native execution field '" + key + "' must be a boolean.";
+    return false;
+}
+
+bool qnn_required_integer_field(
+        const std::string& json,
+        const std::string& key,
+        long long* value,
+        std::string* error) {
+    size_t start = 0;
+    if (!qnn_json_value_start(json, key, &start, error)) return false;
+    errno = 0;
+    char* end = nullptr;
+    const char* begin = json.c_str() + start;
+    const long long parsed = std::strtoll(begin, &end, 10);
+    const size_t end_index = static_cast<size_t>(end - json.c_str());
+    if (end == begin || errno == ERANGE || !qnn_json_token_ends_at(json, end_index)) {
+        *error = "Native execution field '" + key + "' must be an integer.";
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
+bool qnn_required_number_field(
+        const std::string& json,
+        const std::string& key,
+        double* value,
+        std::string* error) {
+    size_t start = 0;
+    if (!qnn_json_value_start(json, key, &start, error)) return false;
+    errno = 0;
+    char* end = nullptr;
+    const char* begin = json.c_str() + start;
+    const double parsed = std::strtod(begin, &end);
+    const size_t end_index = static_cast<size_t>(end - json.c_str());
+    if (end == begin || errno == ERANGE || !std::isfinite(parsed) ||
+        !qnn_json_token_ends_at(json, end_index)) {
+        *error = "Native execution field '" + key + "' must be a finite number.";
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
+bool parse_qnn_scheduler_contract(
+        const std::string& json,
+        QnnSchedulerContract* contract,
+        std::string* error) {
+    std::string scheduler;
+    std::string sample_method;
+    std::string prediction;
+    std::string noise_schedule;
+    std::string timestep_spacing;
+    std::string final_sigma_type;
+    long long integer_value = 0;
+    double number_value = 0.0;
+    if (!qnn_required_string_field(json, "scheduler", &scheduler, error) ||
+        !qnn_required_string_field(json, "sampleMethod", &sample_method, error) ||
+        !qnn_required_string_field(json, "predictionType", &prediction, error) ||
+        !qnn_required_integer_field(json, "numTrainTimesteps", &integer_value, error)) {
+        return false;
+    }
+    if (integer_value <= 0 || integer_value > std::numeric_limits<int>::max()) {
+        *error = "numTrainTimesteps must be a positive int32 value.";
+        return false;
+    }
+    contract->config.num_train_timesteps = static_cast<int>(integer_value);
+    if (!qnn_required_string_field(json, "noiseSchedule", &noise_schedule, error) ||
+        !qnn_required_number_field(json, "betaStart", &number_value, error)) {
+        return false;
+    }
+    contract->config.beta_start = static_cast<float>(number_value);
+    if (!qnn_required_number_field(json, "betaEnd", &number_value, error) ||
+        !qnn_required_string_field(json, "timestepSpacing", &timestep_spacing, error) ||
+        !qnn_required_integer_field(json, "stepsOffset", &integer_value, error)) {
+        return false;
+    }
+    if (integer_value < std::numeric_limits<int>::min() ||
+        integer_value > std::numeric_limits<int>::max()) {
+        *error = "stepsOffset must be an int32 value.";
+        return false;
+    }
+    contract->config.beta_end = static_cast<float>(number_value);
+    contract->config.steps_offset = static_cast<int>(integer_value);
+    if (!qnn_required_bool_field(json, "setAlphaToOne", &contract->config.set_alpha_to_one, error) ||
+        !qnn_required_bool_field(json, "skipPrkSteps", &contract->config.skip_prk_steps, error) ||
+        !qnn_required_string_field(json, "finalSigmaType", &final_sigma_type, error) ||
+        !qnn_required_bool_field(json, "scaleModelInput", &contract->scale_model_input, error) ||
+        !qnn_required_bool_field(json, "clipSample", &contract->config.clip_sample, error) ||
+        !qnn_required_number_field(json, "clipSampleRange", &number_value, error)) {
+        return false;
+    }
+    contract->config.clip_sample_range = static_cast<float>(number_value);
+    if (!qnn_required_bool_field(json, "thresholding", &contract->config.thresholding, error) ||
+        !qnn_required_number_field(json, "eta", &number_value, error)) {
+        return false;
+    }
+    if (number_value != 0.0) {
+        *error = "QNN scheduler execution currently requires eta=0 because no variance-noise tensor is supplied.";
+        return false;
+    }
+    contract->eta = static_cast<float>(number_value);
+    if (!qnn_required_bool_field(json, "lowerOrderFinal", &contract->config.lower_order_final, error) ||
+        !qnn_required_integer_field(json, "steps", &integer_value, error)) {
+        return false;
+    }
+    if (integer_value <= 0 || integer_value > contract->config.num_train_timesteps) {
+        *error = "steps must be in [1, numTrainTimesteps]; native does not clamp it.";
+        return false;
+    }
+    contract->steps = static_cast<int>(integer_value);
+    if (!qnn_required_integer_field(json, "expectedTimetableCount", &integer_value, error) ||
+        integer_value <= 0) {
+        if (error->empty()) *error = "expectedTimetableCount must be positive.";
+        return false;
+    }
+    contract->expected_timetable_count = static_cast<size_t>(integer_value);
+    if (!qnn_required_integer_field(json, "timetableCount", &integer_value, error) ||
+        integer_value <= 0 ||
+        static_cast<size_t>(integer_value) != contract->expected_timetable_count) {
+        if (error->empty()) {
+            *error = "timetableCount must exactly match expectedTimetableCount.";
+        }
+        return false;
+    }
+    if (!qnn_required_integer_field(json, "expectedUnetExecutionCount", &integer_value, error) ||
+        integer_value <= 0) {
+        if (error->empty()) *error = "expectedUnetExecutionCount must be positive.";
+        return false;
+    }
+    contract->expected_unet_execution_count = static_cast<size_t>(integer_value);
+    if (!qnn_required_integer_field(json, "unetExecutionCount", &integer_value, error) ||
+        integer_value <= 0 ||
+        static_cast<size_t>(integer_value) != contract->expected_unet_execution_count) {
+        if (error->empty()) {
+            *error = "unetExecutionCount must exactly match expectedUnetExecutionCount.";
+        }
+        return false;
+    }
+
+    scheduler = normalized_contract_enum(scheduler);
+    if (scheduler == "euler" || scheduler == "euler_discrete") {
+        contract->config.algorithm = mca::diffusion::SchedulerAlgorithm::EulerDiscrete;
+    } else if (scheduler == "ddim") {
+        contract->config.algorithm = mca::diffusion::SchedulerAlgorithm::Ddim;
+    } else if (scheduler == "pndm" || scheduler == "pndm_plms") {
+        contract->config.algorithm = mca::diffusion::SchedulerAlgorithm::Pndm;
+    } else if (scheduler == "dpmpp_2m" || scheduler == "dpm++_2m") {
+        contract->config.algorithm = mca::diffusion::SchedulerAlgorithm::Dpmpp2m;
     } else {
-        timestep = timesteps[0];
-        prev_timestep = timesteps[1];
+        *error = "Unsupported QNN scheduler contract value: " + scheduler;
+        return false;
     }
-    const int ets_index = static_cast<int>(ets.size()) - 1;
-    if (index == 1) {
-        for (size_t i = 0; i < adjusted.size(); ++i) {
-            adjusted[i] = (adjusted[i] + ets[static_cast<size_t>(ets_index)][i]) * 0.5f;
-        }
-    } else if (ets_index == 1) {
-        for (size_t i = 0; i < adjusted.size(); ++i) {
-            adjusted[i] =
-                (3.0f * ets[static_cast<size_t>(ets_index)][i] -
-                 ets[static_cast<size_t>(ets_index - 1)][i]) * 0.5f;
-        }
-    } else if (ets_index == 2) {
-        for (size_t i = 0; i < adjusted.size(); ++i) {
-            adjusted[i] =
-                (23.0f * ets[static_cast<size_t>(ets_index)][i] -
-                 16.0f * ets[static_cast<size_t>(ets_index - 1)][i] +
-                 5.0f * ets[static_cast<size_t>(ets_index - 2)][i]) / 12.0f;
-        }
-    } else if (ets_index >= 3) {
-        for (size_t i = 0; i < adjusted.size(); ++i) {
-            adjusted[i] =
-                (55.0f * ets[static_cast<size_t>(ets_index)][i] -
-                 59.0f * ets[static_cast<size_t>(ets_index - 1)][i] +
-                 37.0f * ets[static_cast<size_t>(ets_index - 2)][i] -
-                 9.0f * ets[static_cast<size_t>(ets_index - 3)][i]) / 24.0f;
+    sample_method = normalized_contract_enum(sample_method);
+    const bool sample_method_matches =
+        (contract->config.algorithm == mca::diffusion::SchedulerAlgorithm::EulerDiscrete &&
+         (sample_method == "euler" || sample_method == "euler_discrete")) ||
+        (contract->config.algorithm == mca::diffusion::SchedulerAlgorithm::Ddim &&
+         sample_method == "ddim") ||
+        (contract->config.algorithm == mca::diffusion::SchedulerAlgorithm::Pndm &&
+         (sample_method == "pndm" || sample_method == "pndm_plms")) ||
+        (contract->config.algorithm == mca::diffusion::SchedulerAlgorithm::Dpmpp2m &&
+         (sample_method == "dpmpp_2m" || sample_method == "dpm++2m" ||
+          sample_method == "dpm_plus_plus_2m"));
+    if (!sample_method_matches) {
+        *error = "sampleMethod conflicts with scheduler: sampleMethod=" + sample_method +
+            ", scheduler=" + scheduler + ".";
+        return false;
+    }
+
+    prediction = normalized_contract_enum(prediction);
+    if (prediction == "epsilon") {
+        contract->config.prediction_type = mca::diffusion::PredictionType::Epsilon;
+    } else if (prediction == "v_prediction") {
+        contract->config.prediction_type = mca::diffusion::PredictionType::VPrediction;
+    } else if (prediction == "sample") {
+        contract->config.prediction_type = mca::diffusion::PredictionType::Sample;
+    } else {
+        *error = "Unsupported QNN predictionType contract value: " + prediction;
+        return false;
+    }
+
+    noise_schedule = normalized_contract_enum(noise_schedule);
+    if (noise_schedule == "linear") {
+        contract->config.beta_schedule = mca::diffusion::BetaSchedule::Linear;
+    } else if (noise_schedule == "scaled_linear") {
+        contract->config.beta_schedule = mca::diffusion::BetaSchedule::ScaledLinear;
+    } else if (noise_schedule == "squaredcos_cap_v2" ||
+               noise_schedule == "squared_cosine_cap_v2") {
+        contract->config.beta_schedule = mca::diffusion::BetaSchedule::SquaredCosineCapV2;
+    } else {
+        *error = "Unsupported explicit QNN noiseSchedule contract value: " + noise_schedule;
+        return false;
+    }
+
+    timestep_spacing = normalized_contract_enum(timestep_spacing);
+    if (timestep_spacing == "linspace") {
+        contract->config.timestep_spacing = mca::diffusion::TimestepSpacing::Linspace;
+    } else if (timestep_spacing == "leading") {
+        contract->config.timestep_spacing = mca::diffusion::TimestepSpacing::Leading;
+    } else if (timestep_spacing == "trailing") {
+        contract->config.timestep_spacing = mca::diffusion::TimestepSpacing::Trailing;
+    } else {
+        *error = "Unsupported QNN timestepSpacing contract value: " + timestep_spacing;
+        return false;
+    }
+
+    final_sigma_type = normalized_contract_enum(final_sigma_type);
+    if (final_sigma_type == "zero") {
+        contract->config.final_sigma_type = mca::diffusion::FinalSigmaType::Zero;
+    } else if (final_sigma_type == "sigma_min") {
+        contract->config.final_sigma_type = mca::diffusion::FinalSigmaType::SigmaMin;
+    } else {
+        *error = "Unsupported QNN finalSigmaType contract value: " + final_sigma_type;
+        return false;
+    }
+
+    const bool scheduler_scales_input =
+        contract->config.algorithm == mca::diffusion::SchedulerAlgorithm::EulerDiscrete;
+    if (contract->scale_model_input != scheduler_scales_input) {
+        *error = "scaleModelInput conflicts with the selected scheduler's actual native behavior.";
+        return false;
+    }
+    return true;
+}
+
+bool parse_qnn_semantic_execution_contract(
+        const std::string& json,
+        QnnSemanticExecutionContract* contract,
+        std::string* error) {
+    long long integer_value = 0;
+    double number_value = 0.0;
+    std::string runtime;
+    std::string vae_scaling_location;
+    bool unconditional_branch = false;
+    if (!qnn_required_string_field(json, "profileId", &contract->profile_id, error) ||
+        !qnn_required_integer_field(json, "profileRevision", &integer_value, error)) {
+        return false;
+    }
+    if (integer_value <= 0 || integer_value > std::numeric_limits<int>::max()) {
+        *error = "profileRevision must be a positive int32 value.";
+        return false;
+    }
+    contract->profile_revision = static_cast<int>(integer_value);
+    if (!qnn_required_string_field(json, "modelFingerprint", &contract->model_fingerprint, error) ||
+        !qnn_required_string_field(json, "runtime", &runtime, error)) {
+        return false;
+    }
+    if (normalized_contract_enum(runtime) != "qnn_htp") {
+        *error = "QNN semantic generation requires runtime=QNN_HTP.";
+        return false;
+    }
+    if (!parse_qnn_scheduler_contract(json, &contract->scheduler, error) ||
+        !qnn_required_number_field(json, "cfgScale", &number_value, error)) {
+        return false;
+    }
+    if (number_value < 0.0 || number_value > 30.0) {
+        *error = "cfgScale must be in [0, 30].";
+        return false;
+    }
+    contract->cfg_scale = static_cast<float>(number_value);
+    if (!qnn_required_bool_field(json, "useCfg", &contract->use_cfg, error) ||
+        !qnn_required_bool_field(json, "unconditionalBranch", &unconditional_branch, error)) {
+        return false;
+    }
+    if (unconditional_branch != contract->use_cfg) {
+        *error = "unconditionalBranch must exactly match useCfg.";
+        return false;
+    }
+    if (!qnn_required_integer_field(json, "seed", &integer_value, error) ||
+        integer_value < 0 ||
+        static_cast<unsigned long long>(integer_value) > std::numeric_limits<uint32_t>::max()) {
+        if (error->empty()) *error = "seed must fit the native uint32 RNG contract.";
+        return false;
+    }
+    contract->seed = static_cast<uint32_t>(integer_value);
+    if (!qnn_required_string_field(json, "tokenizerBackend", &contract->tokenizer_backend, error) ||
+        !qnn_required_integer_field(json, "tokenCount", &integer_value, error)) {
+        return false;
+    }
+    if (integer_value <= 0) {
+        *error = "tokenCount must be positive.";
+        return false;
+    }
+    contract->token_count = static_cast<size_t>(integer_value);
+    if (!qnn_required_integer_field(json, "tokenizerMaxLength", &integer_value, error) ||
+        integer_value <= 0 || integer_value > std::numeric_limits<int>::max()) {
+        if (error->empty()) *error = "tokenizerMaxLength must be a positive int32 value.";
+        return false;
+    }
+    contract->tokenizer_max_length = static_cast<int>(integer_value);
+    contract->tokenizer_backend = normalized_contract_enum(contract->tokenizer_backend);
+    if (contract->tokenizer_backend == "tokenizers_cpp") {
+        contract->tokenizer_backend = "TOKENIZERS_CPP";
+    } else if (contract->tokenizer_backend == "mnn_mtok") {
+        contract->tokenizer_backend = "MNN_MTOK";
+    } else {
+        *error = "Unsupported tokenizerBackend contract value: " + contract->tokenizer_backend;
+        return false;
+    }
+    if (!qnn_required_string_field(
+            json,
+            "embeddingDiskDataType",
+            &contract->embedding_disk_data_type,
+            error)) {
+        return false;
+    }
+    contract->embedding_disk_data_type = normalized_contract_enum(
+        contract->embedding_disk_data_type);
+    if (contract->embedding_disk_data_type == "graph_internal") {
+        contract->embedding_disk_data_type = "GRAPH_INTERNAL";
+    } else if (contract->embedding_disk_data_type == "fp16") {
+        contract->embedding_disk_data_type = "FP16";
+    } else if (contract->embedding_disk_data_type == "fp32") {
+        contract->embedding_disk_data_type = "FP32";
+    } else {
+        *error = "Unsupported embeddingDiskDataType contract value: " +
+            contract->embedding_disk_data_type;
+        return false;
+    }
+    if (!qnn_required_string_field(json, "vaeScalingLocation", &vae_scaling_location, error) ||
+        !qnn_required_number_field(json, "vaeScalingFactor", &number_value, error)) {
+        return false;
+    }
+    if (number_value <= 0.0) {
+        *error = "vaeScalingFactor must be finite and positive.";
+        return false;
+    }
+    contract->vae_scaling_factor = number_value;
+    vae_scaling_location = normalized_contract_enum(vae_scaling_location);
+    if (vae_scaling_location == "host_before_graph") {
+        contract->vae_scaling_location = QnnVaeScalingLocation::HostBeforeGraph;
+    } else if (vae_scaling_location == "graph_internal") {
+        contract->vae_scaling_location = QnnVaeScalingLocation::GraphInternal;
+    } else if (vae_scaling_location == "none") {
+        contract->vae_scaling_location = QnnVaeScalingLocation::None;
+    } else {
+        *error = "Unsupported explicit QNN vaeScalingLocation contract value: " +
+            vae_scaling_location;
+        return false;
+    }
+    if (contract->vae_scaling_location == QnnVaeScalingLocation::None &&
+        std::fabs(contract->vae_scaling_factor - 1.0) > 1e-12) {
+        *error = "vaeScalingLocation=NONE requires vaeScalingFactor=1.";
+        return false;
+    }
+    if (!qnn_required_integer_field(json, "width", &integer_value, error) ||
+        integer_value <= 0 || integer_value > 16384 || integer_value % 8 != 0) {
+        if (error->empty()) *error = "width must be a positive multiple of 8 no larger than 16384.";
+        return false;
+    }
+    contract->width = static_cast<int>(integer_value);
+    if (!qnn_required_integer_field(json, "height", &integer_value, error) ||
+        integer_value <= 0 || integer_value > 16384 || integer_value % 8 != 0) {
+        if (error->empty()) *error = "height must be a positive multiple of 8 no larger than 16384.";
+        return false;
+    }
+    contract->height = static_cast<int>(integer_value);
+    bool fallback = true;
+    if (!qnn_required_string_field(json, "graphName", &contract->graph_name, error) ||
+        !qnn_required_bool_field(json, "fallback", &fallback, error)) {
+        return false;
+    }
+    if (fallback) {
+        *error = "QNN native execution requires fallback=false.";
+        return false;
+    }
+    if (json.find("\"vaeLatentScale\"") != std::string::npos) {
+        *error = "Deprecated vaeLatentScale conflicts with the explicit VAE scaling contract.";
+        return false;
+    }
+    return true;
+}
+
+const char* qnn_scheduler_wire_name(mca::diffusion::SchedulerAlgorithm algorithm) {
+    switch (algorithm) {
+        case mca::diffusion::SchedulerAlgorithm::EulerDiscrete: return "EULER";
+        case mca::diffusion::SchedulerAlgorithm::Ddim: return "DDIM";
+        case mca::diffusion::SchedulerAlgorithm::Pndm: return "PNDM_PLMS";
+        case mca::diffusion::SchedulerAlgorithm::Dpmpp2m: return "DPMPP_2M";
+    }
+    return "UNKNOWN";
+}
+
+const char* qnn_prediction_wire_name(mca::diffusion::PredictionType prediction) {
+    switch (prediction) {
+        case mca::diffusion::PredictionType::Epsilon: return "EPSILON";
+        case mca::diffusion::PredictionType::VPrediction: return "V_PREDICTION";
+        case mca::diffusion::PredictionType::Sample: return "SAMPLE";
+    }
+    return "UNKNOWN";
+}
+
+const char* qnn_vae_scaling_wire_name(QnnVaeScalingLocation location) {
+    switch (location) {
+        case QnnVaeScalingLocation::HostBeforeGraph: return "HOST_BEFORE_GRAPH";
+        case QnnVaeScalingLocation::GraphInternal: return "GRAPH_INTERNAL";
+        case QnnVaeScalingLocation::None: return "NONE";
+    }
+    return "NONE";
+}
+
+double qnn_effective_vae_host_scale(const QnnSemanticExecutionContract& contract) {
+    return contract.vae_scaling_location == QnnVaeScalingLocation::HostBeforeGraph
+        ? 1.0 / contract.vae_scaling_factor
+        : 1.0;
+}
+
+std::string qnn_nonempty_bundle_file_named(
+        const std::vector<std::string>& files,
+        const std::string& expected_name) {
+    const std::string expected = normalized_contract_enum(expected_name);
+    for (const auto& path : files) {
+        const auto separator = path.find_last_of("/\\");
+        const std::string basename = separator == std::string::npos
+            ? path
+            : path.substr(separator + 1u);
+        if (normalized_contract_enum(basename) == expected && file_size_or_zero(path) > 0) {
+            return path;
         }
     }
-    const int last_alpha = static_cast<int>(alphas.size()) - 1;
-    const float alpha_prod_t = alphas[static_cast<size_t>(std::max(0, std::min(last_alpha, timestep)))];
-    const float alpha_prod_prev = alphas[static_cast<size_t>(std::max(0, std::min(last_alpha, prev_timestep)))];
-    const float beta_prod_t = 1.0f - alpha_prod_t;
-    const float beta_prod_prev = 1.0f - alpha_prod_prev;
-    const float sample_coeff = std::sqrt(alpha_prod_prev / alpha_prod_t);
-    const float denom =
-        alpha_prod_t * std::sqrt(beta_prod_prev) +
-        std::sqrt(alpha_prod_t * beta_prod_t * alpha_prod_prev);
-    const float model_coeff = (alpha_prod_prev - alpha_prod_t) / denom;
-    std::vector<float> previous(sample.size(), 0.0f);
-    for (size_t i = 0; i < sample.size(); ++i) {
-        previous[i] = sample_coeff * sample[i] - model_coeff * adjusted[i];
+    return "";
+}
+
+bool resolve_qnn_conditioning_evidence(
+        const std::string& bundle_root,
+        const std::string& conditioning_format,
+        size_t observed_token_ids,
+        const QnnSemanticExecutionContract& contract,
+        QnnConditioningEvidence* evidence,
+        std::string* error) {
+    if (evidence == nullptr) {
+        *error = "Conditioning evidence output is null.";
+        return false;
     }
-    return previous;
+    const auto files = list_files_recursive(bundle_root);
+    const bool has_standard_tokenizer = !qnn_nonempty_bundle_file_named(
+        files,
+        "tokenizer.json").empty();
+    const bool has_mtok_tokenizer = !qnn_nonempty_bundle_file_named(
+        files,
+        "tokenizer.mtok").empty();
+    if (has_standard_tokenizer) {
+        evidence->tokenizer_backend = "TOKENIZERS_CPP";
+    } else if (has_mtok_tokenizer) {
+        evidence->tokenizer_backend = "MNN_MTOK";
+    } else {
+        *error = "The QNN bundle has no tokenizer.json or tokenizer.mtok proving the tokenizer backend.";
+        return false;
+    }
+
+    const std::string format = normalized_contract_enum(conditioning_format);
+    if (format == "qnn_clip_token_ids_i32") {
+        if (observed_token_ids == 0) {
+            *error = "qnn_clip_token_ids_i32 conditioning has no observed int32 token IDs.";
+            return false;
+        }
+        evidence->token_count = observed_token_ids;
+        evidence->embedding_disk_data_type = "GRAPH_INTERNAL";
+    } else {
+        if (observed_token_ids != 0) {
+            *error = "Float embedding conditioning unexpectedly carried int32 token IDs.";
+            return false;
+        }
+        constexpr uint64_t kClipVocabSize = 49408u;
+        constexpr uint64_t kSd15EmbeddingWidth = 768u;
+        constexpr uint64_t kSdxlSecondEmbeddingWidth = 1280u;
+        const bool sdxl = format == "sdxl_qnn_conditioning";
+        const bool sd15 =
+            format == "community_clip" ||
+            format == "sd15_qnn_conditioning" ||
+            format == "sd15_qnn_embeddings_f32";
+        const bool graph_internal = format == "mnn_text_encoder_embeddings_f32";
+        if (!sdxl && !sd15 && !graph_internal) {
+            *error = "Unsupported explicit float conditioningFormat: " + conditioning_format;
+            return false;
+        }
+        evidence->token_count = 154u;
+        if (graph_internal) {
+            if (qnn_nonempty_bundle_file_named(files, "text_encoder.mnn").empty()) {
+                *error = "mnn_text_encoder_embeddings_f32 requires a concrete text_encoder.mnn graph.";
+                return false;
+            }
+            evidence->embedding_disk_data_type = "GRAPH_INTERNAL";
+        } else {
+            const std::string token_embedding = qnn_nonempty_bundle_file_named(
+                files,
+                "token_emb.bin");
+            if (token_embedding.empty()) {
+                *error = "Float CLIP conditioning lacks token_emb.bin dtype evidence.";
+                return false;
+            }
+            const uint64_t expected_fp16 =
+                kClipVocabSize * kSd15EmbeddingWidth * sizeof(uint16_t);
+            const uint64_t token_embedding_bytes = static_cast<uint64_t>(
+                file_size_or_zero(token_embedding));
+            if (token_embedding_bytes == expected_fp16) {
+                evidence->embedding_disk_data_type = "FP16";
+            } else if (token_embedding_bytes == expected_fp16 * 2u) {
+                // Headerless tables of this exact size use the explicit FP32 package contract;
+                // no alternate byte interpretation is accepted without independent metadata.
+                evidence->embedding_disk_data_type = "FP32";
+            } else {
+                std::ostringstream message;
+                message << "token_emb.bin has " << token_embedding_bytes
+                        << " bytes; expected " << expected_fp16
+                        << " for FP16 or " << (expected_fp16 * 2u) << " for FP32.";
+                *error = message.str();
+                return false;
+            }
+            if (sdxl) {
+                const std::string second_token_embedding = qnn_nonempty_bundle_file_named(
+                    files,
+                    "token_emb_2.bin");
+                if (second_token_embedding.empty()) {
+                    *error = "SDXL conditioning lacks token_emb_2.bin dtype evidence.";
+                    return false;
+                }
+                const uint64_t expected_second_fp16 =
+                    kClipVocabSize * kSdxlSecondEmbeddingWidth * sizeof(uint16_t);
+                const uint64_t second_bytes = static_cast<uint64_t>(
+                    file_size_or_zero(second_token_embedding));
+                const uint64_t expected_second = evidence->embedding_disk_data_type == "FP16"
+                    ? expected_second_fp16
+                    : expected_second_fp16 * 2u;
+                if (second_bytes != expected_second) {
+                    std::ostringstream message;
+                    message << "SDXL token embedding dtypes conflict: token_emb_2.bin has "
+                            << second_bytes << " bytes, expected " << expected_second << ".";
+                    *error = message.str();
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (contract.tokenizer_max_length != 77 || evidence->token_count != 154u) {
+        std::ostringstream message;
+        message << "QNN CLIP graphs require two 77-token sequences; maxLength="
+                << contract.tokenizer_max_length << ", observed tokenCount="
+                << evidence->token_count << ".";
+        *error = message.str();
+        return false;
+    }
+    if (contract.tokenizer_backend != evidence->tokenizer_backend) {
+        *error = "tokenizerBackend mismatch: resolved=" + contract.tokenizer_backend +
+            ", conditioning evidence=" + evidence->tokenizer_backend + ".";
+        return false;
+    }
+    if (contract.token_count != evidence->token_count) {
+        std::ostringstream message;
+        message << "tokenCount mismatch: resolved=" << contract.token_count
+                << ", conditioning evidence=" << evidence->token_count << ".";
+        *error = message.str();
+        return false;
+    }
+    if (contract.embedding_disk_data_type != evidence->embedding_disk_data_type) {
+        *error = "embeddingDiskDataType mismatch: resolved=" +
+            contract.embedding_disk_data_type + ", conditioning evidence=" +
+            evidence->embedding_disk_data_type + ".";
+        return false;
+    }
+    return true;
+}
+
+std::string qnn_double_array_json(const std::vector<double>& values) {
+    std::ostringstream out;
+    out << std::setprecision(17) << "[";
+    for (size_t index = 0; index < values.size(); ++index) {
+        if (index > 0) out << ",";
+        out << values[index];
+    }
+    out << "]";
+    return out.str();
+}
+
+std::string qnn_native_effective_json(
+        const QnnSemanticExecutionContract& contract,
+        const QnnNativeEffectiveEvidence& evidence) {
+    std::ostringstream out;
+    out << std::setprecision(17)
+        << "{"
+        << "\"profileId\":" << quote(contract.profile_id) << ","
+        << "\"profileRevision\":" << contract.profile_revision << ","
+        << "\"modelFingerprint\":" << quote(contract.model_fingerprint) << ","
+        << "\"runtime\":\"QNN_HTP\","
+        << "\"scheduler\":" << quote(qnn_scheduler_wire_name(contract.scheduler.config.algorithm)) << ","
+        << "\"predictionType\":" << quote(qnn_prediction_wire_name(contract.scheduler.config.prediction_type)) << ","
+        << "\"steps\":" << contract.scheduler.steps << ","
+        << "\"timetableCount\":" << evidence.timetable_count << ","
+        << "\"unetExecutionCount\":" << evidence.unet_execution_count << ","
+        << "\"cfgScale\":" << contract.cfg_scale << ","
+        << "\"useCfg\":" << (contract.use_cfg ? "true" : "false") << ","
+        << "\"unconditionalBranch\":" << (contract.use_cfg ? "true" : "false") << ","
+        << "\"tokenizerBackend\":" << quote(evidence.tokenizer_backend) << ","
+        << "\"tokenCount\":" << evidence.token_count << ","
+        << "\"embeddingDiskDataType\":" << quote(evidence.embedding_disk_data_type) << ","
+        << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(contract.vae_scaling_location)) << ","
+        << "\"vaeScalingFactor\":" << contract.vae_scaling_factor << ","
+        << "\"width\":" << evidence.width << ","
+        << "\"height\":" << evidence.height << ","
+        << "\"seed\":" << contract.seed << ","
+        << "\"graphName\":" << quote(evidence.graph_name) << ","
+        << "\"fallback\":false"
+        << "}";
+    return out.str();
+}
+
+std::string qnn_semantic_failure_json(
+        const std::string& execution_stage,
+        const std::string& error_code,
+        const std::string& message) {
+    std::ostringstream out;
+    out << "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,"
+        << "\"executionStage\":" << quote(execution_stage) << ","
+        << "\"errorCode\":" << quote(error_code) << ","
+        << "\"message\":" << quote(message) << "}";
+    return out.str();
+}
+
+std::string qnn_execution_contract_mismatch_json(
+        const std::string& field,
+        size_t expected,
+        size_t actual) {
+    std::ostringstream message;
+    message << "Native " << field << " mismatch: expected " << expected
+            << ", actual " << actual << ".";
+    return qnn_semantic_failure_json(
+        "execution_contract_mismatch",
+        "EXECUTION_CONTRACT_MISMATCH",
+        message.str());
+}
+
+bool qnn_write_timestep_tensor(
+        QnnTensorBinding* binding,
+        double timestep,
+        std::string* error) {
+    if (binding == nullptr || !std::isfinite(timestep)) {
+        *error = "Timestep tensor binding and value must be valid and finite.";
+        return false;
+    }
+    const uint64_t element_count = qnn_tensor_element_count(binding->tensor);
+    if (element_count == 0) {
+        *error = "Timestep tensor has no elements: " + binding->name;
+        return false;
+    }
+    const Qnn_DataType_t type = qnn_tensor_data_type(binding->tensor);
+    const auto quantization = qnn_tensor_quantize_params(binding->tensor);
+    const bool quantized =
+        quantization.quantizationEncoding != QNN_QUANTIZATION_ENCODING_UNDEFINED;
+    if (type == QNN_DATATYPE_FLOAT_32 || type == QNN_DATATYPE_UFIXED_POINT_16 ||
+        type == QNN_DATATYPE_SFIXED_POINT_16 ||
+        ((type == QNN_DATATYPE_UINT_16 || type == QNN_DATATYPE_INT_16) && quantized)) {
+        std::vector<float> values(static_cast<size_t>(element_count), static_cast<float>(timestep));
+        return qnn_write_float_tensor(binding, values.data(), values.size(), error);
+    }
+
+    const double rounded = std::round(timestep);
+    if (std::fabs(timestep - rounded) > 1e-6) {
+        std::ostringstream message;
+        message << std::setprecision(17) << "Timestep " << timestep
+                << " is fractional, but graph tensor " << binding->name
+                << " has integer dtype " << qnn_data_type_name(type) << ".";
+        *error = message.str();
+        return false;
+    }
+    const auto ensure_buffer = [&](size_t bytes) {
+        if (binding->buffer.size() >= bytes) return true;
+        *error = "Timestep tensor buffer is too small for " + binding->name;
+        return false;
+    };
+    if (type == QNN_DATATYPE_INT_32) {
+        if (rounded < std::numeric_limits<int32_t>::min() ||
+            rounded > std::numeric_limits<int32_t>::max() ||
+            !ensure_buffer(static_cast<size_t>(element_count) * sizeof(int32_t))) return false;
+        auto* output = reinterpret_cast<int32_t*>(binding->buffer.data());
+        std::fill(output, output + element_count, static_cast<int32_t>(rounded));
+        return true;
+    }
+    if (type == QNN_DATATYPE_UINT_32) {
+        if (rounded < 0.0 || rounded > std::numeric_limits<uint32_t>::max() ||
+            !ensure_buffer(static_cast<size_t>(element_count) * sizeof(uint32_t))) return false;
+        auto* output = reinterpret_cast<uint32_t*>(binding->buffer.data());
+        std::fill(output, output + element_count, static_cast<uint32_t>(rounded));
+        return true;
+    }
+    if (type == QNN_DATATYPE_INT_16) {
+        if (rounded < std::numeric_limits<int16_t>::min() ||
+            rounded > std::numeric_limits<int16_t>::max() ||
+            !ensure_buffer(static_cast<size_t>(element_count) * sizeof(int16_t))) return false;
+        auto* output = reinterpret_cast<int16_t*>(binding->buffer.data());
+        std::fill(output, output + element_count, static_cast<int16_t>(rounded));
+        return true;
+    }
+    if (type == QNN_DATATYPE_UINT_16) {
+        if (rounded < 0.0 || rounded > std::numeric_limits<uint16_t>::max() ||
+            !ensure_buffer(static_cast<size_t>(element_count) * sizeof(uint16_t))) return false;
+        auto* output = reinterpret_cast<uint16_t*>(binding->buffer.data());
+        std::fill(output, output + element_count, static_cast<uint16_t>(rounded));
+        return true;
+    }
+    if (type == QNN_DATATYPE_INT_8) {
+        if (rounded < std::numeric_limits<int8_t>::min() ||
+            rounded > std::numeric_limits<int8_t>::max() ||
+            !ensure_buffer(static_cast<size_t>(element_count))) return false;
+        auto* output = reinterpret_cast<int8_t*>(binding->buffer.data());
+        std::fill(output, output + element_count, static_cast<int8_t>(rounded));
+        return true;
+    }
+    if (type == QNN_DATATYPE_UINT_8) {
+        if (rounded < 0.0 || rounded > std::numeric_limits<uint8_t>::max() ||
+            !ensure_buffer(static_cast<size_t>(element_count))) return false;
+        auto* output = reinterpret_cast<uint8_t*>(binding->buffer.data());
+        std::fill(output, output + element_count, static_cast<uint8_t>(rounded));
+        return true;
+    }
+    *error = "Unsupported QNN timestep tensor dtype for " + binding->name +
+        ": " + qnn_data_type_name(type);
+    return false;
 }
 
 bool qnn_run_unet_once(
@@ -4184,14 +4985,14 @@ bool qnn_run_unet_once(
         int timestep_index,
         int text_index,
         const std::vector<float>& latent,
-        int timestep,
+        double timestep,
         const float* embedding,
         size_t embedding_elements,
         std::vector<float>* output,
         long long* execute_ms,
         std::string* error) {
     if (!qnn_write_float_tensor(&unet.inputs[sample_index], latent.data(), latent.size(), error) ||
-        !qnn_write_int32_tensor(&unet.inputs[timestep_index], timestep, error) ||
+        !qnn_write_timestep_tensor(&unet.inputs[timestep_index], timestep, error) ||
         !qnn_write_float_tensor(&unet.inputs[text_index], embedding, embedding_elements, error)) {
         return false;
     }
@@ -4234,7 +5035,7 @@ bool qnn_run_sdxl_unet_once(
         int time_ids_index,
         int pooled_index,
         const std::vector<float>& latent,
-        int timestep,
+        double timestep,
         const float* hidden,
         size_t hidden_elements,
         const float* time_ids,
@@ -4245,7 +5046,7 @@ bool qnn_run_sdxl_unet_once(
         long long* execute_ms,
         std::string* error) {
     if (!qnn_write_float_tensor(&unet.inputs[sample_index], latent.data(), latent.size(), error) ||
-        !qnn_write_int32_tensor(&unet.inputs[timestep_index], timestep, error) ||
+        !qnn_write_timestep_tensor(&unet.inputs[timestep_index], timestep, error) ||
         !qnn_write_float_tensor(&unet.inputs[hidden_index], hidden, hidden_elements, error) ||
         !qnn_write_float_tensor(&unet.inputs[time_ids_index], time_ids, time_id_elements, error) ||
         !qnn_write_float_tensor(&unet.inputs[pooled_index], pooled, pooled_elements, error)) {
@@ -4278,8 +5079,44 @@ std::string qnn_semantic_generate_json(
     }
 
     const std::string conditioning_format = string_field(params_json, "conditioningFormat");
+    if (conditioning_format.empty()) {
+        return qnn_semantic_failure_json(
+            "execution_contract_invalid",
+            "EXECUTION_CONTRACT_INVALID",
+            "conditioningFormat must be explicit for QNN semantic generation.");
+    }
     const bool qnn_token_conditioning =
         contains_lower(conditioning_format, "qnn_clip_token_ids_i32");
+    std::string error;
+    QnnSemanticExecutionContract execution_contract;
+    if (!parse_qnn_semantic_execution_contract(
+            params_json,
+            &execution_contract,
+            &error)) {
+        return qnn_semantic_failure_json(
+            "execution_contract_invalid",
+            "EXECUTION_CONTRACT_INVALID",
+            error);
+    }
+    const std::string family = normalized_contract_enum(string_field(params_json, "family"));
+    const bool request_sdxl =
+        family == "sdxl" ||
+        contains_lower(execution_contract.profile_id, "sdxl") ||
+        contains_lower(conditioning_format, "sdxl");
+    mca::diffusion::DiffusionScheduler scheduler(execution_contract.scheduler.config);
+    if (!scheduler.set_timesteps(execution_contract.scheduler.steps, &error)) {
+        return qnn_semantic_failure_json(
+            "scheduler_contract_invalid",
+            "EXECUTION_CONTRACT_INVALID",
+            error);
+    }
+    if (scheduler.timesteps().size() !=
+        execution_contract.scheduler.expected_timetable_count) {
+        return qnn_execution_contract_mismatch_json(
+            "timetableCount",
+            execution_contract.scheduler.expected_timetable_count,
+            scheduler.timesteps().size());
+    }
     const std::string unet_binary = string_field(params_json, "unetContextBinary").empty()
         ? "unet.bin"
         : string_field(params_json, "unetContextBinary");
@@ -4290,9 +5127,7 @@ std::string qnn_semantic_generate_json(
         string_field(params_json, "textEncoderContextBinary").empty()
             ? "text_encoder.bin"
             : string_field(params_json, "textEncoderContextBinary");
-    const std::string graph_name = string_field(params_json, "graphName").empty()
-        ? "model"
-        : string_field(params_json, "graphName");
+    const std::string& graph_name = execution_contract.graph_name;
     const std::string text_encoder_graph_name =
         string_field(params_json, "textEncoderGraphName").empty()
             ? graph_name
@@ -4313,7 +5148,6 @@ std::string qnn_semantic_generate_json(
 
     std::vector<float> embeddings;
     std::vector<int32_t> token_ids;
-    std::string error;
     if (qnn_token_conditioning) {
         if (!read_int32_binary_file(embeddings_path, &token_ids, &error)) {
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"token_read_failed\",\"message\":") +
@@ -4322,16 +5156,27 @@ std::string qnn_semantic_generate_json(
     } else {
         if (!read_float_binary_file(embeddings_path, &embeddings, &error)) {
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"embedding_read_failed\",\"message\":") +
-                quote(error) + "}";
+            quote(error) + "}";
         }
     }
+    QnnConditioningEvidence conditioning_evidence;
+    if (!resolve_qnn_conditioning_evidence(
+            bundle_root,
+            conditioning_format,
+            token_ids.size(),
+            execution_contract,
+            &conditioning_evidence,
+            &error)) {
+        return qnn_semantic_failure_json(
+            "conditioning_contract_invalid",
+            "CONDITIONING_EVIDENCE_INVALID",
+            error);
+    }
 
-    const int requested_steps_hint = static_cast<int>(std::max<long long>(
-        1,
-        std::min<long long>(long_field(params_json, "steps"), 20)
-    ));
     const std::string progress_journal_path = string_field(params_json, "progressJournalPath");
-    QnnImageGenerationScope generation(requested_steps_hint, progress_journal_path);
+    QnnImageGenerationScope generation(
+        static_cast<int>(scheduler.timesteps().size()),
+        progress_journal_path);
     if (!generation.active()) {
         return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"generation_busy\",\"message\":\"Another QNN image generation is still finishing.\"}";
     }
@@ -4365,6 +5210,7 @@ std::string qnn_semantic_generate_json(
 
     long long text_encoder_context_load_ms = 0;
     long long text_encoder_execute_ms_total = 0;
+    size_t text_encoder_execute_count = 0;
     uint64_t text_encoder_embedding_width = 0;
     std::string loaded_text_encoder_graph;
     std::string text_encoder_inputs_debug = "[]";
@@ -4427,20 +5273,24 @@ std::string qnn_semantic_generate_json(
         std::vector<float> negative_embeddings;
         std::vector<float> positive_embeddings;
         long long execute_ms = 0;
-        if (!qnn_run_text_encoder_once(
-                text_encoder,
-                token_index,
-                embedding_index,
-                token_ids.data(),
-                static_cast<size_t>(token_elements),
-                &negative_embeddings,
-                &execute_ms,
-                &error)) {
-            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_uncond_failed\",\"message\":") +
-                quote(error) + "}";
+        if (execution_contract.use_cfg) {
+            if (!qnn_run_text_encoder_once(
+                    text_encoder,
+                    token_index,
+                    embedding_index,
+                    token_ids.data(),
+                    static_cast<size_t>(token_elements),
+                    &negative_embeddings,
+                    &execute_ms,
+                    &error)) {
+                return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_uncond_failed\",\"message\":") +
+                    quote(error) + "}";
+            }
+            text_encoder_execute_ms_total += execute_ms;
+            ++text_encoder_execute_count;
+            if (generation.cancelled()) return qnn_image_generation_cancelled_json();
         }
-        text_encoder_execute_ms_total += execute_ms;
-        if (generation.cancelled()) return qnn_image_generation_cancelled_json();
+        execute_ms = 0;
         if (!qnn_run_text_encoder_once(
                 text_encoder,
                 token_index,
@@ -4454,7 +5304,9 @@ std::string qnn_semantic_generate_json(
                 quote(error) + "}";
         }
         text_encoder_execute_ms_total += execute_ms;
-        if (negative_embeddings.size() != static_cast<size_t>(embedding_elements) ||
+        ++text_encoder_execute_count;
+        if ((execution_contract.use_cfg &&
+             negative_embeddings.size() != static_cast<size_t>(embedding_elements)) ||
             positive_embeddings.size() != static_cast<size_t>(embedding_elements)) {
             std::ostringstream message;
             message << "QNN text encoder returned an unexpected output size. Expected "
@@ -4464,11 +5316,15 @@ std::string qnn_semantic_generate_json(
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_output_shape_unsupported\",\"message\":") +
                 quote(message.str()) + "}";
         }
-        embeddings.reserve(negative_embeddings.size() + positive_embeddings.size());
-        embeddings.insert(
-            embeddings.end(),
-            negative_embeddings.begin(),
-            negative_embeddings.end());
+        embeddings.reserve(
+            (execution_contract.use_cfg ? negative_embeddings.size() : 0u) +
+            positive_embeddings.size());
+        if (execution_contract.use_cfg) {
+            embeddings.insert(
+                embeddings.end(),
+                negative_embeddings.begin(),
+                negative_embeddings.end());
+        }
         embeddings.insert(
             embeddings.end(),
             positive_embeddings.begin(),
@@ -4485,11 +5341,6 @@ std::string qnn_semantic_generate_json(
     }
     if (generation.cancelled()) return qnn_image_generation_cancelled_json();
 
-    const std::string family = string_field(params_json, "family");
-    const bool request_sdxl =
-        contains_lower(conditioning_format, "sdxl") ||
-        contains_lower(family, "sdxl") ||
-        contains_lower(bundle_root, "sdxl");
     if (request_sdxl) {
         const int sample_index = std::max(0, tensor_index_by_name(unet.inputs, {"sample", "latent"}));
         int timestep_index = tensor_index_by_name(unet.inputs, {"timestamp", "timestep"});
@@ -4524,27 +5375,15 @@ std::string qnn_semantic_generate_json(
                 quote(message.str()) + "}";
         }
 
-        const long long requested_steps = std::max<long long>(1, long_field(params_json, "steps"));
-        if (requested_steps > 1) {
-            return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"npuActive\":false,\"executionStage\":\"sdxl_multistep_disabled\",\"message\":\"QNN SDXL currently allows only 1-step proof-of-life generation. Multi-step sampling is disabled until repeated HTP graph execution is stabilized.\"}";
-        }
-        const int steps = 1;
-        generation.set_steps(steps);
+        const int steps = execution_contract.scheduler.steps;
+        const auto& timesteps = scheduler.timesteps();
+        generation.set_steps(static_cast<int>(timesteps.size()));
         generation.set_phase(kQnnImageSampling);
-        const long long seed_value = long_field(params_json, "seed");
-        const int seed = static_cast<int>(seed_value == 0 ? 42 : seed_value);
-        const float cfg_scale = static_cast<float>(double_field(params_json, "cfgScale", 7.0));
-        const float vae_decode_scale = static_cast<float>(double_field(params_json, "vaeLatentScale", 1.0 / 0.13025));
-        std::vector<int> timesteps(static_cast<size_t>(steps), 1);
-        const int step_size = 1000 / std::max(1, steps);
-        for (int i = steps - 1; i >= 0; --i) {
-            timesteps[static_cast<size_t>(i)] = 1 + (steps - 1 - i) * step_size;
-        }
-        const auto alphas = sd15_pndm_alphas();
-        std::mt19937 rng(static_cast<uint32_t>(seed));
+        std::mt19937 rng(execution_contract.seed);
         std::normal_distribution<float> normal(0.0f, 1.0f);
         std::vector<float> latents(static_cast<size_t>(latent_elements), 0.0f);
-        for (float& value : latents) value = normal(rng);
+        const float initial_noise_scale = static_cast<float>(scheduler.init_noise_sigma());
+        for (float& value : latents) value = normal(rng) * initial_noise_scale;
 
         const float* negative_hidden = embeddings.data();
         const float* positive_hidden = embeddings.data() + hidden_count;
@@ -4553,35 +5392,46 @@ std::string qnn_semantic_generate_json(
         const float* time_ids = positive_pooled + pooled_count;
         std::vector<float> noise_uncond;
         std::vector<float> noise_cond;
-        std::vector<std::vector<float>> ets;
         long long unet_execute_ms_total = 0;
-        for (int step = 0; step < steps; ++step) {
+        size_t unet_execution_count = 0;
+        for (size_t step = 0; step < timesteps.size(); ++step) {
             if (generation.cancelled()) return qnn_image_generation_cancelled_json();
-            generation.set_step(step);
-            long long execute_ms = 0;
-            if (!qnn_run_sdxl_unet_once(
-                    unet,
-                    sample_index,
-                    timestep_index,
-                    hidden_index,
-                    time_ids_index,
-                    pooled_index,
-                    latents,
-                    timesteps[static_cast<size_t>(step)],
-                    negative_hidden,
-                    hidden_count,
-                    time_ids,
-                    time_ids_count,
-                    negative_pooled,
-                    pooled_count,
-                    &noise_uncond,
-                    &execute_ms,
-                    &error)) {
-                return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_unet_uncond_failed\",\"message\":") +
-                    quote(error) + "}";
+            generation.set_step(static_cast<int>(step));
+            std::vector<float> model_input;
+            if (!scheduler.scale_model_input(latents, step, &model_input, &error)) {
+                return qnn_semantic_failure_json(
+                    "sdxl_scheduler_scale_failed",
+                    "SCHEDULER_EXECUTION_FAILED",
+                    error);
             }
-            unet_execute_ms_total += execute_ms;
-            if (generation.cancelled()) return qnn_image_generation_cancelled_json();
+            long long execute_ms = 0;
+            if (execution_contract.use_cfg) {
+                if (!qnn_run_sdxl_unet_once(
+                        unet,
+                        sample_index,
+                        timestep_index,
+                        hidden_index,
+                        time_ids_index,
+                        pooled_index,
+                        model_input,
+                        timesteps[step],
+                        negative_hidden,
+                        hidden_count,
+                        time_ids,
+                        time_ids_count,
+                        negative_pooled,
+                        pooled_count,
+                        &noise_uncond,
+                        &execute_ms,
+                        &error)) {
+                    return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_unet_uncond_failed\",\"message\":") +
+                        quote(error) + "}";
+                }
+                unet_execute_ms_total += execute_ms;
+                ++unet_execution_count;
+                if (generation.cancelled()) return qnn_image_generation_cancelled_json();
+            }
+            execute_ms = 0;
             if (!qnn_run_sdxl_unet_once(
                     unet,
                     sample_index,
@@ -4589,8 +5439,8 @@ std::string qnn_semantic_generate_json(
                     hidden_index,
                     time_ids_index,
                     pooled_index,
-                    latents,
-                    timesteps[static_cast<size_t>(step)],
+                    model_input,
+                    timesteps[step],
                     positive_hidden,
                     hidden_count,
                     time_ids,
@@ -4604,22 +5454,49 @@ std::string qnn_semantic_generate_json(
                     quote(error) + "}";
             }
             unet_execute_ms_total += execute_ms;
+            ++unet_execution_count;
             if (generation.cancelled()) return qnn_image_generation_cancelled_json();
-            if (noise_uncond.size() < latents.size() || noise_cond.size() < latents.size()) {
-                return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_unet_output_shape_unsupported\",\"message\":\"SDXL UNet output is smaller than the latent tensor.\"}";
+            if ((execution_contract.use_cfg && noise_uncond.size() != latents.size()) ||
+                noise_cond.size() != latents.size()) {
+                return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_unet_output_shape_unsupported\",\"message\":\"SDXL UNet output does not exactly match the latent tensor.\"}";
             }
-            std::vector<float> guided(latents.size(), 0.0f);
-            for (size_t i = 0; i < latents.size(); ++i) {
-                guided[i] = cfg_scale * (noise_cond[i] - noise_uncond[i]) + noise_uncond[i];
+            std::vector<float> guided = noise_cond;
+            if (execution_contract.use_cfg) {
+                guided.resize(latents.size());
+                for (size_t i = 0; i < latents.size(); ++i) {
+                    guided[i] = execution_contract.cfg_scale *
+                        (noise_cond[i] - noise_uncond[i]) + noise_uncond[i];
+                }
             }
-            latents = qnn_pndm_step(latents, ets, guided, step, timesteps, alphas);
-            generation.set_step(step + 1);
+            mca::diffusion::SchedulerStepResult step_result;
+            mca::diffusion::SchedulerStepOptions step_options;
+            step_options.eta = execution_contract.scheduler.eta;
+            if (!scheduler.step(guided, step, latents, &step_result, &error, step_options)) {
+                return qnn_semantic_failure_json(
+                    "sdxl_scheduler_step_failed",
+                    "SCHEDULER_EXECUTION_FAILED",
+                    error);
+            }
+            latents = std::move(step_result.previous_sample);
+            generation.set_step(static_cast<int>(step + 1u));
+        }
+        if (unet_execution_count !=
+            execution_contract.scheduler.expected_unet_execution_count) {
+            return qnn_execution_contract_mismatch_json(
+                "unetExecutionCount",
+                execution_contract.scheduler.expected_unet_execution_count,
+                unet_execution_count);
         }
 
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
         generation.set_phase(kQnnImageDecoding);
-        std::vector<float> vae_latents(latents.size(), 0.0f);
-        for (size_t i = 0; i < latents.size(); ++i) vae_latents[i] = latents[i] * vae_decode_scale;
+        std::vector<float> vae_latents = latents;
+        const double effective_vae_host_scale = qnn_effective_vae_host_scale(execution_contract);
+        if (effective_vae_host_scale != 1.0) {
+            for (float& value : vae_latents) {
+                value = static_cast<float>(value * effective_vae_host_scale);
+            }
+        }
         if (!qnn_write_float_tensor(&vae.inputs[0], vae_latents.data(), vae_latents.size(), &error)) {
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_vae_input_bind_failed\",\"message\":") +
                 quote(error) + "}";
@@ -4650,8 +5527,21 @@ std::string qnn_semantic_generate_json(
             std::chrono::steady_clock::now() - started
         ).count();
         const long long output_bytes = file_size_or_zero(output_path);
+        const QnnNativeEffectiveEvidence native_evidence{
+            timesteps.size(),
+            unet_execution_count,
+            conditioning_evidence.tokenizer_backend,
+            conditioning_evidence.token_count,
+            conditioning_evidence.embedding_disk_data_type,
+            width,
+            height,
+            unet.graph_name,
+        };
+        const std::string native_effective = qnn_native_effective_json(
+            execution_contract,
+            native_evidence);
         std::ostringstream out;
-        out << "{"
+        out << std::setprecision(17) << "{"
             << "\"ok\":true,"
             << "\"backend\":\"qnn_htp\","
             << "\"pipelineProbe\":false,"
@@ -4661,23 +5551,47 @@ std::string qnn_semantic_generate_json(
             << "\"nativeExecution\":true,"
             << "\"fallback\":false,"
             << "\"executionStage\":\"sdxl_semantic_generation_passed\","
+            << "\"profileId\":" << quote(execution_contract.profile_id) << ","
+            << "\"profileRevision\":" << execution_contract.profile_revision << ","
+            << "\"modelFingerprint\":" << quote(execution_contract.model_fingerprint) << ","
+            << "\"runtime\":\"QNN_HTP\","
+            << "\"scheduler\":" << quote(qnn_scheduler_wire_name(execution_contract.scheduler.config.algorithm)) << ","
+            << "\"predictionType\":" << quote(qnn_prediction_wire_name(execution_contract.scheduler.config.prediction_type)) << ","
+            << "\"steps\":" << steps << ","
+            << "\"timetableCount\":" << timesteps.size() << ","
+            << "\"unetExecutionCount\":" << unet_execution_count << ","
+            << "\"cfgScale\":" << execution_contract.cfg_scale << ","
+            << "\"useCfg\":" << (execution_contract.use_cfg ? "true" : "false") << ","
+            << "\"unconditionalBranch\":" << (execution_contract.use_cfg ? "true" : "false") << ","
+            << "\"tokenizerBackend\":" << quote(conditioning_evidence.tokenizer_backend) << ","
+            << "\"tokenCount\":" << conditioning_evidence.token_count << ","
+            << "\"embeddingDiskDataType\":" << quote(conditioning_evidence.embedding_disk_data_type) << ","
+            << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
+            << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","
+            << "\"width\":" << width << ","
+            << "\"height\":" << height << ","
+            << "\"seed\":" << execution_contract.seed << ","
+            << "\"graphName\":" << quote(unet.graph_name) << ","
+            << "\"nativeEffective\":" << native_effective << ","
+            << "\"timesteps\":" << qnn_double_array_json(timesteps) << ","
+            << "\"sigmas\":" << qnn_double_array_json(scheduler.sigmas()) << ","
+            << "\"initNoiseSigma\":" << scheduler.init_noise_sigma() << ","
+            << "\"scaleModelInput\":" << (execution_contract.scheduler.scale_model_input ? "true" : "false") << ","
+            << "\"textEncoderExecutionCount\":" << text_encoder_execute_count << ","
+            << "\"vaeExecutionCount\":1,"
+            << "\"effectiveVaeHostScale\":" << effective_vae_host_scale << ","
             << "\"nativeGenerationSequence\":" << g_qnn_image_generation_sequence.load() << ","
             << "\"nativeStartedAtMonotonicMs\":" << g_qnn_image_generation_started_ms.load() << ","
             << "\"nativeStageMask\":" << g_qnn_image_generation_stage_mask.load() << ","
             << "\"nativeDetailStageMask\":" << g_qnn_image_generation_detail_stage_mask.load() << ","
             << "\"runtimeSessionMode\":\"shared_unet_vae\","
-            << "\"message\":\"QNN SDXL semantic generation completed with MNN CLIP conditioning, CFG sampling, QNN UNet, and QNN VAE decoder.\","
+            << "\"message\":\"QNN SDXL semantic generation completed with the resolved shared scheduler, QNN UNet, and QNN VAE decoder.\","
             << "\"conditioningFormat\":\"sdxl_qnn_conditioning\","
-            << "\"steps\":" << steps << ","
-            << "\"seed\":" << seed << ","
-            << "\"cfgScale\":" << cfg_scale << ","
-            << "\"width\":" << width << ","
-            << "\"height\":" << height << ","
             << "\"elapsedMs\":" << elapsed << ","
             << "\"unetContextLoadMs\":" << unet.context_load_ms << ","
             << "\"vaeContextLoadMs\":" << vae.context_load_ms << ","
             << "\"unetExecuteMsTotal\":" << unet_execute_ms_total << ","
-            << "\"unetExecuteMsAvg\":" << (steps > 0 ? (unet_execute_ms_total / (steps * 2)) : 0) << ","
+            << "\"unetExecuteMsAvg\":" << (unet_execution_count > 0 ? (unet_execute_ms_total / static_cast<long long>(unet_execution_count)) : 0) << ","
             << "\"vaeExecuteMs\":" << vae_execute_ms << ","
             << "\"conditioningElements\":" << embeddings.size() << ","
             << "\"hiddenElements\":" << hidden_elements << ","
@@ -4690,8 +5604,8 @@ std::string qnn_semantic_generate_json(
             << "\"unetGraph\":" << quote(unet.graph_name) << ","
             << "\"vaeGraph\":" << quote(vae.graph_name) << ","
             << "\"debug\":{"
-            << "\"timestepFirst\":" << (timesteps.empty() ? 0 : timesteps.front()) << ","
-            << "\"timestepLast\":" << (timesteps.empty() ? 0 : timesteps.back()) << ","
+            << "\"timestepFirst\":" << (timesteps.empty() ? 0.0 : timesteps.front()) << ","
+            << "\"timestepLast\":" << (timesteps.empty() ? 0.0 : timesteps.back()) << ","
             << "\"unetInputs\":" << qnn_tensor_list_debug_json(unet.inputs) << ","
             << "\"unetOutputs\":" << qnn_tensor_list_debug_json(unet.outputs) << ","
             << "\"vaeInputs\":" << qnn_tensor_list_debug_json(vae.inputs) << ","
@@ -4700,7 +5614,8 @@ std::string qnn_semantic_generate_json(
             << "\"noiseUncondStats\":" << float_vector_stats_json(noise_uncond) << ","
             << "\"noiseCondStats\":" << float_vector_stats_json(noise_cond) << ","
             << "\"pixelStats\":" << float_vector_stats_json(pixels) << "},"
-            << "\"runtime\":" << runtime_probe_json(runtime) << ","
+            << "\"executionRuntime\":" << runtime_probe_json(runtime_session.selected_runtime) << ","
+            << "\"htpArchVersion\":" << runtime_session.selected_runtime.htp_arch_version << ","
             << "\"bundle\":" << bundle_probe_json(bundle)
             << "}";
         return out.str();
@@ -4723,75 +5638,87 @@ std::string qnn_semantic_generate_json(
     if (latent_elements == 0 || text_elements == 0 || vae_input_elements != latent_elements) {
         return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"tensor_shape_unsupported\",\"message\":\"QNN UNet and VAE latent tensor shapes are not compatible.\"}";
     }
-    if (qnn_token_conditioning &&
-        embeddings.size() != static_cast<size_t>(text_elements * 2)) {
+    const size_t conditioning_branch_count = execution_contract.use_cfg ? 2u : 1u;
+    const size_t required_embedding_elements =
+        static_cast<size_t>(text_elements) * conditioning_branch_count;
+    if (qnn_token_conditioning && embeddings.size() != required_embedding_elements) {
         std::ostringstream message;
         message << "QNN text encoder output does not match the UNet conditioning input. "
-                << "Encoder produced " << (embeddings.size() / 2u)
-                << " elements per prompt (width=" << text_encoder_embedding_width
+                << "Encoder produced " << embeddings.size()
+                << " total elements across " << conditioning_branch_count << " branch(es)"
+                << " (width=" << text_encoder_embedding_width
                 << "), UNet expects " << text_elements << ".";
         return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_unet_shape_mismatch\",\"message\":") +
             quote(message.str()) + "}";
     }
-    if (embeddings.size() < static_cast<size_t>(text_elements * 2)) {
+    if (embeddings.size() < required_embedding_elements) {
         std::ostringstream message;
         message << "Prompt embeddings are too small. Need at least "
-                << (text_elements * 2) << " f32 elements, got " << embeddings.size() << ".";
+                << required_embedding_elements << " f32 elements, got " << embeddings.size() << ".";
         return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"embedding_shape_unsupported\",\"message\":") +
             quote(message.str()) + "}";
     }
 
-    const int steps = static_cast<int>(std::max<long long>(1, std::min<long long>(long_field(params_json, "steps"), 20)));
-    generation.set_steps(steps);
+    const int steps = execution_contract.scheduler.steps;
+    const auto& timesteps = scheduler.timesteps();
+    generation.set_steps(static_cast<int>(timesteps.size()));
     generation.set_phase(kQnnImageSampling);
-    const long long seed_value = long_field(params_json, "seed");
-    const int seed = static_cast<int>(seed_value == 0 ? 42 : seed_value);
-    const float cfg_scale = static_cast<float>(double_field(params_json, "cfgScale", 7.5));
-    std::vector<int> timesteps(static_cast<size_t>(steps), 1);
-    const int step_size = 1000 / std::max(1, steps);
-    for (int i = steps - 1; i >= 0; --i) {
-        timesteps[static_cast<size_t>(i)] = 1 + (steps - 1 - i) * step_size;
-    }
-    const auto alphas = sd15_pndm_alphas();
-    std::mt19937 rng(static_cast<uint32_t>(seed));
+    std::mt19937 rng(execution_contract.seed);
     std::normal_distribution<float> normal(0.0f, 1.0f);
     std::vector<float> latents(static_cast<size_t>(latent_elements), 0.0f);
-    for (float& value : latents) value = normal(rng);
+    const float initial_noise_scale = static_cast<float>(scheduler.init_noise_sigma());
+    for (float& value : latents) value = normal(rng) * initial_noise_scale;
 
     const float* negative_embedding = embeddings.data();
-    const float* positive_embedding = embeddings.data() + static_cast<size_t>(text_elements);
+    const bool has_two_embedding_branches =
+        embeddings.size() >= static_cast<size_t>(text_elements * 2u);
+    const float* positive_embedding = embeddings.data() +
+        ((execution_contract.use_cfg || has_two_embedding_branches)
+            ? static_cast<size_t>(text_elements)
+            : 0u);
     std::vector<float> noise_uncond;
     std::vector<float> noise_cond;
-    std::vector<std::vector<float>> ets;
     long long unet_execute_ms_total = 0;
-    for (int step = 0; step < steps; ++step) {
+    size_t unet_execution_count = 0;
+    for (size_t step = 0; step < timesteps.size(); ++step) {
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
-        generation.set_step(step);
-        long long execute_ms = 0;
-        if (!qnn_run_unet_once(
-                unet,
-                sample_index,
-                timestep_index,
-                text_index,
-                latents,
-                timesteps[static_cast<size_t>(step)],
-                negative_embedding,
-                static_cast<size_t>(text_elements),
-                &noise_uncond,
-                &execute_ms,
-                &error)) {
-            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"unet_uncond_failed\",\"message\":") +
-                quote(error) + "}";
+        generation.set_step(static_cast<int>(step));
+        std::vector<float> model_input;
+        if (!scheduler.scale_model_input(latents, step, &model_input, &error)) {
+            return qnn_semantic_failure_json(
+                "scheduler_scale_failed",
+                "SCHEDULER_EXECUTION_FAILED",
+                error);
         }
-        unet_execute_ms_total += execute_ms;
-        if (generation.cancelled()) return qnn_image_generation_cancelled_json();
+        long long execute_ms = 0;
+        if (execution_contract.use_cfg) {
+            if (!qnn_run_unet_once(
+                    unet,
+                    sample_index,
+                    timestep_index,
+                    text_index,
+                    model_input,
+                    timesteps[step],
+                    negative_embedding,
+                    static_cast<size_t>(text_elements),
+                    &noise_uncond,
+                    &execute_ms,
+                    &error)) {
+                return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"unet_uncond_failed\",\"message\":") +
+                    quote(error) + "}";
+            }
+            unet_execute_ms_total += execute_ms;
+            ++unet_execution_count;
+            if (generation.cancelled()) return qnn_image_generation_cancelled_json();
+        }
+        execute_ms = 0;
         if (!qnn_run_unet_once(
                 unet,
                 sample_index,
                 timestep_index,
                 text_index,
-                latents,
-                timesteps[static_cast<size_t>(step)],
+                model_input,
+                timesteps[step],
                 positive_embedding,
                 static_cast<size_t>(text_elements),
                 &noise_cond,
@@ -4801,22 +5728,49 @@ std::string qnn_semantic_generate_json(
                 quote(error) + "}";
         }
         unet_execute_ms_total += execute_ms;
+        ++unet_execution_count;
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
-        if (noise_uncond.size() < latents.size() || noise_cond.size() < latents.size()) {
-            return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"unet_output_shape_unsupported\",\"message\":\"UNet output is smaller than the latent tensor.\"}";
+        if ((execution_contract.use_cfg && noise_uncond.size() != latents.size()) ||
+            noise_cond.size() != latents.size()) {
+            return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"unet_output_shape_unsupported\",\"message\":\"UNet output does not exactly match the latent tensor.\"}";
         }
-        std::vector<float> guided(latents.size(), 0.0f);
-        for (size_t i = 0; i < latents.size(); ++i) {
-            guided[i] = cfg_scale * (noise_cond[i] - noise_uncond[i]) + noise_uncond[i];
+        std::vector<float> guided = noise_cond;
+        if (execution_contract.use_cfg) {
+            guided.resize(latents.size());
+            for (size_t i = 0; i < latents.size(); ++i) {
+                guided[i] = execution_contract.cfg_scale *
+                    (noise_cond[i] - noise_uncond[i]) + noise_uncond[i];
+            }
         }
-        latents = qnn_pndm_step(latents, ets, guided, step, timesteps, alphas);
-        generation.set_step(step + 1);
+        mca::diffusion::SchedulerStepResult step_result;
+        mca::diffusion::SchedulerStepOptions step_options;
+        step_options.eta = execution_contract.scheduler.eta;
+        if (!scheduler.step(guided, step, latents, &step_result, &error, step_options)) {
+            return qnn_semantic_failure_json(
+                "scheduler_step_failed",
+                "SCHEDULER_EXECUTION_FAILED",
+                error);
+        }
+        latents = std::move(step_result.previous_sample);
+        generation.set_step(static_cast<int>(step + 1u));
+    }
+    if (unet_execution_count !=
+        execution_contract.scheduler.expected_unet_execution_count) {
+        return qnn_execution_contract_mismatch_json(
+            "unetExecutionCount",
+            execution_contract.scheduler.expected_unet_execution_count,
+            unet_execution_count);
     }
 
     if (generation.cancelled()) return qnn_image_generation_cancelled_json();
     generation.set_phase(kQnnImageDecoding);
-    std::vector<float> vae_latents(latents.size(), 0.0f);
-    for (size_t i = 0; i < latents.size(); ++i) vae_latents[i] = latents[i] * (1.0f / 0.18215f);
+    std::vector<float> vae_latents = latents;
+    const double effective_vae_host_scale = qnn_effective_vae_host_scale(execution_contract);
+    if (effective_vae_host_scale != 1.0) {
+        for (float& value : vae_latents) {
+            value = static_cast<float>(value * effective_vae_host_scale);
+        }
+    }
     if (!qnn_write_float_tensor(&vae.inputs[0], vae_latents.data(), vae_latents.size(), &error)) {
         return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"vae_input_bind_failed\",\"message\":") +
             quote(error) + "}";
@@ -4847,8 +5801,21 @@ std::string qnn_semantic_generate_json(
         std::chrono::steady_clock::now() - started
     ).count();
     const long long output_bytes = file_size_or_zero(output_path);
+    const QnnNativeEffectiveEvidence native_evidence{
+        timesteps.size(),
+        unet_execution_count,
+        conditioning_evidence.tokenizer_backend,
+        conditioning_evidence.token_count,
+        conditioning_evidence.embedding_disk_data_type,
+        width,
+        height,
+        unet.graph_name,
+    };
+    const std::string native_effective = qnn_native_effective_json(
+        execution_contract,
+        native_evidence);
     std::ostringstream out;
-    out << "{"
+    out << std::setprecision(17) << "{"
         << "\"ok\":true,"
         << "\"backend\":\"qnn_htp\","
         << "\"pipelineProbe\":false,"
@@ -4858,6 +5825,35 @@ std::string qnn_semantic_generate_json(
         << "\"nativeExecution\":true,"
         << "\"fallback\":false,"
         << "\"executionStage\":\"semantic_generation_passed\","
+        << "\"profileId\":" << quote(execution_contract.profile_id) << ","
+        << "\"profileRevision\":" << execution_contract.profile_revision << ","
+        << "\"modelFingerprint\":" << quote(execution_contract.model_fingerprint) << ","
+        << "\"runtime\":\"QNN_HTP\","
+        << "\"scheduler\":" << quote(qnn_scheduler_wire_name(execution_contract.scheduler.config.algorithm)) << ","
+        << "\"predictionType\":" << quote(qnn_prediction_wire_name(execution_contract.scheduler.config.prediction_type)) << ","
+        << "\"steps\":" << steps << ","
+        << "\"timetableCount\":" << timesteps.size() << ","
+        << "\"unetExecutionCount\":" << unet_execution_count << ","
+        << "\"cfgScale\":" << execution_contract.cfg_scale << ","
+        << "\"useCfg\":" << (execution_contract.use_cfg ? "true" : "false") << ","
+        << "\"unconditionalBranch\":" << (execution_contract.use_cfg ? "true" : "false") << ","
+        << "\"tokenizerBackend\":" << quote(conditioning_evidence.tokenizer_backend) << ","
+        << "\"tokenCount\":" << conditioning_evidence.token_count << ","
+        << "\"embeddingDiskDataType\":" << quote(conditioning_evidence.embedding_disk_data_type) << ","
+        << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
+        << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","
+        << "\"width\":" << width << ","
+        << "\"height\":" << height << ","
+        << "\"seed\":" << execution_contract.seed << ","
+        << "\"graphName\":" << quote(unet.graph_name) << ","
+        << "\"nativeEffective\":" << native_effective << ","
+        << "\"timesteps\":" << qnn_double_array_json(timesteps) << ","
+        << "\"sigmas\":" << qnn_double_array_json(scheduler.sigmas()) << ","
+        << "\"initNoiseSigma\":" << scheduler.init_noise_sigma() << ","
+        << "\"scaleModelInput\":" << (execution_contract.scheduler.scale_model_input ? "true" : "false") << ","
+        << "\"textEncoderExecutionCount\":" << text_encoder_execute_count << ","
+        << "\"vaeExecutionCount\":1,"
+        << "\"effectiveVaeHostScale\":" << effective_vae_host_scale << ","
         << "\"nativeGenerationSequence\":" << g_qnn_image_generation_sequence.load() << ","
         << "\"nativeStartedAtMonotonicMs\":" << g_qnn_image_generation_started_ms.load() << ","
         << "\"nativeStageMask\":" << g_qnn_image_generation_stage_mask.load() << ","
@@ -4865,16 +5861,11 @@ std::string qnn_semantic_generate_json(
         << "\"runtimeSessionMode\":"
         << quote(qnn_token_conditioning ? "shared_text_unet_vae" : "shared_unet_vae") << ","
         << "\"message\":" << quote(qnn_token_conditioning
-            ? "QNN semantic generation completed with QNN CLIP text encoding, PNDM scheduler, QNN UNet, and QNN VAE decoder."
-            : "QNN SD1.5 semantic generation completed with MNN text embeddings, PNDM scheduler, QNN UNet, and QNN VAE decoder.") << ","
+            ? "QNN semantic generation completed with QNN CLIP text encoding, the resolved shared scheduler, QNN UNet, and QNN VAE decoder."
+            : "QNN semantic generation completed with MNN text embeddings, the resolved shared scheduler, QNN UNet, and QNN VAE decoder.") << ","
         << "\"conditioningFormat\":" << quote(qnn_token_conditioning
             ? "qnn_clip_token_ids_i32"
             : conditioning_format) << ","
-        << "\"steps\":" << steps << ","
-        << "\"seed\":" << seed << ","
-        << "\"cfgScale\":" << cfg_scale << ","
-        << "\"width\":" << width << ","
-        << "\"height\":" << height << ","
         << "\"elapsedMs\":" << elapsed << ","
         << "\"unetContextLoadMs\":" << unet.context_load_ms << ","
         << "\"vaeContextLoadMs\":" << vae.context_load_ms << ","
@@ -4882,7 +5873,7 @@ std::string qnn_semantic_generate_json(
         << "\"textEncoderExecuteMsTotal\":" << text_encoder_execute_ms_total << ","
         << "\"textEncoderEmbeddingWidth\":" << text_encoder_embedding_width << ","
         << "\"unetExecuteMsTotal\":" << unet_execute_ms_total << ","
-        << "\"unetExecuteMsAvg\":" << (steps > 0 ? (unet_execute_ms_total / (steps * 2)) : 0) << ","
+        << "\"unetExecuteMsAvg\":" << (unet_execution_count > 0 ? (unet_execute_ms_total / static_cast<long long>(unet_execution_count)) : 0) << ","
         << "\"vaeExecuteMs\":" << vae_execute_ms << ","
         << "\"embeddingElements\":" << embeddings.size() << ","
         << "\"textElements\":" << text_elements << ","
@@ -4894,8 +5885,8 @@ std::string qnn_semantic_generate_json(
         << "\"unetGraph\":" << quote(unet.graph_name) << ","
         << "\"vaeGraph\":" << quote(vae.graph_name) << ","
         << "\"debug\":{"
-        << "\"timestepFirst\":" << (timesteps.empty() ? 0 : timesteps.front()) << ","
-        << "\"timestepLast\":" << (timesteps.empty() ? 0 : timesteps.back()) << ","
+        << "\"timestepFirst\":" << (timesteps.empty() ? 0.0 : timesteps.front()) << ","
+        << "\"timestepLast\":" << (timesteps.empty() ? 0.0 : timesteps.back()) << ","
         << "\"textEncoderInputs\":" << text_encoder_inputs_debug << ","
         << "\"textEncoderOutputs\":" << text_encoder_outputs_debug << ","
         << "\"unetInputs\":" << qnn_tensor_list_debug_json(unet.inputs) << ","
@@ -4906,7 +5897,8 @@ std::string qnn_semantic_generate_json(
         << "\"noiseUncondStats\":" << float_vector_stats_json(noise_uncond) << ","
         << "\"noiseCondStats\":" << float_vector_stats_json(noise_cond) << ","
         << "\"pixelStats\":" << float_vector_stats_json(pixels) << "},"
-        << "\"runtime\":" << runtime_probe_json(runtime) << ","
+        << "\"executionRuntime\":" << runtime_probe_json(runtime_session.selected_runtime) << ","
+        << "\"htpArchVersion\":" << runtime_session.selected_runtime.htp_arch_version << ","
         << "\"bundle\":" << bundle_probe_json(bundle)
         << "}";
     return out.str();

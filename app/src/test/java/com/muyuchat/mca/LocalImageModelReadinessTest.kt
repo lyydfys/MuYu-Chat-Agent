@@ -1289,10 +1289,10 @@ class LocalImageModelReadinessTest {
             verificationMessage = verificationMessage
         )
 
-    private fun File.touch(name: String): File =
+    private fun File.touch(name: String, contents: String = "x"): File =
         File(this, name).also {
             it.parentFile?.mkdirs()
-            it.writeText("x")
+            it.writeText(contents)
         }
 
     private fun File.createCompleteSanaBundle(): File {

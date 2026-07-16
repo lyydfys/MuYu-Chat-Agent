@@ -38,9 +38,24 @@ class NativeMnnDiffusionBridge {
         eosId: Int,
         maxTokens: Int
     ): IntArray
+
+    /**
+     * Executes a complete Hugging Face tokenizer.json contract. The output is
+     * negative then positive and contains exactly maxTokens ids per side.
+     */
+    external fun tokenizePromptTokenIdsFromJson(
+        tokenizerJsonPath: String,
+        prompt: String,
+        negativePrompt: String,
+        bosId: Int,
+        eosId: Int,
+        padId: Int,
+        maxTokens: Int
+    ): IntArray
     external fun encodeSd15PromptEmbeddings(
         bundleRoot: String,
         prompt: String,
+        negativePrompt: String,
         outputPath: String,
         backendMode: String,
         threads: Int,
@@ -49,6 +64,7 @@ class NativeMnnDiffusionBridge {
     external fun encodeSdxlPromptConditioning(
         bundleRoot: String,
         prompt: String,
+        negativePrompt: String,
         outputPath: String,
         width: Int,
         height: Int,

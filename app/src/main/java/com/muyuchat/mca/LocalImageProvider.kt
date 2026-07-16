@@ -76,6 +76,7 @@ enum class LocalImageModelFamily(val label: String) {
     FLUX("Flux"),
     SD_TURBO("SD-Turbo"),
     SDXL("SDXL"),
+    SD21("Stable Diffusion 2.1"),
     SD15("Stable Diffusion 1.5"),
     WAN("Wan"),
     CUSTOM("自定义");
@@ -96,6 +97,7 @@ enum class LocalImageModelFamily(val label: String) {
                 "flux" in lower -> FLUX
                 "sd-turbo" in lower || "sd_turbo" in lower -> SD_TURBO
                 "sdxl" in lower || "stable-diffusion-xl" in lower -> SDXL
+                "sd-2.1" in lower || "sd2.1" in lower || "sd21" in lower || "v2-1" in lower || "stable-diffusion-2-1" in lower -> SD21
                 "sd-1.5" in lower || "sd1.5" in lower || "sd15" in lower || "v1-5" in lower || "stable-diffusion-v1-5" in lower -> SD15
                 "wan" in lower -> WAN
                 else -> CUSTOM
@@ -246,6 +248,8 @@ data class LocalImageProgress(
  * auditable configuration instead of silently falling back to those defaults.
  */
 data class LocalImageGenerationOptions(
+    /** null = use profile default; empty string = explicitly disable it. */
+    val negativePrompt: String? = null,
     val width: Int? = null,
     val height: Int? = null,
     val steps: Int? = null,
@@ -262,6 +266,7 @@ data class LocalImageGenerationOptions(
     val useCfg: Boolean? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
+        negativePrompt?.let { put("negativePrompt", it) }
         width?.let { put("width", it) }
         height?.let { put("height", it) }
         steps?.let { put("steps", it) }
@@ -315,6 +320,8 @@ data class LocalImageGenerationOptions(
                 } else null
 
             return LocalImageGenerationOptions(
+                negativePrompt = optionalString("negativePrompt", preserveBlank = true)
+                    ?: optionalString("negative_prompt", preserveBlank = true),
                 width = optionalInt("width"),
                 height = optionalInt("height"),
                 steps = optionalInt("steps"),
@@ -432,7 +439,16 @@ class LocalImageProvider(context: Context) {
             require(qnnHealth.state == LocalImageQnnState.SMOKE_REQUIRED) {
                 qnnHealth.message
             }
-            val isSdxlQnn = model.family == LocalImageModelFamily.SDXL
+            val fallbackSeed = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
+            val effectiveOptions = if (options.seed == null) options.copy(seed = fallbackSeed) else options
+            val profileResolution = resolveLocalImageExecutionProfile(
+                model = model,
+                options = effectiveOptions,
+                bundleRoot = bundleRoot
+            )
+            val profile = profileResolution.profile
+            val effectiveFamily = profile.family
+            val isSdxlQnn = effectiveFamily == LocalImageModelFamily.SDXL
             // Qualcomm's Gen5 archives include a native QNN CLIP graph.  Keep
             // legacy QNN archives on their existing MNN-embedding path, but
             // pass token IDs to the native graph when the archive explicitly
@@ -468,16 +484,10 @@ class LocalImageProvider(context: Context) {
             val latentMetadataFile = File(outputDir, "${outputFile.nameWithoutExtension}.latent.json")
             val unetJournalFile = File(outputDir, "${outputFile.nameWithoutExtension}.unet-stage.json")
             val vaeJournalFile = File(outputDir, "${outputFile.nameWithoutExtension}.vae-stage.json")
-            val (defaultWidth, defaultHeight) = model.imageSize
-                .toImageDimensions(model.family)
-                .let { dimensions -> if (isSdxlQnn) dimensions else dimensions.fastLocalDimensions(model.family) }
             val contract = resolveQnnImageGenerationContract(
-                family = model.family,
-                defaultWidth = defaultWidth,
-                defaultHeight = defaultHeight,
+                resolution = profileResolution,
                 defaultThreads = defaultLocalImageThreads(),
-                fallbackSeed = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt(),
-                options = options
+                options = effectiveOptions
             )
             val width = contract.width
             val height = contract.height
@@ -507,9 +517,14 @@ class LocalImageProvider(context: Context) {
                 )
             }
 
-            val params = JSONObject()
+            val params = ImageExecutionProfileNativeContract.toNativeParamsJson(profileResolution)
                 .put("prompt", prompt.trim())
-                .put("family", model.family.name)
+                .put(
+                    "negativePrompt",
+                    effectiveOptions.negativePrompt ?: profile.defaults.defaultNegativePrompt.orEmpty()
+                )
+                .put("family", effectiveFamily.name)
+                .put("variant", profile.variant.name)
                 .put("width", width)
                 .put("height", height)
                 .put("steps", steps)
@@ -527,7 +542,6 @@ class LocalImageProvider(context: Context) {
                 .putQnnSemanticDefaults(bundleRoot)
             if (isSdxlQnn) {
                 params.put("conditioningFormat", "sdxl_qnn_conditioning")
-                    .put("vaeLatentScale", 1.0 / 0.13025)
             } else if (usesQnnClipTokenIds) {
                 params.put("conditioningFormat", "qnn_clip_token_ids_i32")
             }
@@ -545,6 +559,7 @@ class LocalImageProvider(context: Context) {
                     mnnDiffusionBridge.encodeSdxlPromptConditioning(
                         conditioningRoot.absolutePath,
                         prompt.trim(),
+                        profile.defaults.defaultNegativePrompt.orEmpty(),
                         embeddingFile.absolutePath,
                         width,
                         height,
@@ -556,12 +571,24 @@ class LocalImageProvider(context: Context) {
                         bridge = mnnDiffusionBridge,
                         bundleRoot = bundleRoot,
                         prompt = prompt.trim(),
-                        outputFile = embeddingFile
+                        outputFile = embeddingFile,
+                        negativePrompt = profile.defaults.defaultNegativePrompt.orEmpty(),
+                        bosId = requireNotNull(profile.tokenizer.bosId) {
+                            "Resolved tokenizer profile is missing BOS id."
+                        },
+                        eosId = requireNotNull(profile.tokenizer.eosId) {
+                            "Resolved tokenizer profile is missing EOS id."
+                        },
+                        padId = requireNotNull(profile.tokenizer.padId) {
+                            "Resolved tokenizer profile is missing PAD id."
+                        },
+                        maxTokens = profile.tokenizer.maxLength
                     )
                 } else {
                     mnnDiffusionBridge.encodeSd15PromptEmbeddings(
                         bundleRoot.absolutePath,
                         prompt.trim(),
+                        profile.defaults.defaultNegativePrompt.orEmpty(),
                         embeddingFile.absolutePath,
                         contract.backendMode,
                         threads,
@@ -571,6 +598,22 @@ class LocalImageProvider(context: Context) {
                 val embeddingJson = JSONObject(embeddingRaw)
                 if (!embeddingJson.optBoolean("ok", false)) {
                     error(embeddingJson.optString("error").ifBlank { "Failed to encode QNN prompt embeddings." })
+                }
+                val actualConditioningFormat = embeddingJson
+                    .optString("conditioningFormat")
+                    .ifBlank { embeddingJson.optString("format") }
+                    .trim()
+                require(actualConditioningFormat.isNotEmpty()) {
+                    "Prompt conditioning did not report its native file format."
+                }
+                val requestedConditioningFormat = params.optString("conditioningFormat").trim()
+                if (requestedConditioningFormat.isEmpty()) {
+                    params.put("conditioningFormat", actualConditioningFormat)
+                } else {
+                    require(requestedConditioningFormat == actualConditioningFormat) {
+                        "Prompt conditioning format mismatch: resolved=$requestedConditioningFormat, " +
+                            "encoder=$actualConditioningFormat."
+                    }
                 }
                 if (cancellationRequested.get()) {
                     error("本地生图已停止")
@@ -640,6 +683,7 @@ class LocalImageProvider(context: Context) {
                         }
                     )
                 }
+                ImageExecutionProfileNativeContract.parseAndValidate(profileResolution, json)
                 progress("completed", "QNN NPU image generation completed", step = steps)
                 val generated = File(json.optString("outputPath", outputFile.absolutePath))
                 require(generated.exists() && generated.length() > 0L) { "Snapdragon NPU did not output a valid image." }
@@ -679,42 +723,60 @@ class LocalImageProvider(context: Context) {
                 JSONObject(mnnDiffusionBridge.getRuntimeStatsJson()).optString("lastError")
                     .ifBlank { "MNN-Diffusion native runner is not packaged in this APK." }
             }
-            model.bundleRoot?.let(::File)?.let { prepareMnnDiffusionTokenizerIfPossible(it) }
+            val bundleRoot = model.bundleRoot
+                ?.let(::File)
+                ?.takeIf(File::isDirectory)
+                ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+                ?: error("MNN-Diffusion requires a complete model bundle directory.")
+            prepareMnnDiffusionTokenizerIfPossible(bundleRoot)
             model.localImageStructuralReadinessMessage()?.let { message -> error(message) }
             val outputDir = File(appContext.cacheDir, "local_image_outputs").apply { mkdirs() }
             val outputFile = File(outputDir, "mnn-diffusion-${System.currentTimeMillis()}.png")
-            val runner = resolveMnnDiffusionRunner(model.family, options.runner)
-            val (defaultWidth, defaultHeight) = resolveMnnDiffusionProductDimensions(model, runner)
+            val fallbackSeed = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
+            val effectiveOptions = if (options.seed == null) options.copy(seed = fallbackSeed) else options
+            val profileResolution = resolveLocalImageExecutionProfile(
+                model = model,
+                options = effectiveOptions,
+                bundleRoot = bundleRoot
+            )
+            val profile = profileResolution.profile
+            val resolved = profileResolution.layers.resolved
+            val runner = resolveMnnDiffusionRunner(profile.family, effectiveOptions.runner)
+            val (defaultWidth, defaultHeight) = resolved.width to resolved.height
             // The direct SD1.5 interpreter has a fixed 64x64 latent today.
             // Accepting a mismatched requested size would produce a misleading
             // result, so reject it rather than silently rendering another size.
             val (width, height) = resolveMnnDiffusionDimensions(
                 defaultWidth = defaultWidth,
                 defaultHeight = defaultHeight,
-                requestedWidth = options.width,
-                requestedHeight = options.height
+                requestedWidth = resolved.width,
+                requestedHeight = resolved.height
             )
-            val steps = resolveMnnDiffusionSteps(model.family, options.steps)
-            val threads = resolveMnnDiffusionThreads(options.threads, defaultLocalImageThreads())
-            val backendMode = resolveMnnDiffusionBackendMode(options.backendMode)
-            val sampleMethod = resolveMnnDiffusionSampleMethod(options.sampleMethod)
-            val tokenEmbeddingMode = resolveMnnDiffusionTokenEmbeddingMode(options.tokenEmbeddingMode)
-            val memoryMode = resolveMnnDiffusionMemoryMode(options.memoryMode)
-            val seed = options.seed ?: (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
-            val cfgScale = resolveFiniteMnnDiffusionControl(
-                name = "cfgScale",
-                requested = options.cfgScale,
-                defaultValue = defaultCfgFor(model.family)
-            )
+            val steps = resolved.steps
+            val threads = resolveMnnDiffusionThreads(effectiveOptions.threads, defaultLocalImageThreads())
+            val backendMode = resolveMnnDiffusionBackendMode(effectiveOptions.backendMode)
+            val sampleMethod = imageSchedulerProductName(resolved.scheduler)
+            require(effectiveOptions.tokenEmbeddingMode == null) {
+                "MNN-Diffusion no longer accepts tokenEmbeddingMode; token table precision is " +
+                    "determined from the package's exact byte contract."
+            }
+            val memoryMode = resolveMnnDiffusionMemoryMode(effectiveOptions.memoryMode)
+            require(runner != "direct" || memoryMode == 0) {
+                "MNN-Diffusion direct runner requires memoryMode=0."
+            }
+            val seed = resolved.seed.toInt()
+            val cfgScale = resolved.cfgScale
             val flowShift = resolveFiniteMnnDiffusionControl(
                 name = "flowShift",
-                requested = options.flowShift,
-                defaultValue = defaultFlowShiftFor(model.family)
+                requested = effectiveOptions.flowShift,
+                defaultValue = defaultFlowShiftFor(profile.family)
             )
-            val useCfg = options.useCfg ?: false
-            val params = JSONObject()
+            val useCfg = resolved.useCfg
+            val params = ImageExecutionProfileNativeContract.toNativeParamsJson(profileResolution)
                 .put("prompt", prompt.trim())
-                .put("family", model.family.name)
+                .put("negativePrompt", profile.defaults.defaultNegativePrompt.orEmpty())
+                .put("family", profile.family.name)
+                .put("variant", profile.variant.name)
                 .put("width", width)
                 .put("height", height)
                 .put("steps", steps)
@@ -722,13 +784,12 @@ class LocalImageProvider(context: Context) {
                 .put("seed", seed)
                 .put("randomSeed", seed)
                 .put("cfgScale", cfgScale)
-                .put("distilledGuidance", options.distilledGuidance ?: 3.5)
+                .put("distilledGuidance", effectiveOptions.distilledGuidance ?: 3.5)
                 .put("flowShift", flowShift)
                 .put("useCfg", useCfg)
                 .put("sampleMethod", sampleMethod)
                 .put("runner", runner)
                 .put("backendMode", backendMode)
-                .put("tokenEmbeddingMode", tokenEmbeddingMode)
                 .put("memoryMode", memoryMode)
             onProgress(
                 LocalImageProgress(
@@ -752,21 +813,11 @@ class LocalImageProvider(context: Context) {
                 }
             }
             val raw = try {
-                val primary = mnnDiffusionBridge.generate(
-                    model.bundleRoot ?: File(model.path).parent.orEmpty(),
+                mnnDiffusionBridge.generate(
+                    bundleRoot.absolutePath,
                     params.toString(),
                     outputFile.absolutePath
                 )
-                if (JSONObject(primary).optBoolean("ok", false) || options.backendMode != null) {
-                    primary
-                } else {
-                    params.put("backendMode", "cpu")
-                    mnnDiffusionBridge.generate(
-                        model.bundleRoot ?: File(model.path).parent.orEmpty(),
-                        params.toString(),
-                        outputFile.absolutePath
-                    )
-                }
             } finally {
                 progressPoller.cancelAndJoin()
                 mnnDiffusionBridge.currentProgressOrNull()?.let(onProgress)
@@ -775,36 +826,25 @@ class LocalImageProvider(context: Context) {
             if (!json.optBoolean("ok", false)) {
                 error(json.optString("error").ifBlank { "MNN-Diffusion image generation failed." })
             }
-            require(json.optInt("steps", -1) == steps) {
-                "MNN-Diffusion 未执行请求的 $steps 步。"
+            ImageExecutionProfileNativeContract.parseAndValidate(profileResolution, json)
+            require(mnnDiffusionBackendMatches(backendMode, json.getString("backendMode"))) {
+                "MNN-Diffusion did not execute on the resolved $backendMode backend."
             }
-            require(
-                json.optInt("width", -1) == width &&
-                    json.optInt("height", -1) == height
-            ) {
-                "MNN-Diffusion 未执行请求的 ${width}x${height} 尺寸。"
+            require(json.getString("runner").trim().lowercase() == runner) {
+                "MNN-Diffusion did not execute with the resolved $runner runner."
             }
-            if (options.backendMode != null) {
-                require(mnnDiffusionBackendMatches(backendMode, json.optString("backendMode"))) {
-                    "MNN-Diffusion 未在请求的 $backendMode 后端执行。"
-                }
+            require(json.getString("sampleMethod") == sampleMethod) {
+                "MNN-Diffusion did not execute the resolved scheduler."
             }
-            if (options.runner != null) {
-                require(json.optString("runner").trim().lowercase() == runner) {
-                    "MNN-Diffusion 未在请求的 $runner runner 执行。"
-                }
+            require(json.getInt("memoryMode") == memoryMode) {
+                "MNN-Diffusion did not execute the resolved memory mode."
             }
-            verifyMnnDiffusionResultControlIfPresent(json, "cfgScale", cfgScale)
-            verifyMnnDiffusionResultControlIfPresent(json, "flowShift", flowShift)
-            verifyMnnDiffusionResultControlIfPresent(json, "useCfg", useCfg)
-            verifyMnnDiffusionResultControlIfPresent(json, "sampleMethod", sampleMethod)
-            verifyMnnDiffusionResultControlIfPresent(json, "tokenEmbeddingMode", tokenEmbeddingMode)
-            verifyMnnDiffusionResultControlIfPresent(json, "memoryMode", memoryMode)
             val generated = File(json.optString("path", outputFile.absolutePath))
             require(generated.exists() && generated.length() > 0L) { "MNN-Diffusion did not output a valid image." }
             return@withContext LocalImageResult(
                 bytes = generated.readBytes(),
-                mimeType = json.optString("mimeType", "image/png")
+                mimeType = json.optString("mimeType", "image/png"),
+                executionMetadataJson = json.toString()
             )
         }
         require(model.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
@@ -817,50 +857,65 @@ class LocalImageProvider(context: Context) {
         model.localImageStructuralReadinessMessage()?.let { message -> error(message) }
         val componentSelection = resolveStableDiffusionComponentSelection(model)
         val effectiveFamily = componentSelection.family
+        val bundleRoot = File(componentSelection.bundleRoot).takeIf(File::isDirectory)
+            ?: error("stable-diffusion.cpp requires a complete model bundle directory.")
+        val fallbackSeed = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
+        val inferredUseCfg = options.useCfg ?: options.cfgScale?.let { cfgScale ->
+            kotlin.math.abs(cfgScale - 1.0) > 1e-12
+        }
+        val effectiveOptions = options.copy(
+            seed = options.seed ?: fallbackSeed,
+            useCfg = inferredUseCfg
+        )
+        val profileResolution = resolveLocalImageExecutionProfile(
+            model = model,
+            options = effectiveOptions,
+            bundleRoot = bundleRoot,
+            familyOverride = effectiveFamily
+        )
+        val profile = profileResolution.profile
+        val resolved = profileResolution.layers.resolved
 
         val outputDir = File(appContext.cacheDir, "local_image_outputs").apply { mkdirs() }
         val outputFile = File(outputDir, "sdcpp-${System.currentTimeMillis()}.png")
-        val (defaultWidth, defaultHeight) = model.imageSize
-            .toImageDimensions(effectiveFamily)
-            .fastLocalDimensions(effectiveFamily)
         val (width, height) = resolveStableDiffusionDimensions(
-            defaultWidth = defaultWidth,
-            defaultHeight = defaultHeight,
-            requestedWidth = options.width,
-            requestedHeight = options.height
+            defaultWidth = resolved.width,
+            defaultHeight = resolved.height,
+            requestedWidth = resolved.width,
+            requestedHeight = resolved.height
         )
-        val steps = resolveStableDiffusionSteps(effectiveFamily, options.steps)
-        val threads = resolveStableDiffusionThreads(options.threads, defaultLocalImageThreads())
-        val seed = options.seed ?: (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
-        val cfgScale = resolveStableDiffusionFiniteControl(
-            name = "cfgScale",
-            requested = options.cfgScale,
-            defaultValue = defaultCfgFor(effectiveFamily)
-        )
+        val steps = resolved.steps
+        val threads = resolveStableDiffusionThreads(effectiveOptions.threads, defaultLocalImageThreads())
+        val seed = resolved.seed
+        val cfgScale = resolved.cfgScale
         val distilledGuidance = resolveStableDiffusionFiniteControl(
             name = "distilledGuidance",
-            requested = options.distilledGuidance,
+            requested = effectiveOptions.distilledGuidance,
             defaultValue = 3.5
         )
         val flowShift = resolveStableDiffusionFiniteControl(
             name = "flowShift",
-            requested = options.flowShift,
+            requested = effectiveOptions.flowShift,
             defaultValue = defaultFlowShiftFor(effectiveFamily)
         )
-        val sampleMethod = resolveStableDiffusionSampleMethod(options.sampleMethod)
-        val backendMode = resolveStableDiffusionBackendMode(options.backendMode)
-        require(options.runner == null) {
+        val sampleMethod = imageSchedulerProductName(resolved.scheduler)
+        val backendMode = resolveStableDiffusionBackendMode(effectiveOptions.backendMode)
+        val negativePrompt =
+            effectiveOptions.negativePrompt ?: profile.defaults.defaultNegativePrompt.orEmpty()
+        require(effectiveOptions.runner == null) {
             "stable-diffusion.cpp does not support the MNN runner option."
         }
-        require(options.tokenEmbeddingMode == null || options.tokenEmbeddingMode.trim().equals("auto", ignoreCase = true)) {
-            "stable-diffusion.cpp supports only tokenEmbeddingMode=auto."
+        require(effectiveOptions.tokenEmbeddingMode == null) {
+            "stable-diffusion.cpp no longer accepts tokenEmbeddingMode; its native tokenizer owns conditioning storage."
         }
-        require(options.memoryMode == null || options.memoryMode == 0) {
+        require(effectiveOptions.memoryMode == null || effectiveOptions.memoryMode == 0) {
             "stable-diffusion.cpp supports only memoryMode=0."
         }
-        val params = JSONObject()
+        val params = ImageExecutionProfileNativeContract.toNativeParamsJson(profileResolution)
             .put("prompt", prompt.trim())
+            .put("negativePrompt", negativePrompt)
             .put("family", effectiveFamily.name)
+            .put("variant", profile.variant.name)
             .put("width", width)
             .put("height", height)
             .put("steps", steps)
@@ -899,6 +954,7 @@ class LocalImageProvider(context: Context) {
             val message = json.optString("error").ifBlank { "stable-diffusion.cpp 生成失败。" }
             error(message)
         }
+        ImageExecutionProfileNativeContract.parseAndValidate(profileResolution, json)
         require(json.optInt("width", -1) == width && json.optInt("height", -1) == height) {
             "stable-diffusion.cpp did not execute the requested ${width}x${height} dimensions."
         }
@@ -908,14 +964,17 @@ class LocalImageProvider(context: Context) {
         require(json.optInt("threads", -1) == threads) {
             "stable-diffusion.cpp did not execute the requested $threads threads."
         }
-        require(json.optInt("seed", Int.MIN_VALUE) == seed) {
+        require(json.has("seed") && json.getLong("seed") == seed) {
             "stable-diffusion.cpp did not execute the requested seed."
         }
         verifyStableDiffusionResultControl(json, "cfgScale", cfgScale)
         verifyStableDiffusionResultControl(json, "distilledGuidance", distilledGuidance)
         verifyStableDiffusionResultControl(json, "flowShift", flowShift)
-        require(json.optString("sampleMethod") == sampleMethod) {
-            "stable-diffusion.cpp did not execute sampleMethod=$sampleMethod."
+        require(stableDiffusionNativeSampleMethodMatches(resolved.scheduler, json.optString("sampleMethod"))) {
+            "stable-diffusion.cpp did not execute the resolved ${resolved.scheduler} sampler."
+        }
+        require(json.has("negativePrompt") && json.getString("negativePrompt") == negativePrompt) {
+            "stable-diffusion.cpp did not execute the resolved negative prompt."
         }
         require(json.optString("backendMode") == backendMode) {
             "stable-diffusion.cpp did not execute on backendMode=$backendMode."
@@ -930,9 +989,8 @@ class LocalImageProvider(context: Context) {
                 LocalImageResult(
                     bytes = generated.readBytes(),
                     mimeType = json.optString("mimeType", "image/png"),
-                    executionMetadataJson = JSONObject()
+                    executionMetadataJson = json
                         .put("componentSelection", componentSelectionAudit)
-                        .put("contextReleased", true)
                         .toString()
                 )
             } finally {
@@ -1074,28 +1132,73 @@ internal fun qnnClipTokenizerRoot(bundleRoot: File): File? {
         ?.let { parent -> runCatching { parent.canonicalFile }.getOrNull() }
 }
 
+/** Locates the complete tokenizer contract used by the standard CLIP backend. */
+internal fun qnnClipTokenizerJsonFile(bundleRoot: File): File? {
+    val root = runCatching { bundleRoot.canonicalFile }.getOrNull() ?: return null
+    return root.walkTopDown()
+        .firstOrNull { file ->
+            file.isFile &&
+                file.length() > 0L &&
+                file.name.equals("tokenizer.json", ignoreCase = true)
+        }
+        ?.let { file ->
+            runCatching { file.canonicalFile }
+                .getOrNull()
+                ?.takeIf { candidate ->
+                    candidate.path == root.path || candidate.path.startsWith(root.path + File.separator)
+                }
+        }
+}
+
 /** Writes unconditional then conditional CLIP token IDs as 154 little-endian int32 values. */
 internal fun encodeQnnClipPromptTokenIds(
     bridge: NativeMnnDiffusionBridge,
     bundleRoot: File,
     prompt: String,
-    outputFile: File
+    outputFile: File,
+    negativePrompt: String = "",
+    bosId: Int = 49_406,
+    eosId: Int = 49_407,
+    padId: Int = 49_407,
+    maxTokens: Int = 77
 ): String = runCatching {
+    require(maxTokens in 1..4_096) { "CLIP tokenizer max length is invalid: $maxTokens." }
+    val tokenizerJson = qnnClipTokenizerJsonFile(bundleRoot)
     val tokenizerRoot = qnnClipTokenizerRoot(bundleRoot)
-    val tokenIds = if (tokenizerRoot != null) {
+    val tokenizerBackend: String
+    val tokenIds = if (tokenizerJson != null) {
+        tokenizerBackend = "tokenizers_cpp"
+        bridge.tokenizePromptTokenIdsFromJson(
+            tokenizerJsonPath = tokenizerJson.absolutePath,
+            prompt = prompt,
+            negativePrompt = negativePrompt,
+            bosId = bosId,
+            eosId = eosId,
+            padId = padId,
+            maxTokens = maxTokens
+        )
+    } else if (tokenizerRoot != null && negativePrompt.isEmpty()) {
+        tokenizerBackend = "mnn_mtok"
         bridge.tokenizePromptTokenIdsWithConfig(
             bundleRoot = bundleRoot.absolutePath,
             prompt = prompt,
             tokenizerRoot = tokenizerRoot.absolutePath,
-            bosId = 49406,
-            eosId = 49407,
-            maxTokens = 77
+            bosId = bosId,
+            eosId = eosId,
+            maxTokens = maxTokens
         )
-    } else {
+    } else if (negativePrompt.isEmpty() && bosId == 49_406 && eosId == 49_407 && padId == 49_407 && maxTokens == 77) {
+        tokenizerBackend = "mnn_mtok"
         bridge.tokenizePromptTokenIds(bundleRoot.absolutePath, prompt)
+    } else {
+        error(
+            "The image bundle does not contain tokenizer/tokenizer.json; " +
+                "the requested negative prompt or tokenizer contract cannot be executed exactly."
+        )
     }
-    require(tokenIds.size == QNN_CLIP_TOKEN_ID_COUNT) {
-        "QNN CLIP tokenizer returned ${tokenIds.size} IDs; expected $QNN_CLIP_TOKEN_ID_COUNT."
+    val expectedTokenCount = maxTokens * 2
+    require(tokenIds.size == expectedTokenCount) {
+        "QNN CLIP tokenizer returned ${tokenIds.size} IDs; expected $expectedTokenCount."
     }
     outputFile.parentFile?.mkdirs()
     val bytes = java.nio.ByteBuffer
@@ -1106,6 +1209,11 @@ internal fun encodeQnnClipPromptTokenIds(
     JSONObject()
         .put("ok", true)
         .put("conditioningFormat", "qnn_clip_token_ids_i32")
+        .put("tokenizerBackend", tokenizerBackend)
+        .put("negativePromptSpecified", negativePrompt.isNotEmpty())
+        .put("bosId", bosId)
+        .put("eosId", eosId)
+        .put("padId", padId)
         .put("tokenCount", tokenIds.size)
         .put("outputPath", outputFile.absolutePath)
         .toString()
@@ -1116,14 +1224,33 @@ internal fun encodeQnnClipPromptTokenIds(
         .toString()
 }
 
-private const val QNN_CLIP_TOKEN_ID_COUNT = 154
-
 internal fun qnnImageExecutionMetadata(
     nativeRequestId: String,
     nativeResult: JSONObject,
     outputBytes: Long
-): JSONObject = JSONObject()
-    .put("nativeRequestId", nativeRequestId)
+): JSONObject = JSONObject().also { metadata ->
+    ImageExecutionProfileNativeContract.requiredFields.forEach { field ->
+        require(nativeResult.has(field) && !nativeResult.isNull(field)) {
+            "Native QNN execution metadata is missing required field: $field"
+        }
+        metadata.put(field, nativeResult.get(field))
+    }
+    nativeResult.optJSONObject("nativeEffective")?.let { metadata.put("nativeEffective", it) }
+    nativeResult.optJSONArray("timesteps")?.let { metadata.put("timesteps", it) }
+    nativeResult.optJSONArray("sigmas")?.let { metadata.put("sigmas", it) }
+    listOf(
+        "initNoiseSigma",
+        "scaleModelInput",
+        "textEncoderExecutionCount",
+        "vaeExecutionCount",
+        "effectiveVaeHostScale"
+    ).forEach { field ->
+        if (nativeResult.has(field) && !nativeResult.isNull(field)) {
+            metadata.put(field, nativeResult.get(field))
+        }
+    }
+}.apply {
+    put("nativeRequestId", nativeRequestId)
     .put("backend", nativeResult.optString("backend"))
     .put("executionStage", nativeResult.optString("executionStage"))
     .put("npuActive", nativeResult.optBoolean("npuActive", false))
@@ -1175,6 +1302,7 @@ internal fun qnnImageExecutionMetadata(
             }
         }
     }
+}
 
 internal data class QnnImageGenerationContract(
     val width: Int,
@@ -1209,6 +1337,62 @@ internal data class QnnImageGenerationContract(
 }
 
 internal fun resolveQnnImageGenerationContract(
+    resolution: ImageExecutionProfileResolution,
+    defaultThreads: Int,
+    options: LocalImageGenerationOptions
+): QnnImageGenerationContract {
+    val resolved = resolution.layers.resolved
+    val width = resolved.width
+    val height = resolved.height
+    require(width > 0 && height > 0 && width % 8 == 0 && height % 8 == 0) {
+        "Resolved QNN image dimensions must be positive multiples of 8."
+    }
+    val steps = resolved.steps
+    require(steps in resolution.profile.scheduler.minSteps..resolution.profile.scheduler.maxSteps) {
+        "Resolved QNN steps are outside the execution profile bounds."
+    }
+    val threads = options.threads ?: defaultThreads
+    require(threads in 1..16) { "QNN prompt encoder threads 必须在 1..16。" }
+    val cfgScale = resolved.cfgScale
+    require(cfgScale.isFinite() && cfgScale in 0.0..30.0) { "QNN CFG 必须是 0..30 的有限数值。" }
+    val distilledGuidance = options.distilledGuidance ?: 3.5
+    require(distilledGuidance.isFinite() && distilledGuidance in 0.0..30.0) {
+        "QNN distilled guidance 必须是 0..30 的有限数值。"
+    }
+    val flowShift = options.flowShift ?: -1.0
+    require(flowShift.isFinite() && flowShift in -1.0..100.0) { "QNN flow shift 必须是 -1..100 的有限数值。" }
+    val backendMode = options.backendMode?.trim()?.lowercase().orEmpty().ifBlank { "cpu" }
+    require(backendMode == "cpu" || backendMode == "opencl") {
+        "QNN prompt encoder backend 只支持 cpu 或 opencl。"
+    }
+    val tokenEmbeddingMode = options.tokenEmbeddingMode?.trim()?.lowercase().orEmpty().ifBlank { "auto" }
+    require(tokenEmbeddingMode in setOf("auto", "module", "direct")) {
+        "QNN token embedding mode 只支持 auto、module 或 direct。"
+    }
+    val memoryMode = options.memoryMode ?: 0
+    require(memoryMode in 0..2) { "QNN memory mode 必须在 0..2。" }
+    return QnnImageGenerationContract(
+        width = width,
+        height = height,
+        steps = steps,
+        threads = threads,
+        seed = resolved.seed.toInt().also {
+            require(resolved.seed in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) {
+                "QNN seed must fit the native 32-bit RNG contract."
+            }
+        },
+        cfgScale = cfgScale,
+        distilledGuidance = distilledGuidance,
+        flowShift = flowShift,
+        sampleMethod = imageSchedulerProductName(resolved.scheduler),
+        backendMode = backendMode,
+        tokenEmbeddingMode = tokenEmbeddingMode,
+        memoryMode = memoryMode,
+        useCfg = resolved.useCfg
+    )
+}
+
+internal fun resolveQnnImageGenerationContract(
     family: LocalImageModelFamily,
     defaultWidth: Int,
     defaultHeight: Int,
@@ -1221,9 +1405,9 @@ internal fun resolveQnnImageGenerationContract(
     require(width == defaultWidth && height == defaultHeight) {
         "QNN context 固定为 ${defaultWidth}x${defaultHeight}，不能执行 ${width}x${height}。"
     }
-    val defaultSteps = if (family == LocalImageModelFamily.SDXL) 1 else defaultStepsFor(family).coerceIn(1, 20)
+    val defaultSteps = if (family == LocalImageModelFamily.SDXL) 30 else defaultStepsFor(family).coerceIn(1, 100)
     val steps = options.steps ?: defaultSteps
-    require(steps in 1..20) { "QNN steps 必须在 1..20。" }
+    require(steps in 1..100) { "QNN steps 必须在 1..100。" }
     val threads = options.threads ?: defaultThreads
     require(threads in 1..16) { "QNN prompt encoder threads 必须在 1..16。" }
     val cfgScale = options.cfgScale ?: defaultCfgFor(family)
@@ -1235,7 +1419,7 @@ internal fun resolveQnnImageGenerationContract(
     val flowShift = options.flowShift ?: -1.0
     require(flowShift.isFinite() && flowShift in -1.0..100.0) { "QNN flow shift 必须是 -1..100 的有限数值。" }
     val sampleMethod = options.sampleMethod?.trim()?.lowercase().orEmpty().ifBlank { "pndm" }
-    require(sampleMethod == "pndm") { "QNN SD1.5/SDXL 当前只支持 pndm sampler。" }
+    imageSchedulerAlgorithmFromProductName(sampleMethod)
     val backendMode = options.backendMode?.trim()?.lowercase().orEmpty().ifBlank { "cpu" }
     require(backendMode == "cpu" || backendMode == "opencl") {
         "QNN prompt encoder backend 只支持 cpu 或 opencl。"
@@ -2279,6 +2463,7 @@ private fun LocalImageModelFamily.requiresCompanionComponents(): Boolean =
         LocalImageModelFamily.SANA,
         LocalImageModelFamily.SD_TURBO,
         LocalImageModelFamily.SDXL,
+        LocalImageModelFamily.SD21,
         LocalImageModelFamily.SD15,
         LocalImageModelFamily.CUSTOM -> false
     }
@@ -2295,6 +2480,7 @@ private fun LocalImageModelFamily.requiredCompanionComponentHint(): String =
         LocalImageModelFamily.DREAMLITE,
         LocalImageModelFamily.WAN -> "VAE/AE 和文本编码器/LLM"
         LocalImageModelFamily.SDXL,
+        LocalImageModelFamily.SD21,
         LocalImageModelFamily.SD15,
         LocalImageModelFamily.CUSTOM -> "VAE/AE 和文本编码器/LLM"
     }
@@ -2390,6 +2576,7 @@ private fun String.toImageDimensions(family: LocalImageModelFamily): Pair<Int, I
         LocalImageModelFamily.SD_TURBO,
         LocalImageModelFamily.SDXL -> 1024 to 1024
         LocalImageModelFamily.WAN -> 832 to 480
+        LocalImageModelFamily.SD21,
         LocalImageModelFamily.SD15,
         LocalImageModelFamily.CUSTOM -> 512 to 512
     }
@@ -2405,6 +2592,7 @@ internal fun Pair<Int, Int>.fastLocalDimensions(family: LocalImageModelFamily): 
         LocalImageModelFamily.SANA,
         LocalImageModelFamily.FLUX,
         LocalImageModelFamily.SD_TURBO,
+        LocalImageModelFamily.SD21,
         LocalImageModelFamily.SD15 -> 512
         LocalImageModelFamily.SDXL,
         LocalImageModelFamily.WAN,
@@ -2418,38 +2606,6 @@ internal fun Pair<Int, Int>.fastLocalDimensions(family: LocalImageModelFamily): 
 
 private fun Int.alignImageDimension(): Int =
     (((this.coerceAtLeast(256) + 32) / 64) * 64).coerceIn(256, 1536)
-
-/**
- * Keep the MNN SD1.5 product default independent from the generic image
- * defaults.  QNN and stable-diffusion.cpp use [defaultStepsFor] for their
- * own calibrated paths, while the MNN direct SD1.5 runner needs 20 steps to
- * produce an acceptable product result.
- */
-internal fun resolveMnnDiffusionSteps(
-    family: LocalImageModelFamily,
-    requestedSteps: Int?
-): Int {
-    val steps = requestedSteps ?: when (family) {
-        LocalImageModelFamily.SD15 -> 20
-        else -> defaultStepsFor(family)
-    }
-    require(steps in 1..50) { "MNN-Diffusion 支持 1 到 50 个推理步数。" }
-    return steps
-}
-
-/** The current direct SD1.5 graph has one fixed 64x64 latent: exactly 512x512. */
-internal fun resolveMnnDiffusionProductDimensions(
-    model: LocalImageModelRecord,
-    runner: String
-): Pair<Int, Int> = if (
-    model.runtime == LocalImageRuntime.MNN_DIFFUSION &&
-    model.family == LocalImageModelFamily.SD15 &&
-    runner == "direct"
-) {
-    512 to 512
-} else {
-    model.imageSize.toImageDimensions(model.family).fastLocalDimensions(model.family)
-}
 
 internal fun resolveMnnDiffusionDimensions(
     defaultWidth: Int,
@@ -2528,6 +2684,22 @@ internal fun resolveStableDiffusionSampleMethod(requestedSampleMethod: String?):
     return method
 }
 
+internal fun stableDiffusionNativeSampleMethodMatches(
+    scheduler: ImageSchedulerAlgorithm,
+    nativeSampleMethod: String
+): Boolean {
+    val actual = nativeSampleMethod.trim().lowercase()
+    return actual in when (scheduler) {
+        ImageSchedulerAlgorithm.EULER -> setOf("euler")
+        ImageSchedulerAlgorithm.EULER_A -> setOf("euler_a")
+        ImageSchedulerAlgorithm.DPMPP_2M -> setOf("dpmpp_2m", "dpm++2m")
+        ImageSchedulerAlgorithm.DDIM -> setOf("ddim", "ddim_trailing")
+        ImageSchedulerAlgorithm.LCM -> setOf("lcm")
+        ImageSchedulerAlgorithm.FLOW_MATCH -> setOf("flow_match", "euler")
+        ImageSchedulerAlgorithm.PNDM_PLMS -> emptySet()
+    }
+}
+
 private val STABLE_DIFFUSION_SAMPLE_METHODS = setOf(
     "euler",
     "euler_a",
@@ -2561,22 +2733,6 @@ internal fun resolveMnnDiffusionMemoryMode(requestedMemoryMode: Int?): Int {
     return memoryMode
 }
 
-internal fun resolveMnnDiffusionSampleMethod(requestedSampleMethod: String?): String {
-    val sampleMethod = requestedSampleMethod?.trim()?.lowercase() ?: "euler"
-    require(sampleMethod == "euler") {
-        "MNN-Diffusion currently supports only sampleMethod=euler."
-    }
-    return sampleMethod
-}
-
-internal fun resolveMnnDiffusionTokenEmbeddingMode(requestedMode: String?): String {
-    val mode = requestedMode?.trim()?.lowercase() ?: "auto"
-    require(mode == "auto") {
-        "MNN-Diffusion generation currently supports only tokenEmbeddingMode=auto."
-    }
-    return mode
-}
-
 internal fun resolveFiniteMnnDiffusionControl(
     name: String,
     requested: Double?,
@@ -2602,29 +2758,9 @@ internal fun mnnDiffusionControlAuditJson(params: JSONObject): JSONObject = JSON
         "sampleMethod",
         "runner",
         "backendMode",
-        "tokenEmbeddingMode",
         "memoryMode"
     ).forEach { key ->
         if (params.has(key)) put(key, params.get(key))
-    }
-}
-
-internal fun verifyMnnDiffusionResultControlIfPresent(
-    result: JSONObject,
-    key: String,
-    expected: Any
-) {
-    if (!result.has(key) || result.isNull(key)) return
-    val actual = result.get(key)
-    val matches = when (expected) {
-        is Double -> actual is Number && kotlin.math.abs(actual.toDouble() - expected) <= 1e-9
-        is Int -> actual is Number && actual.toInt() == expected && actual.toDouble() == expected.toDouble()
-        is Boolean -> actual is Boolean && actual == expected
-        is String -> actual is String && actual.trim().equals(expected, ignoreCase = true)
-        else -> actual == expected
-    }
-    require(matches) {
-        "MNN-Diffusion native result reported $key=$actual, expected $expected."
     }
 }
 
@@ -2639,35 +2775,6 @@ internal fun verifyStableDiffusionResultControl(
     val actual = result.get(key)
     require(actual is Number && kotlin.math.abs(actual.toDouble() - expected) <= 1e-6) {
         "stable-diffusion.cpp native result reported $key=$actual, expected $expected."
-    }
-}
-
-internal fun verifyMnnDiffusionExecutionContract(
-    result: JSONObject,
-    expectedRunner: String,
-    expectedBackend: String,
-    expectedSteps: Int,
-    expectedWidth: Int,
-    expectedHeight: Int
-) {
-    require(result.optBoolean("ok", false)) {
-        result.optString("error").ifBlank { "MNN-Diffusion smoke did not complete." }
-    }
-    require(result.optString("runner").trim().equals(expectedRunner, ignoreCase = true)) {
-        "MNN-Diffusion smoke reported runner=${result.optString("runner")}, expected $expectedRunner."
-    }
-    require(mnnDiffusionBackendMatches(expectedBackend, result.optString("backendMode"))) {
-        "MNN-Diffusion smoke reported backendMode=${result.optString("backendMode")}, expected $expectedBackend."
-    }
-    require(result.optInt("steps", -1) == expectedSteps) {
-        "MNN-Diffusion smoke reported steps=${result.optInt("steps", -1)}, expected $expectedSteps."
-    }
-    require(
-        result.optInt("width", -1) == expectedWidth &&
-            result.optInt("height", -1) == expectedHeight
-    ) {
-        "MNN-Diffusion smoke reported ${result.optInt("width", -1)}x${result.optInt("height", -1)}, " +
-            "expected ${expectedWidth}x${expectedHeight}."
     }
 }
 
@@ -2814,6 +2921,7 @@ private fun defaultStepsFor(family: LocalImageModelFamily): Int =
         LocalImageModelFamily.DREAMLITE -> 6
         LocalImageModelFamily.SANA -> 5
         LocalImageModelFamily.SDXL -> 8
+        LocalImageModelFamily.SD21 -> 8
         LocalImageModelFamily.SD15 -> 8
         LocalImageModelFamily.WAN -> 6
         LocalImageModelFamily.CUSTOM -> 6
@@ -2830,6 +2938,7 @@ internal fun defaultCfgFor(family: LocalImageModelFamily): Double =
         LocalImageModelFamily.GLM_IMAGE,
         LocalImageModelFamily.DREAMLITE,
         LocalImageModelFamily.SDXL,
+        LocalImageModelFamily.SD21,
         LocalImageModelFamily.SD15,
         LocalImageModelFamily.WAN,
         LocalImageModelFamily.CUSTOM -> 7.0
@@ -2858,6 +2967,7 @@ private fun defaultImageSizeFor(fileName: String): String =
         LocalImageModelFamily.FLUX,
         LocalImageModelFamily.SDXL -> "512x512"
         LocalImageModelFamily.SD_TURBO -> if ("384" in fileName) "384x384" else "512x512"
+        LocalImageModelFamily.SD21,
         LocalImageModelFamily.SD15 -> if ("384" in fileName) "384x384" else "512x512"
         LocalImageModelFamily.WAN,
         LocalImageModelFamily.CUSTOM -> "512x512"

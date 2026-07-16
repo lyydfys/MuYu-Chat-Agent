@@ -21,6 +21,7 @@ class LocalImageWorkerProtocolTest {
         )
 
         val options = LocalImageGenerationOptions(
+            negativePrompt = "",
             width = 512,
             height = 512,
             steps = 20,
@@ -36,7 +37,12 @@ class LocalImageWorkerProtocolTest {
             runner = "direct"
         )
         val parsed = LocalImageWorkerProtocol.parseGenerateRequest(
-            LocalImageWorkerProtocol.generateRequest("request-1", model, "a ceramic cup", options)
+            LocalImageWorkerProtocol.generateRequest(
+                requestId = "request-1",
+                model = model,
+                prompt = "a ceramic cup",
+                options = options
+            )
         )
 
         assertEquals("request-1", parsed.requestId)
@@ -57,6 +63,57 @@ class LocalImageWorkerProtocolTest {
         assertEquals(0, parsed.options.memoryMode)
         assertEquals(false, parsed.options.useCfg)
         assertEquals("direct", parsed.options.runner)
+        assertEquals("", parsed.options.negativePrompt)
+    }
+
+    @Test
+    fun `omitted and explicit empty negative prompts remain distinct across worker ipc`() {
+        val model = LocalImageModelRecord(
+            id = "model-negative",
+            displayName = "Image model",
+            path = "/data/user/0/com.muyuchat.mca/files/model.bin",
+            fileName = "model.bin",
+            sizeBytes = 123L,
+            sha256 = "def",
+            runtime = LocalImageRuntime.QNN_HTP,
+            family = LocalImageModelFamily.SD15,
+            bundleRoot = "/data/user/0/com.muyuchat.mca/files/bundle"
+        )
+        val controls = LocalImageGenerationOptions(
+            width = 768,
+            height = 512,
+            steps = 24,
+            seed = 42,
+            cfgScale = 6.5,
+            sampleMethod = "dpmpp_2m"
+        )
+
+        val omitted = LocalImageWorkerProtocol.parseGenerateRequest(
+            LocalImageWorkerProtocol.generateRequest("request-omitted", model, "prompt", controls)
+        )
+        val explicitEmptyPayload = LocalImageWorkerProtocol.generateRequest(
+            requestId = "request-empty",
+            model = model,
+            prompt = "prompt",
+            options = controls.copy(negativePrompt = "")
+        )
+        val explicitEmpty = LocalImageWorkerProtocol.parseGenerateRequest(explicitEmptyPayload)
+        val optionJson = JSONObject(explicitEmptyPayload).getJSONObject("options")
+
+        assertEquals(768, explicitEmpty.options.width)
+        assertEquals(512, explicitEmpty.options.height)
+        assertEquals(24, explicitEmpty.options.steps)
+        assertEquals(42, explicitEmpty.options.seed)
+        assertEquals(6.5, explicitEmpty.options.cfgScale ?: 0.0, 0.0)
+        assertEquals("dpmpp_2m", explicitEmpty.options.sampleMethod)
+        assertEquals("dpmpp_2m", optionJson.getString("sampler"))
+        assertEquals("", explicitEmpty.options.negativePrompt)
+        assertTrue(optionJson.has("negativePrompt"))
+        assertEquals("", optionJson.getString("negativePrompt"))
+        assertEquals(null, omitted.options.negativePrompt)
+        assertTrue(!JSONObject(
+            LocalImageWorkerProtocol.generateRequest("request-omitted-2", model, "prompt", controls)
+        ).getJSONObject("options").has("negativePrompt"))
     }
 
     @Test

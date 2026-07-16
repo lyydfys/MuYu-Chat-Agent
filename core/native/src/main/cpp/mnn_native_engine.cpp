@@ -28,8 +28,11 @@
 #include <utility>
 #include <vector>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "nlohmann/json.hpp"
+#include "diffusion_scheduler.hpp"
+#include "image_conditioning.hpp"
 #include "jni_utf8_codec.hpp"
 #include "mnn_legacy_chat_template_policy.hpp"
 #include "mnn_runtime_capability_policy.hpp"
@@ -42,6 +45,10 @@
 
 #ifndef MCA_WITH_MNN_DIFFUSION
 #define MCA_WITH_MNN_DIFFUSION 0
+#endif
+
+#ifndef MCA_WITH_TOKENIZERS_CPP
+#define MCA_WITH_TOKENIZERS_CPP 0
 #endif
 
 #ifndef MCA_MNN_RUNTIME_CACHE_NAMESPACE
@@ -208,6 +215,7 @@ int g_mnn_diffusion_height = 512;
 int g_mnn_diffusion_threads = 4;
 int64_t g_mnn_diffusion_started_at_ms = 0;
 int64_t g_mnn_diffusion_finished_at_ms = 0;
+int64_t g_mnn_diffusion_generation_sequence = 0;
 double g_mnn_diffusion_seconds_per_step = 0.0;
 std::string g_mnn_diffusion_bundle_root;
 std::string g_mnn_diffusion_output_path;
@@ -1123,7 +1131,9 @@ json mnn_diffusion_progress_json_locked() {
         {"runner", g_mnn_diffusion_runner},
         {"width", g_mnn_diffusion_width},
         {"height", g_mnn_diffusion_height},
-        {"cancelRequested", g_mnn_diffusion_cancel_requested}
+        {"cancelRequested", g_mnn_diffusion_cancel_requested},
+        {"nativeGenerationSequence", g_mnn_diffusion_generation_sequence},
+        {"nativeStartedAtMs", g_mnn_diffusion_started_at_ms}
     });
 }
 
@@ -1229,6 +1239,676 @@ bool resolve_mnn_diffusion_runner(
     return false;
 }
 
+enum class MnnVaeScalingLocation {
+    HostBeforeGraph,
+    GraphInternal,
+    None,
+};
+
+struct MnnSchedulerExecutionContract {
+    mca::diffusion::DiffusionSchedulerConfig config;
+    int steps = 0;
+    size_t expected_timetable_count = 0;
+    size_t expected_unet_execution_count = 0;
+    bool scale_model_input = false;
+    float eta = 0.0f;
+};
+
+struct MnnSemanticExecutionContract {
+    std::string profile_id;
+    int profile_revision = 0;
+    std::string model_fingerprint;
+    MnnSchedulerExecutionContract scheduler;
+    bool use_cfg = false;
+    float cfg_scale = 0.0f;
+    uint32_t seed = 0;
+    std::string tokenizer_backend;
+    size_t token_count = 0;
+    int tokenizer_bos_id = 0;
+    int tokenizer_eos_id = 0;
+    int tokenizer_pad_id = 0;
+    int tokenizer_max_length = 0;
+    std::string embedding_disk_data_type;
+    MnnVaeScalingLocation vae_scaling_location = MnnVaeScalingLocation::None;
+    double vae_scaling_factor = 1.0;
+    int width = 0;
+    int height = 0;
+    std::string graph_name;
+    bool fallback = false;
+    std::string negative_prompt;
+    std::string family;
+    std::string backend_mode;
+    std::string runner;
+    int threads = 0;
+    int memory_mode = 0;
+};
+
+struct MnnNativeExecutionEvidence {
+    size_t timetable_count = 0;
+    size_t unet_execution_count = 0;
+    size_t graph_invocation_count = 0;
+    std::string tokenizer_backend;
+    size_t token_count = 0;
+    std::string embedding_disk_data_type;
+    std::vector<double> timesteps;
+    std::vector<double> sigmas;
+    double init_noise_sigma = 1.0;
+};
+
+std::string normalize_mnn_contract_enum(std::string value) {
+    value = normalize_mnn_diffusion_identifier(std::move(value));
+    std::string normalized;
+    normalized.reserve(value.size());
+    for (char ch : value) {
+        if (ch == '-' || ch == '.' || ch == ' ') {
+            normalized.push_back('_');
+        } else if (ch == '+') {
+            normalized.push_back('p');
+        } else {
+            normalized.push_back(ch);
+        }
+    }
+    return normalized;
+}
+
+bool mnn_contract_value(
+        const json& params,
+        const char* key,
+        const json*& value,
+        std::string& error) {
+    const auto it = params.find(key);
+    if (it == params.end() || it->is_null()) {
+        error = std::string("Missing required MNN image execution field '") + key + "'.";
+        return false;
+    }
+    value = &(*it);
+    return true;
+}
+
+bool mnn_contract_string(
+        const json& params,
+        const char* key,
+        std::string& value,
+        std::string& error,
+        bool allowEmpty = false) {
+    const json* raw = nullptr;
+    if (!mnn_contract_value(params, key, raw, error)) return false;
+    if (!raw->is_string()) {
+        error = std::string("MNN image execution field '") + key + "' must be a string.";
+        return false;
+    }
+    value = raw->get<std::string>();
+    if (!allowEmpty && is_blank_text(value)) {
+        error = std::string("MNN image execution field '") + key + "' must not be blank.";
+        return false;
+    }
+    return true;
+}
+
+bool mnn_contract_integer(
+        const json& params,
+        const char* key,
+        int64_t& value,
+        std::string& error) {
+    const json* raw = nullptr;
+    if (!mnn_contract_value(params, key, raw, error)) return false;
+    try {
+        if (raw->is_number_unsigned()) {
+            const auto parsed = raw->get<uint64_t>();
+            if (parsed > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                error = std::string("MNN image execution field '") + key + "' exceeds int64 range.";
+                return false;
+            }
+            value = static_cast<int64_t>(parsed);
+            return true;
+        }
+        if (raw->is_number_integer()) {
+            value = raw->get<int64_t>();
+            return true;
+        }
+    } catch (const std::exception&) {
+        error = std::string("MNN image execution field '") + key + "' exceeds int64 range.";
+        return false;
+    }
+    error = std::string("MNN image execution field '") + key + "' must be an integer.";
+    return false;
+}
+
+bool mnn_contract_number(
+        const json& params,
+        const char* key,
+        double& value,
+        std::string& error) {
+    const json* raw = nullptr;
+    if (!mnn_contract_value(params, key, raw, error)) return false;
+    if (!raw->is_number()) {
+        error = std::string("MNN image execution field '") + key + "' must be numeric.";
+        return false;
+    }
+    try {
+        value = raw->get<double>();
+    } catch (const std::exception&) {
+        error = std::string("MNN image execution field '") + key + "' is outside native numeric range.";
+        return false;
+    }
+    if (!std::isfinite(value)) {
+        error = std::string("MNN image execution field '") + key + "' must be finite.";
+        return false;
+    }
+    return true;
+}
+
+bool mnn_contract_boolean(
+        const json& params,
+        const char* key,
+        bool& value,
+        std::string& error) {
+    const json* raw = nullptr;
+    if (!mnn_contract_value(params, key, raw, error)) return false;
+    if (!raw->is_boolean()) {
+        error = std::string("MNN image execution field '") + key + "' must be a boolean.";
+        return false;
+    }
+    value = raw->get<bool>();
+    return true;
+}
+
+bool parse_mnn_scheduler_execution_contract(
+        const json& params,
+        MnnSchedulerExecutionContract& contract,
+        std::string& error) {
+    std::string scheduler;
+    std::string sampleMethod;
+    std::string prediction;
+    std::string noiseSchedule;
+    std::string timestepSpacing;
+    std::string finalSigmaType;
+    int64_t integerValue = 0;
+    double numberValue = 0.0;
+    if (!mnn_contract_string(params, "scheduler", scheduler, error) ||
+        !mnn_contract_string(params, "sampleMethod", sampleMethod, error) ||
+        !mnn_contract_string(params, "predictionType", prediction, error) ||
+        !mnn_contract_integer(params, "numTrainTimesteps", integerValue, error)) {
+        return false;
+    }
+    if (integerValue <= 0 || integerValue > std::numeric_limits<int>::max()) {
+        error = "numTrainTimesteps must be a positive int32 value.";
+        return false;
+    }
+    contract.config.num_train_timesteps = static_cast<int>(integerValue);
+    if (!mnn_contract_string(params, "noiseSchedule", noiseSchedule, error) ||
+        !mnn_contract_number(params, "betaStart", numberValue, error)) {
+        return false;
+    }
+    contract.config.beta_start = static_cast<float>(numberValue);
+    if (!mnn_contract_number(params, "betaEnd", numberValue, error) ||
+        !mnn_contract_string(params, "timestepSpacing", timestepSpacing, error) ||
+        !mnn_contract_integer(params, "stepsOffset", integerValue, error)) {
+        return false;
+    }
+    if (integerValue < std::numeric_limits<int>::min() ||
+        integerValue > std::numeric_limits<int>::max()) {
+        error = "stepsOffset must fit int32.";
+        return false;
+    }
+    contract.config.beta_end = static_cast<float>(numberValue);
+    contract.config.steps_offset = static_cast<int>(integerValue);
+    if (!(contract.config.beta_start > 0.0f) ||
+        !(contract.config.beta_end > contract.config.beta_start) ||
+        contract.config.beta_end >= 1.0f) {
+        error = "betaStart/betaEnd must satisfy 0 < betaStart < betaEnd < 1.";
+        return false;
+    }
+    if (!mnn_contract_boolean(params, "setAlphaToOne", contract.config.set_alpha_to_one, error) ||
+        !mnn_contract_boolean(params, "skipPrkSteps", contract.config.skip_prk_steps, error) ||
+        !mnn_contract_string(params, "finalSigmaType", finalSigmaType, error) ||
+        !mnn_contract_boolean(params, "scaleModelInput", contract.scale_model_input, error) ||
+        !mnn_contract_boolean(params, "clipSample", contract.config.clip_sample, error) ||
+        !mnn_contract_number(params, "clipSampleRange", numberValue, error)) {
+        return false;
+    }
+    if (numberValue <= 0.0) {
+        error = "clipSampleRange must be finite and positive.";
+        return false;
+    }
+    contract.config.clip_sample_range = static_cast<float>(numberValue);
+    if (!mnn_contract_boolean(params, "thresholding", contract.config.thresholding, error) ||
+        !mnn_contract_number(params, "eta", numberValue, error)) {
+        return false;
+    }
+    if (numberValue != 0.0) {
+        error = "MNN direct scheduler requires eta=0 because no variance-noise tensor is supplied.";
+        return false;
+    }
+    contract.eta = static_cast<float>(numberValue);
+    if (!mnn_contract_boolean(params, "lowerOrderFinal", contract.config.lower_order_final, error) ||
+        !mnn_contract_integer(params, "steps", integerValue, error)) {
+        return false;
+    }
+    if (integerValue <= 0 || integerValue > contract.config.num_train_timesteps) {
+        error = "steps must be in [1, numTrainTimesteps]; native does not clamp it.";
+        return false;
+    }
+    contract.steps = static_cast<int>(integerValue);
+    if (!mnn_contract_integer(params, "expectedTimetableCount", integerValue, error) ||
+        integerValue <= 0) {
+        if (error.empty()) error = "expectedTimetableCount must be positive.";
+        return false;
+    }
+    contract.expected_timetable_count = static_cast<size_t>(integerValue);
+    if (!mnn_contract_integer(params, "expectedUnetExecutionCount", integerValue, error) ||
+        integerValue <= 0) {
+        if (error.empty()) error = "expectedUnetExecutionCount must be positive.";
+        return false;
+    }
+    contract.expected_unet_execution_count = static_cast<size_t>(integerValue);
+
+    scheduler = normalize_mnn_contract_enum(std::move(scheduler));
+    sampleMethod = normalize_mnn_contract_enum(std::move(sampleMethod));
+    if (scheduler == "euler" || scheduler == "euler_discrete") {
+        contract.config.algorithm = mca::diffusion::SchedulerAlgorithm::EulerDiscrete;
+        if (sampleMethod != "euler" && sampleMethod != "euler_discrete") {
+            error = "sampleMethod conflicts with scheduler=EULER.";
+            return false;
+        }
+    } else if (scheduler == "ddim") {
+        contract.config.algorithm = mca::diffusion::SchedulerAlgorithm::Ddim;
+        if (sampleMethod != "ddim") {
+            error = "sampleMethod conflicts with scheduler=DDIM.";
+            return false;
+        }
+    } else if (scheduler == "pndm" || scheduler == "pndm_plms") {
+        contract.config.algorithm = mca::diffusion::SchedulerAlgorithm::Pndm;
+        if (sampleMethod != "pndm" && sampleMethod != "pndm_plms" && sampleMethod != "plms") {
+            error = "sampleMethod conflicts with scheduler=PNDM_PLMS.";
+            return false;
+        }
+    } else if (scheduler == "dpmpp_2m" || scheduler == "dpmpp2m") {
+        contract.config.algorithm = mca::diffusion::SchedulerAlgorithm::Dpmpp2m;
+        if (sampleMethod != "dpmpp_2m" && sampleMethod != "dpmpp2m") {
+            error = "sampleMethod conflicts with scheduler=DPMPP_2M.";
+            return false;
+        }
+    } else {
+        error = "Unsupported MNN direct scheduler contract value: " + scheduler;
+        return false;
+    }
+
+    prediction = normalize_mnn_contract_enum(std::move(prediction));
+    if (prediction == "epsilon") {
+        contract.config.prediction_type = mca::diffusion::PredictionType::Epsilon;
+    } else if (prediction == "v_prediction") {
+        contract.config.prediction_type = mca::diffusion::PredictionType::VPrediction;
+    } else if (prediction == "sample") {
+        contract.config.prediction_type = mca::diffusion::PredictionType::Sample;
+    } else {
+        error = "Unsupported MNN direct predictionType contract value: " + prediction;
+        return false;
+    }
+
+    noiseSchedule = normalize_mnn_contract_enum(std::move(noiseSchedule));
+    if (noiseSchedule == "linear") {
+        contract.config.beta_schedule = mca::diffusion::BetaSchedule::Linear;
+    } else if (noiseSchedule == "scaled_linear") {
+        contract.config.beta_schedule = mca::diffusion::BetaSchedule::ScaledLinear;
+    } else if (noiseSchedule == "squaredcos_cap_v2" ||
+               noiseSchedule == "squared_cosine_cap_v2") {
+        contract.config.beta_schedule = mca::diffusion::BetaSchedule::SquaredCosineCapV2;
+    } else {
+        error = "Unsupported explicit MNN noiseSchedule contract value: " + noiseSchedule;
+        return false;
+    }
+
+    timestepSpacing = normalize_mnn_contract_enum(std::move(timestepSpacing));
+    if (timestepSpacing == "linspace") {
+        contract.config.timestep_spacing = mca::diffusion::TimestepSpacing::Linspace;
+    } else if (timestepSpacing == "leading") {
+        contract.config.timestep_spacing = mca::diffusion::TimestepSpacing::Leading;
+    } else if (timestepSpacing == "trailing") {
+        contract.config.timestep_spacing = mca::diffusion::TimestepSpacing::Trailing;
+    } else {
+        error = "Unsupported MNN timestepSpacing contract value: " + timestepSpacing;
+        return false;
+    }
+
+    finalSigmaType = normalize_mnn_contract_enum(std::move(finalSigmaType));
+    if (finalSigmaType == "zero") {
+        contract.config.final_sigma_type = mca::diffusion::FinalSigmaType::Zero;
+    } else if (finalSigmaType == "sigma_min") {
+        contract.config.final_sigma_type = mca::diffusion::FinalSigmaType::SigmaMin;
+    } else {
+        error = "Unsupported MNN finalSigmaType contract value: " + finalSigmaType;
+        return false;
+    }
+
+    const bool schedulerScalesInput =
+            contract.config.algorithm == mca::diffusion::SchedulerAlgorithm::EulerDiscrete;
+    if (contract.scale_model_input != schedulerScalesInput) {
+        error = "scaleModelInput conflicts with the selected scheduler's actual native behavior.";
+        return false;
+    }
+    return true;
+}
+
+bool parse_mnn_semantic_execution_contract(
+        const json& params,
+        MnnSemanticExecutionContract& contract,
+        std::string& error) {
+    int64_t integerValue = 0;
+    double numberValue = 0.0;
+    std::string runtime;
+    bool hasUnconditionalBranch = false;
+    std::string vaeScalingLocation;
+    if (!mnn_contract_string(params, "profileId", contract.profile_id, error) ||
+        !mnn_contract_integer(params, "profileRevision", integerValue, error)) {
+        return false;
+    }
+    if (integerValue <= 0 || integerValue > std::numeric_limits<int>::max()) {
+        error = "profileRevision must be a positive int32 value.";
+        return false;
+    }
+    contract.profile_revision = static_cast<int>(integerValue);
+    if (!mnn_contract_string(params, "modelFingerprint", contract.model_fingerprint, error) ||
+        !mnn_contract_string(params, "runtime", runtime, error)) {
+        return false;
+    }
+    if (normalize_mnn_contract_enum(runtime) != "mnn_diffusion") {
+        error = "MNN direct generation requires runtime=MNN_DIFFUSION.";
+        return false;
+    }
+    if (!parse_mnn_scheduler_execution_contract(params, contract.scheduler, error) ||
+        !mnn_contract_number(params, "cfgScale", numberValue, error)) {
+        return false;
+    }
+    if (numberValue < 0.0 || numberValue > 30.0) {
+        error = "cfgScale must be in [0, 30].";
+        return false;
+    }
+    contract.cfg_scale = static_cast<float>(numberValue);
+    if (!mnn_contract_boolean(params, "useCfg", contract.use_cfg, error) ||
+        !mnn_contract_boolean(params, "unconditionalBranch", hasUnconditionalBranch, error)) {
+        return false;
+    }
+    if (hasUnconditionalBranch != contract.use_cfg) {
+        error = "unconditionalBranch must exactly match useCfg.";
+        return false;
+    }
+    if (!mnn_contract_integer(params, "seed", integerValue, error) ||
+        integerValue < 0 ||
+        static_cast<uint64_t>(integerValue) > std::numeric_limits<uint32_t>::max()) {
+        if (error.empty()) error = "seed must fit the native uint32 RNG contract.";
+        return false;
+    }
+    contract.seed = static_cast<uint32_t>(integerValue);
+    const auto randomSeedIt = params.find("randomSeed");
+    if (randomSeedIt != params.end() && !randomSeedIt->is_null()) {
+        int64_t randomSeed = 0;
+        if (!mnn_contract_integer(params, "randomSeed", randomSeed, error)) return false;
+        if (randomSeed != integerValue) {
+            error = "randomSeed conflicts with the required seed field.";
+            return false;
+        }
+    }
+    if (!mnn_contract_string(params, "tokenizerBackend", contract.tokenizer_backend, error) ||
+        !mnn_contract_integer(params, "tokenCount", integerValue, error)) {
+        return false;
+    }
+    if (integerValue <= 0) {
+        error = "tokenCount must be positive.";
+        return false;
+    }
+    contract.token_count = static_cast<size_t>(integerValue);
+    contract.tokenizer_backend = normalize_mnn_contract_enum(contract.tokenizer_backend);
+    if (contract.tokenizer_backend == "tokenizers_cpp") {
+        contract.tokenizer_backend = "TOKENIZERS_CPP";
+    } else if (contract.tokenizer_backend == "mnn_mtok") {
+        contract.tokenizer_backend = "MNN_MTOK";
+    } else {
+        error = "Unsupported MNN tokenizerBackend contract value: " + contract.tokenizer_backend;
+        return false;
+    }
+    if (!mnn_contract_integer(params, "tokenizerBosId", integerValue, error) ||
+        integerValue < std::numeric_limits<int>::min() ||
+        integerValue > std::numeric_limits<int>::max()) {
+        if (error.empty()) error = "tokenizerBosId must fit int32.";
+        return false;
+    }
+    contract.tokenizer_bos_id = static_cast<int>(integerValue);
+    if (!mnn_contract_integer(params, "tokenizerEosId", integerValue, error) ||
+        integerValue < std::numeric_limits<int>::min() ||
+        integerValue > std::numeric_limits<int>::max()) {
+        if (error.empty()) error = "tokenizerEosId must fit int32.";
+        return false;
+    }
+    contract.tokenizer_eos_id = static_cast<int>(integerValue);
+    if (!mnn_contract_integer(params, "tokenizerPadId", integerValue, error) ||
+        integerValue < std::numeric_limits<int>::min() ||
+        integerValue > std::numeric_limits<int>::max()) {
+        if (error.empty()) error = "tokenizerPadId must fit int32.";
+        return false;
+    }
+    contract.tokenizer_pad_id = static_cast<int>(integerValue);
+    if (!mnn_contract_integer(params, "tokenizerMaxLength", integerValue, error) ||
+        integerValue <= 0 || integerValue > std::numeric_limits<int>::max()) {
+        if (error.empty()) error = "tokenizerMaxLength must be a positive int32 value.";
+        return false;
+    }
+    contract.tokenizer_max_length = static_cast<int>(integerValue);
+    if (contract.tokenizer_max_length != 77 || contract.token_count != 154U) {
+        error = "The current MNN direct CLIP graph requires tokenizerMaxLength=77 and tokenCount=154.";
+        return false;
+    }
+    if (!mnn_contract_string(
+            params,
+            "embeddingDiskDataType",
+            contract.embedding_disk_data_type,
+            error)) {
+        return false;
+    }
+    contract.embedding_disk_data_type = normalize_mnn_contract_enum(
+            contract.embedding_disk_data_type);
+    if (contract.embedding_disk_data_type == "fp16") {
+        contract.embedding_disk_data_type = "FP16";
+    } else if (contract.embedding_disk_data_type == "fp32") {
+        contract.embedding_disk_data_type = "FP32";
+    } else if (contract.embedding_disk_data_type == "graph_internal") {
+        contract.embedding_disk_data_type = "GRAPH_INTERNAL";
+    } else if (contract.embedding_disk_data_type == "runtime_native") {
+        contract.embedding_disk_data_type = "RUNTIME_NATIVE";
+    } else {
+        error = "Unsupported MNN embeddingDiskDataType contract value: " +
+                contract.embedding_disk_data_type;
+        return false;
+    }
+    if (!mnn_contract_string(params, "vaeScalingLocation", vaeScalingLocation, error) ||
+        !mnn_contract_number(params, "vaeScalingFactor", numberValue, error)) {
+        return false;
+    }
+    if (numberValue <= 0.0) {
+        error = "vaeScalingFactor must be finite and positive.";
+        return false;
+    }
+    contract.vae_scaling_factor = numberValue;
+    vaeScalingLocation = normalize_mnn_contract_enum(std::move(vaeScalingLocation));
+    if (vaeScalingLocation == "host_before_graph") {
+        contract.vae_scaling_location = MnnVaeScalingLocation::HostBeforeGraph;
+    } else if (vaeScalingLocation == "graph_internal") {
+        contract.vae_scaling_location = MnnVaeScalingLocation::GraphInternal;
+    } else if (vaeScalingLocation == "none") {
+        contract.vae_scaling_location = MnnVaeScalingLocation::None;
+    } else {
+        error = "Unsupported MNN vaeScalingLocation contract value: " + vaeScalingLocation;
+        return false;
+    }
+    if (contract.vae_scaling_location == MnnVaeScalingLocation::None &&
+        std::fabs(contract.vae_scaling_factor - 1.0) > 1e-12) {
+        error = "vaeScalingLocation=NONE requires vaeScalingFactor=1.";
+        return false;
+    }
+    if (params.contains("vaeLatentScale")) {
+        error = "Deprecated vaeLatentScale conflicts with the explicit VAE scaling contract.";
+        return false;
+    }
+    if (!mnn_contract_integer(params, "width", integerValue, error) ||
+        integerValue != 512) {
+        if (error.empty()) error = "MNN direct width must be exactly 512.";
+        return false;
+    }
+    contract.width = static_cast<int>(integerValue);
+    if (!mnn_contract_integer(params, "height", integerValue, error) ||
+        integerValue != 512) {
+        if (error.empty()) error = "MNN direct height must be exactly 512.";
+        return false;
+    }
+    contract.height = static_cast<int>(integerValue);
+    if (!mnn_contract_string(params, "graphName", contract.graph_name, error) ||
+        !mnn_contract_boolean(params, "fallback", contract.fallback, error)) {
+        return false;
+    }
+    if (contract.fallback) {
+        error = "MNN direct native execution cannot claim fallback before one occurs.";
+        return false;
+    }
+    if (!mnn_contract_string(params, "negativePrompt", contract.negative_prompt, error, true) ||
+        !mnn_contract_string(params, "family", contract.family, error) ||
+        !mnn_contract_string(params, "backendMode", contract.backend_mode, error) ||
+        !mnn_contract_string(params, "runner", contract.runner, error) ||
+        !mnn_contract_integer(params, "threads", integerValue, error)) {
+        return false;
+    }
+    if (is_blank_text(contract.negative_prompt)) contract.negative_prompt.clear();
+    contract.family = normalize_mnn_contract_enum(contract.family);
+    if (contract.family != "sd15" && contract.family != "sd1_5") {
+        error = "The strict MNN direct contract currently supports SD15 graphs only.";
+        return false;
+    }
+    std::string canonicalBackend;
+    if (!canonical_mnn_diffusion_backend(contract.backend_mode, canonicalBackend, error)) {
+        return false;
+    }
+    contract.backend_mode = canonicalBackend;
+    contract.runner = normalize_mnn_contract_enum(contract.runner);
+    if (contract.runner != "direct" && contract.runner != "module") {
+        error = "Unsupported strict MNN runner contract value: " + contract.runner;
+        return false;
+    }
+    if (integerValue <= 0 || integerValue > 64) {
+        error = "MNN direct threads must be in [1, 64]; native does not clamp it.";
+        return false;
+    }
+    contract.threads = static_cast<int>(integerValue);
+    if (!mnn_contract_integer(params, "memoryMode", integerValue, error) ||
+        integerValue < 0 || integerValue > 2) {
+        if (error.empty()) error = "memoryMode must be 0, 1, or 2; native does not clamp it.";
+        return false;
+    }
+    contract.memory_mode = static_cast<int>(integerValue);
+    if (contract.runner == "direct" && contract.memory_mode != 0) {
+        error = "MNN direct runner requires memoryMode=0; module memory policies are not silently applied.";
+        return false;
+    }
+    if (params.contains("tokenEmbeddingMode")) {
+        error = "tokenEmbeddingMode is obsolete; token_emb.bin dtype is determined only by its exact byte size.";
+        return false;
+    }
+    if (!contract.use_cfg && !contract.negative_prompt.empty()) {
+        error = "A negativePrompt cannot affect pixels when useCfg=false.";
+        return false;
+    }
+    if (contract.tokenizer_backend == "MNN_MTOK" && !contract.negative_prompt.empty()) {
+        error = "MNN_MTOK fallback is allowed only when negativePrompt is empty.";
+        return false;
+    }
+    if (!mnn_contract_integer(params, "timetableCount", integerValue, error) ||
+        integerValue <= 0 ||
+        static_cast<size_t>(integerValue) != contract.scheduler.expected_timetable_count) {
+        if (error.empty()) error = "timetableCount must equal expectedTimetableCount.";
+        return false;
+    }
+    if (!mnn_contract_integer(params, "unetExecutionCount", integerValue, error) ||
+        integerValue <= 0 ||
+        static_cast<size_t>(integerValue) != contract.scheduler.expected_unet_execution_count) {
+        if (error.empty()) error = "unetExecutionCount must equal expectedUnetExecutionCount.";
+        return false;
+    }
+    const size_t branchCount = contract.use_cfg ? 2U : 1U;
+    if (contract.scheduler.expected_timetable_count >
+        std::numeric_limits<size_t>::max() / branchCount ||
+        contract.scheduler.expected_timetable_count * branchCount !=
+            contract.scheduler.expected_unet_execution_count) {
+        error = "expectedUnetExecutionCount does not match timetableCount and CFG branches.";
+        return false;
+    }
+    return true;
+}
+
+const char* mnn_scheduler_wire_name(mca::diffusion::SchedulerAlgorithm algorithm) {
+    switch (algorithm) {
+        case mca::diffusion::SchedulerAlgorithm::EulerDiscrete: return "EULER";
+        case mca::diffusion::SchedulerAlgorithm::Ddim: return "DDIM";
+        case mca::diffusion::SchedulerAlgorithm::Pndm: return "PNDM_PLMS";
+        case mca::diffusion::SchedulerAlgorithm::Dpmpp2m: return "DPMPP_2M";
+    }
+    return "UNKNOWN";
+}
+
+const char* mnn_scheduler_product_name(mca::diffusion::SchedulerAlgorithm algorithm) {
+    switch (algorithm) {
+        case mca::diffusion::SchedulerAlgorithm::EulerDiscrete: return "euler";
+        case mca::diffusion::SchedulerAlgorithm::Ddim: return "ddim";
+        case mca::diffusion::SchedulerAlgorithm::Pndm: return "pndm";
+        case mca::diffusion::SchedulerAlgorithm::Dpmpp2m: return "dpmpp_2m";
+    }
+    return "unknown";
+}
+
+const char* mnn_prediction_wire_name(mca::diffusion::PredictionType prediction) {
+    switch (prediction) {
+        case mca::diffusion::PredictionType::Epsilon: return "EPSILON";
+        case mca::diffusion::PredictionType::VPrediction: return "V_PREDICTION";
+        case mca::diffusion::PredictionType::Sample: return "SAMPLE";
+    }
+    return "UNKNOWN";
+}
+
+const char* mnn_vae_scaling_wire_name(MnnVaeScalingLocation location) {
+    switch (location) {
+        case MnnVaeScalingLocation::HostBeforeGraph: return "HOST_BEFORE_GRAPH";
+        case MnnVaeScalingLocation::GraphInternal: return "GRAPH_INTERNAL";
+        case MnnVaeScalingLocation::None: return "NONE";
+    }
+    return "UNKNOWN";
+}
+
+json mnn_native_effective_json(
+        const MnnSemanticExecutionContract& contract,
+        const MnnNativeExecutionEvidence& evidence) {
+    return json({
+        {"profileId", contract.profile_id},
+        {"profileRevision", contract.profile_revision},
+        {"modelFingerprint", contract.model_fingerprint},
+        {"runtime", "MNN_DIFFUSION"},
+        {"scheduler", mnn_scheduler_wire_name(contract.scheduler.config.algorithm)},
+        {"predictionType", mnn_prediction_wire_name(contract.scheduler.config.prediction_type)},
+        {"steps", contract.scheduler.steps},
+        {"timetableCount", evidence.timetable_count},
+        {"unetExecutionCount", evidence.unet_execution_count},
+        {"cfgScale", contract.cfg_scale},
+        {"useCfg", contract.use_cfg},
+        {"unconditionalBranch", contract.use_cfg},
+        {"tokenizerBackend", evidence.tokenizer_backend},
+        {"tokenCount", evidence.token_count},
+        {"embeddingDiskDataType", evidence.embedding_disk_data_type},
+        {"vaeScalingLocation", mnn_vae_scaling_wire_name(contract.vae_scaling_location)},
+        {"vaeScalingFactor", contract.vae_scaling_factor},
+        {"width", contract.width},
+        {"height", contract.height},
+        {"seed", contract.seed},
+        {"graphName", contract.graph_name},
+        {"fallback", false}
+    });
+}
+
 std::string mnn_diffusion_missing_component(const std::string& root, const std::string& family) {
     if (root.empty() || !directory_exists(root)) {
         return is_sana_family(family)
@@ -1253,15 +1933,19 @@ std::string mnn_diffusion_missing_component(const std::string& root, const std::
         return out.str();
     }
     std::vector<std::string> missing;
-    if (!file_exists(root + "/text_encoder.mnn")) missing.emplace_back("text_encoder.mnn");
-    if (!file_exists(root + "/text_encoder.mnn.weight")) missing.emplace_back("text_encoder.mnn.weight");
+    const bool hasCommunityClip =
+            file_exists(root + "/clip_v2.mnn") &&
+            file_exists(root + "/tokenizer.json") &&
+            file_exists(root + "/token_emb.bin") &&
+            file_exists(root + "/pos_emb.bin");
+    if (!hasCommunityClip) {
+        if (!file_exists(root + "/text_encoder.mnn")) missing.emplace_back("text_encoder.mnn");
+        if (!file_exists(root + "/text_encoder.mnn.weight")) missing.emplace_back("text_encoder.mnn.weight");
+    }
     if (!file_exists(root + "/unet.mnn")) missing.emplace_back("unet.mnn");
     if (!file_exists(root + "/unet.mnn.weight")) missing.emplace_back("unet.mnn.weight");
     if (!file_exists(root + "/vae_decoder.mnn")) missing.emplace_back("vae_decoder.mnn");
     if (!file_exists(root + "/vae_decoder.mnn.weight")) missing.emplace_back("vae_decoder.mnn.weight");
-    if (!file_exists(root + "/tokenizer.mtok")) {
-        missing.emplace_back("tokenizer.mtok (required by the linked MNN diffusion tokenizer)");
-    }
     if (missing.empty()) return "";
     std::ostringstream out;
     out << "MNN-Diffusion Stable Diffusion 1.5 bundle is incomplete: ";
@@ -2336,14 +3020,51 @@ struct ClipBpeTokenizer {
     }
 };
 
-bool build_local_dream_clip_input(
+constexpr size_t kCommunityClipFp16TokenEmbeddingBytes = 75'890'688U;
+constexpr size_t kCommunityClipFp32TokenEmbeddingBytes = 151'781'376U;
+static_assert(
+        kCommunityClipFp16TokenEmbeddingBytes == 49'408U * 768U * sizeof(uint16_t),
+        "SD1.5 FP16 token embedding size must match the CLIP vocabulary contract.");
+static_assert(
+        kCommunityClipFp32TokenEmbeddingBytes == 49'408U * 768U * sizeof(float),
+        "SD1.5 FP32 token embedding size must match the CLIP vocabulary contract.");
+
+bool inspect_community_token_embedding_file(
+        const std::string& root,
+        size_t& tokenBytes,
+        std::string& dataType,
+        std::string& error) {
+    const auto tokenPath = root + "/token_emb.bin";
+    struct stat tokenStat {};
+    if (stat(tokenPath.c_str(), &tokenStat) != 0 ||
+        !S_ISREG(tokenStat.st_mode) || tokenStat.st_size < 0) {
+        error = "token_emb.bin is missing or is not a regular file.";
+        return false;
+    }
+    tokenBytes = static_cast<size_t>(tokenStat.st_size);
+    if (tokenBytes == kCommunityClipFp16TokenEmbeddingBytes) {
+        dataType = "FP16";
+        return true;
+    }
+    if (tokenBytes == kCommunityClipFp32TokenEmbeddingBytes) {
+        dataType = "FP32";
+        return true;
+    }
+    std::ostringstream out;
+    out << "PACKAGE_FORMAT_INVALID: token_emb.bin has " << tokenBytes
+        << " bytes; expected exactly " << kCommunityClipFp16TokenEmbeddingBytes
+        << " for FP16 or " << kCommunityClipFp32TokenEmbeddingBytes << " for FP32.";
+    error = out.str();
+    return false;
+}
+
+bool build_community_clip_input(
         const std::string& root,
         const std::vector<int>& token_ids,
         std::vector<float>& input,
         std::string& error,
-        const std::string& token_embedding_mode = "auto",
         size_t* token_embedding_bytes = nullptr,
-        std::string* token_embedding_mode_used = nullptr) {
+        std::string* token_embedding_data_type = nullptr) {
     constexpr int kMaxTextLen = 77;
     constexpr int kEmbeddingSize = 768;
     constexpr int kVocabSize = 49408;
@@ -2351,19 +3072,19 @@ bool build_local_dream_clip_input(
         error = "CLIP token id count must be 77.";
         return false;
     }
-    const auto token_bytes = read_binary_bytes(root + "/token_emb.bin");
-    const auto pos_bytes = read_binary_bytes(root + "/pos_emb.bin");
-    const size_t expected_token_bytes = static_cast<size_t>(kVocabSize) * kEmbeddingSize * sizeof(uint16_t);
-    const size_t expected_pos_bytes = static_cast<size_t>(kMaxTextLen) * kEmbeddingSize * sizeof(float);
-    const bool token_emb_has_extra_slice = token_bytes.size() == expected_token_bytes * 2;
-    if (token_bytes.size() != expected_token_bytes && !token_emb_has_extra_slice) {
-        std::ostringstream out;
-        out << "token_emb.bin has unexpected size: " << token_bytes.size()
-            << ", expected " << expected_token_bytes
-            << " or " << (expected_token_bytes * 2) << " for a dual-slice SD1.5 QNN bundle.";
-        error = out.str();
+    const auto tokenPath = root + "/token_emb.bin";
+    size_t tokenBytes = 0;
+    std::string detectedDataType;
+    if (!inspect_community_token_embedding_file(
+            root,
+            tokenBytes,
+            detectedDataType,
+            error)) {
         return false;
     }
+    const bool tokenFp16 = detectedDataType == "FP16";
+    const auto pos_bytes = read_binary_bytes(root + "/pos_emb.bin");
+    const size_t expected_pos_bytes = static_cast<size_t>(kMaxTextLen) * kEmbeddingSize * sizeof(float);
     if (pos_bytes.size() != expected_pos_bytes) {
         std::ostringstream out;
         out << "pos_emb.bin has unexpected size: " << pos_bytes.size()
@@ -2372,25 +3093,19 @@ bool build_local_dream_clip_input(
         return false;
     }
     if (token_embedding_bytes != nullptr) {
-        *token_embedding_bytes = token_bytes.size();
+        *token_embedding_bytes = tokenBytes;
     }
-    size_t token_emb_slice_offset = 0;
-    std::string mode_used = "standard";
-    if (token_emb_has_extra_slice) {
-        if (token_embedding_mode == "dual_slice_second_half" ||
-            token_embedding_mode == "second_half" ||
-            token_embedding_mode == "slice1") {
-            token_emb_slice_offset = expected_token_bytes / sizeof(uint16_t);
-            mode_used = "dual_slice_second_half";
-        } else {
-            mode_used = "dual_slice_first_half";
-        }
+    if (token_embedding_data_type != nullptr) {
+        *token_embedding_data_type = detectedDataType;
     }
-    if (token_embedding_mode_used != nullptr) {
-        *token_embedding_mode_used = mode_used;
-    }
-    const auto* token_emb = reinterpret_cast<const uint16_t*>(token_bytes.data());
     const auto* pos_emb = reinterpret_cast<const float*>(pos_bytes.data());
+    std::ifstream tokenInput(tokenPath.c_str(), std::ios::binary);
+    if (!tokenInput.good()) {
+        error = "Failed to open token_emb.bin for windowed reading.";
+        return false;
+    }
+    std::vector<uint16_t> fp16Window(static_cast<size_t>(kEmbeddingSize));
+    std::vector<float> fp32Window(static_cast<size_t>(kEmbeddingSize));
     input.assign(static_cast<size_t>(kMaxTextLen) * kEmbeddingSize, 0.0f);
     for (int pos = 0; pos < kMaxTextLen; ++pos) {
         const int id = token_ids[static_cast<size_t>(pos)];
@@ -2398,39 +3113,68 @@ bool build_local_dream_clip_input(
             error = "CLIP token id at position " + std::to_string(pos) + " is outside the vocabulary range.";
             return false;
         }
+        const size_t elementBytes = tokenFp16 ? sizeof(uint16_t) : sizeof(float);
+        const size_t byteOffset = static_cast<size_t>(id) * kEmbeddingSize * elementBytes;
+        tokenInput.clear();
+        tokenInput.seekg(static_cast<std::streamoff>(byteOffset), std::ios::beg);
+        if (!tokenInput.good()) {
+            error = "Failed to seek token_emb.bin to vocabulary row " + std::to_string(id) + ".";
+            return false;
+        }
+        if (tokenFp16) {
+            tokenInput.read(
+                    reinterpret_cast<char*>(fp16Window.data()),
+                    static_cast<std::streamsize>(fp16Window.size() * sizeof(uint16_t)));
+        } else {
+            tokenInput.read(
+                    reinterpret_cast<char*>(fp32Window.data()),
+                    static_cast<std::streamsize>(fp32Window.size() * sizeof(float)));
+        }
+        if (!tokenInput.good()) {
+            error = "Failed to read a complete token_emb.bin vocabulary row.";
+            return false;
+        }
         for (int dim = 0; dim < kEmbeddingSize; ++dim) {
             const size_t out_index = static_cast<size_t>(pos) * kEmbeddingSize + dim;
-            const size_t token_index = token_emb_slice_offset + static_cast<size_t>(id) * kEmbeddingSize + dim;
-            input[out_index] = fp16_to_float(token_emb[token_index]) + pos_emb[out_index];
+            const float tokenValue = tokenFp16
+                    ? fp16_to_float(fp16Window[static_cast<size_t>(dim)])
+                    : fp32Window[static_cast<size_t>(dim)];
+            const float value = tokenValue + pos_emb[out_index];
+            if (!std::isfinite(value)) {
+                error = "token_emb.bin or pos_emb.bin produced a non-finite CLIP input value.";
+                return false;
+            }
+            input[out_index] = value;
         }
     }
     return true;
 }
 
-bool run_local_dream_clip_encoder_direct(
+bool run_community_clip_encoder_direct(
         const std::string& root,
         const std::vector<int>& token_ids,
         const std::string& backendMode,
         int threads,
-        const std::string& token_embedding_mode,
         FloatTensorData& embeddings,
         std::string& error,
-        json* debug) {
+        json* debug,
+        std::string* embedding_disk_data_type = nullptr) {
     std::vector<float> input_values;
     size_t token_embedding_bytes = 0;
-    std::string token_embedding_mode_used = "standard";
-    if (!build_local_dream_clip_input(
+    std::string token_embedding_type;
+    if (!build_community_clip_input(
             root, token_ids, input_values, error,
-            token_embedding_mode,
-            &token_embedding_bytes, &token_embedding_mode_used)) {
+            &token_embedding_bytes, &token_embedding_type)) {
         return false;
+    }
+    if (embedding_disk_data_type != nullptr) {
+        *embedding_disk_data_type = token_embedding_type;
     }
     if (debug != nullptr) {
         *debug = json::object();
         (*debug)["inputValueStats"] = float_vector_stats_json(input_values);
         (*debug)["tokenEmbeddingBytes"] = token_embedding_bytes;
-        (*debug)["tokenEmbeddingRequestedMode"] = token_embedding_mode;
-        (*debug)["tokenEmbeddingMode"] = token_embedding_mode_used;
+        (*debug)["embeddingDiskDataType"] = token_embedding_type;
         json tokenSamples = json::array();
         for (size_t i = 0; i < token_ids.size() && tokenSamples.size() < 16; ++i) {
             tokenSamples.push_back(token_ids[i]);
@@ -2451,7 +3195,7 @@ bool run_local_dream_clip_encoder_direct(
         error = "clip_v2.mnn session configuration failed: " + config_error;
         return false;
     }
-    // The LocalDream CLIP transformer is numerically fragile with low precision CPU
+    // The community CLIP transformer is numerically fragile with low precision CPU
     // kernels: bad runs produce 1e37-scale hidden states, which collapse CFG.
     backendConfig.precision = MNN::BackendConfig::Precision_High;
     backendConfig.memory = MNN::BackendConfig::Memory_Normal;
@@ -2533,7 +3277,7 @@ bool run_local_dream_clip_encoder_direct(
     return true;
 }
 
-bool has_local_dream_clip_bundle(const std::string& root) {
+bool has_community_clip_bundle(const std::string& root) {
     return file_exists(root + "/clip_v2.mnn") &&
             file_exists(root + "/tokenizer.json") &&
             file_exists(root + "/token_emb.bin") &&
@@ -2842,6 +3586,7 @@ bool has_sdxl_qnn_clip_bundle(const std::string& root) {
 json encode_sdxl_prompt_conditioning_to_file(
         const std::string& root,
         const std::string& prompt,
+        const std::string& negativePrompt,
         const std::string& outputPath,
         int width,
         int height,
@@ -2868,16 +3613,42 @@ json encode_sdxl_prompt_conditioning_to_file(
         });
     }
     std::string error;
-    ClipBpeTokenizer tokenizer;
-    if (!tokenizer.load(root + "/tokenizer.json", error)) {
+    mca::image::ClipTokenizerConfig clip1TokenizerConfig;
+    clip1TokenizerConfig.bos_id = 49406;
+    clip1TokenizerConfig.eos_id = 49407;
+    clip1TokenizerConfig.pad_id = 49407;
+    clip1TokenizerConfig.max_length = 77;
+    mca::image::ClipTokenizerConfig clip2TokenizerConfig = clip1TokenizerConfig;
+    clip2TokenizerConfig.pad_id = 0;
+    mca::image::ClipTokenPair clip1TokenPair;
+    mca::image::ClipTokenPair clip2TokenPair;
+    if (!mca::image::tokenize_clip_pair_from_json(
+            root + "/tokenizer.json",
+            prompt,
+            negativePrompt,
+            clip1TokenizerConfig,
+            &clip1TokenPair,
+            &error) ||
+        !mca::image::tokenize_clip_pair_from_json(
+            root + "/tokenizer.json",
+            prompt,
+            negativePrompt,
+            clip2TokenizerConfig,
+            &clip2TokenPair,
+            &error)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
-    const auto ids = tokenizer.encode_pair(prompt, 77);
-    if (ids.size() != 154) {
+    const auto clip1StandardIds = clip1TokenPair.negative_then_positive();
+    const auto clip2StandardIds = clip2TokenPair.negative_then_positive();
+    const std::vector<int> clip1Ids(clip1StandardIds.begin(), clip1StandardIds.end());
+    const std::vector<int> clip2Ids(clip2StandardIds.begin(), clip2StandardIds.end());
+    if (clip1Ids.size() != 154 || clip2Ids.size() != 154) {
         return json({{"ok", false}, {"error", "CLIP tokenizer returned invalid id count."}});
     }
-    std::vector<int> negIds(ids.begin(), ids.begin() + 77);
-    std::vector<int> posIds(ids.begin() + 77, ids.end());
+    std::vector<int> clip1NegIds(clip1Ids.begin(), clip1Ids.begin() + 77);
+    std::vector<int> clip1PosIds(clip1Ids.begin() + 77, clip1Ids.end());
+    std::vector<int> clip2NegIds(clip2Ids.begin(), clip2Ids.begin() + 77);
+    std::vector<int> clip2PosIds(clip2Ids.begin() + 77, clip2Ids.end());
 
     FloatTensorData negClip1;
     FloatTensorData posClip1;
@@ -2890,25 +3661,25 @@ json encode_sdxl_prompt_conditioning_to_file(
             outputPath.find("/image_bench/runs/") != std::string::npos ||
             outputPath.find("\\image_bench\\runs\\") != std::string::npos;
     if (!run_sdxl_clip_encoder_direct(
-            root, "clip.mnn", "token_emb.bin", "pos_emb.bin", 768, negIds,
+            root, "clip.mnn", "token_emb.bin", "pos_emb.bin", 768, clip1NegIds,
             canonicalBackend, threads, negClip1, nullptr, error,
             includeDebug ? &debug["clip1_negative"] : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
     if (!run_sdxl_clip_encoder_direct(
-            root, "clip.mnn", "token_emb.bin", "pos_emb.bin", 768, posIds,
+            root, "clip.mnn", "token_emb.bin", "pos_emb.bin", 768, clip1PosIds,
             canonicalBackend, threads, posClip1, nullptr, error,
             includeDebug ? &debug["clip1_positive"] : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
     if (!run_sdxl_clip_encoder_direct(
-            root, "clip_2.mnn", "token_emb_2.bin", "pos_emb_2.bin", 1280, negIds,
+            root, "clip_2.mnn", "token_emb_2.bin", "pos_emb_2.bin", 1280, clip2NegIds,
             canonicalBackend, threads, negClip2, &negPooled, error,
             includeDebug ? &debug["clip2_negative"] : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
     if (!run_sdxl_clip_encoder_direct(
-            root, "clip_2.mnn", "token_emb_2.bin", "pos_emb_2.bin", 1280, posIds,
+            root, "clip_2.mnn", "token_emb_2.bin", "pos_emb_2.bin", 1280, clip2PosIds,
             canonicalBackend, threads, posClip2, &posPooled, error,
             includeDebug ? &debug["clip2_positive"] : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
@@ -2959,6 +3730,12 @@ json encode_sdxl_prompt_conditioning_to_file(
             {"hiddenShape", {2, 77, 2048}},
             {"pooledShape", {2, 1280}},
             {"timeIdsShape", {1, 6}},
+            {"clip1PadId", clip1TokenizerConfig.pad_id},
+            {"clip2PadId", clip2TokenizerConfig.pad_id},
+            {"clipPadRules", {
+                {"clip1", "EOS"},
+                {"clip2", "ZERO"}
+            }},
             {"negativeHiddenStats", float_vector_stats_json(std::vector<float>(combined.begin(), combined.begin() + kTextLen * kHidden))},
             {"positiveHiddenStats", float_vector_stats_json(std::vector<float>(combined.begin() + kTextLen * kHidden, combined.begin() + 2 * kTextLen * kHidden))},
             {"positiveNegativeAbsDiffStats", float_vector_abs_diff_stats_json(
@@ -2972,29 +3749,43 @@ json encode_sdxl_prompt_conditioning_to_file(
     return result;
 }
 
-json encode_local_dream_clip_embeddings_to_file(
+json encode_community_clip_embeddings_to_file(
         const std::string& root,
         const std::string& prompt,
+        const std::string& negativePrompt,
         const std::string& outputPath,
         const std::string& backendMode,
-        int threads,
-        const std::string& token_embedding_mode = "auto") {
+        int threads) {
     std::string error;
-    ClipBpeTokenizer tokenizer;
-    if (!tokenizer.load(root + "/tokenizer.json", error)) {
-        return json({{"ok", false}, {"error", error}, {"format", "local_dream_clip"}});
+    mca::image::ClipTokenizerConfig tokenizerConfig;
+    tokenizerConfig.bos_id = 49406;
+    tokenizerConfig.eos_id = 49407;
+    tokenizerConfig.pad_id = 49407;
+    tokenizerConfig.max_length = 77;
+    mca::image::ClipTokenPair tokenPair;
+    if (!mca::image::tokenize_clip_pair_from_json(
+            root + "/tokenizer.json",
+            prompt,
+            negativePrompt,
+            tokenizerConfig,
+            &tokenPair,
+            &error)) {
+        return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
     }
-    auto ids = tokenizer.encode_pair(prompt, 77);
+    const auto standardIds = tokenPair.negative_then_positive();
+    const std::vector<int> ids(standardIds.begin(), standardIds.end());
     if (ids.size() != 154) {
         return json({
             {"ok", false},
             {"error", "CLIP tokenizer returned invalid id count."},
             {"tokenCount", ids.size()},
-            {"format", "local_dream_clip"}
+            {"format", "community_clip"}
         });
     }
     FloatTensorData negative;
     FloatTensorData positive;
+    std::string negativeEmbeddingType;
+    std::string positiveEmbeddingType;
     json negativeDebug = json::object();
     json positiveDebug = json::object();
     const bool includeDebug =
@@ -3002,38 +3793,45 @@ json encode_local_dream_clip_embeddings_to_file(
             outputPath.find("\\image_bench\\runs\\") != std::string::npos;
     std::vector<int> neg_ids(ids.begin(), ids.begin() + 77);
     std::vector<int> pos_ids(ids.begin() + 77, ids.end());
-    if (!run_local_dream_clip_encoder_direct(
+    if (!run_community_clip_encoder_direct(
             root,
             neg_ids,
             backendMode,
             threads,
-            token_embedding_mode,
             negative,
             error,
-            includeDebug ? &negativeDebug : nullptr)) {
-        return json({{"ok", false}, {"error", error}, {"format", "local_dream_clip"}});
+            includeDebug ? &negativeDebug : nullptr,
+            &negativeEmbeddingType)) {
+        return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
     }
-    if (!run_local_dream_clip_encoder_direct(
+    if (!run_community_clip_encoder_direct(
             root,
             pos_ids,
             backendMode,
             threads,
-            token_embedding_mode,
             positive,
             error,
-            includeDebug ? &positiveDebug : nullptr)) {
-        return json({{"ok", false}, {"error", error}, {"format", "local_dream_clip"}});
+            includeDebug ? &positiveDebug : nullptr,
+            &positiveEmbeddingType)) {
+        return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
     }
-    if (!validate_float_tensor_contract(negative, {1, 77, 768}, "Local Dream negative CLIP output", error) ||
-        !validate_float_tensor_contract(positive, {1, 77, 768}, "Local Dream positive CLIP output", error)) {
-        return json({{"ok", false}, {"error", error}, {"format", "local_dream_clip"}});
+    if (negativeEmbeddingType != positiveEmbeddingType) {
+        return json({
+            {"ok", false},
+            {"error", "PACKAGE_FORMAT_INVALID: negative and positive CLIP reads reported different token embedding dtypes."},
+            {"format", "community_clip"}
+        });
+    }
+    if (!validate_float_tensor_contract(negative, {1, 77, 768}, "Community negative CLIP output", error) ||
+        !validate_float_tensor_contract(positive, {1, 77, 768}, "Community positive CLIP output", error)) {
+        return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
     }
     std::vector<float> combined;
     combined.reserve(negative.values.size() + positive.values.size());
     combined.insert(combined.end(), negative.values.begin(), negative.values.end());
     combined.insert(combined.end(), positive.values.begin(), positive.values.end());
     if (!write_float_file(outputPath, combined, error)) {
-        return json({{"ok", false}, {"error", error}, {"format", "local_dream_clip"}});
+        return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
     }
     json result = {
         {"ok", true},
@@ -3047,7 +3845,8 @@ json encode_local_dream_clip_embeddings_to_file(
         {"negativeStats", float_vector_stats_json(negative.values)},
         {"positiveStats", float_vector_stats_json(positive.values)},
         {"positiveNegativeAbsDiffStats", float_vector_abs_diff_stats_json(positive.values, negative.values)},
-        {"format", "local_dream_clip"},
+        {"format", "community_clip"},
+        {"embeddingDiskDataType", negativeEmbeddingType},
         {"backendMode", backendMode == "opencl" || backendMode == "gpu" ? "opencl" : "cpu"}
     };
     if (includeDebug) {
@@ -3059,6 +3858,118 @@ json encode_local_dream_clip_embeddings_to_file(
     return result;
 }
 
+std::string resolve_mnn_tokenizer_json_path(const std::string& root) {
+    const std::array<std::string, 2> candidates = {
+        root + "/tokenizer/tokenizer.json",
+        root + "/tokenizer.json"
+    };
+    for (const auto& candidate : candidates) {
+        if (file_exists(candidate)) return candidate;
+    }
+    return "";
+}
+
+bool tokenize_mnn_sd15_prompt(
+        const std::string& root,
+        const std::string& prompt,
+        const MnnSemanticExecutionContract& contract,
+        std::vector<int>& ids,
+        MnnNativeExecutionEvidence& evidence,
+        std::string& error) {
+    ids.clear();
+    if (contract.tokenizer_backend == "TOKENIZERS_CPP") {
+        const auto tokenizerPath = resolve_mnn_tokenizer_json_path(root);
+        if (tokenizerPath.empty()) {
+            error = "tokenizerBackend=TOKENIZERS_CPP requires tokenizer/tokenizer.json or tokenizer.json.";
+            return false;
+        }
+        mca::image::ClipTokenizerConfig tokenizerConfig;
+        tokenizerConfig.bos_id = contract.tokenizer_bos_id;
+        tokenizerConfig.eos_id = contract.tokenizer_eos_id;
+        tokenizerConfig.pad_id = contract.tokenizer_pad_id;
+        tokenizerConfig.max_length = contract.tokenizer_max_length;
+        mca::image::ClipTokenPair pair;
+        if (!mca::image::tokenize_clip_pair_from_json(
+                tokenizerPath,
+                prompt,
+                contract.negative_prompt,
+                tokenizerConfig,
+                &pair,
+                &error)) {
+            return false;
+        }
+        const auto standardIds = pair.negative_then_positive();
+        ids.assign(standardIds.begin(), standardIds.end());
+        evidence.tokenizer_backend = "TOKENIZERS_CPP";
+    } else if (contract.tokenizer_backend == "MNN_MTOK") {
+        if (!contract.negative_prompt.empty()) {
+            error = "MNN_MTOK cannot execute a non-empty negativePrompt exactly.";
+            return false;
+        }
+        if (!file_exists(root + "/tokenizer.mtok")) {
+            error = "tokenizerBackend=MNN_MTOK requires tokenizer.mtok in the MNN bundle root.";
+            return false;
+        }
+        MNN::DIFFUSION::MtokTokenizer tokenizer(
+                MNN::DIFFUSION::MtokTokenizer::Style::kPair,
+                contract.tokenizer_bos_id,
+                contract.tokenizer_eos_id);
+        if (!tokenizer.load(root)) {
+            error = "Failed to load the explicitly selected MNN_MTOK tokenizer.";
+            return false;
+        }
+        ids = tokenizer.encode(prompt, contract.tokenizer_max_length);
+        evidence.tokenizer_backend = "MNN_MTOK";
+    } else {
+        error = "Unsupported MNN tokenizer backend after strict contract parsing.";
+        return false;
+    }
+    if (ids.size() != contract.token_count) {
+        error = "MNN tokenizer produced " + std::to_string(ids.size()) +
+                " token ids; the resolved contract requires " +
+                std::to_string(contract.token_count) + ".";
+        return false;
+    }
+    evidence.token_count = ids.size();
+    return true;
+}
+
+bool copy_mnn_timestep_to_tensor(
+        MNN::Tensor* tensor,
+        double timestep,
+        std::string& error) {
+    if (tensor == nullptr || tensor->elementSize() != 1) {
+        error = "UNet timestep input must contain exactly one element.";
+        return false;
+    }
+    if (!std::isfinite(timestep)) {
+        error = "UNet timestep must be finite.";
+        return false;
+    }
+    const auto type = tensor->getType();
+    if (type.code == halide_type_float && type.bits == 32 && type.lanes == 1) {
+        return copy_vector_to_tensor<float>(
+                tensor,
+                {static_cast<float>(timestep)},
+                error);
+    }
+    if (type.code == halide_type_int && type.bits == 32 && type.lanes == 1) {
+        if (timestep < static_cast<double>(std::numeric_limits<int>::min()) ||
+            timestep > static_cast<double>(std::numeric_limits<int>::max())) {
+            error = "UNet timestep exceeds int32 range.";
+            return false;
+        }
+        // The official converted MNN graph exposes an int32 timestep and its
+        // module runner truncates the scheduler's float timestep before input.
+        return copy_vector_to_tensor<int>(
+                tensor,
+                {static_cast<int>(timestep)},
+                error);
+    }
+    error = "UNet timestep input must be scalar float32 or int32.";
+    return false;
+}
+
 bool run_text_encoder_direct(
         const std::string& root,
         const std::vector<int>& ids,
@@ -3066,10 +3977,11 @@ bool run_text_encoder_direct(
         int threads,
         FloatTensorData& embeddings,
         std::string& error) {
-    if (ids.size() != 2U * 77U) {
-        error = "text_encoder requires exactly 154 token ids for CFG prompt encoding.";
+    if (ids.size() != 77U && ids.size() != 2U * 77U) {
+        error = "text_encoder requires exactly 77 conditional ids or 154 CFG-pair ids.";
         return false;
     }
+    const int batch = ids.size() == 77U ? 1 : 2;
     const auto path = root + "/text_encoder.mnn";
     std::unique_ptr<MNN::Interpreter> interpreter(MNN::Interpreter::createFromFile(path.c_str()));
     if (!interpreter) {
@@ -3099,7 +4011,7 @@ bool run_text_encoder_direct(
         error = "text_encoder input_ids tensor is missing before resize.";
         return false;
     }
-    interpreter->resizeTensor(input, {2, 77});
+    interpreter->resizeTensor(input, {batch, 77});
     interpreter->resizeSession(session, 1);
     input = interpreter->getSessionInput(session, "input_ids");
     if (input == nullptr) {
@@ -3128,7 +4040,7 @@ bool run_text_encoder_direct(
         return false;
     }
     if (!validate_float_tensor_contract(
-            embeddings, {2, 77, 768}, "text_encoder output", error)) {
+            embeddings, {batch, 77, 768}, "text_encoder output", error)) {
         return false;
     }
     return true;
@@ -3144,8 +4056,14 @@ public:
             const std::string& root,
             const std::string& backendMode,
             int threads,
+            int batch,
             std::string& error) {
         close();
+        if (batch != 1 && batch != 2) {
+            error = "UNet direct batch must be 1 (conditional) or 2 (CFG pair).";
+            return false;
+        }
+        batch_ = batch;
         const auto path = root + "/unet.mnn";
         interpreter_.reset(MNN::Interpreter::createFromFile(path.c_str()));
         if (!interpreter_) {
@@ -3179,9 +4097,9 @@ public:
             close();
             return false;
         }
-        interpreter_->resizeTensor(sample_input_, {2, 4, 64, 64});
+        interpreter_->resizeTensor(sample_input_, {batch_, 4, 64, 64});
         interpreter_->resizeTensor(timestep_input_, {1});
-        interpreter_->resizeTensor(encoder_input_, {2, 77, 768});
+        interpreter_->resizeTensor(encoder_input_, {batch_, 77, 768});
         interpreter_->resizeSession(session_, 1);
         int resizeStatus = -1;
         interpreter_->getSessionInfo(session_, MNN::Interpreter::RESIZE_STATUS, &resizeStatus);
@@ -3198,31 +4116,33 @@ public:
 
     bool run(
             const std::vector<float>& sample,
-            int timestep,
+            double timestep,
             const FloatTensorData& embeddings,
             FloatTensorData& noise,
             std::string& error) {
-        constexpr int kCfgBatch = 2;
         constexpr int kLatentElements = 4 * 64 * 64;
         if (session_ == nullptr || interpreter_ == nullptr) {
             error = "UNet session is not initialized.";
             return false;
         }
-        if (timestep < 0 || timestep >= 1000) {
-            error = "UNet timestep must be in [0, 999].";
+        if (!std::isfinite(timestep) || timestep < 0.0 || timestep >= 1000.0) {
+            error = "UNet timestep must be finite and in [0, 999].";
             return false;
         }
-        if (sample.size() != static_cast<size_t>(kCfgBatch * kLatentElements)) {
-            error = "UNet sample must have shape [2,4,64,64].";
+        if (sample.size() != static_cast<size_t>(batch_ * kLatentElements)) {
+            error = "UNet sample does not match the initialized conditional/CFG batch.";
             return false;
         }
         if (!validate_finite_float_vector(sample, "UNet sample", error) ||
-            !validate_float_tensor_contract(embeddings, {2, 77, 768}, "UNet encoder_hidden_states", error)) {
+            !validate_float_tensor_contract(
+                embeddings,
+                {batch_, 77, 768},
+                "UNet encoder_hidden_states",
+                error)) {
             return false;
         }
-        std::vector<int> timestepValues = {timestep};
         if (!copy_vector_to_tensor<float>(sample_input_, sample, error) ||
-            !copy_vector_to_tensor<int>(timestep_input_, timestepValues, error) ||
+            !copy_mnn_timestep_to_tensor(timestep_input_, timestep, error) ||
             !copy_vector_to_tensor<float>(encoder_input_, embeddings.values, error)) {
             return false;
         }
@@ -3237,11 +4157,15 @@ public:
             error = "UNet output copy failed: " + error;
             return false;
         }
-        if (noise.shape == std::vector<int>({kCfgBatch, 64, 64, 4})) {
-            noise.values = nhwc_to_nchw(noise.values, kCfgBatch, 64, 64, 4);
-            noise.shape = {kCfgBatch, 4, 64, 64};
+        if (noise.shape == std::vector<int>({batch_, 64, 64, 4})) {
+            noise.values = nhwc_to_nchw(noise.values, batch_, 64, 64, 4);
+            noise.shape = {batch_, 4, 64, 64};
         }
-        return validate_float_tensor_contract(noise, {kCfgBatch, 4, 64, 64}, "UNet output", error);
+        return validate_float_tensor_contract(
+                noise,
+                {batch_, 4, 64, 64},
+                "UNet output",
+                error);
     }
 
 private:
@@ -3255,6 +4179,7 @@ private:
         encoder_input_ = nullptr;
         interpreter_.reset();
         weight_path_.clear();
+        batch_ = 0;
     }
 
     std::unique_ptr<MNN::Interpreter> interpreter_;
@@ -3263,6 +4188,7 @@ private:
     MNN::Tensor* timestep_input_ = nullptr;
     MNN::Tensor* encoder_input_ = nullptr;
     std::string weight_path_;
+    int batch_ = 0;
 };
 
 bool run_unet_direct(
@@ -3476,6 +4402,9 @@ bool run_vae_decoder_direct(
     return true;
 }
 
+#if 0
+// Disabled legacy direct sampler. Production direct generation is driven only
+// by mca::diffusion::DiffusionScheduler and its versioned execution contract.
 bool pndm_step(
         const std::vector<float>& sample,
         std::vector<std::vector<float>>& ets,
@@ -3598,6 +4527,7 @@ bool pndm_step(
     }
     return validate_finite_float_vector(previous, "PNDM previous sample", error);
 }
+#endif
 
 bool write_vae_image_to_file(const FloatTensorData& image, const std::string& outputPath, std::string& error) {
     if (!validate_float_tensor_contract(image, {1, 3, 512, 512}, "VAE image", error)) {
@@ -3652,37 +4582,67 @@ bool write_vae_image_to_file(const FloatTensorData& image, const std::string& ou
 json encode_sd15_prompt_embeddings_to_file(
         const std::string& root,
         const std::string& prompt,
+        const std::string& negativePrompt,
         const std::string& outputPath,
         const std::string& backendMode,
-        int threads,
-        const std::string& token_embedding_mode = "auto") {
+        int threads) {
     if (is_blank_text(prompt)) {
         return json({{"ok", false}, {"error", "Prompt is empty."}});
     }
-    if (has_local_dream_clip_bundle(root) && !file_exists(root + "/text_encoder.mnn")) {
-        return encode_local_dream_clip_embeddings_to_file(
+    if (has_community_clip_bundle(root) && !file_exists(root + "/text_encoder.mnn")) {
+        return encode_community_clip_embeddings_to_file(
                 root,
                 prompt,
+                negativePrompt,
                 outputPath,
                 backendMode,
-                threads,
-                token_embedding_mode);
+                threads);
     }
     std::string error;
-    MNN::DIFFUSION::MtokTokenizer tokenizer(MNN::DIFFUSION::MtokTokenizer::Style::kPair, 49406, 49407);
-    if (!tokenizer.load(root)) {
-        if (has_local_dream_clip_bundle(root)) {
-            return encode_local_dream_clip_embeddings_to_file(
-                    root,
-                    prompt,
-                    outputPath,
-                    backendMode,
-                    threads,
-                    token_embedding_mode);
+    std::vector<int> ids;
+    if (file_exists(root + "/tokenizer.json")) {
+        mca::image::ClipTokenizerConfig tokenizerConfig;
+        tokenizerConfig.bos_id = 49406;
+        tokenizerConfig.eos_id = 49407;
+        tokenizerConfig.pad_id = 49407;
+        tokenizerConfig.max_length = 77;
+        mca::image::ClipTokenPair tokenPair;
+        if (!mca::image::tokenize_clip_pair_from_json(
+                root + "/tokenizer.json",
+                prompt,
+                negativePrompt,
+                tokenizerConfig,
+                &tokenPair,
+                &error)) {
+            return json({{"ok", false}, {"error", error}});
         }
-        return json({{"ok", false}, {"error", "Failed to load MNN-Diffusion tokenizer."}});
+        const auto standardIds = tokenPair.negative_then_positive();
+        ids.assign(standardIds.begin(), standardIds.end());
+    } else {
+        if (!negativePrompt.empty()) {
+            return json({
+                    {"ok", false},
+                    {"error", "A complete tokenizer.json is required to execute a custom negative prompt exactly."}
+            });
+        }
+        MNN::DIFFUSION::MtokTokenizer tokenizer(
+                MNN::DIFFUSION::MtokTokenizer::Style::kPair,
+                49406,
+                49407);
+        if (!tokenizer.load(root)) {
+            if (has_community_clip_bundle(root)) {
+                return encode_community_clip_embeddings_to_file(
+                        root,
+                        prompt,
+                        negativePrompt,
+                        outputPath,
+                        backendMode,
+                        threads);
+            }
+            return json({{"ok", false}, {"error", "Failed to load MNN-Diffusion tokenizer."}});
+        }
+        ids = tokenizer.encode(prompt, 77);
     }
-    auto ids = tokenizer.encode(prompt, 77);
     if (ids.size() != 154) {
         return json({
             {"ok", false},
@@ -3715,118 +4675,292 @@ json run_mnn_sd15_interpreter_direct(
         const std::string& root,
         const std::string& prompt,
         const std::string& outputPath,
-        int steps,
-        int seed,
-        const std::string& backendMode,
-        int threads,
+        const MnnSemanticExecutionContract& contract,
+        MnnNativeExecutionEvidence& evidence,
         std::function<void(int)> progressCallback) {
     std::string error;
-    if (steps < 1 || steps > 50) {
-        return json({{"ok", false}, {"error", "SD15 direct runner supports 1 to 50 inference steps."}});
-    }
     if (progressCallback) {
         progressCallback(0);
     }
-    MNN::DIFFUSION::MtokTokenizer tokenizer(MNN::DIFFUSION::MtokTokenizer::Style::kPair, 49406, 49407);
-    if (!tokenizer.load(root)) {
-        return json({{"ok", false}, {"error", "Failed to load MNN-Diffusion tokenizer."}});
-    }
-    auto ids = tokenizer.encode(prompt, 77);
-    if (ids.size() != 154) {
-        return json({{"ok", false}, {"error", "MNN-Diffusion tokenizer returned invalid id count."}});
-    }
-    FloatTensorData embeddings;
-    if (progressCallback) {
-        progressCallback(1);
-    }
-    if (!run_text_encoder_direct(root, ids, backendMode, threads, embeddings, error)) {
-        return json({{"ok", false}, {"error", error}});
-    }
-    if (!validate_float_tensor_contract(embeddings, {2, 77, 768}, "Text encoder output", error)) {
+    std::vector<int> ids;
+    if (!tokenize_mnn_sd15_prompt(root, prompt, contract, ids, evidence, error)) {
         return json({{"ok", false}, {"error", error}});
     }
     const bool includeDebug =
             outputPath.find("/image_bench/runs/") != std::string::npos ||
             outputPath.find("\\image_bench\\runs\\") != std::string::npos;
     json debug = json::object();
+    FloatTensorData embeddings;
+    const int conditioningBatch = contract.use_cfg ? 2 : 1;
+    std::vector<int> positiveIds(ids.begin() + 77, ids.end());
+    if (progressCallback) {
+        progressCallback(1);
+    }
+    if (has_community_clip_bundle(root) && !file_exists(root + "/text_encoder.mnn")) {
+        size_t tokenEmbeddingBytes = 0;
+        std::string detectedEmbeddingType;
+        if (!inspect_community_token_embedding_file(
+                root,
+                tokenEmbeddingBytes,
+                detectedEmbeddingType,
+                error)) {
+            return json({
+                {"ok", false},
+                {"errorCode", "PACKAGE_FORMAT_INVALID"},
+                {"field", "token_emb.bin"},
+                {"error", error}
+            });
+        }
+        if (detectedEmbeddingType != contract.embedding_disk_data_type) {
+            return json({
+                {"ok", false},
+                {"errorCode", "EXECUTION_CONTRACT_MISMATCH"},
+                {"field", "embeddingDiskDataType"},
+                {"error", "embeddingDiskDataType mismatch: resolved=" +
+                        contract.embedding_disk_data_type + ", native=" +
+                        detectedEmbeddingType + "."}
+            });
+        }
+        if (includeDebug) debug["tokenEmbeddingBytes"] = tokenEmbeddingBytes;
+        FloatTensorData positiveEmbeddings;
+        std::string positiveType;
+        json positiveDebug;
+        if (!run_community_clip_encoder_direct(
+                root,
+                positiveIds,
+                contract.backend_mode,
+                contract.threads,
+                positiveEmbeddings,
+                error,
+                includeDebug ? &positiveDebug : nullptr,
+                &positiveType)) {
+            return json({{"ok", false}, {"error", error}});
+        }
+        if (positiveType != detectedEmbeddingType) {
+            return json({
+                {"ok", false},
+                {"errorCode", "PACKAGE_FORMAT_INVALID"},
+                {"field", "token_emb.bin"},
+                {"error", "PACKAGE_FORMAT_INVALID: community CLIP token embedding dtype changed during windowed reading."}
+            });
+        }
+        if (contract.use_cfg) {
+            std::vector<int> negativeIds(ids.begin(), ids.begin() + 77);
+            FloatTensorData negativeEmbeddings;
+            std::string negativeType;
+            json negativeDebug;
+            if (!run_community_clip_encoder_direct(
+                    root,
+                    negativeIds,
+                    contract.backend_mode,
+                    contract.threads,
+                    negativeEmbeddings,
+                    error,
+                    includeDebug ? &negativeDebug : nullptr,
+                    &negativeType)) {
+                return json({{"ok", false}, {"error", error}});
+            }
+            if (negativeType != positiveType) {
+                return json({
+                    {"ok", false},
+                    {"errorCode", "PACKAGE_FORMAT_INVALID"},
+                    {"field", "token_emb.bin"},
+                    {"error", "PACKAGE_FORMAT_INVALID: negative and positive CLIP reads reported different token embedding dtypes."}
+                });
+            }
+            embeddings.shape = {2, 77, 768};
+            embeddings.values.reserve(
+                    negativeEmbeddings.values.size() + positiveEmbeddings.values.size());
+            embeddings.values.insert(
+                    embeddings.values.end(),
+                    negativeEmbeddings.values.begin(),
+                    negativeEmbeddings.values.end());
+            embeddings.values.insert(
+                    embeddings.values.end(),
+                    positiveEmbeddings.values.begin(),
+                    positiveEmbeddings.values.end());
+            if (includeDebug) {
+                debug["communityClip"] = {
+                    {"negative", negativeDebug},
+                    {"positive", positiveDebug}
+                };
+            }
+        } else {
+            embeddings = std::move(positiveEmbeddings);
+            if (includeDebug) debug["communityClip"] = {{"positive", positiveDebug}};
+        }
+        evidence.embedding_disk_data_type = positiveType;
+    } else if (!run_text_encoder_direct(
+            root,
+            contract.use_cfg ? ids : positiveIds,
+            contract.backend_mode,
+            contract.threads,
+            embeddings,
+            error)) {
+        return json({{"ok", false}, {"error", error}});
+    } else {
+        evidence.embedding_disk_data_type = "GRAPH_INTERNAL";
+    }
+    if (!validate_float_tensor_contract(
+            embeddings,
+            {conditioningBatch, 77, 768},
+            "Text encoder output",
+            error)) {
+        return json({{"ok", false}, {"error", error}});
+    }
+    if (evidence.embedding_disk_data_type != contract.embedding_disk_data_type) {
+        return json({
+            {"ok", false},
+            {"errorCode", "EXECUTION_CONTRACT_MISMATCH"},
+            {"field", "embeddingDiskDataType"},
+            {"error", "embeddingDiskDataType mismatch: resolved=" +
+                    contract.embedding_disk_data_type + ", native=" +
+                    evidence.embedding_disk_data_type + "."}
+        });
+    }
     if (includeDebug) {
         const size_t rowSize = 77U * 768U;
-        std::vector<float> negative(embeddings.values.begin(), embeddings.values.begin() + rowSize);
-        std::vector<float> positive(embeddings.values.begin() + rowSize, embeddings.values.end());
         debug["tokenIds"] = ids;
-        debug["negativeEmbeddingStats"] = float_vector_stats_json(negative);
-        debug["positiveEmbeddingStats"] = float_vector_stats_json(positive);
-        debug["positiveNegativeAbsDiffStats"] = float_vector_abs_diff_stats_json(positive, negative);
+        if (contract.use_cfg) {
+            std::vector<float> negative(embeddings.values.begin(), embeddings.values.begin() + rowSize);
+            std::vector<float> positive(embeddings.values.begin() + rowSize, embeddings.values.end());
+            debug["negativeEmbeddingStats"] = float_vector_stats_json(negative);
+            debug["positiveEmbeddingStats"] = float_vector_stats_json(positive);
+            debug["positiveNegativeAbsDiffStats"] = float_vector_abs_diff_stats_json(positive, negative);
+        } else {
+            debug["positiveEmbeddingStats"] = float_vector_stats_json(embeddings.values);
+        }
     }
     if (progressCallback) progressCallback(5);
 
     DirectMnnUnetSession unetSession;
-    if (!unetSession.initialize(root, backendMode, threads, error)) {
+    if (!unetSession.initialize(
+            root,
+            contract.backend_mode,
+            contract.threads,
+            conditioningBatch,
+            error)) {
         return json({{"ok", false}, {"error", error}});
     }
 
-    MNN::DIFFUSION::PNDMScheduler scheduler;
-    const auto alphas = scheduler.get_alphas();
-    std::vector<int> timesteps(static_cast<size_t>(steps));
-    const int stepSize = 1000 / steps;
-    for (int i = steps - 1; i >= 0; --i) {
-        timesteps[i] = 1 + (steps - 1 - i) * stepSize;
+    mca::diffusion::DiffusionScheduler scheduler(contract.scheduler.config);
+    if (!scheduler.set_timesteps(contract.scheduler.steps, &error)) {
+        return json({{"ok", false}, {"error", "MNN direct scheduler setup failed: " + error}});
     }
+    if (scheduler.timesteps().size() != contract.scheduler.expected_timetable_count) {
+        return json({
+            {"ok", false},
+            {"error", "MNN direct scheduler timetableCount mismatch: resolved=" +
+                    std::to_string(contract.scheduler.expected_timetable_count) +
+                    ", native=" + std::to_string(scheduler.timesteps().size()) + "."}
+        });
+    }
+    const size_t branchCount = contract.use_cfg ? 2U : 1U;
+    if (scheduler.expected_unet_execution_count() >
+        std::numeric_limits<size_t>::max() / branchCount ||
+        scheduler.expected_unet_execution_count() * branchCount !=
+            contract.scheduler.expected_unet_execution_count) {
+        return json({
+            {"ok", false},
+            {"error", "MNN direct scheduler unetExecutionCount conflicts with the resolved CFG contract."}
+        });
+    }
+    evidence.timetable_count = scheduler.timesteps().size();
+    evidence.timesteps = scheduler.timesteps();
+    evidence.sigmas = scheduler.sigmas();
+    evidence.init_noise_sigma = scheduler.init_noise_sigma();
+
     std::vector<float> latent(4 * 64 * 64);
-    std::mt19937 rng(seed < 0 ? std::random_device{}() : static_cast<uint32_t>(seed));
+    std::mt19937 rng(contract.seed);
     std::normal_distribution<float> normal(0.0f, 1.0f);
     for (auto& value : latent) {
-        value = normal(rng);
+        value = normal(rng) * static_cast<float>(scheduler.init_noise_sigma());
     }
-    std::vector<std::vector<float>> ets;
-    std::vector<float> firstSample;
-    for (int i = 0; i < steps; ++i) {
+    if (!validate_finite_float_vector(latent, "Initial scheduler latent", error)) {
+        return json({{"ok", false}, {"error", error}});
+    }
+    const size_t timetableCount = scheduler.timesteps().size();
+    for (size_t i = 0; i < timetableCount; ++i) {
         if (progressCallback) {
-            progressCallback(5 + i * 80 / steps);
+            progressCallback(5 + static_cast<int>(i * 80U / timetableCount));
+        }
+        std::vector<float> modelInput;
+        if (!scheduler.scale_model_input(latent, i, &modelInput, &error)) {
+            return json({{"ok", false}, {"error", "MNN direct scheduler input scaling failed: " + error}});
         }
         std::vector<float> sampleBatch;
-        sampleBatch.reserve(latent.size() * 2);
-        sampleBatch.insert(sampleBatch.end(), latent.begin(), latent.end());
-        sampleBatch.insert(sampleBatch.end(), latent.begin(), latent.end());
+        sampleBatch.reserve(modelInput.size() * static_cast<size_t>(conditioningBatch));
+        sampleBatch.insert(sampleBatch.end(), modelInput.begin(), modelInput.end());
+        if (contract.use_cfg) {
+            sampleBatch.insert(sampleBatch.end(), modelInput.begin(), modelInput.end());
+        }
 
         FloatTensorData batchedNoise;
-        if (!unetSession.run(sampleBatch, timesteps[i], embeddings, batchedNoise, error)) {
+        if (!unetSession.run(
+                sampleBatch,
+                scheduler.timesteps()[i],
+                embeddings,
+                batchedNoise,
+                error)) {
             return json({{"ok", false}, {"error", error}});
         }
+        ++evidence.graph_invocation_count;
+        evidence.unet_execution_count += branchCount;
         if (!validate_float_tensor_contract(
-                batchedNoise, {2, 4, 64, 64}, "UNet output", error)) {
+                batchedNoise,
+                {conditioningBatch, 4, 64, 64},
+                "UNet output",
+                error)) {
             return json({{"ok", false}, {"error", error}});
         }
         std::vector<float> guided(latent.size());
-        const float cfgScale = 7.5f;
         for (size_t j = 0; j < latent.size(); ++j) {
-            const float uncond = batchedNoise.values[j];
-            const float cond = batchedNoise.values[latent.size() + j];
-            guided[j] = cfgScale * (cond - uncond) + uncond;
+            if (contract.use_cfg) {
+                const float uncond = batchedNoise.values[j];
+                const float cond = batchedNoise.values[latent.size() + j];
+                guided[j] = contract.cfg_scale * (cond - uncond) + uncond;
+            } else {
+                guided[j] = batchedNoise.values[j];
+            }
         }
-        if (!validate_finite_float_vector(guided, "CFG guided noise", error)) {
+        if (!validate_finite_float_vector(guided, "Guided UNet noise", error)) {
             return json({{"ok", false}, {"error", error}});
         }
-        std::vector<float> nextLatent;
-        if (!pndm_step(
-                latent, ets, firstSample, guided, i, timesteps, alphas, nextLatent, error)) {
-            return json({{"ok", false}, {"error", error}});
+        mca::diffusion::SchedulerStepResult stepResult;
+        mca::diffusion::SchedulerStepOptions stepOptions;
+        stepOptions.eta = contract.scheduler.eta;
+        if (!scheduler.step(guided, i, latent, &stepResult, &error, stepOptions)) {
+            return json({{"ok", false}, {"error", "MNN direct scheduler step failed: " + error}});
         }
-        latent = std::move(nextLatent);
+        latent = std::move(stepResult.previous_sample);
         if (progressCallback) {
-            progressCallback(5 + (i + 1) * 80 / steps);
+            progressCallback(5 + static_cast<int>((i + 1U) * 80U / timetableCount));
         }
     }
-    std::vector<float> vaeInput(latent.size());
-    for (size_t i = 0; i < latent.size(); ++i) {
-        vaeInput[i] = latent[i] * (1.0f / 0.18215f);
+    if (scheduler.completed_step_count() != timetableCount ||
+        evidence.unet_execution_count != contract.scheduler.expected_unet_execution_count) {
+        return json({
+            {"ok", false},
+            {"error", "MNN direct execution counts differ from the resolved scheduler contract."}
+        });
+    }
+    std::vector<float> vaeInput = latent;
+    if (contract.vae_scaling_location == MnnVaeScalingLocation::HostBeforeGraph) {
+        const float inverseScale = static_cast<float>(1.0 / contract.vae_scaling_factor);
+        for (float& value : vaeInput) value *= inverseScale;
     }
     if (!validate_finite_float_vector(vaeInput, "VAE decoder input", error)) {
         return json({{"ok", false}, {"error", error}});
     }
     FloatTensorData image;
     if (progressCallback) progressCallback(90);
-    if (!run_vae_decoder_direct(root, vaeInput, backendMode, threads, image, error)) {
+    if (!run_vae_decoder_direct(
+            root,
+            vaeInput,
+            contract.backend_mode,
+            contract.threads,
+            image,
+            error)) {
         return json({{"ok", false}, {"error", error}});
     }
     if (progressCallback) progressCallback(95);
@@ -3834,7 +4968,13 @@ json run_mnn_sd15_interpreter_direct(
         return json({{"ok", false}, {"error", error}});
     }
     if (progressCallback) progressCallback(100);
-    json result = {{"ok", true}, {"path", outputPath}, {"mimeType", "image/png"}};
+    json result = {
+        {"ok", true},
+        {"path", outputPath},
+        {"mimeType", "image/png"},
+        {"graphInvocationCount", evidence.graph_invocation_count},
+        {"initNoiseSigma", evidence.init_noise_sigma}
+    };
     if (includeDebug) result["debug"] = debug;
     return result;
 }
@@ -4985,29 +6125,84 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptToken
 #endif
 }
 
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIdsFromJson(
+        JNIEnv* env,
+        jobject,
+        jstring tokenizerJsonPath,
+        jstring prompt,
+        jstring negativePrompt,
+        jint bosId,
+        jint eosId,
+        jint padId,
+        jint maxTokens) {
+    if (env == nullptr || maxTokens <= 0 || maxTokens > 4096) {
+        return env == nullptr ? nullptr : env->NewIntArray(0);
+    }
+    mca::image::ClipTokenizerConfig config;
+    config.bos_id = static_cast<int32_t>(bosId);
+    config.eos_id = static_cast<int32_t>(eosId);
+    config.pad_id = static_cast<int32_t>(padId);
+    config.max_length = static_cast<int>(maxTokens);
+    mca::image::ClipTokenPair pair;
+    std::string error;
+    if (!mca::image::tokenize_clip_pair_from_json(
+            normalize_mnn_model_path(jstring_to_std(env, tokenizerJsonPath)),
+            jstring_to_std(env, prompt),
+            jstring_to_std(env, negativePrompt),
+            config,
+            &pair,
+            &error)) {
+        __android_log_print(
+                ANDROID_LOG_ERROR,
+                "MCA-MNN",
+                "Standard image tokenizer failed: %s",
+                error.c_str());
+        return env->NewIntArray(0);
+    }
+    const auto ids = pair.negative_then_positive();
+    const size_t expectedCount = static_cast<size_t>(maxTokens) * 2U;
+    if (ids.size() != expectedCount || expectedCount > static_cast<size_t>(std::numeric_limits<jsize>::max())) {
+        return env->NewIntArray(0);
+    }
+    const auto result = env->NewIntArray(static_cast<jsize>(ids.size()));
+    if (result == nullptr) return nullptr;
+    std::vector<jint> values(ids.begin(), ids.end());
+    env->SetIntArrayRegion(result, 0, static_cast<jsize>(values.size()), values.data());
+    if (env->ExceptionCheck()) {
+        env->DeleteLocalRef(result);
+        return nullptr;
+    }
+    return result;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmbeddings(
         JNIEnv* env,
         jobject,
         jstring bundleRoot,
         jstring prompt,
+        jstring negativePrompt,
         jstring outputPath,
         jstring backendMode,
         jint threads,
         jstring tokenEmbeddingMode) {
 #if MCA_WITH_MNN_DIFFUSION
     const auto root = normalize_mnn_model_path(jstring_to_std(env, bundleRoot));
-    const auto token_mode = jstring_to_std(env, tokenEmbeddingMode);
+    // Retained only for the existing JNI method descriptor. Dtype selection is
+    // derived from token_emb.bin's exact byte size and is never user-tunable.
+    (void)tokenEmbeddingMode;
     const auto out = encode_sd15_prompt_embeddings_to_file(
             root,
             jstring_to_std(env, prompt),
+            jstring_to_std(env, negativePrompt),
             jstring_to_std(env, outputPath),
             jstring_to_std(env, backendMode),
-            std::max(1, static_cast<int>(threads)),
-            token_mode.empty() ? "auto" : token_mode).dump();
+            std::max(1, static_cast<int>(threads))).dump();
 #else
     (void)bundleRoot;
     (void)prompt;
+    (void)negativePrompt;
     (void)outputPath;
     (void)backendMode;
     (void)threads;
@@ -5026,6 +6221,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptCon
         jobject,
         jstring bundleRoot,
         jstring prompt,
+        jstring negativePrompt,
         jstring outputPath,
         jint width,
         jint height,
@@ -5036,6 +6232,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptCon
     const auto out = encode_sdxl_prompt_conditioning_to_file(
             root,
             jstring_to_std(env, prompt),
+            jstring_to_std(env, negativePrompt),
             jstring_to_std(env, outputPath),
             std::max(256, static_cast<int>(width)),
             std::max(256, static_cast<int>(height)),
@@ -5044,6 +6241,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptCon
 #else
     (void)bundleRoot;
     (void)prompt;
+    (void)negativePrompt;
     (void)outputPath;
     (void)width;
     (void)height;
@@ -5070,23 +6268,78 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
     const auto params_raw = jstring_to_std(env, paramsJson);
     const auto output_path = jstring_to_std(env, outputPath);
     json params = json::parse(params_raw, nullptr, false);
-    if (params.is_discarded() || !params.is_object()) params = json::object();
-    const auto prompt = opt_string(params, "prompt", "");
-    const auto family = opt_string(params, "family", "SD15");
+    if (params.is_discarded() || !params.is_object()) {
+        const auto out = json({
+            {"ok", false},
+            {"backend", "mnn_diffusion"},
+            {"errorCode", "EXECUTION_CONTRACT_INVALID"},
+            {"error", "MNN image generation params must be a valid JSON object."}
+        }).dump();
+        return utf8_to_jstring(env, out);
+    }
+    std::string prompt;
+    std::string family;
+    std::string contractError;
+    if (!mnn_contract_string(params, "prompt", prompt, contractError) ||
+        !mnn_contract_string(params, "family", family, contractError)) {
+        const auto out = json({
+            {"ok", false},
+            {"backend", "mnn_diffusion"},
+            {"errorCode", "EXECUTION_CONTRACT_INVALID"},
+            {"error", contractError}
+        }).dump();
+        return utf8_to_jstring(env, out);
+    }
     const bool sana_family = is_sana_family(family);
-    const auto backend_mode = opt_string(params, "backendMode", "cpu");
-    const auto runner_mode = opt_string(params, "runner", "module");
+    MnnSemanticExecutionContract executionContract;
+    if (!sana_family &&
+        !parse_mnn_semantic_execution_contract(params, executionContract, contractError)) {
+        const auto out = json({
+            {"ok", false},
+            {"backend", "mnn_diffusion"},
+            {"errorCode", "EXECUTION_CONTRACT_INVALID"},
+            {"error", contractError}
+        }).dump();
+        return utf8_to_jstring(env, out);
+    }
+    if (!sana_family && executionContract.runner != "direct") {
+        const auto out = json({
+            {"ok", false},
+            {"backend", "mnn_diffusion"},
+            {"errorCode", "EXECUTION_CONTRACT_UNSUPPORTED"},
+            {"field", "runner"},
+            {"error", "runner=module cannot faithfully execute the resolved scheduler, tokenizer, CFG, and VAE contract; use runner=direct."}
+        }).dump();
+        return utf8_to_jstring(env, out);
+    }
+    const auto backend_mode = sana_family
+            ? opt_string(params, "backendMode", "cpu")
+            : executionContract.backend_mode;
     const int requested_steps = opt_int(params, "steps", 8);
     const int steps = sana_family
             ? std::max(2, std::min(50, requested_steps))
-            : std::max(1, std::min(50, requested_steps));
-    const int seed = opt_int(params, "seed", opt_int(params, "randomSeed", -1));
-    const int width = std::max(256, opt_int(params, "width", 512));
-    const int height = std::max(256, opt_int(params, "height", 512));
-    const int threads = std::max(1, opt_int(params, "threads", 4));
-    const int memory_mode = std::max(0, std::min(2, opt_int(params, "memoryMode", 0)));
-    const bool use_cfg = opt_bool(params, "useCfg", false);
-    const float cfg_scale = static_cast<float>(opt_double(params, "cfgScale", sana_family ? 4.5 : 7.5));
+            : executionContract.scheduler.steps;
+    const int seed = sana_family
+            ? opt_int(params, "seed", opt_int(params, "randomSeed", -1))
+            : static_cast<int>(executionContract.seed);
+    const int width = sana_family
+            ? std::max(256, opt_int(params, "width", 512))
+            : executionContract.width;
+    const int height = sana_family
+            ? std::max(256, opt_int(params, "height", 512))
+            : executionContract.height;
+    const int threads = sana_family
+            ? std::max(1, opt_int(params, "threads", 4))
+            : executionContract.threads;
+    const int memory_mode = sana_family
+            ? std::max(0, std::min(2, opt_int(params, "memoryMode", 0)))
+            : executionContract.memory_mode;
+    const bool use_cfg = sana_family
+            ? opt_bool(params, "useCfg", false)
+            : executionContract.use_cfg;
+    const float cfg_scale = sana_family
+            ? static_cast<float>(opt_double(params, "cfgScale", 4.5))
+            : executionContract.cfg_scale;
 
     {
         std::lock_guard<std::mutex> lock(g_mnn_diffusion_mutex);
@@ -5102,6 +6355,12 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         g_mnn_diffusion_cancel_requested = false;
         g_mnn_diffusion_loaded = false;
         g_mnn_diffusion_started_at_ms = now_ms();
+        const int64_t process_unique_sequence =
+                (g_mnn_diffusion_started_at_ms << 16) |
+                (static_cast<int64_t>(::getpid()) & 0xffffLL);
+        g_mnn_diffusion_generation_sequence = std::max<int64_t>(
+                process_unique_sequence,
+                g_mnn_diffusion_generation_sequence + static_cast<int64_t>(1));
         g_mnn_diffusion_finished_at_ms = 0;
         g_mnn_diffusion_seconds_per_step = 0.0;
         g_mnn_diffusion_bundle_root = root;
@@ -5186,6 +6445,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
                             threads);
                 };
         json result;
+        MnnNativeExecutionEvidence executionEvidence;
         if (sana_family) {
             mca::MnnSanaOptions options;
             options.bundle_root = root;
@@ -5225,30 +6485,26 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
                 {"mimeType", "image/png"}
             });
         } else {
-            result = runner_mode == "direct"
-                    ? run_mnn_sd15_interpreter_direct(
-                            root,
-                            prompt,
-                            output_path,
-                            steps,
-                            seed,
-                            backend_mode,
-                            threads,
-                            progress_callback)
-                    : run_mnn_sd15_module_runner(
-                            root,
-                            prompt,
-                            output_path,
-                            steps,
-                            seed,
-                            backend_mode,
-                            memory_mode,
-                            progress_callback);
+            result = run_mnn_sd15_interpreter_direct(
+                    root,
+                    prompt,
+                    output_path,
+                    executionContract,
+                    executionEvidence,
+                    progress_callback);
         }
         const bool ok = result.value("ok", false);
         if (!ok) {
-            const auto out = fail(result.value("error", "MNN-Diffusion direct interpreter failed."));
-            return utf8_to_jstring(env, out);
+            auto failed = json::parse(
+                    fail(result.value("error", "MNN-Diffusion direct interpreter failed.")),
+                    nullptr,
+                    false);
+            if (!failed.is_object()) failed = json::object();
+            failed["ok"] = false;
+            failed["backend"] = "mnn_diffusion";
+            if (result.contains("errorCode")) failed["errorCode"] = result["errorCode"];
+            if (result.contains("field")) failed["field"] = result["field"];
+            return utf8_to_jstring(env, failed.dump());
         }
         if (!ok || !file_exists(output_path)) {
             const auto out = fail("MNN-Diffusion did not produce a valid output image.");
@@ -5261,19 +6517,50 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
             g_mnn_diffusion_finished_at_ms = now_ms();
             set_mnn_diffusion_progress_locked("completed", "Image generation completed.", steps, steps, width, height, threads);
         }
-        const auto out = json({
-            {"ok", true},
-            {"backend", "mnn_diffusion"},
-            {"family", sana_family ? "SANA" : family},
-            {"backendMode", backend_mode == "opencl" || backend_mode == "gpu" ? "opencl" : "cpu"},
-            {"runner", sana_family ? "sana_varp" : (runner_mode == "direct" ? "direct" : "module")},
-            {"path", output_path},
-            {"mimeType", "image/png"},
-            {"steps", steps},
-            {"width", width},
-            {"height", height}
-        }).dump();
-        return utf8_to_jstring(env, out);
+        if (sana_family) {
+            const auto out = json({
+                {"ok", true},
+                {"backend", "mnn_diffusion"},
+                {"family", "SANA"},
+                {"backendMode", backend_mode == "opencl" || backend_mode == "gpu" ? "opencl" : "cpu"},
+                {"runner", "sana_varp"},
+                {"path", output_path},
+                {"mimeType", "image/png"},
+                {"steps", steps},
+                {"width", width},
+                {"height", height},
+                {"nativeGenerationSequence", g_mnn_diffusion_generation_sequence},
+                {"nativeStartedAtMs", g_mnn_diffusion_started_at_ms}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+        const auto nativeEffective = mnn_native_effective_json(
+                executionContract,
+                executionEvidence);
+        json out = nativeEffective;
+        out["ok"] = true;
+        out["nativeExecution"] = true;
+        out["executionStage"] = "semantic_generation_passed";
+        out["backend"] = "mnn_diffusion";
+        out["family"] = "SD15";
+        out["backendMode"] = executionContract.backend_mode;
+        out["runner"] = "direct";
+        out["path"] = output_path;
+        out["mimeType"] = "image/png";
+        out["nativeEffective"] = nativeEffective;
+        out["timesteps"] = executionEvidence.timesteps;
+        out["sigmas"] = executionEvidence.sigmas;
+        out["initNoiseSigma"] = executionEvidence.init_noise_sigma;
+        out["graphInvocationCount"] = executionEvidence.graph_invocation_count;
+        out["negativePromptSpecified"] = !executionContract.negative_prompt.empty();
+        out["nativeGenerationSequence"] = g_mnn_diffusion_generation_sequence;
+        out["nativeStartedAtMs"] = g_mnn_diffusion_started_at_ms;
+        out["sampleMethod"] = mnn_scheduler_product_name(
+                executionContract.scheduler.config.algorithm);
+        out["memoryMode"] = executionContract.memory_mode;
+        if (result.contains("debug")) out["debug"] = result["debug"];
+        const auto serialized = out.dump();
+        return utf8_to_jstring(env, serialized);
     } catch (const mca::MnnSanaCancelled& e) {
         std::lock_guard<std::mutex> lock(g_mnn_diffusion_mutex);
         g_mnn_diffusion_generating = false;

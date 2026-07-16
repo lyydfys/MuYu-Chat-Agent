@@ -22,6 +22,7 @@ class LocalImageWorkerService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val stateLock = Any()
     private lateinit var provider: LocalImageProvider
+    private lateinit var executionJournal: ImageExecutionJournalStore
 
     @Volatile
     private var activeGeneration: ActiveGeneration? = null
@@ -43,6 +44,7 @@ class LocalImageWorkerService : Service() {
                 activeGeneration?.takeIf { requestedId == null || it.requestId == requestedId }
             } ?: return false
             active.cancelRequested = true
+            requestJournalCancellation(active.requestId)
             return provider.cancel()
         }
 
@@ -79,6 +81,13 @@ class LocalImageWorkerService : Service() {
                 return false
             }
 
+            val effectiveOptions = if (request.options.seed == null) {
+                request.options.copy(
+                    seed = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
+                )
+            } else {
+                request.options
+            }
             active.deathRecipient = IBinder.DeathRecipient {
                 cancelForDeadClient(active)
             }
@@ -94,6 +103,7 @@ class LocalImageWorkerService : Service() {
             val job = scope.launch {
                 var transferredOutput: File? = null
                 try {
+                    prepareExecutionJournal(request, effectiveOptions)
                     val startedDelivered = sendProgress(
                         callback,
                         request.requestId,
@@ -108,7 +118,7 @@ class LocalImageWorkerService : Service() {
                             width = 0,
                             height = 0,
                             cancelRequested = false,
-                            requestOptionsJson = request.options.toJson().toString()
+                            requestOptionsJson = effectiveOptions.toJson().toString()
                         )
                     )
                     if (!startedDelivered) {
@@ -144,8 +154,9 @@ class LocalImageWorkerService : Service() {
                         provider.generate(
                             model = request.model,
                             prompt = request.prompt,
-                            options = request.options,
+                            options = effectiveOptions,
                             onProgress = { progress ->
+                                updateJournalFromProgress(request.requestId, progress)
                                 val delivered = sendProgress(
                                     callback,
                                     request.requestId,
@@ -156,7 +167,12 @@ class LocalImageWorkerService : Service() {
                         )
                     }
                     coroutineContext.ensureActive()
-                    val output = writeResultFile(request.requestId, result)
+                    advanceJournalTo(request.requestId, ImageExecutionPhase.PUBLISHING)
+                    updateJournalFromNativeResult(request.requestId, result.executionMetadataJson)
+                    val target = prepareResultTarget(request.requestId, result.mimeType)
+                    updateJournalOutputPath(request.requestId, target.partial)
+                    val output = writeResultFile(target, result)
+                    updateJournalOutputPath(request.requestId, output)
                     transferredOutput = output
                     val delivered = sendComplete(
                         callback = callback,
@@ -179,11 +195,33 @@ class LocalImageWorkerService : Service() {
                             .toString()
                     )
                     if (delivered) {
+                        markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)
                         transferredOutput = null
+                    } else {
+                        markJournalTerminal(
+                            request.requestId,
+                            ImageExecutionPhase.FAILED,
+                            errorCode = "RESULT_DELIVERY_FAILED",
+                            errorMessage = "The generated image could not be delivered to the client."
+                        )
                     }
                 } catch (_: CancellationException) {
+                    finishJournalCancelled(request.requestId, "The image client or worker was cancelled.")
                     // Client death and service teardown have no live callback to notify.
                 } catch (error: Throwable) {
+                    if (active.cancelRequested) {
+                        finishJournalCancelled(
+                            request.requestId,
+                            error.message ?: "Image generation was cancelled."
+                        )
+                    } else {
+                        markJournalTerminal(
+                            request.requestId,
+                            ImageExecutionPhase.FAILED,
+                            errorCode = "GENERATION_FAILED",
+                            errorMessage = error.message ?: "Local image generation failed."
+                        )
+                    }
                     sendError(
                         callback = callback,
                         requestId = request.requestId,
@@ -209,6 +247,10 @@ class LocalImageWorkerService : Service() {
     override fun onCreate() {
         super.onCreate()
         provider = LocalImageProvider(applicationContext)
+        executionJournal = ImageExecutionJournalStore(
+            File(filesDir, IMAGE_EXECUTION_JOURNAL_DIRECTORY)
+        )
+        recoverInterruptedExecutions()
         cleanupStaleResults()
     }
 
@@ -219,6 +261,8 @@ class LocalImageWorkerService : Service() {
             activeGeneration.also { activeGeneration = null }
         }
         if (active != null) {
+            active.cancelRequested = true
+            finishJournalCancelled(active.requestId, "The image worker service stopped.")
             runCatching { provider.cancel() }
             active.job?.cancel()
             unlinkDeathRecipient(active)
@@ -232,6 +276,7 @@ class LocalImageWorkerService : Service() {
         val isCurrent = synchronized(stateLock) { activeGeneration === active }
         if (!isCurrent) return
         active.cancelRequested = true
+        requestJournalCancellation(active.requestId)
         runCatching { provider.cancel() }
         active.job?.cancel(CancellationException("Local image client disconnected."))
     }
@@ -296,21 +341,266 @@ class LocalImageWorkerService : Service() {
         )
     }.isSuccess
 
-    private fun writeResultFile(requestId: String, result: LocalImageResult): File {
+    private fun prepareResultTarget(requestId: String, mimeType: String): ResultFileTarget {
         val outputDir = resultDirectory().apply { mkdirs() }
         cleanupStaleResults()
         val safeId = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80)
-        val extension = when (result.mimeType.lowercase()) {
+        val extension = when (mimeType.lowercase()) {
             "image/jpeg", "image/jpg" -> "jpg"
             "image/webp" -> "webp"
             else -> "png"
         }
         val baseName = "${safeId.ifBlank { "image" }}-${UUID.randomUUID()}"
-        val partial = File(outputDir, "$baseName.$extension.part")
-        val output = File(outputDir, "$baseName.$extension")
-        partial.outputStream().use { it.write(result.bytes) }
-        check(partial.renameTo(output)) { "Unable to publish local image worker output." }
-        return output
+        return ResultFileTarget(
+            partial = File(outputDir, "$baseName.$extension.part"),
+            output = File(outputDir, "$baseName.$extension")
+        )
+    }
+
+    private fun writeResultFile(target: ResultFileTarget, result: LocalImageResult): File {
+        target.partial.outputStream().use { it.write(result.bytes) }
+        check(target.partial.renameTo(target.output)) { "Unable to publish local image worker output." }
+        return target.output
+    }
+
+    private fun prepareExecutionJournal(
+        request: LocalImageWorkerProtocol.GenerateRequest,
+        effectiveOptions: LocalImageGenerationOptions
+    ) {
+        runCatching {
+            val resolution = resolveLocalImageExecutionProfile(
+                model = request.model,
+                options = effectiveOptions,
+                bundleRoot = request.model.workerBundleRoot()
+            )
+            executionJournal.read(request.requestId)?.let { existing ->
+                require(existing.phase.terminal) {
+                    "A non-terminal image request already uses id ${request.requestId}."
+                }
+                executionJournal.deleteTerminal(request.requestId)
+            }
+            val now = System.currentTimeMillis().coerceAtLeast(1L)
+            executionJournal.create(
+                ImageExecutionJournalEntry(
+                    requestId = request.requestId,
+                    modelFingerprint = resolution.profile.modelFingerprint,
+                    profileFingerprint = resolution.profile.bindingFingerprint,
+                    requestedSummaryJson = effectiveOptions.toJson()
+                        .put("runtime", request.model.runtime.name)
+                        .put("family", request.model.family.name)
+                        .toString(),
+                    resolvedSummaryJson = ImageExecutionProfileNativeContract
+                        .toNativeParamsJson(resolution)
+                        .toString(),
+                    phase = ImageExecutionPhase.PREPARING,
+                    step = 0,
+                    steps = resolution.layers.resolved.steps,
+                    workerPid = Process.myPid(),
+                    createdAtMs = now
+                )
+            )
+        }.onFailure { error ->
+            Log.w("MCA-LocalImage", "Unable to create execution journal", error)
+        }
+    }
+
+    private fun updateJournalFromProgress(requestId: String, progress: LocalImageProgress) {
+        val targetPhase = progress.phase.toJournalPhase() ?: return
+        runCatching {
+            advanceJournalTo(
+                requestId = requestId,
+                targetPhase = targetPhase,
+                observedStep = progress.step
+            )
+        }.onFailure { error ->
+            Log.w("MCA-LocalImage", "Unable to persist image progress", error)
+        }
+    }
+
+    private fun advanceJournalTo(
+        requestId: String,
+        targetPhase: ImageExecutionPhase,
+        observedStep: Int? = null
+    ) {
+        var current = executionJournal.read(requestId) ?: return
+        if (current.phase.terminal) return
+        val targetRank = targetPhase.executionRank()
+        while (current.phase.executionRank() < targetRank) {
+            val nextPhase = when (current.phase) {
+                ImageExecutionPhase.PREPARING -> if (targetPhase == ImageExecutionPhase.CONDITIONING) {
+                    ImageExecutionPhase.CONDITIONING
+                } else {
+                    ImageExecutionPhase.SAMPLING
+                }
+                ImageExecutionPhase.CONDITIONING -> ImageExecutionPhase.SAMPLING
+                ImageExecutionPhase.SAMPLING -> ImageExecutionPhase.DECODING
+                ImageExecutionPhase.DECODING -> ImageExecutionPhase.PUBLISHING
+                else -> break
+            }
+            current = executionJournal.update(
+                current.copy(
+                    phase = nextPhase,
+                    step = current.nextObservedStep(observedStep),
+                    updatedAtMs = System.currentTimeMillis().coerceAtLeast(current.updatedAtMs + 1L)
+                )
+            )
+        }
+        if (current.phase == targetPhase || current.phase.executionRank() > targetRank) {
+            val nextStep = current.nextObservedStep(observedStep)
+            if (nextStep != current.step) {
+                executionJournal.update(
+                    current.copy(
+                        step = nextStep,
+                        updatedAtMs = System.currentTimeMillis().coerceAtLeast(current.updatedAtMs + 1L)
+                    )
+                )
+            }
+        }
+    }
+
+    private fun updateJournalFromNativeResult(requestId: String, raw: String) {
+        if (raw.isBlank()) return
+        runCatching {
+            val metadata = JSONObject(raw)
+            val current = executionJournal.read(requestId) ?: return@runCatching
+            if (current.phase.terminal) return@runCatching
+            val sequence = if (metadata.has("nativeGenerationSequence") &&
+                !metadata.isNull("nativeGenerationSequence")
+            ) {
+                metadata.getLong("nativeGenerationSequence")
+            } else {
+                current.nativeGenerationSequence
+            }
+            val stageMask = metadata.optLong("nativeStageMask", current.nativeStageMask)
+            executionJournal.update(
+                current.copy(
+                    nativeStageMask = current.nativeStageMask or stageMask,
+                    nativeGenerationSequence = sequence,
+                    updatedAtMs = System.currentTimeMillis().coerceAtLeast(current.updatedAtMs + 1L)
+                )
+            )
+        }.onFailure { error ->
+            Log.w("MCA-LocalImage", "Unable to persist native image evidence", error)
+        }
+    }
+
+    private fun updateJournalOutputPath(requestId: String, output: File) {
+        runCatching {
+            val current = executionJournal.read(requestId) ?: return@runCatching
+            if (current.phase.terminal) return@runCatching
+            executionJournal.update(
+                current.copy(
+                    outputTempPath = output.canonicalPath,
+                    updatedAtMs = System.currentTimeMillis().coerceAtLeast(current.updatedAtMs + 1L)
+                )
+            )
+        }.onFailure { error ->
+            Log.w("MCA-LocalImage", "Unable to persist image output path", error)
+        }
+    }
+
+    private fun requestJournalCancellation(requestId: String) {
+        runCatching {
+            val current = executionJournal.read(requestId) ?: return@runCatching
+            if (!current.phase.terminal && !current.cancellationRequested) {
+                executionJournal.requestCancellation(requestId)
+            }
+        }.onFailure { error ->
+            Log.w("MCA-LocalImage", "Unable to persist image cancellation", error)
+        }
+    }
+
+    private fun finishJournalCancelled(requestId: String, message: String) {
+        runCatching {
+            val current = executionJournal.read(requestId) ?: return@runCatching
+            if (current.phase.terminal) return@runCatching
+            executionJournal.finishCancelled(
+                requestId = requestId,
+                cleanupRoots = listOf(cacheDir),
+                message = message
+            )
+        }.onFailure { error ->
+            Log.w("MCA-LocalImage", "Unable to finish cancelled image journal", error)
+        }
+    }
+
+    private fun markJournalTerminal(
+        requestId: String,
+        phase: ImageExecutionPhase,
+        errorCode: String = "",
+        errorMessage: String = ""
+    ) {
+        runCatching {
+            var current = executionJournal.read(requestId) ?: return@runCatching
+            if (current.phase.terminal) return@runCatching
+            if (phase == ImageExecutionPhase.COMPLETED && current.steps > 0 && current.step < current.steps) {
+                current = executionJournal.update(
+                    current.copy(
+                        step = current.steps,
+                        updatedAtMs = System.currentTimeMillis().coerceAtLeast(current.updatedAtMs + 1L)
+                    )
+                )
+            }
+            executionJournal.markTerminal(requestId, phase, errorCode, errorMessage)
+        }.onFailure { error ->
+            Log.w("MCA-LocalImage", "Unable to finish image journal", error)
+        }
+    }
+
+    private fun recoverInterruptedExecutions() {
+        runCatching {
+            executionJournal.recoverInterrupted(cleanupRoots = listOf(cacheDir)) { pid ->
+                pid > 0 && File("/proc/$pid").isDirectory
+            }
+        }.onSuccess { report ->
+            if (report.interrupted.isNotEmpty() || report.invalidJournalFiles.isNotEmpty()) {
+                Log.w(
+                    "MCA-LocalImage",
+                    "Recovered ${report.interrupted.size} interrupted image requests; " +
+                        "invalid journals=${report.invalidJournalFiles.size}."
+                )
+            }
+        }.onFailure { error ->
+            Log.w("MCA-LocalImage", "Unable to recover image execution journals", error)
+        }
+    }
+
+    private fun LocalImageModelRecord.workerBundleRoot(): File? =
+        bundleRoot?.let(::File)?.takeIf(File::isDirectory)
+            ?: File(path).takeIf(File::isDirectory)
+            ?: File(path).parentFile?.takeIf(File::isDirectory)
+
+    private fun String.toJournalPhase(): ImageExecutionPhase? {
+        val normalized = trim().lowercase()
+        return when {
+            normalized.isBlank() -> null
+            "condition" in normalized || "text_encoder" in normalized || "tokeniz" in normalized ->
+                ImageExecutionPhase.CONDITIONING
+            "sampl" in normalized || "unet" in normalized || "denois" in normalized ->
+                ImageExecutionPhase.SAMPLING
+            "decod" in normalized || "vae" in normalized -> ImageExecutionPhase.DECODING
+            "publish" in normalized || "writing" in normalized || normalized == "completed" ->
+                ImageExecutionPhase.PUBLISHING
+            else -> ImageExecutionPhase.PREPARING
+        }
+    }
+
+    private fun ImageExecutionPhase.executionRank(): Int = when (this) {
+        ImageExecutionPhase.PREPARING -> 0
+        ImageExecutionPhase.CONDITIONING -> 1
+        ImageExecutionPhase.SAMPLING -> 2
+        ImageExecutionPhase.DECODING -> 3
+        ImageExecutionPhase.PUBLISHING -> 4
+        ImageExecutionPhase.COMPLETED,
+        ImageExecutionPhase.FAILED,
+        ImageExecutionPhase.CANCELLED,
+        ImageExecutionPhase.INTERRUPTED -> 5
+    }
+
+    private fun ImageExecutionJournalEntry.nextObservedStep(observedStep: Int?): Int {
+        if (observedStep == null) return step
+        val upper = if (steps > 0) steps else observedStep.coerceAtLeast(0)
+        return maxOf(step, observedStep.coerceIn(0, upper))
     }
 
     private fun cleanupStaleResults() {
@@ -350,8 +640,14 @@ class LocalImageWorkerService : Service() {
         }
     }
 
+    private data class ResultFileTarget(
+        val partial: File,
+        val output: File
+    )
+
     companion object {
         internal const val RESULT_DIRECTORY = "local_image_worker_results"
+        internal const val IMAGE_EXECUTION_JOURNAL_DIRECTORY = "image_execution_journal"
         private const val RESULT_MAX_AGE_MS = 24 * 60 * 60 * 1000L
     }
 }

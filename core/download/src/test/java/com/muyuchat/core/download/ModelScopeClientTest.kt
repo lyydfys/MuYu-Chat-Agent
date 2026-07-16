@@ -581,6 +581,27 @@ class ModelScopeClientTest {
         )
         assertTrue(gen5Images.all { it.downloadable })
         assertTrue(gen5Images.all { it.supportedChipsetCodes == setOf("SM8850", "SM8850P") })
+        gen5Images.forEach { model ->
+            assertTrue(model.downloadEligibilityFor("", deviceIsSnapdragon = false).canDownload)
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val archive = bundle.components.single {
+                it.role == ImageEngineBundleComponentRole.DIFFUSION && it.fileName.endsWith(".zip")
+            }
+            assertEquals(model.revision, archive.revision)
+            val tokenizerJson = bundle.components.single {
+                it.relativePath == "tokenizer/tokenizer.json"
+            }
+            assertEquals(ImageEngineBundleComponentRole.TOKENIZER, tokenizerJson.role)
+            assertEquals("openai/clip-vit-large-patch14", tokenizerJson.repoId)
+            assertEquals("32bd64288804d66eefd0ccbe215aa642df71cc41", tokenizerJson.revision)
+            assertEquals(2_224_003L, tokenizerJson.expectedSizeBytes)
+            assertEquals(
+                "a83e0809aa4c3af7208b2df632a7a69668c6d48775b3c3fe4e1b1199d1f8b8f4",
+                tokenizerJson.sha256
+            )
+            assertTrue(bundle.components.any { it.relativePath == "scheduler/scheduler_config.json" })
+            assertTrue(bundle.components.any { it.relativePath == "tokenizer/tokenizer_config.json" })
+        }
         assertEquals(
             listOf(
                 "qualcomm_sd15_gen5_qnn",

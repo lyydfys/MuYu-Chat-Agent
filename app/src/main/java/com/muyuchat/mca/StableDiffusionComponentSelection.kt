@@ -288,6 +288,7 @@ private fun LocalImageModelFamily.requiresExplicitStableDiffusionCompanions(): B
     LocalImageModelFamily.SANA,
     LocalImageModelFamily.SD_TURBO,
     LocalImageModelFamily.SDXL,
+    LocalImageModelFamily.SD21,
     LocalImageModelFamily.SD15,
     LocalImageModelFamily.CUSTOM -> false
 }

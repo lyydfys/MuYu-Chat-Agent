@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.31.6)
+cmake_minimum_required(VERSION 3.22.1)
 project(mca_native LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -13,9 +13,11 @@ set(CMAKE_JOB_POOL_LINK mca_link_pool)
 
 option(MCA_WITH_LLAMA_CPP "Build MCA native backend with llama.cpp" ON)
 option(MCA_WITH_MNN_DIFFUSION "Build MCA native backend with MNN Stable Diffusion runner" ON)
+option(MCA_WITH_TOKENIZERS_CPP "Build the complete tokenizer.json backend" ON)
 set(MCA_MNN_SOURCE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/MNN" CACHE PATH "Official MNN source root")
 set(MCA_MNN_ANDROID_BUILD_ROOT "${MCA_MNN_SOURCE_ROOT}/project/android/build_64" CACHE PATH "Official MNN Android build root")
 set(MCA_QNN_SDK_ROOT "" CACHE PATH "Qualcomm AI Runtime / QNN SDK root")
+set(MCA_TOKENIZERS_CPP_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/tokenizers-cpp" CACHE PATH "tokenizers-cpp source root")
 
 if(DEFINED ANDROID_ABI)
     message(STATUS "MCA Android ABI: ${ANDROID_ABI}")
@@ -35,6 +37,41 @@ endif()
 add_library(mca_native SHARED native_engine.cpp)
 add_library(mca_mnn_native SHARED mnn_native_engine.cpp)
 add_library(mca_qnn_native SHARED qnn_native_bridge.cpp)
+target_sources(mca_mnn_native PRIVATE
+        image_conditioning.cpp
+        diffusion_scheduler.cpp)
+target_sources(mca_qnn_native PRIVATE diffusion_scheduler.cpp)
+
+# tokenizers-cpp executes the complete Hugging Face tokenizer.json contract.
+# Release builds use only the pinned third_party submodule so clean checkouts
+# and CI cannot silently select a developer-local implementation.
+if(MCA_WITH_TOKENIZERS_CPP AND EXISTS "${MCA_TOKENIZERS_CPP_ROOT}/CMakeLists.txt")
+    message(STATUS "MCA building complete tokenizer.json support from ${MCA_TOKENIZERS_CPP_ROOT}")
+    set(MLC_ENABLE_SENTENCEPIECE_TOKENIZER OFF CACHE BOOL "MCA image pipeline uses tokenizer.json" FORCE)
+    add_subdirectory("${MCA_TOKENIZERS_CPP_ROOT}" build-tokenizers-cpp EXCLUDE_FROM_ALL)
+    # Android Gradle enumerates every CMake executable even when its source
+    # subdirectory is EXCLUDE_FROM_ALL.  Older pinned SentencePiece revisions
+    # use __android_log_write in protobuf-lite but omit liblog on their CLI
+    # targets; make those incidental tools linkable without patching the
+    # third-party submodule.  MCA ships only the tokenizer library.
+    if(ANDROID)
+        foreach(SPM_TOOL_TARGET
+                spm_encode
+                spm_decode
+                spm_normalize
+                spm_train
+                spm_export_vocab)
+            if(TARGET ${SPM_TOOL_TARGET})
+                target_link_libraries(${SPM_TOOL_TARGET} log)
+            endif()
+        endforeach()
+    endif()
+    target_compile_definitions(mca_mnn_native PRIVATE MCA_WITH_TOKENIZERS_CPP=1)
+    target_link_libraries(mca_mnn_native PRIVATE tokenizers_cpp)
+else()
+    message(WARNING "tokenizers-cpp is missing; complete tokenizer.json support is unavailable.")
+    target_compile_definitions(mca_mnn_native PRIVATE MCA_WITH_TOKENIZERS_CPP=0)
+endif()
 target_link_libraries(mca_qnn_native PRIVATE android log dl)
 target_include_directories(mca_qnn_native PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/stable-diffusion.cpp/thirdparty")

@@ -931,6 +931,7 @@ class LocalImageSmokeActivity : Activity() {
             mnnBridge.encodeSdxlPromptConditioning(
                 bundleRoot,
                 requestJson.optString("prompt"),
+                requestJson.optString("negativePrompt"),
                 embeddingFile.absolutePath,
                 requestJson.optInt("width", 1024),
                 requestJson.optInt("height", 1024),
@@ -941,6 +942,7 @@ class LocalImageSmokeActivity : Activity() {
             mnnBridge.encodeSd15PromptEmbeddings(
                 bundleRoot,
                 requestJson.optString("prompt"),
+                requestJson.optString("negativePrompt"),
                 embeddingFile.absolutePath,
                 requestJson.optString("backendMode", "cpu"),
                 requestJson.optInt("threads", 4),

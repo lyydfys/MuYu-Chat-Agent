@@ -153,6 +153,8 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         val request = ActiveRequest(
             requestId = requestId,
             runtime = model.runtime,
+            requestedSteps = options.steps,
+            requestedUseCfg = options.useCfg,
             onProgress = onProgress
         )
         synchronized(stateLock) {
@@ -432,7 +434,12 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
     }
 
     private fun startWatchdog(request: ActiveRequest, model: LocalImageModelRecord) {
-        val policy = localImageWorkerWatchdogPolicy(model.runtime, model.family) ?: return
+        val policy = localImageWorkerWatchdogPolicy(
+            runtime = model.runtime,
+            family = model.family,
+            steps = request.requestedSteps,
+            useCfg = request.requestedUseCfg
+        ) ?: return
         request.watchdogJob = scope.launch {
             while (!request.completion.isCompleted) {
                 val startedAt = request.watchdogStartedAtMs
@@ -556,6 +563,8 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
     private class ActiveRequest(
         val requestId: String,
         val runtime: LocalImageRuntime,
+        val requestedSteps: Int?,
+        val requestedUseCfg: Boolean?,
         val onProgress: (LocalImageProgress) -> Unit
     ) {
         val completion = CompletableDeferred<LocalImageWorkerProtocol.ResultEnvelope>()

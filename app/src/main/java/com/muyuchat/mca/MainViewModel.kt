@@ -95,8 +95,6 @@ import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.modelstore.ModelSource
 import com.muyuchat.core.modelstore.ModelStoreRepository
 import com.muyuchat.core.modelstore.QairtBundleRuntimeIdentity
-import com.muyuchat.core.nativebridge.NativeMnnDiffusionBridge
-import com.muyuchat.core.nativebridge.NativeQnnBridge
 import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
 import com.muyuchat.core.tuning.AdaptiveTuningRecommendation
@@ -1990,339 +1988,127 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun verifyQnnImageRuntime(model: LocalImageModelRecord): Pair<Boolean, String> =
-        LocalImageExecutionGate.withLease(getApplication<Application>()) {
-            verifyQnnImageRuntimeUnlocked(model)
-        }
-
-    private fun verifyQnnImageRuntimeUnlocked(model: LocalImageModelRecord): Pair<Boolean, String> =
         runCatching {
-            val app = getApplication<Application>()
             val bundleRoot = model.bundleRoot
-                ?.takeIf { it.isNotBlank() }
-                ?: File(model.path).parent.orEmpty()
-            if (bundleRoot.isBlank()) {
-                return@runCatching false to "QNN 图像引擎缺少完整组件目录。"
-            }
-            val bundleRootFile = File(bundleRoot)
-            val runtimeResolution = qnnRuntimeDirectoryResolutionFor(app, bundleRootFile)
-            if (runtimeResolution.stagingError != null) {
-                return@runCatching false to runtimeResolution.stagingError
-            }
-            val report = QnnHtpImageRunner(context = app).runSmoke(
-                device = deviceProfileReader.read(),
-                bundleRoot = bundleRootFile
+                ?.takeIf(String::isNotBlank)
+                ?.let(::File)
+                ?.takeIf(File::isDirectory)
+                ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+                ?: error("QNN 图像引擎缺少完整组件目录。")
+            val seedOptions = LocalImageGenerationOptions(seed = 1234)
+            val baseResolution = resolveLocalImageExecutionProfile(model, seedOptions, bundleRoot)
+            val options = seedOptions.copy(
+                steps = baseResolution.profile.scheduler.minSteps,
+                width = baseResolution.layers.resolved.width,
+                height = baseResolution.layers.resolved.height,
+                cfgScale = baseResolution.layers.resolved.cfgScale,
+                useCfg = baseResolution.layers.resolved.useCfg,
+                sampleMethod = imageSchedulerProductName(baseResolution.layers.resolved.scheduler)
             )
-            val semanticGraphVerificationRequired =
-                report.state == LocalImageQnnState.SMOKE_REQUIRED &&
-                    hasCompleteQnnSemanticGraphBundle(bundleRootFile)
-            if (report.state != LocalImageQnnState.NPU_ACTIVE && !semanticGraphVerificationRequired) {
-                return@runCatching false to report.message
-            }
-            if (!NativeMnnDiffusionBridge.isAvailable) {
-                val reason = NativeMnnDiffusionBridge.loadError?.message.orEmpty()
-                return@runCatching false to "QNN 文本编码器依赖 MNN native 后端，当前未加载${if (reason.isBlank()) "" else "：$reason"}"
-            }
-            if (!NativeMnnDiffusionBridge.runnerReady) {
-                val stats = runCatching { JSONObject(NativeMnnDiffusionBridge().getRuntimeStatsJson()) }.getOrNull()
-                return@runCatching false to stats?.optString("lastError")
-                    .orEmpty()
-                    .ifBlank { "QNN 文本编码器所需 MNN native runner 未打包到当前 APK。" }
-            }
-            if (!NativeQnnBridge.isAvailable) {
-                val reason = NativeQnnBridge.loadError?.message.orEmpty()
-                return@runCatching false to "骁龙 NPU 后端未加载${if (reason.isBlank()) "" else "：$reason"}"
-            }
-            if (!NativeQnnBridge.runnerReady) {
-                val stats = runCatching { JSONObject(NativeQnnBridge().getRuntimeStatsJson()) }.getOrNull()
-                return@runCatching false to stats?.optString("lastError")
-                    .orEmpty()
-                    .ifBlank { "骁龙 NPU 生图组件未打包到当前 APK。" }
-            }
-
-            val outputDir = File(app.cacheDir, "qnn_image_verify").apply { mkdirs() }
-            val outputFile = File(outputDir, "verify-qnn-${System.currentTimeMillis()}.png")
-            val isSdxlQnn = model.family == LocalImageModelFamily.SDXL
-            val usesQnnClipTokenIds = !isSdxlQnn &&
-                qnnNativeTextEncoderContextPath(bundleRootFile) != null
-            val embeddingFile = File(
-                outputDir,
-                if (isSdxlQnn) {
-                    "${outputFile.nameWithoutExtension}.sdxl-conditioning.f32"
-                } else if (usesQnnClipTokenIds) {
-                    "${outputFile.nameWithoutExtension}.qnn-clip-token-ids.i32"
-                } else {
-                    "${outputFile.nameWithoutExtension}.sd15-embeddings.f32"
-                }
+            val verificationResolution = resolveLocalImageExecutionProfile(model, options, bundleRoot)
+            val requestId = "verify-qnn-${System.currentTimeMillis()}-${UUID.randomUUID()}"
+            localImageWorkerClient.begin(model.runtime)
+            val result = localImageWorkerClient.generate(
+                model = model,
+                prompt = "a small white ceramic cup on a wooden desk, morning light, clean background, photo realistic",
+                options = options,
+                requestId = requestId
             )
-            try {
-            val (width, height) = model.qnnVerifyDimensions()
-            val steps = if (isSdxlQnn) 1 else 4
-            val threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
-            val params = JSONObject()
-                .put("prompt", "a small white ceramic cup on a wooden desk, morning light, clean background, photo realistic")
-                .put("family", model.family.name)
-                .put("width", width)
-                .put("height", height)
-                .put("steps", steps)
-                .put("threads", threads)
-                .put("seed", 1234)
-                .put("cfgScale", 7.0)
-                .put("sampleMethod", "pndm")
-                .put("backendMode", "cpu")
-                .putQnnSemanticDefaultsForVerification(bundleRootFile)
-            if (isSdxlQnn) {
-                params.put("conditioningFormat", "sdxl_qnn_conditioning")
-                    .put("vaeLatentScale", 1.0 / 0.13025)
-            } else if (usesQnnClipTokenIds) {
-                params.put("conditioningFormat", "qnn_clip_token_ids_i32")
+            val execution = JSONObject(result.executionMetadataJson)
+            ImageExecutionProfileNativeContract.parseAndValidate(verificationResolution, execution)
+            require(execution.optBoolean("npuActive", false)) {
+                "QNN verification did not prove that the NPU was active."
             }
-
-            val mnnBridge = NativeMnnDiffusionBridge()
-            val qnnBridge = NativeQnnBridge()
-            val embeddingRaw = if (isSdxlQnn) {
-                mnnBridge.encodeSdxlPromptConditioning(
-                    bundleRootFile.absolutePath,
-                    params.optString("prompt"),
-                    embeddingFile.absolutePath,
-                    width,
-                    height,
-                    "cpu",
-                    threads
-                )
-            } else if (usesQnnClipTokenIds) {
-                encodeQnnClipPromptTokenIds(
-                    bridge = mnnBridge,
-                    bundleRoot = bundleRootFile,
-                    prompt = params.optString("prompt"),
-                    outputFile = embeddingFile
-                )
-            } else {
-                mnnBridge.encodeSd15PromptEmbeddings(
-                    bundleRootFile.absolutePath,
-                    params.optString("prompt"),
-                    embeddingFile.absolutePath,
-                    "cpu",
-                    threads,
-                    "auto"
-                )
+            require(execution.optBoolean("qnnGraphExecution", false)) {
+                "QNN verification did not prove graph execution."
             }
-            val embedding = JSONObject(embeddingRaw)
-            if (!embedding.optBoolean("ok", false)) {
-                return@runCatching false to embedding.optString("error")
-                    .ifBlank { "QNN 语义生图校验未能完成文本编码。" }
+            require(execution.optBoolean("nativeExecution", false)) {
+                "QNN verification did not prove native execution."
             }
-
-            val result = JSONObject(
-                qnnBridge.runImageSemanticGenerate(
-                    bundleRootFile.absolutePath,
-                    qnnRuntimeDirsJsonForVerification(app, bundleRootFile),
-                    params.toString(),
-                    embeddingFile.absolutePath,
-                    outputFile.absolutePath
-                )
-            )
-            val outputBytes = outputFile.takeIf { it.isFile }?.length() ?: 0L
-            val ok = result.optBoolean("ok", false) &&
-                result.optBoolean("npuActive", false) &&
-                outputBytes > 0L
-            val elapsedMs = result.optLong("elapsedMs")
-            val unetAvgMs = result.optInt("unetExecuteMsAvg")
-            if (ok) {
-                true to if (isSdxlQnn) {
-                    buildString {
-                        append("QNN SDXL 仅完成 1-step NPU/PNG 技术 smoke")
-                        if (elapsedMs > 0L) append("，耗时 ${elapsedMs}ms")
-                        if (unetAvgMs > 0) append("，UNet ${unetAvgMs}ms/step")
-                        append("；语义与多步质量未通过，不能设为默认引擎。")
-                    }
-                } else {
-                    buildString {
-                        append("QNN 语义生图校验通过：${width}x$height，${steps} step")
-                        if (elapsedMs > 0L) append("，耗时 ${elapsedMs}ms")
-                        if (unetAvgMs > 0) append("，UNet ${unetAvgMs}ms/step")
-                        append("，NPU active。")
-                    }
-                }
-            } else {
-                false to result.optString("message")
-                    .ifBlank { "QNN 语义生图校验未产出有效图片或未证明 NPU active。" }
+            require(!execution.optBoolean("fallback", true)) {
+                "QNN verification unexpectedly used a fallback path."
             }
-            } finally {
-                runCatching { embeddingFile.delete() }
-                runCatching { outputFile.delete() }
+            require(execution.optLong("nativeGenerationSequence", 0L) > 0L) {
+                "QNN verification is missing its native generation sequence."
+            }
+            require(result.bytes.isNotEmpty()) { "QNN verification produced an empty image." }
+            val resolved = verificationResolution.layers.resolved
+            true to buildString {
+                append("QNN 产品生图校验通过：${resolved.width}x${resolved.height}，${resolved.steps} step")
+                execution.optLong("elapsedMs").takeIf { it > 0L }?.let { append("，耗时 ${it}ms") }
+                execution.optLong("unetExecuteMsAvg").takeIf { it > 0L }?.let { append("，UNet ${it}ms/step") }
+                append("，NPU/native/fallback 证据完整。")
             }
         }.getOrElse { error ->
             false to (error.message ?: "QNN 图像引擎校验异常。")
         }
 
-    private fun LocalImageModelRecord.qnnVerifyDimensions(): Pair<Int, Int> {
-        val match = Regex("""(\d{2,4})\s*x\s*(\d{2,4})""").find(imageSize)
-        val width = match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 512
-        val height = match?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 512
-        if (family == LocalImageModelFamily.SDXL) return 1024 to 1024
-        return width.coerceIn(256, 768) to height.coerceIn(256, 768)
-    }
-
-    private fun JSONObject.putQnnSemanticDefaultsForVerification(bundleRoot: File): JSONObject {
-        val manifest = localImageBundleManifestFromRoot(bundleRoot)
-        val smokes = manifest?.qnnSmokeSpecs.orEmpty()
-        val unet = smokes.firstOrNull { spec ->
-            val lower = spec.contextBinary.lowercase()
-            "unet" in lower || "diffusion" in lower || spec.inputs.size >= 3
-        } ?: smokes.firstOrNull()
-        val vae = smokes.firstOrNull { spec ->
-            val lower = spec.contextBinary.lowercase()
-            "vae" in lower || "decoder" in lower || (spec.inputs.size == 1 && spec.outputs.any { it.shape.contains(3) })
-        }
-        val textEncoderContext = qnnNativeTextEncoderContextPath(bundleRoot)
-        put(
-            "unetContextBinary",
-            unet?.contextBinary?.takeIf { it.isNotBlank() }
-                ?: qnnFirstContextPath(bundleRoot, "unet.bin")
-                ?: "unet.bin"
-        )
-        put(
-            "vaeDecoderContextBinary",
-            vae?.contextBinary?.takeIf { it.isNotBlank() }
-                ?: qnnFirstContextPath(bundleRoot, "vae.bin", "vae_decoder.bin")
-                ?: "vae_decoder.bin"
-        )
-        textEncoderContext?.let { put("textEncoderContextBinary", it) }
-        put("graphName", unet?.graphName?.takeIf { it.isNotBlank() } ?: "model")
-        return this
-    }
-
-    private fun qnnRuntimeDirsJsonForVerification(app: Application, bundleRoot: File): String {
-        return JSONArray(qnnRuntimeDirectoriesFor(app, bundleRoot)).toString()
-    }
-
     private suspend fun verifyMnnDiffusionImageRuntime(model: LocalImageModelRecord): Pair<Boolean, String> =
-        LocalImageExecutionGate.withLease(getApplication<Application>()) {
-            verifyMnnDiffusionImageRuntimeUnlocked(model)
-        }
-
-    private fun verifyMnnDiffusionImageRuntimeUnlocked(model: LocalImageModelRecord): Pair<Boolean, String> =
         runCatching {
-            val bridge = NativeMnnDiffusionBridge()
-            if (!NativeMnnDiffusionBridge.isAvailable) {
-                val reason = NativeMnnDiffusionBridge.loadError?.message.orEmpty()
-                return@runCatching false to "MNN-Diffusion native 后端未加载${if (reason.isBlank()) "" else "：$reason"}"
-            }
-            if (!NativeMnnDiffusionBridge.runnerReady) {
-                val stats = runCatching { JSONObject(bridge.getRuntimeStatsJson()) }.getOrNull()
-                return@runCatching false to stats?.optString("lastError")
-                    .orEmpty()
-                    .ifBlank { "MNN-Diffusion native runner 未打包到当前 APK。" }
-            }
-            val primaryFile = File(model.path)
-            val configuredRoot = model.bundleRoot
-                ?.takeIf { it.isNotBlank() }
+            val bundleRoot = model.bundleRoot
+                ?.takeIf(String::isNotBlank)
                 ?.let(::File)
-                ?: primaryFile.parentFile
-            if (configuredRoot == null) {
-                return@runCatching false to "MNN-Diffusion 缺少完整组件目录。"
+                ?.takeIf(File::isDirectory)
+                ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+                ?: error("MNN-Diffusion 缺少完整组件目录。")
+            val seedOptions = LocalImageGenerationOptions(seed = 42)
+            val baseResolution = resolveLocalImageExecutionProfile(model, seedOptions, bundleRoot)
+            require(baseResolution.profile.task == ImageTask.TEXT_TO_IMAGE) {
+                "该 MNN 图像编辑模型需要源图片，不能用纯文本生成校验代替。"
             }
-            val manifest = sequenceOf(configuredRoot, primaryFile.parentFile)
-                .filterNotNull()
-                .mapNotNull { root -> runCatching { localImageBundleManifestFromRoot(root) }.getOrNull() }
-                .firstOrNull()
-            val route = mnnVerificationRoute(model.family, manifest)
-            val contract = LocalImageBundleContract.inspectMnnBundle(
-                bundleRoot = configuredRoot,
-                primaryFile = primaryFile,
-                family = route.family
+            val resolved = baseResolution.layers.resolved
+            val options = seedOptions.copy(
+                width = resolved.width,
+                height = resolved.height,
+                steps = resolved.steps,
+                threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 4),
+                cfgScale = resolved.cfgScale,
+                sampleMethod = imageSchedulerProductName(resolved.scheduler),
+                backendMode = "opencl",
+                memoryMode = 0,
+                runner = "direct",
+                useCfg = resolved.useCfg
             )
-            contract.readinessMessage(route.family)?.let { message ->
-                return@runCatching false to message
+            val verificationResolution = resolveLocalImageExecutionProfile(model, options, bundleRoot)
+            val requestId = "verify-mnn-${System.currentTimeMillis()}-${UUID.randomUUID()}"
+            localImageWorkerClient.begin(model.runtime)
+            val result = localImageWorkerClient.generate(
+                model = model,
+                prompt = "A single red cube on a clean white background, studio lighting, no text.",
+                options = options,
+                requestId = requestId
+            )
+            val execution = JSONObject(result.executionMetadataJson)
+            ImageExecutionProfileNativeContract.parseAndValidate(verificationResolution, execution)
+            require(execution.optString("runner").equals("direct", ignoreCase = true)) {
+                "MNN verification did not use the direct runner."
             }
-            val runtimeRoot = contract.root
-                ?: return@runCatching false to "MNN-Diffusion 缺少完整组件目录。"
-            val bundleRoot = runtimeRoot.absolutePath
-            val isSd15 = route.family == LocalImageModelFamily.SD15
-            val smokeBackend = if (isSd15) "opencl" else "cpu"
-            val smokeRunner = if (isSd15) "direct" else "sana_varp"
-            if (route.requiresUnetPreflight) {
-                prepareMnnDiffusionTokenizerIfPossible(runtimeRoot)
-                val unetPreflightResult = runCatching {
-                    JSONObject(bridge.runUnetSmoke(bundleRoot, smokeBackend))
-                }
-                if (unetPreflightResult.isFailure) {
-                    val message = unetPreflightResult.exceptionOrNull()?.message ?: "unknown error"
-                    return@runCatching false to "MNN-Diffusion UNet 预检异常：$message"
-                }
-                val unetPreflight = unetPreflightResult.getOrThrow()
-                if (!unetPreflight.optBoolean("ok", false)) {
-                    val preflightError = unetPreflight.optString("error")
-                        .ifBlank {
-                            "direct runCode=${unetPreflight.optInt("runCode", -1)}, " +
-                                "resizeStatusAfter=${unetPreflight.optInt("resizeStatusAfter", -1)}"
-                        }
-                    return@runCatching false to
-                        "MNN-Diffusion UNet 预检未通过，已阻止进入不稳定生成路径：$preflightError"
-                }
+            require(mnnDiffusionBackendMatches("opencl", execution.optString("backendMode"))) {
+                "MNN verification did not execute on OpenCL."
             }
-            val outputDir = File(getApplication<Application>().cacheDir, "mnn_image_verify").apply { mkdirs() }
-            val outputFile = File(outputDir, "verify-${System.currentTimeMillis()}.png")
-            val params = JSONObject()
-                .put(
-                    "prompt",
-                    if (isSd15) {
-                        "A single red cube on a clean white background, studio lighting, no text."
-                    } else {
-                        "A small cartoon house in a clean illustration style, no text."
-                    }
-                )
-                .put("family", route.family.name)
-                .put("steps", route.steps)
-                .put("width", route.width)
-                .put("height", route.height)
-                .put("threads", Runtime.getRuntime().availableProcessors().coerceIn(1, 4))
-                .put("seed", 42)
-                .put("backendMode", smokeBackend)
-                .put("runner", smokeRunner)
-                .put("memoryMode", 0)
-            try {
-                val result = JSONObject(bridge.generate(bundleRoot, params.toString(), outputFile.absolutePath))
-                verifyMnnDiffusionExecutionContract(
-                    result = result,
-                    expectedRunner = smokeRunner,
-                    expectedBackend = smokeBackend,
-                    expectedSteps = route.steps,
-                    expectedWidth = route.width,
-                    expectedHeight = route.height
-                )
-                require(outputFile.isFile && outputFile.length() > 0L) {
-                    "MNN-Diffusion smoke did not write a PNG."
+            require(!execution.optBoolean("fallback", true)) {
+                "MNN verification unexpectedly used a fallback path."
+            }
+            require(result.bytes.size >= 8 && result.bytes.copyOfRange(0, 8).contentEquals(
+                byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+            )) { "MNN-Diffusion product output is not a complete PNG." }
+            val bitmap = requireNotNull(BitmapFactory.decodeByteArray(result.bytes, 0, result.bytes.size)) {
+                "MNN-Diffusion product PNG cannot be decoded."
+            }
+            val quality = try {
+                require(bitmap.width == resolved.width && bitmap.height == resolved.height) {
+                    "MNN-Diffusion decoded ${bitmap.width}x${bitmap.height}, " +
+                        "expected ${resolved.width}x${resolved.height}."
                 }
-                val signature = outputFile.inputStream().use { input -> ByteArray(8).also { bytes ->
-                    require(input.read(bytes) == bytes.size) { "MNN-Diffusion smoke PNG is truncated." }
-                } }
-                require(signature.contentEquals(byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a))) {
-                    "MNN-Diffusion smoke output is not a PNG."
-                }
-                val bitmap = requireNotNull(BitmapFactory.decodeFile(outputFile.absolutePath)) {
-                    "MNN-Diffusion smoke PNG cannot be decoded."
-                }
-                val quality = try {
-                    require(bitmap.width == route.width && bitmap.height == route.height) {
-                        "MNN-Diffusion smoke decoded ${bitmap.width}x${bitmap.height}, " +
-                            "expected ${route.width}x${route.height}."
-                    }
-                    val pixels = IntArray(bitmap.width * bitmap.height)
-                    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-                    evaluateLocalImageSmokePixels(bitmap.width, bitmap.height, pixels)
-                } finally {
-                    bitmap.recycle()
-                }
-                require(quality.passed) {
-                    "MNN-Diffusion PNG quality smoke failed: ${quality.message}."
-                }
-                true to "MNN-Diffusion ${route.family.label} ${smokeRunner}/${smokeBackend} " +
-                    "${route.width}x${route.height}、${route.steps}-step PNG smoke 通过；" +
-                    "该结果不代表多提示词语义认证，暂不能设为默认引擎。"
+                val pixels = IntArray(bitmap.width * bitmap.height)
+                bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+                evaluateLocalImageSmokePixels(bitmap.width, bitmap.height, pixels)
             } finally {
-                runCatching { outputFile.delete() }
+                bitmap.recycle()
             }
+            require(quality.passed) { "MNN-Diffusion PNG quality smoke failed: ${quality.message}." }
+            true to "MNN-Diffusion 产品 worker ${resolved.width}x${resolved.height}、" +
+                "${resolved.steps}-step direct/OpenCL 校验通过，执行合同与像素质量一致。"
         }.getOrElse { error ->
             false to (error.message ?: "MNN-Diffusion 校验异常。")
         }
@@ -7948,21 +7734,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         require(prompt.isNotBlank()) { "prompt must not be blank." }
         require(requestId.isNotBlank()) { "requestId must not be blank." }
         val requestedModel = request.optString("model").trim()
-        val model = _uiState.value.localImageModels.firstOrNull {
-            requestedModel.isNotBlank() && it.id == requestedModel && it.configured
-        } ?: _uiState.value.selectedLocalImageModel()
-            ?: error("No configured local image model is selected.")
-        require(model.runtime == LocalImageRuntime.QNN_HTP) {
-            "The selected local image model is not a Snapdragon NPU engine."
+        val model = if (requestedModel.isNotBlank()) {
+            _uiState.value.localImageModels.firstOrNull {
+                it.id == requestedModel && it.configured
+            } ?: error("The requested local image model is not configured: $requestedModel")
+        } else {
+            _uiState.value.selectedLocalImageModel()
+                ?: error("No configured local image model is selected.")
         }
         val size = request.optString("size").trim()
         val dimensions = Regex("""^(\d{2,4})[xX](\d{2,4})$""").matchEntire(size)
+        val negativePrompt = if (request.has("negative_prompt") && !request.isNull("negative_prompt")) {
+            (request.get("negative_prompt") as? String)
+                ?: error("negative_prompt must be a string when specified.")
+        } else {
+            null
+        }
         val options = LocalImageGenerationOptions(
+            negativePrompt = negativePrompt,
             width = dimensions?.groupValues?.getOrNull(1)?.toIntOrNull(),
             height = dimensions?.groupValues?.getOrNull(2)?.toIntOrNull(),
             steps = request.optInt("steps", 0).takeIf { it > 0 },
             seed = request.optInt("seed", 0).takeIf { request.has("seed") },
-            cfgScale = request.optDouble("cfg_scale", Double.NaN).takeIf { it.isFinite() }
+            cfgScale = request.optDouble("cfg_scale", Double.NaN).takeIf { it.isFinite() },
+            sampleMethod = request.optString("sampler").trim().takeIf { it.isNotEmpty() }
         )
         val result = localImageWorkerClient.generate(
             model = model,
@@ -7976,13 +7771,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "The local image worker returned an invalid image."
         }
         val execution = runCatching { JSONObject(result.executionMetadataJson) }.getOrElse { JSONObject() }
+        val nativeEffective = execution.optJSONObject("nativeEffective")
+            ?: error("The local image result is missing nativeEffective execution evidence.")
         require(
-            execution.optBoolean("npuActive", false) &&
-                execution.optBoolean("qnnGraphExecution", false) &&
-                execution.optBoolean("nativeExecution", false) &&
+            execution.optBoolean("nativeExecution", false) &&
                 !execution.optBoolean("fallback", true)
         ) {
-            "The local image result did not prove native QNN graph execution."
+            "The local image result did not prove direct native execution without fallback."
+        }
+        require(execution.optLong("nativeGenerationSequence", 0L) > 0L) {
+            "The local image result is missing a positive native generation sequence."
+        }
+        require(nativeEffective.getString("runtime") == model.runtime.name) {
+            "The local image result runtime does not match the selected model runtime."
+        }
+        if (model.runtime == LocalImageRuntime.QNN_HTP) {
+            require(
+                execution.optBoolean("npuActive", false) &&
+                    execution.optBoolean("qnnGraphExecution", false)
+            ) {
+                "The local image result did not prove native QNN graph execution."
+            }
         }
         return JSONObject()
             .put("created", System.currentTimeMillis() / 1000L)
