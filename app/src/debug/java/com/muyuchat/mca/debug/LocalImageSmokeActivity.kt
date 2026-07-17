@@ -18,6 +18,7 @@ import com.muyuchat.mca.LocalImageVerificationStatus
 import com.muyuchat.mca.LocalImageExecutionGate
 import com.muyuchat.mca.LocalImageGenerationOptions
 import com.muyuchat.mca.LocalImageWorkerClient
+import com.muyuchat.mca.ImagePixelRange
 import com.muyuchat.mca.QnnExecutionDiagnostics
 import com.muyuchat.mca.QnnSmokeSpec
 import com.muyuchat.mca.hasCurrentQnnVerificationStamp
@@ -178,6 +179,14 @@ class LocalImageSmokeActivity : Activity() {
                 .put("backendMode", backendMode)
                 .put("tokenEmbeddingMode", tokenEmbeddingMode)
                 .put("memoryMode", memoryMode)
+            if (isQnnHtp) {
+                requestJson.put(
+                    "pixelRange",
+                    intent.getStringExtra("pixelRange")
+                        .orEmpty()
+                        .ifBlank { ImagePixelRange.NEGATIVE_ONE_TO_ONE.name }
+                )
+            }
             if (family.equals("SDXL", ignoreCase = true)) {
                 requestJson.put("conditioningFormat", "sdxl_qnn_conditioning")
                     .put("vaeLatentScale", 1.0 / 0.13025)
@@ -936,7 +945,8 @@ class LocalImageSmokeActivity : Activity() {
                 requestJson.optInt("width", 1024),
                 requestJson.optInt("height", 1024),
                 requestJson.optString("backendMode", "cpu"),
-                requestJson.optInt("threads", 4)
+                requestJson.optInt("threads", 4),
+                requestJson.optBoolean("promptWeightingSupported", false)
             )
         } else {
             mnnBridge.encodeSd15PromptEmbeddings(
@@ -946,7 +956,8 @@ class LocalImageSmokeActivity : Activity() {
                 embeddingFile.absolutePath,
                 requestJson.optString("backendMode", "cpu"),
                 requestJson.optInt("threads", 4),
-                requestJson.optString("tokenEmbeddingMode", "auto")
+                requestJson.optString("tokenEmbeddingMode", "auto"),
+                requestJson.optBoolean("promptWeightingSupported", false)
             )
         }
         val embeddingResult = JSONObject(embeddingRaw)

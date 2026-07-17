@@ -43,7 +43,7 @@ class LocalImageWorkerService : Service() {
             val active = synchronized(stateLock) {
                 activeGeneration?.takeIf { requestedId == null || it.requestId == requestedId }
             } ?: return false
-            active.cancelRequested = true
+            if (!active.tryRequestCancellation()) return false
             requestJournalCancellation(active.requestId)
             return provider.cancel()
         }
@@ -94,7 +94,7 @@ class LocalImageWorkerService : Service() {
             try {
                 callback.asBinder().linkToDeath(requireNotNull(active.deathRecipient), 0)
             } catch (_: RemoteException) {
-                active.cancelRequested = true
+                active.tryRequestCancellation()
                 runCatching { provider.cancel() }
                 finish(active)
                 return false
@@ -174,6 +174,10 @@ class LocalImageWorkerService : Service() {
                     val output = writeResultFile(target, result)
                     updateJournalOutputPath(request.requestId, output)
                     transferredOutput = output
+                    val outputBytes = output.length()
+                    if (!active.tryBeginResultPublication()) {
+                        throw CancellationException("Image generation was cancelled before result publication.")
+                    }
                     val delivered = sendComplete(
                         callback = callback,
                         requestId = request.requestId,
@@ -186,7 +190,7 @@ class LocalImageWorkerService : Service() {
                         JSONObject()
                             .put("requestId", request.requestId)
                             .put("workerPid", Process.myPid())
-                            .put("outputBytes", output.length())
+                            .put("outputBytes", outputBytes)
                             .put("mimeType", result.mimeType)
                             .put(
                                 "execution",
@@ -261,10 +265,11 @@ class LocalImageWorkerService : Service() {
             activeGeneration.also { activeGeneration = null }
         }
         if (active != null) {
-            active.cancelRequested = true
-            finishJournalCancelled(active.requestId, "The image worker service stopped.")
-            runCatching { provider.cancel() }
-            active.job?.cancel()
+            if (active.tryRequestCancellation()) {
+                finishJournalCancelled(active.requestId, "The image worker service stopped.")
+                runCatching { provider.cancel() }
+                active.job?.cancel()
+            }
             unlinkDeathRecipient(active)
         }
         scope.cancel()
@@ -275,7 +280,7 @@ class LocalImageWorkerService : Service() {
     private fun cancelForDeadClient(active: ActiveGeneration) {
         val isCurrent = synchronized(stateLock) { activeGeneration === active }
         if (!isCurrent) return
-        active.cancelRequested = true
+        if (!active.tryRequestCancellation()) return
         requestJournalCancellation(active.requestId)
         runCatching { provider.cancel() }
         active.job?.cancel(CancellationException("Local image client disconnected."))
@@ -626,11 +631,22 @@ class LocalImageWorkerService : Service() {
         val requestId: String,
         val callback: ILocalImageWorkerCallback
     ) {
+        private val publicationGate = LocalImageWorkerPublicationGate()
         var deathRecipient: IBinder.DeathRecipient? = null
         var job: Job? = null
 
-        @Volatile
-        var cancelRequested: Boolean = false
+        val cancelRequested: Boolean
+            get() = publicationGate.cancelRequested
+
+        /**
+         * Result publication is the commit point for native generation. Once the final output has
+         * been written and callback delivery starts, a normal client unbind may destroy this bound
+         * service before the coroutine resumes after the synchronous Binder callback. That teardown
+         * must not turn the already-produced request into a cancellation.
+         */
+        fun tryBeginResultPublication(): Boolean = publicationGate.tryBeginResultPublication()
+
+        fun tryRequestCancellation(): Boolean = publicationGate.tryRequestCancellation()
 
         private var lastStageTrace: List<String> = emptyList()
 
@@ -649,5 +665,35 @@ class LocalImageWorkerService : Service() {
         internal const val RESULT_DIRECTORY = "local_image_worker_results"
         internal const val IMAGE_EXECUTION_JOURNAL_DIRECTORY = "image_execution_journal"
         private const val RESULT_MAX_AGE_MS = 24 * 60 * 60 * 1000L
+    }
+}
+
+/**
+ * Serializes the only two terminal contenders for a worker request. Result publication wins once
+ * the output file is complete; cancellation wins only while native work is still in progress.
+ */
+internal class LocalImageWorkerPublicationGate {
+    private enum class State {
+        RUNNING,
+        CANCELLATION_REQUESTED,
+        RESULT_PUBLICATION_STARTED
+    }
+
+    @Volatile
+    private var state: State = State.RUNNING
+
+    val cancelRequested: Boolean
+        get() = state == State.CANCELLATION_REQUESTED
+
+    fun tryBeginResultPublication(): Boolean = synchronized(this) {
+        if (state != State.RUNNING) return@synchronized false
+        state = State.RESULT_PUBLICATION_STARTED
+        true
+    }
+
+    fun tryRequestCancellation(): Boolean = synchronized(this) {
+        if (state != State.RUNNING) return@synchronized false
+        state = State.CANCELLATION_REQUESTED
+        true
     }
 }

@@ -1268,6 +1268,7 @@ struct MnnSemanticExecutionContract {
     int tokenizer_eos_id = 0;
     int tokenizer_pad_id = 0;
     int tokenizer_max_length = 0;
+    bool prompt_weighting_supported = false;
     std::string embedding_disk_data_type;
     MnnVaeScalingLocation vae_scaling_location = MnnVaeScalingLocation::None;
     double vae_scaling_factor = 1.0;
@@ -1289,6 +1290,11 @@ struct MnnNativeExecutionEvidence {
     size_t graph_invocation_count = 0;
     std::string tokenizer_backend;
     size_t token_count = 0;
+    bool prompt_weighting_applied = false;
+    size_t positive_weighted_token_count = 0;
+    size_t negative_weighted_token_count = 0;
+    std::string prompt_weight_fingerprint =
+            "9b353b1ac542678089ce3d12ee96ddd6ba3b0252ec0675cdf0540e6aa6b1860e";
     std::string embedding_disk_data_type;
     std::vector<double> timesteps;
     std::vector<double> sigmas;
@@ -1698,6 +1704,18 @@ bool parse_mnn_semantic_execution_contract(
         error = "The current MNN direct CLIP graph requires tokenizerMaxLength=77 and tokenCount=154.";
         return false;
     }
+    if (!mnn_contract_boolean(
+            params,
+            "promptWeightingSupported",
+            contract.prompt_weighting_supported,
+            error)) {
+        return false;
+    }
+    if (contract.prompt_weighting_supported &&
+            contract.tokenizer_backend != "TOKENIZERS_CPP") {
+        error = "Prompt weighting requires the complete TOKENIZERS_CPP contract.";
+        return false;
+    }
     if (!mnn_contract_string(
             params,
             "embeddingDiskDataType",
@@ -1898,6 +1916,11 @@ json mnn_native_effective_json(
         {"unconditionalBranch", contract.use_cfg},
         {"tokenizerBackend", evidence.tokenizer_backend},
         {"tokenCount", evidence.token_count},
+        {"promptWeightingSupported", contract.prompt_weighting_supported},
+        {"promptWeightingApplied", evidence.prompt_weighting_applied},
+        {"positiveWeightedTokenCount", evidence.positive_weighted_token_count},
+        {"negativeWeightedTokenCount", evidence.negative_weighted_token_count},
+        {"promptWeightFingerprint", evidence.prompt_weight_fingerprint},
         {"embeddingDiskDataType", evidence.embedding_disk_data_type},
         {"vaeScalingLocation", mnn_vae_scaling_wire_name(contract.vae_scaling_location)},
         {"vaeScalingFactor", contract.vae_scaling_factor},
@@ -3061,6 +3084,7 @@ bool inspect_community_token_embedding_file(
 bool build_community_clip_input(
         const std::string& root,
         const std::vector<int>& token_ids,
+        const std::vector<float>& token_weights,
         std::vector<float>& input,
         std::string& error,
         size_t* token_embedding_bytes = nullptr,
@@ -3070,6 +3094,10 @@ bool build_community_clip_input(
     constexpr int kVocabSize = 49408;
     if (token_ids.size() != kMaxTextLen) {
         error = "CLIP token id count must be 77.";
+        return false;
+    }
+    if (token_weights.size() != kMaxTextLen) {
+        error = "CLIP token weight count must be 77.";
         return false;
     }
     const auto tokenPath = root + "/token_emb.bin";
@@ -3109,8 +3137,13 @@ bool build_community_clip_input(
     input.assign(static_cast<size_t>(kMaxTextLen) * kEmbeddingSize, 0.0f);
     for (int pos = 0; pos < kMaxTextLen; ++pos) {
         const int id = token_ids[static_cast<size_t>(pos)];
+        const float tokenWeight = token_weights[static_cast<size_t>(pos)];
         if (id < 0 || id >= kVocabSize) {
             error = "CLIP token id at position " + std::to_string(pos) + " is outside the vocabulary range.";
+            return false;
+        }
+        if (!std::isfinite(tokenWeight)) {
+            error = "CLIP token weight at position " + std::to_string(pos) + " is not finite.";
             return false;
         }
         const size_t elementBytes = tokenFp16 ? sizeof(uint16_t) : sizeof(float);
@@ -3139,7 +3172,7 @@ bool build_community_clip_input(
             const float tokenValue = tokenFp16
                     ? fp16_to_float(fp16Window[static_cast<size_t>(dim)])
                     : fp32Window[static_cast<size_t>(dim)];
-            const float value = tokenValue + pos_emb[out_index];
+            const float value = tokenValue * tokenWeight + pos_emb[out_index];
             if (!std::isfinite(value)) {
                 error = "token_emb.bin or pos_emb.bin produced a non-finite CLIP input value.";
                 return false;
@@ -3153,6 +3186,7 @@ bool build_community_clip_input(
 bool run_community_clip_encoder_direct(
         const std::string& root,
         const std::vector<int>& token_ids,
+        const std::vector<float>& token_weights,
         const std::string& backendMode,
         int threads,
         FloatTensorData& embeddings,
@@ -3163,7 +3197,7 @@ bool run_community_clip_encoder_direct(
     size_t token_embedding_bytes = 0;
     std::string token_embedding_type;
     if (!build_community_clip_input(
-            root, token_ids, input_values, error,
+            root, token_ids, token_weights, input_values, error,
             &token_embedding_bytes, &token_embedding_type)) {
         return false;
     }
@@ -3175,6 +3209,7 @@ bool run_community_clip_encoder_direct(
         (*debug)["inputValueStats"] = float_vector_stats_json(input_values);
         (*debug)["tokenEmbeddingBytes"] = token_embedding_bytes;
         (*debug)["embeddingDiskDataType"] = token_embedding_type;
+        (*debug)["tokenWeightStats"] = float_vector_stats_json(token_weights);
         json tokenSamples = json::array();
         for (size_t i = 0; i < token_ids.size() && tokenSamples.size() < 16; ++i) {
             tokenSamples.push_back(token_ids[i]);
@@ -3287,6 +3322,7 @@ bool has_community_clip_bundle(const std::string& root) {
 bool build_clip_embedding_input(
         const std::string& root,
         const std::vector<int>& token_ids,
+        const std::vector<float>& token_weights,
         const std::string& tokenFile,
         const std::string& positionFile,
         int embeddingSize,
@@ -3296,6 +3332,10 @@ bool build_clip_embedding_input(
     constexpr int kVocabSize = 49408;
     if (token_ids.size() != kMaxTextLen) {
         error = "CLIP token id count must be 77.";
+        return false;
+    }
+    if (token_weights.size() != kMaxTextLen) {
+        error = "CLIP token weight count must be 77.";
         return false;
     }
     if (embeddingSize <= 0) {
@@ -3327,8 +3367,13 @@ bool build_clip_embedding_input(
     input.assign(static_cast<size_t>(kMaxTextLen) * static_cast<size_t>(embeddingSize), 0.0f);
     for (int pos = 0; pos < kMaxTextLen; ++pos) {
         const int id = token_ids[static_cast<size_t>(pos)];
+        const float tokenWeight = token_weights[static_cast<size_t>(pos)];
         if (id < 0 || id >= kVocabSize) {
             error = "CLIP token id at position " + std::to_string(pos) + " is outside the vocabulary range.";
+            return false;
+        }
+        if (!std::isfinite(tokenWeight)) {
+            error = "CLIP token weight at position " + std::to_string(pos) + " is not finite.";
             return false;
         }
         for (int dim = 0; dim < embeddingSize; ++dim) {
@@ -3336,7 +3381,14 @@ bool build_clip_embedding_input(
                     static_cast<size_t>(dim);
             const size_t token_index = static_cast<size_t>(id) * static_cast<size_t>(embeddingSize) +
                     static_cast<size_t>(dim);
-            input[out_index] = fp16_to_float(token_emb[token_index]) + pos_emb[out_index];
+            const float value =
+                    fp16_to_float(token_emb[token_index]) * tokenWeight + pos_emb[out_index];
+            if (!std::isfinite(value)) {
+                error = tokenFile + " or " + positionFile +
+                        " produced a non-finite CLIP input value.";
+                return false;
+            }
+            input[out_index] = value;
         }
     }
     return true;
@@ -3379,6 +3431,19 @@ MNN::Tensor* find_output_by_shape(
     return nullptr;
 }
 
+MNN::Tensor* find_named_output_by_shape(
+        const std::map<std::string, MNN::Tensor*>& outputs,
+        const std::vector<int>& expectedShape,
+        const std::vector<std::string>& preferredNames) {
+    for (const auto& name : preferredNames) {
+        auto it = outputs.find(name);
+        if (it != outputs.end() && mnn_tensor_shape(it->second) == expectedShape) {
+            return it->second;
+        }
+    }
+    return nullptr;
+}
+
 bool run_sdxl_clip_encoder_direct(
         const std::string& root,
         const std::string& modelFile,
@@ -3386,6 +3451,7 @@ bool run_sdxl_clip_encoder_direct(
         const std::string& positionFile,
         int embeddingSize,
         const std::vector<int>& tokenIds,
+        const std::vector<float>& tokenWeights,
         const std::string& backendMode,
         int threads,
         FloatTensorData& hidden,
@@ -3393,7 +3459,15 @@ bool run_sdxl_clip_encoder_direct(
         std::string& error,
         json* debug) {
     std::vector<float> input_values;
-    if (!build_clip_embedding_input(root, tokenIds, tokenFile, positionFile, embeddingSize, input_values, error)) {
+    if (!build_clip_embedding_input(
+            root,
+            tokenIds,
+            tokenWeights,
+            tokenFile,
+            positionFile,
+            embeddingSize,
+            input_values,
+            error)) {
         return false;
     }
     const auto path = root + "/" + modelFile;
@@ -3465,6 +3539,7 @@ bool run_sdxl_clip_encoder_direct(
         }
         (*debug)["outputs"] = outputList;
         (*debug)["inputStats"] = float_vector_stats_json(input_values);
+        (*debug)["tokenWeightStats"] = float_vector_stats_json(tokenWeights);
     }
     const std::vector<int> hiddenShape = {1, 77, embeddingSize};
     auto* hiddenTensor = find_output_by_shape(
@@ -3480,8 +3555,15 @@ bool run_sdxl_clip_encoder_direct(
     }
     if (pooled != nullptr) {
         const std::vector<int> pooledShape = {1, embeddingSize};
-        auto* pooledTensor = find_output_by_shape(
-                outputs, pooledShape, {"pooler_output", "pooled_output", "text_embeds"});
+        const std::vector<std::string> pooledNames = {
+                "pooler_output", "pooled_output", "text_embeds"};
+        auto* pooledTensor = find_named_output_by_shape(
+                outputs, pooledShape, pooledNames);
+        auto* pooledSequenceTensor = find_named_output_by_shape(
+                outputs, hiddenShape, pooledNames);
+        if (pooledTensor == nullptr && pooledSequenceTensor == nullptr) {
+            pooledTensor = find_output_by_shape(outputs, pooledShape, {});
+        }
         if (pooledTensor != nullptr) {
             if (!copy_tensor_to_float_vector(pooledTensor, *pooled, error)) {
                 interpreter->releaseSession(session);
@@ -3492,32 +3574,64 @@ bool run_sdxl_clip_encoder_direct(
                 interpreter->releaseSession(session);
                 return false;
             }
+            if (debug != nullptr) {
+                (*debug)["pooledSource"] = "direct_vector";
+                (*debug)["pooledStats"] = float_vector_stats_json(pooled->values);
+            }
         } else {
-            int eosIndex = 0;
+            int eosIndex = -1;
             for (size_t i = 0; i < tokenIds.size(); ++i) {
                 if (tokenIds[i] == 49407) {
                     eosIndex = static_cast<int>(i);
                     break;
                 }
             }
-            const size_t base = static_cast<size_t>(eosIndex) * static_cast<size_t>(embeddingSize);
-            if (hidden.values.size() < base + static_cast<size_t>(embeddingSize)) {
+            if (eosIndex < 0) {
                 interpreter->releaseSession(session);
-                error = modelFile + " pooled fallback failed because hidden output is too small.";
+                error = modelFile + " pooled output requires an EOS token in the executed CLIP sequence.";
+                return false;
+            }
+            FloatTensorData pooledSequence;
+            const FloatTensorData* pooledSource = &hidden;
+            if (pooledSequenceTensor != nullptr) {
+                if (!copy_tensor_to_float_vector(
+                        pooledSequenceTensor, pooledSequence, error)) {
+                    interpreter->releaseSession(session);
+                    error = modelFile + " sequence pooled output copy failed: " + error;
+                    return false;
+                }
+                if (!validate_float_tensor_contract(
+                        pooledSequence,
+                        hiddenShape,
+                        modelFile + " sequence pooled output",
+                        error)) {
+                    interpreter->releaseSession(session);
+                    return false;
+                }
+                pooledSource = &pooledSequence;
+            }
+            const size_t base = static_cast<size_t>(eosIndex) * static_cast<size_t>(embeddingSize);
+            if (pooledSource->values.size() < base + static_cast<size_t>(embeddingSize)) {
+                interpreter->releaseSession(session);
+                error = modelFile + " pooled sequence output is too small for the EOS token row.";
                 return false;
             }
             pooled->shape = {1, embeddingSize};
             pooled->values.assign(
-                    hidden.values.begin() + base,
-                    hidden.values.begin() + base + static_cast<size_t>(embeddingSize));
-            if (!validate_float_tensor_contract(*pooled, pooledShape, modelFile + " pooled fallback", error)) {
+                    pooledSource->values.begin() + static_cast<std::ptrdiff_t>(base),
+                    pooledSource->values.begin() + static_cast<std::ptrdiff_t>(
+                            base + static_cast<size_t>(embeddingSize)));
+            if (!validate_float_tensor_contract(
+                    *pooled, pooledShape, modelFile + " EOS pooled output", error)) {
                 interpreter->releaseSession(session);
                 return false;
             }
             if (debug != nullptr) {
-                (*debug)["pooledFallback"] = "eos_hidden_state";
-                (*debug)["pooledFallbackTokenIndex"] = eosIndex;
-                (*debug)["pooledFallbackStats"] = float_vector_stats_json(pooled->values);
+                (*debug)["pooledSource"] = pooledSequenceTensor != nullptr
+                        ? "sequence_pooled_output"
+                        : "eos_hidden_state";
+                (*debug)["pooledTokenIndex"] = eosIndex;
+                (*debug)["pooledStats"] = float_vector_stats_json(pooled->values);
             }
         }
     }
@@ -3583,6 +3697,89 @@ bool has_sdxl_qnn_clip_bundle(const std::string& root) {
             file_exists(root + "/pos_emb_2.bin");
 }
 
+bool apply_clip_pair_weights_to_batched_embeddings(
+        FloatTensorData& embeddings,
+        const mca::image::ClipTokenPair& tokenPair,
+        bool includeNegative,
+        std::string& error) {
+    std::vector<const mca::image::ClipTokenSequence*> sequences;
+    if (includeNegative) sequences.push_back(&tokenPair.negative);
+    sequences.push_back(&tokenPair.positive);
+    size_t totalTokens = 0;
+    for (const auto* sequence : sequences) {
+        if (sequence == nullptr || sequence->ids.size() != sequence->weights.size() ||
+                sequence->weights.empty()) {
+            error = "Prompt weighting token IDs and weights are inconsistent.";
+            return false;
+        }
+        if (totalTokens > std::numeric_limits<size_t>::max() - sequence->weights.size()) {
+            error = "Prompt weighting token count overflowed native size limits.";
+            return false;
+        }
+        totalTokens += sequence->weights.size();
+    }
+    if (totalTokens == 0 || embeddings.values.size() % totalTokens != 0) {
+        error = "Text encoder output cannot be divided into prompt token rows.";
+        return false;
+    }
+    const size_t embeddingWidth = embeddings.values.size() / totalTokens;
+    if (embeddingWidth == 0) {
+        error = "Text encoder output has zero embedding width.";
+        return false;
+    }
+    std::vector<float> weighted;
+    weighted.reserve(embeddings.values.size());
+    size_t offset = 0;
+    for (const auto* sequence : sequences) {
+        const size_t elementCount = sequence->weights.size() * embeddingWidth;
+        std::vector<float> input(
+                embeddings.values.begin() + static_cast<std::ptrdiff_t>(offset),
+                embeddings.values.begin() + static_cast<std::ptrdiff_t>(offset + elementCount));
+        std::vector<float> output;
+        mca::image::ClipEmbeddingWeightStats stats;
+        if (!mca::image::apply_clip_token_weights_to_embeddings(
+                input,
+                sequence->weights.size(),
+                embeddingWidth,
+                sequence->weights,
+                true,
+                &output,
+                &stats,
+                &error)) {
+            return false;
+        }
+        weighted.insert(weighted.end(), output.begin(), output.end());
+        offset += elementCount;
+    }
+    if (weighted.size() != embeddings.values.size()) {
+        error = "Weighted text encoder output changed element count.";
+        return false;
+    }
+    embeddings.values = std::move(weighted);
+    return true;
+}
+
+bool append_clip_prompt_weighting_evidence(
+        json& target,
+        const mca::image::ClipTokenPair& tokenPair,
+        bool supported,
+        std::string& error) {
+    const std::string fingerprint = tokenPair.weighting_fingerprint();
+    if (fingerprint.size() != 64U) {
+        error = "Prompt weighting fingerprint could not be derived from executed token sequences.";
+        return false;
+    }
+    target["promptWeightingSupported"] = supported;
+    target["promptWeightingApplied"] = supported &&
+            (tokenPair.negative.weighting_applied || tokenPair.positive.weighting_applied);
+    target["positiveWeightedTokenCount"] =
+            supported ? tokenPair.positive.weighted_token_count : 0U;
+    target["negativeWeightedTokenCount"] =
+            supported ? tokenPair.negative.weighted_token_count : 0U;
+    target["promptWeightFingerprint"] = fingerprint;
+    return true;
+}
+
 json encode_sdxl_prompt_conditioning_to_file(
         const std::string& root,
         const std::string& prompt,
@@ -3591,7 +3788,8 @@ json encode_sdxl_prompt_conditioning_to_file(
         int width,
         int height,
         const std::string& backendMode,
-        int threads) {
+        int threads,
+        bool promptWeightingEnabled) {
     if (is_blank_text(prompt)) {
         return json({{"ok", false}, {"error", "Prompt is empty."}, {"format", "sdxl_qnn_conditioning"}});
     }
@@ -3618,6 +3816,7 @@ json encode_sdxl_prompt_conditioning_to_file(
     clip1TokenizerConfig.eos_id = 49407;
     clip1TokenizerConfig.pad_id = 49407;
     clip1TokenizerConfig.max_length = 77;
+    clip1TokenizerConfig.enable_prompt_weighting = promptWeightingEnabled;
     mca::image::ClipTokenizerConfig clip2TokenizerConfig = clip1TokenizerConfig;
     clip2TokenizerConfig.pad_id = 0;
     mca::image::ClipTokenPair clip1TokenPair;
@@ -3662,24 +3861,28 @@ json encode_sdxl_prompt_conditioning_to_file(
             outputPath.find("\\image_bench\\runs\\") != std::string::npos;
     if (!run_sdxl_clip_encoder_direct(
             root, "clip.mnn", "token_emb.bin", "pos_emb.bin", 768, clip1NegIds,
+            clip1TokenPair.negative.weights,
             canonicalBackend, threads, negClip1, nullptr, error,
             includeDebug ? &debug["clip1_negative"] : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
     if (!run_sdxl_clip_encoder_direct(
             root, "clip.mnn", "token_emb.bin", "pos_emb.bin", 768, clip1PosIds,
+            clip1TokenPair.positive.weights,
             canonicalBackend, threads, posClip1, nullptr, error,
             includeDebug ? &debug["clip1_positive"] : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
     if (!run_sdxl_clip_encoder_direct(
             root, "clip_2.mnn", "token_emb_2.bin", "pos_emb_2.bin", 1280, clip2NegIds,
+            clip2TokenPair.negative.weights,
             canonicalBackend, threads, negClip2, &negPooled, error,
             includeDebug ? &debug["clip2_negative"] : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
     if (!run_sdxl_clip_encoder_direct(
             root, "clip_2.mnn", "token_emb_2.bin", "pos_emb_2.bin", 1280, clip2PosIds,
+            clip2TokenPair.positive.weights,
             canonicalBackend, threads, posClip2, &posPooled, error,
             includeDebug ? &debug["clip2_positive"] : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
@@ -3743,6 +3946,10 @@ json encode_sdxl_prompt_conditioning_to_file(
                     std::vector<float>(combined.begin(), combined.begin() + kTextLen * kHidden))},
             {"backendMode", canonicalBackend}
     });
+    if (!append_clip_prompt_weighting_evidence(
+            result, clip1TokenPair, promptWeightingEnabled, error)) {
+        return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
+    }
     if (includeDebug) {
         result["debug"] = debug;
     }
@@ -3755,13 +3962,15 @@ json encode_community_clip_embeddings_to_file(
         const std::string& negativePrompt,
         const std::string& outputPath,
         const std::string& backendMode,
-        int threads) {
+        int threads,
+        bool promptWeightingEnabled = true) {
     std::string error;
     mca::image::ClipTokenizerConfig tokenizerConfig;
     tokenizerConfig.bos_id = 49406;
     tokenizerConfig.eos_id = 49407;
     tokenizerConfig.pad_id = 49407;
     tokenizerConfig.max_length = 77;
+    tokenizerConfig.enable_prompt_weighting = promptWeightingEnabled;
     mca::image::ClipTokenPair tokenPair;
     if (!mca::image::tokenize_clip_pair_from_json(
             root + "/tokenizer.json",
@@ -3796,6 +4005,7 @@ json encode_community_clip_embeddings_to_file(
     if (!run_community_clip_encoder_direct(
             root,
             neg_ids,
+            tokenPair.negative.weights,
             backendMode,
             threads,
             negative,
@@ -3807,6 +4017,7 @@ json encode_community_clip_embeddings_to_file(
     if (!run_community_clip_encoder_direct(
             root,
             pos_ids,
+            tokenPair.positive.weights,
             backendMode,
             threads,
             positive,
@@ -3849,6 +4060,10 @@ json encode_community_clip_embeddings_to_file(
         {"embeddingDiskDataType", negativeEmbeddingType},
         {"backendMode", backendMode == "opencl" || backendMode == "gpu" ? "opencl" : "cpu"}
     };
+    if (!append_clip_prompt_weighting_evidence(
+            result, tokenPair, promptWeightingEnabled, error)) {
+        return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
+    }
     if (includeDebug) {
         result["debug"] = {
                 {"negative", negativeDebug},
@@ -3874,9 +4089,13 @@ bool tokenize_mnn_sd15_prompt(
         const std::string& prompt,
         const MnnSemanticExecutionContract& contract,
         std::vector<int>& ids,
+        mca::image::ClipTokenPair& executedTokenPair,
+        bool& hasExecutedTokenPair,
         MnnNativeExecutionEvidence& evidence,
         std::string& error) {
     ids.clear();
+    executedTokenPair = mca::image::ClipTokenPair{};
+    hasExecutedTokenPair = false;
     if (contract.tokenizer_backend == "TOKENIZERS_CPP") {
         const auto tokenizerPath = resolve_mnn_tokenizer_json_path(root);
         if (tokenizerPath.empty()) {
@@ -3888,6 +4107,7 @@ bool tokenize_mnn_sd15_prompt(
         tokenizerConfig.eos_id = contract.tokenizer_eos_id;
         tokenizerConfig.pad_id = contract.tokenizer_pad_id;
         tokenizerConfig.max_length = contract.tokenizer_max_length;
+        tokenizerConfig.enable_prompt_weighting = contract.prompt_weighting_supported;
         mca::image::ClipTokenPair pair;
         if (!mca::image::tokenize_clip_pair_from_json(
                 tokenizerPath,
@@ -3900,6 +4120,8 @@ bool tokenize_mnn_sd15_prompt(
         }
         const auto standardIds = pair.negative_then_positive();
         ids.assign(standardIds.begin(), standardIds.end());
+        executedTokenPair = pair;
+        hasExecutedTokenPair = true;
         evidence.tokenizer_backend = "TOKENIZERS_CPP";
     } else if (contract.tokenizer_backend == "MNN_MTOK") {
         if (!contract.negative_prompt.empty()) {
@@ -3931,6 +4153,25 @@ bool tokenize_mnn_sd15_prompt(
         return false;
     }
     evidence.token_count = ids.size();
+    if (contract.prompt_weighting_supported) {
+        if (!hasExecutedTokenPair) {
+            error = "Prompt weighting was enabled without executed TOKENIZERS_CPP sequences.";
+            return false;
+        }
+        evidence.prompt_weighting_applied =
+                executedTokenPair.negative.weighting_applied ||
+                executedTokenPair.positive.weighting_applied;
+        evidence.positive_weighted_token_count =
+                executedTokenPair.positive.weighted_token_count;
+        evidence.negative_weighted_token_count =
+                executedTokenPair.negative.weighted_token_count;
+        evidence.prompt_weight_fingerprint =
+                executedTokenPair.weighting_fingerprint();
+        if (evidence.prompt_weight_fingerprint.size() != 64U) {
+            error = "Prompt weighting fingerprint could not be derived from executed token sequences.";
+            return false;
+        }
+    }
     return true;
 }
 
@@ -4585,7 +4826,8 @@ json encode_sd15_prompt_embeddings_to_file(
         const std::string& negativePrompt,
         const std::string& outputPath,
         const std::string& backendMode,
-        int threads) {
+        int threads,
+        bool promptWeightingEnabled) {
     if (is_blank_text(prompt)) {
         return json({{"ok", false}, {"error", "Prompt is empty."}});
     }
@@ -4596,17 +4838,20 @@ json encode_sd15_prompt_embeddings_to_file(
                 negativePrompt,
                 outputPath,
                 backendMode,
-                threads);
+                threads,
+                promptWeightingEnabled);
     }
     std::string error;
     std::vector<int> ids;
+    mca::image::ClipTokenPair tokenPair;
+    bool hasWeightedTokenPair = false;
     if (file_exists(root + "/tokenizer.json")) {
         mca::image::ClipTokenizerConfig tokenizerConfig;
         tokenizerConfig.bos_id = 49406;
         tokenizerConfig.eos_id = 49407;
         tokenizerConfig.pad_id = 49407;
         tokenizerConfig.max_length = 77;
-        mca::image::ClipTokenPair tokenPair;
+        tokenizerConfig.enable_prompt_weighting = promptWeightingEnabled;
         if (!mca::image::tokenize_clip_pair_from_json(
                 root + "/tokenizer.json",
                 prompt,
@@ -4616,6 +4861,7 @@ json encode_sd15_prompt_embeddings_to_file(
                 &error)) {
             return json({{"ok", false}, {"error", error}});
         }
+        hasWeightedTokenPair = true;
         const auto standardIds = tokenPair.negative_then_positive();
         ids.assign(standardIds.begin(), standardIds.end());
     } else {
@@ -4637,7 +4883,8 @@ json encode_sd15_prompt_embeddings_to_file(
                         negativePrompt,
                         outputPath,
                         backendMode,
-                        threads);
+                        threads,
+                        promptWeightingEnabled);
             }
             return json({{"ok", false}, {"error", "Failed to load MNN-Diffusion tokenizer."}});
         }
@@ -4657,10 +4904,14 @@ json encode_sd15_prompt_embeddings_to_file(
     if (!validate_float_tensor_contract(embeddings, {2, 77, 768}, "Text encoder output", error)) {
         return json({{"ok", false}, {"error", error}});
     }
+    if (hasWeightedTokenPair && !apply_clip_pair_weights_to_batched_embeddings(
+            embeddings, tokenPair, true, error)) {
+        return json({{"ok", false}, {"error", error}});
+    }
     if (!write_float_file(outputPath, embeddings.values, error)) {
         return json({{"ok", false}, {"error", error}});
     }
-    return json({
+    json result = json({
         {"ok", true},
         {"path", outputPath},
         {"bytes", static_cast<long long>(embeddings.values.size() * sizeof(float))},
@@ -4669,6 +4920,20 @@ json encode_sd15_prompt_embeddings_to_file(
         {"tokenCount", ids.size()},
         {"backendMode", backendMode == "opencl" || backendMode == "gpu" ? "opencl" : "cpu"}
     });
+    if (hasWeightedTokenPair) {
+        if (!append_clip_prompt_weighting_evidence(
+                result, tokenPair, promptWeightingEnabled, error)) {
+            return json({{"ok", false}, {"error", error}});
+        }
+    } else {
+        result["promptWeightingSupported"] = false;
+        result["promptWeightingApplied"] = false;
+        result["positiveWeightedTokenCount"] = 0;
+        result["negativeWeightedTokenCount"] = 0;
+        result["promptWeightFingerprint"] =
+                "9b353b1ac542678089ce3d12ee96ddd6ba3b0252ec0675cdf0540e6aa6b1860e";
+    }
+    return result;
 }
 
 json run_mnn_sd15_interpreter_direct(
@@ -4683,7 +4948,17 @@ json run_mnn_sd15_interpreter_direct(
         progressCallback(0);
     }
     std::vector<int> ids;
-    if (!tokenize_mnn_sd15_prompt(root, prompt, contract, ids, evidence, error)) {
+    mca::image::ClipTokenPair executedTokenPair;
+    bool hasExecutedTokenPair = false;
+    if (!tokenize_mnn_sd15_prompt(
+            root,
+            prompt,
+            contract,
+            ids,
+            executedTokenPair,
+            hasExecutedTokenPair,
+            evidence,
+            error)) {
         return json({{"ok", false}, {"error", error}});
     }
     const bool includeDebug =
@@ -4693,6 +4968,14 @@ json run_mnn_sd15_interpreter_direct(
     FloatTensorData embeddings;
     const int conditioningBatch = contract.use_cfg ? 2 : 1;
     std::vector<int> positiveIds(ids.begin() + 77, ids.end());
+    const std::vector<float> unitTokenWeights(77U, 1.0f);
+    const auto& positiveTokenWeights = hasExecutedTokenPair
+            ? executedTokenPair.positive.weights
+            : unitTokenWeights;
+    const auto& negativeTokenWeights = hasExecutedTokenPair
+            ? executedTokenPair.negative.weights
+            : unitTokenWeights;
+    bool communityClipInputWeightingExecuted = false;
     if (progressCallback) {
         progressCallback(1);
     }
@@ -4728,6 +5011,7 @@ json run_mnn_sd15_interpreter_direct(
         if (!run_community_clip_encoder_direct(
                 root,
                 positiveIds,
+                positiveTokenWeights,
                 contract.backend_mode,
                 contract.threads,
                 positiveEmbeddings,
@@ -4752,6 +5036,7 @@ json run_mnn_sd15_interpreter_direct(
             if (!run_community_clip_encoder_direct(
                     root,
                     negativeIds,
+                    negativeTokenWeights,
                     contract.backend_mode,
                     contract.threads,
                     negativeEmbeddings,
@@ -4790,6 +5075,7 @@ json run_mnn_sd15_interpreter_direct(
             if (includeDebug) debug["communityClip"] = {{"positive", positiveDebug}};
         }
         evidence.embedding_disk_data_type = positiveType;
+        communityClipInputWeightingExecuted = true;
     } else if (!run_text_encoder_direct(
             root,
             contract.use_cfg ? ids : positiveIds,
@@ -4807,6 +5093,18 @@ json run_mnn_sd15_interpreter_direct(
             "Text encoder output",
             error)) {
         return json({{"ok", false}, {"error", error}});
+    }
+    if (contract.prompt_weighting_supported && !communityClipInputWeightingExecuted) {
+        if (!hasExecutedTokenPair || !apply_clip_pair_weights_to_batched_embeddings(
+                embeddings,
+                executedTokenPair,
+                contract.use_cfg,
+                error)) {
+            if (error.empty()) {
+                error = "Prompt weighting execution evidence is unavailable.";
+            }
+            return json({{"ok", false}, {"error", error}});
+        }
     }
     if (evidence.embedding_disk_data_type != contract.embedding_disk_data_type) {
         return json({
@@ -6079,6 +6377,104 @@ jintArray tokenize_prompt_token_ids(
     }
     return result;
 }
+
+void write_u32_little_endian(std::ostream& output, uint32_t value) {
+    const std::array<uint8_t, 4> bytes = {
+        static_cast<uint8_t>(value & 0xffU),
+        static_cast<uint8_t>((value >> 8U) & 0xffU),
+        static_cast<uint8_t>((value >> 16U) & 0xffU),
+        static_cast<uint8_t>((value >> 24U) & 0xffU),
+    };
+    output.write(
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+}
+
+json encode_prompt_token_ids_with_weights_from_json(
+        const std::string& tokenizerJsonPath,
+        const std::string& prompt,
+        const std::string& negativePrompt,
+        int32_t bosId,
+        int32_t eosId,
+        int32_t padId,
+        int maxTokens,
+        const std::string& outputPath) {
+    if (maxTokens <= 0 || maxTokens > 4096 || outputPath.empty()) {
+        return json({{"ok", false}, {"error", "Weighted CLIP token payload arguments are invalid."}});
+    }
+    mca::image::ClipTokenizerConfig config;
+    config.bos_id = bosId;
+    config.eos_id = eosId;
+    config.pad_id = padId;
+    config.max_length = maxTokens;
+    config.enable_prompt_weighting = true;
+    mca::image::ClipTokenPair pair;
+    std::string error;
+    if (!mca::image::tokenize_clip_pair_from_json(
+            tokenizerJsonPath,
+            prompt,
+            negativePrompt,
+            config,
+            &pair,
+            &error)) {
+        return json({{"ok", false}, {"error", error}});
+    }
+    const auto ids = pair.negative_then_positive();
+    const auto weights = pair.negative_then_positive_weights();
+    const size_t expectedCount = static_cast<size_t>(maxTokens) * 2U;
+    const std::string fingerprint = pair.weighting_fingerprint();
+    if (ids.size() != expectedCount || weights.size() != expectedCount ||
+            fingerprint.size() != 64U ||
+            expectedCount > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        return json({
+            {"ok", false},
+            {"error", "Weighted CLIP token payload is internally inconsistent."}
+        });
+    }
+    const std::string temporaryPath = outputPath + ".part";
+    ::unlink(temporaryPath.c_str());
+    ::unlink(outputPath.c_str());
+    std::ofstream output(temporaryPath.c_str(), std::ios::binary | std::ios::trunc);
+    if (!output.good()) {
+        return json({{"ok", false}, {"error", "Failed to open weighted CLIP token payload."}});
+    }
+    static constexpr std::array<char, 8> kMagic = {
+        'M', 'C', 'A', 'Q', 'P', 'W', '0', '1'
+    };
+    output.write(kMagic.data(), static_cast<std::streamsize>(kMagic.size()));
+    write_u32_little_endian(output, 1U);
+    write_u32_little_endian(output, static_cast<uint32_t>(expectedCount));
+    for (const int32_t id : ids) {
+        write_u32_little_endian(output, static_cast<uint32_t>(id));
+    }
+    for (const float weight : weights) {
+        uint32_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(weight), "float32 payload requires 32-bit float");
+        std::memcpy(&bits, &weight, sizeof(bits));
+        write_u32_little_endian(output, bits);
+    }
+    output.flush();
+    const bool writeOk = output.good();
+    output.close();
+    if (!writeOk || !output.good() || ::rename(temporaryPath.c_str(), outputPath.c_str()) != 0 ||
+            !nonempty_regular_file_exists(outputPath)) {
+        ::unlink(temporaryPath.c_str());
+        ::unlink(outputPath.c_str());
+        return json({{"ok", false}, {"error", "Failed to publish weighted CLIP token payload."}});
+    }
+    json result = {
+        {"ok", true},
+        {"conditioningFormat", "qnn_clip_token_ids_weights_v1"},
+        {"tokenizerBackend", "tokenizers_cpp"},
+        {"tokenCount", ids.size()},
+        {"outputPath", outputPath}
+    };
+    if (!append_clip_prompt_weighting_evidence(result, pair, true, error)) {
+        ::unlink(outputPath.c_str());
+        return json({{"ok", false}, {"error", error}});
+    }
+    return result;
+}
 #endif
 
 extern "C" JNIEXPORT jintArray JNICALL
@@ -6177,6 +6573,45 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptToken
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodePromptTokenIdsWithWeightsFromJson(
+        JNIEnv* env,
+        jobject,
+        jstring tokenizerJsonPath,
+        jstring prompt,
+        jstring negativePrompt,
+        jint bosId,
+        jint eosId,
+        jint padId,
+        jint maxTokens,
+        jstring outputPath) {
+#if MCA_WITH_MNN_DIFFUSION
+    const auto result = encode_prompt_token_ids_with_weights_from_json(
+            normalize_mnn_model_path(jstring_to_std(env, tokenizerJsonPath)),
+            jstring_to_std(env, prompt),
+            jstring_to_std(env, negativePrompt),
+            static_cast<int32_t>(bosId),
+            static_cast<int32_t>(eosId),
+            static_cast<int32_t>(padId),
+            static_cast<int>(maxTokens),
+            normalize_mnn_model_path(jstring_to_std(env, outputPath)));
+#else
+    (void)tokenizerJsonPath;
+    (void)prompt;
+    (void)negativePrompt;
+    (void)bosId;
+    (void)eosId;
+    (void)padId;
+    (void)maxTokens;
+    (void)outputPath;
+    const auto result = json({
+        {"ok", false},
+        {"error", "MNN-Diffusion tokenizer support is not linked in this APK."}
+    });
+#endif
+    return utf8_to_jstring(env, result.dump());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmbeddings(
         JNIEnv* env,
         jobject,
@@ -6186,7 +6621,8 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmb
         jstring outputPath,
         jstring backendMode,
         jint threads,
-        jstring tokenEmbeddingMode) {
+        jstring tokenEmbeddingMode,
+        jboolean promptWeightingEnabled) {
 #if MCA_WITH_MNN_DIFFUSION
     const auto root = normalize_mnn_model_path(jstring_to_std(env, bundleRoot));
     // Retained only for the existing JNI method descriptor. Dtype selection is
@@ -6198,7 +6634,8 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmb
             jstring_to_std(env, negativePrompt),
             jstring_to_std(env, outputPath),
             jstring_to_std(env, backendMode),
-            std::max(1, static_cast<int>(threads))).dump();
+            std::max(1, static_cast<int>(threads)),
+            promptWeightingEnabled == JNI_TRUE).dump();
 #else
     (void)bundleRoot;
     (void)prompt;
@@ -6207,6 +6644,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmb
     (void)backendMode;
     (void)threads;
     (void)tokenEmbeddingMode;
+    (void)promptWeightingEnabled;
     const auto out = json({
         {"ok", false},
         {"error", "MNN-Diffusion native runner is not linked in this APK."}
@@ -6226,7 +6664,8 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptCon
         jint width,
         jint height,
         jstring backendMode,
-        jint threads) {
+        jint threads,
+        jboolean promptWeightingEnabled) {
 #if MCA_WITH_MNN_DIFFUSION
     const auto root = normalize_mnn_model_path(jstring_to_std(env, bundleRoot));
     const auto out = encode_sdxl_prompt_conditioning_to_file(
@@ -6237,7 +6676,8 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptCon
             std::max(256, static_cast<int>(width)),
             std::max(256, static_cast<int>(height)),
             jstring_to_std(env, backendMode),
-            std::max(1, static_cast<int>(threads))).dump();
+            std::max(1, static_cast<int>(threads)),
+            promptWeightingEnabled == JNI_TRUE).dump();
 #else
     (void)bundleRoot;
     (void)prompt;
@@ -6247,6 +6687,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptCon
     (void)height;
     (void)backendMode;
     (void)threads;
+    (void)promptWeightingEnabled;
     const auto out = json({
         {"ok", false},
         {"error", "MNN-Diffusion native runner is not linked in this APK."},

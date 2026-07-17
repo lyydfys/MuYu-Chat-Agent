@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -20,12 +21,29 @@ struct ClipTokenizerConfig {
     int max_length = 77;
     bool add_bos = true;
     bool add_eos = true;
+    // Kept off by default so existing profiles continue to tokenize brackets
+    // literally. A resolved execution profile must opt in explicitly.
+    bool enable_prompt_weighting = false;
+};
+
+struct WeightedPromptFragment {
+    std::string text;
+    float weight = 1.0f;
 };
 
 struct ClipTokenSequence {
     std::vector<int32_t> ids;
+    std::vector<float> weights;
     size_t untruncated_token_count = 0;
     bool truncated = false;
+    bool weighting_applied = false;
+    size_t weighted_token_count = 0;
+    float min_weight = 1.0f;
+    float max_weight = 1.0f;
+    float mean_weight = 1.0f;
+    // SHA-256 over a domain-separated, fixed-little-endian serialization of
+    // token ids and weights quantized to six decimal places.
+    std::string weighting_fingerprint;
 };
 
 struct ClipTokenPair {
@@ -33,7 +51,56 @@ struct ClipTokenPair {
     ClipTokenSequence positive;
 
     std::vector<int32_t> negative_then_positive() const;
+    std::vector<float> negative_then_positive_weights() const;
+    // Domain-separated SHA-256 over both complete fixed-length sequences.
+    std::string weighting_fingerprint() const;
 };
+
+struct ClipEmbeddingWeightStats {
+    bool weighting_applied = false;
+    size_t weighted_token_count = 0;
+    float input_mean_amplitude = 0.0f;
+    float weighted_mean_amplitude = 0.0f;
+    float normalization_scale = 1.0f;
+    float output_mean_amplitude = 0.0f;
+};
+
+using ClipFragmentEncoder = std::function<bool(
+        const std::string& text, std::vector<int32_t>* token_ids, std::string* error)>;
+
+/**
+ * Parses the common prompt-attention notation without changing the text that
+ * is sent to the tokenizer. Supported forms are (text), [text],
+ * (text:1.5), nesting, and backslash escaping. Adjacent fragments with equal
+ * effective weights are merged so whitespace at their boundary is retained.
+ */
+bool parse_clip_prompt_weighting(const std::string& prompt,
+                                 std::vector<WeightedPromptFragment>* fragments,
+                                 std::string* error);
+
+/**
+ * Builds one fixed-length CLIP sequence. When enable_prompt_weighting is true,
+ * each weighted fragment is tokenized independently; otherwise the complete
+ * prompt is sent to the encoder literally and all weights remain 1.0. The
+ * supplied encoder must not add special tokens. BOS/EOS/PAD always carry
+ * weight 1.0, including the EOS inserted after truncation.
+ */
+bool tokenize_weighted_clip_sequence_with_encoder(const std::string& prompt,
+                                                  const ClipTokenizerConfig& config,
+                                                  const ClipFragmentEncoder& encoder,
+                                                  ClipTokenSequence* output, std::string* error);
+
+/**
+ * Applies one weight per token row to a flat [tokenCount, embeddingWidth]
+ * tensor. Optional mean-amplitude normalization preserves the input tensor's
+ * mean absolute magnitude, avoiding a global conditioning-strength drift.
+ */
+bool apply_clip_token_weights_to_embeddings(const std::vector<float>& embeddings,
+                                            size_t token_count, size_t embedding_width,
+                                            const std::vector<float>& weights,
+                                            bool normalize_mean_amplitude,
+                                            std::vector<float>* weighted_embeddings,
+                                            ClipEmbeddingWeightStats* stats, std::string* error);
 
 /**
  * Loads a Hugging Face tokenizer.json and executes its complete normalizer,
@@ -41,12 +108,10 @@ struct ClipTokenPair {
  * remain explicit profile data so SD1.x and the two SDXL encoders do not share
  * an accidental global rule.
  */
-bool tokenize_clip_pair_from_json(
-        const std::string& tokenizer_json_path,
-        const std::string& positive_prompt,
-        const std::string& negative_prompt,
-        const ClipTokenizerConfig& config,
-        ClipTokenPair* output,
-        std::string* error);
+bool tokenize_clip_pair_from_json(const std::string& tokenizer_json_path,
+                                  const std::string& positive_prompt,
+                                  const std::string& negative_prompt,
+                                  const ClipTokenizerConfig& config, ClipTokenPair* output,
+                                  std::string* error);
 
 }  // namespace mca::image

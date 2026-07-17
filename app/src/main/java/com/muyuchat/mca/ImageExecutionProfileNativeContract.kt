@@ -8,7 +8,8 @@ internal const val IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID =
 
 internal data class ImageValidatedNativeExecution(
     val nativeEffective: ImageNativeEffectiveExecution,
-    val validation: ImageExecutionContractValidation
+    val validation: ImageExecutionContractValidation,
+    val pixelRange: ImagePixelRange? = null
 )
 
 internal class ImageNativeExecutionContractException(
@@ -42,6 +43,11 @@ internal object ImageExecutionProfileNativeContract {
         "unconditionalBranch",
         "tokenizerBackend",
         "tokenCount",
+        "promptWeightingSupported",
+        "promptWeightingApplied",
+        "positiveWeightedTokenCount",
+        "negativeWeightedTokenCount",
+        "promptWeightFingerprint",
         "embeddingDiskDataType",
         "vaeScalingLocation",
         "vaeScalingFactor",
@@ -51,6 +57,27 @@ internal object ImageExecutionProfileNativeContract {
         "graphName",
         "fallback"
     )
+
+    val nativeEvidenceOnlyFields: Set<String> = linkedSetOf(
+        "promptWeightingApplied",
+        "positiveWeightedTokenCount",
+        "negativeWeightedTokenCount",
+        "promptWeightFingerprint"
+    )
+
+    /** QNN-only nativeEffective fields; these must not become global runtime requirements. */
+    val qnnNativeEffectiveFields: Set<String> = linkedSetOf("pixelRange")
+
+    /** QNN VAE conversion proof emitted only after actual native pixel conversion. */
+    val qnnPixelRangeEvidenceFields: Set<String> = linkedSetOf(
+        "pixelRangeConversion",
+        "pixelRangeValueCount",
+        "pixelRangeClampedValueCount",
+        "pixelRangeObservedMin",
+        "pixelRangeObservedMax"
+    )
+
+    val resolvedRequestFields: Set<String> = requiredFields - nativeEvidenceOnlyFields
 
     fun toNativeParamsJson(resolution: ImageExecutionProfileResolution): JSONObject =
         resolution.layers.resolved.toJson().apply {
@@ -84,6 +111,16 @@ internal object ImageExecutionProfileNativeContract {
                 .firstOrNull()
                 ?.lastOrNull()
                 ?.let { put("expectedConditioningWidth", it) }
+            if (profile.runtime == LocalImageRuntime.QNN_HTP) {
+                val pixelRange = profile.vae.outputRange
+                if (pixelRange == ImagePixelRange.RUNTIME_NATIVE) {
+                    invalid(
+                        "pixelRange",
+                        "QNN image execution requires an explicit VAE output pixel range."
+                    )
+                }
+                put("pixelRange", pixelRange.name)
+            }
         }
 
     fun toNativeParamsJsonString(resolution: ImageExecutionProfileResolution): String =
@@ -116,6 +153,11 @@ internal object ImageExecutionProfileNativeContract {
                 "Native image execution must report a complete nativeEffective object."
             )
         val nativeEffective = nativeEffectiveJson.toNativeEffective()
+        val pixelRange = if (resolution.layers.resolved.runtime == LocalImageRuntime.QNN_HTP) {
+            validateQnnPixelRange(resolution, nativeEffectiveJson)
+        } else {
+            null
+        }
         val validation = ImageExecutionContractValidator.validate(
             resolution.layers.copy(nativeEffective = nativeEffective)
         )
@@ -130,8 +172,53 @@ internal object ImageExecutionProfileNativeContract {
         }
         return ImageValidatedNativeExecution(
             nativeEffective = nativeEffective,
-            validation = validation
+            validation = validation,
+            pixelRange = pixelRange
         )
+    }
+
+    fun qnnPixelRangeConversionName(range: ImagePixelRange): String = when (range) {
+        ImagePixelRange.NEGATIVE_ONE_TO_ONE -> "negative_one_to_one_to_u8"
+        ImagePixelRange.ZERO_TO_ONE -> "zero_to_one_to_u8"
+        ImagePixelRange.ZERO_TO_255 -> "zero_to_255_to_u8"
+        ImagePixelRange.RUNTIME_NATIVE -> invalid(
+            "pixelRange",
+            "QNN image execution cannot infer a runtime-native VAE output pixel range."
+        )
+    }
+
+    private fun validateQnnPixelRange(
+        resolution: ImageExecutionProfileResolution,
+        nativeEffective: JSONObject
+    ): ImagePixelRange {
+        val expected = resolution.profile.vae.outputRange
+        if (expected == ImagePixelRange.RUNTIME_NATIVE) {
+            invalid(
+                "pixelRange",
+                "Resolved QNN image profile must declare an explicit VAE output pixel range."
+            )
+        }
+        val actual = nativeEffective.requiredEnum("pixelRange", ImagePixelRange.entries)
+        if (actual == ImagePixelRange.RUNTIME_NATIVE) {
+            invalid(
+                "pixelRange",
+                "Native QNN image execution must report an explicit VAE output pixel range."
+            )
+        }
+        if (actual != expected) {
+            val mismatch = ImageExecutionMismatch(
+                field = "pixelRange",
+                resolved = expected.name,
+                nativeEffective = actual.name
+            )
+            throw ImageNativeExecutionContractException(
+                code = EXECUTION_CONTRACT_MISMATCH,
+                field = "pixelRange",
+                mismatches = listOf(mismatch),
+                message = "Native QNN pixel range differs from the resolved VAE contract."
+            )
+        }
+        return actual
     }
 
     private fun ImageResolvedExecution.toJson(): JSONObject = JSONObject()
@@ -149,6 +236,7 @@ internal object ImageExecutionProfileNativeContract {
         .put("unconditionalBranch", unconditionalBranch)
         .put("tokenizerBackend", tokenizerBackend.name)
         .put("tokenCount", tokenCount)
+        .put("promptWeightingSupported", promptWeightingSupported)
         .put("embeddingDiskDataType", embeddingDiskDataType.name)
         .put("vaeScalingLocation", vaeScalingLocation.name)
         .put("vaeScalingFactor", vaeScalingFactor)
@@ -158,8 +246,8 @@ internal object ImageExecutionProfileNativeContract {
         .put("graphName", graphName)
         .put("fallback", fallback)
 
-    private fun JSONObject.toNativeEffective(): ImageNativeEffectiveExecution =
-        ImageNativeEffectiveExecution(
+    private fun JSONObject.toNativeEffective(): ImageNativeEffectiveExecution {
+        val native = ImageNativeEffectiveExecution(
             profileId = requiredString("profileId"),
             profileRevision = requiredInt("profileRevision"),
             modelFingerprint = requiredString("modelFingerprint"),
@@ -174,6 +262,11 @@ internal object ImageExecutionProfileNativeContract {
             unconditionalBranch = requiredBoolean("unconditionalBranch"),
             tokenizerBackend = requiredEnum("tokenizerBackend", ImageTokenizerBackend.entries),
             tokenCount = requiredInt("tokenCount"),
+            promptWeightingSupported = requiredBoolean("promptWeightingSupported"),
+            promptWeightingApplied = requiredBoolean("promptWeightingApplied"),
+            positiveWeightedTokenCount = requiredInt("positiveWeightedTokenCount"),
+            negativeWeightedTokenCount = requiredInt("negativeWeightedTokenCount"),
+            promptWeightFingerprint = requiredString("promptWeightFingerprint").lowercase(),
             embeddingDiskDataType = requiredEnum(
                 "embeddingDiskDataType",
                 ImageEmbeddingDiskDataType.entries
@@ -189,6 +282,55 @@ internal object ImageExecutionProfileNativeContract {
             graphName = requiredString("graphName"),
             fallback = requiredBoolean("fallback")
         )
+        return validatePromptWeightingEvidence(native)
+    }
+
+    internal fun validatePromptWeightingEvidence(
+        native: ImageNativeEffectiveExecution
+    ): ImageNativeEffectiveExecution {
+        if (native.positiveWeightedTokenCount !in 0..native.tokenCount) {
+            invalid(
+                "positiveWeightedTokenCount",
+                "Native positive weighted-token count must fit the executed token capacity."
+            )
+        }
+        if (native.negativeWeightedTokenCount !in 0..native.tokenCount) {
+            invalid(
+                "negativeWeightedTokenCount",
+                "Native negative weighted-token count must fit the executed token capacity."
+            )
+        }
+        if (
+            native.positiveWeightedTokenCount + native.negativeWeightedTokenCount >
+            native.tokenCount
+        ) {
+            invalid(
+                "positiveWeightedTokenCount,negativeWeightedTokenCount",
+                "Native weighted-token counts exceed the executed positive/negative capacity."
+            )
+        }
+        if (!SHA256.matches(native.promptWeightFingerprint)) {
+            invalid(
+                "promptWeightFingerprint",
+                "Native prompt-weight fingerprint must be a 64-character SHA-256 value."
+            )
+        }
+        val weightedTokenCount =
+            native.positiveWeightedTokenCount + native.negativeWeightedTokenCount
+        if (native.promptWeightingApplied && weightedTokenCount == 0) {
+            invalid(
+                "promptWeightingApplied",
+                "Applied prompt weighting requires at least one weighted prompt token."
+            )
+        }
+        if (!native.promptWeightingApplied && weightedTokenCount != 0) {
+            invalid(
+                "promptWeightingApplied",
+                "Weighted-token counts must be zero when prompt weighting was not applied."
+            )
+        }
+        return native
+    }
 
     private fun JSONObject.requiredValue(field: String): Any {
         if (!has(field) || isNull(field)) invalid(field, "Required native execution field is missing.")
@@ -256,4 +398,6 @@ internal object ImageExecutionProfileNativeContract {
             message = message,
             cause = cause
         )
+
+    private val SHA256 = Regex("^[0-9a-f]{64}$")
 }

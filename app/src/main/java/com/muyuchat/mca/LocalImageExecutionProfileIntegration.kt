@@ -70,17 +70,97 @@ internal fun resolveLocalImageExecutionProfile(
             manifestProfile = manifestProfile,
             sidecar = sidecar,
             capabilityDiscovery = discovery,
+            recommendationEvidence = localImageRecommendationEvidence(
+                model = model,
+                bundleRoot = canonicalRoot,
+                manifestJson = manifestJson
+            ),
             userOverrides = overrides
         )
     )
     require(resolution.profile.runtime == model.runtime) {
         "Image execution profile runtime ${resolution.profile.runtime} does not match ${model.runtime}."
     }
-    require(resolution.profile.family == effectiveFamily) {
+    require(effectiveFamily == LocalImageModelFamily.CUSTOM || resolution.profile.family == effectiveFamily) {
         "Image execution profile family ${resolution.profile.family} does not match $effectiveFamily."
     }
     return resolution
 }
+
+/**
+ * Collects package identity without consulting hardware. Exact catalog
+ * matching may select a richer execution profile; unknown evidence remains a
+ * normal generic-compatible import.
+ */
+internal fun localImageRecommendationEvidence(
+    model: LocalImageModelRecord,
+    bundleRoot: File?,
+    manifestJson: JSONObject?
+): ImageRecommendationEvidence {
+    val aliases = buildList {
+        add(model.id)
+        manifestJson?.optString("recommendationId")?.takeIf(String::isNotBlank)?.let(::add)
+        manifestJson?.optString("id")?.takeIf(String::isNotBlank)?.let(::add)
+    }
+    val sourceRepositories = buildList {
+        model.source.takeIf(String::isNotBlank)?.let(::add)
+        manifestJson?.optString("sourceRepo")?.takeIf(String::isNotBlank)?.let(::add)
+        val components = manifestJson?.optJSONArray("components")
+        if (components != null) {
+            for (index in 0 until components.length()) {
+                val component = components.optJSONObject(index) ?: continue
+                val role = component.optString("role").trim().uppercase()
+                if (role in PRIMARY_IMAGE_COMPONENT_ROLES) {
+                    component.optString("sourceRepo").takeIf(String::isNotBlank)?.let(::add)
+                }
+            }
+        }
+    }
+    val artifactPaths = buildList {
+        add(model.displayName)
+        add(model.fileName)
+        add(model.path)
+        model.bundleRoot?.takeIf(String::isNotBlank)?.let(::add)
+        bundleRoot?.absolutePath?.takeIf(String::isNotBlank)?.let(::add)
+        listOf("title", "recommendedFileName", "primary", "primaryFile").forEach { field ->
+            manifestJson?.optString(field)?.takeIf(String::isNotBlank)?.let(::add)
+        }
+        val components = manifestJson?.optJSONArray("components")
+        if (components != null) {
+            for (index in 0 until components.length()) {
+                val component = components.optJSONObject(index) ?: continue
+                listOf("path", "fileName", "sourcePath").forEach { field ->
+                    component.optString(field).takeIf(String::isNotBlank)?.let(::add)
+                }
+            }
+        }
+    }
+    return ImageRecommendationEvidence(
+        aliases = aliases.distinct(),
+        sourceRepositories = sourceRepositories.distinct(),
+        artifactPaths = artifactPaths.distinct()
+    )
+}
+
+/** A quality-bound MNN SD1.5 profile can only use the strict direct runner. */
+internal fun resolveMnnDiffusionProfileRunner(
+    profile: ImageExecutionProfile,
+    requestedRunner: String?
+): String {
+    val resolved = resolveMnnDiffusionRunner(profile.family, requestedRunner)
+    if (
+        profile.runtime == LocalImageRuntime.MNN_DIFFUSION &&
+        profile.profileId == "mnn.sd15.official.512"
+    ) {
+        require(resolved == "direct") {
+            "The MNN SD1.5 quality profile requires runner=direct; module cannot satisfy its execution contract."
+        }
+        return "direct"
+    }
+    return resolved
+}
+
+private val PRIMARY_IMAGE_COMPONENT_ROLES = setOf("DIFFUSION", "MODEL", "UNET", "TRANSFORMER")
 
 internal fun imageSchedulerAlgorithmFromProductName(value: String): ImageSchedulerAlgorithm =
     when (value.trim().lowercase().replace('-', '_').replace(' ', '_')) {
@@ -137,6 +217,7 @@ private fun discoverLocalImageExecutionCapabilities(
         maxLength = maxLength,
         clip1PadRule = ImageClipPadRule.EOS,
         clip2PadRule = if (family == LocalImageModelFamily.SDXL) ImageClipPadRule.ZERO else null,
+        supportsPromptWeighting = tokenizerJson != null,
         separateNegativePrompt = true
     )
     val width = when (family) {

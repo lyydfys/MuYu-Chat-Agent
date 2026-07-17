@@ -419,8 +419,10 @@ internal fun mergeSdxlPhaseNativeResults(
     val mimeType = vaeNative.getString("mimeType")
     require(mimeType == "image/png") { "VAE output MIME proof mismatch." }
 
-    val finalResult = unetEffective.toSdxlNativeEffectiveJson()
-    finalResult.put("nativeEffective", unetEffective.toSdxlNativeEffectiveJson())
+    val nativeEffectiveJson = unetEffective.toSdxlNativeEffectiveJson()
+        .put("pixelRange", contract.pixelRange.name)
+    val finalResult = JSONObject(nativeEffectiveJson.toString())
+    finalResult.put("nativeEffective", nativeEffectiveJson)
         .put("ok", true)
         .put("backend", "qnn_htp")
         .put("npuActive", true)
@@ -451,6 +453,7 @@ internal fun mergeSdxlPhaseNativeResults(
         )
         .put("vaeScalingLocation", vaeNative.getString("vaeScalingLocation"))
         .put("vaeScalingFactor", vaeNative.getDouble("vaeScalingFactor"))
+        .put("pixelRange", vaeNative.getString("pixelRange"))
         .put("effectiveVaeHostScale", vaeNative.getDouble("effectiveVaeHostScale"))
         .put("vaeExecutionCount", vaeNative.getInt("vaeExecutionCount"))
         .put("outputPath", outputFile.canonicalPath)
@@ -471,7 +474,16 @@ internal fun mergeSdxlPhaseNativeResults(
             finalResult.put(field, unetNative.get(field))
         }
     }
-    listOf("vaeContextLoadMs", "vaeExecuteMs", "pixelChecksum").forEach { field ->
+    listOf(
+        "vaeContextLoadMs",
+        "vaeExecuteMs",
+        "pixelChecksum",
+        "pixelRangeConversion",
+        "pixelRangeValueCount",
+        "pixelRangeClampedValueCount",
+        "pixelRangeObservedMin",
+        "pixelRangeObservedMax"
+    ).forEach { field ->
         if (vaeNative.has(field) && !vaeNative.isNull(field)) {
             finalResult.put(field, vaeNative.get(field))
         }

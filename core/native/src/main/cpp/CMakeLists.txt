@@ -40,7 +40,10 @@ add_library(mca_qnn_native SHARED qnn_native_bridge.cpp)
 target_sources(mca_mnn_native PRIVATE
         image_conditioning.cpp
         diffusion_scheduler.cpp)
-target_sources(mca_qnn_native PRIVATE diffusion_scheduler.cpp)
+target_sources(mca_qnn_native PRIVATE
+        image_conditioning.cpp
+        diffusion_scheduler.cpp)
+target_compile_definitions(mca_qnn_native PRIVATE MCA_WITH_TOKENIZERS_CPP=0)
 
 # tokenizers-cpp executes the complete Hugging Face tokenizer.json contract.
 # Release builds use only the pinned third_party submodule so clean checkouts

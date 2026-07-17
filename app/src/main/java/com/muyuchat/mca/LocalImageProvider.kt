@@ -447,6 +447,9 @@ class LocalImageProvider(context: Context) {
                 bundleRoot = bundleRoot
             )
             val profile = profileResolution.profile
+            val resolved = profileResolution.layers.resolved
+            val effectiveNegativePrompt =
+                effectiveOptions.negativePrompt ?: profile.defaults.defaultNegativePrompt.orEmpty()
             val effectiveFamily = profile.family
             val isSdxlQnn = effectiveFamily == LocalImageModelFamily.SDXL
             // Qualcomm's Gen5 archives include a native QNN CLIP graph.  Keep
@@ -471,7 +474,11 @@ class LocalImageProvider(context: Context) {
                 if (isSdxlQnn) {
                     "${outputFile.nameWithoutExtension}.sdxl-conditioning.f32"
                 } else if (usesQnnClipTokenIds) {
-                    "${outputFile.nameWithoutExtension}.qnn-clip-token-ids.i32"
+                    if (resolved.promptWeightingSupported) {
+                        "${outputFile.nameWithoutExtension}.qnn-clip-conditioning.bin"
+                    } else {
+                        "${outputFile.nameWithoutExtension}.qnn-clip-token-ids.i32"
+                    }
                 } else {
                     "${outputFile.nameWithoutExtension}.sd15-embeddings.f32"
                 }
@@ -519,10 +526,7 @@ class LocalImageProvider(context: Context) {
 
             val params = ImageExecutionProfileNativeContract.toNativeParamsJson(profileResolution)
                 .put("prompt", prompt.trim())
-                .put(
-                    "negativePrompt",
-                    effectiveOptions.negativePrompt ?: profile.defaults.defaultNegativePrompt.orEmpty()
-                )
+                .put("negativePrompt", effectiveNegativePrompt)
                 .put("family", effectiveFamily.name)
                 .put("variant", profile.variant.name)
                 .put("width", width)
@@ -543,7 +547,14 @@ class LocalImageProvider(context: Context) {
             if (isSdxlQnn) {
                 params.put("conditioningFormat", "sdxl_qnn_conditioning")
             } else if (usesQnnClipTokenIds) {
-                params.put("conditioningFormat", "qnn_clip_token_ids_i32")
+                params.put(
+                    "conditioningFormat",
+                    if (resolved.promptWeightingSupported) {
+                        "qnn_clip_token_ids_weights_v1"
+                    } else {
+                        "qnn_clip_token_ids_i32"
+                    }
+                )
             }
 
             try {
@@ -559,12 +570,13 @@ class LocalImageProvider(context: Context) {
                     mnnDiffusionBridge.encodeSdxlPromptConditioning(
                         conditioningRoot.absolutePath,
                         prompt.trim(),
-                        profile.defaults.defaultNegativePrompt.orEmpty(),
+                        effectiveNegativePrompt,
                         embeddingFile.absolutePath,
                         width,
                         height,
                         contract.backendMode,
-                        threads
+                        threads,
+                        resolved.promptWeightingSupported
                     )
                 } else if (usesQnnClipTokenIds) {
                     encodeQnnClipPromptTokenIds(
@@ -572,7 +584,7 @@ class LocalImageProvider(context: Context) {
                         bundleRoot = bundleRoot,
                         prompt = prompt.trim(),
                         outputFile = embeddingFile,
-                        negativePrompt = profile.defaults.defaultNegativePrompt.orEmpty(),
+                        negativePrompt = effectiveNegativePrompt,
                         bosId = requireNotNull(profile.tokenizer.bosId) {
                             "Resolved tokenizer profile is missing BOS id."
                         },
@@ -582,17 +594,19 @@ class LocalImageProvider(context: Context) {
                         padId = requireNotNull(profile.tokenizer.padId) {
                             "Resolved tokenizer profile is missing PAD id."
                         },
-                        maxTokens = profile.tokenizer.maxLength
+                        maxTokens = profile.tokenizer.maxLength,
+                        promptWeightingEnabled = resolved.promptWeightingSupported
                     )
                 } else {
                     mnnDiffusionBridge.encodeSd15PromptEmbeddings(
                         bundleRoot.absolutePath,
                         prompt.trim(),
-                        profile.defaults.defaultNegativePrompt.orEmpty(),
+                        effectiveNegativePrompt,
                         embeddingFile.absolutePath,
                         contract.backendMode,
                         threads,
-                        contract.tokenEmbeddingMode
+                        contract.tokenEmbeddingMode,
+                        resolved.promptWeightingSupported
                     )
                 }
                 val embeddingJson = JSONObject(embeddingRaw)
@@ -614,6 +628,12 @@ class LocalImageProvider(context: Context) {
                         "Prompt conditioning format mismatch: resolved=$requestedConditioningFormat, " +
                             "encoder=$actualConditioningFormat."
                     }
+                }
+                ImageExecutionProfileNativeContract.nativeEvidenceOnlyFields.forEach { field ->
+                    require(embeddingJson.has(field) && !embeddingJson.isNull(field)) {
+                        "Prompt conditioning did not report native weighting evidence: $field"
+                    }
+                    params.put(field, embeddingJson.get(field))
                 }
                 if (cancellationRequested.get()) {
                     error("本地生图已停止")
@@ -741,7 +761,9 @@ class LocalImageProvider(context: Context) {
             )
             val profile = profileResolution.profile
             val resolved = profileResolution.layers.resolved
-            val runner = resolveMnnDiffusionRunner(profile.family, effectiveOptions.runner)
+            val effectiveNegativePrompt =
+                effectiveOptions.negativePrompt ?: profile.defaults.defaultNegativePrompt.orEmpty()
+            val runner = resolveMnnDiffusionProfileRunner(profile, effectiveOptions.runner)
             val (defaultWidth, defaultHeight) = resolved.width to resolved.height
             // The direct SD1.5 interpreter has a fixed 64x64 latent today.
             // Accepting a mismatched requested size would produce a misleading
@@ -774,7 +796,7 @@ class LocalImageProvider(context: Context) {
             val useCfg = resolved.useCfg
             val params = ImageExecutionProfileNativeContract.toNativeParamsJson(profileResolution)
                 .put("prompt", prompt.trim())
-                .put("negativePrompt", profile.defaults.defaultNegativePrompt.orEmpty())
+                .put("negativePrompt", effectiveNegativePrompt)
                 .put("family", profile.family.name)
                 .put("variant", profile.variant.name)
                 .put("width", width)
@@ -900,7 +922,7 @@ class LocalImageProvider(context: Context) {
         )
         val sampleMethod = imageSchedulerProductName(resolved.scheduler)
         val backendMode = resolveStableDiffusionBackendMode(effectiveOptions.backendMode)
-        val negativePrompt =
+        val effectiveNegativePrompt =
             effectiveOptions.negativePrompt ?: profile.defaults.defaultNegativePrompt.orEmpty()
         require(effectiveOptions.runner == null) {
             "stable-diffusion.cpp does not support the MNN runner option."
@@ -913,7 +935,7 @@ class LocalImageProvider(context: Context) {
         }
         val params = ImageExecutionProfileNativeContract.toNativeParamsJson(profileResolution)
             .put("prompt", prompt.trim())
-            .put("negativePrompt", negativePrompt)
+            .put("negativePrompt", effectiveNegativePrompt)
             .put("family", effectiveFamily.name)
             .put("variant", profile.variant.name)
             .put("width", width)
@@ -973,7 +995,10 @@ class LocalImageProvider(context: Context) {
         require(stableDiffusionNativeSampleMethodMatches(resolved.scheduler, json.optString("sampleMethod"))) {
             "stable-diffusion.cpp did not execute the resolved ${resolved.scheduler} sampler."
         }
-        require(json.has("negativePrompt") && json.getString("negativePrompt") == negativePrompt) {
+        require(
+            json.has("negativePrompt") &&
+                json.getString("negativePrompt") == effectiveNegativePrompt
+        ) {
             "stable-diffusion.cpp did not execute the resolved negative prompt."
         }
         require(json.optString("backendMode") == backendMode) {
@@ -1150,7 +1175,7 @@ internal fun qnnClipTokenizerJsonFile(bundleRoot: File): File? {
         }
 }
 
-/** Writes unconditional then conditional CLIP token IDs as 154 little-endian int32 values. */
+/** Writes raw token IDs or the versioned token+weight payload selected by the resolved profile. */
 internal fun encodeQnnClipPromptTokenIds(
     bridge: NativeMnnDiffusionBridge,
     bundleRoot: File,
@@ -1160,12 +1185,29 @@ internal fun encodeQnnClipPromptTokenIds(
     bosId: Int = 49_406,
     eosId: Int = 49_407,
     padId: Int = 49_407,
-    maxTokens: Int = 77
+    maxTokens: Int = 77,
+    promptWeightingEnabled: Boolean = false
 ): String = runCatching {
     require(maxTokens in 1..4_096) { "CLIP tokenizer max length is invalid: $maxTokens." }
     val tokenizerJson = qnnClipTokenizerJsonFile(bundleRoot)
     val tokenizerRoot = qnnClipTokenizerRoot(bundleRoot)
     val tokenizerBackend: String
+    outputFile.parentFile?.mkdirs()
+    if (promptWeightingEnabled) {
+        require(tokenizerJson != null) {
+            "Prompt weighting requires tokenizer/tokenizer.json in the image bundle."
+        }
+        return@runCatching bridge.encodePromptTokenIdsWithWeightsFromJson(
+            tokenizerJsonPath = tokenizerJson.absolutePath,
+            prompt = prompt,
+            negativePrompt = negativePrompt,
+            bosId = bosId,
+            eosId = eosId,
+            padId = padId,
+            maxTokens = maxTokens,
+            outputPath = outputFile.absolutePath
+        )
+    }
     val tokenIds = if (tokenizerJson != null) {
         tokenizerBackend = "tokenizers_cpp"
         bridge.tokenizePromptTokenIdsFromJson(
@@ -1200,7 +1242,6 @@ internal fun encodeQnnClipPromptTokenIds(
     require(tokenIds.size == expectedTokenCount) {
         "QNN CLIP tokenizer returned ${tokenIds.size} IDs; expected $expectedTokenCount."
     }
-    outputFile.parentFile?.mkdirs()
     val bytes = java.nio.ByteBuffer
         .allocate(tokenIds.size * Int.SIZE_BYTES)
         .order(java.nio.ByteOrder.LITTLE_ENDIAN)
@@ -1235,7 +1276,67 @@ internal fun qnnImageExecutionMetadata(
         }
         metadata.put(field, nativeResult.get(field))
     }
-    nativeResult.optJSONObject("nativeEffective")?.let { metadata.put("nativeEffective", it) }
+    val nativeEffective = requireNotNull(nativeResult.optJSONObject("nativeEffective")) {
+        "Native QNN execution metadata is missing nativeEffective."
+    }
+    ImageExecutionProfileNativeContract.qnnNativeEffectiveFields.forEach { field ->
+        require(nativeResult.has(field) && !nativeResult.isNull(field)) {
+            "Native QNN execution metadata is missing required field: $field"
+        }
+        require(nativeEffective.has(field) && !nativeEffective.isNull(field)) {
+            "Native QNN nativeEffective metadata is missing required field: $field"
+        }
+        require(nativeResult.get(field) == nativeEffective.get(field)) {
+            "Native QNN $field evidence conflicts with nativeEffective."
+        }
+        metadata.put(field, nativeResult.get(field))
+    }
+    val pixelRange = ImagePixelRange.entries.firstOrNull {
+        it.name == nativeResult.getString("pixelRange")
+    } ?: error("Native QNN execution reported an unknown pixelRange.")
+    require(pixelRange != ImagePixelRange.RUNTIME_NATIVE) {
+        "Native QNN execution must report an explicit pixelRange."
+    }
+    val expectedConversion =
+        ImageExecutionProfileNativeContract.qnnPixelRangeConversionName(pixelRange)
+    require(nativeResult.getString("pixelRangeConversion") == expectedConversion) {
+        "Native QNN pixel-range conversion evidence does not match pixelRange."
+    }
+    fun requiredExactLong(field: String): Long {
+        val number = nativeResult.opt(field) as? Number
+            ?: error("Native QNN execution metadata field $field must be numeric.")
+        val value = number.toLong()
+        require(number.toDouble().isFinite() && number.toDouble() == value.toDouble()) {
+            "Native QNN execution metadata field $field must be an exact integer."
+        }
+        return value
+    }
+    val valueCount = requiredExactLong("pixelRangeValueCount")
+    val clampedValueCount = requiredExactLong("pixelRangeClampedValueCount")
+    val expectedValueCount = Math.multiplyExact(
+        Math.multiplyExact(nativeResult.getLong("width"), nativeResult.getLong("height")),
+        3L
+    )
+    require(valueCount == expectedValueCount) {
+        "Native QNN pixel-range value count does not match the generated RGB image."
+    }
+    require(clampedValueCount in 0L..valueCount) {
+        "Native QNN pixel-range clamp count is invalid."
+    }
+    val observedMin = (nativeResult.opt("pixelRangeObservedMin") as? Number)?.toDouble()
+        ?: error("Native QNN pixelRangeObservedMin evidence must be numeric.")
+    val observedMax = (nativeResult.opt("pixelRangeObservedMax") as? Number)?.toDouble()
+        ?: error("Native QNN pixelRangeObservedMax evidence must be numeric.")
+    require(observedMin.isFinite() && observedMax.isFinite() && observedMin <= observedMax) {
+        "Native QNN observed pixel range is invalid."
+    }
+    ImageExecutionProfileNativeContract.qnnPixelRangeEvidenceFields.forEach { field ->
+        require(nativeResult.has(field) && !nativeResult.isNull(field)) {
+            "Native QNN execution metadata is missing pixel-range evidence: $field"
+        }
+        metadata.put(field, nativeResult.get(field))
+    }
+    metadata.put("nativeEffective", nativeEffective)
     nativeResult.optJSONArray("timesteps")?.let { metadata.put("timesteps", it) }
     nativeResult.optJSONArray("sigmas")?.let { metadata.put("sigmas", it) }
     listOf(

@@ -107,6 +107,7 @@ std::string qnn_sdxl_unet_phase_json(
             bundle_root,
             conditioning_format,
             0u,
+            params_json,
             execution_contract,
             &conditioning_evidence,
             &error)) {
@@ -294,7 +295,7 @@ std::string qnn_sdxl_unet_phase_json(
     }
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started).count();
-    const QnnNativeEffectiveEvidence native_evidence{
+    QnnNativeEffectiveEvidence native_evidence{
         scheduler.timesteps().size(),
         unet_execution_count,
         conditioning_evidence.tokenizer_backend,
@@ -304,6 +305,14 @@ std::string qnn_sdxl_unet_phase_json(
         execution_contract.height,
         unet->graph_name,
     };
+    native_evidence.prompt_weighting_applied =
+        conditioning_evidence.prompt_weighting_applied;
+    native_evidence.positive_weighted_token_count =
+        conditioning_evidence.positive_weighted_token_count;
+    native_evidence.negative_weighted_token_count =
+        conditioning_evidence.negative_weighted_token_count;
+    native_evidence.prompt_weight_fingerprint =
+        conditioning_evidence.prompt_weight_fingerprint;
     const std::string native_effective = qnn_native_effective_json(
         execution_contract,
         native_evidence);
@@ -328,9 +337,16 @@ std::string qnn_sdxl_unet_phase_json(
         << "\"unconditionalBranch\":" << (execution_contract.use_cfg ? "true" : "false") << ","
         << "\"tokenizerBackend\":" << quote(conditioning_evidence.tokenizer_backend) << ","
         << "\"tokenCount\":" << conditioning_evidence.token_count << ","
+        << "\"promptWeightingSupported\":" << (execution_contract.prompt_weighting_supported ? "true" : "false") << ","
+        << "\"promptWeightingApplied\":" << (conditioning_evidence.prompt_weighting_applied ? "true" : "false") << ","
+        << "\"positiveWeightedTokenCount\":" << conditioning_evidence.positive_weighted_token_count << ","
+        << "\"negativeWeightedTokenCount\":" << conditioning_evidence.negative_weighted_token_count << ","
+        << "\"promptWeightFingerprint\":" << quote(conditioning_evidence.prompt_weight_fingerprint) << ","
         << "\"embeddingDiskDataType\":" << quote(conditioning_evidence.embedding_disk_data_type) << ","
         << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
         << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","
+        << "\"pixelRange\":"
+        << quote(mca::qnn::image_pixel_range_wire_name(execution_contract.pixel_range)) << ","
         << "\"width\":" << execution_contract.width << ","
         << "\"height\":" << execution_contract.height << ","
         << "\"seed\":" << execution_contract.seed << ","
@@ -453,8 +469,16 @@ std::string qnn_sdxl_vae_phase_json(
     ::unlink(temporary_output.c_str());
     int width = 0;
     int height = 0;
+    mca::qnn::ImagePixelRangeEvidence pixel_range_evidence;
     if (!write_vae_tensor_png(
-            vae->outputs[0], pixels, temporary_output, &width, &height, &error)) {
+            vae->outputs[0],
+            pixels,
+            temporary_output,
+            execution_contract.pixel_range,
+            &pixel_range_evidence,
+            &width,
+            &height,
+            &error)) {
         ::unlink(temporary_output.c_str());
         return std::string("{\"ok\":false,\"executionStage\":\"sdxl_png_write_failed\",\"message\":") +
             quote(error) + "}";
@@ -485,6 +509,9 @@ std::string qnn_sdxl_vae_phase_json(
         << "\"outputBytes\":" << file_size_or_zero(output_path) << ","
         << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
         << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","
+        << qnn_pixel_range_evidence_json(
+            execution_contract.pixel_range,
+            pixel_range_evidence) << ","
         << "\"effectiveVaeHostScale\":" << effective_vae_host_scale << ","
         << "\"vaeExecutionCount\":1,"
         << "\"vaeContextLoadMs\":" << vae->context_load_ms << ","

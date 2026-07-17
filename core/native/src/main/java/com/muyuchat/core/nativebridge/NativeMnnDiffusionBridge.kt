@@ -52,6 +52,23 @@ class NativeMnnDiffusionBridge {
         padId: Int,
         maxTokens: Int
     ): IntArray
+
+    /**
+     * Writes a versioned little-endian CLIP conditioning payload containing
+     * negative+positive token IDs and their native prompt-attention weights.
+     * The returned JSON is execution evidence produced by the tokenizer, not
+     * a copy of request-side capability flags.
+     */
+    external fun encodePromptTokenIdsWithWeightsFromJson(
+        tokenizerJsonPath: String,
+        prompt: String,
+        negativePrompt: String,
+        bosId: Int,
+        eosId: Int,
+        padId: Int,
+        maxTokens: Int,
+        outputPath: String
+    ): String
     external fun encodeSd15PromptEmbeddings(
         bundleRoot: String,
         prompt: String,
@@ -59,7 +76,8 @@ class NativeMnnDiffusionBridge {
         outputPath: String,
         backendMode: String,
         threads: Int,
-        tokenEmbeddingMode: String
+        tokenEmbeddingMode: String,
+        promptWeightingEnabled: Boolean
     ): String
     external fun encodeSdxlPromptConditioning(
         bundleRoot: String,
@@ -69,7 +87,8 @@ class NativeMnnDiffusionBridge {
         width: Int,
         height: Int,
         backendMode: String,
-        threads: Int
+        threads: Int,
+        promptWeightingEnabled: Boolean
     ): String
     external fun generate(
         bundleRoot: String,

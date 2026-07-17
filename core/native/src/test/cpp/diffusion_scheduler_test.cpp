@@ -14,6 +14,7 @@ using mca::diffusion::DiffusionSchedulerConfig;
 using mca::diffusion::PredictionType;
 using mca::diffusion::SchedulerStepResult;
 using mca::diffusion::SchedulerTensor;
+using mca::diffusion::TimestepSpacing;
 using namespace mca::diffusion::test_fixture;
 
 constexpr double kScheduleTolerance = 2.0e-5;
@@ -180,11 +181,20 @@ void test_twenty_step_schedule_structure() {
     assert(pndm.timesteps()[2] == 901.0);
     assert(pndm.timesteps().back() == 1.0);
 
-    DiffusionScheduler dpmpp(DiffusionSchedulerConfig::stable_diffusion_dpmpp_2m());
+    auto sd15_dpmpp_config = DiffusionSchedulerConfig::stable_diffusion_dpmpp_2m();
+    sd15_dpmpp_config.timestep_spacing = TimestepSpacing::Leading;
+    sd15_dpmpp_config.steps_offset = 0;
+    DiffusionScheduler dpmpp(sd15_dpmpp_config);
     assert(dpmpp.set_timesteps(20, &error));
-    assert(dpmpp.timesteps().size() == 20);
-    assert(dpmpp.sigmas().size() == 21);
-    assert(dpmpp.timesteps().front() == 999.0);
+    assert_values_near(
+            dpmpp.timesteps(),
+            kSd15DpmppLeadingTimesteps20,
+            kScheduleTolerance);
+    assert_values_near(
+            dpmpp.sigmas(),
+            kSd15DpmppLeadingSigmas20,
+            kScheduleTolerance);
+    assert(std::abs(dpmpp.init_noise_sigma() - 1.0) <= kScheduleTolerance);
 }
 
 void test_dpmpp_2m_epsilon() {

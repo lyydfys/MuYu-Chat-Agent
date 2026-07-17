@@ -327,6 +327,7 @@ struct StableDiffusionExecutionContract {
     bool unconditional_branch = false;
     int token_count = 0;
     int tokenizer_max_length = 0;
+    bool prompt_weighting_supported = false;
     double vae_scaling_factor = 0.0;
     int width = 0;
     int height = 0;
@@ -470,6 +471,14 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
         invalid_contract(
                 "tokenCount",
                 "must cover the native positive and negative conditioning capacities");
+    }
+    contract.prompt_weighting_supported = required_boolean(
+            params,
+            "promptWeightingSupported");
+    if (contract.prompt_weighting_supported) {
+        unsupported_contract(
+                "promptWeightingSupported",
+                "this bridge cannot expose token-level prompt-weight evidence through the public stable-diffusion API");
     }
     if (required_string(params, "embeddingDiskDataType") != "RUNTIME_NATIVE") {
         unsupported_contract(
@@ -1166,6 +1175,11 @@ json native_effective_json(const StableDiffusionExecutionContract &contract,
             {"unconditionalBranch", actual_use_cfg},
             {"tokenizerBackend", "SDCPP_NATIVE"},
             {"tokenCount", actual_token_count},
+            {"promptWeightingSupported", contract.prompt_weighting_supported},
+            {"promptWeightingApplied", false},
+            {"positiveWeightedTokenCount", 0},
+            {"negativeWeightedTokenCount", 0},
+            {"promptWeightFingerprint", "9b353b1ac542678089ce3d12ee96ddd6ba3b0252ec0675cdf0540e6aa6b1860e"},
             {"embeddingDiskDataType", "RUNTIME_NATIVE"},
             {"vaeScalingLocation", "RUNTIME_NATIVE"},
             {"vaeScalingFactor", 1.0},

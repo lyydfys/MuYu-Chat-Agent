@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -36,7 +37,9 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 #include "diffusion_scheduler.hpp"
+#include "image_conditioning.hpp"
 #include "jni_utf8_codec.hpp"
+#include "qnn_image_pixel_range.hpp"
 #include "qnn_image_stage_trace.hpp"
 
 #if MCA_WITH_QNN_SDK_HEADERS
@@ -3987,9 +3990,14 @@ bool write_vae_tensor_png(
         const QnnTensorBinding& tensor,
         const std::vector<float>& values,
         const std::string& output_path,
+        mca::qnn::ImagePixelRange pixel_range,
+        mca::qnn::ImagePixelRangeEvidence* pixel_range_evidence,
         int* width,
         int* height,
         std::string* error) {
+    if (pixel_range_evidence == nullptr || width == nullptr || height == nullptr || error == nullptr) {
+        return false;
+    }
     if (tensor.dimensions.size() != 4) {
         *error = "VAE output tensor is expected to be rank 4.";
         return false;
@@ -4022,15 +4030,8 @@ bool write_vae_tensor_png(
         return false;
     }
 
-    float min_value = std::numeric_limits<float>::infinity();
-    float max_value = -std::numeric_limits<float>::infinity();
-    for (float value : values) {
-        if (!std::isfinite(value)) continue;
-        min_value = std::min(min_value, value);
-        max_value = std::max(max_value, value);
-    }
-    const bool looks_zero_to_one = min_value >= -0.05f && max_value <= 1.05f;
     std::vector<uint8_t> rgb(expected, 0);
+    *pixel_range_evidence = mca::qnn::ImagePixelRangeEvidence{};
     auto sample = [&](int c, int y, int x) -> float {
         if (nchw) {
             return values[static_cast<size_t>(c) * (*height) * (*width) +
@@ -4041,15 +4042,26 @@ bool write_vae_tensor_png(
     for (int y = 0; y < *height; ++y) {
         for (int x = 0; x < *width; ++x) {
             for (int c = 0; c < 3; ++c) {
-                float value = sample(c, y, x);
-                if (!std::isfinite(value)) value = 0.0f;
-                const float normalized = looks_zero_to_one
-                    ? value
-                    : value * 0.5f + 0.5f;
-                const int byte_value = static_cast<int>(std::lround(
-                    std::max(0.0f, std::min(1.0f, normalized)) * 255.0f));
-                rgb[(static_cast<size_t>(y) * (*width) + x) * 3 + c] =
-                    static_cast<uint8_t>(byte_value);
+                const float value = sample(c, y, x);
+                uint8_t byte_value = 0;
+                bool clamped = false;
+                if (!mca::qnn::image_pixel_to_u8(
+                        value,
+                        pixel_range,
+                        &byte_value,
+                        &clamped,
+                        error)) {
+                    return false;
+                }
+                pixel_range_evidence->value_count += 1;
+                if (clamped) pixel_range_evidence->clamped_value_count += 1;
+                pixel_range_evidence->observed_min = std::min(
+                    pixel_range_evidence->observed_min,
+                    value);
+                pixel_range_evidence->observed_max = std::max(
+                    pixel_range_evidence->observed_max,
+                    value);
+                rgb[(static_cast<size_t>(y) * (*width) + x) * 3 + c] = byte_value;
             }
         }
     }
@@ -4134,13 +4146,17 @@ struct QnnSemanticExecutionContract {
     QnnSchedulerContract scheduler;
     bool use_cfg = false;
     float cfg_scale = 0.0f;
+    std::string negative_prompt;
     uint32_t seed = 0;
     std::string tokenizer_backend;
     size_t token_count = 0;
     int tokenizer_max_length = 0;
+    bool prompt_weighting_supported = false;
     std::string embedding_disk_data_type;
     QnnVaeScalingLocation vae_scaling_location = QnnVaeScalingLocation::None;
     double vae_scaling_factor = 1.0;
+    mca::qnn::ImagePixelRange pixel_range =
+        mca::qnn::ImagePixelRange::NegativeOneToOne;
     int width = 0;
     int height = 0;
     std::string graph_name;
@@ -4155,13 +4171,158 @@ struct QnnNativeEffectiveEvidence {
     int width = 0;
     int height = 0;
     std::string graph_name;
+    bool prompt_weighting_applied = false;
+    size_t positive_weighted_token_count = 0;
+    size_t negative_weighted_token_count = 0;
+    std::string prompt_weight_fingerprint;
 };
 
 struct QnnConditioningEvidence {
     std::string tokenizer_backend;
     size_t token_count = 0;
+    bool prompt_weighting_applied = false;
+    size_t positive_weighted_token_count = 0;
+    size_t negative_weighted_token_count = 0;
+    std::string prompt_weight_fingerprint;
     std::string embedding_disk_data_type;
 };
+
+uint32_t qnn_u32_little_endian(const uint8_t* bytes) {
+    return static_cast<uint32_t>(bytes[0]) |
+        (static_cast<uint32_t>(bytes[1]) << 8U) |
+        (static_cast<uint32_t>(bytes[2]) << 16U) |
+        (static_cast<uint32_t>(bytes[3]) << 24U);
+}
+
+bool derive_qnn_token_execution_weight_evidence(
+        const std::vector<int32_t>& token_ids,
+        const std::vector<float>& token_weights,
+        bool use_cfg,
+        QnnConditioningEvidence* evidence,
+        std::string* error) {
+    if (evidence == nullptr || error == nullptr) return false;
+    if (token_ids.empty() || token_ids.size() != token_weights.size() ||
+        token_ids.size() % 2U != 0U) {
+        *error = "CLIP token IDs and weights must contain two equally sized sequences.";
+        return false;
+    }
+    if (std::any_of(token_ids.begin(), token_ids.end(), [](int32_t id) { return id < 0; })) {
+        *error = "CLIP token conditioning contains a negative token ID.";
+        return false;
+    }
+    if (std::any_of(token_weights.begin(), token_weights.end(), [](float weight) {
+            return !std::isfinite(weight);
+        })) {
+        *error = "CLIP token conditioning contains a non-finite token weight.";
+        return false;
+    }
+
+    const size_t sequence_length = token_ids.size() / 2U;
+    mca::image::ClipTokenPair pair;
+    pair.negative.ids.assign(token_ids.begin(), token_ids.begin() + sequence_length);
+    pair.positive.ids.assign(token_ids.begin() + sequence_length, token_ids.end());
+    pair.negative.weights.assign(
+        token_weights.begin(), token_weights.begin() + sequence_length);
+    pair.positive.weights.assign(
+        token_weights.begin() + sequence_length, token_weights.end());
+    const auto weighted_count = [](const std::vector<float>& weights) {
+        return static_cast<size_t>(std::count_if(
+            weights.begin(),
+            weights.end(),
+            [](float value) { return std::fabs(value - 1.0f) > 1.0e-6f; }));
+    };
+    const size_t payload_negative_weighted_count = weighted_count(pair.negative.weights);
+    const size_t payload_positive_weighted_count = weighted_count(pair.positive.weights);
+    if (!use_cfg && payload_negative_weighted_count != 0U) {
+        *error = "A non-executed negative CLIP branch must not carry prompt weights when useCfg=false.";
+        return false;
+    }
+    evidence->negative_weighted_token_count =
+        use_cfg ? payload_negative_weighted_count : 0U;
+    evidence->positive_weighted_token_count = payload_positive_weighted_count;
+    evidence->prompt_weighting_applied =
+        evidence->negative_weighted_token_count > 0U ||
+        evidence->positive_weighted_token_count > 0U;
+    evidence->prompt_weight_fingerprint = pair.weighting_fingerprint();
+    if (evidence->prompt_weight_fingerprint.size() != 64U) {
+        *error = "CLIP token conditioning fingerprint could not be derived.";
+        return false;
+    }
+    return true;
+}
+
+bool read_qnn_clip_token_weight_payload(
+        const std::string& path,
+        std::vector<int32_t>* token_ids,
+        std::vector<float>* token_weights,
+        bool use_cfg,
+        QnnConditioningEvidence* evidence,
+        std::string* error) {
+    if (token_ids == nullptr || token_weights == nullptr ||
+        evidence == nullptr || error == nullptr) {
+        return false;
+    }
+    constexpr size_t kHeaderBytes = 16U;
+    constexpr std::array<uint8_t, 8> kMagic = {
+        'M', 'C', 'A', 'Q', 'P', 'W', '0', '1'
+    };
+    const long long file_bytes = file_size_or_zero(path);
+    if (file_bytes < static_cast<long long>(kHeaderBytes) ||
+        file_bytes > static_cast<long long>(16U * 1024U * 1024U)) {
+        *error = "Weighted CLIP token payload size is invalid: " + path;
+        return false;
+    }
+    std::ifstream input(path.c_str(), std::ios::binary);
+    if (!input.good()) {
+        *error = "Failed to open weighted CLIP token payload: " + path;
+        return false;
+    }
+    std::vector<uint8_t> bytes(static_cast<size_t>(file_bytes));
+    input.read(
+        reinterpret_cast<char*>(bytes.data()),
+        static_cast<std::streamsize>(bytes.size()));
+    if (!input.good() || !std::equal(kMagic.begin(), kMagic.end(), bytes.begin())) {
+        *error = "Weighted CLIP token payload header is invalid.";
+        return false;
+    }
+    const uint32_t version = qnn_u32_little_endian(bytes.data() + 8U);
+    const uint32_t token_count = qnn_u32_little_endian(bytes.data() + 12U);
+    if (version != 1U || token_count == 0U || token_count > 8192U) {
+        *error = "Weighted CLIP token payload version or token count is unsupported.";
+        return false;
+    }
+    const size_t expected_bytes = kHeaderBytes +
+        static_cast<size_t>(token_count) * (sizeof(int32_t) + sizeof(float));
+    if (bytes.size() != expected_bytes || token_count % 2U != 0U) {
+        *error = "Weighted CLIP token payload length does not match its header.";
+        return false;
+    }
+    token_ids->assign(token_count, 0);
+    token_weights->assign(token_count, 1.0f);
+    size_t offset = kHeaderBytes;
+    for (size_t index = 0; index < token_ids->size(); ++index, offset += 4U) {
+        (*token_ids)[index] = static_cast<int32_t>(
+            qnn_u32_little_endian(bytes.data() + offset));
+        if ((*token_ids)[index] < 0) {
+            *error = "Weighted CLIP token payload contains a negative token ID.";
+            return false;
+        }
+    }
+    for (size_t index = 0; index < token_weights->size(); ++index, offset += 4U) {
+        const uint32_t bits = qnn_u32_little_endian(bytes.data() + offset);
+        std::memcpy(&(*token_weights)[index], &bits, sizeof(bits));
+        if (!std::isfinite((*token_weights)[index])) {
+            *error = "Weighted CLIP token payload contains a non-finite token weight.";
+            return false;
+        }
+    }
+    return derive_qnn_token_execution_weight_evidence(
+        *token_ids,
+        *token_weights,
+        use_cfg,
+        evidence,
+        error);
+}
 
 std::string normalized_contract_enum(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -4204,7 +4365,8 @@ bool qnn_required_string_field(
         const std::string& json,
         const std::string& key,
         std::string* value,
-        std::string* error) {
+        std::string* error,
+        bool allow_empty = false) {
     size_t start = 0;
     if (!qnn_json_value_start(json, key, &start, error)) return false;
     if (json[start] != '"') {
@@ -4230,7 +4392,7 @@ bool qnn_required_string_field(
             continue;
         }
         if (c == '"') {
-            if (value->empty()) {
+            if (value->empty() && !allow_empty) {
                 *error = "Native execution field '" + key + "' must not be blank.";
                 return false;
             }
@@ -4484,6 +4646,29 @@ bool parse_qnn_scheduler_contract(
     return true;
 }
 
+bool parse_qnn_pixel_range_contract(
+        const std::string& json,
+        mca::qnn::ImagePixelRange* pixel_range,
+        std::string* error) {
+    std::string wire_value;
+    if (pixel_range == nullptr ||
+        !qnn_required_string_field(json, "pixelRange", &wire_value, error)) {
+        return false;
+    }
+    wire_value = normalized_contract_enum(wire_value);
+    if (wire_value == "negative_one_to_one") {
+        *pixel_range = mca::qnn::ImagePixelRange::NegativeOneToOne;
+    } else if (wire_value == "zero_to_one") {
+        *pixel_range = mca::qnn::ImagePixelRange::ZeroToOne;
+    } else if (wire_value == "zero_to_255") {
+        *pixel_range = mca::qnn::ImagePixelRange::ZeroTo255;
+    } else {
+        *error = "Unsupported explicit QNN pixelRange contract value: " + wire_value;
+        return false;
+    }
+    return true;
+}
+
 bool parse_qnn_semantic_execution_contract(
         const std::string& json,
         QnnSemanticExecutionContract* contract,
@@ -4527,6 +4712,18 @@ bool parse_qnn_semantic_execution_contract(
         *error = "unconditionalBranch must exactly match useCfg.";
         return false;
     }
+    if (!qnn_required_string_field(
+            json,
+            "negativePrompt",
+            &contract->negative_prompt,
+            error,
+            true)) {
+        return false;
+    }
+    if (!contract->use_cfg && !contract->negative_prompt.empty()) {
+        *error = "A negativePrompt cannot affect pixels when useCfg=false.";
+        return false;
+    }
     if (!qnn_required_integer_field(json, "seed", &integer_value, error) ||
         integer_value < 0 ||
         static_cast<unsigned long long>(integer_value) > std::numeric_limits<uint32_t>::max()) {
@@ -4556,6 +4753,18 @@ bool parse_qnn_semantic_execution_contract(
         contract->tokenizer_backend = "MNN_MTOK";
     } else {
         *error = "Unsupported tokenizerBackend contract value: " + contract->tokenizer_backend;
+        return false;
+    }
+    if (!qnn_required_bool_field(
+            json,
+            "promptWeightingSupported",
+            &contract->prompt_weighting_supported,
+            error)) {
+        return false;
+    }
+    if (contract->prompt_weighting_supported &&
+        contract->tokenizer_backend != "TOKENIZERS_CPP") {
+        *error = "Prompt weighting requires the complete TOKENIZERS_CPP contract.";
         return false;
     }
     if (!qnn_required_string_field(
@@ -4602,6 +4811,9 @@ bool parse_qnn_semantic_execution_contract(
     if (contract->vae_scaling_location == QnnVaeScalingLocation::None &&
         std::fabs(contract->vae_scaling_factor - 1.0) > 1e-12) {
         *error = "vaeScalingLocation=NONE requires vaeScalingFactor=1.";
+        return false;
+    }
+    if (!parse_qnn_pixel_range_contract(json, &contract->pixel_range, error)) {
         return false;
     }
     if (!qnn_required_integer_field(json, "width", &integer_value, error) ||
@@ -4666,6 +4878,21 @@ double qnn_effective_vae_host_scale(const QnnSemanticExecutionContract& contract
         : 1.0;
 }
 
+std::string qnn_pixel_range_evidence_json(
+        mca::qnn::ImagePixelRange range,
+        const mca::qnn::ImagePixelRangeEvidence& evidence) {
+    std::ostringstream out;
+    out << std::setprecision(9)
+        << "\"pixelRange\":" << quote(mca::qnn::image_pixel_range_wire_name(range)) << ","
+        << "\"pixelRangeConversion\":"
+        << quote(mca::qnn::image_pixel_range_conversion_name(range)) << ","
+        << "\"pixelRangeValueCount\":" << evidence.value_count << ","
+        << "\"pixelRangeClampedValueCount\":" << evidence.clamped_value_count << ","
+        << "\"pixelRangeObservedMin\":" << evidence.observed_min << ","
+        << "\"pixelRangeObservedMax\":" << evidence.observed_max;
+    return out.str();
+}
+
 std::string qnn_nonempty_bundle_file_named(
         const std::vector<std::string>& files,
         const std::string& expected_name) {
@@ -4686,6 +4913,7 @@ bool resolve_qnn_conditioning_evidence(
         const std::string& bundle_root,
         const std::string& conditioning_format,
         size_t observed_token_ids,
+        const std::string& params_json,
         const QnnSemanticExecutionContract& contract,
         QnnConditioningEvidence* evidence,
         std::string* error) {
@@ -4710,7 +4938,9 @@ bool resolve_qnn_conditioning_evidence(
     }
 
     const std::string format = normalized_contract_enum(conditioning_format);
-    if (format == "qnn_clip_token_ids_i32") {
+    const bool weighted_token_payload =
+        format == "qnn_clip_token_ids_weights_v1";
+    if (format == "qnn_clip_token_ids_i32" || weighted_token_payload) {
         if (observed_token_ids == 0) {
             *error = "qnn_clip_token_ids_i32 conditioning has no observed int32 token IDs.";
             return false;
@@ -4820,6 +5050,101 @@ bool resolve_qnn_conditioning_evidence(
             evidence->embedding_disk_data_type + ".";
         return false;
     }
+    if (weighted_token_payload && !contract.prompt_weighting_supported) {
+        *error = "Weighted token payload requires promptWeightingSupported=true.";
+        return false;
+    }
+    if (format == "qnn_clip_token_ids_i32" && contract.prompt_weighting_supported) {
+        *error = "Prompt weighting requires the versioned qnn_clip_token_ids_weights_v1 payload.";
+        return false;
+    }
+
+    const bool token_conditioning =
+        format == "qnn_clip_token_ids_i32" || weighted_token_payload;
+    if (token_conditioning) {
+        if (evidence->prompt_weight_fingerprint.size() != 64U ||
+            !std::all_of(
+                evidence->prompt_weight_fingerprint.begin(),
+                evidence->prompt_weight_fingerprint.end(),
+                [](unsigned char value) { return std::isxdigit(value) != 0; })) {
+            *error = "Token conditioning did not produce a valid native SHA-256 fingerprint.";
+            return false;
+        }
+        if (evidence->prompt_weighting_applied !=
+            (evidence->positive_weighted_token_count +
+                evidence->negative_weighted_token_count > 0U)) {
+            *error = "Native token weighting evidence conflicts with the executed branch counts.";
+            return false;
+        }
+    } else {
+        // Legacy float conditioning cannot reconstruct token weights inside the
+        // QNN process. Accept only complete evidence emitted by the native
+        // encoder; a versioned, artifact-bound float container remains the
+        // follow-up that will remove this handoff entirely.
+        bool reported_applied = false;
+        long long reported_positive = 0;
+        long long reported_negative = 0;
+        std::string reported_fingerprint;
+        if (!qnn_required_bool_field(
+                params_json,
+                "promptWeightingApplied",
+                &reported_applied,
+                error) ||
+            !qnn_required_integer_field(
+                params_json,
+                "positiveWeightedTokenCount",
+                &reported_positive,
+                error) ||
+            !qnn_required_integer_field(
+                params_json,
+                "negativeWeightedTokenCount",
+                &reported_negative,
+                error) ||
+            !qnn_required_string_field(
+                params_json,
+                "promptWeightFingerprint",
+                &reported_fingerprint,
+                error)) {
+            return false;
+        }
+        if (reported_positive < 0 || reported_positive > 4096 ||
+            reported_negative < 0 || reported_negative > 4096) {
+            *error = "Prompt weighting token counts must be in [0, 4096].";
+            return false;
+        }
+        std::transform(
+            reported_fingerprint.begin(),
+            reported_fingerprint.end(),
+            reported_fingerprint.begin(),
+            [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (reported_fingerprint.size() != 64U ||
+            !std::all_of(
+                reported_fingerprint.begin(),
+                reported_fingerprint.end(),
+                [](unsigned char value) { return std::isxdigit(value) != 0; })) {
+            *error = "Prompt weighting fingerprint must be a 64-character SHA-256 value.";
+            return false;
+        }
+        if (reported_applied != (reported_positive + reported_negative > 0)) {
+            *error = "Prompt weighting applied flag conflicts with weighted token counts.";
+            return false;
+        }
+        if (!contract.prompt_weighting_supported &&
+            (reported_applied || reported_positive != 0 || reported_negative != 0)) {
+            *error = "A profile without prompt weighting reported applied float-conditioning weights.";
+            return false;
+        }
+        if (!contract.use_cfg && reported_negative != 0) {
+            *error = "Float conditioning reported weights for a negative branch that was not executed.";
+            return false;
+        }
+        evidence->prompt_weighting_applied = reported_applied;
+        evidence->positive_weighted_token_count =
+            static_cast<size_t>(reported_positive);
+        evidence->negative_weighted_token_count =
+            static_cast<size_t>(reported_negative);
+        evidence->prompt_weight_fingerprint = reported_fingerprint;
+    }
     return true;
 }
 
@@ -4854,9 +5179,15 @@ std::string qnn_native_effective_json(
         << "\"unconditionalBranch\":" << (contract.use_cfg ? "true" : "false") << ","
         << "\"tokenizerBackend\":" << quote(evidence.tokenizer_backend) << ","
         << "\"tokenCount\":" << evidence.token_count << ","
+        << "\"promptWeightingSupported\":" << (contract.prompt_weighting_supported ? "true" : "false") << ","
+        << "\"promptWeightingApplied\":" << (evidence.prompt_weighting_applied ? "true" : "false") << ","
+        << "\"positiveWeightedTokenCount\":" << evidence.positive_weighted_token_count << ","
+        << "\"negativeWeightedTokenCount\":" << evidence.negative_weighted_token_count << ","
+        << "\"promptWeightFingerprint\":" << quote(evidence.prompt_weight_fingerprint) << ","
         << "\"embeddingDiskDataType\":" << quote(evidence.embedding_disk_data_type) << ","
         << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(contract.vae_scaling_location)) << ","
         << "\"vaeScalingFactor\":" << contract.vae_scaling_factor << ","
+        << "\"pixelRange\":" << quote(mca::qnn::image_pixel_range_wire_name(contract.pixel_range)) << ","
         << "\"width\":" << evidence.width << ","
         << "\"height\":" << evidence.height << ","
         << "\"seed\":" << contract.seed << ","
@@ -5085,8 +5416,13 @@ std::string qnn_semantic_generate_json(
             "EXECUTION_CONTRACT_INVALID",
             "conditioningFormat must be explicit for QNN semantic generation.");
     }
+    const std::string normalized_conditioning_format =
+        normalized_contract_enum(conditioning_format);
+    const bool qnn_weighted_token_conditioning =
+        normalized_conditioning_format == "qnn_clip_token_ids_weights_v1";
     const bool qnn_token_conditioning =
-        contains_lower(conditioning_format, "qnn_clip_token_ids_i32");
+        normalized_conditioning_format == "qnn_clip_token_ids_i32" ||
+        qnn_weighted_token_conditioning;
     std::string error;
     QnnSemanticExecutionContract execution_contract;
     if (!parse_qnn_semantic_execution_contract(
@@ -5148,10 +5484,33 @@ std::string qnn_semantic_generate_json(
 
     std::vector<float> embeddings;
     std::vector<int32_t> token_ids;
+    std::vector<float> token_weights;
+    QnnConditioningEvidence conditioning_evidence;
     if (qnn_token_conditioning) {
-        if (!read_int32_binary_file(embeddings_path, &token_ids, &error)) {
+        const bool read_ok = qnn_weighted_token_conditioning
+            ? read_qnn_clip_token_weight_payload(
+                embeddings_path,
+                &token_ids,
+                &token_weights,
+                execution_contract.use_cfg,
+                &conditioning_evidence,
+                &error)
+            : read_int32_binary_file(embeddings_path, &token_ids, &error);
+        if (!read_ok) {
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"token_read_failed\",\"message\":") +
                 quote(error) + "}";
+        }
+        if (!qnn_weighted_token_conditioning) {
+            const std::vector<float> unity_weights(token_ids.size(), 1.0f);
+            if (!derive_qnn_token_execution_weight_evidence(
+                    token_ids,
+                    unity_weights,
+                    execution_contract.use_cfg,
+                    &conditioning_evidence,
+                    &error)) {
+                return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"token_evidence_invalid\",\"message\":") +
+                    quote(error) + "}";
+            }
         }
     } else {
         if (!read_float_binary_file(embeddings_path, &embeddings, &error)) {
@@ -5159,11 +5518,11 @@ std::string qnn_semantic_generate_json(
             quote(error) + "}";
         }
     }
-    QnnConditioningEvidence conditioning_evidence;
     if (!resolve_qnn_conditioning_evidence(
             bundle_root,
             conditioning_format,
             token_ids.size(),
+            params_json,
             execution_contract,
             &conditioning_evidence,
             &error)) {
@@ -5315,6 +5674,56 @@ std::string qnn_semantic_generate_json(
                     << positive_embeddings.size() << ".";
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_output_shape_unsupported\",\"message\":") +
                 quote(message.str()) + "}";
+        }
+        if (qnn_weighted_token_conditioning) {
+            if (token_weights.size() != token_ids.size()) {
+                return qnn_semantic_failure_json(
+                    "prompt_weight_shape_invalid",
+                    "CONDITIONING_EVIDENCE_INVALID",
+                    "Weighted CLIP token IDs and weights have different lengths.");
+            }
+            const size_t sequence_tokens = static_cast<size_t>(token_elements);
+            auto apply_weights = [&](
+                    std::vector<float>* values,
+                    size_t weight_offset,
+                    const char* stage) -> bool {
+                std::vector<float> sequence_weights(
+                    token_weights.begin() + static_cast<std::ptrdiff_t>(weight_offset),
+                    token_weights.begin() + static_cast<std::ptrdiff_t>(
+                        weight_offset + sequence_tokens));
+                std::vector<float> weighted;
+                mca::image::ClipEmbeddingWeightStats stats;
+                if (!mca::image::apply_clip_token_weights_to_embeddings(
+                        *values,
+                        sequence_tokens,
+                        static_cast<size_t>(text_encoder_embedding_width),
+                        sequence_weights,
+                        true,
+                        &weighted,
+                        &stats,
+                        &error)) {
+                    error = std::string(stage) + ": " + error;
+                    return false;
+                }
+                *values = std::move(weighted);
+                return true;
+            };
+            if (execution_contract.use_cfg &&
+                !apply_weights(&negative_embeddings, 0U, "negative prompt weighting failed")) {
+                return qnn_semantic_failure_json(
+                    "text_encoder_uncond_weighting_failed",
+                    "CONDITIONING_EXECUTION_FAILED",
+                    error);
+            }
+            if (!apply_weights(
+                    &positive_embeddings,
+                    sequence_tokens,
+                    "positive prompt weighting failed")) {
+                return qnn_semantic_failure_json(
+                    "text_encoder_cond_weighting_failed",
+                    "CONDITIONING_EXECUTION_FAILED",
+                    error);
+            }
         }
         embeddings.reserve(
             (execution_contract.use_cfg ? negative_embeddings.size() : 0u) +
@@ -5514,11 +5923,20 @@ std::string qnn_semantic_generate_json(
         }
         int width = 0;
         int height = 0;
+        mca::qnn::ImagePixelRangeEvidence pixel_range_evidence;
         generation.record_stage(
             mca::qnn::ImageStage::PngWrite,
             kQnnImagePngWrite);
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
-        if (!write_vae_tensor_png(vae.outputs[0], pixels, output_path, &width, &height, &error)) {
+        if (!write_vae_tensor_png(
+                vae.outputs[0],
+                pixels,
+                output_path,
+                execution_contract.pixel_range,
+                &pixel_range_evidence,
+                &width,
+                &height,
+                &error)) {
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_png_write_failed\",\"message\":") +
                 quote(error) + "}";
         }
@@ -5527,7 +5945,7 @@ std::string qnn_semantic_generate_json(
             std::chrono::steady_clock::now() - started
         ).count();
         const long long output_bytes = file_size_or_zero(output_path);
-        const QnnNativeEffectiveEvidence native_evidence{
+        QnnNativeEffectiveEvidence native_evidence{
             timesteps.size(),
             unet_execution_count,
             conditioning_evidence.tokenizer_backend,
@@ -5537,6 +5955,14 @@ std::string qnn_semantic_generate_json(
             height,
             unet.graph_name,
         };
+        native_evidence.prompt_weighting_applied =
+            conditioning_evidence.prompt_weighting_applied;
+        native_evidence.positive_weighted_token_count =
+            conditioning_evidence.positive_weighted_token_count;
+        native_evidence.negative_weighted_token_count =
+            conditioning_evidence.negative_weighted_token_count;
+        native_evidence.prompt_weight_fingerprint =
+            conditioning_evidence.prompt_weight_fingerprint;
         const std::string native_effective = qnn_native_effective_json(
             execution_contract,
             native_evidence);
@@ -5565,9 +5991,17 @@ std::string qnn_semantic_generate_json(
             << "\"unconditionalBranch\":" << (execution_contract.use_cfg ? "true" : "false") << ","
             << "\"tokenizerBackend\":" << quote(conditioning_evidence.tokenizer_backend) << ","
             << "\"tokenCount\":" << conditioning_evidence.token_count << ","
+            << "\"promptWeightingSupported\":" << (execution_contract.prompt_weighting_supported ? "true" : "false") << ","
+            << "\"promptWeightingApplied\":" << (conditioning_evidence.prompt_weighting_applied ? "true" : "false") << ","
+            << "\"positiveWeightedTokenCount\":" << conditioning_evidence.positive_weighted_token_count << ","
+            << "\"negativeWeightedTokenCount\":" << conditioning_evidence.negative_weighted_token_count << ","
+            << "\"promptWeightFingerprint\":" << quote(conditioning_evidence.prompt_weight_fingerprint) << ","
             << "\"embeddingDiskDataType\":" << quote(conditioning_evidence.embedding_disk_data_type) << ","
             << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
             << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","
+            << qnn_pixel_range_evidence_json(
+                execution_contract.pixel_range,
+                pixel_range_evidence) << ","
             << "\"width\":" << width << ","
             << "\"height\":" << height << ","
             << "\"seed\":" << execution_contract.seed << ","
@@ -5788,11 +6222,20 @@ std::string qnn_semantic_generate_json(
     }
     int width = 0;
     int height = 0;
+    mca::qnn::ImagePixelRangeEvidence pixel_range_evidence;
     generation.record_stage(
         mca::qnn::ImageStage::PngWrite,
         kQnnImagePngWrite);
     if (generation.cancelled()) return qnn_image_generation_cancelled_json();
-    if (!write_vae_tensor_png(vae.outputs[0], pixels, output_path, &width, &height, &error)) {
+    if (!write_vae_tensor_png(
+            vae.outputs[0],
+            pixels,
+            output_path,
+            execution_contract.pixel_range,
+            &pixel_range_evidence,
+            &width,
+            &height,
+            &error)) {
         return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"png_write_failed\",\"message\":") +
             quote(error) + "}";
     }
@@ -5801,7 +6244,7 @@ std::string qnn_semantic_generate_json(
         std::chrono::steady_clock::now() - started
     ).count();
     const long long output_bytes = file_size_or_zero(output_path);
-    const QnnNativeEffectiveEvidence native_evidence{
+    QnnNativeEffectiveEvidence native_evidence{
         timesteps.size(),
         unet_execution_count,
         conditioning_evidence.tokenizer_backend,
@@ -5811,6 +6254,14 @@ std::string qnn_semantic_generate_json(
         height,
         unet.graph_name,
     };
+    native_evidence.prompt_weighting_applied =
+        conditioning_evidence.prompt_weighting_applied;
+    native_evidence.positive_weighted_token_count =
+        conditioning_evidence.positive_weighted_token_count;
+    native_evidence.negative_weighted_token_count =
+        conditioning_evidence.negative_weighted_token_count;
+    native_evidence.prompt_weight_fingerprint =
+        conditioning_evidence.prompt_weight_fingerprint;
     const std::string native_effective = qnn_native_effective_json(
         execution_contract,
         native_evidence);
@@ -5839,9 +6290,17 @@ std::string qnn_semantic_generate_json(
         << "\"unconditionalBranch\":" << (execution_contract.use_cfg ? "true" : "false") << ","
         << "\"tokenizerBackend\":" << quote(conditioning_evidence.tokenizer_backend) << ","
         << "\"tokenCount\":" << conditioning_evidence.token_count << ","
+        << "\"promptWeightingSupported\":" << (execution_contract.prompt_weighting_supported ? "true" : "false") << ","
+        << "\"promptWeightingApplied\":" << (conditioning_evidence.prompt_weighting_applied ? "true" : "false") << ","
+        << "\"positiveWeightedTokenCount\":" << conditioning_evidence.positive_weighted_token_count << ","
+        << "\"negativeWeightedTokenCount\":" << conditioning_evidence.negative_weighted_token_count << ","
+        << "\"promptWeightFingerprint\":" << quote(conditioning_evidence.prompt_weight_fingerprint) << ","
         << "\"embeddingDiskDataType\":" << quote(conditioning_evidence.embedding_disk_data_type) << ","
         << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
         << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","
+        << qnn_pixel_range_evidence_json(
+            execution_contract.pixel_range,
+            pixel_range_evidence) << ","
         << "\"width\":" << width << ","
         << "\"height\":" << height << ","
         << "\"seed\":" << execution_contract.seed << ","
@@ -5863,9 +6322,7 @@ std::string qnn_semantic_generate_json(
         << "\"message\":" << quote(qnn_token_conditioning
             ? "QNN semantic generation completed with QNN CLIP text encoding, the resolved shared scheduler, QNN UNet, and QNN VAE decoder."
             : "QNN semantic generation completed with MNN text embeddings, the resolved shared scheduler, QNN UNet, and QNN VAE decoder.") << ","
-        << "\"conditioningFormat\":" << quote(qnn_token_conditioning
-            ? "qnn_clip_token_ids_i32"
-            : conditioning_format) << ","
+        << "\"conditioningFormat\":" << quote(conditioning_format) << ","
         << "\"elapsedMs\":" << elapsed << ","
         << "\"unetContextLoadMs\":" << unet.context_load_ms << ","
         << "\"vaeContextLoadMs\":" << vae.context_load_ms << ","
@@ -5919,6 +6376,13 @@ std::string qnn_pipeline_probe_json(
     }
     if (!bundle.root_present) {
         return "{\"ok\":false,\"backend\":\"qnn_htp\",\"pipelineProbe\":true,\"executionStage\":\"bundle_missing\",\"message\":\"QNN bundle root is missing.\"}";
+    }
+    std::string error;
+    mca::qnn::ImagePixelRange pixel_range =
+        mca::qnn::ImagePixelRange::NegativeOneToOne;
+    if (!parse_qnn_pixel_range_contract(params_json, &pixel_range, &error)) {
+        return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"pipelineProbe\":true,\"executionStage\":\"execution_contract_invalid\",\"errorCode\":\"EXECUTION_CONTRACT_INVALID\",\"message\":") +
+            quote(error) + "}";
     }
 
     const std::string unet_binary = string_field(params_json, "unetContextBinary").empty()
@@ -5977,7 +6441,6 @@ std::string qnn_pipeline_probe_json(
     std::vector<float> text(static_cast<size_t>(text_elements), 0.0f);
     std::vector<float> unet_output;
     long long unet_execute_ms_total = 0;
-    std::string error;
     for (int step = 0; step < steps; ++step) {
         if (!qnn_write_float_tensor(&unet.inputs[sample_index], latents.data(), latents.size(), &error) ||
             !qnn_write_int32_tensor(&unet.inputs[timestep_index], steps - step, &error) ||
@@ -6019,7 +6482,16 @@ std::string qnn_pipeline_probe_json(
     }
     int width = 0;
     int height = 0;
-    if (!write_vae_tensor_png(vae.outputs[0], pixels, output_path, &width, &height, &error)) {
+    mca::qnn::ImagePixelRangeEvidence pixel_range_evidence;
+    if (!write_vae_tensor_png(
+            vae.outputs[0],
+            pixels,
+            output_path,
+            pixel_range,
+            &pixel_range_evidence,
+            &width,
+            &height,
+            &error)) {
         return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"pipelineProbe\":true,\"executionStage\":\"png_write_failed\",\"message\":") +
             quote(error) + "}";
     }
@@ -6040,6 +6512,7 @@ std::string qnn_pipeline_probe_json(
         << "\"seed\":" << seed << ","
         << "\"width\":" << width << ","
         << "\"height\":" << height << ","
+        << qnn_pixel_range_evidence_json(pixel_range, pixel_range_evidence) << ","
         << "\"elapsedMs\":" << elapsed << ","
         << "\"unetContextLoadMs\":" << unet.context_load_ms << ","
         << "\"vaeContextLoadMs\":" << vae.context_load_ms << ","

@@ -84,7 +84,8 @@ internal data class SdxlNativePhaseProof(
 /** Immutable resolved execution fields carried through both isolated phase workers. */
 internal data class SdxlImageExecutionContract(
     val paramsJson: String,
-    val expected: ImageNativeEffectiveExecution,
+    val expected: ImageResolvedExecution,
+    val pixelRange: ImagePixelRange,
     val expectedTimetableCount: Int,
     val expectedUnetExecutionCount: Int
 ) {
@@ -94,18 +95,23 @@ internal data class SdxlImageExecutionContract(
 
     fun paramsObject(): JSONObject = JSONObject(paramsJson)
 
-    fun expectedJson(): JSONObject = expected.toSdxlNativeEffectiveJson()
+    fun expectedJson(): JSONObject = expected.toSdxlResolvedExecutionJson()
+        .put("pixelRange", pixelRange.name)
 
     fun requireNativeEffective(
         nativeResult: JSONObject,
         phase: SdxlImagePhase
     ): ImageNativeEffectiveExecution {
         val evidence = nativeResult.optJSONObject("nativeEffective") ?: nativeResult
+        val actualPixelRange = evidence.strictEnum("pixelRange", ImagePixelRange.entries)
+        require(actualPixelRange == pixelRange) {
+            "SDXL ${phase.wireName} nativeEffective pixelRange mismatch."
+        }
         val actual = evidence.toSdxlNativeEffective()
         val validation = ImageExecutionContractValidator.validate(
             ImageExecutionLayers(
                 requested = ImageRequestedExecution(),
-                resolved = expected.toSdxlResolvedExecution(),
+                resolved = expected,
                 nativeEffective = actual
             )
         )
@@ -131,7 +137,11 @@ internal data class SdxlImageExecutionContract(
     companion object {
         fun fromParams(raw: String): SdxlImageExecutionContract {
             val json = JSONObject(raw)
-            val effective = json.toSdxlNativeEffective()
+            val effective = json.toSdxlResolvedExecution()
+            val pixelRange = json.strictEnum("pixelRange", ImagePixelRange.entries)
+            require(pixelRange != ImagePixelRange.RUNTIME_NATIVE) {
+                "SDXL QNN execution requires an explicit VAE output pixel range."
+            }
             val expectedTimetableCount = json.strictInt("expectedTimetableCount")
             val expectedUnetExecutionCount = json.strictInt("expectedUnetExecutionCount")
             require(expectedTimetableCount == effective.timetableCount) {
@@ -158,6 +168,7 @@ internal data class SdxlImageExecutionContract(
             return SdxlImageExecutionContract(
                 paramsJson = json.toString(),
                 expected = effective,
+                pixelRange = pixelRange,
                 expectedTimetableCount = expectedTimetableCount,
                 expectedUnetExecutionCount = expectedUnetExecutionCount
             )
@@ -189,6 +200,26 @@ internal fun validateSdxlVaeNativeEvidence(
     require(nativeResult.strictInt("vaeExecutionCount") == 1) { "VAE must execute exactly once." }
     require(nativeResult.strictInt("width") == contract.width) { "VAE output width mismatch." }
     require(nativeResult.strictInt("height") == contract.height) { "VAE output height mismatch." }
+    val pixelRange = nativeResult.strictEnum("pixelRange", ImagePixelRange.entries)
+    require(pixelRange == contract.pixelRange) { "VAE output pixel range mismatch." }
+    require(pixelRange != ImagePixelRange.RUNTIME_NATIVE) {
+        "VAE output pixel range must be explicit."
+    }
+    require(
+        nativeResult.strictString("pixelRangeConversion") ==
+            ImageExecutionProfileNativeContract.qnnPixelRangeConversionName(pixelRange)
+    ) { "VAE pixel-range conversion evidence mismatch." }
+    val valueCount = nativeResult.strictLong("pixelRangeValueCount")
+    val clampedValueCount = nativeResult.strictLong("pixelRangeClampedValueCount")
+    val expectedValueCount = Math.multiplyExact(
+        Math.multiplyExact(contract.width.toLong(), contract.height.toLong()),
+        3L
+    )
+    require(valueCount == expectedValueCount) { "VAE pixel-range value count mismatch." }
+    require(clampedValueCount in 0L..valueCount) { "VAE pixel-range clamp count is invalid." }
+    val observedMin = nativeResult.strictDouble("pixelRangeObservedMin")
+    val observedMax = nativeResult.strictDouble("pixelRangeObservedMax")
+    require(observedMin <= observedMax) { "VAE observed pixel range is invalid." }
 }
 
 internal data class SdxlImagePhaseError(
@@ -471,7 +502,9 @@ internal object SdxlLatentArtifact {
             shape = shape,
             byteSize = latentFile.length(),
             sha256 = sha256(latentFile),
-            nativeEffectiveJson = nativeEffective.toSdxlNativeEffectiveJson().toString(),
+            nativeEffectiveJson = nativeEffective.toSdxlNativeEffectiveJson()
+                .put("pixelRange", contract.pixelRange.name)
+                .toString(),
             unetNativeGenerationSequence = proof.nativeGenerationSequence,
             unetNativeStageMask = proof.nativeStageMask,
             unetNativeDetailStageMask = proof.nativeDetailStageMask
@@ -555,29 +588,42 @@ private fun JSONArray.toPositiveIntList(): List<Int> = buildList {
 }
 
 private fun JSONObject.toSdxlNativeEffective(): ImageNativeEffectiveExecution =
-    ImageNativeEffectiveExecution(
-        profileId = strictString("profileId"),
-        profileRevision = strictInt("profileRevision"),
-        modelFingerprint = strictString("modelFingerprint"),
-        runtime = strictEnum("runtime", LocalImageRuntime.entries),
-        scheduler = strictEnum("scheduler", ImageSchedulerAlgorithm.entries),
-        predictionType = strictEnum("predictionType", ImagePredictionType.entries),
-        steps = strictInt("steps"),
-        timetableCount = strictInt("timetableCount"),
-        unetExecutionCount = strictInt("unetExecutionCount"),
-        cfgScale = strictDouble("cfgScale"),
-        useCfg = strictBoolean("useCfg"),
-        unconditionalBranch = strictBoolean("unconditionalBranch"),
-        tokenizerBackend = strictEnum("tokenizerBackend", ImageTokenizerBackend.entries),
-        tokenCount = strictInt("tokenCount"),
-        embeddingDiskDataType = strictEnum("embeddingDiskDataType", ImageEmbeddingDiskDataType.entries),
-        vaeScalingLocation = strictEnum("vaeScalingLocation", ImageVaeScalingLocation.entries),
-        vaeScalingFactor = strictDouble("vaeScalingFactor"),
-        width = strictInt("width"),
-        height = strictInt("height"),
-        seed = strictLong("seed"),
-        graphName = strictString("graphName"),
-        fallback = strictBoolean("fallback")
+    ImageExecutionProfileNativeContract.validatePromptWeightingEvidence(
+        ImageNativeEffectiveExecution(
+            profileId = strictString("profileId"),
+            profileRevision = strictInt("profileRevision"),
+            modelFingerprint = strictString("modelFingerprint"),
+            runtime = strictEnum("runtime", LocalImageRuntime.entries),
+            scheduler = strictEnum("scheduler", ImageSchedulerAlgorithm.entries),
+            predictionType = strictEnum("predictionType", ImagePredictionType.entries),
+            steps = strictInt("steps"),
+            timetableCount = strictInt("timetableCount"),
+            unetExecutionCount = strictInt("unetExecutionCount"),
+            cfgScale = strictDouble("cfgScale"),
+            useCfg = strictBoolean("useCfg"),
+            unconditionalBranch = strictBoolean("unconditionalBranch"),
+            tokenizerBackend = strictEnum("tokenizerBackend", ImageTokenizerBackend.entries),
+            tokenCount = strictInt("tokenCount"),
+            promptWeightingSupported = strictBoolean("promptWeightingSupported"),
+            promptWeightingApplied = strictBoolean("promptWeightingApplied"),
+            positiveWeightedTokenCount = strictInt("positiveWeightedTokenCount"),
+            negativeWeightedTokenCount = strictInt("negativeWeightedTokenCount"),
+            promptWeightFingerprint = strictString("promptWeightFingerprint"),
+            embeddingDiskDataType = strictEnum(
+                "embeddingDiskDataType",
+                ImageEmbeddingDiskDataType.entries
+            ),
+            vaeScalingLocation = strictEnum(
+                "vaeScalingLocation",
+                ImageVaeScalingLocation.entries
+            ),
+            vaeScalingFactor = strictDouble("vaeScalingFactor"),
+            width = strictInt("width"),
+            height = strictInt("height"),
+            seed = strictLong("seed"),
+            graphName = strictString("graphName"),
+            fallback = strictBoolean("fallback")
+        )
     )
 
 internal fun ImageNativeEffectiveExecution.toSdxlNativeEffectiveJson(): JSONObject = JSONObject()
@@ -595,6 +641,11 @@ internal fun ImageNativeEffectiveExecution.toSdxlNativeEffectiveJson(): JSONObje
     .put("unconditionalBranch", unconditionalBranch)
     .put("tokenizerBackend", tokenizerBackend.name)
     .put("tokenCount", tokenCount)
+    .put("promptWeightingSupported", promptWeightingSupported)
+    .put("promptWeightingApplied", promptWeightingApplied)
+    .put("positiveWeightedTokenCount", positiveWeightedTokenCount)
+    .put("negativeWeightedTokenCount", negativeWeightedTokenCount)
+    .put("promptWeightFingerprint", promptWeightFingerprint)
     .put("embeddingDiskDataType", embeddingDiskDataType.name)
     .put("vaeScalingLocation", vaeScalingLocation.name)
     .put("vaeScalingFactor", vaeScalingFactor)
@@ -604,31 +655,57 @@ internal fun ImageNativeEffectiveExecution.toSdxlNativeEffectiveJson(): JSONObje
     .put("graphName", graphName)
     .put("fallback", fallback)
 
-private fun ImageNativeEffectiveExecution.toSdxlResolvedExecution(): ImageResolvedExecution =
+private fun JSONObject.toSdxlResolvedExecution(): ImageResolvedExecution =
     ImageResolvedExecution(
-        profileId = profileId,
-        profileRevision = profileRevision,
-        modelFingerprint = modelFingerprint,
-        runtime = runtime,
-        scheduler = scheduler,
-        predictionType = predictionType,
-        steps = steps,
-        timetableCount = timetableCount,
-        unetExecutionCount = unetExecutionCount,
-        cfgScale = cfgScale,
-        useCfg = useCfg,
-        unconditionalBranch = unconditionalBranch,
-        tokenizerBackend = tokenizerBackend,
-        tokenCount = tokenCount,
-        embeddingDiskDataType = embeddingDiskDataType,
-        vaeScalingLocation = vaeScalingLocation,
-        vaeScalingFactor = vaeScalingFactor,
-        width = width,
-        height = height,
-        seed = seed,
-        graphName = graphName,
-        fallback = fallback
+        profileId = strictString("profileId"),
+        profileRevision = strictInt("profileRevision"),
+        modelFingerprint = strictString("modelFingerprint"),
+        runtime = strictEnum("runtime", LocalImageRuntime.entries),
+        scheduler = strictEnum("scheduler", ImageSchedulerAlgorithm.entries),
+        predictionType = strictEnum("predictionType", ImagePredictionType.entries),
+        steps = strictInt("steps"),
+        timetableCount = strictInt("timetableCount"),
+        unetExecutionCount = strictInt("unetExecutionCount"),
+        cfgScale = strictDouble("cfgScale"),
+        useCfg = strictBoolean("useCfg"),
+        unconditionalBranch = strictBoolean("unconditionalBranch"),
+        tokenizerBackend = strictEnum("tokenizerBackend", ImageTokenizerBackend.entries),
+        tokenCount = strictInt("tokenCount"),
+        promptWeightingSupported = strictBoolean("promptWeightingSupported"),
+        embeddingDiskDataType = strictEnum("embeddingDiskDataType", ImageEmbeddingDiskDataType.entries),
+        vaeScalingLocation = strictEnum("vaeScalingLocation", ImageVaeScalingLocation.entries),
+        vaeScalingFactor = strictDouble("vaeScalingFactor"),
+        width = strictInt("width"),
+        height = strictInt("height"),
+        seed = strictLong("seed"),
+        graphName = strictString("graphName"),
+        fallback = strictBoolean("fallback")
     )
+
+private fun ImageResolvedExecution.toSdxlResolvedExecutionJson(): JSONObject = JSONObject()
+    .put("profileId", profileId)
+    .put("profileRevision", profileRevision)
+    .put("modelFingerprint", modelFingerprint)
+    .put("runtime", runtime.name)
+    .put("scheduler", scheduler.name)
+    .put("predictionType", predictionType.name)
+    .put("steps", steps)
+    .put("timetableCount", timetableCount)
+    .put("unetExecutionCount", unetExecutionCount)
+    .put("cfgScale", cfgScale)
+    .put("useCfg", useCfg)
+    .put("unconditionalBranch", unconditionalBranch)
+    .put("tokenizerBackend", tokenizerBackend.name)
+    .put("tokenCount", tokenCount)
+    .put("promptWeightingSupported", promptWeightingSupported)
+    .put("embeddingDiskDataType", embeddingDiskDataType.name)
+    .put("vaeScalingLocation", vaeScalingLocation.name)
+    .put("vaeScalingFactor", vaeScalingFactor)
+    .put("width", width)
+    .put("height", height)
+    .put("seed", seed)
+    .put("graphName", graphName)
+    .put("fallback", fallback)
 
 private fun JSONObject.strictValue(name: String): Any {
     require(has(name) && !isNull(name)) { "Missing required SDXL execution field: $name" }

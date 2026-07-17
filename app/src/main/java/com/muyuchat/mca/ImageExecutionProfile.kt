@@ -133,8 +133,11 @@ internal data class ImageSchedulerContract(
     val rng: ImageRngContract = ImageRngContract.MT19937,
     val seedBits: Int = 32
 ) {
-    fun expectedTimestepCount(steps: Int): Int =
-        if (algorithm == ImageSchedulerAlgorithm.PNDM_PLMS && skipPrkSteps) steps + 1 else steps
+    fun expectedTimestepCount(steps: Int): Int = when {
+        algorithm != ImageSchedulerAlgorithm.PNDM_PLMS -> steps
+        skipPrkSteps -> steps + 1
+        else -> steps + 9 // 12 PRK warmup calls plus the remaining steps - 3 PLMS calls.
+    }
 }
 
 internal enum class ImageTensorLayout { NCHW, NHWC, BSH, BCHW, RUNTIME_NATIVE }
@@ -323,6 +326,16 @@ internal object ImageExecutionProfileValidator {
             if (profile.tokenizer.maxLength <= 0) {
                 issue("TOKENIZER_CONTRACT_INVALID", "tokenizer.maxLength", "Tokenizer max length must be positive.")
             }
+            if (
+                profile.tokenizer.supportsPromptWeighting !=
+                profile.capabilities.supportsPromptWeighting
+            ) {
+                issue(
+                    "CAPABILITY_CONTRACT_INVALID",
+                    "supportsPromptWeighting",
+                    "Tokenizer and generation capabilities must agree on prompt weighting support."
+                )
+            }
             if ((profile.conditioning.exactByteSize ?: 1L) <= 0L) {
                 issue("CONDITIONING_CONTRACT_INVALID", "conditioning.exactByteSize", "Embedding byte size must be positive when declared.")
             }
@@ -447,6 +460,7 @@ internal data class ImageResolvedExecution(
     val unconditionalBranch: Boolean,
     val tokenizerBackend: ImageTokenizerBackend,
     val tokenCount: Int,
+    val promptWeightingSupported: Boolean,
     val embeddingDiskDataType: ImageEmbeddingDiskDataType,
     val vaeScalingLocation: ImageVaeScalingLocation,
     val vaeScalingFactor: Double,
@@ -472,6 +486,11 @@ internal data class ImageNativeEffectiveExecution(
     val unconditionalBranch: Boolean,
     val tokenizerBackend: ImageTokenizerBackend,
     val tokenCount: Int,
+    val promptWeightingSupported: Boolean,
+    val promptWeightingApplied: Boolean,
+    val positiveWeightedTokenCount: Int,
+    val negativeWeightedTokenCount: Int,
+    val promptWeightFingerprint: String,
     val embeddingDiskDataType: ImageEmbeddingDiskDataType,
     val vaeScalingLocation: ImageVaeScalingLocation,
     val vaeScalingFactor: Double,
@@ -529,6 +548,24 @@ internal object ImageExecutionContractValidator {
             compare("unconditionalBranch", resolved.unconditionalBranch, native.unconditionalBranch)
             compare("tokenizerBackend", resolved.tokenizerBackend, native.tokenizerBackend)
             compare("tokenCount", resolved.tokenCount, native.tokenCount)
+            compare(
+                "promptWeightingSupported",
+                resolved.promptWeightingSupported,
+                native.promptWeightingSupported
+            )
+            if (!native.promptWeightingSupported) {
+                compare("promptWeightingApplied", false, native.promptWeightingApplied)
+                compare(
+                    "positiveWeightedTokenCount",
+                    0,
+                    native.positiveWeightedTokenCount
+                )
+                compare(
+                    "negativeWeightedTokenCount",
+                    0,
+                    native.negativeWeightedTokenCount
+                )
+            }
             compare("embeddingDiskDataType", resolved.embeddingDiskDataType, native.embeddingDiskDataType)
             compare("vaeScalingLocation", resolved.vaeScalingLocation, native.vaeScalingLocation)
             compareDouble("vaeScalingFactor", resolved.vaeScalingFactor, native.vaeScalingFactor)

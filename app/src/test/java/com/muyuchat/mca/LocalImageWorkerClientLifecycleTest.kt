@@ -29,6 +29,39 @@ class LocalImageWorkerClientLifecycleTest {
     }
 
     @Test
+    fun resultPublicationWinsBeforeCancellation() {
+        val gate = LocalImageWorkerPublicationGate()
+
+        assertTrue(gate.tryBeginResultPublication())
+        assertFalse(gate.tryRequestCancellation())
+        assertFalse(gate.cancelRequested)
+    }
+
+    @Test
+    fun cancellationWinsBeforeResultPublication() {
+        val gate = LocalImageWorkerPublicationGate()
+
+        assertTrue(gate.tryRequestCancellation())
+        assertFalse(gate.tryBeginResultPublication())
+        assertTrue(gate.cancelRequested)
+    }
+
+    @Test
+    fun publicationAndCancellationGatesAreIdempotent() {
+        val publicationGate = LocalImageWorkerPublicationGate()
+        assertTrue(publicationGate.tryBeginResultPublication())
+        assertFalse(publicationGate.tryBeginResultPublication())
+        assertFalse(publicationGate.tryRequestCancellation())
+        assertFalse(publicationGate.cancelRequested)
+
+        val cancellationGate = LocalImageWorkerPublicationGate()
+        assertTrue(cancellationGate.tryRequestCancellation())
+        assertFalse(cancellationGate.tryRequestCancellation())
+        assertFalse(cancellationGate.tryBeginResultPublication())
+        assertTrue(cancellationGate.cancelRequested)
+    }
+
+    @Test
     fun generateFinallyReleasesBinderStateBeforeClearingTheActiveRequest() {
         val source = localImageWorkerClientSource()
         val generateStart = source.indexOf("suspend fun generate(")
@@ -52,16 +85,85 @@ class LocalImageWorkerClientLifecycleTest {
         )
     }
 
+    @Test
+    fun successfulDeliveryCommitsPublicationBeforeClientUnbindCanDestroyTheService() {
+        val source = localImageWorkerServiceSource()
+        val job = functionBody(source, "val job = scope.launch {")
+        val beginPublication = job.indexOf("active.tryBeginResultPublication()")
+        val deliver = job.indexOf("val delivered = sendComplete(")
+        val completed = job.indexOf(
+            "markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)"
+        )
+        val deliveryFailed = job.indexOf("errorCode = \"RESULT_DELIVERY_FAILED\"")
+        val onDestroy = functionBody(source, "override fun onDestroy()")
+
+        assertTrue("worker job must contain its result callback", deliver >= 0)
+        assertTrue(
+            "a successful callback can resume the client and unbind synchronously; " +
+                "publication must commit before invoking that callback",
+            beginPublication in 0 until deliver
+        )
+        assertTrue(onDestroy.contains("if (active.tryRequestCancellation())"))
+        assertTrue(
+            "COMPLETED is committed only after the callback confirms delivery",
+            completed > deliver
+        )
+        assertTrue(
+            "a callback delivery failure must remain FAILED rather than COMPLETED",
+            deliveryFailed > completed
+        )
+    }
+
+    @Test
+    fun unfinishedBinderDeathStillFailsTheClientAndStopsTheWorker() {
+        val clientSource = localImageWorkerClientSource()
+        val serviceSource = localImageWorkerServiceSource()
+        val connected = functionBody(clientSource, "override fun onServiceConnected(")
+        val connectionLoss = functionBody(clientSource, "private fun handleConnectionLoss(")
+        val generate = functionBody(serviceSource, "override fun generate(")
+        val deadClient = functionBody(serviceSource, "private fun cancelForDeadClient(")
+
+        assertTrue(connected.contains("handleConnectionLoss("))
+        assertTrue(connectionLoss.contains("active?.completion?.completeExceptionally(failure)"))
+        assertTrue(generate.contains("cancelForDeadClient(active)"))
+        assertTrue(deadClient.contains("if (!isCurrent) return"))
+        assertTrue(deadClient.contains("if (!active.tryRequestCancellation()) return"))
+        assertTrue(deadClient.contains("requestJournalCancellation(active.requestId)"))
+        assertTrue(deadClient.contains("provider.cancel()"))
+        assertTrue(deadClient.contains("active.job?.cancel("))
+    }
+
+    @Test
+    fun explicitCancellationStillCancelsTheRegisteredRemoteRequest() {
+        val clientSource = localImageWorkerClientSource()
+        val serviceSource = localImageWorkerServiceSource()
+        val serviceCancel = functionBody(serviceSource, "override fun cancel(")
+
+        assertTrue(clientSource.contains("request.handshake.requestCancel()"))
+        assertTrue(clientSource.contains("cancelRemote(request)"))
+        assertTrue(serviceCancel.contains("if (!active.tryRequestCancellation()) return false"))
+        assertTrue(serviceCancel.contains("requestJournalCancellation(active.requestId)"))
+        assertTrue(serviceCancel.contains("return provider.cancel()"))
+    }
+
     private fun localImageWorkerClientSource(): String {
+        return localImageWorkerSource("LocalImageWorkerClient.kt")
+    }
+
+    private fun localImageWorkerServiceSource(): String {
+        return localImageWorkerSource("LocalImageWorkerService.kt")
+    }
+
+    private fun localImageWorkerSource(fileName: String): String {
         var root = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(6) {
             listOf(
-                File(root, "src/main/java/com/muyuchat/mca/LocalImageWorkerClient.kt"),
-                File(root, "app/src/main/java/com/muyuchat/mca/LocalImageWorkerClient.kt")
+                File(root, "src/main/java/com/muyuchat/mca/$fileName"),
+                File(root, "app/src/main/java/com/muyuchat/mca/$fileName")
             ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
             root = root.parentFile ?: return@repeat
         }
-        error("Unable to locate LocalImageWorkerClient.kt")
+        error("Unable to locate $fileName")
     }
 
     private fun functionBody(source: String, signature: String): String {

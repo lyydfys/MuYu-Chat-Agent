@@ -86,7 +86,7 @@ class SdxlImagePhaseProtocolTest {
         latent.writeBytes(ByteArray(4 * 2 * 2 * 4) { index -> index.toByte() })
         val metadataFile = File(temporaryFolder.root, "latent.json")
         val native = JSONObject()
-            .putAll(contractParams(steps = 30))
+            .putAll(nativeEffectiveParams(steps = 30))
             .put("runtimeProfile", "V79")
             .put("htpArchVersion", 79)
             .put("latentDtype", "float32-le")
@@ -131,6 +131,7 @@ class SdxlImagePhaseProtocolTest {
         val params = contractParams(steps = 30)
         val contract = SdxlImageExecutionContract.fromParams(params.toString())
         val native = JSONObject(params.toString())
+            .putAll(nativePromptWeightingEvidence())
             .put("runtimeProfile", "V79")
             .put("htpArchVersion", 79)
             .put("latentDtype", "float32-le")
@@ -248,10 +249,12 @@ class SdxlImagePhaseProtocolTest {
 
     @Test
     fun `final execution metadata preserves dynamic transport and isolated process proof`() {
-        val nativeExecution = contractParams(steps = 30)
+        val nativeExecution = nativeEffectiveParams(steps = 30)
         val metadata = qnnImageExecutionMetadata(
             nativeRequestId = "qnn-native-1",
             nativeResult = JSONObject(nativeExecution.toString())
+                .put("nativeEffective", JSONObject(nativeExecution.toString()))
+                .putAll(vaePixelRangeEvidence())
                 .put("backend", "qnn_htp")
                 .put("executionStage", "sdxl_two_phase_passed")
                 .put("npuActive", true)
@@ -324,6 +327,7 @@ class SdxlImagePhaseProtocolTest {
         val metadataFile = File(temporaryFolder.root, "merge-latent.json")
         val output = temporaryFolder.newFile("merge-output.png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
         val unetNative = JSONObject(params.toString())
+            .putAll(nativePromptWeightingEvidence())
             .put("ok", true)
             .put("runtimeProfile", "V79")
             .put("htpArchVersion", 79)
@@ -352,6 +356,7 @@ class SdxlImagePhaseProtocolTest {
             .put("vaeExecutionCount", 1)
             .put("width", 1024)
             .put("height", 1024)
+            .putAll(vaePixelRangeEvidence())
             .put("mimeType", "image/png")
             .put("outputPath", output.canonicalPath)
             .put("outputBytes", output.length())
@@ -398,6 +403,19 @@ class SdxlImagePhaseProtocolTest {
         assertEquals(52L, merged.getLong("vaeNativeGenerationSequence"))
         assertTrue(merged.getBoolean("nativeExecution"))
         assertFalse(merged.getBoolean("fallback"))
+        assertEquals(
+            ImagePixelRange.NEGATIVE_ONE_TO_ONE.name,
+            merged.getString("pixelRange")
+        )
+        assertEquals(
+            ImagePixelRange.NEGATIVE_ONE_TO_ONE.name,
+            merged.getJSONObject("nativeEffective").getString("pixelRange")
+        )
+        assertEquals(
+            "negative_one_to_one_to_u8",
+            merged.getString("pixelRangeConversion")
+        )
+        assertEquals(1024L * 1024L * 3L, merged.getLong("pixelRangeValueCount"))
     }
 
     @Test
@@ -410,8 +428,24 @@ class SdxlImagePhaseProtocolTest {
             .put("vaeExecutionCount", 1)
             .put("width", 1024)
             .put("height", 1024)
+            .putAll(vaePixelRangeEvidence())
 
         assertTrue(runCatching { validateSdxlVaeNativeEvidence(contract, wrongScale) }.isFailure)
+    }
+
+    @Test
+    fun `vae pixel range mismatch fails before final publication`() {
+        val contract = SdxlImageExecutionContract.fromParams(contractParams(steps = 30).toString())
+        val wrongRange = JSONObject()
+            .put("vaeScalingLocation", ImageVaeScalingLocation.HOST_BEFORE_GRAPH.name)
+            .put("vaeScalingFactor", 0.13025)
+            .put("effectiveVaeHostScale", 1.0 / 0.13025)
+            .put("vaeExecutionCount", 1)
+            .put("width", 1024)
+            .put("height", 1024)
+            .putAll(vaePixelRangeEvidence(ImagePixelRange.ZERO_TO_ONE))
+
+        assertTrue(runCatching { validateSdxlVaeNativeEvidence(contract, wrongRange) }.isFailure)
     }
 
     @Test
@@ -448,15 +482,40 @@ class SdxlImagePhaseProtocolTest {
             .put("unconditionalBranch", useCfg)
             .put("tokenizerBackend", ImageTokenizerBackend.TOKENIZERS_CPP.name)
             .put("tokenCount", 154)
+            .put("promptWeightingSupported", true)
             .put("embeddingDiskDataType", ImageEmbeddingDiskDataType.FP16.name)
             .put("vaeScalingLocation", ImageVaeScalingLocation.HOST_BEFORE_GRAPH.name)
             .put("vaeScalingFactor", 0.13025)
+            .put("pixelRange", ImagePixelRange.NEGATIVE_ONE_TO_ONE.name)
             .put("width", 1024)
             .put("height", 1024)
             .put("seed", 1234L)
             .put("graphName", "model")
             .put("fallback", false)
     }
+
+    private fun nativeEffectiveParams(steps: Int, useCfg: Boolean = true): JSONObject =
+        JSONObject(contractParams(steps, useCfg).toString())
+            .putAll(nativePromptWeightingEvidence())
+
+    private fun nativePromptWeightingEvidence(): JSONObject = JSONObject()
+        .put("promptWeightingApplied", false)
+        .put("positiveWeightedTokenCount", 0)
+        .put("negativeWeightedTokenCount", 0)
+        .put("promptWeightFingerprint", "c".repeat(64))
+
+    private fun vaePixelRangeEvidence(
+        range: ImagePixelRange = ImagePixelRange.NEGATIVE_ONE_TO_ONE
+    ): JSONObject = JSONObject()
+        .put("pixelRange", range.name)
+        .put(
+            "pixelRangeConversion",
+            ImageExecutionProfileNativeContract.qnnPixelRangeConversionName(range)
+        )
+        .put("pixelRangeValueCount", 1024L * 1024L * 3L)
+        .put("pixelRangeClampedValueCount", 17L)
+        .put("pixelRangeObservedMin", -1.125)
+        .put("pixelRangeObservedMax", 1.25)
 
     private fun phaseResult(
         requestId: String,

@@ -52,6 +52,18 @@ internal data class ImageDeviceExecutionHints(
     val preferredThreads: Int? = null
 )
 
+/**
+ * Stable package identity carried independently from device information.
+ * Every value is advisory unless it matches an exact catalog identity rule;
+ * an unknown value always falls through to capability discovery or the
+ * generic compatible profile.
+ */
+internal data class ImageRecommendationEvidence(
+    val aliases: List<String> = emptyList(),
+    val sourceRepositories: List<String> = emptyList(),
+    val artifactPaths: List<String> = emptyList()
+)
+
 internal data class ImageExecutionProfileResolverInput(
     val modelFingerprint: String,
     val runtime: LocalImageRuntime,
@@ -61,6 +73,7 @@ internal data class ImageExecutionProfileResolverInput(
     val manifestProfile: ImageExecutionProfile? = null,
     val sidecar: ImageProfileSidecar? = null,
     val capabilityDiscovery: ImageCapabilityDiscovery? = null,
+    val recommendationEvidence: ImageRecommendationEvidence = ImageRecommendationEvidence(),
     val userOverrides: ImageGenerationOverrides = ImageGenerationOverrides(),
     val deviceHints: ImageDeviceExecutionHints = ImageDeviceExecutionHints()
 )
@@ -87,6 +100,14 @@ internal data class BuiltInImageProfileTarget(
     val profileId: String
 )
 
+private data class BuiltInImageProfileIdentityRule(
+    val recommendationId: String,
+    val aliases: Set<String> = emptySet(),
+    val primaryRepositories: Set<String> = emptySet(),
+    val artifactMarkers: Set<String> = emptySet(),
+    val modelFingerprints: Set<String> = emptySet()
+)
+
 internal object ImageExecutionProfileResolver {
     val builtInTargets: List<BuiltInImageProfileTarget> = listOf(
         BuiltInImageProfileTarget("cyberrealistic_sd15_qnn228", "community.sd15.qnn228"),
@@ -110,9 +131,122 @@ internal object ImageExecutionProfileResolver {
     )
 
     private val targetByRecommendationId = builtInTargets.associateBy(BuiltInImageProfileTarget::recommendationId)
-    private val bundleIdAliases = mapOf(
-        "sd15_mnn_bundle" to "sd15_mnn_512_quality",
-        "z_image_turbo_q2_bundle" to "z_image_turbo_q4"
+    private val identityRules: List<BuiltInImageProfileIdentityRule> = listOf(
+        identityRule(
+            "cyberrealistic_sd15_qnn228",
+            aliases = setOf("cyberrealistic-sd15-qnn228-8gen2"),
+            repositories = setOf("Mr-J-369/CyberRealistic_Final-SD1.5-qnn2.28"),
+            artifacts = setOf(
+                "cyberrealistic_final_qnn2.28_min.zip",
+                "cyberrealistic_final_qnn2.28_8gen2.zip"
+            ),
+            fingerprints = setOf("9daf0e4d80d14ae93c774faf5366702c58b0cdb71618d5e5130b54226936bf3f")
+        ),
+        identityRule(
+            "realisticvisionhyper_sd15_qnn228",
+            repositories = setOf("Mr-J-369/RealisticVisionHyper-SD1.5-qnn2.28"),
+            artifacts = setOf("RealisticVisionHyper-qnn2.28-min.zip"),
+            fingerprints = setOf("7f552ad7f9070f1e482d93d3785ceedd6f3fc1d437db9c5da00d81d9edd34b86")
+        ),
+        identityRule(
+            "dreamshaper_sd15_qnn228",
+            repositories = setOf("Mr-J-369/DreamShaper-SD1.5-qnn2.28"),
+            artifacts = setOf("DreamShaperV8-qnn2.28-min.zip"),
+            fingerprints = setOf("e4fbd2a28db64b038372d1847d82b66f2f754ed0e95d412a283104b9382ae59c")
+        ),
+        identityRule(
+            "meinamix_sd15_qnn228",
+            repositories = setOf("Mr-J-369/MeinaMix-SD1.5-qnn2.28"),
+            artifacts = setOf("MeinaMix-qnn2.28-8gen2.zip")
+        ),
+        identityRule(
+            "sdxl_base_qnn228",
+            repositories = setOf("xororz/sdxl-qnn"),
+            artifacts = setOf("sdxl_base_qnn2.28_8gen3.zip"),
+            fingerprints = setOf("426e36987fd3b84dd05255cb12bc5463c427c8b55598bd3b2486a72291d6be7f")
+        ),
+        identityRule(
+            "realismsdxl_dmd2_alt_qnn228",
+            repositories = setOf("Mr-J-369/RealismByStableYogiV8.0_DMD2_ALT-SDXL-qnn2.28"),
+            artifacts = setOf("realismSDXLByStable_v80DMD2ALT_qnn2.28_8gen3.zip"),
+            fingerprints = setOf("e95df91391f1f6f6f39416985ada906fec77d65496d3f52f54feb0c3da3744e8")
+        ),
+        identityRule(
+            "animagine_xl_v4_qnn228",
+            repositories = setOf("YuuiKurata/animagineXL_qnn2.28"),
+            artifacts = setOf("animagineXL40_v4Opt_qnn2.28_8gen3.zip"),
+            fingerprints = setOf("a08612048ad60e834ae7f5a1b234cfb7edd299e28dc20abab1a4a9be5bf34dfc")
+        ),
+        identityRule(
+            "cyberrealisticxl_qnn228",
+            repositories = setOf("xororz/sdxl-qnn"),
+            artifacts = setOf("cyber_realistic_v10_qnn2.28_8gen3.zip"),
+            fingerprints = setOf("2af39e9c80629a27406112e91627657981b50f28b477e7adaf9415d886e08ea2")
+        ),
+        identityRule(
+            "qualcomm_sd15_gen5_qnn",
+            repositories = setOf("qualcomm/Stable-Diffusion-v1.5"),
+            artifacts = setOf("stable_diffusion_v1_5-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip")
+        ),
+        identityRule(
+            "qualcomm_sd21_gen5_qnn",
+            repositories = setOf("qualcomm/Stable-Diffusion-v2.1"),
+            artifacts = setOf("stable_diffusion_v2_1-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip")
+        ),
+        identityRule(
+            "qualcomm_controlnet_canny_gen5_qnn",
+            repositories = setOf("qualcomm/ControlNet-Canny"),
+            artifacts = setOf("controlnet_canny-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip")
+        ),
+        identityRule(
+            "sd15_mnn_512_quality",
+            aliases = setOf("sd15_mnn_bundle"),
+            repositories = setOf("MNN/stable-diffusion-v1-5-mnn-opencl"),
+            artifacts = setOf("stable-diffusion-v1-5-mnn-opencl")
+        ),
+        identityRule(
+            "mnn_sana_edit_v2",
+            repositories = setOf("MNN/MNN-Sana-Edit-V2"),
+            artifacts = setOf("MNN-Sana-Edit-V2")
+        ),
+        identityRule(
+            "sd_turbo_512_experimental",
+            repositories = setOf("AI-ModelScope/sd-turbo"),
+            artifacts = setOf("sd_turbo.safetensors"),
+            fingerprints = setOf("3f067a1b943cf162f2b8f8588f6cf5824bd5b4c7d1d88d87164b9ca123616549")
+        ),
+        identityRule(
+            "z_image_turbo_q4",
+            aliases = setOf("z_image_turbo_q2_bundle"),
+            repositories = setOf("hf/leejet-Z-Image-Turbo-GGUF"),
+            artifacts = setOf("z_image_turbo-Q2_K.gguf"),
+            fingerprints = setOf("a9cf1b0368e24c2f9d542d2951c01f6f7fc85ed8c9ed39b5b37b15375508d58a")
+        ),
+        identityRule(
+            "flux2_klein_4b_q4",
+            repositories = setOf("hf/leejet-FLUX.2-klein-4B-GGUF"),
+            artifacts = setOf("flux-2-klein-4b-Q4_0.gguf")
+        ),
+        identityRule(
+            "qwen_image_2512_q2",
+            repositories = setOf("unsloth/Qwen-Image-2512-GGUF"),
+            artifacts = setOf("qwen-image-2512-Q2_K.gguf"),
+            fingerprints = setOf("176678f0d4e6c613c5a318014f16d829438b8feec9454bde7b3070a520bf1728")
+        ),
+        identityRule(
+            "longcat_image_q4",
+            repositories = setOf("vantagewithai/LongCat-Image-GGUF"),
+            artifacts = setOf("LongCat-Image-Q4_0.gguf"),
+            fingerprints = setOf("d494513ea95e82fb7069cdb914738f22dfc940fc770000fbbc8ad0a7a445f601")
+        )
+    )
+    private val stableDiffusionCppSchedulers = setOf(
+        ImageSchedulerAlgorithm.EULER,
+        ImageSchedulerAlgorithm.EULER_A,
+        ImageSchedulerAlgorithm.DDIM,
+        ImageSchedulerAlgorithm.DPMPP_2M,
+        ImageSchedulerAlgorithm.LCM,
+        ImageSchedulerAlgorithm.FLOW_MATCH
     )
 
     fun resolve(input: ImageExecutionProfileResolverInput): ImageExecutionProfileResolution {
@@ -125,11 +259,7 @@ internal object ImageExecutionProfileResolver {
             markAllProfileFields(fieldSources, ImageProfileSource.MANIFEST)
             input.manifestProfile
         } else {
-            val builtInTarget = input.recommendationId
-                ?.let { id ->
-                    val recommendationId = bundleIdAliases[id] ?: id.removeSuffix("_bundle")
-                    targetByRecommendationId[id] ?: targetByRecommendationId[recommendationId]
-                }
+            val builtInTarget = resolveBuiltInTarget(input)
             when {
                 builtInTarget != null -> {
                     sourceChain += ImageProfileSource.BUILT_IN
@@ -175,7 +305,7 @@ internal object ImageExecutionProfileResolver {
             provenance = ImageProfileProvenance(
                 primarySource = sourceChain.first(),
                 sources = sourceChain.distinct(),
-                recommendationId = input.recommendationId,
+                recommendationId = resolvedProfile.provenance.recommendationId ?: input.recommendationId,
                 recommendationRevision = input.recommendationRevision,
                 notes = if (input.deviceHints.localProfileKnown) emptyList() else listOf(
                     "Device-local profile is unavailable; native load and real execution remain authoritative."
@@ -224,6 +354,115 @@ internal object ImageExecutionProfileResolver {
         )
     }
 
+    private fun resolveBuiltInTarget(
+        input: ImageExecutionProfileResolverInput
+    ): BuiltInImageProfileTarget? {
+        val aliasTokens = buildSet {
+            input.recommendationId
+                ?.takeIf(String::isNotBlank)
+                ?.let { add(normalizeIdentityToken(it)) }
+            input.recommendationEvidence.aliases
+                .asSequence()
+                .filter(String::isNotBlank)
+                .map(::normalizeIdentityToken)
+                .forEach(::add)
+        }
+        identityRules.singleOrNull { rule -> rule.aliases.any(aliasTokens::contains) }
+            ?.let { return targetByRecommendationId.getValue(it.recommendationId) }
+
+        val fingerprint = input.modelFingerprint.trim().lowercase()
+        identityRules.singleOrNull { rule -> fingerprint in rule.modelFingerprints }
+            ?.let { return targetByRecommendationId.getValue(it.recommendationId) }
+
+        val sourceRepositories = input.recommendationEvidence.sourceRepositories
+            .asSequence()
+            .filter(String::isNotBlank)
+            .map(::normalizeRepositoryIdentity)
+            .toSet()
+        val artifactTokens = input.recommendationEvidence.artifactPaths
+            .asSequence()
+            .filter(String::isNotBlank)
+            .flatMap { value -> artifactIdentityTokens(value).asSequence() }
+            .toSet()
+        val repositoryMatches = identityRules.filter { rule ->
+            rule.primaryRepositories.any(sourceRepositories::contains)
+        }
+        if (repositoryMatches.size == 1) {
+            return targetByRecommendationId.getValue(repositoryMatches.single().recommendationId)
+        }
+        repositoryMatches.singleOrNull { rule ->
+            rule.artifactMarkers.any(artifactTokens::contains)
+        }?.let { return targetByRecommendationId.getValue(it.recommendationId) }
+
+        identityRules.singleOrNull { rule ->
+            rule.artifactMarkers.any(artifactTokens::contains)
+        }?.let { return targetByRecommendationId.getValue(it.recommendationId) }
+        return null
+    }
+
+    private fun identityRule(
+        recommendationId: String,
+        aliases: Set<String> = emptySet(),
+        repositories: Set<String> = emptySet(),
+        artifacts: Set<String> = emptySet(),
+        fingerprints: Set<String> = emptySet()
+    ): BuiltInImageProfileIdentityRule {
+        require(targetByRecommendationId.containsKey(recommendationId)) {
+            "Unknown recommendation identity rule: $recommendationId"
+        }
+        val normalizedAliases = buildSet {
+            add(normalizeIdentityToken(recommendationId))
+            add(normalizeIdentityToken("${recommendationId}_bundle"))
+            aliases.mapTo(this, ::normalizeIdentityToken)
+        }
+        return BuiltInImageProfileIdentityRule(
+            recommendationId = recommendationId,
+            aliases = normalizedAliases,
+            primaryRepositories = repositories.mapTo(linkedSetOf(), ::normalizeRepositoryIdentity),
+            artifactMarkers = (artifacts + aliases + recommendationId + "${recommendationId}_bundle")
+                .mapTo(linkedSetOf(), ::normalizeIdentityToken),
+            modelFingerprints = fingerprints.mapTo(linkedSetOf()) { it.trim().lowercase() }
+        )
+    }
+
+    private fun normalizeRepositoryIdentity(value: String): String {
+        val normalized = value.trim().lowercase().replace('\\', '/').trim('/')
+        val withoutProvider = listOf("hugging_face:", "modelscope:")
+            .firstOrNull(normalized::startsWith)
+            ?.let { prefix -> normalized.removePrefix(prefix) }
+            ?: normalized
+        return withoutProvider.removeSuffix(".git").trim('/')
+    }
+
+    private fun artifactIdentityTokens(value: String): Set<String> = buildSet {
+        value.trim()
+            .replace('\\', '/')
+            .split('/')
+            .asSequence()
+            .filter(String::isNotBlank)
+            .forEach { segment ->
+                val normalized = normalizeIdentityToken(segment)
+                if (normalized.isNotBlank()) {
+                    add(normalized)
+                    normalized.removePrefix("bundle_").takeIf(String::isNotBlank)?.let(::add)
+                    normalized.removeSuffix("_bundle").takeIf(String::isNotBlank)?.let(::add)
+                }
+                val stem = segment.substringBeforeLast('.', segment)
+                val normalizedStem = normalizeIdentityToken(stem)
+                if (normalizedStem.isNotBlank()) {
+                    add(normalizedStem)
+                    normalizedStem.removePrefix("bundle_").takeIf(String::isNotBlank)?.let(::add)
+                    normalizedStem.removeSuffix("_bundle").takeIf(String::isNotBlank)?.let(::add)
+                }
+            }
+    }
+
+    private fun normalizeIdentityToken(value: String): String = value
+        .trim()
+        .lowercase()
+        .replace(Regex("[^a-z0-9]+"), "_")
+        .trim('_')
+
     private fun applySidecar(
         base: ImageExecutionProfile,
         sidecar: ImageProfileSidecar,
@@ -265,19 +504,27 @@ internal object ImageExecutionProfileResolver {
     private fun applyCapabilityDiscovery(
         base: ImageExecutionProfile,
         discovery: ImageCapabilityDiscovery
-    ): ImageExecutionProfile = base.copy(
-        family = discovery.family ?: base.family,
-        variant = discovery.variant ?: base.variant,
-        task = discovery.task ?: base.task,
-        tokenizer = discovery.tokenizer ?: base.tokenizer,
-        conditioning = discovery.conditioning ?: base.conditioning,
-        scheduler = discovery.scheduler ?: base.scheduler,
-        latent = discovery.latent ?: base.latent,
-        vae = discovery.vae ?: base.vae,
-        graph = discovery.graph ?: base.graph,
-        defaults = discovery.defaults ?: base.defaults,
-        capabilities = discovery.capabilities ?: base.capabilities
-    )
+    ): ImageExecutionProfile {
+        val tokenizer = discovery.tokenizer ?: base.tokenizer
+        val discoveredCapabilities = discovery.capabilities ?: base.capabilities
+        val capabilities = discoveredCapabilities.copy(
+            supportsPromptWeighting = tokenizer.supportsPromptWeighting &&
+                base.runtime in setOf(LocalImageRuntime.QNN_HTP, LocalImageRuntime.MNN_DIFFUSION)
+        )
+        return base.copy(
+            family = discovery.family ?: base.family,
+            variant = discovery.variant ?: base.variant,
+            task = discovery.task ?: base.task,
+            tokenizer = tokenizer,
+            conditioning = discovery.conditioning ?: base.conditioning,
+            scheduler = discovery.scheduler ?: base.scheduler,
+            latent = discovery.latent ?: base.latent,
+            vae = discovery.vae ?: base.vae,
+            graph = discovery.graph ?: base.graph,
+            defaults = discovery.defaults ?: base.defaults,
+            capabilities = capabilities
+        )
+    }
 
     private fun applyUserOverrides(
         base: ImageExecutionProfile,
@@ -335,6 +582,9 @@ internal object ImageExecutionProfileResolver {
             unconditionalBranch = profile.defaults.useCfg,
             tokenizerBackend = profile.tokenizer.backend,
             tokenCount = profile.tokenizer.maxLength * if (profile.tokenizer.separateNegativePrompt) 2 else 1,
+            promptWeightingSupported =
+                profile.tokenizer.supportsPromptWeighting &&
+                    profile.capabilities.supportsPromptWeighting,
             embeddingDiskDataType = profile.conditioning.diskDataType,
             vaeScalingLocation = profile.vae.scalingLocation,
             vaeScalingFactor = profile.vae.scalingFactor,
@@ -379,7 +629,8 @@ internal object ImageExecutionProfileResolver {
             variant = ImageModelVariant.DMD2_ALT,
             steps = 4,
             cfg = 1.0,
-            useCfg = false
+            useCfg = false,
+            timestepSpacing = ImageTimestepSpacing.LINSPACE
         )
         "qualcomm.sd15.gen5.qnn245" -> qnnGen5Profile(profileId, fingerprint, sd21 = false)
         "qualcomm.sd21.gen5.qnn245" -> qnnGen5Profile(profileId, fingerprint, sd21 = true)
@@ -408,7 +659,15 @@ internal object ImageExecutionProfileResolver {
         runtime = LocalImageRuntime.QNN_HTP,
         family = LocalImageModelFamily.SD15,
         variant = variant,
-        scheduler = scheduler(ImageSchedulerAlgorithm.DPMPP_2M, ImagePredictionType.EPSILON, steps, if (variant == ImageModelVariant.HYPER) 1 else 10, 50),
+        scheduler = scheduler(
+            ImageSchedulerAlgorithm.DPMPP_2M,
+            ImagePredictionType.EPSILON,
+            steps,
+            if (variant == ImageModelVariant.HYPER) 1 else 10,
+            50,
+            timestepSpacing = ImageTimestepSpacing.LEADING,
+            order = 2
+        ),
         tokenizer = clipTokenizer(ImageTokenizerBackend.TOKENIZERS_CPP),
         conditioning = conditioning(conditioningType, conversion, 768),
         vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
@@ -423,14 +682,22 @@ internal object ImageExecutionProfileResolver {
         variant: ImageModelVariant = ImageModelVariant.SDXL_BASE,
         steps: Int = 30,
         cfg: Double = 7.0,
-        useCfg: Boolean = true
+        useCfg: Boolean = true,
+        timestepSpacing: ImageTimestepSpacing = ImageTimestepSpacing.TRAILING
     ): ImageExecutionProfile = profile(
         profileId = profileId,
         fingerprint = fingerprint,
         runtime = LocalImageRuntime.QNN_HTP,
         family = LocalImageModelFamily.SDXL,
         variant = variant,
-        scheduler = scheduler(ImageSchedulerAlgorithm.DPMPP_2M, ImagePredictionType.EPSILON, steps, 1, 50),
+        scheduler = scheduler(
+            ImageSchedulerAlgorithm.DPMPP_2M,
+            ImagePredictionType.EPSILON,
+            steps,
+            1,
+            50,
+            timestepSpacing = timestepSpacing
+        ),
         tokenizer = clipTokenizer(ImageTokenizerBackend.TOKENIZERS_CPP, dualClip = true),
         conditioning = conditioning(ImageEmbeddingDiskDataType.FP16, ImageEmbeddingConversionStrategy.NONE, 2_048, dualEncoder = true, pooled = true),
         vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.13025, 1024),
@@ -498,7 +765,15 @@ internal object ImageExecutionProfileResolver {
         runtime = LocalImageRuntime.MNN_DIFFUSION,
         family = LocalImageModelFamily.SD15,
         variant = ImageModelVariant.STANDARD,
-        scheduler = scheduler(ImageSchedulerAlgorithm.DPMPP_2M, ImagePredictionType.EPSILON, 20, 10, 50),
+        scheduler = scheduler(
+            ImageSchedulerAlgorithm.DPMPP_2M,
+            ImagePredictionType.EPSILON,
+            20,
+            10,
+            50,
+            timestepSpacing = ImageTimestepSpacing.LEADING,
+            order = 2
+        ),
         tokenizer = clipTokenizer(ImageTokenizerBackend.TOKENIZERS_CPP),
         conditioning = conditioning(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, ImageEmbeddingConversionStrategy.GRAPH_EXECUTION, 768),
         vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
@@ -549,7 +824,8 @@ internal object ImageExecutionProfileResolver {
         defaults = defaults(512, 20, 4.5, useCfg = true),
         capabilities = capabilities(
             512,
-            setOf(ImageSchedulerAlgorithm.FLOW_MATCH)
+            setOf(ImageSchedulerAlgorithm.FLOW_MATCH),
+            supportsPromptWeighting = false
         ).copy(requiresInputImage = true, supportsMask = true)
     )
 
@@ -583,6 +859,7 @@ internal object ImageExecutionProfileResolver {
         defaults = defaults(size, steps, cfg, useCfg = cfg > 1.0),
         capabilities = stableDiffusionCapabilities(
             setOf(algorithm, ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER_A)
+                .intersect(stableDiffusionCppSchedulers)
         )
     )
 
@@ -620,9 +897,13 @@ internal object ImageExecutionProfileResolver {
             graph = graph,
             defaults = defaults(size, 20, 7.0, useCfg = true),
             capabilities = if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
-                stableDiffusionCapabilities(ImageSchedulerAlgorithm.entries.toSet())
+                stableDiffusionCapabilities(stableDiffusionCppSchedulers)
             } else {
-                capabilities(size, ImageSchedulerAlgorithm.entries.toSet())
+                capabilities(
+                    size,
+                    ImageSchedulerAlgorithm.entries.toSet(),
+                    supportsPromptWeighting = false
+                )
             }
         ).copy(
             provenance = ImageProfileProvenance(
@@ -680,7 +961,8 @@ internal object ImageExecutionProfileResolver {
         setAlphaToOne: Boolean = false,
         scaleModelInput: Boolean = false,
         skipPrk: Boolean = false,
-        clipSample: Boolean = false
+        clipSample: Boolean = false,
+        order: Int = 1
     ) = ImageSchedulerContract(
         algorithm = algorithm,
         predictionType = prediction,
@@ -693,6 +975,7 @@ internal object ImageExecutionProfileResolver {
         skipPrkSteps = skipPrk,
         clipSample = clipSample,
         scaleModelInput = scaleModelInput,
+        order = order,
         defaultSteps = defaultSteps,
         minSteps = minSteps,
         maxSteps = maxSteps
@@ -710,7 +993,7 @@ internal object ImageExecutionProfileResolver {
         maxLength = 77,
         clip1PadRule = if (padZero) ImageClipPadRule.ZERO else ImageClipPadRule.EOS,
         clip2PadRule = if (dualClip) ImageClipPadRule.ZERO else null,
-        supportsPromptWeighting = true,
+        supportsPromptWeighting = backend == ImageTokenizerBackend.TOKENIZERS_CPP,
         separateNegativePrompt = true
     )
 
@@ -768,14 +1051,18 @@ internal object ImageExecutionProfileResolver {
         useCfg = useCfg
     )
 
-    private fun capabilities(size: Int, schedulers: Set<ImageSchedulerAlgorithm>) = ImageGenerationCapabilities(
+    private fun capabilities(
+        size: Int,
+        schedulers: Set<ImageSchedulerAlgorithm>,
+        supportsPromptWeighting: Boolean = true
+    ) = ImageGenerationCapabilities(
         supportedSchedulers = schedulers,
         minWidth = size,
         maxWidth = size,
         minHeight = size,
         maxHeight = size,
         supportsNegativePrompt = true,
-        supportsPromptWeighting = true
+        supportsPromptWeighting = supportsPromptWeighting
     )
 
     private fun stableDiffusionCapabilities(
@@ -789,7 +1076,7 @@ internal object ImageExecutionProfileResolver {
         widthMultiple = 64,
         heightMultiple = 64,
         supportsNegativePrompt = true,
-        supportsPromptWeighting = true
+        supportsPromptWeighting = false
     )
 
     private fun markAllProfileFields(

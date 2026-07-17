@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -39,6 +40,112 @@ class ImageExecutionProfileResolverTest {
             assertEquals(ImageProfileSource.BUILT_IN, resolution.profile.provenance.primarySource)
             assertTrue(resolution.validation.valid)
             assertFalse(resolution.deviceAdmissionRestricted)
+        }
+    }
+
+    @Test
+    fun `historical alias source repository and bundle artifacts recover exact profiles`() {
+        val historicalAlias = ImageExecutionProfileResolver.resolve(
+            input(recommendationId = "cyberrealistic-sd15-qnn228-8gen2")
+        )
+        assertEquals("community.sd15.qnn228", historicalAlias.profile.profileId)
+        assertEquals(
+            "cyberrealistic_sd15_qnn228",
+            historicalAlias.profile.provenance.recommendationId
+        )
+
+        val sourceOnly = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                recommendationEvidence = ImageRecommendationEvidence(
+                    sourceRepositories = listOf(
+                        "hugging_face:Mr-J-369/RealisticVisionHyper-SD1.5-qnn2.28"
+                    )
+                )
+            )
+        )
+        assertEquals("community.sd15.hyper.qnn228", sourceOnly.profile.profileId)
+
+        val bundlePathOnly = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                recommendationEvidence = ImageRecommendationEvidence(
+                    artifactPaths = listOf(
+                        "/image_models/bundle-dreamshaper_sd15_qnn228/DreamShaperV8-qnn2.28-min.zip"
+                    )
+                )
+            )
+        )
+        assertEquals("community.sd15.qnn228", bundlePathOnly.profile.profileId)
+    }
+
+    @Test
+    fun `exact fingerprint outranks conflicting source and ambiguous repository needs artifact evidence`() {
+        val fingerprintMatch = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                fingerprint = "3f067a1b943cf162f2b8f8588f6cf5824bd5b4c7d1d88d87164b9ca123616549",
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.CUSTOM,
+                recommendationEvidence = ImageRecommendationEvidence(
+                    sourceRepositories = listOf("Mr-J-369/CyberRealistic_Final-SD1.5-qnn2.28")
+                )
+            )
+        )
+        assertEquals("sdcpp.sd-turbo", fingerprintMatch.profile.profileId)
+
+        val ambiguousSource = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                family = LocalImageModelFamily.SDXL,
+                recommendationEvidence = ImageRecommendationEvidence(
+                    sourceRepositories = listOf("hugging_face:xororz/sdxl-qnn")
+                )
+            )
+        )
+        assertEquals(ImageProfileSource.GENERIC_FALLBACK, ambiguousSource.profile.provenance.primarySource)
+
+        val disambiguated = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                family = LocalImageModelFamily.SDXL,
+                recommendationEvidence = ImageRecommendationEvidence(
+                    sourceRepositories = listOf("hugging_face:xororz/sdxl-qnn"),
+                    artifactPaths = listOf("cyber_realistic_v10_qnn2.28_8gen3.zip")
+                )
+            )
+        )
+        assertEquals("community.sdxl.base.qnn228", disambiguated.profile.profileId)
+        assertEquals("cyberrealisticxl_qnn228", disambiguated.profile.provenance.recommendationId)
+    }
+
+    @Test
+    fun `local model source restores recommendation profile even when imported family is custom`() {
+        val root = Files.createTempDirectory("image-profile-source-identity").toFile()
+        try {
+            val model = LocalImageModelRecord(
+                displayName = "Stable Diffusion Turbo",
+                path = root.resolve("sd_turbo.safetensors").absolutePath,
+                fileName = "sd_turbo.safetensors",
+                sizeBytes = 1L,
+                sha256 = FINGERPRINT,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.CUSTOM,
+                source = "modelscope:AI-ModelScope/sd-turbo",
+                bundleRoot = root.absolutePath
+            )
+            val resolution = resolveLocalImageExecutionProfile(
+                model = model,
+                options = LocalImageGenerationOptions(),
+                bundleRoot = root
+            )
+
+            assertEquals("sdcpp.sd-turbo", resolution.profile.profileId)
+            assertEquals(LocalImageModelFamily.SD_TURBO, resolution.profile.family)
+            assertEquals(ImageProfileSource.BUILT_IN, resolution.profile.provenance.primarySource)
+            assertFalse(resolution.deviceAdmissionRestricted)
+        } finally {
+            root.deleteRecursively()
         }
     }
 
@@ -86,6 +193,36 @@ class ImageExecutionProfileResolverTest {
         assertEquals(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, sana.conditioning.diskDataType)
         assertEquals(ImageTokenizerBackend.MNN_MTOK, sana.tokenizer.backend)
         assertEquals(LocalImageRuntime.MNN_DIFFUSION, sana.runtime)
+    }
+
+    @Test
+    fun `community sd15 qnn and mnn profiles pin leading dpmpp 2m`() {
+        listOf(
+            "cyberrealistic_sd15_qnn228",
+            "realisticvisionhyper_sd15_qnn228",
+            "meinamix_sd15_qnn228",
+            "sd15_mnn_512_quality"
+        ).forEach { id ->
+            val scheduler = resolve(id).profile.scheduler
+            assertEquals(ImageSchedulerAlgorithm.DPMPP_2M, scheduler.algorithm)
+            assertEquals(ImageTimestepSpacing.LEADING, scheduler.timestepSpacing)
+            assertEquals(2, scheduler.order)
+        }
+    }
+
+    @Test
+    fun `community sdxl pins trailing without changing dmd2 or gen5 schedulers`() {
+        val sdxl = resolve("sdxl_base_qnn228").profile.scheduler
+        assertEquals(ImageSchedulerAlgorithm.DPMPP_2M, sdxl.algorithm)
+        assertEquals(ImageTimestepSpacing.TRAILING, sdxl.timestepSpacing)
+
+        val dmd2 = resolve("realismsdxl_dmd2_alt_qnn228").profile.scheduler
+        assertEquals(ImageSchedulerAlgorithm.DPMPP_2M, dmd2.algorithm)
+        assertEquals(ImageTimestepSpacing.LINSPACE, dmd2.timestepSpacing)
+
+        val gen5 = resolve("qualcomm_sd15_gen5_qnn").profile.scheduler
+        assertEquals(ImageSchedulerAlgorithm.EULER, gen5.algorithm)
+        assertEquals(ImageTimestepSpacing.LINSPACE, gen5.timestepSpacing)
     }
 
     @Test
@@ -182,6 +319,65 @@ class ImageExecutionProfileResolverTest {
         assertFalse(resolution.deviceAdmissionRestricted)
         assertTrue(resolution.validation.valid)
         assertTrue(resolution.warnings.single().contains("native load"))
+    }
+
+    @Test
+    fun `built in capability claims expose only implemented sampler and weighting paths`() {
+        val stable = resolve("sd_turbo_512_experimental").profile
+        assertFalse(ImageSchedulerAlgorithm.PNDM_PLMS in stable.capabilities.supportedSchedulers)
+        assertFalse(stable.capabilities.supportsPromptWeighting)
+        assertFalse(stable.tokenizer.supportsPromptWeighting)
+
+        listOf(
+            resolve("cyberrealistic_sd15_qnn228").profile,
+            resolve("qualcomm_sd15_gen5_qnn").profile,
+            resolve("sd15_mnn_512_quality").profile
+        ).forEach { profile ->
+            assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, profile.tokenizer.backend)
+            assertTrue(profile.tokenizer.supportsPromptWeighting)
+            assertTrue(profile.capabilities.supportsPromptWeighting)
+        }
+        val sana = resolve("mnn_sana_edit_v2").profile
+        assertFalse(sana.tokenizer.supportsPromptWeighting)
+        assertFalse(sana.capabilities.supportsPromptWeighting)
+
+        val genericStable = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.CUSTOM
+            )
+        ).profile
+        assertFalse(ImageSchedulerAlgorithm.PNDM_PLMS in genericStable.capabilities.supportedSchedulers)
+        assertEquals(
+            setOf(
+                ImageSchedulerAlgorithm.EULER,
+                ImageSchedulerAlgorithm.EULER_A,
+                ImageSchedulerAlgorithm.DDIM,
+                ImageSchedulerAlgorithm.DPMPP_2M,
+                ImageSchedulerAlgorithm.LCM,
+                ImageSchedulerAlgorithm.FLOW_MATCH
+            ),
+            genericStable.capabilities.supportedSchedulers
+        )
+        val genericMnn = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                runtime = LocalImageRuntime.MNN_DIFFUSION,
+                family = LocalImageModelFamily.CUSTOM
+            )
+        ).profile
+        assertFalse(genericMnn.tokenizer.supportsPromptWeighting)
+        assertFalse(genericMnn.capabilities.supportsPromptWeighting)
+    }
+
+    @Test
+    fun `MNN quality profile deterministically requires direct runner`() {
+        val profile = resolve("sd15_mnn_512_quality").profile
+        assertEquals(ImageWorkerStrategy.IN_PROCESS, profile.graph.workerStrategy)
+        assertEquals("direct", resolveMnnDiffusionProfileRunner(profile, null))
+        assertEquals("direct", resolveMnnDiffusionProfileRunner(profile, "direct"))
+        assertInvalid { resolveMnnDiffusionProfileRunner(profile, "module") }
     }
 
     @Test
@@ -299,6 +495,22 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
+    fun `pndm override accounts for the full prk warmup timetable`() {
+        val resolution = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "cyberrealistic_sd15_qnn228",
+                userOverrides = ImageGenerationOverrides(
+                    scheduler = ImageSchedulerAlgorithm.PNDM_PLMS
+                )
+            )
+        )
+
+        assertFalse(resolution.profile.scheduler.skipPrkSteps)
+        assertEquals(29, resolution.layers.resolved.timetableCount)
+        assertEquals(58, resolution.layers.resolved.unetExecutionCount)
+    }
+
+    @Test
     fun `task profiles declare concrete input capabilities`() {
         val control = resolve("qualcomm_controlnet_canny_gen5_qnn").profile
         assertEquals(ImageTask.CONTROL_IMAGE, control.task)
@@ -322,6 +534,7 @@ class ImageExecutionProfileResolverTest {
         manifestProfile: ImageExecutionProfile? = null,
         sidecar: ImageProfileSidecar? = null,
         capabilityDiscovery: ImageCapabilityDiscovery? = null,
+        recommendationEvidence: ImageRecommendationEvidence = ImageRecommendationEvidence(),
         userOverrides: ImageGenerationOverrides = ImageGenerationOverrides(),
         deviceHints: ImageDeviceExecutionHints = ImageDeviceExecutionHints(localProfileKnown = true)
     ) = ImageExecutionProfileResolverInput(
@@ -333,6 +546,7 @@ class ImageExecutionProfileResolverTest {
         manifestProfile = manifestProfile,
         sidecar = sidecar,
         capabilityDiscovery = capabilityDiscovery,
+        recommendationEvidence = recommendationEvidence,
         userOverrides = userOverrides,
         deviceHints = deviceHints
     )
@@ -361,6 +575,11 @@ class ImageExecutionProfileResolverTest {
         unconditionalBranch = unconditionalBranch,
         tokenizerBackend = tokenizerBackend,
         tokenCount = tokenCount,
+        promptWeightingSupported = promptWeightingSupported,
+        promptWeightingApplied = false,
+        positiveWeightedTokenCount = 0,
+        negativeWeightedTokenCount = 0,
+        promptWeightFingerprint = "c".repeat(64),
         embeddingDiskDataType = embeddingDiskDataType,
         vaeScalingLocation = vaeScalingLocation,
         vaeScalingFactor = vaeScalingFactor,
@@ -374,5 +593,14 @@ class ImageExecutionProfileResolverTest {
     private companion object {
         val FINGERPRINT: String = "a".repeat(64)
         val OTHER_FINGERPRINT: String = "b".repeat(64)
+    }
+
+    private fun assertInvalid(block: () -> Unit) {
+        try {
+            block()
+            throw AssertionError("Expected invalid execution selection.")
+        } catch (_: IllegalArgumentException) {
+            // Expected.
+        }
     }
 }
