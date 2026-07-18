@@ -26,7 +26,7 @@ namespace {
 constexpr std::streamoff kMaxTokenizerJsonBytes = 64LL * 1024LL * 1024LL;
 #endif
 constexpr float kRoundBracketMultiplier = 1.1f;
-constexpr float kSquareBracketMultiplier = 1.0f / kRoundBracketMultiplier;
+constexpr float kSquareBracketMultiplier = 0.9f;
 constexpr float kWeightEqualityTolerance = 1.0e-6f;
 constexpr size_t kMaxPromptNesting = 128;
 constexpr float kMaxAbsoluteExplicitWeight = 1000.0f;
@@ -475,6 +475,10 @@ bool encode_clip_sequence(tokenizers::Tokenizer* tokenizer, const std::string& t
 
 }  // namespace
 
+std::string sha256_hex_bytes(const std::vector<uint8_t>& payload) {
+    return sha256_hex(payload);
+}
+
 std::vector<int32_t> ClipTokenPair::negative_then_positive() const {
     std::vector<int32_t> combined;
     combined.reserve(negative.ids.size() + positive.ids.size());
@@ -641,6 +645,38 @@ bool apply_clip_token_weights_to_embeddings(const std::vector<float>& embeddings
         output_amplitude_sum += std::abs(static_cast<double>(value));
     }
     stats->output_mean_amplitude = static_cast<float>(output_amplitude_sum / element_count);
+    return true;
+}
+
+bool validate_clip_token_id_graph_prompt_weights(const std::vector<float>& weights,
+                                                 size_t* weighted_token_count,
+                                                 std::string* error) {
+    if (weighted_token_count == nullptr || error == nullptr) return false;
+    *weighted_token_count = 0;
+    error->clear();
+    if (weights.empty()) {
+        *error = "CLIP token-id graph weighting evidence is empty.";
+        return false;
+    }
+    for (const float weight : weights) {
+        if (!std::isfinite(weight)) {
+            *error = "CLIP token-id graph weighting evidence contains a non-finite value.";
+            return false;
+        }
+        if (std::abs(weight - 1.0f) > kWeightEqualityTolerance) {
+            ++(*weighted_token_count);
+        }
+    }
+    if (*weighted_token_count != 0U) {
+        std::ostringstream message;
+        message << "Prompt weighting cannot be executed exactly by an int32 token-id text "
+                << "encoder graph: " << *weighted_token_count
+                << " token weights require a pre-transformer embedding input and a compatible "
+                << "token-embedding artifact. Weighting the graph's final hidden-state output "
+                << "is not equivalent. Use an unweighted prompt with this bundle.";
+        *error = message.str();
+        return false;
+    }
     return true;
 }
 

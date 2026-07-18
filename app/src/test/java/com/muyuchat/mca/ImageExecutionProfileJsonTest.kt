@@ -43,6 +43,65 @@ class ImageExecutionProfileJsonTest {
     }
 
     @Test
+    fun `manifest behavior gives nested defaults priority while preserving partial values`() {
+        val manifest = JSONObject()
+            .put("prompt", "root prompt")
+            .put("steps", 4)
+            .put("width", 256)
+            .put(
+                "modelConfig",
+                JSONObject()
+                    .put("prompt", "model prompt")
+                    .put("height", 320)
+            )
+            .put(
+                "generation",
+                JSONObject()
+                    .put("prompt", "generation prompt")
+                    .put("steps", 6)
+            )
+            .put(
+                "generationDefaults",
+                JSONObject()
+                    .put("prompt", "generation defaults prompt")
+                    .put("cfg", 2.5)
+            )
+            .put(
+                "defaults",
+                JSONObject()
+                    .put("prompt", "defaults prompt")
+                    .put("width", 640)
+            )
+
+        val behavior = requireNotNull(ImageExecutionProfileJson.parseManifestBehavior(manifest))
+
+        assertEquals("defaults prompt", behavior.defaultPrompt)
+        assertEquals(6, behavior.steps)
+        assertEquals(2.5, behavior.cfgScale ?: error("missing cfgScale"), 0.0)
+        assertEquals(640, behavior.width)
+        assertEquals(320, behavior.height)
+    }
+
+    @Test
+    fun `manifest image size parses and nested defaults retain priority`() {
+        val imageSizeOnly = requireNotNull(
+            ImageExecutionProfileJson.parseManifestBehavior(
+                JSONObject().put("imageSize", "768 x 512")
+            )
+        )
+        val manifest = JSONObject()
+            .put("imageSize", "768 x 512")
+            .put("defaults", JSONObject().put("width", 384).put("height", 384))
+
+        val behavior = requireNotNull(ImageExecutionProfileJson.parseManifestBehavior(manifest))
+
+        assertEquals(768, imageSizeOnly.width)
+        assertEquals(512, imageSizeOnly.height)
+        assertEquals(384, behavior.width)
+        assertEquals(384, behavior.height)
+    }
+
+    @Test
     fun `manifest graph path escape is an explicit package error`() {
         val profile = validProfileJson()
         profile.getJSONObject("graph")
@@ -55,6 +114,19 @@ class ImageExecutionProfileJsonTest {
 
         assertEquals("PROFILE_PATH_INVALID", error.code)
         assertEquals("graph.unet.relativePath", error.field)
+    }
+
+    @Test
+    fun `manifest rejects tokenizer and conditioning sequence axis drift`() {
+        val profile = validProfileJson()
+        profile.getJSONObject("tokenizer").put("maxLength", 256)
+
+        val error = expectJsonFailure {
+            ImageExecutionProfileJson.parseManifest(JSONObject().put("executionProfile", profile))
+        }
+
+        assertEquals("PROFILE_VALIDATION_FAILED", error.code)
+        assertEquals("conditioning.textEncoderInputShape", error.field)
     }
 
     @Test
@@ -204,6 +276,116 @@ class ImageExecutionProfileJsonTest {
     }
 
     @Test
+    fun `package behavior config parses generation defaults`() {
+        val behavior = requireNotNull(
+            ImageExecutionProfileJson.parsePackageBehaviorConfig(
+                JSONObject()
+                    .put("prompt", "  a quiet landscape  ")
+                    .put("negative_prompt", "  blur, artifacts  ")
+                    .put("steps", 8)
+                    .put("cfg", 1.5)
+                    .put("scheduler", "DPM++ 2M")
+                    .put("width", 768)
+                    .put("height", 512)
+            )
+        )
+
+        assertEquals("a quiet landscape", behavior.defaultPrompt)
+        assertEquals("blur, artifacts", behavior.defaultNegativePrompt)
+        assertEquals(8, behavior.steps)
+        assertEquals(1.5, behavior.cfgScale ?: error("missing cfgScale"), 0.0)
+        assertEquals(ImageSchedulerAlgorithm.DPMPP_2M, behavior.scheduler)
+        assertEquals(768, behavior.width)
+        assertEquals(512, behavior.height)
+    }
+
+    @Test
+    fun `package behavior config preserves an explicitly empty negative prompt`() {
+        val behavior = requireNotNull(
+            ImageExecutionProfileJson.parsePackageBehaviorConfig(
+                JSONObject().put("negativePrompt", "   ")
+            )
+        )
+
+        assertEquals("", behavior.defaultNegativePrompt)
+    }
+
+    @Test
+    fun `package behavior config recognizes dmd2 and turbo markers`() {
+        val dmd2 = requireNotNull(
+            ImageExecutionProfileJson.parsePackageBehaviorConfig(
+                JSONObject().put("is_dmd2", true)
+            )
+        )
+        val turbo = requireNotNull(
+            ImageExecutionProfileJson.parsePackageBehaviorConfig(
+                JSONObject()
+                    .put("isTurbo", true)
+                    .put("modelFamily", "sd_turbo")
+            )
+        )
+        val zImageTurbo = requireNotNull(
+            ImageExecutionProfileJson.parsePackageBehaviorConfig(
+                JSONObject().put("pipelineType", "z-image-turbo")
+            )
+        )
+
+        assertEquals(LocalImageModelFamily.SDXL, dmd2.family)
+        assertEquals(ImageModelVariant.DMD2_ALT, dmd2.variant)
+        assertEquals(LocalImageModelFamily.SD_TURBO, turbo.family)
+        assertEquals(ImageModelVariant.SD_TURBO, turbo.variant)
+        assertEquals(LocalImageModelFamily.Z_IMAGE, zImageTurbo.family)
+        assertEquals(ImageModelVariant.Z_IMAGE_TURBO, zImageTurbo.variant)
+    }
+
+    @Test
+    fun `package behavior config rejects invalid field types`() {
+        val cases = listOf(
+            JSONObject().put("prompt", 7) to "config.prompt",
+            JSONObject().put("negative_prompt", false) to "config.negative_prompt",
+            JSONObject().put("steps", "8") to "config.steps",
+            JSONObject().put("cfg", "1.5") to "config.cfg",
+            JSONObject().put("scheduler", 1) to "config.scheduler",
+            JSONObject().put("width", 512.5) to "config.width",
+            JSONObject().put("height", true) to "config.height"
+        )
+
+        cases.forEach { (json, expectedField) ->
+            val error = expectJsonFailure {
+                ImageExecutionProfileJson.parsePackageBehaviorConfig(json)
+            }
+            assertEquals("PROFILE_FORMAT_INVALID", error.code)
+            assertEquals(expectedField, error.field)
+        }
+    }
+
+    @Test
+    fun `package behavior config rejects non positive and malformed dimensions`() {
+        val invalidConfigSizes = listOf(
+            JSONObject().put("width", 0) to "config.width",
+            JSONObject().put("height", -1) to "config.height"
+        )
+
+        invalidConfigSizes.forEach { (json, expectedField) ->
+            val error = expectJsonFailure {
+                ImageExecutionProfileJson.parsePackageBehaviorConfig(json)
+            }
+            assertEquals("PROFILE_FORMAT_INVALID", error.code)
+            assertEquals(expectedField, error.field)
+        }
+
+        listOf("512-by-512", "0x512", "512x0").forEach { imageSize ->
+            val error = expectJsonFailure {
+                ImageExecutionProfileJson.parseManifestBehavior(
+                    JSONObject().put("imageSize", imageSize)
+                )
+            }
+            assertEquals("PROFILE_FORMAT_INVALID", error.code)
+            assertEquals("manifest.imageSize", error.field)
+        }
+    }
+
+    @Test
     fun `missing sidecars return null and present sidecars merge`() {
         val root = Files.createTempDirectory("image-profile-sidecars").toFile()
         try {
@@ -221,6 +403,40 @@ class ImageExecutionProfileJsonTest {
             val sidecar = requireNotNull(ImageExecutionProfileJson.parseSidecars(root))
             assertEquals(ImageSchedulerAlgorithm.DDIM, sidecar.scheduler?.algorithm)
             assertEquals(77, sidecar.tokenizer?.maxLength)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `sidecar reader loads behavior from root config json`() {
+        val root = Files.createTempDirectory("image-profile-behavior-sidecar").toFile()
+        try {
+            File(root, "config.json").writeText(
+                JSONObject()
+                    .put("prompt", "package prompt")
+                    .put("negative_prompt", "")
+                    .put("steps", 5)
+                    .put("cfg_scale", 0.0)
+                    .put("sample_method", "euler_a")
+                    .put("width", 640)
+                    .put("height", 384)
+                    .toString(),
+                Charsets.UTF_8
+            )
+
+            val sidecar = requireNotNull(ImageExecutionProfileJson.parseSidecars(root))
+            val behavior = requireNotNull(sidecar.behavior)
+
+            assertNull(sidecar.scheduler)
+            assertNull(sidecar.tokenizer)
+            assertEquals("package prompt", behavior.defaultPrompt)
+            assertEquals("", behavior.defaultNegativePrompt)
+            assertEquals(5, behavior.steps)
+            assertEquals(0.0, behavior.cfgScale ?: error("missing cfgScale"), 0.0)
+            assertEquals(ImageSchedulerAlgorithm.EULER_A, behavior.scheduler)
+            assertEquals(640, behavior.width)
+            assertEquals(384, behavior.height)
         } finally {
             root.deleteRecursively()
         }

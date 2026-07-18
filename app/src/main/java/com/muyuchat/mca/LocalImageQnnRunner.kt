@@ -132,12 +132,13 @@ internal class QnnHtpImageRunner(
         if (
             manifest.requiresQnnRuntime &&
             !bundleRuntimeReady &&
-            !device.accelerationProfile.qnnRuntime.usableForSmoke
+            (!device.accelerationProfile.qnnRuntime.ready ||
+                !device.accelerationProfile.qnnRuntime.htpStubLibraryPresent)
         ) {
             return manifest.report(
                 state = LocalImageQnnState.QNN_RUNTIME_MISSING,
                 backend = backendLabel,
-                message = "Device supports Snapdragon NPU acceleration, but the complete runtime is not load-verified."
+                message = "The complete QNN System, HTP, Skel, and Stub runtime libraries are unavailable."
             )
         }
         val declaredSmokeSpecs = manifest.qnnSmokeSpecs.ifEmpty {
@@ -145,7 +146,10 @@ internal class QnnHtpImageRunner(
         }
         val usesSemanticGraphDiscovery = declaredSmokeSpecs.none(QnnSmokeSpec::hasStaticGraphMetadata)
         val missing = if (usesSemanticGraphDiscovery) {
-            qnnSemanticGraphBundleMissingComponents(bundleRoot)
+            qnnSemanticGraphBundleMissingComponents(
+                root = bundleRoot,
+                requiresControlNet = manifest.task == "CONTROL_IMAGE"
+            )
         } else {
             qnnMissingComponents(bundleRoot, manifest)
         }
@@ -316,19 +320,27 @@ private fun QnnSmokeSpec.hasStaticGraphMetadata(): Boolean =
         inputs.isNotEmpty() ||
         outputs.isNotEmpty()
 
-internal fun qnnSemanticGraphBundleMissingComponents(root: File): List<String> =
+internal fun qnnSemanticGraphBundleMissingComponents(
+    root: File,
+    requiresControlNet: Boolean = false
+): List<String> =
     buildList {
         if (root.nonEmptyQnnContextPath("text_encoder.bin") == null) add("text_encoder.bin")
         if (root.nonEmptyQnnContextPath("unet.bin") == null) add("unet.bin")
         if (root.nonEmptyQnnContextPath("vae.bin", "vae_decoder.bin") == null) {
             add("vae.bin (or vae_decoder.bin)")
         }
+        if (requiresControlNet && root.nonEmptyQnnContextPath("controlnet.bin") == null) {
+            add("controlnet.bin")
+        }
     }
 
-internal fun hasCompleteQnnSemanticGraphBundle(root: File): Boolean =
-    qnnSemanticGraphBundleMissingComponents(root).isEmpty()
+internal fun hasCompleteQnnSemanticGraphBundle(
+    root: File,
+    requiresControlNet: Boolean = false
+): Boolean = qnnSemanticGraphBundleMissingComponents(root, requiresControlNet).isEmpty()
 
-private fun File.nonEmptyQnnContextPath(vararg names: String): String? =
+internal fun File.nonEmptyQnnContextPath(vararg names: String): String? =
     qnnFirstContextPath(this, *names)?.takeIf { relativePath ->
         val rootCanonical = runCatching { canonicalFile }.getOrNull() ?: return@takeIf false
         val candidate = runCatching { File(rootCanonical, relativePath).canonicalFile }.getOrNull()

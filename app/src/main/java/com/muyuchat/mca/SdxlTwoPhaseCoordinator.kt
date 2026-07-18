@@ -131,7 +131,8 @@ internal class SdxlTwoPhaseCoordinator(
                     latentPath = latentFile.canonicalPath,
                     metadataPath = metadataFile.canonicalPath,
                     outputPath = "",
-                    journalPath = unetJournal.canonicalPath
+                    journalPath = unetJournal.canonicalPath,
+                    conditioningArtifactSha256 = contract.conditioningArtifactSha256
                 ),
                 timeoutMs = sdxlUnetPhaseTimeoutMs(contract.expectedUnetExecutionCount),
                 onProgress = ::report
@@ -189,9 +190,12 @@ internal class SdxlTwoPhaseCoordinator(
                     latentPath = latentFile.canonicalPath,
                     metadataPath = metadataFile.canonicalPath,
                     outputPath = outputFile.canonicalPath,
-                    journalPath = vaeJournal.canonicalPath
+                    journalPath = vaeJournal.canonicalPath,
+                    conditioningArtifactSha256 = contract.conditioningArtifactSha256
                 ),
-                timeoutMs = sdxlVaePhaseTimeoutMs(contract.steps),
+                timeoutMs = sdxlVaePhaseTimeoutMs(
+                    vaeExecutionCount = SDXL_DEFAULT_VAE_EXECUTION_COUNT
+                ),
                 onProgress = ::report
             )
             check(vae.processDeathConfirmed) { "VAE phase process did not exit after PNG publication." }
@@ -374,6 +378,13 @@ internal fun mergeSdxlPhaseNativeResults(
     require(unetResult.phase == SdxlImagePhase.UNET) { "Expected UNet phase result." }
     require(vaeResult.phase == SdxlImagePhase.VAE) { "Expected VAE phase result." }
     require(unetResult.requestId == vaeResult.requestId) { "SDXL phase request identity mismatch." }
+    require(
+        unetResult.conditioningArtifactSha256 == contract.conditioningArtifactSha256 &&
+            vaeResult.conditioningArtifactSha256 == contract.conditioningArtifactSha256
+    ) { "SDXL phase conditioning artifact identity mismatch." }
+    require(unetResult.workerPid > 0 && vaeResult.workerPid > 0) {
+        "SDXL phase worker PID proof is missing."
+    }
     require(unetNative.optBoolean("ok") && vaeNative.optBoolean("ok")) {
         "SDXL phase native success proof is missing."
     }
@@ -382,11 +393,15 @@ internal fun mergeSdxlPhaseNativeResults(
     }
     require(unetNative.getInt("htpArchVersion") == transportHtpArch) { "UNet transport proof mismatch." }
     require(vaeNative.getInt("htpArchVersion") == vaeTransportHtpArch) { "VAE transport proof mismatch." }
+    validateSdxlUnetNativeEvidence(contract, unetNative)
     val unetEffective = contract.requireNativeEffective(unetNative, SdxlImagePhase.UNET)
-    contract.requireNativeEffective(
+    val metadataEffective = contract.requireNativeEffective(
         JSONObject().put("nativeEffective", JSONObject(metadata.nativeEffectiveJson)),
         SdxlImagePhase.UNET
     )
+    require(metadataEffective == unetEffective) {
+        "Committed latent native execution evidence differs from the UNet result."
+    }
     validateSdxlVaeNativeEvidence(contract, vaeNative)
     require(metadata.unetNativeGenerationSequence == unetResult.nativeGenerationSequence) {
         "Committed latent sequence mismatch."
@@ -416,11 +431,62 @@ internal fun mergeSdxlPhaseNativeResults(
     val nativeOutput = File(vaeNative.getString("outputPath")).canonicalFile
     require(nativeOutput == outputFile.canonicalFile) { "VAE output path proof mismatch." }
     require(vaeNative.getLong("outputBytes") == outputFile.length()) { "VAE output byte proof mismatch." }
+    val outputSha256 = vaeNative.getString("outputSha256").lowercase()
+    require(outputSha256 == sdxlArtifactSha256(outputFile)) { "VAE output SHA-256 proof mismatch." }
     val mimeType = vaeNative.getString("mimeType")
     require(mimeType == "image/png") { "VAE output MIME proof mismatch." }
 
-    val nativeEffectiveJson = unetEffective.toSdxlNativeEffectiveJson()
-        .put("pixelRange", contract.pixelRange.name)
+    val unetNativeEffectiveJson = unetNative.optJSONObject("nativeEffective")
+        ?: error("UNet native result is missing nativeEffective evidence.")
+    val actualConditioningArtifactSha256 = unetNativeEffectiveJson
+        .getString("conditioningArtifactSha256")
+        .lowercase()
+    require(actualConditioningArtifactSha256 == metadata.conditioningArtifactSha256) {
+        "Committed latent conditioning evidence differs from the UNet result."
+    }
+    val metadataNativeEffectiveJson = JSONObject(metadata.nativeEffectiveJson)
+    require(
+        metadataNativeEffectiveJson.getString("conditioningArtifactSha256").lowercase() ==
+            actualConditioningArtifactSha256
+    ) { "Committed latent nativeEffective conditioning evidence was changed." }
+
+    val sdxlPhaseProof = JSONObject()
+        .put("conditioningArtifactSha256", actualConditioningArtifactSha256)
+        .put("unetContextLoadCount", unetNative.getInt("unetContextLoadCount"))
+        .put("unetSamplingLoopCount", unetNative.getInt("unetSamplingLoopCount"))
+        .put("unetSamplingStepCount", unetNative.getInt("unetSamplingStepCount"))
+        .put("unetGraphExecutionCount", unetNative.getInt("unetGraphExecutionCount"))
+        .put(
+            "unetContextReusedAcrossSteps",
+            unetNative.getBoolean("unetContextReusedAcrossSteps")
+        )
+        .put("unetGraphName", unetNative.getString("unetGraphName"))
+        .put("vaeContextLoadCount", vaeNative.getInt("vaeContextLoadCount"))
+        .put("vaeExecutionCount", vaeNative.getInt("vaeExecutionCount"))
+        .put("vaeTileCount", vaeNative.getInt("vaeTileCount"))
+        .put("vaeTiled", vaeNative.getBoolean("vaeTiled"))
+        .put("vaeGraphName", vaeNative.getString("vaeGraphName"))
+        .put("vaeSourceLatentShape", vaeNative.getJSONArray("vaeSourceLatentShape"))
+        .put("vaeInputLatentShape", vaeNative.getJSONArray("vaeInputLatentShape"))
+        .put("vaeOutputTileShape", vaeNative.getJSONArray("vaeOutputTileShape"))
+        .put("vaeFinalOutputShape", vaeNative.getJSONArray("vaeFinalOutputShape"))
+        .put("vaeDecodeSpatialScale", vaeNative.getInt("vaeDecodeSpatialScale"))
+        .put("vaeScalingLocation", vaeNative.getString("vaeScalingLocation"))
+        .put("vaeScalingFactor", vaeNative.getDouble("vaeScalingFactor"))
+        .put("effectiveVaeHostScale", vaeNative.getDouble("effectiveVaeHostScale"))
+        .put("pixelRange", vaeNative.getString("pixelRange"))
+        .put("pixelRangeConversion", vaeNative.getString("pixelRangeConversion"))
+        .put("pixelRangeValueCount", vaeNative.getLong("pixelRangeValueCount"))
+        .put("pixelRangeClampedValueCount", vaeNative.getLong("pixelRangeClampedValueCount"))
+        .put("pixelRangeObservedMin", vaeNative.getDouble("pixelRangeObservedMin"))
+        .put("pixelRangeObservedMax", vaeNative.getDouble("pixelRangeObservedMax"))
+        .put("outputSha256", outputSha256)
+    val nativeEffectiveJson = JSONObject(unetNativeEffectiveJson.toString())
+        .put("vaeScalingLocation", vaeNative.getString("vaeScalingLocation"))
+        .put("vaeScalingFactor", vaeNative.getDouble("vaeScalingFactor"))
+        .put("pixelRange", vaeNative.getString("pixelRange"))
+        .put("conditioningArtifactSha256", actualConditioningArtifactSha256)
+        .put("sdxlPhaseProof", sdxlPhaseProof)
     val finalResult = JSONObject(nativeEffectiveJson.toString())
     finalResult.put("nativeEffective", nativeEffectiveJson)
         .put("ok", true)
@@ -434,12 +500,14 @@ internal fun mergeSdxlPhaseNativeResults(
         .put("transportHtpArch", transportHtpArch)
         .put("unetWorkerPid", unetResult.workerPid)
         .put("unetRuntimeProfile", unetResult.runtimeProfile)
+        .put("unetGraph", unetNative.getString("unetGraphName"))
         .put("unetProcessDeathConfirmed", true)
         .put("unetNativeGenerationSequence", unetProof.nativeGenerationSequence)
         .put("unetNativeStageMask", unetProof.nativeStageMask)
         .put("unetNativeDetailStageMask", unetProof.nativeDetailStageMask)
         .put("vaeWorkerPid", vaeResult.workerPid)
         .put("vaeRuntimeProfile", vaeResult.runtimeProfile)
+        .put("vaeGraph", vaeNative.getString("vaeGraphName"))
         .put("vaeTransportHtpArch", vaeTransportHtpArch)
         .put("vaeProcessDeathConfirmed", true)
         .put("vaeNativeGenerationSequence", vaeProof.nativeGenerationSequence)
@@ -459,6 +527,7 @@ internal fun mergeSdxlPhaseNativeResults(
         .put("outputPath", outputFile.canonicalPath)
         .put("mimeType", mimeType)
         .put("outputBytes", outputFile.length())
+        .put("outputSha256", outputSha256)
         .put("latentSha256", metadata.sha256)
         .put("stageTrace", JSONArray(stageTrace))
 
@@ -467,6 +536,11 @@ internal fun mergeSdxlPhaseNativeResults(
         "sigmas",
         "initNoiseSigma",
         "scaleModelInput",
+        "unetContextLoadCount",
+        "unetSamplingLoopCount",
+        "unetSamplingStepCount",
+        "unetGraphExecutionCount",
+        "unetContextReusedAcrossSteps",
         "unetContextLoadMs",
         "unetExecuteMsTotal"
     ).forEach { field ->
@@ -477,6 +551,14 @@ internal fun mergeSdxlPhaseNativeResults(
     listOf(
         "vaeContextLoadMs",
         "vaeExecuteMs",
+        "vaeTileCount",
+        "vaeTiled",
+        "vaeContextLoadCount",
+        "vaeSourceLatentShape",
+        "vaeInputLatentShape",
+        "vaeOutputTileShape",
+        "vaeFinalOutputShape",
+        "vaeDecodeSpatialScale",
         "pixelChecksum",
         "pixelRangeConversion",
         "pixelRangeValueCount",
@@ -490,6 +572,7 @@ internal fun mergeSdxlPhaseNativeResults(
     }
     (vaeNative.optJSONObject("runtimeEvidence")
         ?: vaeNative.optJSONObject("runtime"))?.let { finalResult.put("runtimeEvidence", it) }
+    validateSdxlFlatNativeEffective(finalResult)
     return finalResult
 }
 
@@ -573,13 +656,20 @@ private class SdxlPhaseClient(
     private val phase: SdxlImagePhase,
     private val onProgress: (SdxlImagePhaseProgress) -> Unit
 ) : AutoCloseable {
+    private val lifecycleLock = Any()
     private val serviceReady = CompletableDeferred<ISdxlImagePhaseWorker>()
     private val result = CompletableDeferred<SdxlImagePhaseResult>()
     private val processDeath = CompletableDeferred<Unit>()
     private var service: ISdxlImagePhaseWorker? = null
     private var binder: IBinder? = null
+
+    @Volatile
     private var workerPid: Int = -1
     private var bound = false
+    private var bindingRequested = false
+    private var closed = false
+
+    @Volatile
     private var requestId: String = ""
 
     private val deathRecipient = IBinder.DeathRecipient {
@@ -593,30 +683,46 @@ private class SdxlPhaseClient(
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, connectedBinder: IBinder) {
-            binder = connectedBinder
-            service = ISdxlImagePhaseWorker.Stub.asInterface(connectedBinder)
-            runCatching { connectedBinder.linkToDeath(deathRecipient, 0) }
-                .onFailure { serviceReady.completeExceptionally(it) }
-                .onSuccess { serviceReady.complete(requireNotNull(service)) }
+            val connectedService = ISdxlImagePhaseWorker.Stub.asInterface(connectedBinder)
+            val linkError = runCatching { connectedBinder.linkToDeath(deathRecipient, 0) }
+                .exceptionOrNull()
+            val accepted = synchronized(lifecycleLock) {
+                if (closed || (!bound && !bindingRequested) || linkError != null) {
+                    false
+                } else {
+                    binder = connectedBinder
+                    service = connectedService
+                    true
+                }
+            }
+            if (!accepted) {
+                runCatching { connectedBinder.unlinkToDeath(deathRecipient, 0) }
+                if (linkError != null) serviceReady.completeExceptionally(linkError)
+                runCatching { context.unbindService(this) }
+                return
+            }
+            if (!serviceReady.complete(connectedService)) {
+                runCatching { connectedBinder.unlinkToDeath(deathRecipient, 0) }
+                releaseBindingForExit()
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
-            processDeath.complete(Unit)
+            failConnection("SDXL ${phase.wireName} phase service disconnected.")
         }
 
         override fun onBindingDied(name: ComponentName) {
-            processDeath.complete(Unit)
+            failConnection("SDXL ${phase.wireName} phase binding died.")
         }
 
         override fun onNullBinding(name: ComponentName) {
-            serviceReady.completeExceptionally(
-                LocalImageWorkerDisconnectedException("SDXL ${phase.wireName} phase returned a null binding.")
-            )
+            failConnection("SDXL ${phase.wireName} phase returned a null binding.")
         }
     }
 
     private val callback = object : ISdxlImagePhaseWorkerCallback.Stub() {
         override fun onProgress(payloadJson: String) {
+            if (isClosed()) return
             val envelope = runCatching { SdxlImagePhaseProtocol.parseProgress(payloadJson) }
                 .getOrElse {
                     result.completeExceptionally(it)
@@ -631,6 +737,7 @@ private class SdxlPhaseClient(
         }
 
         override fun onComplete(payloadJson: String) {
+            if (isClosed()) return
             val envelope = runCatching { SdxlImagePhaseProtocol.parseResult(payloadJson) }
                 .getOrElse {
                     result.completeExceptionally(it)
@@ -645,11 +752,16 @@ private class SdxlPhaseClient(
         }
 
         override fun onError(payloadJson: String) {
+            if (isClosed()) return
             val envelope = runCatching { SdxlImagePhaseProtocol.parseError(payloadJson) }
                 .getOrElse {
                     result.completeExceptionally(it)
                     return
                 }
+            if (envelope.requestId != requestId || envelope.phase != phase) {
+                result.completeExceptionally(IllegalStateException("SDXL phase error identity mismatch."))
+                return
+            }
             if (envelope.workerPid > 0) workerPid = envelope.workerPid
             result.completeExceptionally(LocalImageWorkerRemoteException(envelope.code, envelope.message))
         }
@@ -661,8 +773,26 @@ private class SdxlPhaseClient(
             SdxlImagePhase.UNET -> SdxlUnetWorkerService::class.java
             SdxlImagePhase.VAE -> SdxlVaeWorkerService::class.java
         }
-        bound = context.bindService(Intent(context, serviceClass), connection, Context.BIND_AUTO_CREATE)
-        check(bound) { "Unable to bind SDXL ${phase.wireName} phase worker." }
+        synchronized(lifecycleLock) {
+            check(!closed) { "SDXL ${phase.wireName} phase client is closed." }
+            check(!bindingRequested && !bound) { "SDXL ${phase.wireName} phase bind was already requested." }
+            bindingRequested = true
+        }
+        val didBind = runCatching {
+            context.bindService(Intent(context, serviceClass), connection, Context.BIND_AUTO_CREATE)
+        }.getOrElse { error ->
+            synchronized(lifecycleLock) { bindingRequested = false }
+            throw error
+        }
+        val closedDuringBind = synchronized(lifecycleLock) {
+            bindingRequested = false
+            if (!closed) bound = didBind
+            closed
+        }
+        if (closedDuringBind && didBind) {
+            runCatching { context.unbindService(connection) }
+        }
+        check(!closedDuringBind && didBind) { "Unable to bind SDXL ${phase.wireName} phase worker." }
         try {
             return withTimeout(timeoutMs) {
                 val remote = serviceReady.await()
@@ -691,21 +821,48 @@ private class SdxlPhaseClient(
     }
 
     fun cancelAndTerminate() {
-        runCatching { service?.cancel(requestId) }
-        if (workerPid > 0 && workerPid != Process.myPid()) {
-            runCatching { Process.killProcess(workerPid) }
+        val (currentService, currentPid) = synchronized(lifecycleLock) { service to workerPid }
+        runCatching { currentService?.cancel(requestId) }
+        if (currentPid > 0 && currentPid != Process.myPid()) {
+            runCatching { Process.killProcess(currentPid) }
         }
     }
 
     private fun releaseBindingForExit() {
-        if (!bound) return
-        runCatching { context.unbindService(connection) }
+        val shouldUnbind = synchronized(lifecycleLock) {
+            if (!bound) false else {
+                bound = false
+                true
+            }
+        }
+        if (shouldUnbind) runCatching { context.unbindService(connection) }
+    }
+
+    private fun failConnection(message: String) {
+        val failure = LocalImageWorkerDisconnectedException(message)
+        processDeath.complete(Unit)
+        if (isClosed()) return
+        serviceReady.completeExceptionally(failure)
+        result.completeExceptionally(failure)
+    }
+
+    private fun isClosed(): Boolean = synchronized(lifecycleLock) { closed }
+
+    private fun closeLifecycle(): Pair<IBinder?, Boolean> = synchronized(lifecycleLock) {
+        if (closed) return@synchronized null to false
+        closed = true
+        val currentBinder = binder
+        binder = null
+        service = null
+        val shouldUnbind = bound
         bound = false
+        currentBinder to shouldUnbind
     }
 
     override fun close() {
-        binder?.let { runCatching { it.unlinkToDeath(deathRecipient, 0) } }
-        releaseBindingForExit()
+        val (currentBinder, shouldUnbind) = closeLifecycle()
+        currentBinder?.let { runCatching { it.unlinkToDeath(deathRecipient, 0) } }
+        if (shouldUnbind) runCatching { context.unbindService(connection) }
     }
 }
 

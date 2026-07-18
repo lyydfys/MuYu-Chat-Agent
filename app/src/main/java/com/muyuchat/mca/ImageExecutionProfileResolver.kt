@@ -1,5 +1,7 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.download.RecommendedImageDefaults
+
 internal data class ImageProfileSidecar(
     val profileId: String? = null,
     val profileRevision: Int? = null,
@@ -13,8 +15,42 @@ internal data class ImageProfileSidecar(
     val vae: ImageVaeContract? = null,
     val graph: ImageGraphContract? = null,
     val defaults: ImageGenerationDefaults? = null,
-    val capabilities: ImageGenerationCapabilities? = null
+    val capabilities: ImageGenerationCapabilities? = null,
+    val behavior: ImagePackageBehaviorConfig? = null
 )
+
+/**
+ * Partial user-facing behavior declared by a model package. Unlike a complete
+ * execution profile, every field is optional and only overrides the matching
+ * built-in or generic field. It never grants device admission or bypasses a
+ * native load/execute failure.
+ */
+internal data class ImagePackageBehaviorConfig(
+    val family: LocalImageModelFamily? = null,
+    val variant: ImageModelVariant? = null,
+    val defaultPrompt: String? = null,
+    val defaultNegativePrompt: String? = null,
+    val steps: Int? = null,
+    val cfgScale: Double? = null,
+    val scheduler: ImageSchedulerAlgorithm? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val useCfg: Boolean? = null
+) {
+    fun overlay(higherPriority: ImagePackageBehaviorConfig): ImagePackageBehaviorConfig =
+        ImagePackageBehaviorConfig(
+            family = higherPriority.family ?: family,
+            variant = higherPriority.variant ?: variant,
+            defaultPrompt = higherPriority.defaultPrompt ?: defaultPrompt,
+            defaultNegativePrompt = higherPriority.defaultNegativePrompt ?: defaultNegativePrompt,
+            steps = higherPriority.steps ?: steps,
+            cfgScale = higherPriority.cfgScale ?: cfgScale,
+            scheduler = higherPriority.scheduler ?: scheduler,
+            width = higherPriority.width ?: width,
+            height = higherPriority.height ?: height,
+            useCfg = higherPriority.useCfg ?: useCfg
+        )
+}
 
 internal data class ImageCapabilityDiscovery(
     val family: LocalImageModelFamily? = null,
@@ -71,6 +107,7 @@ internal data class ImageExecutionProfileResolverInput(
     val recommendationId: String? = null,
     val recommendationRevision: String? = null,
     val manifestProfile: ImageExecutionProfile? = null,
+    val manifestBehavior: ImagePackageBehaviorConfig? = null,
     val sidecar: ImageProfileSidecar? = null,
     val capabilityDiscovery: ImageCapabilityDiscovery? = null,
     val recommendationEvidence: ImageRecommendationEvidence = ImageRecommendationEvidence(),
@@ -253,6 +290,12 @@ internal object ImageExecutionProfileResolver {
         val fieldSources = linkedMapOf<String, ImageProfileSource>()
         val sourceChain = mutableListOf<ImageProfileSource>()
         val fingerprint = input.modelFingerprint.trim().lowercase()
+        val packageFamily = if (input.manifestProfile == null) {
+            input.manifestBehavior?.family ?: input.sidecar?.behavior?.family
+        } else {
+            input.manifestProfile.family
+        }
+        val fallbackFamily = packageFamily ?: input.capabilityDiscovery?.family ?: input.family
 
         val base: ImageExecutionProfile = if (input.manifestProfile != null) {
             sourceChain += ImageProfileSource.MANIFEST
@@ -274,14 +317,14 @@ internal object ImageExecutionProfileResolver {
                     sourceChain += ImageProfileSource.CAPABILITY_DISCOVERY
                     markAllProfileFields(fieldSources, ImageProfileSource.CAPABILITY_DISCOVERY)
                     applyCapabilityDiscovery(
-                        genericProfile(input.runtime, input.family, fingerprint),
+                        genericProfile(input.runtime, fallbackFamily, fingerprint),
                         input.capabilityDiscovery
                     )
                 }
                 else -> {
                     sourceChain += ImageProfileSource.GENERIC_FALLBACK
                     markAllProfileFields(fieldSources, ImageProfileSource.GENERIC_FALLBACK)
-                    genericProfile(input.runtime, input.family, fingerprint)
+                    genericProfile(input.runtime, fallbackFamily, fingerprint)
                 }
             }
         }
@@ -299,8 +342,33 @@ internal object ImageExecutionProfileResolver {
             sourceChain.add(0, ImageProfileSource.SIDECAR)
             resolvedProfile = applySidecar(resolvedProfile, input.sidecar, fieldSources)
         }
+        if (input.manifestProfile == null && input.manifestBehavior != null) {
+            sourceChain.add(0, ImageProfileSource.MANIFEST)
+            resolvedProfile = applyPackageBehavior(
+                base = resolvedProfile,
+                behavior = input.manifestBehavior,
+                source = ImageProfileSource.MANIFEST,
+                sources = fieldSources
+            )
+        }
+        if (input.userOverrides.negativePromptSpecified &&
+            !input.userOverrides.negativePrompt.isNullOrEmpty() &&
+            !resolvedProfile.capabilities.supportsNegativePrompt
+        ) {
+            throw ImageProfileResolutionException(
+                ImageProfileValidationReport(
+                    listOf(
+                        ImageProfileValidationIssue(
+                            code = "NEGATIVE_PROMPT_UNSUPPORTED",
+                            field = "defaults.defaultNegativePrompt",
+                            message = "This image profile has no executable negative-prompt branch."
+                        )
+                    )
+                )
+            )
+        }
         resolvedProfile = applyUserOverrides(resolvedProfile, input.userOverrides, fieldSources)
-        if (hasUserOverrides(input.userOverrides)) sourceChain += ImageProfileSource.USER_OVERRIDE
+        if (hasUserOverrides(input.userOverrides)) sourceChain.add(0, ImageProfileSource.USER_OVERRIDE)
         resolvedProfile = resolvedProfile.copy(
             provenance = ImageProfileProvenance(
                 primarySource = sourceChain.first(),
@@ -357,6 +425,13 @@ internal object ImageExecutionProfileResolver {
     private fun resolveBuiltInTarget(
         input: ImageExecutionProfileResolverInput
     ): BuiltInImageProfileTarget? {
+        // Exact bytes are stronger identity evidence than a requested card or
+        // legacy bundle alias. This prevents stale request metadata from
+        // silently applying another recommendation's execution profile.
+        val fingerprint = input.modelFingerprint.trim().lowercase()
+        identityRules.singleOrNull { rule -> fingerprint in rule.modelFingerprints }
+            ?.let { return targetByRecommendationId.getValue(it.recommendationId) }
+
         val aliasTokens = buildSet {
             input.recommendationId
                 ?.takeIf(String::isNotBlank)
@@ -368,10 +443,6 @@ internal object ImageExecutionProfileResolver {
                 .forEach(::add)
         }
         identityRules.singleOrNull { rule -> rule.aliases.any(aliasTokens::contains) }
-            ?.let { return targetByRecommendationId.getValue(it.recommendationId) }
-
-        val fingerprint = input.modelFingerprint.trim().lowercase()
-        identityRules.singleOrNull { rule -> fingerprint in rule.modelFingerprints }
             ?.let { return targetByRecommendationId.getValue(it.recommendationId) }
 
         val sourceRepositories = input.recommendationEvidence.sourceRepositories
@@ -484,7 +555,7 @@ internal object ImageExecutionProfileResolver {
         mark("graph", sidecar.graph != null)
         mark("defaults", sidecar.defaults != null)
         mark("capabilities", sidecar.capabilities != null)
-        return base.copy(
+        val replaced = base.copy(
             profileId = sidecar.profileId ?: base.profileId,
             profileRevision = sidecar.profileRevision ?: base.profileRevision,
             family = sidecar.family ?: base.family,
@@ -499,6 +570,113 @@ internal object ImageExecutionProfileResolver {
             defaults = sidecar.defaults ?: base.defaults,
             capabilities = sidecar.capabilities ?: base.capabilities
         )
+        return sidecar.behavior?.let { behavior ->
+            applyPackageBehavior(replaced, behavior, ImageProfileSource.SIDECAR, sources)
+        } ?: replaced
+    }
+
+    private fun applyPackageBehavior(
+        base: ImageExecutionProfile,
+        behavior: ImagePackageBehaviorConfig,
+        source: ImageProfileSource,
+        sources: MutableMap<String, ImageProfileSource>
+    ): ImageExecutionProfile {
+        fun mark(field: String, present: Boolean) {
+            if (present) sources[field] = source
+        }
+
+        mark("family", behavior.family != null)
+        mark("variant", behavior.variant != null)
+        mark("scheduler.algorithm", behavior.scheduler != null)
+        mark("scheduler.defaultSteps", behavior.steps != null)
+        mark("defaults.defaultPrompt", behavior.defaultPrompt != null)
+        mark("defaults.defaultNegativePrompt", behavior.defaultNegativePrompt != null)
+        mark("defaults.steps", behavior.steps != null)
+        mark("defaults.cfgScale", behavior.cfgScale != null)
+        mark("defaults.width", behavior.width != null)
+        mark("defaults.height", behavior.height != null)
+        mark("defaults.useCfg", behavior.useCfg != null || behavior.cfgScale != null)
+
+        val width = behavior.width ?: base.defaults.width
+        val height = behavior.height ?: base.defaults.height
+        val dimensionsChanged = width != base.defaults.width || height != base.defaults.height
+        if (dimensionsChanged) {
+            sources["latent.initialShape"] = source
+            sources["vae.inputShape"] = source
+            sources["vae.outputShape"] = source
+        }
+        val cfgScale = behavior.cfgScale ?: base.defaults.cfgScale
+        val useCfg = behavior.useCfg
+            ?: behavior.cfgScale?.let { kotlin.math.abs(it - 1.0) > 1.0e-12 }
+            ?: base.defaults.useCfg
+        val scheduler = base.scheduler.copy(
+            algorithm = behavior.scheduler ?: base.scheduler.algorithm,
+            defaultSteps = behavior.steps ?: base.scheduler.defaultSteps
+        )
+        val resizedContracts = resizedImageContracts(base, width, height)
+        return base.copy(
+            family = behavior.family ?: base.family,
+            variant = behavior.variant ?: base.variant,
+            scheduler = scheduler,
+            latent = if (dimensionsChanged) resizedContracts.first else base.latent,
+            vae = if (dimensionsChanged) resizedContracts.second else base.vae,
+            defaults = base.defaults.copy(
+                width = width,
+                height = height,
+                steps = behavior.steps ?: base.defaults.steps,
+                cfgScale = cfgScale,
+                useCfg = useCfg,
+                defaultPrompt = behavior.defaultPrompt ?: base.defaults.defaultPrompt,
+                defaultNegativePrompt = behavior.defaultNegativePrompt
+                    ?: base.defaults.defaultNegativePrompt
+            )
+        )
+    }
+
+    private fun resizedImageContracts(
+        base: ImageExecutionProfile,
+        width: Int,
+        height: Int
+    ): Pair<ImageLatentContract, ImageVaeContract> {
+        val latentWidth = width / base.latent.downsampleFactor
+        val latentHeight = height / base.latent.downsampleFactor
+        return base.latent.copy(
+            initialShape = resizedImageTensorShape(
+                layout = base.latent.schedulerLayout,
+                current = base.latent.initialShape,
+                channels = base.latent.channels,
+                width = latentWidth,
+                height = latentHeight
+            )
+        ) to base.vae.copy(
+            inputShape = resizedImageTensorShape(
+                layout = base.vae.inputLayout,
+                current = base.vae.inputShape,
+                channels = base.latent.channels,
+                width = latentWidth,
+                height = latentHeight
+            ),
+            outputShape = resizedImageTensorShape(
+                layout = base.vae.outputLayout,
+                current = base.vae.outputShape,
+                channels = 3,
+                width = width,
+                height = height
+            )
+        )
+    }
+
+    private fun resizedImageTensorShape(
+        layout: ImageTensorLayout,
+        current: List<Int>,
+        channels: Int,
+        width: Int,
+        height: Int
+    ): List<Int> = when (layout) {
+        ImageTensorLayout.NCHW,
+        ImageTensorLayout.BCHW -> listOf(1, channels, height, width)
+        ImageTensorLayout.NHWC -> listOf(1, height, width, channels)
+        else -> current
     }
 
     private fun applyCapabilityDiscovery(
@@ -532,6 +710,9 @@ internal object ImageExecutionProfileResolver {
         sources: MutableMap<String, ImageProfileSource>
     ): ImageExecutionProfile {
         val schedulerChanged = overrides.scheduler != null || overrides.predictionType != null
+        val width = overrides.width ?: base.defaults.width
+        val height = overrides.height ?: base.defaults.height
+        val dimensionsChanged = width != base.defaults.width || height != base.defaults.height
         if (schedulerChanged) sources["scheduler"] = ImageProfileSource.USER_OVERRIDE
         if (overrides.steps != null) sources["defaults.steps"] = ImageProfileSource.USER_OVERRIDE
         if (overrides.cfgScale != null) sources["defaults.cfgScale"] = ImageProfileSource.USER_OVERRIDE
@@ -540,14 +721,22 @@ internal object ImageExecutionProfileResolver {
         if (overrides.height != null) sources["defaults.height"] = ImageProfileSource.USER_OVERRIDE
         if (overrides.seed != null) sources["defaults.seed"] = ImageProfileSource.USER_OVERRIDE
         if (overrides.negativePromptSpecified) sources["defaults.defaultNegativePrompt"] = ImageProfileSource.USER_OVERRIDE
+        if (dimensionsChanged) {
+            sources["latent.initialShape"] = ImageProfileSource.USER_OVERRIDE
+            sources["vae.inputShape"] = ImageProfileSource.USER_OVERRIDE
+            sources["vae.outputShape"] = ImageProfileSource.USER_OVERRIDE
+        }
+        val resizedContracts = resizedImageContracts(base, width, height)
         return base.copy(
             scheduler = base.scheduler.copy(
                 algorithm = overrides.scheduler ?: base.scheduler.algorithm,
                 predictionType = overrides.predictionType ?: base.scheduler.predictionType
             ),
+            latent = if (dimensionsChanged) resizedContracts.first else base.latent,
+            vae = if (dimensionsChanged) resizedContracts.second else base.vae,
             defaults = base.defaults.copy(
-                width = overrides.width ?: base.defaults.width,
-                height = overrides.height ?: base.defaults.height,
+                width = width,
+                height = height,
                 steps = overrides.steps ?: base.defaults.steps,
                 cfgScale = overrides.cfgScale ?: base.defaults.cfgScale,
                 seed = overrides.seed ?: base.defaults.seed,
@@ -564,6 +753,33 @@ internal object ImageExecutionProfileResolver {
     private fun resolvedExecution(profile: ImageExecutionProfile): ImageResolvedExecution {
         val timetableCount = profile.scheduler.expectedTimestepCount(profile.defaults.steps)
         val branches = if (profile.defaults.useCfg) 2 else 1
+        val tokenCount = when {
+            profile.family == LocalImageModelFamily.SANA &&
+                profile.tokenizer.backend == ImageTokenizerBackend.MNN_MTOK -> {
+                // Sana reports the sequence axis consumed by each conditioning
+                // branch. Positive and negative branches are separate executions,
+                // so adding both 256-token sequences would misstate the native
+                // contract as 512 tokens.
+                profile.conditioning.textEncoderInputShape.getOrNull(1)
+                    ?.takeIf { it > 0 }
+                    ?: profile.tokenizer.maxLength
+            }
+            profile.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP -> {
+                // stable-diffusion.cpp only prepares the negative conditioner
+                // when CFG actually executes. This is the resolved minimum
+                // branch capacity; native reports the prompt-dependent token
+                // count separately after real conditioning runs.
+                profile.tokenizer.maxLength * branches
+            }
+            profile.runtime == LocalImageRuntime.QNN_HTP -> {
+                // QNN packages consume the fixed negative/positive CLIP
+                // payload contract even when a distilled UNet executes only
+                // the positive branch.
+                profile.tokenizer.maxLength * 2
+            }
+            else -> profile.tokenizer.maxLength *
+                if (profile.tokenizer.separateNegativePrompt) 2 else 1
+        }
         val graphName = profile.graph.unet?.graphName
             ?: profile.graph.controlNet?.graphName
             ?: "runtime-native"
@@ -581,7 +797,7 @@ internal object ImageExecutionProfileResolver {
             useCfg = profile.defaults.useCfg,
             unconditionalBranch = profile.defaults.useCfg,
             tokenizerBackend = profile.tokenizer.backend,
-            tokenCount = profile.tokenizer.maxLength * if (profile.tokenizer.separateNegativePrompt) 2 else 1,
+            tokenCount = tokenCount,
             promptWeightingSupported =
                 profile.tokenizer.supportsPromptWeighting &&
                     profile.capabilities.supportsPromptWeighting,
@@ -601,7 +817,7 @@ internal object ImageExecutionProfileResolver {
         modelFingerprint: String,
         recommendationRevision: String?
     ): ImageExecutionProfile {
-        val profile = profileTemplate(target.profileId, modelFingerprint)
+        val profile = profileTemplate(target, modelFingerprint)
         return profile.copy(
             provenance = ImageProfileProvenance(
                 primarySource = ImageProfileSource.BUILT_IN,
@@ -612,17 +828,54 @@ internal object ImageExecutionProfileResolver {
         )
     }
 
-    private fun profileTemplate(profileId: String, fingerprint: String): ImageExecutionProfile = when (profileId) {
-        "community.sd15.qnn228" -> qnnSd15Profile(profileId, fingerprint)
-        "community.sd15.hyper.qnn228" -> qnnSd15Profile(profileId, fingerprint, ImageModelVariant.HYPER, 8, 2.0)
+    private fun profileTemplate(
+        target: BuiltInImageProfileTarget,
+        fingerprint: String
+    ): ImageExecutionProfile = when (val profileId = target.profileId) {
+        "community.sd15.qnn228" -> qnnSd15Profile(
+            profileId,
+            fingerprint,
+            defaultNegativePrompt = if (target.recommendationId == "cyberrealistic_sd15_qnn228") {
+                RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
+            } else {
+                RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+            }
+        )
+        "community.sd15.hyper.qnn228" -> qnnSd15Profile(
+            profileId,
+            fingerprint,
+            ImageModelVariant.HYPER,
+            8,
+            2.0,
+            defaultNegativePrompt = RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
+        )
         "community.sd15.legacy-fp32.qnn228" -> qnnSd15Profile(
             profileId,
             fingerprint,
             ImageModelVariant.LEGACY_FP32,
             conditioningType = ImageEmbeddingDiskDataType.FP32,
-            conversion = ImageEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING
+            conversion = ImageEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
+            defaultNegativePrompt = RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT
         )
-        "community.sdxl.base.qnn228" -> qnnSdxlProfile(profileId, fingerprint)
+        "community.sdxl.base.qnn228" -> qnnSdxlProfile(
+            profileId = profileId,
+            fingerprint = fingerprint,
+            steps = when (target.recommendationId) {
+                "animagine_xl_v4_qnn228" -> RecommendedImageDefaults.ANIMAGINE_XL_STEPS
+                "cyberrealisticxl_qnn228" -> RecommendedImageDefaults.CYBERREALISTIC_XL_STEPS
+                else -> 30
+            },
+            cfg = when (target.recommendationId) {
+                "animagine_xl_v4_qnn228" -> RecommendedImageDefaults.ANIMAGINE_XL_CFG
+                "cyberrealisticxl_qnn228" -> RecommendedImageDefaults.CYBERREALISTIC_XL_CFG
+                else -> 7.0
+            },
+            defaultNegativePrompt = when (target.recommendationId) {
+                "animagine_xl_v4_qnn228" -> RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT
+                "cyberrealisticxl_qnn228" -> RecommendedImageDefaults.CYBERREALISTIC_XL_NEGATIVE_PROMPT
+                else -> RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT
+            }
+        )
         "community.sdxl.dmd2-alt.qnn228" -> qnnSdxlProfile(
             profileId,
             fingerprint,
@@ -630,18 +883,20 @@ internal object ImageExecutionProfileResolver {
             steps = 4,
             cfg = 1.0,
             useCfg = false,
-            timestepSpacing = ImageTimestepSpacing.LINSPACE
+            timestepSpacing = ImageTimestepSpacing.LINSPACE,
+            defaultNegativePrompt = null,
+            supportsNegativePrompt = false
         )
         "qualcomm.sd15.gen5.qnn245" -> qnnGen5Profile(profileId, fingerprint, sd21 = false)
         "qualcomm.sd21.gen5.qnn245" -> qnnGen5Profile(profileId, fingerprint, sd21 = true)
         "qualcomm.controlnet-canny.gen5.qnn245" -> qnnControlNetProfile(profileId, fingerprint)
         "mnn.sd15.official.512" -> mnnSd15Profile(profileId, fingerprint)
         "mnn.sana-edit.v2" -> sanaEditProfile(profileId, fingerprint)
-        "sdcpp.sd-turbo" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.SD_TURBO, ImageModelVariant.SD_TURBO, 4, 0.0, ImageSchedulerAlgorithm.EULER_A)
-        "sdcpp.z-image-turbo" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.Z_IMAGE, ImageModelVariant.Z_IMAGE_TURBO, 9, 0.0, ImageSchedulerAlgorithm.FLOW_MATCH)
-        "sdcpp.flux2-klein" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.FLUX, ImageModelVariant.FLUX2_KLEIN, 20, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024)
-        "sdcpp.qwen-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.QWEN_IMAGE, ImageModelVariant.QWEN_IMAGE, 20, 4.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024)
-        "sdcpp.longcat-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.LONGCAT_IMAGE, ImageModelVariant.LONGCAT_IMAGE, 20, 4.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024)
+        "sdcpp.sd-turbo" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.SD_TURBO, ImageModelVariant.SD_TURBO, 4, 1.0, ImageSchedulerAlgorithm.EULER_A, supportsNegativePrompt = false)
+        "sdcpp.z-image-turbo" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.Z_IMAGE, ImageModelVariant.Z_IMAGE_TURBO, 8, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, supportsNegativePrompt = false)
+        "sdcpp.flux2-klein" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.FLUX, ImageModelVariant.FLUX2_KLEIN, 4, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, supportsNegativePrompt = false)
+        "sdcpp.qwen-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.QWEN_IMAGE, ImageModelVariant.QWEN_IMAGE, 40, 2.5, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT)
+        "sdcpp.longcat-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.LONGCAT_IMAGE, ImageModelVariant.LONGCAT_IMAGE, 20, 5.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT)
         else -> error("Unknown built-in image profile target: $profileId")
     }
 
@@ -652,7 +907,8 @@ internal object ImageExecutionProfileResolver {
         steps: Int = 20,
         cfg: Double = 7.0,
         conditioningType: ImageEmbeddingDiskDataType = ImageEmbeddingDiskDataType.FP16,
-        conversion: ImageEmbeddingConversionStrategy = ImageEmbeddingConversionStrategy.NONE
+        conversion: ImageEmbeddingConversionStrategy = ImageEmbeddingConversionStrategy.NONE,
+        defaultNegativePrompt: String = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
     ): ImageExecutionProfile = profile(
         profileId = profileId,
         fingerprint = fingerprint,
@@ -671,8 +927,21 @@ internal object ImageExecutionProfileResolver {
         tokenizer = clipTokenizer(ImageTokenizerBackend.TOKENIZERS_CPP),
         conditioning = conditioning(conditioningType, conversion, 768),
         vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
-        graph = qnnGraph("clip_text_encoder_qnn_context.bin", "unet.bin", "vae_decoder.bin", "2.28", 68),
-        defaults = defaults(512, steps, cfg, useCfg = true),
+        graph = qnnGraph(
+            "clip_text_encoder_qnn_context.bin",
+            "unet.bin",
+            "vae_decoder.bin",
+            "2.28",
+            68,
+            vaeEncoder = "vae_encoder.bin"
+        ),
+        defaults = defaults(
+            512,
+            steps,
+            cfg,
+            useCfg = true,
+            defaultNegativePrompt = defaultNegativePrompt
+        ),
         capabilities = capabilities(512, setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER, ImageSchedulerAlgorithm.PNDM_PLMS))
     )
 
@@ -683,7 +952,9 @@ internal object ImageExecutionProfileResolver {
         steps: Int = 30,
         cfg: Double = 7.0,
         useCfg: Boolean = true,
-        timestepSpacing: ImageTimestepSpacing = ImageTimestepSpacing.TRAILING
+        timestepSpacing: ImageTimestepSpacing = ImageTimestepSpacing.TRAILING,
+        defaultNegativePrompt: String? = RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT,
+        supportsNegativePrompt: Boolean = true
     ): ImageExecutionProfile = profile(
         profileId = profileId,
         fingerprint = fingerprint,
@@ -696,14 +967,31 @@ internal object ImageExecutionProfileResolver {
             steps,
             1,
             50,
-            timestepSpacing = timestepSpacing
+            timestepSpacing = timestepSpacing,
+            order = 2
         ),
-        tokenizer = clipTokenizer(ImageTokenizerBackend.TOKENIZERS_CPP, dualClip = true),
+        tokenizer = clipTokenizer(
+            ImageTokenizerBackend.TOKENIZERS_CPP,
+            dualClip = true,
+            separateNegativePrompt = supportsNegativePrompt
+        ),
         conditioning = conditioning(ImageEmbeddingDiskDataType.FP16, ImageEmbeddingConversionStrategy.NONE, 2_048, dualEncoder = true, pooled = true),
         vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.13025, 1024),
-        graph = qnnGraph("clip.mnn", "unet.bin", "vae_decoder.bin", "2.28", 73, ImageWorkerStrategy.SPLIT_UNET_VAE),
-        defaults = defaults(1024, steps, cfg, useCfg),
-        capabilities = capabilities(1024, setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER, ImageSchedulerAlgorithm.LCM))
+        graph = qnnGraph(
+            textEncoder = "clip.mnn",
+            unet = "unet.bin",
+            vae = "vae_decoder.bin",
+            qnnSdk = "2.28",
+            htpArch = null,
+            strategy = ImageWorkerStrategy.SPLIT_UNET_VAE,
+            vaeEncoder = "vae_encoder.bin"
+        ),
+        defaults = defaults(1024, steps, cfg, useCfg, defaultNegativePrompt),
+        capabilities = capabilities(
+            1024,
+            setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER, ImageSchedulerAlgorithm.LCM),
+            supportsNegativePrompt = supportsNegativePrompt
+        )
     )
 
     private fun qnnGen5Profile(
@@ -721,11 +1009,12 @@ internal object ImageExecutionProfileResolver {
                 ImageSchedulerAlgorithm.DDIM,
                 ImagePredictionType.V_PREDICTION,
                 20,
-                10,
-                50,
+                1,
+                100,
                 stepsOffset = 1,
                 timestepSpacing = ImageTimestepSpacing.LEADING,
                 setAlphaToOne = false,
+                skipPrk = true,
                 clipSample = false
             )
         } else {
@@ -733,20 +1022,35 @@ internal object ImageExecutionProfileResolver {
                 ImageSchedulerAlgorithm.EULER,
                 ImagePredictionType.EPSILON,
                 20,
-                10,
-                50,
-                stepsOffset = 0,
+                1,
+                100,
+                stepsOffset = 1,
                 timestepSpacing = ImageTimestepSpacing.LINSPACE,
                 setAlphaToOne = false,
-                scaleModelInput = true
+                scaleModelInput = true,
+                skipPrk = true
             )
         },
-        tokenizer = clipTokenizer(ImageTokenizerBackend.TOKENIZERS_CPP, padZero = sd21),
+        tokenizer = clipTokenizer(
+            ImageTokenizerBackend.TOKENIZERS_CPP,
+            padZero = sd21,
+            supportsPromptWeighting = false
+        ),
         conditioning = conditioning(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, ImageEmbeddingConversionStrategy.GRAPH_EXECUTION, if (sd21) 1_024 else 768),
         vae = vae(ImageVaeScalingLocation.GRAPH_INTERNAL, 0.18215, 512),
         graph = qnnGraph("text_encoder.bin", "unet.bin", "vae.bin", "2.45.0.260326154327", 81, ImageWorkerStrategy.SHARED_TEXT_UNET_VAE),
-        defaults = defaults(512, 20, 7.5, useCfg = true),
-        capabilities = capabilities(512, setOf(if (sd21) ImageSchedulerAlgorithm.DDIM else ImageSchedulerAlgorithm.EULER))
+        defaults = defaults(
+            512,
+            20,
+            7.5,
+            useCfg = true,
+            defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+        ),
+        capabilities = capabilities(
+            512,
+            setOf(if (sd21) ImageSchedulerAlgorithm.DDIM else ImageSchedulerAlgorithm.EULER),
+            supportsPromptWeighting = false
+        )
     )
 
     private fun qnnControlNetProfile(profileId: String, fingerprint: String): ImageExecutionProfile {
@@ -783,7 +1087,13 @@ internal object ImageExecutionProfileResolver {
             vae = ImageGraphArtifactContract("vae_decoder.mnn"),
             workerStrategy = ImageWorkerStrategy.IN_PROCESS
         ),
-        defaults = defaults(512, 20, 7.0, useCfg = true),
+        defaults = defaults(
+            512,
+            20,
+            7.0,
+            useCfg = true,
+            defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+        ),
         capabilities = capabilities(512, setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER, ImageSchedulerAlgorithm.PNDM_PLMS))
     )
 
@@ -797,9 +1107,9 @@ internal object ImageExecutionProfileResolver {
         scheduler = scheduler(
             ImageSchedulerAlgorithm.FLOW_MATCH,
             ImagePredictionType.FLOW,
-            20,
-            1,
-            100
+            10,
+            2,
+            50
         ),
         tokenizer = ImageTokenizerContract(
             backend = ImageTokenizerBackend.MNN_MTOK,
@@ -811,22 +1121,30 @@ internal object ImageExecutionProfileResolver {
         conditioning = conditioning(
             ImageEmbeddingDiskDataType.GRAPH_INTERNAL,
             ImageEmbeddingConversionStrategy.GRAPH_EXECUTION,
-            1
+            width = 1,
+            maxLength = 256
         ),
         vae = vae(ImageVaeScalingLocation.RUNTIME_NATIVE, 1.0, 512),
         graph = ImageGraphContract(
             textEncoder = ImageGraphArtifactContract("llm/llm.mnn"),
             unet = ImageGraphArtifactContract("transformer.mnn"),
             vae = ImageGraphArtifactContract("vae_decoder.mnn"),
+            vaeEncoder = ImageGraphArtifactContract("vae_encoder.mnn"),
             configSidecars = listOf("llm/meta_queries.mnn"),
             workerStrategy = ImageWorkerStrategy.DEDICATED_WORKER
         ),
-        defaults = defaults(512, 20, 4.5, useCfg = true),
+        defaults = defaults(
+            512,
+            10,
+            4.5,
+            useCfg = true,
+            defaultNegativePrompt = RecommendedImageDefaults.EDIT_NEGATIVE_PROMPT
+        ),
         capabilities = capabilities(
             512,
             setOf(ImageSchedulerAlgorithm.FLOW_MATCH),
             supportsPromptWeighting = false
-        ).copy(requiresInputImage = true, supportsMask = true)
+        ).copy(requiresInputImage = true, supportsMask = false)
     )
 
     private fun sdcppProfile(
@@ -838,6 +1156,8 @@ internal object ImageExecutionProfileResolver {
         cfg: Double,
         algorithm: ImageSchedulerAlgorithm,
         size: Int = 512,
+        defaultNegativePrompt: String? = null,
+        supportsNegativePrompt: Boolean = true,
         runtime: LocalImageRuntime = LocalImageRuntime.STABLE_DIFFUSION_CPP
     ): ImageExecutionProfile = profile(
         profileId = profileId,
@@ -852,14 +1172,36 @@ internal object ImageExecutionProfileResolver {
             1,
             100
         ),
-        tokenizer = clipTokenizer(ImageTokenizerBackend.SDCPP_NATIVE),
-        conditioning = conditioning(ImageEmbeddingDiskDataType.RUNTIME_NATIVE, ImageEmbeddingConversionStrategy.RUNTIME_NATIVE, 1),
+        tokenizer = clipTokenizer(
+            ImageTokenizerBackend.SDCPP_NATIVE,
+            separateNegativePrompt = supportsNegativePrompt
+        ),
+        conditioning = conditioning(
+            ImageEmbeddingDiskDataType.RUNTIME_NATIVE,
+            ImageEmbeddingConversionStrategy.RUNTIME_NATIVE,
+            1,
+            separateNegativePrompt = supportsNegativePrompt
+        ),
         vae = vae(ImageVaeScalingLocation.RUNTIME_NATIVE, 1.0, size),
         graph = ImageGraphContract(workerStrategy = ImageWorkerStrategy.IN_PROCESS),
-        defaults = defaults(size, steps, cfg, useCfg = cfg > 1.0),
+        defaults = defaults(
+            size,
+            steps,
+            cfg,
+            useCfg = kotlin.math.abs(cfg - 1.0) > 1.0e-12,
+            defaultNegativePrompt = defaultNegativePrompt
+        ),
         capabilities = stableDiffusionCapabilities(
-            setOf(algorithm, ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER_A)
-                .intersect(stableDiffusionCppSchedulers)
+            when (algorithm) {
+                ImageSchedulerAlgorithm.FLOW_MATCH -> setOf(ImageSchedulerAlgorithm.FLOW_MATCH)
+                ImageSchedulerAlgorithm.EULER_A -> setOf(
+                    ImageSchedulerAlgorithm.EULER_A,
+                    ImageSchedulerAlgorithm.EULER,
+                    ImageSchedulerAlgorithm.DPMPP_2M
+                )
+                else -> setOf(algorithm)
+            },
+            supportsNegativePrompt = supportsNegativePrompt
         )
     )
 
@@ -868,9 +1210,38 @@ internal object ImageExecutionProfileResolver {
         family: LocalImageModelFamily,
         fingerprint: String
     ): ImageExecutionProfile {
-        val size = if (family == LocalImageModelFamily.SDXL) 1024 else 512
+        val flowFamily = family in setOf(
+            LocalImageModelFamily.Z_IMAGE,
+            LocalImageModelFamily.QWEN_IMAGE,
+            LocalImageModelFamily.GLM_IMAGE,
+            LocalImageModelFamily.LONGCAT_IMAGE,
+            LocalImageModelFamily.DREAMLITE,
+            LocalImageModelFamily.FLUX
+        )
+        val size = if (family == LocalImageModelFamily.SDXL || flowFamily) 1024 else 512
+        val conditionalOnly = family in setOf(
+            LocalImageModelFamily.SD_TURBO,
+            LocalImageModelFamily.Z_IMAGE,
+            LocalImageModelFamily.FLUX
+        )
+        val genericSteps = when (family) {
+            LocalImageModelFamily.SD_TURBO,
+            LocalImageModelFamily.FLUX -> 4
+            LocalImageModelFamily.Z_IMAGE -> 8
+            LocalImageModelFamily.QWEN_IMAGE -> 40
+            else -> 20
+        }
+        val genericCfg = when (family) {
+            LocalImageModelFamily.QWEN_IMAGE -> 2.5
+            LocalImageModelFamily.LONGCAT_IMAGE -> 5.0
+            else -> if (conditionalOnly) 1.0 else 7.0
+        }
         val algorithm = when (runtime) {
-            LocalImageRuntime.STABLE_DIFFUSION_CPP -> ImageSchedulerAlgorithm.EULER_A
+            LocalImageRuntime.STABLE_DIFFUSION_CPP -> if (flowFamily) {
+                ImageSchedulerAlgorithm.FLOW_MATCH
+            } else {
+                ImageSchedulerAlgorithm.EULER_A
+            }
             LocalImageRuntime.QNN_HTP, LocalImageRuntime.MNN_DIFFUSION -> ImageSchedulerAlgorithm.PNDM_PLMS
             else -> ImageSchedulerAlgorithm.EULER
         }
@@ -890,19 +1261,55 @@ internal object ImageExecutionProfileResolver {
             runtime = runtime,
             family = family,
             variant = ImageModelVariant.GENERIC_COMPATIBLE,
-            scheduler = scheduler(algorithm, ImagePredictionType.EPSILON, 20, 1, 100, skipPrk = algorithm == ImageSchedulerAlgorithm.PNDM_PLMS),
-            tokenizer = clipTokenizer(if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) ImageTokenizerBackend.SDCPP_NATIVE else ImageTokenizerBackend.MNN_MTOK),
-            conditioning = conditioning(ImageEmbeddingDiskDataType.RUNTIME_NATIVE, ImageEmbeddingConversionStrategy.RUNTIME_NATIVE, 1),
+            scheduler = scheduler(
+                algorithm,
+                if (algorithm == ImageSchedulerAlgorithm.FLOW_MATCH) {
+                    ImagePredictionType.FLOW
+                } else {
+                    ImagePredictionType.EPSILON
+                },
+                genericSteps,
+                1,
+                100,
+                skipPrk = algorithm == ImageSchedulerAlgorithm.PNDM_PLMS
+            ),
+            tokenizer = clipTokenizer(
+                if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+                    ImageTokenizerBackend.SDCPP_NATIVE
+                } else {
+                    ImageTokenizerBackend.MNN_MTOK
+                },
+                separateNegativePrompt = !conditionalOnly
+            ),
+            conditioning = conditioning(
+                ImageEmbeddingDiskDataType.RUNTIME_NATIVE,
+                ImageEmbeddingConversionStrategy.RUNTIME_NATIVE,
+                1,
+                separateNegativePrompt = !conditionalOnly
+            ),
             vae = vae(ImageVaeScalingLocation.RUNTIME_NATIVE, 1.0, size),
             graph = graph,
-            defaults = defaults(size, 20, 7.0, useCfg = true),
+            defaults = defaults(
+                size,
+                genericSteps,
+                genericCfg,
+                useCfg = !conditionalOnly
+            ),
             capabilities = if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
-                stableDiffusionCapabilities(stableDiffusionCppSchedulers)
+                stableDiffusionCapabilities(
+                    if (flowFamily) {
+                        setOf(ImageSchedulerAlgorithm.FLOW_MATCH)
+                    } else {
+                        stableDiffusionCppSchedulers
+                    },
+                    supportsNegativePrompt = !conditionalOnly
+                )
             } else {
                 capabilities(
                     size,
                     ImageSchedulerAlgorithm.entries.toSet(),
-                    supportsPromptWeighting = false
+                    supportsPromptWeighting = false,
+                    supportsNegativePrompt = !conditionalOnly
                 )
             }
         ).copy(
@@ -984,7 +1391,9 @@ internal object ImageExecutionProfileResolver {
     private fun clipTokenizer(
         backend: ImageTokenizerBackend,
         dualClip: Boolean = false,
-        padZero: Boolean = false
+        padZero: Boolean = false,
+        supportsPromptWeighting: Boolean = backend == ImageTokenizerBackend.TOKENIZERS_CPP,
+        separateNegativePrompt: Boolean = true
     ) = ImageTokenizerContract(
         backend = backend,
         bosId = 49_406,
@@ -993,24 +1402,34 @@ internal object ImageExecutionProfileResolver {
         maxLength = 77,
         clip1PadRule = if (padZero) ImageClipPadRule.ZERO else ImageClipPadRule.EOS,
         clip2PadRule = if (dualClip) ImageClipPadRule.ZERO else null,
-        supportsPromptWeighting = backend == ImageTokenizerBackend.TOKENIZERS_CPP,
-        separateNegativePrompt = true
+        supportsPromptWeighting = supportsPromptWeighting,
+        separateNegativePrompt = separateNegativePrompt
     )
 
     private fun conditioning(
         dataType: ImageEmbeddingDiskDataType,
         conversion: ImageEmbeddingConversionStrategy,
         width: Int,
+        maxLength: Int = 77,
         dualEncoder: Boolean = false,
-        pooled: Boolean = false
+        pooled: Boolean = false,
+        separateNegativePrompt: Boolean = true
     ) = ImageConditioningContract(
         diskDataType = dataType,
-        textEncoderInputShape = listOf(1, 77),
-        textEncoderOutputShapes = if (dualEncoder) listOf(listOf(1, 77, 768), listOf(1, 77, 1_280)) else listOf(listOf(1, 77, width)),
+        textEncoderInputShape = listOf(1, maxLength),
+        textEncoderOutputShapes = if (dualEncoder) {
+            listOf(listOf(1, maxLength, 768), listOf(1, maxLength, 1_280))
+        } else {
+            listOf(listOf(1, maxLength, width))
+        },
         conversionStrategy = conversion,
         dualEncoder = dualEncoder,
         pooledOutput = pooled,
-        concatenationOrder = if (dualEncoder) listOf("clip1_hidden", "clip2_hidden", "clip2_pooled") else listOf("negative", "positive")
+        concatenationOrder = when {
+            dualEncoder -> listOf("clip1_hidden", "clip2_hidden", "clip2_pooled")
+            separateNegativePrompt -> listOf("negative", "positive")
+            else -> listOf("positive")
+        }
     )
 
     private fun vae(location: ImageVaeScalingLocation, factor: Double, size: Int) = ImageVaeContract(
@@ -1030,11 +1449,13 @@ internal object ImageExecutionProfileResolver {
         vae: String,
         qnnSdk: String?,
         htpArch: Int?,
-        strategy: ImageWorkerStrategy = ImageWorkerStrategy.SHARED_TEXT_UNET_VAE
+        strategy: ImageWorkerStrategy = ImageWorkerStrategy.SHARED_TEXT_UNET_VAE,
+        vaeEncoder: String? = null
     ) = ImageGraphContract(
         textEncoder = ImageGraphArtifactContract(textEncoder),
         unet = ImageGraphArtifactContract(unet),
         vae = ImageGraphArtifactContract(vae),
+        vaeEncoder = vaeEncoder?.let(::ImageGraphArtifactContract),
         schedulerSidecar = "scheduler/scheduler_config.json",
         tokenizerSidecar = "tokenizer/tokenizer_config.json",
         qnnSdk = qnnSdk,
@@ -1042,31 +1463,40 @@ internal object ImageExecutionProfileResolver {
         workerStrategy = strategy
     )
 
-    private fun defaults(size: Int, steps: Int, cfg: Double, useCfg: Boolean) = ImageGenerationDefaults(
+    private fun defaults(
+        size: Int,
+        steps: Int,
+        cfg: Double,
+        useCfg: Boolean,
+        defaultNegativePrompt: String? = null
+    ) = ImageGenerationDefaults(
         width = size,
         height = size,
         steps = steps,
         cfgScale = cfg,
         seed = 42L,
-        useCfg = useCfg
+        useCfg = useCfg,
+        defaultNegativePrompt = defaultNegativePrompt
     )
 
     private fun capabilities(
         size: Int,
         schedulers: Set<ImageSchedulerAlgorithm>,
-        supportsPromptWeighting: Boolean = true
+        supportsPromptWeighting: Boolean = true,
+        supportsNegativePrompt: Boolean = true
     ) = ImageGenerationCapabilities(
         supportedSchedulers = schedulers,
         minWidth = size,
         maxWidth = size,
         minHeight = size,
         maxHeight = size,
-        supportsNegativePrompt = true,
+        supportsNegativePrompt = supportsNegativePrompt,
         supportsPromptWeighting = supportsPromptWeighting
     )
 
     private fun stableDiffusionCapabilities(
-        schedulers: Set<ImageSchedulerAlgorithm>
+        schedulers: Set<ImageSchedulerAlgorithm>,
+        supportsNegativePrompt: Boolean = true
     ) = ImageGenerationCapabilities(
         supportedSchedulers = schedulers,
         minWidth = 256,
@@ -1075,7 +1505,7 @@ internal object ImageExecutionProfileResolver {
         maxHeight = 1_536,
         widthMultiple = 64,
         heightMultiple = 64,
-        supportsNegativePrompt = true,
+        supportsNegativePrompt = supportsNegativePrompt,
         supportsPromptWeighting = false
     )
 

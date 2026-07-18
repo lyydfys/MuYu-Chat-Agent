@@ -53,6 +53,7 @@ import com.muyuchat.feature.chat.ChatHistoryItem
 import com.muyuchat.feature.chat.FileAssetUiItem
 import com.muyuchat.feature.chat.ImageAssetUiItem
 import com.muyuchat.feature.chat.ImageGenerationUiJob
+import com.muyuchat.feature.chat.ImageGenerationUiTaskMode
 import com.muyuchat.feature.chat.ChatModelChoice
 import com.muyuchat.feature.chat.ChatUiState
 import com.muyuchat.feature.modelhub.ModelHubScreen
@@ -246,11 +247,18 @@ private fun McaApp(
                         addAll(
                             state.localImageModels
                                 .sortedByDescending { if (it.id == state.selectedLocalImageModelId) 1 else 0 }
-                                .take(3)
                                 .map { model ->
                                     val qnnVerificationCurrent = state.qnnImageVerificationCurrentByModelId[model.id]
-                                    val readiness = model.localImageReadinessForUi(qnnVerificationCurrent)
-                                    val readinessLabel = model.localImageReadinessLabelForUi(qnnVerificationCurrent)
+                                    val imageCapabilities = model.imageCapabilitiesForUi()
+                                    val readiness = model.localImageReadinessForUi(
+                                        qnnVerificationCurrent,
+                                        imageCapabilities
+                                    )
+                                    val readinessLabel = model.localImageReadinessLabelForUi(
+                                        qnnVerificationCurrent,
+                                        imageCapabilities
+                                    )
+                                    val imageDefaults = imageCapabilities.executionDefaults
                                     ChatModelChoice(
                                         id = MainViewModel.LOCAL_IMAGE_MODEL_CHOICE_PREFIX + model.id,
                                         displayName = model.displayName,
@@ -262,7 +270,25 @@ private fun McaApp(
                                         } else {
                                             "${model.family.label} · $readinessLabel"
                                         },
-                                        cloud = false
+                                        cloud = false,
+                                        supportedImageTaskModes = imageCapabilities.supportedTaskModes,
+                                        supportsImageNegativePrompt = imageCapabilities.supportsNegativePrompt,
+                                        supportsImageClipSkip = model.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                                        supportsImageVaeTiling = model.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                                        maxImageBatchCount = if (model.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) 8 else 1,
+                                        imageDefaultWidth = imageDefaults.width,
+                                        imageDefaultHeight = imageDefaults.height,
+                                        imageDefaultSteps = imageDefaults.steps,
+                                        imageDefaultCfgScale = imageDefaults.cfgScale,
+                                        imageDefaultSeed = imageDefaults.seed,
+                                        imageDefaultSampler = imageDefaults.sampler,
+                                        imageMinWidth = imageDefaults.minWidth,
+                                        imageMaxWidth = imageDefaults.maxWidth,
+                                        imageMinHeight = imageDefaults.minHeight,
+                                        imageMaxHeight = imageDefaults.maxHeight,
+                                        imageWidthMultiple = imageDefaults.widthMultiple,
+                                        imageHeightMultiple = imageDefaults.heightMultiple,
+                                        imageSupportedSamplers = imageDefaults.supportedSamplers
                                     )
                                 }
                         )
@@ -270,7 +296,6 @@ private fun McaApp(
                             state.cloudModels
                                 .filter { it.kind == CloudModelKind.IMAGE && it.configured }
                                 .sortedByDescending { it.updatedAt }
-                                .take(3)
                                 .map { model ->
                                     ChatModelChoice(
                                         id = MainViewModel.CLOUD_IMAGE_MODEL_CHOICE_PREFIX + model.id,
@@ -313,6 +338,9 @@ private fun McaApp(
                     },
                     selectedAssistantId = state.selectedAssistantId,
                     images = state.images.map { image ->
+                        val generation = ImageGenerationHistoryMetadata.fromJsonOrNull(
+                            image.generationMetadataJson
+                        )
                         ImageAssetUiItem(
                             id = image.id,
                             name = image.name,
@@ -323,7 +351,10 @@ private fun McaApp(
                                 .format(java.util.Date(image.createdAt)),
                             sizeText = formatAssetBytes(image.sizeBytes),
                             width = image.width,
-                            height = image.height
+                            height = image.height,
+                            generationDetails = generation?.displayDetails().orEmpty(),
+                            generationPrompt = generation?.requestPrompt.orEmpty(),
+                            canRecreate = generation != null
                         )
                     },
                     files = state.files.map { file ->
@@ -343,8 +374,18 @@ private fun McaApp(
                             id = job.id,
                             prompt = job.prompt,
                             statusLabel = job.status.label,
+                            modelId = job.modelId,
+                            modelName = job.modelName,
+                            modelIsCloud = job.backend == ImageBackend.CLOUD,
                             imageAssetId = job.imageAssetId,
+                            previewUriString = job.previewUriString,
+                            previewMode = job.previewMode,
+                            previewStep = job.previewStep,
+                            previewRevision = job.previewRevision,
+                            previewWidth = job.previewWidth,
+                            previewHeight = job.previewHeight,
                             failed = job.status.failed,
+                            terminal = job.status.terminal,
                             message = job.message,
                             startedAtMillis = job.startedAtMillis
                         )
@@ -428,7 +469,38 @@ private fun McaApp(
                 onDeleteImageAsset = viewModel::deleteImageAsset,
                 onUseFileAsset = viewModel::useFileAsset,
                 onDeleteFileAsset = viewModel::deleteFileAsset,
-                onGenerateImagePrompt = viewModel::generateImageAsset,
+                onGenerateImagePrompt = { prompt, uiOptions ->
+                    viewModel.generateImageAsset(
+                        prompt = prompt,
+                        inputDraft = LocalImageInputDraft(
+                            taskMode = LocalImageTaskMode.fromWireName(uiOptions.taskMode.wireName),
+                            inputImageReference = uiOptions.inputImageUri,
+                            maskImageReference = uiOptions.maskImageUri,
+                            controlImageReference = uiOptions.controlImageUri,
+                            strength = uiOptions.strength,
+                            controlStrength = uiOptions.controlStrength
+                        ),
+                        options = LocalImageGenerationOptions(
+                            negativePrompt = uiOptions.negativePrompt,
+                            width = uiOptions.width,
+                            height = uiOptions.height,
+                            steps = uiOptions.steps,
+                            seed = uiOptions.seed,
+                            cfgScale = uiOptions.cfgScale,
+                            sampleMethod = uiOptions.sampleMethod,
+                            clipSkip = uiOptions.clipSkip,
+                            batchCount = uiOptions.batchCount,
+                            vaeTiling = uiOptions.vaeTileSize?.let { tileSize ->
+                                LocalImageVaeTilingOptions(
+                                    tileSize = tileSize,
+                                    overlap = uiOptions.vaeTileOverlap ?: 0.5
+                                )
+                            }
+                        )
+                    )
+                },
+                onRetryImageGeneration = viewModel::retryImageGeneration,
+                onRecreateImageAsset = viewModel::recreateImageAsset,
                 onCancelImageGeneration = viewModel::cancelImageGeneration,
                 onSelectImageModel = viewModel::selectImageGenerationModel,
                 onReasoningModeChange = viewModel::updateReasoningMode,

@@ -4,7 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 internal object LocalImageWorkerProtocol {
-    private const val VERSION = 1
+    private const val VERSION = 2
 
     data class GenerateRequest(
         val requestId: String,
@@ -24,7 +24,17 @@ internal object LocalImageWorkerProtocol {
         val workerPid: Int,
         val outputPath: String,
         val mimeType: String,
-        val executionMetadataJson: String = ""
+        val executionMetadataJson: String = "",
+        val outputs: List<OutputEnvelope> = listOf(
+            OutputEnvelope(index = 0, outputPath = outputPath, mimeType = mimeType, seed = null)
+        )
+    )
+
+    data class OutputEnvelope(
+        val index: Int,
+        val outputPath: String,
+        val mimeType: String,
+        val seed: Long?
     )
 
     data class ErrorEnvelope(
@@ -41,7 +51,8 @@ internal object LocalImageWorkerProtocol {
             .toString()
 
     fun parseBeginRuntime(raw: String): LocalImageRuntime =
-        LocalImageRuntime.from(JSONObject(raw).requireString("runtime"))
+        JSONObject(raw).also { it.requireCurrentVersion() }
+            .let { LocalImageRuntime.from(it.requireString("runtime")) }
 
     fun cancelRequest(requestId: String?): String =
         JSONObject()
@@ -50,7 +61,8 @@ internal object LocalImageWorkerProtocol {
             .toString()
 
     fun parseCancelRequestId(raw: String): String? =
-        JSONObject(raw).optString("requestId").takeIf { it.isNotBlank() }
+        JSONObject(raw).also { it.requireCurrentVersion() }
+            .optString("requestId").takeIf { it.isNotBlank() }
 
     fun generateRequest(
         requestId: String,
@@ -74,6 +86,7 @@ internal object LocalImageWorkerProtocol {
 
     fun parseGenerateRequest(raw: String): GenerateRequest {
         val json = JSONObject(raw)
+        json.requireCurrentVersion()
         val optionJson = json.optJSONObject("options")
         val parsedOptions = LocalImageGenerationOptions.fromJson(optionJson)
         val sampler = optionJson?.explicitString("sampler", preserveEmpty = true)
@@ -119,12 +132,22 @@ internal object LocalImageWorkerProtocol {
                 .put("cancelRequested", progress.cancelRequested)
                 .put("requestOptionsJson", progress.requestOptionsJson)
                 .put("componentSelectionJson", progress.componentSelectionJson)
+                .put("previewPath", progress.previewPath)
+                .put("previewMimeType", progress.previewMimeType)
+                .put("previewMode", progress.previewMode)
+                .put("previewStep", progress.previewStep)
+                .put("previewRevision", progress.previewRevision)
+                .put("previewWidth", progress.previewWidth)
+                .put("previewHeight", progress.previewHeight)
+                .put("previewFrameCount", progress.previewFrameCount)
+                .put("previewNoisy", progress.previewNoisy)
                 .put("stageTrace", JSONArray(progress.stageTrace))
         )
         .toString()
 
     fun parseProgress(raw: String): ProgressEnvelope {
         val json = JSONObject(raw)
+        json.requireReadableVersion()
         val progress = json.optJSONObject("progress") ?: error("Missing progress payload.")
         return ProgressEnvelope(
             requestId = json.requireString("requestId"),
@@ -142,6 +165,15 @@ internal object LocalImageWorkerProtocol {
                 cancelRequested = progress.optBoolean("cancelRequested"),
                 requestOptionsJson = progress.optString("requestOptionsJson"),
                 componentSelectionJson = progress.optString("componentSelectionJson"),
+                previewPath = progress.optString("previewPath"),
+                previewMimeType = progress.optString("previewMimeType"),
+                previewMode = progress.optString("previewMode"),
+                previewStep = progress.optInt("previewStep"),
+                previewRevision = progress.optLong("previewRevision"),
+                previewWidth = progress.optInt("previewWidth"),
+                previewHeight = progress.optInt("previewHeight"),
+                previewFrameCount = progress.optInt("previewFrameCount"),
+                previewNoisy = progress.optBoolean("previewNoisy"),
                 stageTrace = progress.optJSONArray("stageTrace")?.let { trace ->
                     buildList {
                         for (index in 0 until trace.length()) {
@@ -166,16 +198,84 @@ internal object LocalImageWorkerProtocol {
         .put("outputPath", outputPath)
         .put("mimeType", mimeType)
         .put("executionMetadataJson", executionMetadataJson)
+        .put(
+            "outputs",
+            JSONArray().put(
+                JSONObject()
+                    .put("index", 0)
+                    .put("outputPath", outputPath)
+                    .put("mimeType", mimeType)
+            )
+        )
         .toString()
+
+    fun result(
+        requestId: String,
+        workerPid: Int,
+        outputs: List<OutputEnvelope>,
+        executionMetadataJson: String = ""
+    ): String {
+        require(outputs.isNotEmpty()) { "Worker result outputs must not be empty." }
+        require(outputs.map(OutputEnvelope::index) == outputs.indices.toList()) {
+            "Worker result output indices must be contiguous and start at zero."
+        }
+        val first = outputs.first()
+        return JSONObject()
+            .put("version", VERSION)
+            .put("requestId", requestId)
+            .put("workerPid", workerPid)
+            .put("outputPath", first.outputPath)
+            .put("mimeType", first.mimeType)
+            .put("executionMetadataJson", executionMetadataJson)
+            .put(
+                "outputs",
+                JSONArray().apply {
+                    outputs.forEach { output ->
+                        put(
+                            JSONObject()
+                                .put("index", output.index)
+                                .put("outputPath", output.outputPath)
+                                .put("mimeType", output.mimeType)
+                                .apply { output.seed?.let { put("seed", it) } }
+                        )
+                    }
+                }
+            )
+            .toString()
+    }
 
     fun parseResult(raw: String): ResultEnvelope {
         val json = JSONObject(raw)
+        json.requireReadableVersion()
+        val legacyPath = json.requireString("outputPath")
+        val legacyMime = json.optString("mimeType", "image/png").ifBlank { "image/png" }
+        val outputs = json.optJSONArray("outputs")?.let { array ->
+            buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: error("Worker output item must be an object.")
+                    val itemIndex = item.optInt("index", -1)
+                    require(itemIndex == index) { "Worker output indices must be contiguous and start at zero." }
+                    add(
+                        OutputEnvelope(
+                            index = itemIndex,
+                            outputPath = item.requireString("outputPath"),
+                            mimeType = item.optString("mimeType", "image/png").ifBlank { "image/png" },
+                            seed = if (item.has("seed") && !item.isNull("seed")) item.getLong("seed") else null
+                        )
+                    )
+                }
+            }.also { require(it.isNotEmpty()) { "Worker result outputs must not be empty." } }
+        } ?: listOf(OutputEnvelope(0, legacyPath, legacyMime, null))
+        require(outputs.first().outputPath == legacyPath && outputs.first().mimeType == legacyMime) {
+            "Worker legacy result fields must match output index zero."
+        }
         return ResultEnvelope(
             requestId = json.requireString("requestId"),
             workerPid = json.optInt("workerPid", -1),
-            outputPath = json.requireString("outputPath"),
-            mimeType = json.optString("mimeType", "image/png").ifBlank { "image/png" },
-            executionMetadataJson = json.optString("executionMetadataJson")
+            outputPath = legacyPath,
+            mimeType = legacyMime,
+            executionMetadataJson = json.optString("executionMetadataJson"),
+            outputs = outputs
         )
     }
 
@@ -194,6 +294,7 @@ internal object LocalImageWorkerProtocol {
 
     fun parseError(raw: String): ErrorEnvelope {
         val json = JSONObject(raw)
+        json.requireReadableVersion()
         return ErrorEnvelope(
             requestId = json.optString("requestId"),
             workerPid = json.optInt("workerPid", -1),
@@ -204,6 +305,14 @@ internal object LocalImageWorkerProtocol {
 
     private fun JSONObject.requireString(name: String): String =
         optString(name).takeIf { it.isNotBlank() } ?: kotlin.error("Missing $name.")
+
+    private fun JSONObject.requireCurrentVersion() {
+        require(optInt("version", -1) == VERSION) { "Unsupported local image worker protocol version." }
+    }
+
+    private fun JSONObject.requireReadableVersion() {
+        require(optInt("version", 1) in 1..VERSION) { "Unsupported local image worker protocol version." }
+    }
 
     private fun JSONObject.explicitString(name: String, preserveEmpty: Boolean): String? {
         if (!has(name)) return null

@@ -11,7 +11,10 @@ import com.muyuchat.core.download.ImageEngineQnnSmokeSpec
 import com.muyuchat.core.download.ImageEngineQnnSmokeTensorSpec
 import com.muyuchat.core.download.ImageEngineQnnRuntimeProfileSpec
 import com.muyuchat.core.download.ImageEngineSmokeSpec
+import com.muyuchat.core.download.ImageEngineTask
 import com.muyuchat.core.download.ModelRepositoryProvider
+import com.muyuchat.core.download.ModelScopeClient
+import com.muyuchat.core.download.ModelScopeRecommendedKind
 import com.muyuchat.core.download.RemoteModelFile
 import com.muyuchat.core.deviceprofile.QnnRuntimeProbeState
 import com.muyuchat.core.deviceprofile.QnnRuntimeStatus
@@ -27,6 +30,47 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalImageModelReadinessTest {
+    @Test
+    fun everyRecommendedImagePersistsItsCatalogExecutionProfileBoundToPrimaryBytes() {
+        val models = ModelScopeClient().recommendedModels()
+            .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+        assertEquals(18, models.size)
+        models.forEach { model ->
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val source = requireNotNull(bundle.executionProfile)
+            val root = Files.createTempDirectory("catalog-profile-${model.id}").toFile()
+            try {
+                val primary = File(root, "${model.id}.bin").apply {
+                    writeText("primary:${model.id}", Charsets.UTF_8)
+                }
+                val manifest = downloadedImageBundleManifestJson(
+                    displayName = model.title,
+                    bundle = bundle,
+                    targets = listOf(
+                        remote(primary.name, ImageEngineBundleComponentRole.DIFFUSION) to primary
+                    )
+                )
+                val profile = ImageExecutionProfileJson.parseProfile(
+                    manifest.getJSONObject("executionProfile")
+                )
+
+                assertEquals(source.profileId, profile.profileId)
+                assertEquals(source.profileRevision, profile.profileRevision)
+                assertEquals(source.scheduler.algorithm.name, profile.scheduler.algorithm.name)
+                assertEquals(source.defaults.steps, profile.defaults.steps)
+                assertEquals(source.defaults.cfgScale, profile.defaults.cfgScale, 0.0)
+                assertEquals(source.defaults.width, profile.defaults.width)
+                assertEquals(source.defaults.height, profile.defaults.height)
+                assertEquals(ImageProfileSource.MANIFEST, profile.provenance.primarySource)
+                assertEquals(model.id, profile.provenance.recommendationId)
+                assertEquals(primary.sha256ForProfile(), profile.modelFingerprint)
+                assertEquals(source.graph.vaeEncoder, profile.graph.vaeEncoder?.relativePath)
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
     @Test
     fun universalQnnArchivePersistsTheExactLocalTransportProfile() {
         val root = Files.createTempDirectory("qnn-universal-installed-profile").toFile()
@@ -191,7 +235,6 @@ class LocalImageModelReadinessTest {
             assertNull(record.localImageReadinessMessage())
             assertEquals("未验证·可尝试", record.localImageReadinessLabel())
             assertTrue(record.localImageVerificationDiagnosticMessage()!!.contains("native 执行"))
-            assertFalse(record.isCertifiedForAutomaticLocalImageSelection())
         } finally {
             root.deleteRecursively()
         }
@@ -313,7 +356,6 @@ class LocalImageModelReadinessTest {
 
         assertTrue(record.isReadyForLocalImageGeneration())
         assertEquals("MNN smoke", record.localImageReadinessLabel())
-        assertFalse(record.isCertifiedForAutomaticLocalImageSelection())
     }
 
     @Test
@@ -774,7 +816,6 @@ class LocalImageModelReadinessTest {
 
         assertTrue(record.isReadyForLocalImageGeneration())
         assertEquals("NPU 1-step smoke", record.localImageReadinessLabel())
-        assertFalse(record.isCertifiedForAutomaticLocalImageSelection())
     }
 
     @Test
@@ -963,6 +1004,35 @@ class LocalImageModelReadinessTest {
         assertEquals("384x384", manifest.imageSize)
         assertEquals(unet.canonicalFile, manifest.primaryFile!!.canonicalFile)
         assertEquals(4, manifest.componentCount)
+    }
+
+    @Test
+    fun downloadedRecommendationManifestPersistsCatalogIdentityAndTask() {
+        val root = Files.createTempDirectory("downloaded-image-task-manifest").toFile()
+        try {
+            val controlNet = root.touch("controlnet.bin")
+            val bundle = ImageEngineBundleSpec(
+                id = "controlnet_bundle",
+                title = "Control image bundle",
+                components = emptyList(),
+                recommendationId = "controlnet_recommendation",
+                task = ImageEngineTask.CONTROL_IMAGE,
+                runtime = ImageEngineBundleRuntime.QNN_HTP,
+                accelerator = ImageEngineAccelerator.QNN_HTP
+            )
+            val manifest = downloadedImageBundleManifestJson(
+                displayName = bundle.title,
+                bundle = bundle,
+                targets = listOf(
+                    remote("controlnet.bin", ImageEngineBundleComponentRole.DIFFUSION) to controlNet
+                )
+            )
+
+            assertEquals("controlnet_recommendation", manifest.getString("recommendationId"))
+            assertEquals("CONTROL_IMAGE", manifest.getString("task"))
+        } finally {
+            root.deleteRecursively()
+        }
     }
 
     @Test

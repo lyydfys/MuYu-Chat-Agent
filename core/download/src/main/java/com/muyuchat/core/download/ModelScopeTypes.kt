@@ -67,6 +67,7 @@ enum class ImageEngineBundleComponentRole(val label: String) {
     CONFIG("运行配置"),
     DIFFUSION("diffusion 主模型"),
     VAE("VAE / AE"),
+    VAE_ENCODER("VAE encoder"),
     TEXT_ENCODER("文本编码器 / LLM"),
     TOKENIZER("Tokenizer"),
     CONDITIONING("条件连接 / 投影"),
@@ -101,7 +102,306 @@ data class ImageEngineBundleComponentSpec(
 
 enum class ImageEngineTask(val label: String) {
     TEXT_TO_IMAGE("文生图"),
+    CONTROL_IMAGE("控制图生图"),
     IMAGE_EDIT("图像编辑")
+}
+
+/**
+ * Catalog-owned execution metadata persisted with a downloaded image bundle.
+ *
+ * The names intentionally match the app execution-profile JSON contract. The
+ * model fingerprint and provenance are install-time values, while every field
+ * below is immutable publisher/catalog metadata. Keeping these values beside
+ * the downloadable components prevents the UI, smoke test, sidecars and native
+ * request from silently choosing different model defaults.
+ */
+enum class ImageEngineModelFamily {
+    SD15,
+    SD21,
+    SDXL,
+    SD_TURBO,
+    Z_IMAGE,
+    FLUX,
+    QWEN_IMAGE,
+    LONGCAT_IMAGE,
+    SANA
+}
+
+enum class ImageEngineModelVariant {
+    STANDARD,
+    HYPER,
+    LEGACY_FP32,
+    SD21,
+    SDXL_BASE,
+    DMD2_ALT,
+    SD_TURBO,
+    Z_IMAGE_TURBO,
+    FLUX2_KLEIN,
+    QWEN_IMAGE,
+    LONGCAT_IMAGE,
+    CONTROLNET_CANNY,
+    SANA_EDIT
+}
+
+/**
+ * Catalog-owned generation defaults shared by download manifests and the
+ * app's built-in fallback profiles. Keep these concise enough for the pinned
+ * tokenizer budgets; package sidecars and explicit user values still win.
+ */
+object RecommendedImageDefaults {
+    const val SD15_NEGATIVE_PROMPT =
+        "worst quality, low quality, lowres, blurry, bad anatomy, bad hands, extra fingers, " +
+            "missing fingers, malformed limbs, text, signature, watermark"
+    const val PHOTO_NEGATIVE_PROMPT =
+        "worst quality, low quality, lowres, blurry, out of focus, bad anatomy, bad hands, " +
+            "extra fingers, deformed, unrealistic, cartoon, anime, cgi, text, signature, watermark"
+    const val ANIME_NEGATIVE_PROMPT =
+        "worst quality, low quality, lowres, bad anatomy, bad hands, missing fingers, extra fingers, " +
+            "malformed limbs, realistic photo, text, signature, watermark, username, blurry"
+    const val SDXL_NEGATIVE_PROMPT =
+        "worst quality, low quality, lowres, blurry, bad anatomy, bad hands, extra fingers, " +
+            "missing fingers, deformed, text, signature, watermark"
+    const val CYBERREALISTIC_XL_NEGATIVE_PROMPT =
+        "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, " +
+            "cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, " +
+            "watermark, username, blurry"
+    const val EDIT_NEGATIVE_PROMPT =
+        "low quality, blurry, distorted, deformed, artifacts, text, watermark"
+    const val LANGUAGE_CONDITIONED_NEGATIVE_PROMPT =
+        "blurry, low quality, distorted, deformed, text, watermark"
+    const val QWEN_IMAGE_2512_NEGATIVE_PROMPT =
+        "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，" +
+            "过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。"
+    const val LONGCAT_IMAGE_NEGATIVE_PROMPT = ""
+
+    const val ANIMAGINE_XL_STEPS = 28
+    const val ANIMAGINE_XL_CFG = 5.0
+    const val CYBERREALISTIC_XL_STEPS = 20
+    const val CYBERREALISTIC_XL_CFG = 7.0
+}
+
+enum class ImageEngineSchedulerAlgorithm {
+    DPMPP_2M,
+    EULER,
+    EULER_A,
+    DDIM,
+    PNDM_PLMS,
+    LCM,
+    FLOW_MATCH
+}
+
+enum class ImageEnginePredictionType { EPSILON, V_PREDICTION, FLOW }
+enum class ImageEngineTimestepSpacing { LEADING, TRAILING, LINSPACE }
+enum class ImageEngineNoiseSchedule { SCALED_LINEAR, SIGMA }
+enum class ImageEngineFinalSigmaType { ZERO, SIGMA_MIN }
+enum class ImageEngineTokenizerBackend { TOKENIZERS_CPP, MNN_MTOK, SDCPP_NATIVE }
+enum class ImageEngineClipPadRule { EOS, ZERO, MODEL_DECLARED }
+enum class ImageEngineEmbeddingDataType { FP16, FP32, GRAPH_INTERNAL, RUNTIME_NATIVE }
+enum class ImageEngineEmbeddingConversionStrategy {
+    NONE,
+    FP32_TO_FP16_STREAMING,
+    GRAPH_EXECUTION,
+    RUNTIME_NATIVE
+}
+
+enum class ImageEngineVaeScalingLocation { HOST_BEFORE_GRAPH, GRAPH_INTERNAL, RUNTIME_NATIVE }
+enum class ImageEngineTensorLayout { NCHW, RUNTIME_NATIVE }
+enum class ImageEnginePixelRange { NEGATIVE_ONE_TO_ONE, RUNTIME_NATIVE }
+enum class ImageEngineChannelOrder { RGB, RUNTIME_NATIVE }
+enum class ImageEngineWorkerStrategy {
+    IN_PROCESS,
+    DEDICATED_WORKER,
+    SPLIT_UNET_VAE,
+    SHARED_TEXT_UNET_VAE
+}
+
+data class ImageEngineSchedulerContractSpec(
+    val algorithm: ImageEngineSchedulerAlgorithm,
+    val predictionType: ImageEnginePredictionType,
+    val numTrainTimesteps: Int = 1_000,
+    val noiseSchedule: ImageEngineNoiseSchedule = ImageEngineNoiseSchedule.SCALED_LINEAR,
+    val betaStart: Double? = 0.00085,
+    val betaEnd: Double? = 0.012,
+    val timestepSpacing: ImageEngineTimestepSpacing = ImageEngineTimestepSpacing.LEADING,
+    val stepsOffset: Int = 0,
+    val setAlphaToOne: Boolean = false,
+    val skipPrkSteps: Boolean = false,
+    val finalSigmaType: ImageEngineFinalSigmaType = ImageEngineFinalSigmaType.ZERO,
+    val clipSample: Boolean = false,
+    val clipSampleRange: Double = 1.0,
+    val thresholding: Boolean = false,
+    val eta: Double = 0.0,
+    val lowerOrderFinal: Boolean = true,
+    val initNoiseSigma: Double = 1.0,
+    val scaleModelInput: Boolean = false,
+    val order: Int = 1,
+    val defaultSteps: Int,
+    val minSteps: Int,
+    val maxSteps: Int,
+    val seedBits: Int = 32
+) {
+    init {
+        require(defaultSteps in minSteps..maxSteps) { "Default image steps must be inside the supported range." }
+        require(numTrainTimesteps > 0) { "Image scheduler train timesteps must be positive." }
+        require(order > 0) { "Image scheduler order must be positive." }
+        require(seedBits in 1..64) { "Image scheduler seed width is invalid." }
+        if (noiseSchedule == ImageEngineNoiseSchedule.SIGMA) {
+            require(betaStart == null && betaEnd == null) { "Flow schedulers must not declare beta endpoints." }
+        } else {
+            require(betaStart != null && betaEnd != null) { "Diffusion schedulers require beta endpoints." }
+        }
+    }
+}
+
+data class ImageEngineTokenizerContractSpec(
+    val backend: ImageEngineTokenizerBackend,
+    val bosId: Int? = null,
+    val eosId: Int? = null,
+    val padId: Int? = null,
+    val maxLength: Int,
+    val clip1PadRule: ImageEngineClipPadRule = ImageEngineClipPadRule.EOS,
+    val clip2PadRule: ImageEngineClipPadRule? = null,
+    val supportsPromptWeighting: Boolean = false,
+    val supportsTextualInversion: Boolean = false,
+    val separateNegativePrompt: Boolean = true
+) {
+    init {
+        require(maxLength > 0) { "Tokenizer max length must be positive." }
+    }
+}
+
+data class ImageEngineConditioningContractSpec(
+    val diskDataType: ImageEngineEmbeddingDataType,
+    val conversionStrategy: ImageEngineEmbeddingConversionStrategy,
+    val textEncoderInputShape: List<Int>,
+    val textEncoderOutputShapes: List<List<Int>>,
+    val dualEncoder: Boolean = false,
+    val pooledOutput: Boolean = false,
+    val concatenationOrder: List<String>
+)
+
+data class ImageEngineVaeContractSpec(
+    val scalingLocation: ImageEngineVaeScalingLocation,
+    val scalingFactor: Double,
+    val inputShape: List<Int>,
+    val outputShape: List<Int>,
+    val inputLayout: ImageEngineTensorLayout = ImageEngineTensorLayout.NCHW,
+    val outputLayout: ImageEngineTensorLayout = ImageEngineTensorLayout.NCHW,
+    val outputRange: ImageEnginePixelRange = ImageEnginePixelRange.NEGATIVE_ONE_TO_ONE,
+    val channelOrder: ImageEngineChannelOrder = ImageEngineChannelOrder.RGB
+) {
+    init {
+        require(scalingFactor.isFinite() && scalingFactor > 0.0) { "VAE scaling factor must be positive." }
+        require(inputShape.all { it > 0 } && outputShape.all { it > 0 }) { "VAE tensor shapes must be positive." }
+    }
+}
+
+data class ImageEngineGraphContractSpec(
+    val textEncoder: String? = null,
+    val unet: String? = null,
+    val vae: String? = null,
+    val vaeEncoder: String? = null,
+    val controlNet: String? = null,
+    val schedulerSidecar: String? = null,
+    val tokenizerSidecar: String? = null,
+    val configSidecars: List<String> = emptyList(),
+    val qnnSdk: String? = null,
+    val htpArch: Int? = null,
+    val workerStrategy: ImageEngineWorkerStrategy
+)
+
+data class ImageEngineGenerationDefaultsSpec(
+    val width: Int,
+    val height: Int,
+    val steps: Int,
+    val cfgScale: Double,
+    val seed: Long = 42L,
+    val useCfg: Boolean,
+    val defaultPrompt: String? = null,
+    val defaultNegativePrompt: String? = null
+) {
+    init {
+        require(width > 0 && height > 0) { "Default image dimensions must be positive." }
+        require(steps > 0) { "Default image steps must be positive." }
+        require(cfgScale.isFinite() && cfgScale in 0.0..30.0) { "Default image CFG is invalid." }
+    }
+}
+
+data class ImageEngineGenerationCapabilitiesSpec(
+    val supportedSchedulers: Set<ImageEngineSchedulerAlgorithm>,
+    val minWidth: Int,
+    val maxWidth: Int,
+    val minHeight: Int,
+    val maxHeight: Int,
+    val widthMultiple: Int = 8,
+    val heightMultiple: Int = 8,
+    val supportsNegativePrompt: Boolean = true,
+    val supportsPromptWeighting: Boolean = false,
+    val supportsTextualInversion: Boolean = false,
+    val requiresControlImage: Boolean = false,
+    val requiresInputImage: Boolean = false,
+    val supportsMask: Boolean = false
+) {
+    init {
+        require(supportedSchedulers.isNotEmpty()) { "At least one image scheduler must be supported." }
+        require(minWidth in 1..maxWidth && minHeight in 1..maxHeight) { "Image capability bounds are invalid." }
+        require(widthMultiple > 0 && heightMultiple > 0) { "Image dimension multiples must be positive." }
+    }
+}
+
+data class ImageEngineExecutionProfileSpec(
+    val profileId: String,
+    val profileRevision: Int = 1,
+    val family: ImageEngineModelFamily,
+    val variant: ImageEngineModelVariant,
+    val task: ImageEngineTask = ImageEngineTask.TEXT_TO_IMAGE,
+    val tokenizer: ImageEngineTokenizerContractSpec,
+    val conditioning: ImageEngineConditioningContractSpec,
+    val scheduler: ImageEngineSchedulerContractSpec,
+    val vae: ImageEngineVaeContractSpec,
+    val graph: ImageEngineGraphContractSpec,
+    val defaults: ImageEngineGenerationDefaultsSpec,
+    val capabilities: ImageEngineGenerationCapabilitiesSpec
+) {
+    init {
+        require(profileId.isNotBlank()) { "Image execution profile id must not be blank." }
+        require(profileRevision > 0) { "Image execution profile revision must be positive." }
+        require(defaults.steps == scheduler.defaultSteps) { "Image defaults and scheduler steps must match." }
+        require(conditioning.textEncoderInputShape.getOrNull(1) == tokenizer.maxLength) {
+            "Tokenizer length and conditioning input sequence axis must match."
+        }
+        require(conditioning.textEncoderOutputShapes.all { shape ->
+            shape.getOrNull(1) == tokenizer.maxLength
+        }) {
+            "Tokenizer length and conditioning output sequence axes must match."
+        }
+        require(scheduler.algorithm in capabilities.supportedSchedulers) { "Default scheduler must be supported." }
+        require(defaults.width in capabilities.minWidth..capabilities.maxWidth) { "Default width is unsupported." }
+        require(defaults.height in capabilities.minHeight..capabilities.maxHeight) { "Default height is unsupported." }
+        require(defaults.width % capabilities.widthMultiple == 0) { "Default width violates the profile multiple." }
+        require(defaults.height % capabilities.heightMultiple == 0) { "Default height violates the profile multiple." }
+        require(!capabilities.supportsPromptWeighting || tokenizer.supportsPromptWeighting) {
+            "Image capabilities cannot advertise prompt weighting without tokenizer support."
+        }
+        require(capabilities.supportsNegativePrompt || defaults.defaultNegativePrompt == null) {
+            "A conditional-only image profile cannot declare a default negative prompt."
+        }
+        require(capabilities.supportsNegativePrompt || !tokenizer.separateNegativePrompt) {
+            "A conditional-only image profile cannot declare a separate negative prompt branch."
+        }
+        require(task != ImageEngineTask.CONTROL_IMAGE || capabilities.requiresControlImage) {
+            "Control-image profiles must require a control image."
+        }
+        require(!capabilities.requiresControlImage || !graph.controlNet.isNullOrBlank()) {
+            "Control-image profiles must declare a ControlNet graph."
+        }
+        require(task != ImageEngineTask.IMAGE_EDIT || capabilities.requiresInputImage) {
+            "Image-edit profiles must require an input image."
+        }
+        require(defaults.useCfg || defaults.cfgScale == 1.0) {
+            "CFG-disabled defaults must retain the conditional branch at scale 1.0."
+        }
+    }
 }
 
 enum class ImageEngineBundleRuntime(val label: String) {
@@ -171,6 +471,7 @@ data class ImageEngineBundleSpec(
     val id: String,
     val title: String,
     val components: List<ImageEngineBundleComponentSpec>,
+    val recommendationId: String? = null,
     val task: ImageEngineTask = ImageEngineTask.TEXT_TO_IMAGE,
     val runtime: ImageEngineBundleRuntime = ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP,
     val accelerator: ImageEngineAccelerator = ImageEngineAccelerator.CPU,
@@ -180,13 +481,27 @@ data class ImageEngineBundleSpec(
     val smokeSpec: ImageEngineSmokeSpec = ImageEngineSmokeSpec(),
     val qnnSmokeSpecs: List<ImageEngineQnnSmokeSpec> = emptyList(),
     val requiredRuntimeProfile: ImageEngineQnnRuntimeProfileSpec? = null,
+    val executionProfile: ImageEngineExecutionProfileSpec? = null,
     /**
      * Explicit runtime family identifier persisted into the installed bundle
      * manifest.  It avoids relying on a checkpoint filename to choose a
      * family-specific execution path.  Legacy bundles may leave this null.
      */
-    val modelFamily: String? = null
+    val modelFamily: String? = executionProfile?.family?.name
 ) {
+    init {
+        executionProfile?.let { profile ->
+            require(recommendationId?.isNotBlank() == true) {
+                "Catalog image bundles with an execution profile require a recommendation id."
+            }
+            require(profile.task == task) { "Image bundle task and execution profile task must match." }
+            require(modelFamily == profile.family.name) { "Image bundle family and execution profile family must match." }
+            require(smokeSpec.width == profile.defaults.width) { "Image smoke width and execution default width must match." }
+            require(smokeSpec.height == profile.defaults.height) { "Image smoke height and execution default height must match." }
+            require(smokeSpec.steps == profile.defaults.steps) { "Image smoke steps and execution default steps must match." }
+        }
+    }
+
     val requiredComponents: List<ImageEngineBundleComponentSpec>
         get() = components.filter { it.required }
 
@@ -314,7 +629,8 @@ fun RemoteModelFile.fileKind(): RemoteModelFileKind {
     val lowerName = name.lowercase()
     return when {
         bundleRole == ImageEngineBundleComponentRole.DIFFUSION -> RemoteModelFileKind.IMAGE_MODEL
-        bundleRole == ImageEngineBundleComponentRole.VAE -> RemoteModelFileKind.IMAGE_VAE
+        bundleRole == ImageEngineBundleComponentRole.VAE ||
+            bundleRole == ImageEngineBundleComponentRole.VAE_ENCODER -> RemoteModelFileKind.IMAGE_VAE
         bundleRole == ImageEngineBundleComponentRole.TEXT_ENCODER -> RemoteModelFileKind.IMAGE_TEXT_ENCODER
         bundleRole == ImageEngineBundleComponentRole.TOKENIZER -> RemoteModelFileKind.IMAGE_TOKENIZER
         bundleRole == ImageEngineBundleComponentRole.CONFIG ||

@@ -124,6 +124,7 @@ enum class LocalImageVerificationStatus {
 internal data class LocalImageBundleManifest(
     val id: String? = null,
     val displayName: String? = null,
+    val task: String? = null,
     val runtime: LocalImageRuntime? = null,
     val family: LocalImageModelFamily? = null,
     val imageSize: String? = null,
@@ -215,12 +216,196 @@ data class LocalImageModelRecord(
     }
 }
 
+data class LocalImageOutput(
+    val bytes: ByteArray,
+    val mimeType: String = "image/png",
+    val seed: Long? = null,
+    val index: Int = 0
+) {
+    init {
+        require(bytes.isNotEmpty()) { "Local image output must not be empty." }
+        require(mimeType.startsWith("image/")) { "Local image output MIME type must use image/*." }
+        require(index >= 0) { "Local image output index must be non-negative." }
+    }
+}
+
 data class LocalImageResult(
     val bytes: ByteArray,
     val mimeType: String = "image/png",
     /** Native execution audit returned through the isolated product worker. */
-    val executionMetadataJson: String = ""
-)
+    val executionMetadataJson: String = "",
+    val seed: Long? = null,
+    /** Ordered batch outputs. The legacy bytes/mimeType fields always mirror index 0. */
+    val outputs: List<LocalImageOutput> = listOf(
+        LocalImageOutput(bytes = bytes, mimeType = mimeType, seed = seed, index = 0)
+    )
+) {
+    init {
+        require(outputs.isNotEmpty()) { "Local image result must contain at least one output." }
+        require(outputs.map(LocalImageOutput::index) == outputs.indices.toList()) {
+            "Local image output indices must be contiguous and start at zero."
+        }
+        require(outputs.first().bytes.contentEquals(bytes) &&
+            outputs.first().mimeType == mimeType && outputs.first().seed == seed
+        ) {
+            "Legacy local image result fields must mirror output index zero."
+        }
+    }
+}
+
+/**
+ * Consumes the concrete files reported by stable-diffusion.cpp and always removes every
+ * worker-private output after reading it. Older single-image runtimes may omit outputs[], but a
+ * batch must prove its exact count, contiguous indices, deterministic seeds, MIME type, and files.
+ */
+internal fun consumeStableDiffusionOutputs(
+    result: JSONObject,
+    expectedCount: Int,
+    expectedSeed: Long,
+    legacyOutputFile: File
+): List<LocalImageOutput> {
+    require(expectedCount in 1..8) { "stable-diffusion.cpp output count must be between 1 and 8." }
+    require(expectedSeed >= 0L) { "stable-diffusion.cpp output seed must be non-negative." }
+    val outputRoot = requireNotNull(legacyOutputFile.parentFile).canonicalFile
+    val cleanupCandidates = linkedSetOf(legacyOutputFile.canonicalFile)
+    val hasOutputsField = result.has("outputs")
+    val rawOutputs = result.opt("outputs")
+    val outputArray = rawOutputs as? JSONArray
+
+    fun rememberCleanupCandidate(path: String) {
+        if (path.isBlank()) return
+        runCatching { File(path).canonicalFile }
+            .getOrNull()
+            ?.takeIf { candidate ->
+                candidate.path.startsWith(outputRoot.path + File.separator)
+            }
+            ?.let(cleanupCandidates::add)
+    }
+
+    (result.opt("path") as? String)?.let(::rememberCleanupCandidate)
+    if (outputArray != null) {
+        for (index in 0 until outputArray.length()) {
+            val item = outputArray.optJSONObject(index) ?: continue
+            (item.opt("path") as? String)?.let(::rememberCleanupCandidate)
+        }
+    } else if (rawOutputs is JSONObject) {
+        (rawOutputs.opt("path") as? String)?.let(::rememberCleanupCandidate)
+    }
+
+    fun JSONObject.requiredOutputString(name: String): String {
+        require(has(name) && !isNull(name)) { "stable-diffusion.cpp output is missing $name." }
+        val raw = get(name)
+        require(raw is String && raw.isNotBlank()) {
+            "stable-diffusion.cpp output $name must be a non-blank string."
+        }
+        return raw
+    }
+
+    fun JSONObject.requiredOutputLong(name: String): Long {
+        require(has(name) && !isNull(name)) { "stable-diffusion.cpp output is missing $name." }
+        val raw = get(name)
+        require(raw is Byte || raw is Short || raw is Int || raw is Long) {
+            "stable-diffusion.cpp output $name must be an integer."
+        }
+        return (raw as Number).toLong()
+    }
+
+    fun validatedMimeType(raw: String): String {
+        val normalized = raw.trim().lowercase()
+        require(normalized == "image/png") {
+            "stable-diffusion.cpp output MIME type must be image/png."
+        }
+        return normalized
+    }
+
+    fun validatedOutputFile(path: String): File {
+        val file = File(path).canonicalFile
+        require(file.path.startsWith(outputRoot.path + File.separator)) {
+            "stable-diffusion.cpp output path escaped its output directory."
+        }
+        require(file.isFile && file.length() > 0L) {
+            "stable-diffusion.cpp output file is missing or empty: ${file.name}"
+        }
+        return file
+    }
+
+    return try {
+        require(!hasOutputsField || outputArray != null) {
+            "stable-diffusion.cpp outputs must be an array."
+        }
+        if (outputArray == null) {
+            require(expectedCount == 1) {
+                "stable-diffusion.cpp batch output is missing outputs[]."
+            }
+            val path = if (result.has("path")) {
+                result.requiredOutputString("path")
+            } else {
+                legacyOutputFile.canonicalPath
+            }
+            val mimeType = if (result.has("mimeType")) {
+                validatedMimeType(result.requiredOutputString("mimeType"))
+            } else {
+                "image/png"
+            }
+            val file = validatedOutputFile(path)
+            listOf(
+                LocalImageOutput(
+                    bytes = file.readBytes(),
+                    mimeType = mimeType,
+                    seed = expectedSeed,
+                    index = 0
+                )
+            )
+        } else {
+            require(outputArray.length() == expectedCount) {
+                "stable-diffusion.cpp returned ${outputArray.length()} outputs; expected $expectedCount."
+            }
+            listOf("outputCount", "n").forEach { field ->
+                if (result.has(field)) {
+                    require(result.requiredOutputLong(field) == expectedCount.toLong()) {
+                        "stable-diffusion.cpp $field does not match outputs[]."
+                    }
+                }
+            }
+            val descriptors = buildList {
+                for (index in 0 until outputArray.length()) {
+                    val item = outputArray.optJSONObject(index)
+                        ?: error("stable-diffusion.cpp output item must be an object.")
+                    require(item.requiredOutputLong("index") == index.toLong()) {
+                        "stable-diffusion.cpp output indices must be contiguous and start at zero."
+                    }
+                    val expectedOutputSeed = Math.addExact(expectedSeed, index.toLong())
+                    require(item.requiredOutputLong("seed") == expectedOutputSeed) {
+                        "stable-diffusion.cpp output seed does not match index $index."
+                    }
+                    val mimeType = validatedMimeType(item.requiredOutputString("mimeType"))
+                    val file = validatedOutputFile(item.requiredOutputString("path"))
+                    add(Triple(file, mimeType, expectedOutputSeed))
+                }
+            }
+            require(descriptors.map { it.first.canonicalPath }.distinct().size == descriptors.size) {
+                "stable-diffusion.cpp returned duplicate output paths."
+            }
+            val legacyPath = validatedOutputFile(result.requiredOutputString("path"))
+            val legacyMimeType = validatedMimeType(result.requiredOutputString("mimeType"))
+            require(legacyPath.canonicalPath == descriptors.first().first.canonicalPath &&
+                legacyMimeType == descriptors.first().second
+            ) {
+                "stable-diffusion.cpp legacy output fields must mirror output index zero."
+            }
+            descriptors.mapIndexed { index, (file, mimeType, outputSeed) ->
+                LocalImageOutput(
+                    bytes = file.readBytes(),
+                    mimeType = mimeType,
+                    seed = outputSeed,
+                    index = index
+                )
+            }
+        }
+    } finally {
+        cleanupCandidates.forEach { file -> runCatching { file.delete() } }
+    }
+}
 
 data class LocalImageProgress(
     val phase: String,
@@ -238,7 +423,17 @@ data class LocalImageProgress(
     /** Actual stable-diffusion.cpp component paths selected by native execution. */
     val componentSelectionJson: String = "",
     /** Monotonic native stage evidence; useful even when a short stage is missed by polling. */
-    val stageTrace: List<String> = emptyList()
+    val stageTrace: List<String> = emptyList(),
+    /** App-private PNG written only by the native stable-diffusion.cpp preview callback. */
+    val previewPath: String = "",
+    val previewMimeType: String = "",
+    val previewMode: String = "",
+    val previewStep: Int = 0,
+    val previewRevision: Long = 0L,
+    val previewWidth: Int = 0,
+    val previewHeight: Int = 0,
+    val previewFrameCount: Int = 0,
+    val previewNoisy: Boolean = false
 )
 
 /**
@@ -263,7 +458,17 @@ data class LocalImageGenerationOptions(
     val tokenEmbeddingMode: String? = null,
     val memoryMode: Int? = null,
     val runner: String? = null,
-    val useCfg: Boolean? = null
+    val useCfg: Boolean? = null,
+    val taskMode: LocalImageTaskMode = LocalImageTaskMode.TEXT_TO_IMAGE,
+    val inputImage: LocalImagePreparedInput? = null,
+    val maskImage: LocalImagePreparedInput? = null,
+    val controlImage: LocalImagePreparedInput? = null,
+    val strength: Double? = null,
+    val controlStrength: Double? = null,
+    val clipSkip: Int? = null,
+    val batchCount: Int = 1,
+    val vaeTiling: LocalImageVaeTilingOptions? = null,
+    val preview: LocalImagePreviewOptions? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         negativePrompt?.let { put("negativePrompt", it) }
@@ -281,6 +486,16 @@ data class LocalImageGenerationOptions(
         memoryMode?.let { put("memoryMode", it) }
         runner?.let { put("runner", it) }
         useCfg?.let { put("useCfg", it) }
+        put("taskMode", taskMode.wireName)
+        inputImage?.let { put("inputImage", it.toJson()) }
+        maskImage?.let { put("maskImage", it.toJson()) }
+        controlImage?.let { put("controlImage", it.toJson()) }
+        strength?.let { put("strength", it) }
+        controlStrength?.let { put("controlStrength", it) }
+        clipSkip?.let { put("clipSkip", it) }
+        put("batchCount", batchCount)
+        vaeTiling?.let { put("vaeTiling", it.toJson()) }
+        preview?.let { put("preview", it.toJson()) }
     }
 
     companion object {
@@ -318,6 +533,15 @@ data class LocalImageGenerationOptions(
                     require(raw is Boolean) { "$key must be a boolean." }
                     raw
                 } else null
+            fun optionalObject(key: String): JSONObject? =
+                if (json.has(key)) {
+                    require(!json.isNull(key)) { "$key must be an object when specified." }
+                    val raw = json.get(key)
+                    require(raw is JSONObject) { "$key must be an object when specified." }
+                    raw
+                } else {
+                    null
+                }
 
             return LocalImageGenerationOptions(
                 negativePrompt = optionalString("negativePrompt", preserveBlank = true)
@@ -337,8 +561,23 @@ data class LocalImageGenerationOptions(
                 tokenEmbeddingMode = optionalString("tokenEmbeddingMode", preserveBlank = true),
                 memoryMode = optionalInt("memoryMode"),
                 runner = optionalString("runner", preserveBlank = true),
-                useCfg = optionalBoolean("useCfg")
-            )
+                useCfg = optionalBoolean("useCfg"),
+                taskMode = if (json.has("taskMode")) {
+                    require(!json.isNull("taskMode")) { "taskMode must be a string when specified." }
+                    LocalImageTaskMode.fromWireName(optionalString("taskMode", preserveBlank = true))
+                } else {
+                    LocalImageTaskMode.TEXT_TO_IMAGE
+                },
+                inputImage = optionalObject("inputImage")?.let(LocalImagePreparedInput::fromJson),
+                maskImage = optionalObject("maskImage")?.let(LocalImagePreparedInput::fromJson),
+                controlImage = optionalObject("controlImage")?.let(LocalImagePreparedInput::fromJson),
+                strength = optionalDouble("strength"),
+                controlStrength = optionalDouble("controlStrength"),
+                clipSkip = optionalInt("clipSkip"),
+                batchCount = optionalInt("batchCount") ?: 1,
+                vaeTiling = optionalObject("vaeTiling")?.let(LocalImageVaeTilingOptions::fromJson),
+                preview = optionalObject("preview")?.let(LocalImagePreviewOptions::fromJson)
+            ).also { options -> options.validateProductInputContract() }
         }
     }
 }
@@ -405,6 +644,8 @@ class LocalImageProvider(context: Context) {
             require(model.configured) { "本地图像生成模型文件不存在，请重新导入。" }
             require(prompt.isNotBlank()) { "请输入图片描述。" }
             require(!cancellationRequested.get()) { "本地生图已停止" }
+            options.validateProductInputContract()
+            validateLocalImageRuntimeProductOptions(model.runtime, options)
         if (model.runtime == LocalImageRuntime.QNN_HTP) {
             require(NativeQnnBridge.isAvailable) {
                 val reason = NativeQnnBridge.loadError?.message.orEmpty()
@@ -535,15 +776,14 @@ class LocalImageProvider(context: Context) {
                 .put("threads", threads)
                 .put("seed", contract.seed)
                 .put("cfgScale", contract.cfgScale)
-                .put("distilledGuidance", contract.distilledGuidance)
-                .put("flowShift", contract.flowShift)
                 .put("sampleMethod", contract.sampleMethod)
                 .put("backendMode", contract.backendMode)
                 .put("tokenEmbeddingMode", contract.tokenEmbeddingMode)
                 .put("memoryMode", contract.memoryMode)
                 .put("useCfg", contract.useCfg)
                 .put("progressJournalPath", progressJournalFile.absolutePath)
-                .putQnnSemanticDefaults(bundleRoot)
+                .putQnnSemanticDefaults(bundleRoot, profile)
+            effectiveOptions.putProductInputNativeParams(params)
             if (isSdxlQnn) {
                 params.put("conditioningFormat", "sdxl_qnn_conditioning")
             } else if (usesQnnClipTokenIds) {
@@ -635,6 +875,11 @@ class LocalImageProvider(context: Context) {
                     }
                     params.put(field, embeddingJson.get(field))
                 }
+                require(embeddingFile.isFile && embeddingFile.length() > 0L) {
+                    "Prompt conditioning did not produce a concrete artifact."
+                }
+                val conditioningArtifactSha256 = embeddingFile.sha256Contents()
+                params.put("conditioningArtifactSha256", conditioningArtifactSha256)
                 if (cancellationRequested.get()) {
                     error("本地生图已停止")
                 }
@@ -703,7 +948,28 @@ class LocalImageProvider(context: Context) {
                         }
                     )
                 }
+                if (!isSdxlQnn) {
+                    val nativeEffective = json.optJSONObject("nativeEffective")
+                        ?: error("QNN image generation did not report nativeEffective evidence.")
+                    require(json.optString("conditioningArtifactSha256") == conditioningArtifactSha256 &&
+                        nativeEffective.optString("conditioningArtifactSha256") == conditioningArtifactSha256
+                    ) {
+                        "QNN image generation did not consume the exact prepared conditioning artifact."
+                    }
+                }
                 ImageExecutionProfileNativeContract.parseAndValidate(profileResolution, json)
+                val inputExecutionAudit = when (effectiveOptions.taskMode) {
+                    LocalImageTaskMode.CONTROL ->
+                        verifyAndSanitizeQnnProductInput(json, effectiveOptions)
+                    LocalImageTaskMode.TEXT_TO_IMAGE -> {
+                        verifyAndSanitizeQnnTextToImagePrivatePaths(json, effectiveOptions)
+                        null
+                    }
+                    else -> error(
+                        "QNN native product input verification is unavailable for " +
+                            effectiveOptions.taskMode.wireName
+                    )
+                }
                 progress("completed", "QNN NPU image generation completed", step = steps)
                 val generated = File(json.optString("outputPath", outputFile.absolutePath))
                 require(generated.exists() && generated.length() > 0L) { "Snapdragon NPU did not output a valid image." }
@@ -713,8 +979,10 @@ class LocalImageProvider(context: Context) {
                     executionMetadataJson = qnnImageExecutionMetadata(
                         nativeRequestId = requestToken,
                         nativeResult = json,
-                        outputBytes = generated.length()
-                    ).toString()
+                        outputBytes = generated.length(),
+                        inputExecutionAudit = inputExecutionAudit
+                    ).toString(),
+                    seed = contract.seed.toLong()
                 )
             } finally {
                 runCatching { embeddingFile.delete() }
@@ -788,11 +1056,6 @@ class LocalImageProvider(context: Context) {
             }
             val seed = resolved.seed.toInt()
             val cfgScale = resolved.cfgScale
-            val flowShift = resolveFiniteMnnDiffusionControl(
-                name = "flowShift",
-                requested = effectiveOptions.flowShift,
-                defaultValue = defaultFlowShiftFor(profile.family)
-            )
             val useCfg = resolved.useCfg
             val params = ImageExecutionProfileNativeContract.toNativeParamsJson(profileResolution)
                 .put("prompt", prompt.trim())
@@ -806,13 +1069,12 @@ class LocalImageProvider(context: Context) {
                 .put("seed", seed)
                 .put("randomSeed", seed)
                 .put("cfgScale", cfgScale)
-                .put("distilledGuidance", effectiveOptions.distilledGuidance ?: 3.5)
-                .put("flowShift", flowShift)
                 .put("useCfg", useCfg)
                 .put("sampleMethod", sampleMethod)
                 .put("runner", runner)
                 .put("backendMode", backendMode)
                 .put("memoryMode", memoryMode)
+            effectiveOptions.putProductInputNativeParams(params)
             onProgress(
                 LocalImageProgress(
                     phase = "request_validated",
@@ -861,12 +1123,16 @@ class LocalImageProvider(context: Context) {
             require(json.getInt("memoryMode") == memoryMode) {
                 "MNN-Diffusion did not execute the resolved memory mode."
             }
+            val inputExecutionAudit = verifyAndSanitizeMnnProductInput(json, effectiveOptions)
             val generated = File(json.optString("path", outputFile.absolutePath))
             require(generated.exists() && generated.length() > 0L) { "MNN-Diffusion did not output a valid image." }
             return@withContext LocalImageResult(
                 bytes = generated.readBytes(),
                 mimeType = json.optString("mimeType", "image/png"),
-                executionMetadataJson = json.toString()
+                executionMetadataJson = json
+                    .put("imageInput", inputExecutionAudit)
+                    .toString(),
+                seed = seed.toLong()
             )
         }
         require(model.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
@@ -896,6 +1162,9 @@ class LocalImageProvider(context: Context) {
             familyOverride = effectiveFamily
         )
         val profile = profileResolution.profile
+        val nativeComponentSelection = componentSelection.withControlNetPath(
+            resolveProfileControlNetPath(bundleRoot, profile)
+        )
         val resolved = profileResolution.layers.resolved
 
         val outputDir = File(appContext.cacheDir, "local_image_outputs").apply { mkdirs() }
@@ -918,7 +1187,7 @@ class LocalImageProvider(context: Context) {
         val flowShift = resolveStableDiffusionFiniteControl(
             name = "flowShift",
             requested = effectiveOptions.flowShift,
-            defaultValue = defaultFlowShiftFor(effectiveFamily)
+            defaultValue = defaultStableDiffusionFlowShiftFor(profile)
         )
         val sampleMethod = imageSchedulerProductName(resolved.scheduler)
         val backendMode = resolveStableDiffusionBackendMode(effectiveOptions.backendMode)
@@ -945,10 +1214,13 @@ class LocalImageProvider(context: Context) {
             .put("seed", seed)
             .put("cfgScale", cfgScale)
             .put("distilledGuidance", distilledGuidance)
+            .put("distilledGuidanceSpecified", effectiveOptions.distilledGuidance != null)
             .put("flowShift", flowShift)
+            .put("flowShiftSpecified", effectiveOptions.flowShift != null)
             .put("sampleMethod", sampleMethod)
             .put("backendMode", backendMode)
-        componentSelection.putIntoNativeParams(params)
+        effectiveOptions.putProductInputNativeParams(params)
+        nativeComponentSelection.putIntoNativeParams(params)
 
         val progressPoller = launch {
             while (isActive) {
@@ -970,6 +1242,9 @@ class LocalImageProvider(context: Context) {
             // The product worker is disposable and must return the model's
             // multi-gigabyte mappings after every terminal outcome instead.
             runCatching { bridge.shutdown() }
+            stableDiffusionPreviewCandidates(outputFile).forEach { preview ->
+                runCatching { preview.delete() }
+            }
         }
         val json = JSONObject(raw)
         if (!json.optBoolean("ok", false)) {
@@ -990,8 +1265,17 @@ class LocalImageProvider(context: Context) {
             "stable-diffusion.cpp did not execute the requested seed."
         }
         verifyStableDiffusionResultControl(json, "cfgScale", cfgScale)
-        verifyStableDiffusionResultControl(json, "distilledGuidance", distilledGuidance)
-        verifyStableDiffusionResultControl(json, "flowShift", flowShift)
+        verifyStableDiffusionDistilledGuidanceResult(
+            result = json,
+            requested = distilledGuidance,
+            specified = effectiveOptions.distilledGuidance != null
+        )
+        verifyStableDiffusionFlowShiftResult(
+            result = json,
+            requested = flowShift,
+            specified = effectiveOptions.flowShift != null,
+            expectApplied = resolved.predictionType == ImagePredictionType.FLOW
+        )
         require(stableDiffusionNativeSampleMethodMatches(resolved.scheduler, json.optString("sampleMethod"))) {
             "stable-diffusion.cpp did not execute the resolved ${resolved.scheduler} sampler."
         }
@@ -1007,20 +1291,26 @@ class LocalImageProvider(context: Context) {
         require(json.optBoolean("contextReleased", false)) {
             "stable-diffusion.cpp did not confirm native context release."
         }
-        val componentSelectionAudit = componentSelection.verifyNativeEcho(json)
-        val generated = File(json.optString("path", outputFile.absolutePath))
-        require(generated.exists() && generated.length() > 0L) { "stable-diffusion.cpp 未输出有效图片。" }
-            try {
-                LocalImageResult(
-                    bytes = generated.readBytes(),
-                    mimeType = json.optString("mimeType", "image/png"),
-                    executionMetadataJson = json
-                        .put("componentSelection", componentSelectionAudit)
-                        .toString()
-                )
-            } finally {
-                runCatching { generated.delete() }
-            }
+        val componentSelectionAudit = nativeComponentSelection.verifyNativeEcho(json)
+        val inputExecutionAudit = verifyAndSanitizeStableDiffusionProductInput(json, effectiveOptions)
+        val executionMetadataJson = json
+            .put("componentSelection", componentSelectionAudit)
+            .put("imageInput", inputExecutionAudit)
+            .toString()
+        val outputs = consumeStableDiffusionOutputs(
+            result = json,
+            expectedCount = effectiveOptions.batchCount,
+            expectedSeed = seed,
+            legacyOutputFile = outputFile
+        )
+        val first = outputs.first()
+        LocalImageResult(
+            bytes = first.bytes,
+            mimeType = first.mimeType,
+            executionMetadataJson = executionMetadataJson,
+            seed = first.seed,
+            outputs = outputs
+        )
         } finally {
             if (activeRuntime == model.runtime) {
                 activeRuntime = null
@@ -1071,6 +1361,15 @@ class LocalImageProvider(context: Context) {
             height = json.optInt("height"),
             cancelRequested = json.optBoolean("cancelRequested"),
             componentSelectionJson = json.optJSONObject("componentSelection")?.toString().orEmpty(),
+            previewPath = json.optString("previewPath"),
+            previewMimeType = json.optString("previewMimeType"),
+            previewMode = json.optString("previewMode"),
+            previewStep = json.optInt("previewStep"),
+            previewRevision = json.optLong("previewRevision"),
+            previewWidth = json.optInt("previewWidth"),
+            previewHeight = json.optInt("previewHeight"),
+            previewFrameCount = json.optInt("previewFrameCount"),
+            previewNoisy = json.optBoolean("previewNoisy"),
             stageTrace = json.optJSONArray("stageTrace")?.let { trace ->
                 buildList {
                     for (index in 0 until trace.length()) {
@@ -1095,7 +1394,10 @@ class LocalImageProvider(context: Context) {
         return JSONArray(qnnRuntimeDirectoriesFor(appContext, bundleRoot)).toString()
     }
 
-    private fun JSONObject.putQnnSemanticDefaults(bundleRoot: File): JSONObject {
+    private fun JSONObject.putQnnSemanticDefaults(
+        bundleRoot: File,
+        profile: ImageExecutionProfile
+    ): JSONObject {
         val manifest = localImageBundleManifestFromRoot(bundleRoot)
         val smokes = manifest?.qnnSmokeSpecs.orEmpty()
         val unet = smokes.firstOrNull { spec ->
@@ -1106,21 +1408,66 @@ class LocalImageProvider(context: Context) {
             val lower = spec.contextBinary.lowercase()
             "vae" in lower || "decoder" in lower || (spec.inputs.size == 1 && spec.outputs.any { it.shape.contains(3) })
         }
-        val textEncoderContext = qnnNativeTextEncoderContextPath(bundleRoot)
+        val manifestBound = profile.provenance.primarySource == ImageProfileSource.MANIFEST
+        fun resolveProfileArtifact(
+            artifact: ImageGraphArtifactContract?,
+            required: Boolean,
+            vararg legacyNames: String
+        ): String? {
+            artifact?.relativePath?.trim()?.takeIf(String::isNotEmpty)?.let { relativePath ->
+                require(!File(relativePath).isAbsolute && !Regex("^[A-Za-z]:[\\\\/]").containsMatchIn(relativePath)) {
+                    "Image execution graph path must stay inside the installed bundle."
+                }
+                val root = bundleRoot.canonicalFile
+                val candidate = File(root, relativePath).canonicalFile
+                require(candidate.path.startsWith(root.path + File.separator)) {
+                    "Image execution graph path escapes the installed bundle."
+                }
+                if (candidate.isFile) return candidate.relativeTo(root).invariantSeparatorsPath
+                if (manifestBound && required) {
+                    error("Installed image execution profile is missing required graph: $relativePath")
+                }
+            }
+            return qnnFirstContextPath(bundleRoot, *legacyNames)
+        }
+        val profileUnet = resolveProfileArtifact(profile.graph.unet, true, "unet.bin")
+        val profileVae = resolveProfileArtifact(
+            profile.graph.vae,
+            true,
+            "vae.bin",
+            "vae_decoder.bin"
+        )
+        val textEncoderContext = resolveProfileArtifact(
+            profile.graph.textEncoder?.takeIf { it.relativePath.endsWith(".bin", ignoreCase = true) },
+            false,
+            "text_encoder.bin"
+        )
+        val controlNetContext = resolveProfileArtifact(
+            profile.graph.controlNet,
+            profile.task == ImageTask.CONTROL_IMAGE,
+            "controlnet.bin"
+        )
         put(
             "unetContextBinary",
-            unet?.contextBinary?.takeIf { it.isNotBlank() }
-                ?: qnnFirstContextPath(bundleRoot, "unet.bin")
+            profileUnet
+                ?: unet?.contextBinary?.takeIf { it.isNotBlank() }
                 ?: "unet.bin"
         )
         put(
             "vaeDecoderContextBinary",
-            vae?.contextBinary?.takeIf { it.isNotBlank() }
-                ?: qnnFirstContextPath(bundleRoot, "vae.bin", "vae_decoder.bin")
+            profileVae
+                ?: vae?.contextBinary?.takeIf { it.isNotBlank() }
                 ?: "vae_decoder.bin"
         )
         textEncoderContext?.let { put("textEncoderContextBinary", it) }
-        put("graphName", unet?.graphName?.takeIf { it.isNotBlank() } ?: "model")
+        controlNetContext?.let { put("controlNetContextBinary", it) }
+        put("graphName", profile.graph.unet?.graphName?.takeIf { it.isNotBlank() }
+            ?: unet?.graphName?.takeIf { it.isNotBlank() }
+            ?: "model")
+        profile.graph.textEncoder?.graphName?.takeIf { it.isNotBlank() }
+            ?.let { put("textEncoderGraphName", it) }
+        profile.graph.controlNet?.graphName?.takeIf { it.isNotBlank() }
+            ?.let { put("controlNetGraphName", it) }
         return this
     }
 }
@@ -1268,7 +1615,8 @@ internal fun encodeQnnClipPromptTokenIds(
 internal fun qnnImageExecutionMetadata(
     nativeRequestId: String,
     nativeResult: JSONObject,
-    outputBytes: Long
+    outputBytes: Long,
+    inputExecutionAudit: JSONObject? = null
 ): JSONObject = JSONObject().also { metadata ->
     ImageExecutionProfileNativeContract.requiredFields.forEach { field ->
         require(nativeResult.has(field) && !nativeResult.isNull(field)) {
@@ -1339,12 +1687,54 @@ internal fun qnnImageExecutionMetadata(
     metadata.put("nativeEffective", nativeEffective)
     nativeResult.optJSONArray("timesteps")?.let { metadata.put("timesteps", it) }
     nativeResult.optJSONArray("sigmas")?.let { metadata.put("sigmas", it) }
+    inputExecutionAudit?.let { metadata.put("imageInput", it) }
+    listOf(
+        "taskMode",
+        "batchCount",
+        "inputImageExecutionCount",
+        "maskImageExecutionCount",
+        "controlImageExecutionCount",
+        "controlImageSha256",
+        "controlImagePreprocessedSha256",
+        "controlImagePreprocess",
+        "controlImageSourceWidth",
+        "controlImageSourceHeight",
+        "controlImageSourceChannels",
+        "controlImageOrientedWidth",
+        "controlImageOrientedHeight",
+        "controlImageExifOrientation",
+        "controlImageTensorWidth",
+        "controlImageTensorHeight",
+        "controlImageTensorChannels",
+        "controlImageTensorLayout",
+        "controlImageEdgePixelCount",
+        "controlImageTensorChecksum",
+        "controlStrength",
+        "controlStrengthApplied",
+        "controlNetExecutionCount",
+        "controlNetResidualTensorCount",
+        "controlNetResidualWriteCount",
+        "controlNetResidualUnetReuseCount",
+        "controlNetConditioningBranch",
+        "controlNetInputConsumed",
+        "controlNetInputBufferSha256",
+        "controlNetScaledResidualChecksum",
+        "controlNetGraph",
+        "conditioningArtifactSha256"
+    ).forEach { field ->
+        if (nativeResult.has(field) && !nativeResult.isNull(field)) {
+            metadata.put(field, nativeResult.get(field))
+        }
+    }
     listOf(
         "initNoiseSigma",
         "scaleModelInput",
         "textEncoderExecutionCount",
         "vaeExecutionCount",
-        "effectiveVaeHostScale"
+        "effectiveVaeHostScale",
+        "vaeTileCount",
+        "vaeTiled",
+        "outputSha256"
     ).forEach { field ->
         if (nativeResult.has(field) && !nativeResult.isNull(field)) {
             metadata.put(field, nativeResult.get(field))
@@ -1412,8 +1802,6 @@ internal data class QnnImageGenerationContract(
     val threads: Int,
     val seed: Int,
     val cfgScale: Double,
-    val distilledGuidance: Double,
-    val flowShift: Double,
     val sampleMethod: String,
     val backendMode: String,
     val tokenEmbeddingMode: String,
@@ -1428,8 +1816,6 @@ internal data class QnnImageGenerationContract(
             .put("threads", threads)
             .put("seed", seed)
             .put("cfgScale", cfgScale)
-            .put("distilledGuidance", distilledGuidance)
-            .put("flowShift", flowShift)
             .put("sampleMethod", sampleMethod)
             .put("backendMode", backendMode)
             .put("tokenEmbeddingMode", tokenEmbeddingMode)
@@ -1442,6 +1828,12 @@ internal fun resolveQnnImageGenerationContract(
     defaultThreads: Int,
     options: LocalImageGenerationOptions
 ): QnnImageGenerationContract {
+    require(options.distilledGuidance == null) {
+        "QNN image graphs do not expose a distilled-guidance input."
+    }
+    require(options.flowShift == null) {
+        "QNN image schedulers do not expose a writable flow-shift control."
+    }
     val resolved = resolution.layers.resolved
     val width = resolved.width
     val height = resolved.height
@@ -1456,12 +1848,6 @@ internal fun resolveQnnImageGenerationContract(
     require(threads in 1..16) { "QNN prompt encoder threads 必须在 1..16。" }
     val cfgScale = resolved.cfgScale
     require(cfgScale.isFinite() && cfgScale in 0.0..30.0) { "QNN CFG 必须是 0..30 的有限数值。" }
-    val distilledGuidance = options.distilledGuidance ?: 3.5
-    require(distilledGuidance.isFinite() && distilledGuidance in 0.0..30.0) {
-        "QNN distilled guidance 必须是 0..30 的有限数值。"
-    }
-    val flowShift = options.flowShift ?: -1.0
-    require(flowShift.isFinite() && flowShift in -1.0..100.0) { "QNN flow shift 必须是 -1..100 的有限数值。" }
     val backendMode = options.backendMode?.trim()?.lowercase().orEmpty().ifBlank { "cpu" }
     require(backendMode == "cpu" || backendMode == "opencl") {
         "QNN prompt encoder backend 只支持 cpu 或 opencl。"
@@ -1483,8 +1869,6 @@ internal fun resolveQnnImageGenerationContract(
             }
         },
         cfgScale = cfgScale,
-        distilledGuidance = distilledGuidance,
-        flowShift = flowShift,
         sampleMethod = imageSchedulerProductName(resolved.scheduler),
         backendMode = backendMode,
         tokenEmbeddingMode = tokenEmbeddingMode,
@@ -1501,6 +1885,12 @@ internal fun resolveQnnImageGenerationContract(
     fallbackSeed: Int,
     options: LocalImageGenerationOptions
 ): QnnImageGenerationContract {
+    require(options.distilledGuidance == null) {
+        "QNN image graphs do not expose a distilled-guidance input."
+    }
+    require(options.flowShift == null) {
+        "QNN image schedulers do not expose a writable flow-shift control."
+    }
     val width = options.width ?: defaultWidth
     val height = options.height ?: defaultHeight
     require(width == defaultWidth && height == defaultHeight) {
@@ -1513,12 +1903,6 @@ internal fun resolveQnnImageGenerationContract(
     require(threads in 1..16) { "QNN prompt encoder threads 必须在 1..16。" }
     val cfgScale = options.cfgScale ?: defaultCfgFor(family)
     require(cfgScale.isFinite() && cfgScale in 0.0..30.0) { "QNN CFG 必须是 0..30 的有限数值。" }
-    val distilledGuidance = options.distilledGuidance ?: 3.5
-    require(distilledGuidance.isFinite() && distilledGuidance in 0.0..30.0) {
-        "QNN distilled guidance 必须是 0..30 的有限数值。"
-    }
-    val flowShift = options.flowShift ?: -1.0
-    require(flowShift.isFinite() && flowShift in -1.0..100.0) { "QNN flow shift 必须是 -1..100 的有限数值。" }
     val sampleMethod = options.sampleMethod?.trim()?.lowercase().orEmpty().ifBlank { "pndm" }
     imageSchedulerAlgorithmFromProductName(sampleMethod)
     val backendMode = options.backendMode?.trim()?.lowercase().orEmpty().ifBlank { "cpu" }
@@ -1538,8 +1922,6 @@ internal fun resolveQnnImageGenerationContract(
         threads = threads,
         seed = options.seed ?: fallbackSeed,
         cfgScale = cfgScale,
-        distilledGuidance = distilledGuidance,
-        flowShift = flowShift,
         sampleMethod = sampleMethod,
         backendMode = backendMode,
         tokenEmbeddingMode = tokenEmbeddingMode,
@@ -1654,7 +2036,8 @@ class LocalImageModelStore(context: Context) {
         primaryRemote: RemoteModelFile,
         componentCount: Int,
         runtimeOverride: LocalImageRuntime? = null,
-        imageSizeOverride: String? = null
+        imageSizeOverride: String? = null,
+        primarySha256: String? = null
     ): LocalImageModelRecord {
         require(bundleDir.isDirectory) { "本地生图引擎包目录不存在：${bundleDir.absolutePath}" }
         require(primaryFile.exists()) { "Local image engine bundle is missing a diffusion model: ${primaryFile.name}" }
@@ -1672,7 +2055,15 @@ class LocalImageModelStore(context: Context) {
             path = resolvedPrimary.absolutePath,
             fileName = resolvedPrimary.name,
             sizeBytes = bundleDir.walkTopDown().filter { it.isFile }.sumOf { it.length() },
-            sha256 = sha256(resolvedPrimary),
+            sha256 = primarySha256
+                ?.trim()
+                ?.lowercase()
+                ?.also { digest ->
+                    require(digest.matches(Regex("^[0-9a-f]{64}$"))) {
+                        "Downloaded image model SHA-256 is invalid."
+                    }
+                }
+                ?: sha256(resolvedPrimary),
             runtime = runtimeOverride ?: manifest?.runtime ?: inferLocalImageRuntimeForBundle(bundleDir, resolvedPrimary),
             family = manifest?.family ?: LocalImageModelFamily.infer(familyHint),
             imageSize = imageSizeOverride ?: manifest?.imageSize ?: defaultImageSizeFor(familyHint),
@@ -1708,9 +2099,20 @@ class LocalImageModelStore(context: Context) {
     fun deleteModel(id: String): Boolean {
         val models = loadModels()
         val target = models.firstOrNull { it.id == id } ?: return false
-        runCatching {
-            target.bundleRoot?.let { File(it).deleteRecursively() } ?: File(target.path).delete()
-        }
+        val targetFile = target.bundleRoot
+            ?.takeIf(String::isNotBlank)
+            ?.let(::File)
+            ?: File(target.path)
+        val deleted = runCatching {
+            if (!targetFile.exists()) {
+                true
+            } else if (targetFile.isDirectory) {
+                targetFile.deleteRecursively() && !targetFile.exists()
+            } else {
+                targetFile.delete() && !targetFile.exists()
+            }
+        }.getOrDefault(false)
+        if (!deleted || targetFile.exists()) return false
         val remaining = models.filterNot { it.id == id }
         saveModels(remaining)
         if (loadSelectedModelId() == id) saveSelectedModelId(remaining.firstOrNull { it.isReadyForLocalImageGeneration() }?.id)
@@ -2285,8 +2687,15 @@ fun LocalImageModelRecord.localImageStructuralReadinessMessage(): String? {
 fun LocalImageModelRecord.isReadyForLocalImageGeneration(): Boolean =
     localImageReadinessMessage() == null
 
-internal fun LocalImageModelRecord.isCertifiedForAutomaticLocalImageSelection(): Boolean =
-    verificationStatus == LocalImageVerificationStatus.PASSED
+/** Automatic selection is structural only; verification state is deliberately ignored. */
+internal fun selectStructurallyReadyLocalImageModelId(
+    models: List<LocalImageModelRecord>,
+    preferredId: String?
+): String? = preferredId
+    ?.takeIf { id ->
+        models.any { model -> model.id == id && model.localImageStructuralReadinessMessage() == null }
+    }
+    ?: models.firstOrNull { model -> model.localImageStructuralReadinessMessage() == null }?.id
 
 fun LocalImageModelRecord.localImageReadinessLabel(): String {
     val structuralReady = localImageStructuralReadinessMessage() == null
@@ -2338,10 +2747,15 @@ private fun LocalImageModelRecord.qnnImageBundleReadinessMessage(): String? {
     val files = root.walkTopDown().filter { it.isFile }.toList()
     val names = files.map { it.invariantSeparatorsPath.lowercase() }
     fun hasAny(vararg tokens: String): Boolean = names.any { name -> tokens.any { it in name } }
+    val requiresControlNet = manifest?.task == "CONTROL_IMAGE" ||
+        manifest?.id.orEmpty().contains("controlnet", ignoreCase = true)
     val missing = buildList {
         if (!hasAny("qnn", "context", "unet", "diffusion", "transformer")) add("QNN diffusion/context")
         if (!hasAny("vae", "decoder", "ae")) add("VAE/AE decoder")
         if (!hasAny("text_encoder", "clip", "t5", "tokenizer", "qwen", "llm")) add("text encoder/tokenizer")
+        if (requiresControlNet && root.nonEmptyQnnContextPath("controlnet.bin") == null) {
+            add("controlnet.bin")
+        }
     }
     return if (missing.isEmpty()) null else "QNN image bundle is incomplete: ${missing.joinToString(", ")}."
 }
@@ -2426,6 +2840,10 @@ internal fun localImageBundleManifestFromRoot(root: File): LocalImageBundleManif
         displayName = manifest.optString("title").takeIf { it.isNotBlank() }
             ?: manifest.optString("displayName").takeIf { it.isNotBlank() }
             ?: manifest.optString("name").takeIf { it.isNotBlank() },
+        task = manifest.optString("task")
+            .trim()
+            .uppercase()
+            .takeIf(String::isNotBlank),
         runtime = runtime,
         family = family,
         imageSize = imageSize,
@@ -2766,6 +3184,14 @@ internal fun resolveStableDiffusionFiniteControl(
 ): Double {
     val value = requested ?: defaultValue
     require(value.isFinite()) { "stable-diffusion.cpp $name must be finite." }
+    when (name) {
+        "distilledGuidance" -> require(value in 0.0..30.0) {
+            "stable-diffusion.cpp distilledGuidance must be in [0, 30]."
+        }
+        "flowShift" -> require(value == -1.0 || value in 0.0..100.0) {
+            "stable-diffusion.cpp flowShift must be -1 (model default) or in [0, 100]."
+        }
+    }
     return value
 }
 
@@ -2775,6 +3201,14 @@ internal fun resolveStableDiffusionBackendMode(requestedBackendMode: String?): S
         "stable-diffusion.cpp Android backend currently supports only backendMode=cpu."
     }
     return backend
+}
+
+internal fun stableDiffusionPreviewCandidates(outputFile: File): List<File> = buildList {
+    repeat(2) { slot ->
+        val preview = File(outputFile.absolutePath + ".preview-$slot.png")
+        add(preview)
+        add(File(preview.absolutePath + ".part"))
+    }
 }
 
 internal fun resolveStableDiffusionSampleMethod(requestedSampleMethod: String?): String {
@@ -2834,16 +3268,6 @@ internal fun resolveMnnDiffusionMemoryMode(requestedMemoryMode: Int?): Int {
     return memoryMode
 }
 
-internal fun resolveFiniteMnnDiffusionControl(
-    name: String,
-    requested: Double?,
-    defaultValue: Double
-): Double {
-    val value = requested ?: defaultValue
-    require(value.isFinite()) { "MNN-Diffusion $name must be finite." }
-    return value
-}
-
 internal fun mnnDiffusionControlAuditJson(params: JSONObject): JSONObject = JSONObject().apply {
     listOf(
         "family",
@@ -2853,8 +3277,6 @@ internal fun mnnDiffusionControlAuditJson(params: JSONObject): JSONObject = JSON
         "threads",
         "seed",
         "cfgScale",
-        "distilledGuidance",
-        "flowShift",
         "useCfg",
         "sampleMethod",
         "runner",
@@ -2876,6 +3298,83 @@ internal fun verifyStableDiffusionResultControl(
     val actual = result.get(key)
     require(actual is Number && kotlin.math.abs(actual.toDouble() - expected) <= 1e-6) {
         "stable-diffusion.cpp native result reported $key=$actual, expected $expected."
+    }
+}
+
+internal fun verifyStableDiffusionDistilledGuidanceResult(
+    result: JSONObject,
+    requested: Double,
+    specified: Boolean
+) {
+    verifyStableDiffusionResultControl(result, "requestedDistilledGuidance", requested)
+    require(
+        result.has("distilledGuidanceSpecified") &&
+            result.get("distilledGuidanceSpecified") is Boolean &&
+            result.getBoolean("distilledGuidanceSpecified") == specified
+    ) {
+        "stable-diffusion.cpp did not preserve whether distilled guidance was explicitly requested."
+    }
+    require(
+        result.has("distilledGuidanceApplied") &&
+            result.get("distilledGuidanceApplied") is Boolean
+    ) {
+        "stable-diffusion.cpp did not report distilled-guidance applicability."
+    }
+    if (result.getBoolean("distilledGuidanceApplied")) {
+        verifyStableDiffusionResultControl(result, "distilledGuidance", requested)
+    } else {
+        require(result.has("distilledGuidance") && result.isNull("distilledGuidance")) {
+            "stable-diffusion.cpp claimed an inert distilled-guidance value as effective."
+        }
+    }
+}
+
+internal fun verifyStableDiffusionFlowShiftResult(
+    result: JSONObject,
+    requested: Double,
+    specified: Boolean,
+    expectApplied: Boolean
+) {
+    verifyStableDiffusionResultControl(result, "requestedFlowShift", requested)
+    require(
+        result.has("flowShiftSpecified") &&
+            result.get("flowShiftSpecified") is Boolean &&
+            result.getBoolean("flowShiftSpecified") == specified
+    ) {
+        "stable-diffusion.cpp did not preserve whether flow shift was explicitly requested."
+    }
+    require(result.has("flowShiftApplied") && result.get("flowShiftApplied") is Boolean) {
+        "stable-diffusion.cpp did not report flow-shift applicability."
+    }
+    val applied = result.getBoolean("flowShiftApplied")
+    require(applied == expectApplied) {
+        "stable-diffusion.cpp flow-shift applicability conflicts with the resolved prediction mode."
+    }
+    require(result.has("dynamicFlowShift") && result.get("dynamicFlowShift") is Boolean) {
+        "stable-diffusion.cpp did not report whether flow shift was dynamically resolved."
+    }
+    val dynamic = result.getBoolean("dynamicFlowShift")
+    if (!applied) {
+        require(!dynamic && result.has("flowShift") && result.isNull("flowShift")) {
+            "stable-diffusion.cpp claimed an inert flow shift as effective."
+        }
+        return
+    }
+    require(result.has("flowShift") && !result.isNull("flowShift")) {
+        "stable-diffusion.cpp did not report the effective flow shift."
+    }
+    val effective = result.get("flowShift")
+    require(effective is Number && effective.toDouble().isFinite() && effective.toDouble() >= 0.0) {
+        "stable-diffusion.cpp reported an invalid effective flow shift."
+    }
+    if (dynamic) {
+        require(requested < 0.0) {
+            "stable-diffusion.cpp dynamically replaced an explicit flow-shift override."
+        }
+    } else if (requested >= 0.0) {
+        require(kotlin.math.abs(effective.toDouble() - requested) <= 1e-6) {
+            "stable-diffusion.cpp effective flow shift differs from the configured value."
+        }
     }
 }
 
@@ -3045,8 +3544,10 @@ internal fun defaultCfgFor(family: LocalImageModelFamily): Double =
         LocalImageModelFamily.CUSTOM -> 7.0
     }
 
-private fun defaultFlowShiftFor(family: LocalImageModelFamily): Double =
-    when (family) {
+internal fun defaultStableDiffusionFlowShiftFor(profile: ImageExecutionProfile): Double {
+    if (profile.scheduler.predictionType != ImagePredictionType.FLOW) return -1.0
+    return when (profile.family) {
+        LocalImageModelFamily.FLUX -> -1.0
         LocalImageModelFamily.Z_IMAGE,
         LocalImageModelFamily.QWEN_IMAGE,
         LocalImageModelFamily.GLM_IMAGE,
@@ -3054,8 +3555,13 @@ private fun defaultFlowShiftFor(family: LocalImageModelFamily): Double =
         LocalImageModelFamily.DREAMLITE,
         LocalImageModelFamily.SANA,
         LocalImageModelFamily.WAN -> 3.0
-        else -> 0.0
+        LocalImageModelFamily.SD_TURBO,
+        LocalImageModelFamily.SDXL,
+        LocalImageModelFamily.SD21,
+        LocalImageModelFamily.SD15,
+        LocalImageModelFamily.CUSTOM -> -1.0
     }
+}
 
 private fun defaultImageSizeFor(fileName: String): String =
     when (LocalImageModelFamily.infer(fileName)) {

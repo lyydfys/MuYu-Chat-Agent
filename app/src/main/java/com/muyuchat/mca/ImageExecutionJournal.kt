@@ -7,6 +7,7 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.UUID
+import org.json.JSONArray
 import org.json.JSONObject
 
 internal enum class ImageExecutionPhase {
@@ -49,6 +50,8 @@ internal data class ImageExecutionJournalEntry(
     val updatedAtMs: Long = createdAtMs,
     val latentTempPath: String = "",
     val outputTempPath: String = "",
+    val outputTempPaths: List<String> = emptyList(),
+    val inputTempPaths: List<String> = emptyList(),
     val cancellationRequested: Boolean = false,
     val errorCode: String = "",
     val errorMessage: String = ""
@@ -67,6 +70,12 @@ internal data class ImageExecutionJournalEntry(
         require(workerPid >= -1) { "Image journal worker PID is invalid." }
         require(createdAtMs > 0L) { "Image journal creation time must be positive." }
         require(updatedAtMs >= createdAtMs) { "Image journal update time precedes creation time." }
+        require(inputTempPaths.none(String::isBlank)) {
+            "Image journal input temp paths must not contain blank values."
+        }
+        require(outputTempPaths.none(String::isBlank)) {
+            "Image journal output temp paths must not contain blank values."
+        }
         requireJsonObject(requestedSummaryJson, "requested summary")
         requireJsonObject(resolvedSummaryJson, "resolved summary")
     }
@@ -90,6 +99,8 @@ internal data class ImageExecutionJournalEntry(
         .put("updatedAtMs", updatedAtMs)
         .put("latentTempPath", latentTempPath)
         .put("outputTempPath", outputTempPath)
+        .put("outputTempPaths", JSONArray(outputTempPaths))
+        .put("inputTempPaths", JSONArray(inputTempPaths))
         .put("cancellationRequested", cancellationRequested)
         .put("errorCode", errorCode)
         .put("errorMessage", errorMessage)
@@ -114,6 +125,20 @@ internal data class ImageExecutionJournalEntry(
             updatedAtMs = json.optLong("updatedAtMs", json.optLong("createdAtMs", 0L)),
             latentTempPath = json.optString("latentTempPath"),
             outputTempPath = json.optString("outputTempPath"),
+            outputTempPaths = json.optJSONArray("outputTempPaths")?.let { array ->
+                buildList {
+                    for (index in 0 until array.length()) {
+                        array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                    }
+                }
+            }.orEmpty(),
+            inputTempPaths = json.optJSONArray("inputTempPaths")?.let { array ->
+                buildList {
+                    for (index in 0 until array.length()) {
+                        array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                    }
+                }
+            }.orEmpty(),
             cancellationRequested = json.optBoolean("cancellationRequested", false),
             errorCode = json.optString("errorCode"),
             errorMessage = json.optString("errorMessage")
@@ -285,6 +310,8 @@ internal class ImageExecutionJournalStore(
         entry: ImageExecutionJournalEntry,
         cleanupRoots: List<File>
     ): ImageExecutionCleanupReport = sequenceOf(entry.latentTempPath, entry.outputTempPath)
+        .plus(entry.outputTempPaths.asSequence())
+        .plus(entry.inputTempPaths.asSequence())
         .filter(String::isNotBlank)
         .distinct()
         .fold(ImageExecutionCleanupReport()) { report, path ->
@@ -315,6 +342,9 @@ internal class ImageExecutionJournalStore(
         require(current.modelFingerprint == next.modelFingerprint) { "Image journal model fingerprint cannot change." }
         require(current.profileFingerprint == next.profileFingerprint) { "Image journal profile fingerprint cannot change." }
         require(current.createdAtMs == next.createdAtMs) { "Image journal creation time cannot change." }
+        require(current.inputTempPaths == next.inputTempPaths) {
+            "Image journal input temp paths cannot change."
+        }
         require(normalizedJsonObject(current.requestedSummaryJson) == normalizedJsonObject(next.requestedSummaryJson)) {
             "Image journal requested summary cannot change."
         }
@@ -342,6 +372,9 @@ internal class ImageExecutionJournalStore(
         }
         require((next.nativeStageMask or current.nativeStageMask) == next.nativeStageMask) {
             "Image journal native stage mask cannot lose observed stages."
+        }
+        require(next.outputTempPaths.containsAll(current.outputTempPaths)) {
+            "Image journal output temp paths cannot lose observed paths."
         }
         if (current.steps > 0 && next.steps > 0) {
             require(current.steps == next.steps) { "Image journal total steps cannot change." }

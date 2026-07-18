@@ -1,5 +1,8 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.download.ModelScopeClient
+import com.muyuchat.core.download.ModelScopeRecommendedKind
+import com.muyuchat.core.download.RecommendedImageDefaults
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -44,6 +47,29 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
+    fun `all catalog profiles materialize exactly like their legacy built in fallbacks`() {
+        val models = ModelScopeClient().recommendedModels()
+            .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+
+        assertEquals(18, models.size)
+        models.forEach { model ->
+            val catalogProfile = requireNotNull(
+                materializeDownloadedImageExecutionProfile(
+                    bundle = requireNotNull(model.imageEngineBundle),
+                    modelFingerprint = FINGERPRINT
+                )
+            )
+            val fallbackProfile = resolve(model.id).profile
+
+            assertEquals(
+                "${model.id} catalog profile drifted from its old-package fallback",
+                catalogProfile.copy(provenance = fallbackProfile.provenance),
+                fallbackProfile
+            )
+        }
+    }
+
+    @Test
     fun `historical alias source repository and bundle artifacts recover exact profiles`() {
         val historicalAlias = ImageExecutionProfileResolver.resolve(
             input(recommendationId = "cyberrealistic-sd15-qnn228-8gen2")
@@ -80,7 +106,19 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
-    fun `exact fingerprint outranks conflicting source and ambiguous repository needs artifact evidence`() {
+    fun `exact fingerprint outranks conflicting request and source while ambiguous repository needs artifact evidence`() {
+        val conflictingRequest = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "cyberrealistic_sd15_qnn228",
+                fingerprint = "3f067a1b943cf162f2b8f8588f6cf5824bd5b4c7d1d88d87164b9ca123616549"
+            )
+        )
+        assertEquals("sdcpp.sd-turbo", conflictingRequest.profile.profileId)
+        assertEquals(
+            "sd_turbo_512_experimental",
+            conflictingRequest.profile.provenance.recommendationId
+        )
+
         val fingerprintMatch = ImageExecutionProfileResolver.resolve(
             input(
                 recommendationId = null,
@@ -215,14 +253,188 @@ class ImageExecutionProfileResolverTest {
         val sdxl = resolve("sdxl_base_qnn228").profile.scheduler
         assertEquals(ImageSchedulerAlgorithm.DPMPP_2M, sdxl.algorithm)
         assertEquals(ImageTimestepSpacing.TRAILING, sdxl.timestepSpacing)
+        assertEquals(2, sdxl.order)
+        assertNull(resolve("sdxl_base_qnn228").profile.graph.htpArch)
 
         val dmd2 = resolve("realismsdxl_dmd2_alt_qnn228").profile.scheduler
         assertEquals(ImageSchedulerAlgorithm.DPMPP_2M, dmd2.algorithm)
         assertEquals(ImageTimestepSpacing.LINSPACE, dmd2.timestepSpacing)
+        assertEquals(2, dmd2.order)
 
         val gen5 = resolve("qualcomm_sd15_gen5_qnn").profile.scheduler
         assertEquals(ImageSchedulerAlgorithm.EULER, gen5.algorithm)
         assertEquals(ImageTimestepSpacing.LINSPACE, gen5.timestepSpacing)
+        assertEquals(1, gen5.stepsOffset)
+        assertTrue(gen5.skipPrkSteps)
+        assertTrue(gen5.scaleModelInput)
+        assertEquals(1, gen5.minSteps)
+        assertEquals(100, gen5.maxSteps)
+
+        val gen5Sd21 = resolve("qualcomm_sd21_gen5_qnn").profile.scheduler
+        assertEquals(ImageSchedulerAlgorithm.DDIM, gen5Sd21.algorithm)
+        assertEquals(ImagePredictionType.V_PREDICTION, gen5Sd21.predictionType)
+        assertEquals(ImageTimestepSpacing.LEADING, gen5Sd21.timestepSpacing)
+        assertEquals(1, gen5Sd21.stepsOffset)
+        assertTrue(gen5Sd21.skipPrkSteps)
+        assertEquals(1, gen5Sd21.minSteps)
+        assertEquals(100, gen5Sd21.maxSteps)
+    }
+
+    @Test
+    fun `DMD2 and Turbo builtins expose their exact family and variant`() {
+        val dmd2 = resolve("realismsdxl_dmd2_alt_qnn228")
+        assertEquals(LocalImageModelFamily.SDXL, dmd2.profile.family)
+        assertEquals(ImageModelVariant.DMD2_ALT, dmd2.profile.variant)
+        assertFalse(dmd2.profile.defaults.useCfg)
+        assertEquals(4, dmd2.layers.resolved.unetExecutionCount)
+        assertEquals(154, dmd2.layers.resolved.tokenCount)
+        assertEquals(listOf(ImageProfileSource.BUILT_IN), dmd2.sourceChain)
+
+        val turbo = resolve("sd_turbo_512_experimental")
+        assertEquals(LocalImageModelFamily.SD_TURBO, turbo.profile.family)
+        assertEquals(ImageModelVariant.SD_TURBO, turbo.profile.variant)
+        assertEquals(1.0, turbo.profile.defaults.cfgScale, 0.0)
+        assertFalse(turbo.profile.defaults.useCfg)
+        assertEquals(77, turbo.layers.resolved.tokenCount)
+        assertEquals(listOf(ImageProfileSource.BUILT_IN), turbo.sourceChain)
+
+        val zImageTurbo = resolve("z_image_turbo_q4")
+        assertEquals(LocalImageModelFamily.Z_IMAGE, zImageTurbo.profile.family)
+        assertEquals(ImageModelVariant.Z_IMAGE_TURBO, zImageTurbo.profile.variant)
+        assertEquals(8, zImageTurbo.profile.defaults.steps)
+        assertEquals(8, zImageTurbo.layers.resolved.unetExecutionCount)
+        assertEquals(1.0, zImageTurbo.profile.defaults.cfgScale, 0.0)
+        assertFalse(zImageTurbo.profile.defaults.useCfg)
+        assertEquals(77, zImageTurbo.layers.resolved.tokenCount)
+        assertEquals(listOf(ImageProfileSource.BUILT_IN), zImageTurbo.sourceChain)
+    }
+
+    @Test
+    fun `recommended CFG models expose concise family defaults and model tuned controls`() {
+        val expectedNegativePrompts = mapOf(
+            "cyberrealistic_sd15_qnn228" to RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT,
+            "realisticvisionhyper_sd15_qnn228" to RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT,
+            "dreamshaper_sd15_qnn228" to RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
+            "meinamix_sd15_qnn228" to RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT,
+            "sdxl_base_qnn228" to RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT,
+            "animagine_xl_v4_qnn228" to RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT,
+            "cyberrealisticxl_qnn228" to RecommendedImageDefaults.CYBERREALISTIC_XL_NEGATIVE_PROMPT,
+            "qualcomm_sd15_gen5_qnn" to RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
+            "qualcomm_sd21_gen5_qnn" to RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
+            "qualcomm_controlnet_canny_gen5_qnn" to RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
+            "sd15_mnn_512_quality" to RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
+            "mnn_sana_edit_v2" to RecommendedImageDefaults.EDIT_NEGATIVE_PROMPT,
+            "qwen_image_2512_q2" to RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT,
+            "longcat_image_q4" to RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT
+        )
+
+        expectedNegativePrompts.forEach { (id, expected) ->
+            val profile = resolve(id).profile
+            assertTrue("$id must expose its executable negative branch", profile.capabilities.supportsNegativePrompt)
+            assertTrue("$id must tokenize negative and positive prompts separately", profile.tokenizer.separateNegativePrompt)
+            assertEquals(id, expected, profile.defaults.defaultNegativePrompt)
+        }
+
+        val animagine = resolve("animagine_xl_v4_qnn228").profile.defaults
+        assertEquals(RecommendedImageDefaults.ANIMAGINE_XL_STEPS, animagine.steps)
+        assertEquals(RecommendedImageDefaults.ANIMAGINE_XL_CFG, animagine.cfgScale, 0.0)
+
+        val cyberXl = resolve("cyberrealisticxl_qnn228").profile.defaults
+        assertEquals(RecommendedImageDefaults.CYBERREALISTIC_XL_STEPS, cyberXl.steps)
+        assertEquals(RecommendedImageDefaults.CYBERREALISTIC_XL_CFG, cyberXl.cfgScale, 0.0)
+    }
+
+    @Test
+    fun `conditional only recommendations never expose or accept a negative prompt branch`() {
+        listOf(
+            "realismsdxl_dmd2_alt_qnn228",
+            "sd_turbo_512_experimental",
+            "z_image_turbo_q4",
+            "flux2_klein_4b_q4"
+        ).forEach { id ->
+            val profile = resolve(id).profile
+            assertFalse("$id must remain conditional-only", profile.defaults.useCfg)
+            assertFalse("$id must not advertise negative prompts", profile.capabilities.supportsNegativePrompt)
+            assertFalse("$id must not allocate a negative token branch", profile.tokenizer.separateNegativePrompt)
+            assertNull("$id must not inject a default negative prompt", profile.defaults.defaultNegativePrompt)
+        }
+        listOf(
+            "sd_turbo_512_experimental",
+            "z_image_turbo_q4",
+            "flux2_klein_4b_q4"
+        ).forEach { id ->
+            assertEquals(
+                "$id must retain one active tokenizer branch of parsing capacity",
+                77,
+                resolve(id).layers.resolved.tokenCount
+            )
+        }
+
+        val unsupported = expectResolutionFailure {
+            ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = "sd_turbo_512_experimental",
+                    runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                    family = LocalImageModelFamily.SD_TURBO,
+                    userOverrides = ImageGenerationOverrides(
+                        negativePrompt = "blur",
+                        negativePromptSpecified = true
+                    )
+                )
+            )
+        }
+        assertTrue(unsupported.validation.issues.any { it.code == "NEGATIVE_PROMPT_UNSUPPORTED" })
+
+        val explicitlyEmpty = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "sd_turbo_512_experimental",
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.SD_TURBO,
+                userOverrides = ImageGenerationOverrides(
+                    negativePrompt = "",
+                    negativePromptSpecified = true
+                )
+            )
+        )
+        assertEquals("", explicitlyEmpty.profile.defaults.defaultNegativePrompt)
+
+        listOf(
+            LocalImageModelFamily.SD_TURBO,
+            LocalImageModelFamily.Z_IMAGE,
+            LocalImageModelFamily.FLUX
+        ).forEach { family ->
+            val generic = ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = null,
+                    runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                    family = family
+                )
+            ).profile
+            assertFalse("$family generic fallback must remain conditional-only", generic.defaults.useCfg)
+            assertFalse(generic.capabilities.supportsNegativePrompt)
+            assertFalse(generic.tokenizer.separateNegativePrompt)
+        }
+    }
+
+    @Test
+    fun `generic flow-family fallbacks keep native workflow step counts`() {
+        val expectedSteps = mapOf(
+            LocalImageModelFamily.Z_IMAGE to 8,
+            LocalImageModelFamily.QWEN_IMAGE to 40,
+            LocalImageModelFamily.LONGCAT_IMAGE to 20
+        )
+
+        expectedSteps.forEach { (family, steps) ->
+            val profile = ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = null,
+                    runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                    family = family
+                )
+            ).profile
+            assertEquals("$family generic step count", steps, profile.defaults.steps)
+            assertEquals(ImageSchedulerAlgorithm.FLOW_MATCH, profile.scheduler.algorithm)
+        }
     }
 
     @Test
@@ -280,6 +492,239 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
+    fun `sidecar behavior overrides builtin behavior and resizes tensor shapes`() {
+        val resolution = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "sd_turbo_512_experimental",
+                sidecar = ImageProfileSidecar(
+                    behavior = ImagePackageBehaviorConfig(
+                        family = LocalImageModelFamily.SDXL,
+                        variant = ImageModelVariant.DMD2_ALT,
+                        defaultPrompt = "sidecar prompt",
+                        steps = 6,
+                        cfgScale = 2.5,
+                        scheduler = ImageSchedulerAlgorithm.DPMPP_2M,
+                        width = 768,
+                        height = 512,
+                        useCfg = true
+                    )
+                )
+            )
+        )
+
+        assertEquals(LocalImageModelFamily.SDXL, resolution.profile.family)
+        assertEquals(ImageModelVariant.DMD2_ALT, resolution.profile.variant)
+        assertEquals(ImageSchedulerAlgorithm.DPMPP_2M, resolution.profile.scheduler.algorithm)
+        assertEquals(6, resolution.profile.scheduler.defaultSteps)
+        assertEquals(6, resolution.profile.defaults.steps)
+        assertEquals(2.5, resolution.profile.defaults.cfgScale, 0.0)
+        assertTrue(resolution.profile.defaults.useCfg)
+        assertEquals(768, resolution.profile.defaults.width)
+        assertEquals(512, resolution.profile.defaults.height)
+        assertEquals(listOf(1, 4, 64, 96), resolution.profile.latent.initialShape)
+        assertEquals(listOf(1, 4, 64, 96), resolution.profile.vae.inputShape)
+        assertEquals(listOf(1, 3, 512, 768), resolution.profile.vae.outputShape)
+
+        listOf(
+            "family",
+            "variant",
+            "scheduler.algorithm",
+            "scheduler.defaultSteps",
+            "defaults.defaultPrompt",
+            "defaults.steps",
+            "defaults.cfgScale",
+            "defaults.width",
+            "defaults.height",
+            "defaults.useCfg",
+            "latent.initialShape",
+            "vae.inputShape",
+            "vae.outputShape"
+        ).forEach { field ->
+            assertEquals(field, ImageProfileSource.SIDECAR, resolution.fieldSources.getValue(field))
+        }
+        assertEquals(ImageProfileSource.BUILT_IN, resolution.fieldSources.getValue("profileId"))
+        assertEquals(
+            listOf(ImageProfileSource.SIDECAR, ImageProfileSource.BUILT_IN),
+            resolution.sourceChain
+        )
+        assertEquals(resolution.sourceChain, resolution.profile.provenance.sources)
+    }
+
+    @Test
+    fun `cfg zero package behavior remains an explicit unconditional cfg branch`() {
+        val resolution = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "sd_turbo_512_experimental",
+                sidecar = ImageProfileSidecar(
+                    behavior = ImagePackageBehaviorConfig(cfgScale = 0.0)
+                )
+            )
+        )
+
+        assertEquals(0.0, resolution.profile.defaults.cfgScale, 0.0)
+        assertTrue(resolution.profile.defaults.useCfg)
+        assertEquals(
+            resolution.layers.resolved.timetableCount * 2,
+            resolution.layers.resolved.unetExecutionCount
+        )
+    }
+
+    @Test
+    fun `manifest behavior overrides sidecar behavior field by field`() {
+        val resolution = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "sd_turbo_512_experimental",
+                manifestBehavior = ImagePackageBehaviorConfig(
+                    family = LocalImageModelFamily.SD_TURBO,
+                    variant = ImageModelVariant.SD_TURBO,
+                    defaultPrompt = "manifest prompt",
+                    steps = 4,
+                    cfgScale = 1.0,
+                    scheduler = ImageSchedulerAlgorithm.EULER_A,
+                    width = 768,
+                    height = 576,
+                    useCfg = false
+                ),
+                sidecar = ImageProfileSidecar(
+                    behavior = ImagePackageBehaviorConfig(
+                        family = LocalImageModelFamily.SDXL,
+                        variant = ImageModelVariant.DMD2_ALT,
+                        defaultPrompt = "sidecar prompt",
+                        defaultNegativePrompt = "sidecar negative",
+                        steps = 7,
+                        cfgScale = 3.0,
+                        scheduler = ImageSchedulerAlgorithm.DPMPP_2M,
+                        width = 640,
+                        height = 512,
+                        useCfg = true
+                    )
+                )
+            )
+        )
+
+        assertEquals(LocalImageModelFamily.SD_TURBO, resolution.profile.family)
+        assertEquals(ImageModelVariant.SD_TURBO, resolution.profile.variant)
+        assertEquals(ImageSchedulerAlgorithm.EULER_A, resolution.profile.scheduler.algorithm)
+        assertEquals(4, resolution.profile.defaults.steps)
+        assertEquals(1.0, resolution.profile.defaults.cfgScale, 0.0)
+        assertFalse(resolution.profile.defaults.useCfg)
+        assertEquals("manifest prompt", resolution.profile.defaults.defaultPrompt)
+        assertEquals("sidecar negative", resolution.profile.defaults.defaultNegativePrompt)
+        assertEquals(768, resolution.profile.defaults.width)
+        assertEquals(576, resolution.profile.defaults.height)
+        assertEquals(listOf(1, 4, 72, 96), resolution.profile.latent.initialShape)
+        assertEquals(listOf(1, 4, 72, 96), resolution.profile.vae.inputShape)
+        assertEquals(listOf(1, 3, 576, 768), resolution.profile.vae.outputShape)
+
+        listOf(
+            "family",
+            "variant",
+            "scheduler.algorithm",
+            "scheduler.defaultSteps",
+            "defaults.defaultPrompt",
+            "defaults.steps",
+            "defaults.cfgScale",
+            "defaults.width",
+            "defaults.height",
+            "defaults.useCfg",
+            "latent.initialShape",
+            "vae.inputShape",
+            "vae.outputShape"
+        ).forEach { field ->
+            assertEquals(field, ImageProfileSource.MANIFEST, resolution.fieldSources.getValue(field))
+        }
+        assertEquals(
+            ImageProfileSource.SIDECAR,
+            resolution.fieldSources.getValue("defaults.defaultNegativePrompt")
+        )
+        assertEquals(
+            listOf(
+                ImageProfileSource.MANIFEST,
+                ImageProfileSource.SIDECAR,
+                ImageProfileSource.BUILT_IN
+            ),
+            resolution.sourceChain
+        )
+        assertEquals(ImageProfileSource.MANIFEST, resolution.profile.provenance.primarySource)
+        assertEquals(resolution.sourceChain, resolution.profile.provenance.sources)
+    }
+
+    @Test
+    fun `user overrides are highest priority and resize package tensor shapes`() {
+        val resolution = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "sd_turbo_512_experimental",
+                manifestBehavior = ImagePackageBehaviorConfig(
+                    steps = 5,
+                    cfgScale = 1.0,
+                    scheduler = ImageSchedulerAlgorithm.EULER_A,
+                    width = 768,
+                    height = 576,
+                    useCfg = false
+                ),
+                sidecar = ImageProfileSidecar(
+                    behavior = ImagePackageBehaviorConfig(
+                        steps = 7,
+                        cfgScale = 3.0,
+                        scheduler = ImageSchedulerAlgorithm.DPMPP_2M,
+                        width = 640,
+                        height = 512,
+                        useCfg = true
+                    )
+                ),
+                userOverrides = ImageGenerationOverrides(
+                    scheduler = ImageSchedulerAlgorithm.DPMPP_2M,
+                    steps = 3,
+                    cfgScale = 2.0,
+                    useCfg = true,
+                    width = 896,
+                    height = 640,
+                    seed = 2_026_071_701L
+                )
+            )
+        )
+
+        assertEquals(ImageSchedulerAlgorithm.DPMPP_2M, resolution.profile.scheduler.algorithm)
+        assertEquals(3, resolution.profile.defaults.steps)
+        assertEquals(2.0, resolution.profile.defaults.cfgScale, 0.0)
+        assertTrue(resolution.profile.defaults.useCfg)
+        assertEquals(896, resolution.profile.defaults.width)
+        assertEquals(640, resolution.profile.defaults.height)
+        assertEquals(2_026_071_701L, resolution.profile.defaults.seed)
+        assertEquals(listOf(1, 4, 80, 112), resolution.profile.latent.initialShape)
+        assertEquals(listOf(1, 4, 80, 112), resolution.profile.vae.inputShape)
+        assertEquals(listOf(1, 3, 640, 896), resolution.profile.vae.outputShape)
+
+        listOf(
+            "scheduler",
+            "defaults.steps",
+            "defaults.cfgScale",
+            "defaults.useCfg",
+            "defaults.width",
+            "defaults.height",
+            "defaults.seed",
+            "latent.initialShape",
+            "vae.inputShape",
+            "vae.outputShape"
+        ).forEach { field ->
+            assertEquals(field, ImageProfileSource.USER_OVERRIDE, resolution.fieldSources.getValue(field))
+        }
+        assertEquals(
+            listOf(
+                ImageProfileSource.USER_OVERRIDE,
+                ImageProfileSource.MANIFEST,
+                ImageProfileSource.SIDECAR,
+                ImageProfileSource.BUILT_IN
+            ),
+            resolution.sourceChain
+        )
+        assertEquals(ImageProfileSource.USER_OVERRIDE, resolution.profile.provenance.primarySource)
+        assertEquals(resolution.sourceChain, resolution.profile.provenance.sources)
+        assertEquals(896, resolution.layers.resolved.width)
+        assertEquals(640, resolution.layers.resolved.height)
+    }
+
+    @Test
     fun `capability discovery wins over generic fallback when no exact recommendation exists`() {
         val resolution = ImageExecutionProfileResolver.resolve(
             input(
@@ -295,6 +740,12 @@ class ImageExecutionProfileResolverTest {
 
         assertEquals(ImageModelVariant.FLUX2_KLEIN, resolution.profile.variant)
         assertEquals(LocalImageModelFamily.FLUX, resolution.profile.family)
+        assertEquals(ImageSchedulerAlgorithm.FLOW_MATCH, resolution.profile.scheduler.algorithm)
+        assertEquals(ImagePredictionType.FLOW, resolution.profile.scheduler.predictionType)
+        assertEquals(4, resolution.profile.defaults.steps)
+        assertEquals(1.0, resolution.profile.defaults.cfgScale, 0.0)
+        assertEquals(1024, resolution.profile.defaults.width)
+        assertEquals(setOf(ImageSchedulerAlgorithm.FLOW_MATCH), resolution.profile.capabilities.supportedSchedulers)
         assertEquals(ImageProfileSource.CAPABILITY_DISCOVERY, resolution.profile.provenance.primarySource)
         assertEquals(listOf(ImageProfileSource.CAPABILITY_DISCOVERY), resolution.sourceChain)
     }
@@ -324,18 +775,36 @@ class ImageExecutionProfileResolverTest {
     @Test
     fun `built in capability claims expose only implemented sampler and weighting paths`() {
         val stable = resolve("sd_turbo_512_experimental").profile
+        assertEquals(
+            setOf(
+                ImageSchedulerAlgorithm.EULER_A,
+                ImageSchedulerAlgorithm.EULER,
+                ImageSchedulerAlgorithm.DPMPP_2M
+            ),
+            stable.capabilities.supportedSchedulers
+        )
         assertFalse(ImageSchedulerAlgorithm.PNDM_PLMS in stable.capabilities.supportedSchedulers)
         assertFalse(stable.capabilities.supportsPromptWeighting)
         assertFalse(stable.tokenizer.supportsPromptWeighting)
 
         listOf(
             resolve("cyberrealistic_sd15_qnn228").profile,
-            resolve("qualcomm_sd15_gen5_qnn").profile,
             resolve("sd15_mnn_512_quality").profile
         ).forEach { profile ->
             assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, profile.tokenizer.backend)
             assertTrue(profile.tokenizer.supportsPromptWeighting)
             assertTrue(profile.capabilities.supportsPromptWeighting)
+        }
+        listOf(
+            resolve("qualcomm_sd15_gen5_qnn"),
+            resolve("qualcomm_sd21_gen5_qnn"),
+            resolve("qualcomm_controlnet_canny_gen5_qnn")
+        ).forEach { resolution ->
+            assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, resolution.profile.tokenizer.backend)
+            assertFalse(resolution.profile.tokenizer.supportsPromptWeighting)
+            assertFalse(resolution.profile.capabilities.supportsPromptWeighting)
+            assertFalse(resolution.layers.resolved.promptWeightingSupported)
+            assertEquals(154, resolution.layers.resolved.tokenCount)
         }
         val sana = resolve("mnn_sana_edit_v2").profile
         assertFalse(sana.tokenizer.supportsPromptWeighting)
@@ -369,6 +838,24 @@ class ImageExecutionProfileResolverTest {
         ).profile
         assertFalse(genericMnn.tokenizer.supportsPromptWeighting)
         assertFalse(genericMnn.capabilities.supportsPromptWeighting)
+    }
+
+    @Test
+    fun `modern stable diffusion builtins retain model-specific flow defaults`() {
+        val flux = resolve("flux2_klein_4b_q4").profile
+        assertEquals(4, flux.defaults.steps)
+        assertEquals(1.0, flux.defaults.cfgScale, 0.0)
+        assertEquals(setOf(ImageSchedulerAlgorithm.FLOW_MATCH), flux.capabilities.supportedSchedulers)
+
+        val qwen = resolve("qwen_image_2512_q2").profile
+        assertEquals(40, qwen.defaults.steps)
+        assertEquals(2.5, qwen.defaults.cfgScale, 0.0)
+        assertEquals(setOf(ImageSchedulerAlgorithm.FLOW_MATCH), qwen.capabilities.supportedSchedulers)
+
+        val longCat = resolve("longcat_image_q4").profile
+        assertEquals(20, longCat.defaults.steps)
+        assertEquals(5.0, longCat.defaults.cfgScale, 0.0)
+        assertEquals(setOf(ImageSchedulerAlgorithm.FLOW_MATCH), longCat.capabilities.supportedSchedulers)
     }
 
     @Test
@@ -408,7 +895,10 @@ class ImageExecutionProfileResolverTest {
         assertEquals(2_026_071_700L, resolution.profile.defaults.seed)
         assertEquals("", resolution.profile.defaults.defaultNegativePrompt)
         assertEquals(ImageProfileSource.USER_OVERRIDE, resolution.fieldSources.getValue("defaults.steps"))
-        assertEquals(ImageProfileSource.USER_OVERRIDE, resolution.sourceChain.last())
+        assertEquals(
+            listOf(ImageProfileSource.USER_OVERRIDE, ImageProfileSource.BUILT_IN),
+            resolution.sourceChain
+        )
         assertEquals(22, resolution.layers.resolved.steps)
     }
 
@@ -520,7 +1010,14 @@ class ImageExecutionProfileResolverTest {
         val edit = resolve("mnn_sana_edit_v2").profile
         assertEquals(ImageTask.IMAGE_EDIT, edit.task)
         assertTrue(edit.capabilities.requiresInputImage)
-        assertTrue(edit.capabilities.supportsMask)
+        assertFalse(edit.capabilities.supportsMask)
+        assertEquals(listOf(1, 256), edit.conditioning.textEncoderInputShape)
+        assertEquals(listOf(listOf(1, 256, 1)), edit.conditioning.textEncoderOutputShapes)
+        assertTrue(edit.tokenizer.separateNegativePrompt)
+        assertEquals(256, resolve("mnn_sana_edit_v2").layers.resolved.tokenCount)
+        assertEquals(10, edit.defaults.steps)
+        assertEquals(2, edit.scheduler.minSteps)
+        assertEquals(50, edit.scheduler.maxSteps)
     }
 
     private fun resolve(recommendationId: String): ImageExecutionProfileResolution =
@@ -532,6 +1029,7 @@ class ImageExecutionProfileResolverTest {
         runtime: LocalImageRuntime = LocalImageRuntime.QNN_HTP,
         family: LocalImageModelFamily = LocalImageModelFamily.SD15,
         manifestProfile: ImageExecutionProfile? = null,
+        manifestBehavior: ImagePackageBehaviorConfig? = null,
         sidecar: ImageProfileSidecar? = null,
         capabilityDiscovery: ImageCapabilityDiscovery? = null,
         recommendationEvidence: ImageRecommendationEvidence = ImageRecommendationEvidence(),
@@ -544,6 +1042,7 @@ class ImageExecutionProfileResolverTest {
         recommendationId = recommendationId,
         recommendationRevision = "test-revision",
         manifestProfile = manifestProfile,
+        manifestBehavior = manifestBehavior,
         sidecar = sidecar,
         capabilityDiscovery = capabilityDiscovery,
         recommendationEvidence = recommendationEvidence,

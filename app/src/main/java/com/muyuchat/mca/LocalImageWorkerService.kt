@@ -18,11 +18,14 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
+internal const val LOCAL_IMAGE_GENERATION_CANCELLED_CODE = "image_generation_cancelled"
+
 class LocalImageWorkerService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val stateLock = Any()
     private lateinit var provider: LocalImageProvider
     private lateinit var executionJournal: ImageExecutionJournalStore
+    private lateinit var workerInputStore: LocalImageWorkerInputStore
 
     @Volatile
     private var activeGeneration: ActiveGeneration? = null
@@ -45,7 +48,10 @@ class LocalImageWorkerService : Service() {
             } ?: return false
             if (!active.tryRequestCancellation()) return false
             requestJournalCancellation(active.requestId)
-            return provider.cancel()
+            runCatching { provider.cancel() }
+            active.job?.cancel(CancellationException("Local image generation was cancelled."))
+            publishCancellationTerminal(active, "Local image generation was cancelled.")
+            return true
         }
 
         override fun generate(requestJson: String, callback: ILocalImageWorkerCallback): Boolean {
@@ -81,7 +87,7 @@ class LocalImageWorkerService : Service() {
                 return false
             }
 
-            val effectiveOptions = if (request.options.seed == null) {
+            val effectiveOptions = if (request.options.seed == null || request.options.seed == -1) {
                 request.options.copy(
                     seed = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
                 )
@@ -101,9 +107,12 @@ class LocalImageWorkerService : Service() {
             }
 
             val job = scope.launch {
-                var transferredOutput: File? = null
+                var transferredOutputs: List<File> = emptyList()
+                var workerInputs: LocalImageWorkerInputs? = null
                 try {
-                    prepareExecutionJournal(request, effectiveOptions)
+                    workerInputs = workerInputStore.materialize(request.requestId, effectiveOptions)
+                    val workerOptions = workerInputs.options
+                    prepareExecutionJournal(request, workerOptions, workerInputs.directory)
                     val startedDelivered = sendProgress(
                         callback,
                         request.requestId,
@@ -118,7 +127,7 @@ class LocalImageWorkerService : Service() {
                             width = 0,
                             height = 0,
                             cancelRequested = false,
-                            requestOptionsJson = effectiveOptions.toJson().toString()
+                            requestOptionsJson = workerOptions.inputAuditJson().toString()
                         )
                     )
                     if (!startedDelivered) {
@@ -154,7 +163,7 @@ class LocalImageWorkerService : Service() {
                         provider.generate(
                             model = request.model,
                             prompt = request.prompt,
-                            options = effectiveOptions,
+                            options = workerOptions,
                             onProgress = { progress ->
                                 updateJournalFromProgress(request.requestId, progress)
                                 val delivered = sendProgress(
@@ -169,20 +178,33 @@ class LocalImageWorkerService : Service() {
                     coroutineContext.ensureActive()
                     advanceJournalTo(request.requestId, ImageExecutionPhase.PUBLISHING)
                     updateJournalFromNativeResult(request.requestId, result.executionMetadataJson)
-                    val target = prepareResultTarget(request.requestId, result.mimeType)
-                    updateJournalOutputPath(request.requestId, target.partial)
-                    val output = writeResultFile(target, result)
-                    updateJournalOutputPath(request.requestId, output)
-                    transferredOutput = output
-                    val outputBytes = output.length()
+                    val publishedOutputs = result.outputs.map { generated ->
+                        val target = prepareResultTarget(
+                            requestId = request.requestId,
+                            mimeType = generated.mimeType,
+                            index = generated.index
+                        )
+                        updateJournalOutputPath(request.requestId, target.partial)
+                        val output = writeResultFile(target, generated.bytes)
+                        updateJournalOutputPath(request.requestId, output)
+                        generated to output
+                    }
+                    transferredOutputs = publishedOutputs.map { it.second }
+                    val outputBytes = transferredOutputs.sumOf(File::length)
                     if (!active.tryBeginResultPublication()) {
                         throw CancellationException("Image generation was cancelled before result publication.")
                     }
                     val delivered = sendComplete(
                         callback = callback,
                         requestId = request.requestId,
-                        outputFile = output,
-                        mimeType = result.mimeType,
+                        outputs = publishedOutputs.map { (generated, output) ->
+                            LocalImageWorkerProtocol.OutputEnvelope(
+                                index = generated.index,
+                                outputPath = output.canonicalPath,
+                                mimeType = generated.mimeType,
+                                seed = generated.seed
+                            )
+                        },
                         executionMetadataJson = result.executionMetadataJson
                     )
                     Log.i(
@@ -200,7 +222,7 @@ class LocalImageWorkerService : Service() {
                     )
                     if (delivered) {
                         markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)
-                        transferredOutput = null
+                        transferredOutputs = emptyList()
                     } else {
                         markJournalTerminal(
                             request.requestId,
@@ -209,37 +231,43 @@ class LocalImageWorkerService : Service() {
                             errorMessage = "The generated image could not be delivered to the client."
                         )
                     }
-                } catch (_: CancellationException) {
-                    finishJournalCancelled(request.requestId, "The image client or worker was cancelled.")
+                } catch (error: CancellationException) {
+                    val message = error.message ?: "The image client or worker was cancelled."
+                    finishJournalCancelled(request.requestId, message)
+                    publishCancellationTerminal(active, message)
                     // Client death and service teardown have no live callback to notify.
                 } catch (error: Throwable) {
-                    if (active.cancelRequested) {
-                        finishJournalCancelled(
-                            request.requestId,
-                            error.message ?: "Image generation was cancelled."
-                        )
-                    } else {
+                    val errorCode = localImageWorkerErrorCode(error)
+                    val message = error.message ?: "Local image generation failed."
+                    if (active.tryBeginErrorPublication()) {
                         markJournalTerminal(
                             request.requestId,
                             ImageExecutionPhase.FAILED,
-                            errorCode = "GENERATION_FAILED",
-                            errorMessage = error.message ?: "Local image generation failed."
+                            errorCode = errorCode.uppercase(),
+                            errorMessage = message
                         )
+                        sendError(
+                            callback = callback,
+                            requestId = request.requestId,
+                            code = errorCode,
+                            message = message
+                        )
+                    } else if (active.cancelRequested) {
+                        finishJournalCancelled(request.requestId, message)
+                        publishCancellationTerminal(active, message)
                     }
-                    sendError(
-                        callback = callback,
-                        requestId = request.requestId,
-                        code = "generation_failed",
-                        message = error.message ?: "Local image generation failed."
-                    )
                 } finally {
-                    transferredOutput?.delete()
+                    transferredOutputs.forEach { it.delete() }
+                    workerInputStore.cleanup(workerInputs?.directory)
                     finish(active)
                 }
             }
             synchronized(stateLock) {
                 if (activeGeneration === active) {
                     active.job = job
+                    if (active.cancelRequested) {
+                        job.cancel(CancellationException("Local image generation was cancelled."))
+                    }
                 } else {
                     job.cancel()
                 }
@@ -251,6 +279,8 @@ class LocalImageWorkerService : Service() {
     override fun onCreate() {
         super.onCreate()
         provider = LocalImageProvider(applicationContext)
+        workerInputStore = LocalImageWorkerInputStore(applicationContext)
+        workerInputStore.clearOrphanedWorkerInputs()
         executionJournal = ImageExecutionJournalStore(
             File(filesDir, IMAGE_EXECUTION_JOURNAL_DIRECTORY)
         )
@@ -315,16 +345,14 @@ class LocalImageWorkerService : Service() {
     private fun sendComplete(
         callback: ILocalImageWorkerCallback,
         requestId: String,
-        outputFile: File,
-        mimeType: String,
+        outputs: List<LocalImageWorkerProtocol.OutputEnvelope>,
         executionMetadataJson: String
     ): Boolean = runCatching {
         callback.onComplete(
             LocalImageWorkerProtocol.result(
                 requestId = requestId,
                 workerPid = Process.myPid(),
-                outputPath = outputFile.canonicalPath,
-                mimeType = mimeType,
+                outputs = outputs,
                 executionMetadataJson = executionMetadataJson
             )
         )
@@ -346,7 +374,24 @@ class LocalImageWorkerService : Service() {
         )
     }.isSuccess
 
-    private fun prepareResultTarget(requestId: String, mimeType: String): ResultFileTarget {
+    private fun publishCancellationTerminal(
+        active: ActiveGeneration,
+        message: String
+    ): Boolean {
+        if (!active.tryBeginCancellationTerminalPublication()) return false
+        return sendError(
+            callback = active.callback,
+            requestId = active.requestId,
+            code = LOCAL_IMAGE_GENERATION_CANCELLED_CODE,
+            message = message.ifBlank { "Local image generation was cancelled." }
+        )
+    }
+
+    private fun prepareResultTarget(
+        requestId: String,
+        mimeType: String,
+        index: Int = 0
+    ): ResultFileTarget {
         val outputDir = resultDirectory().apply { mkdirs() }
         cleanupStaleResults()
         val safeId = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80)
@@ -355,58 +400,70 @@ class LocalImageWorkerService : Service() {
             "image/webp" -> "webp"
             else -> "png"
         }
-        val baseName = "${safeId.ifBlank { "image" }}-${UUID.randomUUID()}"
+        val baseName = "${safeId.ifBlank { "image" }}-${UUID.randomUUID()}-${index.toString().padStart(3, '0')}"
         return ResultFileTarget(
             partial = File(outputDir, "$baseName.$extension.part"),
             output = File(outputDir, "$baseName.$extension")
         )
     }
 
-    private fun writeResultFile(target: ResultFileTarget, result: LocalImageResult): File {
-        target.partial.outputStream().use { it.write(result.bytes) }
+    private fun writeResultFile(target: ResultFileTarget, bytes: ByteArray): File {
+        target.partial.outputStream().use { it.write(bytes) }
         check(target.partial.renameTo(target.output)) { "Unable to publish local image worker output." }
         return target.output
     }
 
     private fun prepareExecutionJournal(
         request: LocalImageWorkerProtocol.GenerateRequest,
-        effectiveOptions: LocalImageGenerationOptions
+        effectiveOptions: LocalImageGenerationOptions,
+        inputDirectory: File
     ) {
-        runCatching {
-            val resolution = resolveLocalImageExecutionProfile(
-                model = request.model,
-                options = effectiveOptions,
-                bundleRoot = request.model.workerBundleRoot()
-            )
-            executionJournal.read(request.requestId)?.let { existing ->
-                require(existing.phase.terminal) {
-                    "A non-terminal image request already uses id ${request.requestId}."
-                }
-                executionJournal.deleteTerminal(request.requestId)
+        val resolution = resolveLocalImageExecutionProfile(
+            model = request.model,
+            options = effectiveOptions,
+            bundleRoot = request.model.workerBundleRoot()
+        )
+        executionJournal.read(request.requestId)?.let { existing ->
+            require(existing.phase.terminal) {
+                "A non-terminal image request already uses id ${request.requestId}."
             }
-            val now = System.currentTimeMillis().coerceAtLeast(1L)
-            executionJournal.create(
-                ImageExecutionJournalEntry(
-                    requestId = request.requestId,
-                    modelFingerprint = resolution.profile.modelFingerprint,
-                    profileFingerprint = resolution.profile.bindingFingerprint,
-                    requestedSummaryJson = effectiveOptions.toJson()
-                        .put("runtime", request.model.runtime.name)
-                        .put("family", request.model.family.name)
-                        .toString(),
-                    resolvedSummaryJson = ImageExecutionProfileNativeContract
-                        .toNativeParamsJson(resolution)
-                        .toString(),
-                    phase = ImageExecutionPhase.PREPARING,
-                    step = 0,
-                    steps = resolution.layers.resolved.steps,
-                    workerPid = Process.myPid(),
-                    createdAtMs = now
+            check(executionJournal.deleteTerminal(request.requestId)) {
+                "Unable to replace terminal image journal ${request.requestId}."
+            }
+        }
+        val now = System.currentTimeMillis().coerceAtLeast(1L)
+        executionJournal.create(
+            ImageExecutionJournalEntry(
+                requestId = request.requestId,
+                modelFingerprint = resolution.profile.modelFingerprint,
+                profileFingerprint = resolution.profile.bindingFingerprint,
+                requestedSummaryJson = effectiveOptions.toJson()
+                    .apply {
+                        remove("inputImage")
+                        remove("maskImage")
+                        remove("controlImage")
+                        put("productInput", effectiveOptions.inputAuditJson())
+                    }
+                    .put("runtime", request.model.runtime.name)
+                    .put("family", request.model.family.name)
+                    .toString(),
+                resolvedSummaryJson = ImageExecutionProfileNativeContract
+                    .toNativeParamsJson(resolution)
+                    .put("productInput", effectiveOptions.inputAuditJson())
+                    .toString(),
+                phase = ImageExecutionPhase.PREPARING,
+                step = 0,
+                steps = resolution.layers.resolved.steps,
+                workerPid = Process.myPid(),
+                createdAtMs = now,
+                inputTempPaths = listOfNotNull(
+                    effectiveOptions.inputImage?.path,
+                    effectiveOptions.maskImage?.path,
+                    effectiveOptions.controlImage?.path,
+                    inputDirectory.canonicalPath
                 )
             )
-        }.onFailure { error ->
-            Log.w("MCA-LocalImage", "Unable to create execution journal", error)
-        }
+        )
     }
 
     private fun updateJournalFromProgress(requestId: String, progress: LocalImageProgress) {
@@ -490,18 +547,18 @@ class LocalImageWorkerService : Service() {
     }
 
     private fun updateJournalOutputPath(requestId: String, output: File) {
-        runCatching {
-            val current = executionJournal.read(requestId) ?: return@runCatching
-            if (current.phase.terminal) return@runCatching
-            executionJournal.update(
-                current.copy(
-                    outputTempPath = output.canonicalPath,
-                    updatedAtMs = System.currentTimeMillis().coerceAtLeast(current.updatedAtMs + 1L)
-                )
-            )
-        }.onFailure { error ->
-            Log.w("MCA-LocalImage", "Unable to persist image output path", error)
+        val current = executionJournal.read(requestId)
+            ?: error("Image execution journal disappeared before result publication.")
+        check(!current.phase.terminal) {
+            "Image execution journal became terminal before result publication."
         }
+        executionJournal.update(
+            current.copy(
+                outputTempPath = output.canonicalPath,
+                outputTempPaths = (current.outputTempPaths + output.canonicalPath).distinct(),
+                updatedAtMs = System.currentTimeMillis().coerceAtLeast(current.updatedAtMs + 1L)
+            )
+        )
     }
 
     private fun requestJournalCancellation(requestId: String) {
@@ -648,6 +705,11 @@ class LocalImageWorkerService : Service() {
 
         fun tryRequestCancellation(): Boolean = publicationGate.tryRequestCancellation()
 
+        fun tryBeginCancellationTerminalPublication(): Boolean =
+            publicationGate.tryBeginCancellationTerminalPublication()
+
+        fun tryBeginErrorPublication(): Boolean = publicationGate.tryBeginErrorPublication()
+
         private var lastStageTrace: List<String> = emptyList()
 
         fun withAccumulatedStages(progress: LocalImageProgress): LocalImageProgress = synchronized(this) {
@@ -668,19 +730,39 @@ class LocalImageWorkerService : Service() {
     }
 }
 
+internal fun localImageWorkerErrorCode(error: Throwable): String {
+    val raw = when (error) {
+        is LocalImageProductContractException -> error.code
+        is LocalImageWorkerRemoteException -> error.code
+        is ImageNativeExecutionContractException -> error.code
+        is ImageProfileResolutionException -> "invalid_image_execution_profile"
+        else -> "generation_failed"
+    }
+    return raw.trim()
+        .lowercase()
+        .replace(Regex("[^a-z0-9_.-]+"), "_")
+        .trim('_')
+        .take(80)
+        .ifBlank { "generation_failed" }
+}
+
 /**
- * Serializes the only two terminal contenders for a worker request. Result publication wins once
- * the output file is complete; cancellation wins only while native work is still in progress.
+ * Serializes result, cancellation, and normal-error terminal publication for a worker request.
+ * Result publication wins once the output file is complete; cancellation or error wins only while
+ * native work is still in progress.
  */
 internal class LocalImageWorkerPublicationGate {
     private enum class State {
         RUNNING,
         CANCELLATION_REQUESTED,
-        RESULT_PUBLICATION_STARTED
+        RESULT_PUBLICATION_STARTED,
+        ERROR_PUBLICATION_STARTED
     }
 
     @Volatile
     private var state: State = State.RUNNING
+
+    private var cancellationTerminalPublicationStarted: Boolean = false
 
     val cancelRequested: Boolean
         get() = state == State.CANCELLATION_REQUESTED
@@ -694,6 +776,20 @@ internal class LocalImageWorkerPublicationGate {
     fun tryRequestCancellation(): Boolean = synchronized(this) {
         if (state != State.RUNNING) return@synchronized false
         state = State.CANCELLATION_REQUESTED
+        true
+    }
+
+    fun tryBeginCancellationTerminalPublication(): Boolean = synchronized(this) {
+        if (state != State.CANCELLATION_REQUESTED || cancellationTerminalPublicationStarted) {
+            return@synchronized false
+        }
+        cancellationTerminalPublicationStarted = true
+        true
+    }
+
+    fun tryBeginErrorPublication(): Boolean = synchronized(this) {
+        if (state != State.RUNNING) return@synchronized false
+        state = State.ERROR_PUBLICATION_STARTED
         true
     }
 }

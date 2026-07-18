@@ -38,7 +38,9 @@
 #include "stb_image_write.h"
 #include "diffusion_scheduler.hpp"
 #include "image_conditioning.hpp"
+#include "image_execution_math.hpp"
 #include "jni_utf8_codec.hpp"
+#include "qnn_controlnet_execution.hpp"
 #include "qnn_image_pixel_range.hpp"
 #include "qnn_image_stage_trace.hpp"
 
@@ -4072,10 +4074,34 @@ bool write_vae_tensor_png(
     return true;
 }
 
+bool qnn_consumed_payload_sha256(
+        const void* payload,
+        size_t payload_bytes,
+        std::string* digest,
+        std::string* error) {
+    constexpr size_t kMaxAuditedArtifactBytes = 64U * 1024U * 1024U;
+    if (payload == nullptr || payload_bytes == 0U ||
+        payload_bytes > kMaxAuditedArtifactBytes || digest == nullptr || error == nullptr) {
+        if (error != nullptr) {
+            *error = "Consumed artifact bytes are empty or exceed the native SHA-256 audit limit.";
+        }
+        return false;
+    }
+    const auto* begin = static_cast<const uint8_t*>(payload);
+    const std::vector<uint8_t> consumed_bytes(begin, begin + payload_bytes);
+    *digest = mca::qnn::controlnet::sha256_hex_bytes(consumed_bytes);
+    if (digest->size() != 64U) {
+        *error = "Consumed artifact SHA-256 could not be derived.";
+        return false;
+    }
+    return true;
+}
+
 bool read_float_binary_file(
         const std::string& path,
         std::vector<float>* values,
-        std::string* error) {
+        std::string* error,
+        std::string* consumed_payload_sha256 = nullptr) {
     const long long bytes = file_size_or_zero(path);
     if (bytes <= 0 || bytes % static_cast<long long>(sizeof(float)) != 0) {
         *error = "Embedding file is missing, empty, or not f32 aligned: " + path;
@@ -4094,13 +4120,22 @@ bool read_float_binary_file(
         *error = "Failed to read embedding file: " + path;
         return false;
     }
+    if (consumed_payload_sha256 != nullptr &&
+        !qnn_consumed_payload_sha256(
+            values->data(),
+            static_cast<size_t>(bytes),
+            consumed_payload_sha256,
+            error)) {
+        return false;
+    }
     return true;
 }
 
 bool read_int32_binary_file(
         const std::string& path,
         std::vector<int32_t>* values,
-        std::string* error) {
+        std::string* error,
+        std::string* consumed_payload_sha256 = nullptr) {
     const long long bytes = file_size_or_zero(path);
     if (bytes <= 0 || bytes % static_cast<long long>(sizeof(int32_t)) != 0) {
         *error = "Token file is missing, empty, or not int32 aligned: " + path;
@@ -4119,6 +4154,44 @@ bool read_int32_binary_file(
         static_cast<std::streamsize>(bytes));
     if (!input.good()) {
         *error = "Failed to read token file: " + path;
+        return false;
+    }
+    if (consumed_payload_sha256 != nullptr &&
+        !qnn_consumed_payload_sha256(
+            values->data(),
+            static_cast<size_t>(bytes),
+            consumed_payload_sha256,
+            error)) {
+        return false;
+    }
+    return true;
+}
+
+bool qnn_file_sha256(
+        const std::string& path,
+        std::string* digest,
+        std::string* error) {
+    if (digest == nullptr || error == nullptr) return false;
+    const long long bytes = file_size_or_zero(path);
+    constexpr long long kMaxAuditedArtifactBytes = 64LL * 1024LL * 1024LL;
+    if (bytes <= 0 || bytes > kMaxAuditedArtifactBytes) {
+        *error = "Artifact is missing, empty, or exceeds the native SHA-256 audit limit.";
+        return false;
+    }
+    std::ifstream input(path.c_str(), std::ios::binary);
+    if (!input.good()) {
+        *error = "Failed to open the artifact for SHA-256 verification.";
+        return false;
+    }
+    std::vector<uint8_t> payload(static_cast<size_t>(bytes));
+    input.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+    if (!input.good()) {
+        *error = "Failed to read the complete artifact for SHA-256 verification.";
+        return false;
+    }
+    *digest = mca::qnn::controlnet::sha256_hex_bytes(payload);
+    if (digest->size() != 64U) {
+        *error = "Artifact SHA-256 could not be derived.";
         return false;
     }
     return true;
@@ -4175,6 +4248,32 @@ struct QnnNativeEffectiveEvidence {
     size_t positive_weighted_token_count = 0;
     size_t negative_weighted_token_count = 0;
     std::string prompt_weight_fingerprint;
+    std::string conditioning_artifact_sha256;
+    std::string task_mode = "text_to_image";
+    std::string control_image_path;
+    std::string control_image_sha256;
+    std::string control_image_preprocessed_sha256;
+    std::string control_image_preprocess = "none";
+    double control_strength = 0.0;
+    size_t control_image_execution_count = 0;
+    size_t controlnet_execution_count = 0;
+    size_t controlnet_residual_tensor_count = 0;
+    size_t controlnet_residual_write_count = 0;
+    size_t controlnet_residual_unet_reuse_count = 0;
+    bool controlnet_input_consumed = false;
+    std::string controlnet_conditioning_branch = "none";
+    std::string controlnet_graph_name;
+    uint32_t control_image_source_width = 0;
+    uint32_t control_image_source_height = 0;
+    uint32_t control_image_source_channels = 0;
+    uint32_t control_image_tensor_width = 0;
+    uint32_t control_image_tensor_height = 0;
+    uint32_t control_image_tensor_channels = 0;
+    int control_image_exif_orientation = 0;
+    size_t control_image_edge_pixel_count = 0;
+    uint64_t control_image_tensor_checksum = 0;
+    uint64_t controlnet_scaled_residual_checksum = 0;
+    std::string controlnet_input_buffer_sha256;
 };
 
 struct QnnConditioningEvidence {
@@ -4184,6 +4283,7 @@ struct QnnConditioningEvidence {
     size_t positive_weighted_token_count = 0;
     size_t negative_weighted_token_count = 0;
     std::string prompt_weight_fingerprint;
+    std::string conditioning_artifact_sha256;
     std::string embedding_disk_data_type;
 };
 
@@ -4257,7 +4357,8 @@ bool read_qnn_clip_token_weight_payload(
         std::vector<float>* token_weights,
         bool use_cfg,
         QnnConditioningEvidence* evidence,
-        std::string* error) {
+        std::string* error,
+        std::string* consumed_payload_sha256 = nullptr) {
     if (token_ids == nullptr || token_weights == nullptr ||
         evidence == nullptr || error == nullptr) {
         return false;
@@ -4316,11 +4417,18 @@ bool read_qnn_clip_token_weight_payload(
             return false;
         }
     }
-    return derive_qnn_token_execution_weight_evidence(
-        *token_ids,
-        *token_weights,
-        use_cfg,
-        evidence,
+    if (!derive_qnn_token_execution_weight_evidence(
+            *token_ids,
+            *token_weights,
+            use_cfg,
+            evidence,
+            error)) {
+        return false;
+    }
+    return consumed_payload_sha256 == nullptr || qnn_consumed_payload_sha256(
+        bytes.data(),
+        bytes.size(),
+        consumed_payload_sha256,
         error);
 }
 
@@ -4712,6 +4820,10 @@ bool parse_qnn_semantic_execution_contract(
         *error = "unconditionalBranch must exactly match useCfg.";
         return false;
     }
+    if (!contract->use_cfg && std::fabs(number_value - 1.0) > 1.0e-12) {
+        *error = "Conditional-only execution requires cfgScale=1 when useCfg=false.";
+        return false;
+    }
     if (!qnn_required_string_field(
             json,
             "negativePrompt",
@@ -4911,6 +5023,7 @@ std::string qnn_nonempty_bundle_file_named(
 
 bool resolve_qnn_conditioning_evidence(
         const std::string& bundle_root,
+        const std::string& consumed_artifact_sha256,
         const std::string& conditioning_format,
         size_t observed_token_ids,
         const std::string& params_json,
@@ -4919,6 +5032,37 @@ bool resolve_qnn_conditioning_evidence(
         std::string* error) {
     if (evidence == nullptr) {
         *error = "Conditioning evidence output is null.";
+        return false;
+    }
+    std::string requested_artifact_sha256;
+    if (!qnn_required_string_field(
+            params_json,
+            "conditioningArtifactSha256",
+            &requested_artifact_sha256,
+            error)) {
+        return false;
+    }
+    requested_artifact_sha256 = normalized_contract_enum(requested_artifact_sha256);
+    if (requested_artifact_sha256.size() != 64U ||
+        !std::all_of(
+            requested_artifact_sha256.begin(),
+            requested_artifact_sha256.end(),
+            [](unsigned char value) { return std::isxdigit(value) != 0; })) {
+        *error = "conditioningArtifactSha256 must be a 64-character SHA-256 value.";
+        return false;
+    }
+    evidence->conditioning_artifact_sha256 = normalized_contract_enum(
+        consumed_artifact_sha256);
+    if (evidence->conditioning_artifact_sha256.size() != 64U ||
+        !std::all_of(
+            evidence->conditioning_artifact_sha256.begin(),
+            evidence->conditioning_artifact_sha256.end(),
+            [](unsigned char value) { return std::isxdigit(value) != 0; })) {
+        *error = "The consumed conditioning artifact bytes have no valid SHA-256 evidence.";
+        return false;
+    }
+    if (evidence->conditioning_artifact_sha256 != requested_artifact_sha256) {
+        *error = "The conditioning artifact bytes differ from conditioningArtifactSha256.";
         return false;
     }
     const auto files = list_files_recursive(bundle_root);
@@ -5184,6 +5328,8 @@ std::string qnn_native_effective_json(
         << "\"positiveWeightedTokenCount\":" << evidence.positive_weighted_token_count << ","
         << "\"negativeWeightedTokenCount\":" << evidence.negative_weighted_token_count << ","
         << "\"promptWeightFingerprint\":" << quote(evidence.prompt_weight_fingerprint) << ","
+        << "\"conditioningArtifactSha256\":"
+        << quote(evidence.conditioning_artifact_sha256) << ","
         << "\"embeddingDiskDataType\":" << quote(evidence.embedding_disk_data_type) << ","
         << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(contract.vae_scaling_location)) << ","
         << "\"vaeScalingFactor\":" << contract.vae_scaling_factor << ","
@@ -5192,6 +5338,46 @@ std::string qnn_native_effective_json(
         << "\"height\":" << evidence.height << ","
         << "\"seed\":" << contract.seed << ","
         << "\"graphName\":" << quote(evidence.graph_name) << ","
+        << "\"taskMode\":" << quote(evidence.task_mode) << ","
+        << "\"batchCount\":1,"
+        << "\"inputImagePath\":\"\","
+        << "\"maskImagePath\":\"\","
+        << "\"controlImagePath\":" << quote(evidence.control_image_path) << ","
+        << "\"inputImageExecutionCount\":0,"
+        << "\"maskImageExecutionCount\":0,"
+        << "\"controlImageExecutionCount\":" << evidence.control_image_execution_count << ","
+        << "\"controlImageSha256\":" << quote(evidence.control_image_sha256) << ","
+        << "\"controlImagePreprocessedSha256\":"
+        << quote(evidence.control_image_preprocessed_sha256) << ","
+        << "\"controlImagePreprocess\":" << quote(evidence.control_image_preprocess) << ","
+        << "\"strength\":1,"
+        << "\"controlStrength\":" << evidence.control_strength << ","
+        << "\"controlStrengthApplied\":"
+        << (evidence.control_image_execution_count == 1U ? "true" : "false") << ","
+        << "\"clipSkip\":-1,"
+        << "\"controlNetExecutionCount\":" << evidence.controlnet_execution_count << ","
+        << "\"controlNetResidualTensorCount\":" << evidence.controlnet_residual_tensor_count << ","
+        << "\"controlNetResidualWriteCount\":" << evidence.controlnet_residual_write_count << ","
+        << "\"controlNetResidualUnetReuseCount\":"
+        << evidence.controlnet_residual_unet_reuse_count << ","
+        << "\"controlNetConditioningBranch\":"
+        << quote(evidence.controlnet_conditioning_branch) << ","
+        << "\"controlNetInputConsumed\":"
+        << (evidence.controlnet_input_consumed ? "true" : "false") << ","
+        << "\"controlNetGraph\":" << quote(evidence.controlnet_graph_name) << ","
+        << "\"controlImageSourceWidth\":" << evidence.control_image_source_width << ","
+        << "\"controlImageSourceHeight\":" << evidence.control_image_source_height << ","
+        << "\"controlImageSourceChannels\":" << evidence.control_image_source_channels << ","
+        << "\"controlImageTensorWidth\":" << evidence.control_image_tensor_width << ","
+        << "\"controlImageTensorHeight\":" << evidence.control_image_tensor_height << ","
+        << "\"controlImageTensorChannels\":" << evidence.control_image_tensor_channels << ","
+        << "\"controlImageExifOrientation\":" << evidence.control_image_exif_orientation << ","
+        << "\"controlImageEdgePixelCount\":" << evidence.control_image_edge_pixel_count << ","
+        << "\"controlImageTensorChecksum\":" << evidence.control_image_tensor_checksum << ","
+        << "\"controlNetInputBufferSha256\":"
+        << quote(evidence.controlnet_input_buffer_sha256) << ","
+        << "\"controlNetScaledResidualChecksum\":"
+        << evidence.controlnet_scaled_residual_checksum << ","
         << "\"fallback\":false"
         << "}";
     return out.str();
@@ -5310,6 +5496,215 @@ bool qnn_write_timestep_tensor(
     return false;
 }
 
+struct QnnControlNetLayout {
+    int latent_index = -1;
+    int timestep_index = -1;
+    int text_index = -1;
+    int image_index = -1;
+    mca::image::SpatialTensorShape image_shape;
+    std::vector<mca::qnn::controlnet::ResidualBinding> residual_bindings;
+};
+
+int qnn_exact_tensor_index(
+        const std::vector<QnnTensorBinding>& tensors,
+        const std::vector<std::string>& accepted_names,
+        std::string* error) {
+    int resolved = -1;
+    for (size_t index = 0; index < tensors.size(); ++index) {
+        const std::string normalized = normalized_contract_enum(tensors[index].name);
+        if (std::find(accepted_names.begin(), accepted_names.end(), normalized) ==
+            accepted_names.end()) {
+            continue;
+        }
+        if (resolved >= 0) {
+            *error = "QNN graph exposes duplicate semantic tensor inputs for " +
+                tensors[static_cast<size_t>(resolved)].name + " and " + tensors[index].name + ".";
+            return -2;
+        }
+        resolved = static_cast<int>(index);
+    }
+    return resolved;
+}
+
+bool qnn_resolve_controlnet_layout(
+        const QnnExecutableGraph& controlnet,
+        const QnnExecutableGraph& unet,
+        int unet_sample_index,
+        int unet_timestep_index,
+        int unet_text_index,
+        int expected_width,
+        int expected_height,
+        QnnControlNetLayout* layout,
+        std::string* error) {
+    if (layout == nullptr || error == nullptr || unet_sample_index < 0 ||
+        unet_timestep_index < 0 || unet_text_index < 0) {
+        return false;
+    }
+    if (controlnet.inputs.size() != 4U) {
+        *error = "ControlNet graph must expose exactly latent, timestep, text_emb, and image_cond inputs. inputs=" +
+            qnn_tensor_list_debug_json(controlnet.inputs);
+        return false;
+    }
+    layout->latent_index = qnn_exact_tensor_index(
+        controlnet.inputs, {"latent", "sample"}, error);
+    layout->timestep_index = qnn_exact_tensor_index(
+        controlnet.inputs, {"timestep", "timestamp"}, error);
+    layout->text_index = qnn_exact_tensor_index(
+        controlnet.inputs, {"text_emb", "text_embedding", "encoder_hidden_states"}, error);
+    layout->image_index = qnn_exact_tensor_index(
+        controlnet.inputs, {"image_cond", "control_image", "controlnet_cond"}, error);
+    if (layout->latent_index < 0 || layout->timestep_index < 0 ||
+        layout->text_index < 0 || layout->image_index < 0) {
+        if (error->empty()) {
+            *error = "ControlNet graph tensor names do not match the required four-input contract. inputs=" +
+                qnn_tensor_list_debug_json(controlnet.inputs);
+        }
+        return false;
+    }
+    if (controlnet.inputs[static_cast<size_t>(layout->latent_index)].dimensions !=
+            unet.inputs[static_cast<size_t>(unet_sample_index)].dimensions ||
+        controlnet.inputs[static_cast<size_t>(layout->timestep_index)].dimensions !=
+            unet.inputs[static_cast<size_t>(unet_timestep_index)].dimensions ||
+        controlnet.inputs[static_cast<size_t>(layout->text_index)].dimensions !=
+            unet.inputs[static_cast<size_t>(unet_text_index)].dimensions) {
+        *error = "ControlNet latent, timestep, and text tensor shapes must exactly match the Control-UNet base inputs.";
+        return false;
+    }
+    if (!mca::image::resolve_spatial_tensor_shape(
+            controlnet.inputs[static_cast<size_t>(layout->image_index)].dimensions,
+            3U,
+            &layout->image_shape,
+            error)) {
+        return false;
+    }
+    if (layout->image_shape.batch != 1U ||
+        layout->image_shape.width != static_cast<size_t>(expected_width) ||
+        layout->image_shape.height != static_cast<size_t>(expected_height)) {
+        *error = "ControlNet image_cond tensor does not match the resolved execution width and height.";
+        return false;
+    }
+
+    std::vector<mca::qnn::controlnet::TensorDescriptor> control_outputs;
+    std::vector<mca::qnn::controlnet::TensorDescriptor> unet_inputs;
+    control_outputs.reserve(controlnet.outputs.size());
+    unet_inputs.reserve(unet.inputs.size());
+    for (const auto& tensor : controlnet.outputs) {
+        control_outputs.push_back({tensor.name, tensor.dimensions});
+    }
+    for (const auto& tensor : unet.inputs) {
+        unet_inputs.push_back({tensor.name, tensor.dimensions});
+    }
+    return mca::qnn::controlnet::build_residual_binding_plan(
+        control_outputs,
+        unet_inputs,
+        &layout->residual_bindings,
+        error);
+}
+
+bool qnn_control_image_tensor_for_layout(
+        const mca::qnn::controlnet::PreparedControlImage& image,
+        const mca::image::SpatialTensorShape& shape,
+        std::vector<float>* tensor,
+        std::string* error) {
+    if (tensor == nullptr || error == nullptr || shape.batch != 1U || shape.channels != 3U ||
+        shape.width != image.tensor_width || shape.height != image.tensor_height ||
+        image.tensor_hwc.size() != shape.element_count()) {
+        if (error != nullptr) {
+            *error = "Prepared control image does not exactly match the QNN image_cond tensor.";
+        }
+        return false;
+    }
+    if (shape.layout == mca::image::SpatialTensorLayout::Nhwc) {
+        *tensor = image.tensor_hwc;
+        error->clear();
+        return true;
+    }
+    tensor->assign(shape.element_count(), 0.0F);
+    for (size_t y = 0U; y < shape.height; ++y) {
+        for (size_t x = 0U; x < shape.width; ++x) {
+            for (size_t channel = 0U; channel < 3U; ++channel) {
+                const size_t source = (y * shape.width + x) * 3U + channel;
+                const size_t target = (channel * shape.height + y) * shape.width + x;
+                (*tensor)[target] = image.tensor_hwc[source];
+            }
+        }
+    }
+    error->clear();
+    return true;
+}
+
+bool qnn_run_controlnet_once(
+        QnnExecutableGraph& controlnet,
+        const QnnControlNetLayout& layout,
+        QnnExecutableGraph& unet,
+        const std::vector<float>& latent,
+        double timestep,
+        const float* embedding,
+        size_t embedding_elements,
+        const std::vector<float>& control_image_tensor,
+        double control_strength,
+        size_t* residual_write_count,
+        uint64_t* scaled_residual_checksum,
+        std::string* input_buffer_sha256,
+        long long* execute_ms,
+        std::string* error) {
+    if (embedding == nullptr || residual_write_count == nullptr ||
+        scaled_residual_checksum == nullptr || input_buffer_sha256 == nullptr ||
+        execute_ms == nullptr || error == nullptr) {
+        return false;
+    }
+    if (!qnn_write_float_tensor(
+            &controlnet.inputs[static_cast<size_t>(layout.latent_index)],
+            latent.data(), latent.size(), error) ||
+        !qnn_write_timestep_tensor(
+            &controlnet.inputs[static_cast<size_t>(layout.timestep_index)],
+            timestep, error) ||
+        !qnn_write_float_tensor(
+            &controlnet.inputs[static_cast<size_t>(layout.text_index)],
+            embedding, embedding_elements, error) ||
+        !qnn_write_float_tensor(
+            &controlnet.inputs[static_cast<size_t>(layout.image_index)],
+            control_image_tensor.data(), control_image_tensor.size(), error)) {
+        return false;
+    }
+    const std::string current_input_buffer_sha256 =
+        mca::qnn::controlnet::sha256_hex_bytes(
+            controlnet.inputs[static_cast<size_t>(layout.image_index)].buffer);
+    if (current_input_buffer_sha256.size() != 64U) {
+        *error = "ControlNet image_cond graph buffer SHA-256 could not be derived.";
+        return false;
+    }
+    if (input_buffer_sha256->empty()) {
+        *input_buffer_sha256 = current_input_buffer_sha256;
+    } else if (*input_buffer_sha256 != current_input_buffer_sha256) {
+        *error = "ControlNet image_cond graph buffer changed between scheduler steps.";
+        return false;
+    }
+    if (!controlnet.execute(execute_ms, error)) return false;
+
+    for (const auto& binding : layout.residual_bindings) {
+        std::vector<float> residual;
+        if (!qnn_read_float_tensor(
+                controlnet.outputs[binding.control_output_index],
+                &residual,
+                error) ||
+            !mca::qnn::controlnet::scale_residual_in_place(
+                &residual,
+                control_strength,
+                error) ||
+            !qnn_write_float_tensor(
+                &unet.inputs[binding.unet_input_index],
+                residual.data(),
+                residual.size(),
+                error)) {
+            return false;
+        }
+        *scaled_residual_checksum += checksum_float_vector(residual);
+        ++(*residual_write_count);
+    }
+    return true;
+}
+
 bool qnn_run_unet_once(
         QnnExecutableGraph& unet,
         int sample_index,
@@ -5386,7 +5781,198 @@ bool qnn_run_sdxl_unet_once(
     if (!unet.execute(execute_ms, error)) {
         return false;
     }
-    return qnn_read_float_tensor(unet.outputs[0], output, error);
+    std::vector<float> raw_output;
+    if (!qnn_read_float_tensor(unet.outputs[0], &raw_output, error)) {
+        return false;
+    }
+    mca::image::SpatialTensorShape input_shape;
+    mca::image::SpatialTensorShape output_shape;
+    if (!mca::image::resolve_spatial_tensor_shape(
+                unet.inputs[sample_index].dimensions,
+                4U,
+                &input_shape,
+                error) ||
+        !mca::image::resolve_spatial_tensor_shape(
+                unet.outputs[0].dimensions,
+                4U,
+                &output_shape,
+                error)) {
+        return false;
+    }
+    if (input_shape.height != output_shape.height ||
+        input_shape.width != output_shape.width) {
+        *error = "SDXL UNet output spatial shape does not match its latent input.";
+        return false;
+    }
+    return mca::image::copy_spatial_tile(
+        raw_output,
+        output_shape,
+        0U,
+        0U,
+        input_shape,
+        output,
+        error);
+}
+
+bool qnn_matches_vector_shape(
+        const std::vector<uint32_t>& dimensions,
+        uint32_t expected_elements) {
+    return dimensions.size() == 2U && dimensions[0] == 1U &&
+        dimensions[1] == expected_elements;
+}
+
+struct QnnSdxlConditioningBuffers {
+    std::vector<float> negative_hidden;
+    std::vector<float> positive_hidden;
+    const float* negative_pooled = nullptr;
+    const float* positive_pooled = nullptr;
+    const float* time_ids = nullptr;
+};
+
+bool qnn_prepare_sdxl_conditioning(
+        const QnnExecutableGraph& unet,
+        int hidden_index,
+        int time_ids_index,
+        int pooled_index,
+        const std::vector<float>& payload,
+        QnnSdxlConditioningBuffers* conditioning,
+        std::string* error) {
+    if (conditioning == nullptr || error == nullptr || hidden_index < 0 ||
+        time_ids_index < 0 || pooled_index < 0) {
+        return false;
+    }
+    mca::image::SequenceFeatureShape hidden_shape;
+    if (!mca::image::resolve_sequence_feature_shape(
+            unet.inputs[static_cast<size_t>(hidden_index)].dimensions,
+            static_cast<uint32_t>(mca::image::kSdxlClipTokenCount),
+            static_cast<uint32_t>(mca::image::kSdxlHiddenWidth),
+            &hidden_shape,
+            error)) {
+        return false;
+    }
+    if (!qnn_matches_vector_shape(
+            unet.inputs[static_cast<size_t>(pooled_index)].dimensions,
+            static_cast<uint32_t>(mca::image::kSdxlPooledWidth))) {
+        *error = "SDXL pooled conditioning tensor must be exactly [1,1280].";
+        return false;
+    }
+    if (!qnn_matches_vector_shape(
+            unet.inputs[static_cast<size_t>(time_ids_index)].dimensions,
+            static_cast<uint32_t>(mca::image::kSdxlTimeIdCount))) {
+        *error = "SDXL micro-conditioning tensor must be exactly [1,6].";
+        return false;
+    }
+    if (!mca::image::validate_sdxl_conditioning_payload(payload.size(), error)) {
+        return false;
+    }
+    constexpr size_t kHiddenElements =
+            mca::image::kSdxlClipTokenCount * mca::image::kSdxlHiddenWidth;
+    if (!mca::image::reorder_sequence_feature_tensor(
+            payload.data(),
+            kHiddenElements,
+            hidden_shape,
+            &conditioning->negative_hidden,
+            error) ||
+        !mca::image::reorder_sequence_feature_tensor(
+            payload.data() + kHiddenElements,
+            kHiddenElements,
+            hidden_shape,
+            &conditioning->positive_hidden,
+            error)) {
+        return false;
+    }
+    conditioning->negative_pooled = payload.data() + 2U * kHiddenElements;
+    conditioning->positive_pooled =
+            conditioning->negative_pooled + mca::image::kSdxlPooledWidth;
+    conditioning->time_ids =
+            conditioning->positive_pooled + mca::image::kSdxlPooledWidth;
+    error->clear();
+    return true;
+}
+
+struct QnnVaeDecodeResult {
+    mca::image::VaeDecodePlan plan;
+    std::vector<float> pixels_nchw;
+    size_t execution_count = 0U;
+    long long execute_ms_total = 0;
+};
+
+bool qnn_decode_vae_latents(
+        QnnExecutableGraph& vae,
+        const std::vector<uint32_t>& source_latent_dimensions,
+        const std::vector<float>& source_latents,
+        const QnnSemanticExecutionContract& execution_contract,
+        QnnVaeDecodeResult* result,
+        std::string* error) {
+    if (result == nullptr || error == nullptr || vae.inputs.empty() || vae.outputs.empty()) {
+        return false;
+    }
+    QnnVaeDecodeResult decoded;
+    if (!mca::image::build_vae_decode_plan(
+            source_latent_dimensions,
+            vae.inputs[0].dimensions,
+            vae.outputs[0].dimensions,
+            static_cast<size_t>(execution_contract.width),
+            static_cast<size_t>(execution_contract.height),
+            &decoded.plan,
+            error)) {
+        return false;
+    }
+    if (source_latents.size() != decoded.plan.source_latent.element_count()) {
+        *error = "Published latent values do not match the resolved source latent shape.";
+        return false;
+    }
+    std::vector<std::vector<float>> tile_outputs;
+    tile_outputs.reserve(decoded.plan.tiles.size());
+    for (const auto& tile : decoded.plan.tiles) {
+        if (qnn_image_generation_cancelled()) {
+            *error = "Image generation was cancelled during VAE tile decode.";
+            return false;
+        }
+        std::vector<float> vae_latents;
+        if (!mca::image::copy_spatial_tile(
+                source_latents,
+                decoded.plan.source_latent,
+                tile.latent_x,
+                tile.latent_y,
+                decoded.plan.vae_input,
+                &vae_latents,
+                error) ||
+            !mca::image::scale_vae_latents_in_place(
+                &vae_latents,
+                execution_contract.vae_scaling_factor,
+                execution_contract.vae_scaling_location ==
+                        QnnVaeScalingLocation::HostBeforeGraph,
+                error) ||
+            !qnn_write_float_tensor(
+                &vae.inputs[0],
+                vae_latents.data(),
+                vae_latents.size(),
+                error)) {
+            return false;
+        }
+        long long execute_ms = 0;
+        if (!vae.execute(&execute_ms, error)) {
+            return false;
+        }
+        decoded.execute_ms_total += execute_ms;
+        ++decoded.execution_count;
+        std::vector<float> tile_pixels;
+        if (!qnn_read_float_tensor(vae.outputs[0], &tile_pixels, error)) {
+            return false;
+        }
+        tile_outputs.push_back(std::move(tile_pixels));
+    }
+    if (!mca::image::blend_vae_decode_tiles(
+            decoded.plan,
+            tile_outputs,
+            &decoded.pixels_nchw,
+            error)) {
+        return false;
+    }
+    *result = std::move(decoded);
+    error->clear();
+    return true;
 }
 
 #include "qnn_sdxl_isolated_phases.hpp"
@@ -5434,11 +6020,77 @@ std::string qnn_semantic_generate_json(
             "EXECUTION_CONTRACT_INVALID",
             error);
     }
+    std::string task_mode = normalized_contract_enum(string_field(params_json, "taskMode"));
+    if (task_mode.empty()) task_mode = "text_to_image";
+    const bool request_controlnet = task_mode == "control";
+    if (task_mode != "text_to_image" && !request_controlnet) {
+        return qnn_semantic_failure_json(
+            "task_mode_unsupported",
+            "TASK_MODE_EXECUTION_UNSUPPORTED",
+            "QNN semantic generation supports taskMode=text_to_image or control for this execution path.");
+    }
+    const std::string input_image_path = string_field(params_json, "inputImagePath");
+    const std::string mask_image_path = string_field(params_json, "maskImagePath");
+    const std::string control_image_path = string_field(params_json, "controlImagePath");
+    const std::string control_image_sha256 = string_field(params_json, "controlImageSha256");
+    const bool control_strength_specified =
+        params_json.find("\"controlStrength\"") != std::string::npos;
+    const bool control_preprocess_specified =
+        params_json.find("\"controlImagePreprocess\"") != std::string::npos;
+    const double control_strength = double_field(params_json, "controlStrength", 1.0);
+    const std::string control_image_preprocess_value =
+        string_field(params_json, "controlImagePreprocess");
+    mca::qnn::controlnet::ControlImagePreprocessMode control_image_preprocess =
+        mca::qnn::controlnet::ControlImagePreprocessMode::Canny;
+    if (!mca::qnn::controlnet::parse_control_image_preprocess_mode(
+            control_image_preprocess_value,
+            &control_image_preprocess,
+            &error)) {
+        return qnn_semantic_failure_json(
+            "control_image_contract_invalid",
+            "EXECUTION_CONTRACT_INVALID",
+            error);
+    }
+    if (!std::isfinite(control_strength) || control_strength < 0.0 || control_strength > 2.0) {
+        return qnn_semantic_failure_json(
+            "control_strength_invalid",
+            "EXECUTION_CONTRACT_INVALID",
+            "controlStrength must be finite and in [0, 2].");
+    }
+    const long long batch_count = long_field(params_json, "batchCount");
+    if (batch_count != 0 && batch_count != 1) {
+        return qnn_semantic_failure_json(
+            "batch_count_unsupported",
+            "TASK_MODE_EXECUTION_UNSUPPORTED",
+            "QNN semantic generation currently executes exactly one output per native request.");
+    }
+    if (request_controlnet) {
+        if (!input_image_path.empty() || !mask_image_path.empty() ||
+            control_image_path.empty() || control_image_sha256.empty()) {
+            return qnn_semantic_failure_json(
+                "control_image_contract_invalid",
+                "EXECUTION_CONTRACT_INVALID",
+                "taskMode=control requires only controlImagePath and controlImageSha256.");
+        }
+    } else if (!input_image_path.empty() || !mask_image_path.empty() ||
+               !control_image_path.empty() || !control_image_sha256.empty() ||
+               control_strength_specified || control_preprocess_specified) {
+        return qnn_semantic_failure_json(
+            "text_image_contract_invalid",
+            "EXECUTION_CONTRACT_INVALID",
+            "taskMode=text_to_image cannot carry image input paths or hashes.");
+    }
     const std::string family = normalized_contract_enum(string_field(params_json, "family"));
     const bool request_sdxl =
         family == "sdxl" ||
         contains_lower(execution_contract.profile_id, "sdxl") ||
         contains_lower(conditioning_format, "sdxl");
+    if (request_controlnet && request_sdxl) {
+        return qnn_semantic_failure_json(
+            "controlnet_family_unsupported",
+            "TASK_MODE_EXECUTION_UNSUPPORTED",
+            "This QNN ControlNet execution path requires the SD1.x four-graph contract.");
+    }
     mca::diffusion::DiffusionScheduler scheduler(execution_contract.scheduler.config);
     if (!scheduler.set_timesteps(execution_contract.scheduler.steps, &error)) {
         return qnn_semantic_failure_json(
@@ -5463,14 +6115,23 @@ std::string qnn_semantic_generate_json(
         string_field(params_json, "textEncoderContextBinary").empty()
             ? "text_encoder.bin"
             : string_field(params_json, "textEncoderContextBinary");
+    const std::string controlnet_binary =
+        string_field(params_json, "controlNetContextBinary").empty()
+            ? "controlnet.bin"
+            : string_field(params_json, "controlNetContextBinary");
     const std::string& graph_name = execution_contract.graph_name;
     const std::string text_encoder_graph_name =
         string_field(params_json, "textEncoderGraphName").empty()
             ? graph_name
             : string_field(params_json, "textEncoderGraphName");
+    const std::string controlnet_graph_name =
+        string_field(params_json, "controlNetGraphName").empty()
+            ? graph_name
+            : string_field(params_json, "controlNetGraphName");
     const std::string unet_path = join_path(bundle_root, unet_binary);
     const std::string vae_path = join_path(bundle_root, vae_binary);
     const std::string text_encoder_path = join_path(bundle_root, text_encoder_binary);
+    const std::string controlnet_path = join_path(bundle_root, controlnet_binary);
     if (!exists_file(unet_path) || !exists_file(vae_path)) {
         return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"context_missing\",\"message\":") +
             quote("QNN semantic generation context is missing. Expected " +
@@ -5481,10 +6142,16 @@ std::string qnn_semantic_generate_json(
             quote("QNN token conditioning requires " + text_encoder_binary +
                 " in the bundle root.") + "}";
     }
+    if (request_controlnet && !exists_file(controlnet_path)) {
+        return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"controlnet_context_missing\",\"errorCode\":\"REQUIRED_GRAPH_MISSING\",\"message\":") +
+            quote("QNN control generation requires " + controlnet_binary +
+                " in the bundle root.") + "}";
+    }
 
     std::vector<float> embeddings;
     std::vector<int32_t> token_ids;
     std::vector<float> token_weights;
+    std::string consumed_conditioning_artifact_sha256;
     QnnConditioningEvidence conditioning_evidence;
     if (qnn_token_conditioning) {
         const bool read_ok = qnn_weighted_token_conditioning
@@ -5494,8 +6161,13 @@ std::string qnn_semantic_generate_json(
                 &token_weights,
                 execution_contract.use_cfg,
                 &conditioning_evidence,
-                &error)
-            : read_int32_binary_file(embeddings_path, &token_ids, &error);
+                &error,
+                &consumed_conditioning_artifact_sha256)
+            : read_int32_binary_file(
+                embeddings_path,
+                &token_ids,
+                &error,
+                &consumed_conditioning_artifact_sha256);
         if (!read_ok) {
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"token_read_failed\",\"message\":") +
                 quote(error) + "}";
@@ -5513,13 +6185,18 @@ std::string qnn_semantic_generate_json(
             }
         }
     } else {
-        if (!read_float_binary_file(embeddings_path, &embeddings, &error)) {
+        if (!read_float_binary_file(
+                embeddings_path,
+                &embeddings,
+                &error,
+                &consumed_conditioning_artifact_sha256)) {
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"embedding_read_failed\",\"message\":") +
             quote(error) + "}";
         }
     }
     if (!resolve_qnn_conditioning_evidence(
             bundle_root,
+            consumed_conditioning_artifact_sha256,
             conditioning_format,
             token_ids.size(),
             params_json,
@@ -5571,9 +6248,16 @@ std::string qnn_semantic_generate_json(
     long long text_encoder_execute_ms_total = 0;
     size_t text_encoder_execute_count = 0;
     uint64_t text_encoder_embedding_width = 0;
+    uint64_t text_encoder_input_elements = 0;
     std::string loaded_text_encoder_graph;
+    std::string text_encoder_input_tensor;
+    std::string text_encoder_input_data_type;
     std::string text_encoder_inputs_debug = "[]";
     std::string text_encoder_outputs_debug = "[]";
+    std::string prompt_weighting_execution_mode = qnn_token_conditioning
+        ? "token_ids_unweighted"
+        : "external_float_conditioning";
+    bool conditioning_artifact_consumed = !qnn_token_conditioning && !embeddings.empty();
     if (qnn_token_conditioning) {
         QnnExecutableGraph text_encoder;
         if (!text_encoder.load_in_session(
@@ -5609,8 +6293,19 @@ std::string qnn_semantic_generate_json(
 
         const uint64_t token_elements = qnn_tensor_element_count(
             text_encoder.inputs[static_cast<size_t>(token_index)].tensor);
+        const Qnn_DataType_t token_data_type = qnn_tensor_data_type(
+            text_encoder.inputs[static_cast<size_t>(token_index)].tensor);
         const uint64_t embedding_elements = qnn_tensor_element_count(
             text_encoder.outputs[static_cast<size_t>(embedding_index)].tensor);
+        text_encoder_input_elements = token_elements;
+        text_encoder_input_tensor =
+            text_encoder.inputs[static_cast<size_t>(token_index)].name;
+        text_encoder_input_data_type = qnn_data_type_name(token_data_type);
+        if (token_data_type != QNN_DATATYPE_INT_32) {
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_tensor_layout_unsupported\",\"message\":") +
+                quote("QNN CLIP token conditioning requires an actual int32 token-id graph input. inputs=" +
+                    text_encoder_inputs_debug) + "}";
+        }
         if (token_elements != 77 || token_ids.size() != static_cast<size_t>(token_elements * 2u)) {
             std::ostringstream message;
             message << "QNN CLIP token conditioning requires exactly two 77-token int32 sequences. "
@@ -5628,6 +6323,24 @@ std::string qnn_semantic_generate_json(
                 quote(message.str()) + "}";
         }
         text_encoder_embedding_width = embedding_elements / token_elements;
+
+        if (qnn_weighted_token_conditioning) {
+            size_t unsupported_weighted_token_count = 0;
+            if (!mca::image::validate_clip_token_id_graph_prompt_weights(
+                    token_weights,
+                    &unsupported_weighted_token_count,
+                    &error)) {
+                std::ostringstream message;
+                message << error << " Actual graph input=" << text_encoder_input_tensor
+                        << ", dtype=" << text_encoder_input_data_type
+                        << ", elements=" << text_encoder_input_elements << ".";
+                return qnn_semantic_failure_json(
+                    "prompt_weighting_execution_unsupported",
+                    "PROMPT_WEIGHTING_EXECUTION_UNSUPPORTED",
+                    message.str());
+            }
+            prompt_weighting_execution_mode = "token_ids_unity_weight_payload";
+        }
 
         std::vector<float> negative_embeddings;
         std::vector<float> positive_embeddings;
@@ -5675,56 +6388,6 @@ std::string qnn_semantic_generate_json(
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"text_encoder_output_shape_unsupported\",\"message\":") +
                 quote(message.str()) + "}";
         }
-        if (qnn_weighted_token_conditioning) {
-            if (token_weights.size() != token_ids.size()) {
-                return qnn_semantic_failure_json(
-                    "prompt_weight_shape_invalid",
-                    "CONDITIONING_EVIDENCE_INVALID",
-                    "Weighted CLIP token IDs and weights have different lengths.");
-            }
-            const size_t sequence_tokens = static_cast<size_t>(token_elements);
-            auto apply_weights = [&](
-                    std::vector<float>* values,
-                    size_t weight_offset,
-                    const char* stage) -> bool {
-                std::vector<float> sequence_weights(
-                    token_weights.begin() + static_cast<std::ptrdiff_t>(weight_offset),
-                    token_weights.begin() + static_cast<std::ptrdiff_t>(
-                        weight_offset + sequence_tokens));
-                std::vector<float> weighted;
-                mca::image::ClipEmbeddingWeightStats stats;
-                if (!mca::image::apply_clip_token_weights_to_embeddings(
-                        *values,
-                        sequence_tokens,
-                        static_cast<size_t>(text_encoder_embedding_width),
-                        sequence_weights,
-                        true,
-                        &weighted,
-                        &stats,
-                        &error)) {
-                    error = std::string(stage) + ": " + error;
-                    return false;
-                }
-                *values = std::move(weighted);
-                return true;
-            };
-            if (execution_contract.use_cfg &&
-                !apply_weights(&negative_embeddings, 0U, "negative prompt weighting failed")) {
-                return qnn_semantic_failure_json(
-                    "text_encoder_uncond_weighting_failed",
-                    "CONDITIONING_EXECUTION_FAILED",
-                    error);
-            }
-            if (!apply_weights(
-                    &positive_embeddings,
-                    sequence_tokens,
-                    "positive prompt weighting failed")) {
-                return qnn_semantic_failure_json(
-                    "text_encoder_cond_weighting_failed",
-                    "CONDITIONING_EXECUTION_FAILED",
-                    error);
-            }
-        }
         embeddings.reserve(
             (execution_contract.use_cfg ? negative_embeddings.size() : 0u) +
             positive_embeddings.size());
@@ -5738,9 +6401,24 @@ std::string qnn_semantic_generate_json(
             embeddings.end(),
             positive_embeddings.begin(),
             positive_embeddings.end());
+        conditioning_artifact_consumed =
+            text_encoder_execute_count == (execution_contract.use_cfg ? 2U : 1U);
         text_encoder.close();
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
     }
+
+    QnnExecutableGraph controlnet;
+    if (request_controlnet && !controlnet.load_in_session(
+            &runtime_session,
+            runtime,
+            controlnet_path,
+            controlnet_graph_name,
+            false)) {
+        const std::string primary_error = controlnet.message;
+        return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"controlnet_load_failed\",\"message\":") +
+            quote(primary_error) + "}";
+    }
+    if (generation.cancelled()) return qnn_image_generation_cancelled_json();
 
     QnnExecutableGraph vae;
     if (!vae.load_in_session(&runtime_session, runtime, vae_path, graph_name, true)) {
@@ -5763,26 +6441,47 @@ std::string qnn_semantic_generate_json(
             return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"tensor_layout_unsupported\",\"message\":\"QNN SDXL semantic generation expects UNet(sample,encoder_hidden_states,timestamp,time_ids,text_embeds) and VAE(latent) tensors.\"}";
         }
 
-        const uint64_t latent_elements = qnn_tensor_element_count(unet.inputs[sample_index].tensor);
-        const uint64_t hidden_elements = qnn_tensor_element_count(unet.inputs[hidden_index].tensor);
-        const uint64_t pooled_elements = qnn_tensor_element_count(unet.inputs[pooled_index].tensor);
-        const uint64_t time_id_elements = qnn_tensor_element_count(unet.inputs[time_ids_index].tensor);
-        const uint64_t vae_input_elements = qnn_tensor_element_count(vae.inputs[0].tensor);
-        if (latent_elements == 0 || hidden_elements == 0 || pooled_elements == 0 ||
-            time_id_elements == 0 || vae_input_elements != latent_elements) {
-            return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"tensor_shape_unsupported\",\"message\":\"QNN SDXL UNet and VAE tensor shapes are not compatible.\"}";
+        mca::image::SpatialTensorShape latent_shape;
+        mca::image::SpatialTensorShape unet_output_shape;
+        if (!mca::image::resolve_spatial_tensor_shape(
+                    unet.inputs[sample_index].dimensions,
+                    4U,
+                    &latent_shape,
+                    &error) ||
+            !mca::image::resolve_spatial_tensor_shape(
+                    unet.outputs[0].dimensions,
+                    4U,
+                    &unet_output_shape,
+                    &error)) {
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"latent_layout_unsupported\",\"message\":") +
+                quote(error) + "}";
         }
-        const size_t hidden_count = static_cast<size_t>(hidden_elements);
-        const size_t pooled_count = static_cast<size_t>(pooled_elements);
-        const size_t time_ids_count = static_cast<size_t>(time_id_elements);
-        const size_t needed = hidden_count * 2u + pooled_count * 2u + time_ids_count;
-        if (embeddings.size() < needed) {
-            std::ostringstream message;
-            message << "SDXL conditioning file is too small. Need at least "
-                    << needed << " f32 elements, got " << embeddings.size() << ".";
+        if (latent_shape.height != unet_output_shape.height ||
+            latent_shape.width != unet_output_shape.width ||
+            latent_shape.width * 8U != static_cast<size_t>(execution_contract.width) ||
+            latent_shape.height * 8U != static_cast<size_t>(execution_contract.height)) {
+            return qnn_semantic_failure_json(
+                "latent_resolution_mismatch",
+                "EXECUTION_CONTRACT_MISMATCH",
+                "Resolved SDXL width/height do not match the native UNet latent tensor at the required 8x VAE scale.");
+        }
+        const uint64_t latent_elements = latent_shape.element_count();
+        QnnSdxlConditioningBuffers conditioning;
+        if (!qnn_prepare_sdxl_conditioning(
+                    unet,
+                    hidden_index,
+                    time_ids_index,
+                    pooled_index,
+                    embeddings,
+                    &conditioning,
+                    &error)) {
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"conditioning_shape_unsupported\",\"message\":") +
-                quote(message.str()) + "}";
+                quote(error) + "}";
         }
+        constexpr size_t hidden_count =
+            mca::image::kSdxlClipTokenCount * mca::image::kSdxlHiddenWidth;
+        constexpr size_t pooled_count = mca::image::kSdxlPooledWidth;
+        constexpr size_t time_ids_count = mca::image::kSdxlTimeIdCount;
 
         const int steps = execution_contract.scheduler.steps;
         const auto& timesteps = scheduler.timesteps();
@@ -5794,11 +6493,6 @@ std::string qnn_semantic_generate_json(
         const float initial_noise_scale = static_cast<float>(scheduler.init_noise_sigma());
         for (float& value : latents) value = normal(rng) * initial_noise_scale;
 
-        const float* negative_hidden = embeddings.data();
-        const float* positive_hidden = embeddings.data() + hidden_count;
-        const float* negative_pooled = embeddings.data() + hidden_count * 2u;
-        const float* positive_pooled = negative_pooled + pooled_count;
-        const float* time_ids = positive_pooled + pooled_count;
         std::vector<float> noise_uncond;
         std::vector<float> noise_cond;
         long long unet_execute_ms_total = 0;
@@ -5824,11 +6518,11 @@ std::string qnn_semantic_generate_json(
                         pooled_index,
                         model_input,
                         timesteps[step],
-                        negative_hidden,
+                        conditioning.negative_hidden.data(),
                         hidden_count,
-                        time_ids,
+                        conditioning.time_ids,
                         time_ids_count,
-                        negative_pooled,
+                        conditioning.negative_pooled,
                         pooled_count,
                         &noise_uncond,
                         &execute_ms,
@@ -5850,11 +6544,11 @@ std::string qnn_semantic_generate_json(
                     pooled_index,
                     model_input,
                     timesteps[step],
-                    positive_hidden,
+                    conditioning.positive_hidden.data(),
                     hidden_count,
-                    time_ids,
+                    conditioning.time_ids,
                     time_ids_count,
-                    positive_pooled,
+                    conditioning.positive_pooled,
                     pooled_count,
                     &noise_cond,
                     &execute_ms,
@@ -5869,13 +6563,18 @@ std::string qnn_semantic_generate_json(
                 noise_cond.size() != latents.size()) {
                 return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_unet_output_shape_unsupported\",\"message\":\"SDXL UNet output does not exactly match the latent tensor.\"}";
             }
-            std::vector<float> guided = noise_cond;
-            if (execution_contract.use_cfg) {
-                guided.resize(latents.size());
-                for (size_t i = 0; i < latents.size(); ++i) {
-                    guided[i] = execution_contract.cfg_scale *
-                        (noise_cond[i] - noise_uncond[i]) + noise_uncond[i];
-                }
+            std::vector<float> guided;
+            if (!mca::image::apply_classifier_free_guidance(
+                    noise_cond,
+                    noise_uncond,
+                    execution_contract.cfg_scale,
+                    execution_contract.use_cfg,
+                    &guided,
+                    &error)) {
+                return qnn_semantic_failure_json(
+                    "sdxl_cfg_failed",
+                    "EXECUTION_CONTRACT_INVALID",
+                    error);
             }
             mca::diffusion::SchedulerStepResult step_result;
             mca::diffusion::SchedulerStepOptions step_options;
@@ -5899,38 +6598,37 @@ std::string qnn_semantic_generate_json(
 
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
         generation.set_phase(kQnnImageDecoding);
-        std::vector<float> vae_latents = latents;
         const double effective_vae_host_scale = qnn_effective_vae_host_scale(execution_contract);
-        if (effective_vae_host_scale != 1.0) {
-            for (float& value : vae_latents) {
-                value = static_cast<float>(value * effective_vae_host_scale);
-            }
-        }
-        if (!qnn_write_float_tensor(&vae.inputs[0], vae_latents.data(), vae_latents.size(), &error)) {
-            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_vae_input_bind_failed\",\"message\":") +
-                quote(error) + "}";
-        }
-        long long vae_execute_ms = 0;
-        if (!vae.execute(&vae_execute_ms, &error)) {
-            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_vae_execute_failed\",\"message\":") +
+        QnnVaeDecodeResult vae_decode;
+        if (!qnn_decode_vae_latents(
+                vae,
+                unet.inputs[sample_index].dimensions,
+                latents,
+                execution_contract,
+                &vae_decode,
+                &error)) {
+            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_vae_decode_failed\",\"message\":") +
                 quote(error) + "}";
         }
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
-        std::vector<float> pixels;
-        if (!qnn_read_float_tensor(vae.outputs[0], &pixels, &error)) {
-            return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_vae_output_read_failed\",\"message\":") +
-                quote(error) + "}";
-        }
         int width = 0;
         int height = 0;
         mca::qnn::ImagePixelRangeEvidence pixel_range_evidence;
+        QnnTensorBinding final_output_binding;
+        final_output_binding.name = "sdxl_tiled_vae_output_nchw";
+        final_output_binding.dimensions = {
+            1U,
+            3U,
+            static_cast<uint32_t>(vae_decode.plan.final_output.height),
+            static_cast<uint32_t>(vae_decode.plan.final_output.width),
+        };
         generation.record_stage(
             mca::qnn::ImageStage::PngWrite,
             kQnnImagePngWrite);
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
         if (!write_vae_tensor_png(
-                vae.outputs[0],
-                pixels,
+                final_output_binding,
+                vae_decode.pixels_nchw,
                 output_path,
                 execution_contract.pixel_range,
                 &pixel_range_evidence,
@@ -5939,6 +6637,12 @@ std::string qnn_semantic_generate_json(
                 &error)) {
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_png_write_failed\",\"message\":") +
                 quote(error) + "}";
+        }
+        if (width != execution_contract.width || height != execution_contract.height) {
+            return qnn_semantic_failure_json(
+                "sdxl_output_resolution_mismatch",
+                "EXECUTION_CONTRACT_MISMATCH",
+                "Decoded SDXL image dimensions do not match the requested execution contract.");
         }
 
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -6012,7 +6716,9 @@ std::string qnn_semantic_generate_json(
             << "\"initNoiseSigma\":" << scheduler.init_noise_sigma() << ","
             << "\"scaleModelInput\":" << (execution_contract.scheduler.scale_model_input ? "true" : "false") << ","
             << "\"textEncoderExecutionCount\":" << text_encoder_execute_count << ","
-            << "\"vaeExecutionCount\":1,"
+            << "\"vaeExecutionCount\":" << vae_decode.execution_count << ","
+            << "\"vaeTileCount\":" << vae_decode.plan.tiles.size() << ","
+            << "\"vaeTiled\":" << (vae_decode.plan.tiled() ? "true" : "false") << ","
             << "\"effectiveVaeHostScale\":" << effective_vae_host_scale << ","
             << "\"nativeGenerationSequence\":" << g_qnn_image_generation_sequence.load() << ","
             << "\"nativeStartedAtMonotonicMs\":" << g_qnn_image_generation_started_ms.load() << ","
@@ -6026,13 +6732,13 @@ std::string qnn_semantic_generate_json(
             << "\"vaeContextLoadMs\":" << vae.context_load_ms << ","
             << "\"unetExecuteMsTotal\":" << unet_execute_ms_total << ","
             << "\"unetExecuteMsAvg\":" << (unet_execution_count > 0 ? (unet_execute_ms_total / static_cast<long long>(unet_execution_count)) : 0) << ","
-            << "\"vaeExecuteMs\":" << vae_execute_ms << ","
+            << "\"vaeExecuteMs\":" << vae_decode.execute_ms_total << ","
             << "\"conditioningElements\":" << embeddings.size() << ","
-            << "\"hiddenElements\":" << hidden_elements << ","
-            << "\"pooledElements\":" << pooled_elements << ","
-            << "\"timeIdElements\":" << time_id_elements << ","
+            << "\"hiddenElements\":" << hidden_count << ","
+            << "\"pooledElements\":" << pooled_count << ","
+            << "\"timeIdElements\":" << time_ids_count << ","
             << "\"latentChecksum\":" << checksum_float_vector(latents) << ","
-            << "\"pixelChecksum\":" << checksum_float_vector(pixels) << ","
+            << "\"pixelChecksum\":" << checksum_float_vector(vae_decode.pixels_nchw) << ","
             << "\"outputPath\":" << quote(output_path) << ","
             << "\"outputBytes\":" << output_bytes << ","
             << "\"unetGraph\":" << quote(unet.graph_name) << ","
@@ -6047,7 +6753,7 @@ std::string qnn_semantic_generate_json(
             << "\"finalLatentStats\":" << float_vector_stats_json(latents) << ","
             << "\"noiseUncondStats\":" << float_vector_stats_json(noise_uncond) << ","
             << "\"noiseCondStats\":" << float_vector_stats_json(noise_cond) << ","
-            << "\"pixelStats\":" << float_vector_stats_json(pixels) << "},"
+            << "\"pixelStats\":" << float_vector_stats_json(vae_decode.pixels_nchw) << "},"
             << "\"executionRuntime\":" << runtime_probe_json(runtime_session.selected_runtime) << ","
             << "\"htpArchVersion\":" << runtime_session.selected_runtime.htp_arch_version << ","
             << "\"bundle\":" << bundle_probe_json(bundle)
@@ -6066,11 +6772,96 @@ std::string qnn_semantic_generate_json(
         return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"tensor_layout_unsupported\",\"message\":\"QNN SD1.5 semantic generation expects UNet(sample,timestep,text) and VAE(latent) tensors.\"}";
     }
 
-    const uint64_t latent_elements = qnn_tensor_element_count(unet.inputs[sample_index].tensor);
+    mca::image::SpatialTensorShape latent_shape;
+    mca::image::SpatialTensorShape unet_output_shape;
+    mca::image::SpatialTensorShape vae_input_shape;
+    mca::image::SpatialTensorShape vae_output_shape;
+    if (!mca::image::resolve_spatial_tensor_shape(
+                unet.inputs[sample_index].dimensions,
+                4U,
+                &latent_shape,
+                &error) ||
+        !mca::image::resolve_spatial_tensor_shape(
+                unet.outputs[0].dimensions,
+                4U,
+                &unet_output_shape,
+                &error) ||
+        !mca::image::resolve_spatial_tensor_shape(
+                vae.inputs[0].dimensions,
+                4U,
+                &vae_input_shape,
+                &error) ||
+        !mca::image::resolve_spatial_tensor_shape(
+                vae.outputs[0].dimensions,
+                3U,
+                &vae_output_shape,
+                &error)) {
+        return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"latent_layout_unsupported\",\"message\":") +
+            quote(error) + "}";
+    }
+    if (latent_shape.batch != 1U || unet_output_shape.batch != 1U ||
+        vae_input_shape.batch != 1U || vae_output_shape.batch != 1U ||
+        latent_shape.height != unet_output_shape.height ||
+        latent_shape.width != unet_output_shape.width ||
+        latent_shape.height != vae_input_shape.height ||
+        latent_shape.width != vae_input_shape.width ||
+        latent_shape.width * 8U != static_cast<size_t>(execution_contract.width) ||
+        latent_shape.height * 8U != static_cast<size_t>(execution_contract.height) ||
+        vae_output_shape.width != static_cast<size_t>(execution_contract.width) ||
+        vae_output_shape.height != static_cast<size_t>(execution_contract.height)) {
+        return qnn_semantic_failure_json(
+            "latent_resolution_mismatch",
+            "EXECUTION_CONTRACT_MISMATCH",
+            "Resolved width and height must both match the native UNet latent and VAE tensors at the required 8x scale.");
+    }
+    const uint64_t latent_elements = latent_shape.element_count();
     const uint64_t text_elements = qnn_tensor_element_count(unet.inputs[text_index].tensor);
-    const uint64_t vae_input_elements = qnn_tensor_element_count(vae.inputs[0].tensor);
-    if (latent_elements == 0 || text_elements == 0 || vae_input_elements != latent_elements) {
+    if (latent_elements == 0 || text_elements == 0 ||
+        vae_input_shape.element_count() != latent_elements) {
         return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"tensor_shape_unsupported\",\"message\":\"QNN UNet and VAE latent tensor shapes are not compatible.\"}";
+    }
+    QnnControlNetLayout controlnet_layout;
+    mca::qnn::controlnet::PreparedControlImage prepared_control_image;
+    std::vector<float> control_image_tensor;
+    if (request_controlnet) {
+        if (!qnn_resolve_controlnet_layout(
+                controlnet,
+                unet,
+                sample_index,
+                timestep_index,
+                text_index,
+                execution_contract.width,
+                execution_contract.height,
+                &controlnet_layout,
+                &error)) {
+            return qnn_semantic_failure_json(
+                "controlnet_tensor_layout_unsupported",
+                "CONTROLNET_GRAPH_CONTRACT_INVALID",
+                error);
+        }
+        if (!mca::qnn::controlnet::load_prepared_control_image(
+                control_image_path,
+                control_image_sha256,
+                static_cast<uint32_t>(controlnet_layout.image_shape.width),
+                static_cast<uint32_t>(controlnet_layout.image_shape.height),
+                control_image_preprocess,
+                &prepared_control_image,
+                &error)) {
+            return qnn_semantic_failure_json(
+                "control_image_decode_failed",
+                "CONTROL_IMAGE_INVALID",
+                error);
+        }
+        if (!qnn_control_image_tensor_for_layout(
+                prepared_control_image,
+                controlnet_layout.image_shape,
+                &control_image_tensor,
+                &error)) {
+            return qnn_semantic_failure_json(
+                "control_image_tensor_bind_failed",
+                "CONTROLNET_GRAPH_CONTRACT_INVALID",
+                error);
+        }
     }
     const size_t conditioning_branch_count = execution_contract.use_cfg ? 2u : 1u;
     const size_t required_embedding_elements =
@@ -6114,6 +6905,11 @@ std::string qnn_semantic_generate_json(
     std::vector<float> noise_cond;
     long long unet_execute_ms_total = 0;
     size_t unet_execution_count = 0;
+    long long controlnet_execute_ms_total = 0;
+    size_t controlnet_execution_count = 0;
+    size_t controlnet_residual_write_count = 0;
+    uint64_t controlnet_scaled_residual_checksum = 0U;
+    std::string controlnet_input_buffer_sha256;
     for (size_t step = 0; step < timesteps.size(); ++step) {
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
         generation.set_step(static_cast<int>(step));
@@ -6125,7 +6921,38 @@ std::string qnn_semantic_generate_json(
                 error);
         }
         long long execute_ms = 0;
+        if (request_controlnet) {
+            // The published ControlNet pipeline conditions the graph with the
+            // positive embedding once per scheduler step, then supplies the
+            // same residual set to both UNet branches. Running ControlNet again
+            // for the unconditional branch changes the calibrated execution
+            // and doubles the dominant graph cost.
+            if (!qnn_run_controlnet_once(
+                    controlnet,
+                    controlnet_layout,
+                    unet,
+                    model_input,
+                    timesteps[step],
+                    positive_embedding,
+                    static_cast<size_t>(text_elements),
+                    control_image_tensor,
+                    control_strength,
+                    &controlnet_residual_write_count,
+                    &controlnet_scaled_residual_checksum,
+                    &controlnet_input_buffer_sha256,
+                    &execute_ms,
+                    &error)) {
+                return qnn_semantic_failure_json(
+                    "controlnet_execute_failed",
+                    "CONTROLNET_EXECUTION_FAILED",
+                    error);
+            }
+            controlnet_execute_ms_total += execute_ms;
+            ++controlnet_execution_count;
+            if (generation.cancelled()) return qnn_image_generation_cancelled_json();
+        }
         if (execution_contract.use_cfg) {
+            execute_ms = 0;
             if (!qnn_run_unet_once(
                     unet,
                     sample_index,
@@ -6168,13 +6995,18 @@ std::string qnn_semantic_generate_json(
             noise_cond.size() != latents.size()) {
             return "{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"unet_output_shape_unsupported\",\"message\":\"UNet output does not exactly match the latent tensor.\"}";
         }
-        std::vector<float> guided = noise_cond;
-        if (execution_contract.use_cfg) {
-            guided.resize(latents.size());
-            for (size_t i = 0; i < latents.size(); ++i) {
-                guided[i] = execution_contract.cfg_scale *
-                    (noise_cond[i] - noise_uncond[i]) + noise_uncond[i];
-            }
+        std::vector<float> guided;
+        if (!mca::image::apply_classifier_free_guidance(
+                noise_cond,
+                noise_uncond,
+                execution_contract.cfg_scale,
+                execution_contract.use_cfg,
+                &guided,
+                &error)) {
+            return qnn_semantic_failure_json(
+                "cfg_failed",
+                "EXECUTION_CONTRACT_INVALID",
+                error);
         }
         mca::diffusion::SchedulerStepResult step_result;
         mca::diffusion::SchedulerStepOptions step_options;
@@ -6194,6 +7026,33 @@ std::string qnn_semantic_generate_json(
             "unetExecutionCount",
             execution_contract.scheduler.expected_unet_execution_count,
             unet_execution_count);
+    }
+    if (request_controlnet) {
+        const size_t expected_controlnet_executions = timesteps.size();
+        const size_t expected_residual_writes =
+            expected_controlnet_executions * controlnet_layout.residual_bindings.size();
+        if (controlnet_execution_count != expected_controlnet_executions) {
+            return qnn_execution_contract_mismatch_json(
+                "controlNetExecutionCount",
+                expected_controlnet_executions,
+                controlnet_execution_count);
+        }
+        if (controlnet_residual_write_count != expected_residual_writes) {
+            return qnn_execution_contract_mismatch_json(
+                "controlNetResidualWriteCount",
+                expected_residual_writes,
+                controlnet_residual_write_count);
+        }
+        if (prepared_control_image.encoded_sha256 !=
+                normalized_contract_enum(control_image_sha256) ||
+            prepared_control_image.preprocessed_sha256.size() != 64U ||
+            controlnet_input_buffer_sha256.size() != 64U ||
+            control_image_tensor.empty()) {
+            return qnn_semantic_failure_json(
+                "control_input_evidence_invalid",
+                "CONTROLNET_EXECUTION_EVIDENCE_INVALID",
+                "ControlNet did not retain verifiable consumed image evidence.");
+        }
     }
 
     if (generation.cancelled()) return qnn_image_generation_cancelled_json();
@@ -6262,6 +7121,48 @@ std::string qnn_semantic_generate_json(
         conditioning_evidence.negative_weighted_token_count;
     native_evidence.prompt_weight_fingerprint =
         conditioning_evidence.prompt_weight_fingerprint;
+    native_evidence.conditioning_artifact_sha256 =
+        conditioning_evidence.conditioning_artifact_sha256;
+    native_evidence.task_mode = task_mode;
+    native_evidence.control_strength = request_controlnet ? control_strength : 0.0;
+    if (request_controlnet) {
+        native_evidence.control_image_path = prepared_control_image.canonical_path;
+        native_evidence.control_image_sha256 = prepared_control_image.encoded_sha256;
+        native_evidence.control_image_preprocessed_sha256 =
+            prepared_control_image.preprocessed_sha256;
+        native_evidence.control_image_preprocess =
+            mca::qnn::controlnet::control_image_preprocess_wire_name(
+                prepared_control_image.preprocess_mode);
+        native_evidence.control_image_execution_count = 1U;
+        native_evidence.controlnet_execution_count = controlnet_execution_count;
+        native_evidence.controlnet_residual_tensor_count =
+            controlnet_layout.residual_bindings.size();
+        native_evidence.controlnet_residual_write_count =
+            controlnet_residual_write_count;
+        native_evidence.controlnet_residual_unet_reuse_count =
+            execution_contract.use_cfg ? timesteps.size() : 0U;
+        native_evidence.controlnet_conditioning_branch = "positive";
+        const size_t expected_controlnet_executions = timesteps.size();
+        native_evidence.controlnet_input_consumed =
+            controlnet_execution_count == expected_controlnet_executions &&
+            controlnet_residual_write_count ==
+                expected_controlnet_executions * controlnet_layout.residual_bindings.size() &&
+            controlnet_input_buffer_sha256.size() == 64U;
+        native_evidence.controlnet_graph_name = controlnet.graph_name;
+        native_evidence.control_image_source_width = prepared_control_image.source_width;
+        native_evidence.control_image_source_height = prepared_control_image.source_height;
+        native_evidence.control_image_source_channels = prepared_control_image.source_channels;
+        native_evidence.control_image_tensor_width = prepared_control_image.tensor_width;
+        native_evidence.control_image_tensor_height = prepared_control_image.tensor_height;
+        native_evidence.control_image_tensor_channels = prepared_control_image.tensor_channels;
+        native_evidence.control_image_exif_orientation = prepared_control_image.exif_orientation;
+        native_evidence.control_image_edge_pixel_count = prepared_control_image.edge_pixel_count;
+        native_evidence.control_image_tensor_checksum = checksum_float_vector(control_image_tensor);
+        native_evidence.controlnet_scaled_residual_checksum =
+            controlnet_scaled_residual_checksum;
+        native_evidence.controlnet_input_buffer_sha256 =
+            controlnet_input_buffer_sha256;
+    }
     const std::string native_effective = qnn_native_effective_json(
         execution_contract,
         native_evidence);
@@ -6292,9 +7193,13 @@ std::string qnn_semantic_generate_json(
         << "\"tokenCount\":" << conditioning_evidence.token_count << ","
         << "\"promptWeightingSupported\":" << (execution_contract.prompt_weighting_supported ? "true" : "false") << ","
         << "\"promptWeightingApplied\":" << (conditioning_evidence.prompt_weighting_applied ? "true" : "false") << ","
+        << "\"promptWeightingExecutionSupported\":" << (!qnn_token_conditioning && execution_contract.prompt_weighting_supported ? "true" : "false") << ","
+        << "\"promptWeightingExecutionMode\":" << quote(prompt_weighting_execution_mode) << ","
         << "\"positiveWeightedTokenCount\":" << conditioning_evidence.positive_weighted_token_count << ","
         << "\"negativeWeightedTokenCount\":" << conditioning_evidence.negative_weighted_token_count << ","
         << "\"promptWeightFingerprint\":" << quote(conditioning_evidence.prompt_weight_fingerprint) << ","
+        << "\"conditioningArtifactSha256\":"
+        << quote(conditioning_evidence.conditioning_artifact_sha256) << ","
         << "\"embeddingDiskDataType\":" << quote(conditioning_evidence.embedding_disk_data_type) << ","
         << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
         << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","
@@ -6305,6 +7210,56 @@ std::string qnn_semantic_generate_json(
         << "\"height\":" << height << ","
         << "\"seed\":" << execution_contract.seed << ","
         << "\"graphName\":" << quote(unet.graph_name) << ","
+        << "\"taskMode\":" << quote(task_mode) << ","
+        << "\"batchCount\":1,"
+        << "\"inputImagePath\":\"\","
+        << "\"maskImagePath\":\"\","
+        << "\"controlImagePath\":" << quote(native_evidence.control_image_path) << ","
+        << "\"inputImageExecutionCount\":0,"
+        << "\"maskImageExecutionCount\":0,"
+        << "\"controlImageExecutionCount\":"
+        << native_evidence.control_image_execution_count << ","
+        << "\"controlImageSha256\":" << quote(native_evidence.control_image_sha256) << ","
+        << "\"controlImagePreprocessedSha256\":"
+        << quote(native_evidence.control_image_preprocessed_sha256) << ","
+        << "\"controlImagePreprocess\":" << quote(native_evidence.control_image_preprocess) << ","
+        << "\"controlImageSourceWidth\":" << prepared_control_image.source_width << ","
+        << "\"controlImageSourceHeight\":" << prepared_control_image.source_height << ","
+        << "\"controlImageSourceChannels\":" << prepared_control_image.source_channels << ","
+        << "\"controlImageOrientedWidth\":" << prepared_control_image.oriented_width << ","
+        << "\"controlImageOrientedHeight\":" << prepared_control_image.oriented_height << ","
+        << "\"controlImageExifOrientation\":"
+        << (request_controlnet ? prepared_control_image.exif_orientation : 0) << ","
+        << "\"controlImageTensorWidth\":" << prepared_control_image.tensor_width << ","
+        << "\"controlImageTensorHeight\":" << prepared_control_image.tensor_height << ","
+        << "\"controlImageTensorChannels\":"
+        << (request_controlnet ? prepared_control_image.tensor_channels : 0U) << ","
+        << "\"controlImageTensorLayout\":"
+        << quote(request_controlnet &&
+                 controlnet_layout.image_shape.layout == mca::image::SpatialTensorLayout::Nchw
+                     ? "NCHW"
+                     : (request_controlnet ? "NHWC" : "NONE")) << ","
+        << "\"controlImageEdgePixelCount\":" << prepared_control_image.edge_pixel_count << ","
+        << "\"controlImageTensorChecksum\":" << checksum_float_vector(control_image_tensor) << ","
+        << "\"strength\":1,"
+        << "\"controlStrength\":" << native_evidence.control_strength << ","
+        << "\"controlStrengthApplied\":" << (request_controlnet ? "true" : "false") << ","
+        << "\"clipSkip\":-1,"
+        << "\"controlNetExecutionCount\":" << controlnet_execution_count << ","
+        << "\"controlNetResidualTensorCount\":"
+        << native_evidence.controlnet_residual_tensor_count << ","
+        << "\"controlNetResidualWriteCount\":" << controlnet_residual_write_count << ","
+        << "\"controlNetResidualUnetReuseCount\":"
+        << native_evidence.controlnet_residual_unet_reuse_count << ","
+        << "\"controlNetConditioningBranch\":"
+        << quote(native_evidence.controlnet_conditioning_branch) << ","
+        << "\"controlNetInputConsumed\":"
+        << (native_evidence.controlnet_input_consumed ? "true" : "false") << ","
+        << "\"controlNetInputBufferSha256\":"
+        << quote(native_evidence.controlnet_input_buffer_sha256) << ","
+        << "\"controlNetScaledResidualChecksum\":"
+        << controlnet_scaled_residual_checksum << ","
+        << "\"controlNetGraph\":" << quote(native_evidence.controlnet_graph_name) << ","
         << "\"nativeEffective\":" << native_effective << ","
         << "\"timesteps\":" << qnn_double_array_json(timesteps) << ","
         << "\"sigmas\":" << qnn_double_array_json(scheduler.sigmas()) << ","
@@ -6318,10 +7273,16 @@ std::string qnn_semantic_generate_json(
         << "\"nativeStageMask\":" << g_qnn_image_generation_stage_mask.load() << ","
         << "\"nativeDetailStageMask\":" << g_qnn_image_generation_detail_stage_mask.load() << ","
         << "\"runtimeSessionMode\":"
-        << quote(qnn_token_conditioning ? "shared_text_unet_vae" : "shared_unet_vae") << ","
-        << "\"message\":" << quote(qnn_token_conditioning
-            ? "QNN semantic generation completed with QNN CLIP text encoding, the resolved shared scheduler, QNN UNet, and QNN VAE decoder."
-            : "QNN semantic generation completed with MNN text embeddings, the resolved shared scheduler, QNN UNet, and QNN VAE decoder.") << ","
+        << quote(request_controlnet
+            ? (qnn_token_conditioning
+                ? "shared_text_unet_controlnet_vae"
+                : "shared_unet_controlnet_vae")
+            : (qnn_token_conditioning ? "shared_text_unet_vae" : "shared_unet_vae")) << ","
+        << "\"message\":" << quote(request_controlnet
+            ? "QNN control generation completed with verified image preprocessing, one positive-conditioned ControlNet execution per scheduler step, residual reuse across CFG UNet branches, the resolved scheduler, Control-UNet, and QNN VAE decode."
+            : (qnn_token_conditioning
+                ? "QNN semantic generation completed with QNN CLIP text encoding, the resolved shared scheduler, QNN UNet, and QNN VAE decoder."
+                : "QNN semantic generation completed with MNN text embeddings, the resolved shared scheduler, QNN UNet, and QNN VAE decoder.")) << ","
         << "\"conditioningFormat\":" << quote(conditioning_format) << ","
         << "\"elapsedMs\":" << elapsed << ","
         << "\"unetContextLoadMs\":" << unet.context_load_ms << ","
@@ -6329,6 +7290,16 @@ std::string qnn_semantic_generate_json(
         << "\"textEncoderContextLoadMs\":" << text_encoder_context_load_ms << ","
         << "\"textEncoderExecuteMsTotal\":" << text_encoder_execute_ms_total << ","
         << "\"textEncoderEmbeddingWidth\":" << text_encoder_embedding_width << ","
+        << "\"textEncoderInputTensor\":" << quote(text_encoder_input_tensor) << ","
+        << "\"textEncoderInputDataType\":" << quote(text_encoder_input_data_type) << ","
+        << "\"textEncoderInputElements\":" << text_encoder_input_elements << ","
+        << "\"conditioningArtifactConsumed\":" << (conditioning_artifact_consumed ? "true" : "false") << ","
+        << "\"controlNetContextLoadMs\":" << (request_controlnet ? controlnet.context_load_ms : 0) << ","
+        << "\"controlNetExecuteMsTotal\":" << controlnet_execute_ms_total << ","
+        << "\"controlNetExecuteMsAvg\":"
+        << (controlnet_execution_count > 0
+            ? controlnet_execute_ms_total / static_cast<long long>(controlnet_execution_count)
+            : 0) << ","
         << "\"unetExecuteMsTotal\":" << unet_execute_ms_total << ","
         << "\"unetExecuteMsAvg\":" << (unet_execution_count > 0 ? (unet_execute_ms_total / static_cast<long long>(unet_execution_count)) : 0) << ","
         << "\"vaeExecuteMs\":" << vae_execute_ms << ","
@@ -6339,6 +7310,7 @@ std::string qnn_semantic_generate_json(
         << "\"outputPath\":" << quote(output_path) << ","
         << "\"outputBytes\":" << output_bytes << ","
         << "\"textEncoderGraph\":" << quote(loaded_text_encoder_graph) << ","
+        << "\"controlNetLoadedGraph\":" << quote(native_evidence.controlnet_graph_name) << ","
         << "\"unetGraph\":" << quote(unet.graph_name) << ","
         << "\"vaeGraph\":" << quote(vae.graph_name) << ","
         << "\"debug\":{"
@@ -6346,6 +7318,10 @@ std::string qnn_semantic_generate_json(
         << "\"timestepLast\":" << (timesteps.empty() ? 0.0 : timesteps.back()) << ","
         << "\"textEncoderInputs\":" << text_encoder_inputs_debug << ","
         << "\"textEncoderOutputs\":" << text_encoder_outputs_debug << ","
+        << "\"controlNetInputs\":"
+        << (request_controlnet ? qnn_tensor_list_debug_json(controlnet.inputs) : "[]") << ","
+        << "\"controlNetOutputs\":"
+        << (request_controlnet ? qnn_tensor_list_debug_json(controlnet.outputs) : "[]") << ","
         << "\"unetInputs\":" << qnn_tensor_list_debug_json(unet.inputs) << ","
         << "\"unetOutputs\":" << qnn_tensor_list_debug_json(unet.outputs) << ","
         << "\"vaeInputs\":" << qnn_tensor_list_debug_json(vae.inputs) << ","

@@ -8,6 +8,9 @@
 
 namespace mca::image {
 
+/** SHA-256 over the exact byte payload, returned as lower-case hexadecimal. */
+std::string sha256_hex_bytes(const std::vector<uint8_t>& payload);
+
 enum class TokenizerBackend {
     TokenizersCpp,
     MnnMtok,
@@ -101,6 +104,18 @@ bool apply_clip_token_weights_to_embeddings(const std::vector<float>& embeddings
                                             bool normalize_mean_amplitude,
                                             std::vector<float>* weighted_embeddings,
                                             ClipEmbeddingWeightStats* stats, std::string* error);
+
+/**
+ * Validates weights for a text-encoder graph whose only conditioning input is
+ * an int32 token-id sequence. Such a graph owns both the token embedding lookup
+ * and the transformer, so host-side weighting of its final hidden-state output
+ * is not an exact substitute for weighting the pre-transformer token embedding.
+ * Unity weights remain fully compatible and keep ordinary prompts on the
+ * graph-native path; any effective non-unity weight fails closed.
+ */
+bool validate_clip_token_id_graph_prompt_weights(const std::vector<float>& weights,
+                                                 size_t* weighted_token_count,
+                                                 std::string* error);
 
 /**
  * Loads a Hugging Face tokenizer.json and executes its complete normalizer,

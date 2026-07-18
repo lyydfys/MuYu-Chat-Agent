@@ -76,6 +76,8 @@ class ImageExecutionJournalTest {
         val cleanupRoot = File(root, "transient").apply { mkdirs() }
         val outsideRoot = File(root, "outside").apply { mkdirs() }
         val latent = File(cleanupRoot, "request.latent.tmp").apply { writeText("latent") }
+        val input = File(cleanupRoot, "request.input.img").apply { writeText("input") }
+        val secondOutput = File(cleanupRoot, "request-001.png.part").apply { writeText("output") }
         val outside = File(outsideRoot, "must-remain.tmp").apply { writeText("outside") }
         val store = ImageExecutionJournalStore(journalRoot) { ++now }
         store.create(
@@ -83,7 +85,9 @@ class ImageExecutionJournalTest {
                 requestId = "cancel-me",
                 createdAtMs = now,
                 latentTempPath = latent.absolutePath,
-                outputTempPath = outside.absolutePath
+                outputTempPath = outside.absolutePath,
+                outputTempPaths = listOf(secondOutput.absolutePath),
+                inputTempPaths = listOf(input.absolutePath)
             )
         )
 
@@ -93,6 +97,8 @@ class ImageExecutionJournalTest {
         assertTrue(result.entry.cancellationRequested)
         assertEquals("CANCELLED", result.entry.errorCode)
         assertFalse(latent.exists())
+        assertFalse(input.exists())
+        assertFalse(secondOutput.exists())
         assertTrue(outside.exists())
         assertTrue(result.cleanup.deletedPaths.contains(latent.canonicalPath))
         assertTrue(result.cleanup.skippedPaths.contains(outside.canonicalPath))
@@ -163,6 +169,33 @@ class ImageExecutionJournalTest {
     }
 
     @Test
+    fun `recovery removes worker input files and their request directory`() = withTempDirectory { root ->
+        var now = 3500L
+        val cleanupRoot = File(root, "cache").apply { mkdirs() }
+        val requestDirectory = File(cleanupRoot, "worker-input-request").apply { mkdirs() }
+        val input = File(requestDirectory, "input.img").apply { writeText("input") }
+        val inputPath = input.canonicalPath
+        val directoryPath = requestDirectory.canonicalPath
+        val store = ImageExecutionJournalStore(File(root, "journal")) { ++now }
+        store.create(
+            entry(
+                requestId = "dead-input",
+                createdAtMs = now,
+                workerPid = 333,
+                inputTempPaths = listOf(inputPath, directoryPath)
+            )
+        )
+
+        val report = store.recoverInterrupted(cleanupRoots = listOf(cleanupRoot)) { false }
+
+        assertEquals(listOf("dead-input"), report.interrupted.map { it.requestId })
+        assertFalse(input.exists())
+        assertFalse(requestDirectory.exists())
+        assertTrue(report.cleanup.deletedPaths.contains(inputPath))
+        assertTrue(report.cleanup.deletedPaths.contains(directoryPath))
+    }
+
+    @Test
     fun `terminal and regressive transitions fail closed`() = withTempDirectory { root ->
         var now = 4000L
         val store = ImageExecutionJournalStore(File(root, "journal")) { ++now }
@@ -202,6 +235,8 @@ class ImageExecutionJournalTest {
         workerPid: Int = -1,
         latentTempPath: String = "",
         outputTempPath: String = "",
+        outputTempPaths: List<String> = emptyList(),
+        inputTempPaths: List<String> = emptyList(),
         requested: String = "{}"
     ): ImageExecutionJournalEntry = ImageExecutionJournalEntry(
         requestId = requestId,
@@ -215,7 +250,9 @@ class ImageExecutionJournalTest {
         workerPid = workerPid,
         createdAtMs = createdAtMs,
         latentTempPath = latentTempPath,
-        outputTempPath = outputTempPath
+        outputTempPath = outputTempPath,
+        outputTempPaths = outputTempPaths,
+        inputTempPaths = inputTempPaths
     )
 
     private fun assertInvalid(block: () -> Unit) {

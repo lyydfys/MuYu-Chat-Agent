@@ -7,9 +7,13 @@ import org.json.JSONObject
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
+import kotlin.math.abs
 
 internal fun normalizedRemoteSha256OrNull(value: String?): String? =
     value?.trim()?.takeIf { it.matches(Regex("^[0-9a-fA-F]{64}$")) }
+
+internal fun stableDiffusionCppUsesCfg(cfgScale: Double): Boolean =
+    abs(cfgScale - 1.0) > 1e-12
 
 class ModelScopeClient(
     private val client: OkHttpClient = OkHttpClient(),
@@ -331,18 +335,29 @@ class ModelScopeClient(
                 client.newCall(request(url)).execute().use { response ->
                     if (!response.isSuccessful) error("HTTP ${response.code}")
                     val root = JSONObject(response.body?.string().orEmpty())
-                    val asset = root.selectQnnContextAsset(preferredChipsets)
+                    val asset = root.selectQnnContextAsset(
+                        preferredChipsets = preferredChipsets,
+                        catalogTargetChipset = QAIRT_GEN5_IMAGE_RELEASE_ASSET_CHIPSET
+                    )
                     val downloadUrl = preferHuggingFaceDownloadUrl(asset.downloadUrl)
                     val name = downloadUrl.substringBefore('?').substringAfterLast('/').ifBlank {
                         model.recommendedFileName.ifBlank { "${model.id}.zip" }
                     }
+                    val pinnedIntegrity = pinnedQairtImageReleaseAssetIntegrity(
+                        modelId = model.id,
+                        resolvedName = name,
+                        recommendedName = model.recommendedFileName
+                    )
                     RemoteModelFile(
                         repoId = model.repoId,
                         revision = safeRevision,
                         path = name,
                         name = name,
-                        sizeBytes = QAIRT_IMAGE_RELEASE_ASSET_SIZE_BYTES[model.id],
-                        sha256 = null,
+                        // The pinned size belongs to the catalog's exact named
+                        // archive. A generic/vendor variant of the same target
+                        // can differ in length, so do not attach a false size.
+                        sizeBytes = pinnedIntegrity.first,
+                        sha256 = pinnedIntegrity.second,
                         downloadUrl = downloadUrl,
                         provider = ModelRepositoryProvider.HUGGING_FACE,
                         bundleRole = ImageEngineBundleComponentRole.DIFFUSION,
@@ -648,8 +663,21 @@ class ModelScopeClient(
 
     internal fun selectedQnnImageChipsetForTest(
         releaseAssetsJson: String,
-        preferredChipsets: List<String>
-    ): String = JSONObject(releaseAssetsJson).selectQnnContextAsset(preferredChipsets).chipset
+        preferredChipsets: List<String>,
+        catalogTargetChipset: String? = null
+    ): String = JSONObject(releaseAssetsJson)
+        .selectQnnContextAsset(preferredChipsets, catalogTargetChipset)
+        .chipset
+
+    internal fun pinnedQairtImageReleaseAssetIntegrity(
+        modelId: String,
+        resolvedName: String,
+        recommendedName: String
+    ): Pair<Long?, String?> {
+        val exactNamedArchive = resolvedName.equals(recommendedName, ignoreCase = true)
+        return QAIRT_IMAGE_RELEASE_ASSET_SIZE_BYTES[modelId]?.takeIf { exactNamedArchive } to
+            QAIRT_IMAGE_RELEASE_ASSET_SHA256[modelId]?.takeIf { exactNamedArchive }
+    }
 
     private fun preferHuggingFaceDownloadUrl(url: String): String {
         val preferred = huggingFaceEndpoints.firstOrNull {
@@ -681,23 +709,44 @@ class ModelScopeClient(
         val downloadUrl: String
     )
 
-    private fun JSONObject.selectQnnContextAsset(preferredChipsets: List<String>): QairtReleaseAsset {
+    private fun JSONObject.selectQnnContextAsset(
+        preferredChipsets: List<String>,
+        catalogTargetChipset: String? = null
+    ): QairtReleaseAsset {
         val chipsetAssets = optJSONObject("precisions")
             ?.optJSONObject("w8a16")
             ?.optJSONObject("chipset_assets")
             ?: error("release_assets.json 缺少 w8a16 chipset_assets。")
+
+        fun assetFor(chipset: String): QairtReleaseAsset? = chipsetAssets.optJSONObject(chipset)
+            ?.optJSONObject("qnn_context_binary")
+            ?.optString("download_url")
+            ?.takeIf { it.startsWith("http") }
+            ?.let { QairtReleaseAsset(chipset, it) }
+
+        catalogTargetChipset
+            ?.trim()
+            ?.removeSuffix("-for-galaxy")
+            ?.takeIf(String::isNotBlank)
+            ?.let { target ->
+                // A catalog entry names one executable context target. Device
+                // discovery may rank that entry, but downloading it must not
+                // silently substitute a context archive for another chipset.
+                return listOf(target, "$target-for-galaxy")
+                    .firstNotNullOfOrNull(::assetFor)
+                    ?: error("release_assets.json 缺少目录声明的 QNN context 目标：$target。")
+            }
+
         val requested = preferredChipsets
             .map { it.trim() }
             .filter { it.isNotBlank() }
-            .flatMap { chipset -> listOf("$chipset-for-galaxy", chipset) }
+            // A chipset match does not imply a vendor-specific device build.
+            // Prefer the generic asset and use the Galaxy variant only when
+            // the publisher exposes no generic package for that chipset.
+            .flatMap { chipset -> listOf(chipset, "$chipset-for-galaxy") }
             .distinct()
         for (chipset in requested) {
-            val downloadUrl = chipsetAssets.optJSONObject(chipset)
-                ?.optJSONObject("qnn_context_binary")
-                ?.optString("download_url")
-                ?.takeIf { it.startsWith("http") }
-                ?: continue
-            return QairtReleaseAsset(chipset, downloadUrl)
+            assetFor(chipset)?.let { return it }
         }
         val available = buildList {
             val keys = chipsetAssets.keys()
@@ -705,13 +754,7 @@ class ModelScopeClient(
         }
         return available
             .sortedWith(qairtFallbackChipsetComparator())
-            .firstNotNullOfOrNull { chipset ->
-                chipsetAssets.optJSONObject(chipset)
-                    ?.optJSONObject("qnn_context_binary")
-                    ?.optString("download_url")
-                    ?.takeIf { it.startsWith("http") }
-                    ?.let { QairtReleaseAsset(chipset, it) }
-            }
+            .firstNotNullOfOrNull(::assetFor)
             ?: error("release_assets.json 没有可下载的 qnn_context_binary w8a16 芯片包。")
     }
 
@@ -770,10 +813,23 @@ class ModelScopeClient(
             "qualcomm_sd21_gen5_qnn",
             "qualcomm_controlnet_canny_gen5_qnn"
         )
+        private const val QAIRT_GEN5_IMAGE_RELEASE_ASSET_CHIPSET =
+            "qualcomm-snapdragon-8-elite-gen5"
         private val QAIRT_IMAGE_RELEASE_ASSET_SIZE_BYTES = mapOf(
             "qualcomm_sd15_gen5_qnn" to 711_934_104L,
             "qualcomm_sd21_gen5_qnn" to 874_955_354L,
             "qualcomm_controlnet_canny_gen5_qnn" to 950_517_794L
+        )
+        // SHA-256 of the exact pinned S3 release objects named by each immutable
+        // release_assets.json revision. These are download/install contracts,
+        // not device admission rules.
+        private val QAIRT_IMAGE_RELEASE_ASSET_SHA256 = mapOf(
+            "qualcomm_sd15_gen5_qnn" to
+                "3716ba4c32d6dcf1af93857d22889e1e95f9c3e4c62983fff2d2a743eeff644e",
+            "qualcomm_sd21_gen5_qnn" to
+                "3fc5fc8df77e4952776020d932ee5934ec432b397a456515ae7f8ed2af004ae8",
+            "qualcomm_controlnet_canny_gen5_qnn" to
+                "582b4dee61584cdd2e0f96bdbaff19a6bf919af365c4a7f258ed260be5e1262d"
         )
         private val MODEL_FILE_EXTENSIONS = setOf(
             "gguf",
@@ -808,6 +864,7 @@ class ModelScopeClient(
         )
 
         private const val SANA_EDIT_V2_REVISION = "50adc28b4682161542f893c624048adf6dd027ca"
+        private const val SD15_MNN_REVISION = "346de5fcde406781a34368140419ac3f62440916"
 
         // Keep every recommended MNN package on one immutable ModelScope revision.  The
         // installer still validates the per-file SHA-256 returned by ModelScope, but a
@@ -821,9 +878,6 @@ class ModelScopeClient(
         private const val GEMMA4_E2B_MNN_REVISION = "ad38122704d7a0cfd207abb75a815a2436ab92e6"
         private const val GEMMA4_E4B_MNN_REVISION = "69a938a0f52bedcffc7e42215932f03de15bfe86"
         private const val GEMMA4_26B_A4B_MNN_REVISION = "2dcaf1402d04cf22c738b937cbab2b8147afc2a0"
-
-        private const val SANA_EDIT_V2_DOWNLOAD_BLOCK_REASON =
-            "MCA 安装器已能保留 Sana 必需的 llm/ 子目录，但应用侧尚未接通源图片协议、VAE encoder 调度与完整 edit pipeline；在图像编辑链路和真机 smoke test 完成前不开放一键下载。"
 
         private fun gemmaTextOnlyMnnComponents(): List<MnnModelBundleComponentSpec> = listOf(
             MnnModelBundleComponentSpec(MnnModelBundleComponentRole.CONFIG, "config.json"),
@@ -892,71 +946,41 @@ class ModelScopeClient(
                 component(ImageEngineBundleComponentRole.DIFFUSION, "transformer.mnn.weight", 884_435_680L, "b3bab45fbabc8dabd05840b52ea3cd9bd3e54dd990e153ff6fbecd8b6c17f331"),
                 component(ImageEngineBundleComponentRole.VAE, "vae_decoder.mnn", 751_784L, "9fbe51979b27339b7685cf88f1010a0ff3ab7ff1a7d873fba321eea94b762911"),
                 component(ImageEngineBundleComponentRole.VAE, "vae_decoder.mnn.weight", 162_011_594L, "a6ef7a13ba9af29754adf9b97651cb29a7eaee20b716c16dbe079f500d5eddae"),
-                component(ImageEngineBundleComponentRole.VAE, "vae_encoder.mnn", 761_568L, "06da21081f8ee98792bd1838990068e7284351157cafbfa8793282b611eacb24"),
-                component(ImageEngineBundleComponentRole.VAE, "vae_encoder.mnn.weight", 155_787_522L, "b44ac00f4683697add9578ef4c0f561fb5753fe24a3f4525e7f492028409d05e")
+                component(ImageEngineBundleComponentRole.VAE_ENCODER, "vae_encoder.mnn", 761_568L, "06da21081f8ee98792bd1838990068e7284351157cafbfa8793282b611eacb24"),
+                component(ImageEngineBundleComponentRole.VAE_ENCODER, "vae_encoder.mnn.weight", 155_787_522L, "b44ac00f4683697add9578ef4c0f561fb5753fe24a3f4525e7f492028409d05e")
             )
         }
 
         private fun stableDiffusion15MnnComponents(): List<ImageEngineBundleComponentSpec> {
             val repoId = "MNN/stable-diffusion-v1-5-mnn-opencl"
-            val revision = "master"
+            val revision = SD15_MNN_REVISION
+
+            fun component(
+                role: ImageEngineBundleComponentRole,
+                fileName: String,
+                expectedSizeBytes: Long,
+                sha256: String,
+                required: Boolean = true
+            ) = ImageEngineBundleComponentSpec(
+                role = role,
+                repoId = repoId,
+                revision = revision,
+                provider = ModelRepositoryProvider.MODELSCOPE,
+                fileName = fileName,
+                required = required,
+                expectedSizeBytes = expectedSizeBytes,
+                sha256 = sha256
+            )
+
             return listOf(
-                ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.TEXT_ENCODER,
-                    repoId = repoId,
-                    revision = revision,
-                    provider = ModelRepositoryProvider.MODELSCOPE,
-                    fileName = "text_encoder.mnn"
-                ),
-                ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.TEXT_ENCODER,
-                    repoId = repoId,
-                    revision = revision,
-                    provider = ModelRepositoryProvider.MODELSCOPE,
-                    fileName = "text_encoder.mnn.weight"
-                ),
-                ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.DIFFUSION,
-                    repoId = repoId,
-                    revision = revision,
-                    provider = ModelRepositoryProvider.MODELSCOPE,
-                    fileName = "unet.mnn"
-                ),
-                ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.DIFFUSION,
-                    repoId = repoId,
-                    revision = revision,
-                    provider = ModelRepositoryProvider.MODELSCOPE,
-                    fileName = "unet.mnn.weight"
-                ),
-                ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.VAE,
-                    repoId = repoId,
-                    revision = revision,
-                    provider = ModelRepositoryProvider.MODELSCOPE,
-                    fileName = "vae_decoder.mnn"
-                ),
-                ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.VAE,
-                    repoId = repoId,
-                    revision = revision,
-                    provider = ModelRepositoryProvider.MODELSCOPE,
-                    fileName = "vae_decoder.mnn.weight"
-                ),
-                ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.TOKENIZER,
-                    repoId = repoId,
-                    revision = revision,
-                    provider = ModelRepositoryProvider.MODELSCOPE,
-                    fileName = "vocab.json"
-                ),
-                ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.TOKENIZER,
-                    repoId = repoId,
-                    revision = revision,
-                    provider = ModelRepositoryProvider.MODELSCOPE,
-                    fileName = "merges.txt"
-                ),
+                component(ImageEngineBundleComponentRole.TEXT_ENCODER, "text_encoder.mnn", 249_944L, "5713fa5c83aa446b5b9c28a48a90c647a5bababc5ee5f254cf72e7f479551036"),
+                component(ImageEngineBundleComponentRole.TEXT_ENCODER, "text_encoder.mnn.weight", 238_120_368L, "c245ac80dd8a72279976414435801d579a8dcf83aba84e121c4e4a0b74bbed3d"),
+                component(ImageEngineBundleComponentRole.DIFFUSION, "unet.mnn", 1_248_536L, "0aaad66712a3f86ef7891392517a5d7471327574a6f4c6defcefc10ce5e06fee"),
+                component(ImageEngineBundleComponentRole.DIFFUSION, "unet.mnn.weight", 863_262_988L, "67049e0d6ce8cb34ab1cd78e58909427db1b57f9fd048e16f2f9c86c39f7479b"),
+                component(ImageEngineBundleComponentRole.VAE, "vae_decoder.mnn", 128_248L, "fa6f34c9e77fb715f57d27d65c930455c2ba11b42f2b956da8dcadb2b4bf14b2"),
+                component(ImageEngineBundleComponentRole.VAE, "vae_decoder.mnn.weight", 49_639_112L, "20db884599922383eb168fd2fd018892a7741bb45f3ad7073d4cfaf7d75f2241"),
+                component(ImageEngineBundleComponentRole.TOKENIZER, "vocab.json", 1_059_962L, "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349"),
+                component(ImageEngineBundleComponentRole.TOKENIZER, "merges.txt", 524_619L, "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a"),
                 ImageEngineBundleComponentSpec(
                     role = ImageEngineBundleComponentRole.TOKENIZER,
                     repoId = "openai/clip-vit-large-patch14",
@@ -967,23 +991,645 @@ class ModelScopeClient(
                     sha256 = "a83e0809aa4c3af7208b2df632a7a69668c6d48775b3c3fe4e1b1199d1f8b8f4",
                     relativePath = "tokenizer.json"
                 ),
-                ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.OPTIONAL,
-                    repoId = repoId,
-                    revision = revision,
-                    provider = ModelRepositoryProvider.MODELSCOPE,
-                    fileName = "configuration.json",
-                    required = false
-                ),
-                ImageEngineBundleComponentSpec(
-                    role = ImageEngineBundleComponentRole.OPTIONAL,
-                    repoId = repoId,
-                    revision = revision,
-                    provider = ModelRepositoryProvider.MODELSCOPE,
-                    fileName = "alphas.txt",
-                    required = false
+                component(ImageEngineBundleComponentRole.OPTIONAL, "configuration.json", 54L, "70da9376517abe492bc35499d5455724da1cbc454126a1dbfad8c0542deace48", required = false),
+                component(ImageEngineBundleComponentRole.OPTIONAL, "alphas.txt", 6_999L, "18fe126a911bad616346202b0542adacf59881edcb2edc4a74c5a571ed297f51", required = false)
+            )
+        }
+
+        private fun imageScheduler(
+            algorithm: ImageEngineSchedulerAlgorithm,
+            predictionType: ImageEnginePredictionType,
+            defaultSteps: Int,
+            minSteps: Int,
+            maxSteps: Int,
+            timestepSpacing: ImageEngineTimestepSpacing = when (algorithm) {
+                ImageEngineSchedulerAlgorithm.EULER,
+                ImageEngineSchedulerAlgorithm.DPMPP_2M -> ImageEngineTimestepSpacing.LINSPACE
+                else -> ImageEngineTimestepSpacing.LEADING
+            },
+            stepsOffset: Int = 0,
+            setAlphaToOne: Boolean = false,
+            skipPrkSteps: Boolean = false,
+            scaleModelInput: Boolean = false,
+            order: Int = 1
+        ): ImageEngineSchedulerContractSpec = ImageEngineSchedulerContractSpec(
+            algorithm = algorithm,
+            predictionType = predictionType,
+            noiseSchedule = if (algorithm == ImageEngineSchedulerAlgorithm.FLOW_MATCH) {
+                ImageEngineNoiseSchedule.SIGMA
+            } else {
+                ImageEngineNoiseSchedule.SCALED_LINEAR
+            },
+            betaStart = if (algorithm == ImageEngineSchedulerAlgorithm.FLOW_MATCH) null else 0.00085,
+            betaEnd = if (algorithm == ImageEngineSchedulerAlgorithm.FLOW_MATCH) null else 0.012,
+            timestepSpacing = timestepSpacing,
+            stepsOffset = stepsOffset,
+            setAlphaToOne = setAlphaToOne,
+            skipPrkSteps = skipPrkSteps,
+            scaleModelInput = scaleModelInput,
+            order = order,
+            defaultSteps = defaultSteps,
+            minSteps = minSteps,
+            maxSteps = maxSteps
+        )
+
+        private fun clipTokenizer(
+            backend: ImageEngineTokenizerBackend,
+            maxLength: Int = 77,
+            dualClip: Boolean = false,
+            padZero: Boolean = false,
+            supportsPromptWeighting: Boolean = backend == ImageEngineTokenizerBackend.TOKENIZERS_CPP,
+            separateNegativePrompt: Boolean = true
+        ): ImageEngineTokenizerContractSpec = ImageEngineTokenizerContractSpec(
+            backend = backend,
+            bosId = if (backend == ImageEngineTokenizerBackend.MNN_MTOK) null else 49_406,
+            eosId = if (backend == ImageEngineTokenizerBackend.MNN_MTOK) null else 49_407,
+            padId = when {
+                backend == ImageEngineTokenizerBackend.MNN_MTOK -> null
+                dualClip || padZero -> 0
+                else -> 49_407
+            },
+            maxLength = maxLength,
+            clip1PadRule = when {
+                backend == ImageEngineTokenizerBackend.MNN_MTOK -> ImageEngineClipPadRule.MODEL_DECLARED
+                padZero -> ImageEngineClipPadRule.ZERO
+                else -> ImageEngineClipPadRule.EOS
+            },
+            clip2PadRule = if (dualClip) ImageEngineClipPadRule.ZERO else null,
+            supportsPromptWeighting = supportsPromptWeighting,
+            separateNegativePrompt = separateNegativePrompt
+        )
+
+        private fun imageConditioning(
+            diskDataType: ImageEngineEmbeddingDataType,
+            conversionStrategy: ImageEngineEmbeddingConversionStrategy,
+            width: Int,
+            maxLength: Int = 77,
+            dualEncoder: Boolean = false,
+            pooledOutput: Boolean = false,
+            separateNegativePrompt: Boolean = true
+        ): ImageEngineConditioningContractSpec = ImageEngineConditioningContractSpec(
+            diskDataType = diskDataType,
+            conversionStrategy = conversionStrategy,
+            textEncoderInputShape = listOf(1, maxLength),
+            textEncoderOutputShapes = if (dualEncoder) {
+                listOf(listOf(1, maxLength, 768), listOf(1, maxLength, 1_280))
+            } else {
+                listOf(listOf(1, maxLength, width))
+            },
+            dualEncoder = dualEncoder,
+            pooledOutput = pooledOutput,
+            concatenationOrder = when {
+                dualEncoder -> listOf("clip1_hidden", "clip2_hidden", "clip2_pooled")
+                separateNegativePrompt -> listOf("negative", "positive")
+                else -> listOf("positive")
+            }
+        )
+
+        private fun imageVae(
+            scalingLocation: ImageEngineVaeScalingLocation,
+            scalingFactor: Double,
+            size: Int
+        ): ImageEngineVaeContractSpec = ImageEngineVaeContractSpec(
+            scalingLocation = scalingLocation,
+            scalingFactor = scalingFactor,
+            inputShape = listOf(1, 4, size / 8, size / 8),
+            outputShape = listOf(1, 3, size, size)
+        )
+
+        private fun fixedImageCapabilities(
+            size: Int,
+            schedulers: Set<ImageEngineSchedulerAlgorithm>,
+            supportsPromptWeighting: Boolean = true,
+            supportsNegativePrompt: Boolean = true,
+            requiresControlImage: Boolean = false,
+            requiresInputImage: Boolean = false,
+            supportsMask: Boolean = false
+        ): ImageEngineGenerationCapabilitiesSpec = ImageEngineGenerationCapabilitiesSpec(
+            supportedSchedulers = schedulers,
+            minWidth = size,
+            maxWidth = size,
+            minHeight = size,
+            maxHeight = size,
+            supportsNegativePrompt = supportsNegativePrompt,
+            supportsPromptWeighting = supportsPromptWeighting,
+            requiresControlImage = requiresControlImage,
+            requiresInputImage = requiresInputImage,
+            supportsMask = supportsMask
+        )
+
+        private fun stableDiffusionCppCapabilities(
+            schedulers: Set<ImageEngineSchedulerAlgorithm>,
+            supportsNegativePrompt: Boolean = true
+        ): ImageEngineGenerationCapabilitiesSpec = ImageEngineGenerationCapabilitiesSpec(
+            supportedSchedulers = schedulers,
+            minWidth = 256,
+            maxWidth = 1_536,
+            minHeight = 256,
+            maxHeight = 1_536,
+            widthMultiple = 64,
+            heightMultiple = 64,
+            supportsNegativePrompt = supportsNegativePrompt,
+            supportsPromptWeighting = false
+        )
+
+        private fun stableDiffusionCppSchedulers(
+            algorithm: ImageEngineSchedulerAlgorithm
+        ): Set<ImageEngineSchedulerAlgorithm> = when (algorithm) {
+            // Flow checkpoints are trained against their flow timetable. Do
+            // not advertise diffusion-only samplers that the bridge can parse
+            // but the selected checkpoint cannot execute faithfully.
+            ImageEngineSchedulerAlgorithm.FLOW_MATCH -> setOf(algorithm)
+            ImageEngineSchedulerAlgorithm.EULER_A -> setOf(
+                ImageEngineSchedulerAlgorithm.EULER_A,
+                ImageEngineSchedulerAlgorithm.EULER,
+                ImageEngineSchedulerAlgorithm.DPMPP_2M
+            )
+            else -> setOf(algorithm)
+        }
+
+        private fun qnnGraph(
+            textEncoder: String,
+            unet: String,
+            vae: String,
+            qnnSdk: String?,
+            htpArch: Int?,
+            vaeEncoder: String? = null,
+            workerStrategy: ImageEngineWorkerStrategy = ImageEngineWorkerStrategy.SHARED_TEXT_UNET_VAE,
+            controlNet: String? = null
+        ): ImageEngineGraphContractSpec = ImageEngineGraphContractSpec(
+            textEncoder = textEncoder,
+            unet = unet,
+            vae = vae,
+            vaeEncoder = vaeEncoder,
+            controlNet = controlNet,
+            schedulerSidecar = "scheduler/scheduler_config.json",
+            tokenizerSidecar = "tokenizer/tokenizer_config.json",
+            qnnSdk = qnnSdk,
+            htpArch = htpArch,
+            workerStrategy = workerStrategy
+        )
+
+        private fun qnnSd15ExecutionProfile(
+            profileId: String,
+            variant: ImageEngineModelVariant = ImageEngineModelVariant.STANDARD,
+            steps: Int = 20,
+            cfgScale: Double = 7.0,
+            conditioningDataType: ImageEngineEmbeddingDataType = ImageEngineEmbeddingDataType.FP16,
+            conversionStrategy: ImageEngineEmbeddingConversionStrategy = ImageEngineEmbeddingConversionStrategy.NONE,
+            defaultNegativePrompt: String = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+        ): ImageEngineExecutionProfileSpec = ImageEngineExecutionProfileSpec(
+            profileId = profileId,
+            family = ImageEngineModelFamily.SD15,
+            variant = variant,
+            tokenizer = clipTokenizer(ImageEngineTokenizerBackend.TOKENIZERS_CPP),
+            conditioning = imageConditioning(conditioningDataType, conversionStrategy, 768),
+            scheduler = imageScheduler(
+                algorithm = ImageEngineSchedulerAlgorithm.DPMPP_2M,
+                predictionType = ImageEnginePredictionType.EPSILON,
+                defaultSteps = steps,
+                minSteps = if (variant == ImageEngineModelVariant.HYPER) 1 else 10,
+                maxSteps = 50,
+                timestepSpacing = ImageEngineTimestepSpacing.LEADING,
+                order = 2
+            ),
+            vae = imageVae(ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
+            graph = qnnGraph(
+                textEncoder = "clip_text_encoder_qnn_context.bin",
+                unet = "unet.bin",
+                vae = "vae_decoder.bin",
+                qnnSdk = "2.28",
+                htpArch = 68,
+                vaeEncoder = "vae_encoder.bin"
+            ),
+            defaults = ImageEngineGenerationDefaultsSpec(
+                width = 512,
+                height = 512,
+                steps = steps,
+                cfgScale = cfgScale,
+                useCfg = true,
+                defaultNegativePrompt = defaultNegativePrompt
+            ),
+            capabilities = fixedImageCapabilities(
+                512,
+                setOf(
+                    ImageEngineSchedulerAlgorithm.DPMPP_2M,
+                    ImageEngineSchedulerAlgorithm.EULER,
+                    ImageEngineSchedulerAlgorithm.PNDM_PLMS
                 )
             )
+        )
+
+        private fun qnnSdxlExecutionProfile(
+            profileId: String,
+            variant: ImageEngineModelVariant = ImageEngineModelVariant.SDXL_BASE,
+            steps: Int = 30,
+            cfgScale: Double = 7.0,
+            useCfg: Boolean = true,
+            timestepSpacing: ImageEngineTimestepSpacing = ImageEngineTimestepSpacing.TRAILING,
+            defaultNegativePrompt: String? = RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT,
+            supportsNegativePrompt: Boolean = true
+        ): ImageEngineExecutionProfileSpec = ImageEngineExecutionProfileSpec(
+            profileId = profileId,
+            family = ImageEngineModelFamily.SDXL,
+            variant = variant,
+            tokenizer = clipTokenizer(
+                ImageEngineTokenizerBackend.TOKENIZERS_CPP,
+                dualClip = true,
+                separateNegativePrompt = supportsNegativePrompt
+            ),
+            conditioning = imageConditioning(
+                ImageEngineEmbeddingDataType.FP16,
+                ImageEngineEmbeddingConversionStrategy.NONE,
+                2_048,
+                dualEncoder = true,
+                pooledOutput = true
+            ),
+            scheduler = imageScheduler(
+                algorithm = ImageEngineSchedulerAlgorithm.DPMPP_2M,
+                predictionType = ImageEnginePredictionType.EPSILON,
+                defaultSteps = steps,
+                minSteps = 1,
+                maxSteps = 50,
+                timestepSpacing = timestepSpacing,
+                order = 2
+            ),
+            vae = imageVae(ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.13025, 1024),
+            graph = qnnGraph(
+                textEncoder = "clip.mnn",
+                unet = "unet.bin",
+                vae = "vae_decoder.bin",
+                qnnSdk = "2.28",
+                // SDXL packages can mix graph targets (for example V75 UNet
+                // with V73 VAE). The package therefore has no single HTP
+                // architecture admission value; native context metadata must
+                // select transport per graph.
+                htpArch = null,
+                vaeEncoder = "vae_encoder.bin",
+                workerStrategy = ImageEngineWorkerStrategy.SPLIT_UNET_VAE
+            ),
+            defaults = ImageEngineGenerationDefaultsSpec(
+                width = 1024,
+                height = 1024,
+                steps = steps,
+                cfgScale = cfgScale,
+                useCfg = useCfg,
+                defaultNegativePrompt = defaultNegativePrompt
+            ),
+            capabilities = fixedImageCapabilities(
+                1024,
+                setOf(
+                    ImageEngineSchedulerAlgorithm.DPMPP_2M,
+                    ImageEngineSchedulerAlgorithm.EULER,
+                    ImageEngineSchedulerAlgorithm.LCM
+                ),
+                supportsNegativePrompt = supportsNegativePrompt
+            )
+        )
+
+        private fun qnnGen5ExecutionProfile(
+            profileId: String,
+            sd21: Boolean,
+            controlNet: Boolean = false
+        ): ImageEngineExecutionProfileSpec {
+            val task = if (controlNet) ImageEngineTask.CONTROL_IMAGE else ImageEngineTask.TEXT_TO_IMAGE
+            return ImageEngineExecutionProfileSpec(
+                profileId = profileId,
+                family = if (sd21) ImageEngineModelFamily.SD21 else ImageEngineModelFamily.SD15,
+                variant = when {
+                    controlNet -> ImageEngineModelVariant.CONTROLNET_CANNY
+                    sd21 -> ImageEngineModelVariant.SD21
+                    else -> ImageEngineModelVariant.STANDARD
+                },
+                task = task,
+                tokenizer = clipTokenizer(
+                    ImageEngineTokenizerBackend.TOKENIZERS_CPP,
+                    padZero = sd21,
+                    supportsPromptWeighting = false
+                ),
+                conditioning = imageConditioning(
+                    ImageEngineEmbeddingDataType.GRAPH_INTERNAL,
+                    ImageEngineEmbeddingConversionStrategy.GRAPH_EXECUTION,
+                    if (sd21) 1_024 else 768
+                ),
+                // These values are the effective pinned sidecar semantics, not
+                // a class-name guess from the publisher scheduler JSON.
+                scheduler = if (sd21) {
+                    imageScheduler(
+                        algorithm = ImageEngineSchedulerAlgorithm.DDIM,
+                        predictionType = ImageEnginePredictionType.V_PREDICTION,
+                        defaultSteps = 20,
+                        minSteps = 1,
+                        maxSteps = 100,
+                        timestepSpacing = ImageEngineTimestepSpacing.LEADING,
+                        stepsOffset = 1,
+                        setAlphaToOne = false,
+                        skipPrkSteps = true
+                    )
+                } else {
+                    imageScheduler(
+                        algorithm = ImageEngineSchedulerAlgorithm.EULER,
+                        predictionType = ImageEnginePredictionType.EPSILON,
+                        defaultSteps = 20,
+                        minSteps = 1,
+                        maxSteps = 100,
+                        timestepSpacing = ImageEngineTimestepSpacing.LINSPACE,
+                        stepsOffset = 1,
+                        setAlphaToOne = false,
+                        skipPrkSteps = true,
+                        scaleModelInput = true
+                    )
+                },
+                vae = imageVae(ImageEngineVaeScalingLocation.GRAPH_INTERNAL, 0.18215, 512),
+                graph = qnnGraph(
+                    textEncoder = "text_encoder.bin",
+                    unet = "unet.bin",
+                    vae = "vae.bin",
+                    qnnSdk = "2.45.0.260326154327",
+                    htpArch = 81,
+                    controlNet = if (controlNet) "controlnet.bin" else null
+                ),
+                defaults = ImageEngineGenerationDefaultsSpec(
+                    width = 512,
+                    height = 512,
+                    steps = 20,
+                    cfgScale = 7.5,
+                    useCfg = true,
+                    defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+                ),
+                capabilities = fixedImageCapabilities(
+                    size = 512,
+                    schedulers = setOf(
+                        if (sd21) ImageEngineSchedulerAlgorithm.DDIM else ImageEngineSchedulerAlgorithm.EULER
+                    ),
+                    supportsPromptWeighting = false,
+                    requiresControlImage = controlNet
+                )
+            )
+        }
+
+        private fun mnnSd15ExecutionProfile(): ImageEngineExecutionProfileSpec =
+            ImageEngineExecutionProfileSpec(
+                profileId = "mnn.sd15.official.512",
+                family = ImageEngineModelFamily.SD15,
+                variant = ImageEngineModelVariant.STANDARD,
+                tokenizer = clipTokenizer(ImageEngineTokenizerBackend.TOKENIZERS_CPP),
+                conditioning = imageConditioning(
+                    ImageEngineEmbeddingDataType.GRAPH_INTERNAL,
+                    ImageEngineEmbeddingConversionStrategy.GRAPH_EXECUTION,
+                    768
+                ),
+                scheduler = imageScheduler(
+                    algorithm = ImageEngineSchedulerAlgorithm.DPMPP_2M,
+                    predictionType = ImageEnginePredictionType.EPSILON,
+                    defaultSteps = 20,
+                    minSteps = 10,
+                    maxSteps = 50,
+                    timestepSpacing = ImageEngineTimestepSpacing.LEADING,
+                    order = 2
+                ),
+                vae = imageVae(ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
+                graph = ImageEngineGraphContractSpec(
+                    textEncoder = "text_encoder.mnn",
+                    unet = "unet.mnn",
+                    vae = "vae_decoder.mnn",
+                    workerStrategy = ImageEngineWorkerStrategy.IN_PROCESS
+                ),
+                defaults = ImageEngineGenerationDefaultsSpec(
+                    width = 512,
+                    height = 512,
+                    steps = 20,
+                    cfgScale = 7.0,
+                    useCfg = true,
+                    defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+                ),
+                capabilities = fixedImageCapabilities(
+                    512,
+                    setOf(
+                        ImageEngineSchedulerAlgorithm.DPMPP_2M,
+                        ImageEngineSchedulerAlgorithm.EULER,
+                        ImageEngineSchedulerAlgorithm.PNDM_PLMS
+                    )
+                )
+            )
+
+        private fun sanaEditExecutionProfile(): ImageEngineExecutionProfileSpec =
+            ImageEngineExecutionProfileSpec(
+                profileId = "mnn.sana-edit.v2",
+                family = ImageEngineModelFamily.SANA,
+                variant = ImageEngineModelVariant.SANA_EDIT,
+                task = ImageEngineTask.IMAGE_EDIT,
+                tokenizer = clipTokenizer(ImageEngineTokenizerBackend.MNN_MTOK, maxLength = 256),
+                conditioning = imageConditioning(
+                    ImageEngineEmbeddingDataType.GRAPH_INTERNAL,
+                    ImageEngineEmbeddingConversionStrategy.GRAPH_EXECUTION,
+                    width = 1,
+                    maxLength = 256
+                ),
+                scheduler = imageScheduler(
+                    algorithm = ImageEngineSchedulerAlgorithm.FLOW_MATCH,
+                    predictionType = ImageEnginePredictionType.FLOW,
+                    defaultSteps = 10,
+                    minSteps = 2,
+                    maxSteps = 50
+                ),
+                vae = imageVae(ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0, 512),
+                graph = ImageEngineGraphContractSpec(
+                    textEncoder = "llm/llm.mnn",
+                    unet = "transformer.mnn",
+                    vae = "vae_decoder.mnn",
+                    vaeEncoder = "vae_encoder.mnn",
+                    configSidecars = listOf("llm/meta_queries.mnn"),
+                    workerStrategy = ImageEngineWorkerStrategy.DEDICATED_WORKER
+                ),
+                defaults = ImageEngineGenerationDefaultsSpec(
+                    width = 512,
+                    height = 512,
+                    steps = 10,
+                    cfgScale = 4.5,
+                    useCfg = true,
+                    defaultNegativePrompt = RecommendedImageDefaults.EDIT_NEGATIVE_PROMPT
+                ),
+                capabilities = fixedImageCapabilities(
+                    size = 512,
+                    schedulers = setOf(ImageEngineSchedulerAlgorithm.FLOW_MATCH),
+                    supportsPromptWeighting = false,
+                    requiresInputImage = true,
+                    supportsMask = false
+                )
+            )
+
+        private fun stableDiffusionCppExecutionProfile(
+            profileId: String,
+            family: ImageEngineModelFamily,
+            variant: ImageEngineModelVariant,
+            steps: Int,
+            cfgScale: Double,
+            algorithm: ImageEngineSchedulerAlgorithm,
+            size: Int = 512,
+            defaultNegativePrompt: String? = null,
+            supportsNegativePrompt: Boolean = true
+        ): ImageEngineExecutionProfileSpec = ImageEngineExecutionProfileSpec(
+            profileId = profileId,
+            family = family,
+            variant = variant,
+            tokenizer = clipTokenizer(
+                ImageEngineTokenizerBackend.SDCPP_NATIVE,
+                separateNegativePrompt = supportsNegativePrompt
+            ),
+            conditioning = imageConditioning(
+                ImageEngineEmbeddingDataType.RUNTIME_NATIVE,
+                ImageEngineEmbeddingConversionStrategy.RUNTIME_NATIVE,
+                1,
+                separateNegativePrompt = supportsNegativePrompt
+            ),
+            scheduler = imageScheduler(
+                algorithm = algorithm,
+                predictionType = if (algorithm == ImageEngineSchedulerAlgorithm.FLOW_MATCH) {
+                    ImageEnginePredictionType.FLOW
+                } else {
+                    ImageEnginePredictionType.EPSILON
+                },
+                defaultSteps = steps,
+                minSteps = 1,
+                maxSteps = 100
+            ),
+            vae = imageVae(ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0, size),
+            graph = ImageEngineGraphContractSpec(workerStrategy = ImageEngineWorkerStrategy.IN_PROCESS),
+            defaults = ImageEngineGenerationDefaultsSpec(
+                width = size,
+                height = size,
+                steps = steps,
+                cfgScale = cfgScale,
+                useCfg = stableDiffusionCppUsesCfg(cfgScale),
+                defaultNegativePrompt = defaultNegativePrompt
+            ),
+            capabilities = stableDiffusionCppCapabilities(
+                stableDiffusionCppSchedulers(algorithm),
+                supportsNegativePrompt = supportsNegativePrompt
+            )
+        )
+
+        private fun recommendedImageExecutionProfile(
+            recommendationId: String
+        ): ImageEngineExecutionProfileSpec = when (recommendationId) {
+            "cyberrealistic_sd15_qnn228" -> qnnSd15ExecutionProfile(
+                profileId = "community.sd15.qnn228",
+                defaultNegativePrompt = RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
+            )
+            "dreamshaper_sd15_qnn228" -> qnnSd15ExecutionProfile(
+                profileId = "community.sd15.qnn228",
+                defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+            )
+            "realisticvisionhyper_sd15_qnn228" -> qnnSd15ExecutionProfile(
+                profileId = "community.sd15.hyper.qnn228",
+                variant = ImageEngineModelVariant.HYPER,
+                steps = 8,
+                cfgScale = 2.0,
+                defaultNegativePrompt = RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
+            )
+            "meinamix_sd15_qnn228" -> qnnSd15ExecutionProfile(
+                profileId = "community.sd15.legacy-fp32.qnn228",
+                variant = ImageEngineModelVariant.LEGACY_FP32,
+                conditioningDataType = ImageEngineEmbeddingDataType.FP32,
+                conversionStrategy = ImageEngineEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
+                defaultNegativePrompt = RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT
+            )
+            "sdxl_base_qnn228" -> qnnSdxlExecutionProfile(
+                profileId = "community.sdxl.base.qnn228",
+                defaultNegativePrompt = RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT
+            )
+            "animagine_xl_v4_qnn228" -> qnnSdxlExecutionProfile(
+                profileId = "community.sdxl.base.qnn228",
+                steps = RecommendedImageDefaults.ANIMAGINE_XL_STEPS,
+                cfgScale = RecommendedImageDefaults.ANIMAGINE_XL_CFG,
+                defaultNegativePrompt = RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT
+            )
+            "cyberrealisticxl_qnn228" -> qnnSdxlExecutionProfile(
+                profileId = "community.sdxl.base.qnn228",
+                steps = RecommendedImageDefaults.CYBERREALISTIC_XL_STEPS,
+                cfgScale = RecommendedImageDefaults.CYBERREALISTIC_XL_CFG,
+                defaultNegativePrompt = RecommendedImageDefaults.CYBERREALISTIC_XL_NEGATIVE_PROMPT
+            )
+            "realismsdxl_dmd2_alt_qnn228" -> qnnSdxlExecutionProfile(
+                profileId = "community.sdxl.dmd2-alt.qnn228",
+                variant = ImageEngineModelVariant.DMD2_ALT,
+                steps = 4,
+                cfgScale = 1.0,
+                useCfg = false,
+                timestepSpacing = ImageEngineTimestepSpacing.LINSPACE,
+                defaultNegativePrompt = null,
+                supportsNegativePrompt = false
+            )
+            "qualcomm_sd15_gen5_qnn" -> qnnGen5ExecutionProfile(
+                profileId = "qualcomm.sd15.gen5.qnn245",
+                sd21 = false
+            )
+            "qualcomm_sd21_gen5_qnn" -> qnnGen5ExecutionProfile(
+                profileId = "qualcomm.sd21.gen5.qnn245",
+                sd21 = true
+            )
+            "qualcomm_controlnet_canny_gen5_qnn" -> qnnGen5ExecutionProfile(
+                profileId = "qualcomm.controlnet-canny.gen5.qnn245",
+                sd21 = false,
+                controlNet = true
+            )
+            "sd15_mnn_512_quality" -> mnnSd15ExecutionProfile()
+            "mnn_sana_edit_v2" -> sanaEditExecutionProfile()
+            "sd_turbo_512_experimental" -> stableDiffusionCppExecutionProfile(
+                profileId = "sdcpp.sd-turbo",
+                family = ImageEngineModelFamily.SD_TURBO,
+                variant = ImageEngineModelVariant.SD_TURBO,
+                steps = 4,
+                // A zero native guidance scale selects the unconditional
+                // branch. Distilled conditional-only execution uses 1.0 and
+                // disables the negative CFG branch explicitly.
+                cfgScale = 1.0,
+                algorithm = ImageEngineSchedulerAlgorithm.EULER_A,
+                supportsNegativePrompt = false
+            )
+            "z_image_turbo_q4" -> stableDiffusionCppExecutionProfile(
+                profileId = "sdcpp.z-image-turbo",
+                family = ImageEngineModelFamily.Z_IMAGE,
+                variant = ImageEngineModelVariant.Z_IMAGE_TURBO,
+                steps = 8,
+                cfgScale = 1.0,
+                algorithm = ImageEngineSchedulerAlgorithm.FLOW_MATCH,
+                supportsNegativePrompt = false
+            )
+            "flux2_klein_4b_q4" -> stableDiffusionCppExecutionProfile(
+                profileId = "sdcpp.flux2-klein",
+                family = ImageEngineModelFamily.FLUX,
+                variant = ImageEngineModelVariant.FLUX2_KLEIN,
+                // The recommended file is the distilled Klein checkpoint,
+                // not the separately published Klein Base checkpoint.
+                steps = 4,
+                cfgScale = 1.0,
+                algorithm = ImageEngineSchedulerAlgorithm.FLOW_MATCH,
+                size = 1024,
+                supportsNegativePrompt = false
+            )
+            "qwen_image_2512_q2" -> stableDiffusionCppExecutionProfile(
+                profileId = "sdcpp.qwen-image",
+                family = ImageEngineModelFamily.QWEN_IMAGE,
+                variant = ImageEngineModelVariant.QWEN_IMAGE,
+                steps = 40,
+                cfgScale = 2.5,
+                algorithm = ImageEngineSchedulerAlgorithm.FLOW_MATCH,
+                size = 1024,
+                defaultNegativePrompt = RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT
+            )
+            "longcat_image_q4" -> stableDiffusionCppExecutionProfile(
+                profileId = "sdcpp.longcat-image",
+                family = ImageEngineModelFamily.LONGCAT_IMAGE,
+                variant = ImageEngineModelVariant.LONGCAT_IMAGE,
+                steps = 20,
+                cfgScale = 5.0,
+                algorithm = ImageEngineSchedulerAlgorithm.FLOW_MATCH,
+                size = 1024,
+                defaultNegativePrompt = RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT
+            )
+            else -> error("Unknown catalog image execution profile: $recommendationId")
         }
 
         private fun qnnZipComponent(
@@ -1062,16 +1708,19 @@ class ModelScopeClient(
             ImageEngineQnnSmokeSpec(
                 graphName = "model",
                 contextBinary = "vae_decoder.bin",
-                width = 1024,
-                height = 1024,
+                // Published SDXL packages carry a 512 decoder graph. The
+                // production SDXL path decodes a 128x128 latent through
+                // overlapping 64x64 tiles and merges the 512x512 outputs.
+                width = 512,
+                height = 512,
                 steps = 1,
                 timeoutSeconds = 300,
                 prompt = "sdxl vae decoder smoke",
                 inputs = listOf(
-                    ImageEngineQnnSmokeTensorSpec("input", "float32", listOf(1, 4, 128, 128))
+                    ImageEngineQnnSmokeTensorSpec("input", "float32", listOf(1, 4, 64, 64))
                 ),
                 outputs = listOf(
-                    ImageEngineQnnSmokeTensorSpec("output", "float32", listOf(1, 3, 1024, 1024), role = "output")
+                    ImageEngineQnnSmokeTensorSpec("output", "float32", listOf(1, 3, 512, 512), role = "output")
                 )
             )
         )
@@ -1086,28 +1735,38 @@ class ModelScopeClient(
             sha256: String? = null,
             completeBundleRuntime: Boolean = true,
             minDeviceTier: ImageEngineMinDeviceTier = ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN1
-        ): ImageEngineBundleSpec = ImageEngineBundleSpec(
-            id = id,
-            title = title,
-            components = qnnZipComponent(repoId, fileName, revision, expectedSizeBytes, sha256),
-            runtime = ImageEngineBundleRuntime.QNN_HTP,
-            accelerator = ImageEngineAccelerator.QNN_HTP,
-            minDeviceTier = minDeviceTier,
-            requiresQnnRuntime = true,
-            requiresSmokeTest = true,
-            smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 4, timeoutSeconds = 240),
-            qnnSmokeSpecs = sd15QnnSmokeSpecs(),
-            requiredRuntimeProfile = ImageEngineQnnRuntimeProfileSpec(
-                qnnSdk = "2.28",
-                // The `min` context targets the publisher's broadest hardware
-                // baseline. A self-contained archive may also carry several
-                // physical-device transports; installation resolves the exact
-                // local HTP profile instead of treating this fallback as a
-                // device-admission rule.
-                htpArch = 68,
-                completeBundleRuntime = completeBundleRuntime
+        ): ImageEngineBundleSpec {
+            val profile = recommendedImageExecutionProfile(id)
+            return ImageEngineBundleSpec(
+                id = id,
+                title = title,
+                components = qnnZipComponent(repoId, fileName, revision, expectedSizeBytes, sha256),
+                recommendationId = id,
+                runtime = ImageEngineBundleRuntime.QNN_HTP,
+                accelerator = ImageEngineAccelerator.QNN_HTP,
+                minDeviceTier = minDeviceTier,
+                requiresQnnRuntime = true,
+                requiresSmokeTest = true,
+                smokeSpec = ImageEngineSmokeSpec(
+                    width = profile.defaults.width,
+                    height = profile.defaults.height,
+                    steps = profile.defaults.steps,
+                    timeoutSeconds = 240
+                ),
+                qnnSmokeSpecs = sd15QnnSmokeSpecs(),
+                requiredRuntimeProfile = ImageEngineQnnRuntimeProfileSpec(
+                    qnnSdk = "2.28",
+                    // The `min` context targets the publisher's broadest hardware
+                    // baseline. A self-contained archive may also carry several
+                    // physical-device transports; installation resolves the exact
+                    // local HTP profile instead of treating this fallback as a
+                    // device-admission rule.
+                    htpArch = 68,
+                    completeBundleRuntime = completeBundleRuntime
+                ),
+                executionProfile = profile
             )
-        )
+        }
 
         private fun sdxlQnnBundle(
             id: String,
@@ -1117,20 +1776,31 @@ class ModelScopeClient(
             revision: String = "main",
             expectedSizeBytes: Long? = null,
             sha256: String? = null
-        ): ImageEngineBundleSpec = ImageEngineBundleSpec(
-            id = id,
-            title = title,
-            components = qnnZipComponent(repoId, fileName, revision, expectedSizeBytes, sha256),
-            runtime = ImageEngineBundleRuntime.QNN_HTP,
-            accelerator = ImageEngineAccelerator.QNN_HTP,
-            minDeviceTier = ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN3,
-            requiresQnnRuntime = true,
-            requiresSmokeTest = true,
-            smokeSpec = ImageEngineSmokeSpec(width = 1024, height = 1024, steps = 1, timeoutSeconds = 360),
-            qnnSmokeSpecs = sdxlQnnSmokeSpecs()
-        )
+        ): ImageEngineBundleSpec {
+            val recommendationId = id.removeSuffix("_bundle")
+            val profile = recommendedImageExecutionProfile(recommendationId)
+            return ImageEngineBundleSpec(
+                id = id,
+                title = title,
+                components = qnnZipComponent(repoId, fileName, revision, expectedSizeBytes, sha256),
+                recommendationId = recommendationId,
+                runtime = ImageEngineBundleRuntime.QNN_HTP,
+                accelerator = ImageEngineAccelerator.QNN_HTP,
+                minDeviceTier = ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN3,
+                requiresQnnRuntime = true,
+                requiresSmokeTest = true,
+                smokeSpec = ImageEngineSmokeSpec(
+                    width = profile.defaults.width,
+                    height = profile.defaults.height,
+                    steps = profile.defaults.steps,
+                    timeoutSeconds = 360
+                ),
+                qnnSmokeSpecs = sdxlQnnSmokeSpecs(),
+                executionProfile = profile
+            )
+        }
 
-        private fun pendingGen5QnnBundle(
+        private fun gen5QnnBundle(
             id: String,
             title: String,
             repoId: String,
@@ -1138,23 +1808,42 @@ class ModelScopeClient(
             revision: String,
             useSd21Sidecars: Boolean = false,
             task: ImageEngineTask = ImageEngineTask.TEXT_TO_IMAGE
-        ): ImageEngineBundleSpec = ImageEngineBundleSpec(
-            id = id,
-            title = title,
-            components = qnnZipComponent(repoId, fileName, revision) + gen5TokenizerSidecars(useSd21Sidecars),
-            task = task,
-            runtime = ImageEngineBundleRuntime.QNN_HTP,
-            accelerator = ImageEngineAccelerator.QNN_HTP,
-            minDeviceTier = ImageEngineMinDeviceTier.SNAPDRAGON_8_ELITE,
-            requiresQnnRuntime = true,
-            requiresSmokeTest = true,
-            smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 1, timeoutSeconds = 300),
-            requiredRuntimeProfile = ImageEngineQnnRuntimeProfileSpec(
-                qnnSdk = "2.45.0.260326154327",
-                htpArch = 81,
-                completeBundleRuntime = false
+        ): ImageEngineBundleSpec {
+            val recommendationId = id.removeSuffix("_bundle")
+            val profile = recommendedImageExecutionProfile(recommendationId)
+            return ImageEngineBundleSpec(
+                id = id,
+                title = title,
+                components = qnnZipComponent(
+                    repoId = repoId,
+                    fileName = fileName,
+                    revision = revision,
+                    expectedSizeBytes = QAIRT_IMAGE_RELEASE_ASSET_SIZE_BYTES[recommendationId]
+                        ?: error("Missing pinned Gen5 QNN archive size for $recommendationId."),
+                    sha256 = QAIRT_IMAGE_RELEASE_ASSET_SHA256[recommendationId]
+                        ?: error("Missing pinned Gen5 QNN archive SHA-256 for $recommendationId.")
+                ) + gen5TokenizerSidecars(useSd21Sidecars),
+                recommendationId = recommendationId,
+                task = task,
+                runtime = ImageEngineBundleRuntime.QNN_HTP,
+                accelerator = ImageEngineAccelerator.QNN_HTP,
+                minDeviceTier = ImageEngineMinDeviceTier.SNAPDRAGON_8_ELITE,
+                requiresQnnRuntime = true,
+                requiresSmokeTest = true,
+                smokeSpec = ImageEngineSmokeSpec(
+                    width = profile.defaults.width,
+                    height = profile.defaults.height,
+                    steps = profile.defaults.steps,
+                    timeoutSeconds = 300
+                ),
+                requiredRuntimeProfile = ImageEngineQnnRuntimeProfileSpec(
+                    qnnSdk = "2.45.0.260326154327",
+                    htpArch = 81,
+                    completeBundleRuntime = false
+                ),
+                executionProfile = profile
             )
-        )
+        }
 
         private fun gen5TokenizerSidecars(useSd21: Boolean): List<ImageEngineBundleComponentSpec> {
             val repoId = if (useSd21) {
@@ -1644,7 +2333,7 @@ class ModelScopeClient(
                 title = "RealisticVision Hyper SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/RealisticVisionHyper-SD1.5-qnn2.28",
                 revision = "92a2e40d65a47a6b8aa3ee86ffffdc0ed2b0b66b",
-                description = "写实人像和生活摄影方向的 SD1.5 QNN 包。已完成产品 worker 20-step、三次冷启动和三次复用真机回归，仍作为可手动选择的实验模型。",
+                description = "写实人像和生活摄影方向的 SD1.5 Hyper QNN 包。默认 8-step、CFG 2.0；已完成三次冷启动和三次复用真机回归，仍作为可手动选择的实验模型。",
                 recommendedFileName = "RealisticVisionHyper-qnn2.28-min.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
@@ -1699,7 +2388,7 @@ class ModelScopeClient(
                 id = "meinamix_sd15_qnn228",
                 title = "MeinaMix SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/MeinaMix-SD1.5-qnn2.28",
-                revision = "main",
+                revision = "17d26a779cf2a53acc6caf0345c663767c293c5a",
                 description = "动漫与插画方向的 SD1.5 QNN 包。适合作为本地 NPU 生图的风格化补充模型。",
                 recommendedFileName = "MeinaMix-qnn2.28-8gen2.zip",
                 parameterScale = "SD1.5",
@@ -1717,7 +2406,10 @@ class ModelScopeClient(
                     id = "meinamix_sd15_qnn228",
                     title = "MeinaMix SD1.5 QNN 2.28",
                     repoId = "Mr-J-369/MeinaMix-SD1.5-qnn2.28",
-                    fileName = "MeinaMix-qnn2.28-8gen2.zip"
+                    fileName = "MeinaMix-qnn2.28-8gen2.zip",
+                    revision = "17d26a779cf2a53acc6caf0345c663767c293c5a",
+                    expectedSizeBytes = 1_228_483_146L,
+                    sha256 = "120aa73eb843bf24a96fe067baa2c4f97fb3a95620c36caffe080ed7f4503d09"
                 ).copy(requiredRuntimeProfile = null)
             ),
             ModelScopeRecommendedModel(
@@ -1725,7 +2417,7 @@ class ModelScopeClient(
                 title = "SDXL Base QNN 2.28",
                 repoId = "xororz/sdxl-qnn",
                 revision = "ead90f4635e21e7412b8200a5efd220b0193beeb",
-                description = "通用基础 SDXL QNN 第三方包；开放给骁龙设备实验下载，优先收集不同芯片的兼容性反馈。",
+                description = "通用基础 SDXL QNN 完整 1024×1024 包；双 CLIP、多步 UNet 与分进程 VAE tile 链路已接线，首次运行由真实 native graph 结果确认兼容性。",
                 recommendedFileName = "sdxl_base_qnn2.28_8gen3.zip",
                 parameterScale = "SDXL",
                 quant = "QNN 2.28",
@@ -1754,7 +2446,7 @@ class ModelScopeClient(
                 title = "RealismSDXL DMD2 ALT QNN 2.28",
                 repoId = "Mr-J-369/RealismByStableYogiV8.0_DMD2_ALT-SDXL-qnn2.28",
                 revision = "ab203b4d41e42bd01073e19dcd478d7b231780d2",
-                description = "写实与少步生成方向的第三方 SDXL QNN 包；开放给骁龙设备实验下载，运行结果由用户反馈。",
+                description = "写实方向的 SDXL DMD2 ALT 少步包；默认 4-step、CFG 1.0 单分支，完整 UNet timetable 与 VAE tile 链路已接线。",
                 recommendedFileName = "realismSDXLByStable_v80DMD2ALT_qnn2.28_8gen3.zip",
                 parameterScale = "SDXL",
                 quant = "QNN 2.28 DMD2 ALT",
@@ -1783,7 +2475,7 @@ class ModelScopeClient(
                 title = "Animagine XL v4 QNN 2.28",
                 repoId = "YuuiKurata/animagineXL_qnn2.28",
                 revision = "43de36d441380fc9cc34f25c1d01bbf74c8776b7",
-                description = "动漫与插画方向的第三方 SDXL QNN 包；开放给骁龙设备实验下载，运行结果由用户反馈。",
+                description = "动漫与插画方向的 SDXL QNN 包；默认 1024×1024、28-step、CFG 5.0，并使用动漫模型专属负面提示词。",
                 recommendedFileName = "animagineXL40_v4Opt_qnn2.28_8gen3.zip",
                 parameterScale = "SDXL",
                 quant = "QNN 2.28",
@@ -1856,7 +2548,7 @@ class ModelScopeClient(
                 downloadable = true,
                 downloadBlockReason = null,
                 localImageEngineTier = LocalImageEngineTier.QUICK,
-                imageEngineBundle = pendingGen5QnnBundle(
+                imageEngineBundle = gen5QnnBundle(
                     id = "qualcomm_sd15_gen5_qnn_bundle",
                     title = "Qualcomm Stable Diffusion 1.5 Gen5 QNN",
                     repoId = "qualcomm/Stable-Diffusion-v1.5",
@@ -1883,7 +2575,7 @@ class ModelScopeClient(
                 downloadable = true,
                 downloadBlockReason = null,
                 localImageEngineTier = LocalImageEngineTier.STANDARD,
-                imageEngineBundle = pendingGen5QnnBundle(
+                imageEngineBundle = gen5QnnBundle(
                     id = "qualcomm_sd21_gen5_qnn_bundle",
                     title = "Qualcomm Stable Diffusion 2.1 Gen5 QNN",
                     repoId = "qualcomm/Stable-Diffusion-v2.1",
@@ -1897,34 +2589,35 @@ class ModelScopeClient(
                 title = "Qualcomm ControlNet Canny · 骁龙 8 Elite Gen 5",
                 repoId = "qualcomm/ControlNet-Canny",
                 revision = "2e0b3bb550cad49caf0f2e135d1f67bced02e61e",
-                description = "骁龙 8 Elite Gen 5 边缘图控制与编辑官方包，ControlNet 输入链路待接入。",
+                description = "Gen5 QNN Canny 控制图生图包；边缘预处理、ControlNet residual 注入与强度参数已接线，首次运行由真实 native graph 结果确认。",
                 recommendedFileName = "controlnet_canny-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
                 parameterScale = "ControlNet",
                 quant = "w8a16 QAIRT 2.45",
                 minRamGb = 12,
-                tags = listOf("边缘控制", "图像编辑", "Gen5", "QNN", "骁龙 NPU", "Qualcomm"),
+                tags = listOf("边缘控制", "控制图生图", "Gen5", "QNN", "骁龙 NPU", "Qualcomm"),
                 priority = 2,
                 kind = ModelScopeRecommendedKind.IMAGE,
-                status = RecommendedModelStatus.PENDING_INTEGRATION,
+                status = RecommendedModelStatus.EXPERIMENTAL,
                 supportedChipsetCodes = GEN5_QNN_CHIPSETS,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 downloadable = true,
                 downloadBlockReason = null,
                 localImageEngineTier = LocalImageEngineTier.HEAVY_EXPERIMENTAL,
-                imageEngineBundle = pendingGen5QnnBundle(
+                imageEngineBundle = gen5QnnBundle(
                     id = "qualcomm_controlnet_canny_gen5_qnn_bundle",
                     title = "Qualcomm ControlNet Canny Gen5 QNN",
                     repoId = "qualcomm/ControlNet-Canny",
                     fileName = "controlnet_canny-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
                     revision = "2e0b3bb550cad49caf0f2e135d1f67bced02e61e",
-                    task = ImageEngineTask.IMAGE_EDIT
+                    task = ImageEngineTask.CONTROL_IMAGE
                 )
             ),
             ModelScopeRecommendedModel(
                 id = "sd15_mnn_512_quality",
                 title = "Stable Diffusion 1.5 · MNN 512×512",
                 repoId = "MNN/stable-diffusion-v1-5-mnn-opencl",
-                description = "真机 direct + OpenCL 512×512、20-step 产品 worker 已完成技术闭环；机器人提示词语义通过，车辆提示词仍有颜色和车型偏差，module 路径仍会产生横向条纹噪声。允许实验下载和手动选择，但不能设为默认引擎。",
+                revision = SD15_MNN_REVISION,
+                description = "真机 direct + OpenCL 512×512、20-step 文生图链路已完成技术闭环；机器人提示词语义通过，车辆提示词仍有颜色和车型偏差。发布仓库不含 VAE encoder，因此该推荐包不宣称 img2img 或 inpaint 能力。允许实验下载和手动选择，但不能设为默认引擎。",
                 recommendedFileName = "unet.mnn",
                 parameterScale = "SD1.5",
                 quant = "MNN",
@@ -1939,11 +2632,13 @@ class ModelScopeClient(
                     id = "sd15_mnn_bundle",
                     title = "MNN SD1.5 512 实验包",
                     components = stableDiffusion15MnnComponents(),
+                    recommendationId = "sd15_mnn_512_quality",
                     runtime = ImageEngineBundleRuntime.MNN_DIFFUSION,
                     accelerator = ImageEngineAccelerator.CPU,
                     minDeviceTier = ImageEngineMinDeviceTier.ANY,
                     requiresSmokeTest = true,
-                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 20, timeoutSeconds = 600)
+                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 20, timeoutSeconds = 600),
+                    executionProfile = recommendedImageExecutionProfile("sd15_mnn_512_quality")
                 )
             ),
             ModelScopeRecommendedModel(
@@ -1951,12 +2646,12 @@ class ModelScopeClient(
                 title = "Stable Diffusion Turbo · 512×512",
                 repoId = "AI-ModelScope/sd-turbo",
                 revision = "dc8a205ed5961a45a1b99c2913a194e616bd284b",
-                description = "Stable Diffusion 2.1 蒸馏的一步文生图模型。512×512、1-step 已完成三次冷启动真机出图；384×384 尚未验证。允许实验下载和手动选择，不会自动设为默认引擎。",
+                description = "Stable Diffusion 2.1 蒸馏文生图模型。512×512、4-step、CFG 1.0 的 conditional-only 路径已完成三次冷启动真机出图；384×384 尚未验证。允许实验下载和手动选择，不会自动设为默认引擎。",
                 recommendedFileName = "sd_turbo.safetensors",
                 parameterScale = "SD-Turbo",
                 quant = "FP16",
                 minRamGb = 8,
-                tags = listOf("本地生图", "Stable Diffusion Turbo", "direct 512 已验证", "一步生成", "CPU", "ModelScope", "实验"),
+                tags = listOf("本地生图", "Stable Diffusion Turbo", "direct 512 已验证", "四步生成", "CPU", "ModelScope", "实验"),
                 priority = 0,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.RECOMMENDED,
@@ -1978,11 +2673,13 @@ class ModelScopeClient(
                             relativePath = "sd_turbo.safetensors"
                         )
                     ),
+                    recommendationId = "sd_turbo_512_experimental",
                     runtime = ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP,
                     accelerator = ImageEngineAccelerator.CPU,
                     minDeviceTier = ImageEngineMinDeviceTier.ANY,
                     requiresSmokeTest = true,
-                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 1, timeoutSeconds = 600),
+                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 4, timeoutSeconds = 600),
+                    executionProfile = recommendedImageExecutionProfile("sd_turbo_512_experimental"),
                     // This is a single complete checkpoint, not a split bundle
                     // and not a separately verified 384×384 preset.
                     modelFamily = "SD_TURBO"
@@ -1993,24 +2690,25 @@ class ModelScopeClient(
                 title = "Sana Edit V2 · MNN",
                 repoId = "MNN/MNN-Sana-Edit-V2",
                 revision = SANA_EDIT_V2_REVISION,
-                description = "ModelScope 官方 MNN Sana 卡通风格图像编辑包。安装器已能原子保留 llm/ 子目录；当前缺口是源图片协议、VAE encoder 调度和完整 edit pipeline，因此先作为精确组件契约展示。",
+                description = "ModelScope 官方 MNN Sana 卡通风格图像编辑包；默认 512×512、10-step、CFG 4.5，完整下载 llm、VAE encoder、transformer 与 VAE decoder，选择原图后运行本地编辑。",
                 recommendedFileName = "transformer.mnn",
                 parameterScale = "Sana Edit V2",
                 quant = "MNN",
                 minRamGb = 8,
-                tags = listOf("本地图像编辑", "Sana", "MNN", "ModelScope", "512x512", "需集成"),
+                tags = listOf("本地图像编辑", "Sana", "MNN", "ModelScope", "512x512", "VAE Encoder"),
                 priority = 2,
                 kind = ModelScopeRecommendedKind.IMAGE,
-                status = RecommendedModelStatus.PENDING_INTEGRATION,
-                visibleInRecommendations = false,
+                status = RecommendedModelStatus.RECOMMENDED,
+                visibleInRecommendations = true,
                 provider = ModelRepositoryProvider.MODELSCOPE,
-                downloadable = false,
-                downloadBlockReason = SANA_EDIT_V2_DOWNLOAD_BLOCK_REASON,
+                downloadable = true,
+                downloadBlockReason = null,
                 localImageEngineTier = LocalImageEngineTier.HEAVY_EXPERIMENTAL,
                 imageEngineBundle = ImageEngineBundleSpec(
                     id = "mnn_sana_edit_v2_bundle",
                     title = "MNN Sana Edit V2 图像编辑包",
                     components = sanaEditV2MnnComponents(),
+                    recommendationId = "mnn_sana_edit_v2",
                     task = ImageEngineTask.IMAGE_EDIT,
                     runtime = ImageEngineBundleRuntime.MNN_DIFFUSION,
                     accelerator = ImageEngineAccelerator.CPU,
@@ -2022,14 +2720,15 @@ class ModelScopeClient(
                         steps = 10,
                         timeoutSeconds = 600,
                         prompt = ""
-                    )
+                    ),
+                    executionProfile = recommendedImageExecutionProfile("mnn_sana_edit_v2")
                 )
             ),
             ModelScopeRecommendedModel(
                 id = "z_image_turbo_q4",
                 title = "Z-Image Turbo · Q2_K GGUF",
                 repoId = "hf/leejet-Z-Image-Turbo-GGUF",
-                description = "Z-Image Turbo 三组件实验包，包含 Q2_K diffusion、匹配 VAE 和 Qwen3 文本编码器；下载后由用户参与兼容性测试。",
+                description = "Z-Image Turbo 完整三组件包，包含 Q2_K diffusion、匹配 VAE 和 Qwen3 文本编码器；按 stable-diffusion.cpp 上游执行 8 次 DiT、CFG 1.0 单分支。",
                 recommendedFileName = "z_image_turbo-Q2_K.gguf",
                 parameterScale = "6B",
                 quant = "Q2_K",
@@ -2044,11 +2743,12 @@ class ModelScopeClient(
                 imageEngineBundle = ImageEngineBundleSpec(
                     id = "z_image_turbo_q2_bundle",
                     title = "Z-Image Turbo Q2_K 引擎包",
+                    recommendationId = "z_image_turbo_q4",
                     runtime = ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP,
                     accelerator = ImageEngineAccelerator.CPU,
                     minDeviceTier = ImageEngineMinDeviceTier.ANY,
                     requiresSmokeTest = true,
-                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 4, timeoutSeconds = 600),
+                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 8, timeoutSeconds = 600),
                     components = listOf(
                         ImageEngineBundleComponentSpec(
                             role = ImageEngineBundleComponentRole.DIFFUSION,
@@ -2078,6 +2778,7 @@ class ModelScopeClient(
                             sha256 = "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"
                         )
                     ),
+                    executionProfile = recommendedImageExecutionProfile("z_image_turbo_q4"),
                     modelFamily = "Z_IMAGE"
                 )
             ),
@@ -2085,7 +2786,7 @@ class ModelScopeClient(
                 id = "flux2_klein_4b_q4",
                 title = "FLUX.2 Klein 4B",
                 repoId = "hf/leejet-FLUX.2-klein-4B-GGUF",
-                description = "FLUX.2 Klein diffusion 主模型。单个 GGUF 不能直接生成，还需 FLUX VAE 和 Qwen3 文本编码器。",
+                description = "FLUX.2 Klein 4B 蒸馏版完整本地引擎包，一次下载主模型、匹配 VAE 与 Qwen3 文本编码器；默认 1024×1024、4-step、CFG 1.0 单分支。",
                 recommendedFileName = "flux-2-klein-4b-Q4_0.gguf",
                 parameterScale = "4B",
                 quant = "Q4_0",
@@ -2093,49 +2794,57 @@ class ModelScopeClient(
                 tags = listOf("本地生图", "FLUX.2", "画质实验", "GGUF", "ModelScope"),
                 priority = 1,
                 kind = ModelScopeRecommendedKind.IMAGE,
-                status = RecommendedModelStatus.PENDING_INTEGRATION,
-                visibleInRecommendations = false,
-                downloadable = false,
-                downloadBlockReason = "当前尚未形成可验证的完整生图闭环。",
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                visibleInRecommendations = true,
+                downloadable = true,
+                downloadBlockReason = null,
                 localImageEngineTier = LocalImageEngineTier.COMPACT_QUALITY,
                 imageEngineBundle = ImageEngineBundleSpec(
                     id = "flux2_klein_4b_q4_bundle",
                     title = "FLUX.2 Klein 4B Q4 引擎包",
+                    recommendationId = "flux2_klein_4b_q4",
                     runtime = ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP,
                     accelerator = ImageEngineAccelerator.CPU,
                     minDeviceTier = ImageEngineMinDeviceTier.ANY,
                     requiresSmokeTest = true,
-                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 4, timeoutSeconds = 900),
+                    smokeSpec = ImageEngineSmokeSpec(width = 1024, height = 1024, steps = 4, timeoutSeconds = 900),
                     components = listOf(
                         ImageEngineBundleComponentSpec(
                             role = ImageEngineBundleComponentRole.DIFFUSION,
                             repoId = "hf/leejet-FLUX.2-klein-4B-GGUF",
                             revision = "master",
                             provider = ModelRepositoryProvider.MODELSCOPE,
-                            fileName = "flux-2-klein-4b-Q4_0.gguf"
+                            fileName = "flux-2-klein-4b-Q4_0.gguf",
+                            expectedSizeBytes = 2_460_378_560L,
+                            sha256 = "d1023499ef3f2f82ff7c50e6778495195c1b6cc34835741778868428111f9ff4"
                         ),
                         ImageEngineBundleComponentSpec(
                             role = ImageEngineBundleComponentRole.VAE,
                             repoId = "Comfy-Org/flux2-klein-4B",
                             revision = "master",
                             provider = ModelRepositoryProvider.MODELSCOPE,
-                            fileName = "split_files/vae/flux2-vae.safetensors"
+                            fileName = "split_files/vae/flux2-vae.safetensors",
+                            expectedSizeBytes = 336_211_292L,
+                            sha256 = "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"
                         ),
                         ImageEngineBundleComponentSpec(
                             role = ImageEngineBundleComponentRole.TEXT_ENCODER,
                             repoId = "unsloth/Qwen3-4B-GGUF",
                             revision = "master",
                             provider = ModelRepositoryProvider.MODELSCOPE,
-                            fileName = "Qwen3-4B-Q4_K_M.gguf"
+                            fileName = "Qwen3-4B-Q4_K_M.gguf",
+                            expectedSizeBytes = 2_497_281_312L,
+                            sha256 = "f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a"
                         )
-                    )
+                    ),
+                    executionProfile = recommendedImageExecutionProfile("flux2_klein_4b_q4")
                 )
             ),
             ModelScopeRecommendedModel(
                 id = "qwen_image_2512_q2",
                 title = "Qwen-Image 2512 · Q2_K GGUF",
                 repoId = "unsloth/Qwen-Image-2512-GGUF",
-                description = "Qwen-Image diffusion 主模型低内存版本。生成还需要 Qwen-Image VAE 和 Qwen2.5-VL 文本编码器。",
+                description = "Qwen-Image 低内存完整三组件包，一次下载 diffusion 主模型、匹配 VAE 和 Qwen2.5-VL 文本编码器；按 2512 的 stable-diffusion.cpp 工作流默认 1024×1024、40-step、CFG 2.5。",
                 recommendedFileName = "qwen-image-2512-Q2_K.gguf",
                 parameterScale = "Image",
                 quant = "Q2_K",
@@ -2150,11 +2859,12 @@ class ModelScopeClient(
                 imageEngineBundle = ImageEngineBundleSpec(
                     id = "qwen_image_2512_q2_bundle",
                     title = "Qwen-Image 2512 Q2 引擎包",
+                    recommendationId = "qwen_image_2512_q2",
                     runtime = ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP,
                     accelerator = ImageEngineAccelerator.CPU,
                     minDeviceTier = ImageEngineMinDeviceTier.ANY,
                     requiresSmokeTest = true,
-                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 6, timeoutSeconds = 1200),
+                    smokeSpec = ImageEngineSmokeSpec(width = 1024, height = 1024, steps = 40, timeoutSeconds = 1200),
                     components = listOf(
                         ImageEngineBundleComponentSpec(
                             role = ImageEngineBundleComponentRole.DIFFUSION,
@@ -2184,6 +2894,7 @@ class ModelScopeClient(
                             sha256 = "d16776dcd9a28d42758c2958ed3a752aabf20a305252cd64ff2be72b4a78c503"
                         )
                     ),
+                    executionProfile = recommendedImageExecutionProfile("qwen_image_2512_q2"),
                     modelFamily = "QWEN_IMAGE"
                 )
             ),
@@ -2191,7 +2902,7 @@ class ModelScopeClient(
                 id = "longcat_image_q4",
                 title = "LongCat-Image · Q4_0 GGUF",
                 repoId = "vantagewithai/LongCat-Image-GGUF",
-                description = "LongCat diffusion 主模型。生成还需要 FLUX VAE 和 Qwen2.5-VL 文本编码器。",
+                description = "LongCat-Image 完整三组件包，一次下载 diffusion 主模型、匹配 FLUX VAE 和 Qwen2.5-VL 文本编码器；默认 1024×1024、20-step、CFG 5.0。",
                 recommendedFileName = "LongCat-Image-Q4_0.gguf",
                 parameterScale = "Image",
                 quant = "Q4_0",
@@ -2206,11 +2917,12 @@ class ModelScopeClient(
                 imageEngineBundle = ImageEngineBundleSpec(
                     id = "longcat_image_q4_bundle",
                     title = "LongCat-Image Q4 引擎包",
+                    recommendationId = "longcat_image_q4",
                     runtime = ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP,
                     accelerator = ImageEngineAccelerator.CPU,
                     minDeviceTier = ImageEngineMinDeviceTier.ANY,
                     requiresSmokeTest = true,
-                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 6, timeoutSeconds = 1200),
+                    smokeSpec = ImageEngineSmokeSpec(width = 1024, height = 1024, steps = 20, timeoutSeconds = 1200),
                     components = listOf(
                         ImageEngineBundleComponentSpec(
                             role = ImageEngineBundleComponentRole.DIFFUSION,
@@ -2240,6 +2952,7 @@ class ModelScopeClient(
                             sha256 = "d16776dcd9a28d42758c2958ed3a752aabf20a305252cd64ff2be72b4a78c503"
                         )
                     ),
+                    executionProfile = recommendedImageExecutionProfile("longcat_image_q4"),
                     modelFamily = "LONGCAT_IMAGE"
                 )
             )

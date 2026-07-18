@@ -59,7 +59,7 @@ class LocalImageWorkerWatchdogTest {
         assertTrue(thirtyStepsSingleBranch > oneStep)
         assertTrue(thirtyStepsCfg > thirtyStepsSingleBranch)
         assertTrue(sdxlUnetPhaseTimeoutMs(60) < thirtyStepsCfg)
-        assertTrue(sdxlVaePhaseTimeoutMs(30) < thirtyStepsCfg)
+        assertTrue(sdxlVaePhaseTimeoutMs(SDXL_DEFAULT_VAE_EXECUTION_COUNT) < thirtyStepsCfg)
     }
 
     @Test

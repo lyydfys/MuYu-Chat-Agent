@@ -1,4 +1,5 @@
 #include "../../main/cpp/image_conditioning.hpp"
+#include "../../main/cpp/mnn_sana_conditioning_contract.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -20,6 +21,13 @@ using mca::image::WeightedPromptFragment;
 constexpr float kTolerance = 1.0e-5f;
 
 void assert_near(float actual, float expected, float tolerance = kTolerance) {
+    if (std::abs(actual - expected) > tolerance) {
+        std::fprintf(stderr,
+                     "conditioning value mismatch: actual=%.9g expected=%.9g tolerance=%.9g\n",
+                     static_cast<double>(actual),
+                     static_cast<double>(expected),
+                     static_cast<double>(tolerance));
+    }
     assert(std::abs(actual - expected) <= tolerance);
 }
 
@@ -48,9 +56,9 @@ bool encode_each_byte(const std::string& text, std::vector<int32_t>* ids, std::s
 void test_prompt_parser_default_explicit_and_nested_weights() {
     assert_fragments("a (bright) [shadow] (ceramic lantern:1.5)",
                      {"a ", "bright", " ", "shadow", " ", "ceramic lantern"},
-                     {1.0f, 1.1f, 1.0f, 1.0f / 1.1f, 1.0f, 1.5f});
+                     {1.0f, 1.1f, 1.0f, 0.9f, 1.0f, 1.5f});
     assert_fragments("(outer (inner) tail)", {"outer ", "inner", " tail"}, {1.1f, 1.21f, 1.1f});
-    assert_fragments("[(nested:2.0)]", {"nested"}, {2.0f / 1.1f});
+    assert_fragments("[(nested:2.0)]", {"nested"}, {1.8f});
     assert_fragments("plain", {"plain"}, {1.0f});
 }
 
@@ -201,6 +209,76 @@ void test_embedding_weighting_rejects_invalid_shape_and_values() {
     assert(error.find("finite") != std::string::npos);
 }
 
+void test_token_id_graph_accepts_unity_weights_for_ordinary_prompts() {
+    size_t weighted_token_count = 99;
+    std::string error = "stale";
+    assert(mca::image::validate_clip_token_id_graph_prompt_weights(
+            std::vector<float>(154, 1.0f), &weighted_token_count, &error));
+    assert(weighted_token_count == 0);
+    assert(error.empty());
+
+    assert(mca::image::validate_clip_token_id_graph_prompt_weights(
+            {1.0f, 1.0f + 0.5e-6f, 1.0f - 0.5e-6f},
+            &weighted_token_count,
+            &error));
+    assert(weighted_token_count == 0);
+    assert(error.empty());
+}
+
+void test_token_id_graph_rejects_non_unity_weights_instead_of_post_weighting() {
+    size_t weighted_token_count = 0;
+    std::string error;
+    assert(!mca::image::validate_clip_token_id_graph_prompt_weights(
+            {1.0f, 1.5f, 0.75f, 1.0f}, &weighted_token_count, &error));
+    assert(weighted_token_count == 2);
+    assert(error.find("pre-transformer embedding input") != std::string::npos);
+    assert(error.find("not equivalent") != std::string::npos);
+
+    assert(!mca::image::validate_clip_token_id_graph_prompt_weights(
+            {1.0f, std::numeric_limits<float>::infinity()},
+            &weighted_token_count,
+            &error));
+    assert(error.find("non-finite") != std::string::npos);
+}
+
+void test_cfg_token_id_graph_requires_unity_on_each_executed_branch() {
+    std::vector<float> negative(77, 1.0f);
+    std::vector<float> positive(77, 1.0f);
+    size_t weighted_token_count = 0;
+    std::string error;
+
+    positive[12] = 1.1f;
+    assert(mca::image::validate_clip_token_id_graph_prompt_weights(
+            negative, &weighted_token_count, &error));
+    assert(!mca::image::validate_clip_token_id_graph_prompt_weights(
+            positive, &weighted_token_count, &error));
+    assert(weighted_token_count == 1);
+
+    positive[12] = 1.0f;
+    negative[42] = 0.9f;
+    assert(!mca::image::validate_clip_token_id_graph_prompt_weights(
+            negative, &weighted_token_count, &error));
+    assert(weighted_token_count == 1);
+    assert(mca::image::validate_clip_token_id_graph_prompt_weights(
+            positive, &weighted_token_count, &error));
+}
+
+void test_sana_cfg_invokes_llm_in_positive_negative_source_order() {
+    const std::string positive = "draw a calm blue lake";
+    const std::string negative = "low quality";
+    const auto invocation = mca::mnn_sana_prompt_invocation(positive, negative, true);
+    assert(invocation.prompt == &positive);
+    assert(invocation.negative_prompt == &negative);
+    assert(invocation.use_cfg);
+    assert(std::string(invocation.executed_conditioning_order) == "negative_then_positive");
+
+    const auto conditional_only = mca::mnn_sana_prompt_invocation(positive, negative, false);
+    assert(conditional_only.prompt == &positive);
+    assert(conditional_only.negative_prompt == &negative);
+    assert(!conditional_only.use_cfg);
+    assert(std::string(conditional_only.executed_conditioning_order) == "positive_only");
+}
+
 }  // namespace
 
 int main() {
@@ -211,5 +289,9 @@ int main() {
     test_disabled_weighting_tokenizes_attention_syntax_literally();
     test_embedding_weighting_with_mean_amplitude_normalization();
     test_embedding_weighting_rejects_invalid_shape_and_values();
+    test_token_id_graph_accepts_unity_weights_for_ordinary_prompts();
+    test_token_id_graph_rejects_non_unity_weights_instead_of_post_weighting();
+    test_cfg_token_id_graph_requires_unity_on_each_executed_branch();
+    test_sana_cfg_invokes_llm_in_positive_negative_source_order();
     return 0;
 }

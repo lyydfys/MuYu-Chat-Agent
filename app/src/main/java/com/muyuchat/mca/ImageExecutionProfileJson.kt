@@ -21,6 +21,8 @@ internal object ImageExecutionProfileJson {
     private const val MANIFEST_PROFILE_FIELD = "executionProfile"
     private const val DEFAULT_SCHEDULER_SIDECAR = "scheduler/scheduler_config.json"
     private const val DEFAULT_TOKENIZER_SIDECAR = "tokenizer/tokenizer_config.json"
+    private const val DEFAULT_BEHAVIOR_SIDECAR = "config.json"
+    private val IMAGE_SIZE = Regex("""^(\d+)[xX×](\d+)$""")
 
     fun parseManifest(manifest: JSONObject): ImageExecutionProfile? {
         if (!manifest.has(MANIFEST_PROFILE_FIELD) || manifest.isNull(MANIFEST_PROFILE_FIELD)) return null
@@ -33,10 +35,188 @@ internal object ImageExecutionProfileJson {
         return parseManifest(readJsonFile(manifestFile, "manifest"))
     }
 
+    /** Canonical writer used when a catalog profile is materialized into an installed package. */
+    fun toJson(profile: ImageExecutionProfile): JSONObject = JSONObject()
+        .put("schemaVersion", profile.schemaVersion)
+        .put("profileId", profile.profileId)
+        .put("profileRevision", profile.profileRevision)
+        .put("modelFingerprint", profile.modelFingerprint.lowercase())
+        .put("runtime", profile.runtime.name)
+        .put("family", profile.family.name)
+        .put("variant", profile.variant.name)
+        .put("task", profile.task.name)
+        .put(
+            "provenance",
+            JSONObject()
+                .put("primarySource", profile.provenance.primarySource.name)
+                .put("sources", JSONArray(profile.provenance.sources.map { source -> source.name }))
+                .apply {
+                    profile.provenance.recommendationId?.let { put("recommendationId", it) }
+                    profile.provenance.recommendationRevision?.let { put("recommendationRevision", it) }
+                    put("notes", JSONArray(profile.provenance.notes))
+                }
+        )
+        .put(
+            "tokenizer",
+            JSONObject()
+                .put("backend", profile.tokenizer.backend.name)
+                .put(
+                    "assets",
+                    JSONArray(profile.tokenizer.assets.map { asset ->
+                        JSONObject()
+                            .put("relativePath", asset.relativePath)
+                            .put("fingerprint", asset.fingerprint.lowercase())
+                    })
+                )
+                .apply {
+                    profile.tokenizer.bosId?.let { put("bosId", it) }
+                    profile.tokenizer.eosId?.let { put("eosId", it) }
+                    profile.tokenizer.padId?.let { put("padId", it) }
+                }
+                .put("maxLength", profile.tokenizer.maxLength)
+                .put("unicodeNormalization", profile.tokenizer.unicodeNormalization.name)
+                .put("lowercase", profile.tokenizer.lowercase)
+                .put("preTokenizer", profile.tokenizer.preTokenizer)
+                .put("postProcessor", profile.tokenizer.postProcessor)
+                .put("clip1PadRule", profile.tokenizer.clip1PadRule.name)
+                .apply { profile.tokenizer.clip2PadRule?.let { put("clip2PadRule", it.name) } }
+                .put("supportsPromptWeighting", profile.tokenizer.supportsPromptWeighting)
+                .put("supportsTextualInversion", profile.tokenizer.supportsTextualInversion)
+                .put("separateNegativePrompt", profile.tokenizer.separateNegativePrompt)
+        )
+        .put(
+            "conditioning",
+            JSONObject()
+                .put("diskDataType", profile.conditioning.diskDataType.name)
+                .apply {
+                    profile.conditioning.exactByteSize?.let { put("exactByteSize", it) }
+                    profile.conditioning.elementCount?.let { put("elementCount", it) }
+                }
+                .put("tokenTableShape", JSONArray(profile.conditioning.tokenTableShape))
+                .put("positionTableShape", JSONArray(profile.conditioning.positionTableShape))
+                .put("textEncoderInputShape", JSONArray(profile.conditioning.textEncoderInputShape))
+                .put(
+                    "textEncoderOutputShapes",
+                    JSONArray(profile.conditioning.textEncoderOutputShapes.map { shape -> JSONArray(shape) })
+                )
+                .put("conversionStrategy", profile.conditioning.conversionStrategy.name)
+                .put("dualEncoder", profile.conditioning.dualEncoder)
+                .put("pooledOutput", profile.conditioning.pooledOutput)
+                .put("concatenationOrder", JSONArray(profile.conditioning.concatenationOrder))
+        )
+        .put(
+            "scheduler",
+            JSONObject()
+                .put("algorithm", profile.scheduler.algorithm.name)
+                .put("predictionType", profile.scheduler.predictionType.name)
+                .put("numTrainTimesteps", profile.scheduler.numTrainTimesteps)
+                .put("noiseSchedule", profile.scheduler.noiseSchedule.name)
+                .apply {
+                    profile.scheduler.betaStart?.let { put("betaStart", it) }
+                    profile.scheduler.betaEnd?.let { put("betaEnd", it) }
+                }
+                .put("timestepSpacing", profile.scheduler.timestepSpacing.name)
+                .put("stepsOffset", profile.scheduler.stepsOffset)
+                .put("setAlphaToOne", profile.scheduler.setAlphaToOne)
+                .put("skipPrkSteps", profile.scheduler.skipPrkSteps)
+                .put("finalSigmaType", profile.scheduler.finalSigmaType.name)
+                .put("clipSample", profile.scheduler.clipSample)
+                .put("clipSampleRange", profile.scheduler.clipSampleRange)
+                .put("thresholding", profile.scheduler.thresholding)
+                .put("eta", profile.scheduler.eta)
+                .put("lowerOrderFinal", profile.scheduler.lowerOrderFinal)
+                .put("initNoiseSigma", profile.scheduler.initNoiseSigma)
+                .put("scaleModelInput", profile.scheduler.scaleModelInput)
+                .put("order", profile.scheduler.order)
+                .put("defaultSteps", profile.scheduler.defaultSteps)
+                .put("minSteps", profile.scheduler.minSteps)
+                .put("maxSteps", profile.scheduler.maxSteps)
+                .put("rng", profile.scheduler.rng.name)
+                .put("seedBits", profile.scheduler.seedBits)
+        )
+        .put(
+            "latent",
+            JSONObject()
+                .put("channels", profile.latent.channels)
+                .put("downsampleFactor", profile.latent.downsampleFactor)
+                .put("schedulerLayout", profile.latent.schedulerLayout.name)
+                .put("graphLayout", profile.latent.graphLayout.name)
+                .put("initialShape", JSONArray(profile.latent.initialShape))
+                .put("dataType", profile.latent.dataType.name)
+        )
+        .put(
+            "vae",
+            JSONObject()
+                .put("scalingLocation", profile.vae.scalingLocation.name)
+                .put("scalingFactor", profile.vae.scalingFactor)
+                .put("inputShape", JSONArray(profile.vae.inputShape))
+                .put("outputShape", JSONArray(profile.vae.outputShape))
+                .put("inputLayout", profile.vae.inputLayout.name)
+                .put("outputLayout", profile.vae.outputLayout.name)
+                .put("outputRange", profile.vae.outputRange.name)
+                .put("channelOrder", profile.vae.channelOrder.name)
+        )
+        .put("graph", graphToJson(profile.graph))
+        .put(
+            "defaults",
+            JSONObject()
+                .put("width", profile.defaults.width)
+                .put("height", profile.defaults.height)
+                .put("steps", profile.defaults.steps)
+                .put("cfgScale", profile.defaults.cfgScale)
+                .put("seed", profile.defaults.seed)
+                .put("useCfg", profile.defaults.useCfg)
+                .apply {
+                    profile.defaults.defaultPrompt?.let { put("defaultPrompt", it) }
+                    profile.defaults.defaultNegativePrompt?.let { put("defaultNegativePrompt", it) }
+                }
+        )
+        .put(
+            "capabilities",
+            JSONObject()
+                .put(
+                    "supportedSchedulers",
+                    JSONArray(profile.capabilities.supportedSchedulers.map { scheduler -> scheduler.name })
+                )
+                .put("minWidth", profile.capabilities.minWidth)
+                .put("maxWidth", profile.capabilities.maxWidth)
+                .put("minHeight", profile.capabilities.minHeight)
+                .put("maxHeight", profile.capabilities.maxHeight)
+                .put("widthMultiple", profile.capabilities.widthMultiple)
+                .put("heightMultiple", profile.capabilities.heightMultiple)
+                .put("supportsNegativePrompt", profile.capabilities.supportsNegativePrompt)
+                .put("supportsPromptWeighting", profile.capabilities.supportsPromptWeighting)
+                .put("supportsTextualInversion", profile.capabilities.supportsTextualInversion)
+                .put("requiresControlImage", profile.capabilities.requiresControlImage)
+                .put("requiresInputImage", profile.capabilities.requiresInputImage)
+                .put("supportsMask", profile.capabilities.supportsMask)
+        )
+
+    /** Parses partial generation behavior without requiring a full execution profile. */
+    fun parseManifestBehavior(manifest: JSONObject): ImagePackageBehaviorConfig? {
+        var behavior = parseBehaviorFields(manifest, "manifest")
+        listOf(
+            "modelConfig",
+            "model_config",
+            "generation",
+            "generationConfig",
+            "generation_config",
+            "generationDefaults",
+            "generation_defaults",
+            "defaults"
+        ).forEach { field ->
+            manifest.optionalObject(field)?.let { nested ->
+                behavior = mergeBehavior(behavior, parseBehaviorFields(nested, "manifest.$field"))
+            }
+        }
+        return behavior
+    }
+
     fun parseSidecars(
         bundleRoot: File,
         schedulerRelativePath: String = DEFAULT_SCHEDULER_SIDECAR,
-        tokenizerRelativePath: String = DEFAULT_TOKENIZER_SIDECAR
+        tokenizerRelativePath: String = DEFAULT_TOKENIZER_SIDECAR,
+        behaviorRelativePaths: List<String> = listOf(DEFAULT_BEHAVIOR_SIDECAR)
     ): ImageProfileSidecar? {
         val schedulerFile = safeBundleFile(bundleRoot, schedulerRelativePath, "schedulerSidecar")
         val tokenizerFile = safeBundleFile(bundleRoot, tokenizerRelativePath, "tokenizerSidecar")
@@ -46,11 +226,42 @@ internal object ImageExecutionProfileJson {
         val tokenizer = tokenizerFile.takeIf(File::isFile)?.let { file ->
             parseTokenizerConfig(readJsonFile(file, tokenizerRelativePath))
         }
-        if (scheduler == null && tokenizer == null) return null
+        var behavior: ImagePackageBehaviorConfig? = null
+        behaviorRelativePaths.distinct().forEachIndexed { index, relativePath ->
+            val file = safeBundleFile(bundleRoot, relativePath, "behaviorSidecars[$index]")
+            if (file.isFile) {
+                behavior = mergeBehavior(
+                    behavior,
+                    parsePackageBehaviorConfig(readJsonFile(file, relativePath), relativePath)
+                )
+            }
+        }
+        if (scheduler == null && tokenizer == null && behavior == null) return null
         return ImageProfileSidecar(
             scheduler = scheduler,
-            tokenizer = tokenizer
+            tokenizer = tokenizer,
+            behavior = behavior
         )
+    }
+
+    fun parsePackageBehaviorConfig(
+        json: JSONObject,
+        fieldPrefix: String = "config"
+    ): ImagePackageBehaviorConfig? {
+        var behavior = parseBehaviorFields(json, fieldPrefix)
+        listOf(
+            "generation",
+            "generationConfig",
+            "generation_config",
+            "generationDefaults",
+            "generation_defaults",
+            "defaults"
+        ).forEach { field ->
+            json.optionalObject(field)?.let { nested ->
+                behavior = mergeBehavior(behavior, parseBehaviorFields(nested, "$fieldPrefix.$field"))
+            }
+        }
+        return behavior
     }
 
     fun parseSchedulerConfig(json: JSONObject): ImageSchedulerContract {
@@ -189,7 +400,31 @@ internal object ImageExecutionProfileJson {
                 cause = error
             )
         }
-        val validation = ImageExecutionProfileValidator.validate(profile)
+        val sequenceAxisIssues = buildList {
+            if (profile.conditioning.textEncoderInputShape.getOrNull(1) != profile.tokenizer.maxLength) {
+                add(
+                    ImageProfileValidationIssue(
+                        code = "CONDITIONING_CONTRACT_INVALID",
+                        field = "conditioning.textEncoderInputShape",
+                        message = "Conditioning input sequence axis must match tokenizer maxLength."
+                    )
+                )
+            }
+            profile.conditioning.textEncoderOutputShapes.forEachIndexed { index, shape ->
+                if (shape.getOrNull(1) != profile.tokenizer.maxLength) {
+                    add(
+                        ImageProfileValidationIssue(
+                            code = "CONDITIONING_CONTRACT_INVALID",
+                            field = "conditioning.textEncoderOutputShapes[$index]",
+                            message = "Conditioning output sequence axis must match tokenizer maxLength."
+                        )
+                    )
+                }
+            }
+        }
+        val validation = ImageProfileValidationReport(
+            ImageExecutionProfileValidator.validate(profile).issues + sequenceAxisIssues
+        )
         if (!validation.valid) {
             val first = validation.issues.first()
             throw ImageExecutionProfileJsonException(
@@ -300,6 +535,7 @@ internal object ImageExecutionProfileJson {
         textEncoder = json.optionalObject("textEncoder")?.let { parseGraphArtifact(it, "graph.textEncoder") },
         unet = json.optionalObject("unet")?.let { parseGraphArtifact(it, "graph.unet") },
         vae = json.optionalObject("vae")?.let { parseGraphArtifact(it, "graph.vae") },
+        vaeEncoder = json.optionalObject("vaeEncoder")?.let { parseGraphArtifact(it, "graph.vaeEncoder") },
         controlNet = json.optionalObject("controlNet")?.let { parseGraphArtifact(it, "graph.controlNet") },
         schedulerSidecar = json.optionalStrictString("schedulerSidecar")?.also { requireSafePath(it, "graph.schedulerSidecar") },
         tokenizerSidecar = json.optionalStrictString("tokenizerSidecar")?.also { requireSafePath(it, "graph.tokenizerSidecar") },
@@ -326,6 +562,37 @@ internal object ImageExecutionProfileJson {
             }.orEmpty()
         )
     }
+
+    private fun graphToJson(graph: ImageGraphContract): JSONObject = JSONObject().apply {
+        graph.textEncoder?.let { put("textEncoder", graphArtifactToJson(it)) }
+        graph.unet?.let { put("unet", graphArtifactToJson(it)) }
+        graph.vae?.let { put("vae", graphArtifactToJson(it)) }
+        graph.vaeEncoder?.let { put("vaeEncoder", graphArtifactToJson(it)) }
+        graph.controlNet?.let { put("controlNet", graphArtifactToJson(it)) }
+        graph.schedulerSidecar?.let { put("schedulerSidecar", it) }
+        graph.tokenizerSidecar?.let { put("tokenizerSidecar", it) }
+        put("configSidecars", JSONArray(graph.configSidecars))
+        graph.qnnSdk?.let { put("qnnSdk", it) }
+        graph.htpArch?.let { put("htpArch", it) }
+        graph.contextMetadataFingerprint?.let { put("contextMetadataFingerprint", it) }
+        put("workerStrategy", graph.workerStrategy.name)
+    }
+
+    private fun graphArtifactToJson(artifact: ImageGraphArtifactContract): JSONObject = JSONObject()
+        .put("relativePath", artifact.relativePath)
+        .put("graphName", artifact.graphName)
+        .put("inputs", JSONArray(artifact.inputs.map(::tensorToJson)))
+        .put("outputs", JSONArray(artifact.outputs.map(::tensorToJson)))
+
+    private fun tensorToJson(tensor: ImageTensorContract): JSONObject = JSONObject()
+        .put("role", tensor.role)
+        .put("name", tensor.name)
+        .put("shape", JSONArray(tensor.shape))
+        .put("dataType", tensor.dataType.name)
+        .apply {
+            tensor.scale?.let { put("scale", it) }
+            tensor.zeroPoint?.let { put("zeroPoint", it) }
+        }
 
     private fun parseTensor(json: JSONObject, field: String): ImageTensorContract = ImageTensorContract(
         role = json.requiredStrictString("role"),
@@ -364,6 +631,195 @@ internal object ImageExecutionProfileJson {
         requiresInputImage = json.requiredStrictBoolean("requiresInputImage"),
         supportsMask = json.requiredStrictBoolean("supportsMask")
     )
+
+    private fun parseBehaviorFields(
+        json: JSONObject,
+        fieldPrefix: String
+    ): ImagePackageBehaviorConfig? {
+        val defaultPrompt = json.optionalStrictStringAlias(
+            fieldPrefix,
+            listOf("defaultPrompt", "default_prompt", "positivePrompt", "positive_prompt", "prompt"),
+            preserveBlank = true
+        )
+        val defaultNegativePrompt = json.optionalStrictStringAlias(
+            fieldPrefix,
+            listOf("defaultNegativePrompt", "default_negative_prompt", "negativePrompt", "negative_prompt"),
+            preserveBlank = true
+        )
+        val steps = json.optionalStrictIntAlias(
+            fieldPrefix,
+            listOf("defaultSteps", "default_steps", "numInferenceSteps", "num_inference_steps", "steps")
+        )?.also { value ->
+            if (value <= 0) throw formatError("$fieldPrefix.steps", "Default steps must be positive.")
+        }
+        val cfgScale = json.optionalStrictDoubleAlias(
+            fieldPrefix,
+            listOf("defaultCfg", "default_cfg", "cfgScale", "cfg_scale", "guidanceScale", "guidance_scale", "cfg")
+        )?.also { value ->
+            if (value !in 0.0..30.0) throw formatError("$fieldPrefix.cfg", "Default CFG must be between 0 and 30.")
+        }
+        val scheduler = json.optionalStrictStringAlias(
+            fieldPrefix,
+            listOf(
+                "defaultScheduler",
+                "default_scheduler",
+                "sampleMethod",
+                "sample_method",
+                "schedulerName",
+                "scheduler_name",
+                "schedulerType",
+                "scheduler_type",
+                "samplerName",
+                "sampler_name",
+                "sampler",
+                "scheduler"
+            )
+        )?.let { value -> packageBehaviorScheduler(value, "$fieldPrefix.scheduler") }
+        val imageSize = json.optionalImageSizeAlias(
+            fieldPrefix,
+            listOf("imageSize", "image_size", "resolution")
+        )
+        val width = (json.optionalStrictIntAlias(
+            fieldPrefix,
+            listOf("defaultWidth", "default_width", "width")
+        ) ?: imageSize?.first)?.also { value ->
+            if (value <= 0) throw formatError("$fieldPrefix.width", "Default width must be positive.")
+        }
+        val height = (json.optionalStrictIntAlias(
+            fieldPrefix,
+            listOf("defaultHeight", "default_height", "height")
+        ) ?: imageSize?.second)?.also { value ->
+            if (value <= 0) throw formatError("$fieldPrefix.height", "Default height must be positive.")
+        }
+        val useCfg = json.optionalStrictBooleanAlias(
+            fieldPrefix,
+            listOf("useCfg", "use_cfg", "doClassifierFreeGuidance", "do_classifier_free_guidance")
+        )
+        val declaredFamilyValue = json.optionalStrictStringAlias(
+            fieldPrefix,
+            listOf("modelFamily", "model_family", "family")
+        )
+        val declaredFamily = declaredFamilyValue?.let(::packageBehaviorFamily)
+        val declaredVariantValue = json.optionalStrictStringAlias(
+            fieldPrefix,
+            listOf("modelVariant", "model_variant", "variant")
+        )
+        val declaredVariant = declaredVariantValue?.let(::packageBehaviorVariant)
+        val modelType = json.optionalStrictStringAlias(
+            fieldPrefix,
+            listOf("modelType", "model_type", "pipelineType", "pipeline_type")
+        )
+        val dmd2 = json.optionalStrictBooleanAlias(
+            fieldPrefix,
+            listOf("dmd2", "isDmd2", "is_dmd2")
+        ) ?: false
+        val turbo = json.optionalStrictBooleanAlias(
+            fieldPrefix,
+            listOf("turbo", "isTurbo", "is_turbo")
+        ) ?: false
+        val marker = listOfNotNull(modelType, declaredVariantValue, declaredFamilyValue)
+            .joinToString("_")
+            .normalizeBehaviorToken()
+
+        var family = declaredFamily
+        var variant = declaredVariant
+        if (dmd2 || "dmd2" in marker) {
+            family = LocalImageModelFamily.SDXL
+            variant = ImageModelVariant.DMD2_ALT
+        } else if (turbo || "turbo" in marker) {
+            variant = when {
+                "z_image" in marker || "zimage" in marker -> ImageModelVariant.Z_IMAGE_TURBO
+                else -> ImageModelVariant.SD_TURBO
+            }
+            family = when {
+                "z_image" in marker || "zimage" in marker -> LocalImageModelFamily.Z_IMAGE
+                "sd_turbo" in marker || "sdturbo" in marker -> LocalImageModelFamily.SD_TURBO
+                else -> family ?: LocalImageModelFamily.SD_TURBO
+            }
+        }
+
+        val result = ImagePackageBehaviorConfig(
+            family = family,
+            variant = variant,
+            defaultPrompt = defaultPrompt,
+            defaultNegativePrompt = defaultNegativePrompt,
+            steps = steps,
+            cfgScale = cfgScale,
+            scheduler = scheduler,
+            width = width,
+            height = height,
+            useCfg = useCfg
+        )
+        return result.takeUnless { behavior ->
+            behavior.family == null &&
+                behavior.variant == null &&
+                behavior.defaultPrompt == null &&
+                behavior.defaultNegativePrompt == null &&
+                behavior.steps == null &&
+                behavior.cfgScale == null &&
+                behavior.scheduler == null &&
+                behavior.width == null &&
+                behavior.height == null &&
+                behavior.useCfg == null
+        }
+    }
+
+    private fun mergeBehavior(
+        lowerPriority: ImagePackageBehaviorConfig?,
+        higherPriority: ImagePackageBehaviorConfig?
+    ): ImagePackageBehaviorConfig? = when {
+        lowerPriority == null -> higherPriority
+        higherPriority == null -> lowerPriority
+        else -> lowerPriority.overlay(higherPriority)
+    }
+
+    private fun packageBehaviorScheduler(value: String, field: String): ImageSchedulerAlgorithm {
+        val normalized = value.normalizeBehaviorToken()
+        return when (normalized) {
+            "dpm", "dpm_karras", "dpm_sde", "dpm_sde_karras", "dpmpp_2m",
+            "dpmpp_2m_karras", "dpm_2m", "dpm_plus_plus_2m", "dpmsolvermultistepscheduler" ->
+                ImageSchedulerAlgorithm.DPMPP_2M
+            "euler", "k_euler", "euler_karras", "euler_discrete", "eulerdiscretescheduler" ->
+                ImageSchedulerAlgorithm.EULER
+            "euler_a", "eulera", "k_euler_a", "euler_a_karras", "euler_ancestral", "eulerancestraldiscretescheduler" ->
+                ImageSchedulerAlgorithm.EULER_A
+            "ddim", "ddimscheduler" -> ImageSchedulerAlgorithm.DDIM
+            "pndm", "plms", "pndm_plms", "pndmscheduler" -> ImageSchedulerAlgorithm.PNDM_PLMS
+            "lcm", "lcmscheduler" -> ImageSchedulerAlgorithm.LCM
+            "flow", "flow_match", "flowmatch", "flowmatchscheduler" -> ImageSchedulerAlgorithm.FLOW_MATCH
+            else -> throw formatError(field, "Unsupported package default scheduler: $value")
+        }
+    }
+
+    private fun packageBehaviorFamily(value: String): LocalImageModelFamily {
+        val normalized = value.normalizeBehaviorToken()
+        return LocalImageModelFamily.entries.firstOrNull { family ->
+            family.name.normalizeBehaviorToken() == normalized
+        } ?: when (normalized) {
+            "sd1_5", "stable_diffusion_1_5", "stable_diffusion_v1_5" -> LocalImageModelFamily.SD15
+            "sd2_1", "stable_diffusion_2_1", "stable_diffusion_v2_1" -> LocalImageModelFamily.SD21
+            "stable_diffusion_xl" -> LocalImageModelFamily.SDXL
+            "sd_turbo", "stable_diffusion_turbo" -> LocalImageModelFamily.SD_TURBO
+            else -> LocalImageModelFamily.CUSTOM
+        }
+    }
+
+    private fun packageBehaviorVariant(value: String): ImageModelVariant? {
+        val normalized = value.normalizeBehaviorToken()
+        return ImageModelVariant.entries.firstOrNull { variant ->
+            variant.name.normalizeBehaviorToken() == normalized
+        } ?: when (normalized) {
+            "dmd2", "dmd2_alt", "sdxl_dmd2" -> ImageModelVariant.DMD2_ALT
+            "turbo", "sd_turbo" -> ImageModelVariant.SD_TURBO
+            "z_image_turbo", "zimage_turbo" -> ImageModelVariant.Z_IMAGE_TURBO
+            else -> null
+        }
+    }
+
+    private fun String.normalizeBehaviorToken(): String = trim()
+        .lowercase()
+        .replace(Regex("[^a-z0-9]+"), "_")
+        .trim('_')
 
     private fun clipTokenId(json: JSONObject, idField: String, tokenField: String, fixedId: Int): Int {
         json.optionalStrictInt(idField)?.let { return it }
@@ -480,6 +936,21 @@ internal object ImageExecutionProfileJson {
         return normalized
     }
 
+    private fun JSONObject.optionalStrictStringAlias(
+        fieldPrefix: String,
+        names: List<String>,
+        preserveBlank: Boolean = false
+    ): String? {
+        val name = firstPresentAlias(names) ?: return null
+        val value = get(name)
+        if (value !is String) throw formatError("$fieldPrefix.$name", "$name must be a string.")
+        val normalized = value.trim()
+        if (!preserveBlank && normalized.isBlank()) {
+            throw formatError("$fieldPrefix.$name", "$name must not be blank.")
+        }
+        return normalized
+    }
+
     private fun JSONObject.requiredStrictInt(name: String): Int =
         optionalStrictInt(name) ?: throw formatError(name, "$name is required and must be an integer.")
 
@@ -490,6 +961,17 @@ internal object ImageExecutionProfileJson {
         val number = value.toDouble()
         if (!number.isFinite() || number % 1.0 != 0.0 || number !in Int.MIN_VALUE.toDouble()..Int.MAX_VALUE.toDouble()) {
             throw formatError(name, "$name must be a finite 32-bit integer.")
+        }
+        return number.toInt()
+    }
+
+    private fun JSONObject.optionalStrictIntAlias(fieldPrefix: String, names: List<String>): Int? {
+        val name = firstPresentAlias(names) ?: return null
+        val value = get(name)
+        if (value !is Number) throw formatError("$fieldPrefix.$name", "$name must be an integer.")
+        val number = value.toDouble()
+        if (!number.isFinite() || number % 1.0 != 0.0 || number !in Int.MIN_VALUE.toDouble()..Int.MAX_VALUE.toDouble()) {
+            throw formatError("$fieldPrefix.$name", "$name must be a finite 32-bit integer.")
         }
         return number.toInt()
     }
@@ -520,6 +1002,15 @@ internal object ImageExecutionProfileJson {
         }
     }
 
+    private fun JSONObject.optionalStrictDoubleAlias(fieldPrefix: String, names: List<String>): Double? {
+        val name = firstPresentAlias(names) ?: return null
+        val value = get(name)
+        if (value !is Number) throw formatError("$fieldPrefix.$name", "$name must be numeric.")
+        return value.toDouble().also { number ->
+            if (!number.isFinite()) throw formatError("$fieldPrefix.$name", "$name must be finite.")
+        }
+    }
+
     private fun JSONObject.requiredStrictBoolean(name: String): Boolean =
         optionalStrictBoolean(name) ?: throw formatError(name, "$name is required and must be boolean.")
 
@@ -529,6 +1020,53 @@ internal object ImageExecutionProfileJson {
         if (value !is Boolean) throw formatError(name, "$name must be boolean.")
         return value
     }
+
+    private fun JSONObject.optionalStrictBooleanAlias(fieldPrefix: String, names: List<String>): Boolean? {
+        val name = firstPresentAlias(names) ?: return null
+        val value = get(name)
+        if (value !is Boolean) throw formatError("$fieldPrefix.$name", "$name must be boolean.")
+        return value
+    }
+
+    private fun JSONObject.optionalImageSizeAlias(
+        fieldPrefix: String,
+        names: List<String>
+    ): Pair<Int, Int>? {
+        val name = firstPresentAlias(names) ?: return null
+        val field = "$fieldPrefix.$name"
+        val value = get(name)
+        val dimensions = when (value) {
+            is Number -> {
+                val number = value.toDouble()
+                if (!number.isFinite() || number % 1.0 != 0.0 || number !in 1.0..Int.MAX_VALUE.toDouble()) {
+                    throw formatError(field, "$name must be a positive integer or WIDTHxHEIGHT string.")
+                }
+                number.toInt() to number.toInt()
+            }
+            is String -> {
+                val normalized = value.replace(" ", "")
+                val match = IMAGE_SIZE.matchEntire(normalized)
+                if (match != null) {
+                    val width = match.groupValues[1].toIntOrNull()
+                    val height = match.groupValues[2].toIntOrNull()
+                    if (width == null || height == null || width <= 0 || height <= 0) {
+                        throw formatError(field, "$name dimensions must be positive 32-bit integers.")
+                    }
+                    width to height
+                } else {
+                    val square = normalized.toIntOrNull()
+                        ?.takeIf { it > 0 }
+                        ?: throw formatError(field, "$name must use WIDTHxHEIGHT format or a positive square size.")
+                    square to square
+                }
+            }
+            else -> throw formatError(field, "$name must be a positive integer or WIDTHxHEIGHT string.")
+        }
+        return dimensions
+    }
+
+    private fun JSONObject.firstPresentAlias(names: List<String>): String? =
+        names.firstOrNull { name -> has(name) && !isNull(name) }
 
     private fun JSONObject.strictObject(name: String): JSONObject =
         optionalObject(name) ?: throw formatError(name, "$name is required and must be an object.")

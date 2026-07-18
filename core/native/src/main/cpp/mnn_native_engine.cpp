@@ -1293,13 +1293,36 @@ struct MnnNativeExecutionEvidence {
     bool prompt_weighting_applied = false;
     size_t positive_weighted_token_count = 0;
     size_t negative_weighted_token_count = 0;
-    std::string prompt_weight_fingerprint =
-            "9b353b1ac542678089ce3d12ee96ddd6ba3b0252ec0675cdf0540e6aa6b1860e";
+    std::string prompt_weight_fingerprint;
     std::string embedding_disk_data_type;
     std::vector<double> timesteps;
     std::vector<double> sigmas;
     double init_noise_sigma = 1.0;
 };
+
+void append_mnn_u32_little_endian(uint32_t value, std::vector<uint8_t>& payload) {
+    for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+        payload.push_back(static_cast<uint8_t>((value >> shift) & UINT32_C(0xff)));
+    }
+}
+
+void append_mnn_u64_little_endian(uint64_t value, std::vector<uint8_t>& payload) {
+    for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+        payload.push_back(static_cast<uint8_t>((value >> shift) & UINT64_C(0xff)));
+    }
+}
+
+std::string mnn_token_id_fingerprint(const std::vector<int>& ids) {
+    if (ids.empty()) return {};
+    static const std::string domain = "mca.mnn.executed.token.ids.v1";
+    std::vector<uint8_t> payload(domain.begin(), domain.end());
+    append_mnn_u64_little_endian(static_cast<uint64_t>(ids.size()), payload);
+    for (const int id : ids) {
+        if (id < 0) return {};
+        append_mnn_u32_little_endian(static_cast<uint32_t>(id), payload);
+    }
+    return mca::image::sha256_hex_bytes(payload);
+}
 
 std::string normalize_mnn_contract_enum(std::string value) {
     value = normalize_mnn_diffusion_identifier(std::move(value));
@@ -1911,6 +1934,8 @@ json mnn_native_effective_json(
         {"steps", contract.scheduler.steps},
         {"timetableCount", evidence.timetable_count},
         {"unetExecutionCount", evidence.unet_execution_count},
+        {"graphInvocationCount", evidence.graph_invocation_count},
+        {"logicalBranchExecutionCount", evidence.unet_execution_count},
         {"cfgScale", contract.cfg_scale},
         {"useCfg", contract.use_cfg},
         {"unconditionalBranch", contract.use_cfg},
@@ -1928,8 +1953,204 @@ json mnn_native_effective_json(
         {"height", contract.height},
         {"seed", contract.seed},
         {"graphName", contract.graph_name},
+        {"fallback", false},
+        {"taskMode", "text_to_image"},
+        {"inputImagePath", ""},
+        {"maskImagePath", ""},
+        {"controlImagePath", ""},
+        {"inputImageExecutionCount", 0},
+        {"maskImageExecutionCount", 0},
+        {"controlImageExecutionCount", 0}
+    });
+}
+
+bool mnn_sana_native_effective_json(
+        const json& params,
+        int completedSteps,
+        int graphInvocationCount,
+        int conditioningSequenceLength,
+        int conditioningBatchSize,
+        const std::string& conditioningOrder,
+        int tokenizerInputSequenceLength,
+        int tokenizerInputBatchSize,
+        int tokenizerNonPaddingTokenCount,
+        const std::string& tokenizerInputOrder,
+        const std::string& conditioningArtifactSha256,
+        bool requireExecutionEvidence,
+        json& nativeEffective,
+        std::string& error) {
+    std::string profileId;
+    std::string modelFingerprint;
+    std::string runtime;
+    std::string scheduler;
+    std::string predictionType;
+    std::string sampleMethod;
+    std::string timestepSpacing;
+    std::string tokenizerBackend;
+    std::string embeddingDiskDataType;
+    std::string vaeScalingLocation;
+    std::string graphName;
+    int64_t profileRevision = 0;
+    int64_t steps = 0;
+    int64_t timetableCount = 0;
+    int64_t unetExecutionCount = 0;
+    int64_t expectedTimetableCount = 0;
+    int64_t expectedUnetExecutionCount = 0;
+    int64_t tokenCount = 0;
+    int64_t width = 0;
+    int64_t height = 0;
+    int64_t seed = 0;
+    double cfgScale = 0.0;
+    double vaeScalingFactor = 0.0;
+    bool useCfg = false;
+    bool unconditionalBranch = false;
+    bool promptWeightingSupported = false;
+    bool fallback = false;
+    if (!mnn_contract_string(params, "profileId", profileId, error) ||
+        !mnn_contract_integer(params, "profileRevision", profileRevision, error) ||
+        !mnn_contract_string(params, "modelFingerprint", modelFingerprint, error) ||
+        !mnn_contract_string(params, "runtime", runtime, error) ||
+        !mnn_contract_string(params, "scheduler", scheduler, error) ||
+        !mnn_contract_string(params, "predictionType", predictionType, error) ||
+        !mnn_contract_string(params, "sampleMethod", sampleMethod, error) ||
+        !mnn_contract_string(params, "timestepSpacing", timestepSpacing, error) ||
+        !mnn_contract_integer(params, "steps", steps, error) ||
+        !mnn_contract_integer(params, "timetableCount", timetableCount, error) ||
+        !mnn_contract_integer(params, "unetExecutionCount", unetExecutionCount, error) ||
+        !mnn_contract_integer(params, "expectedTimetableCount", expectedTimetableCount, error) ||
+        !mnn_contract_integer(params, "expectedUnetExecutionCount", expectedUnetExecutionCount, error) ||
+        !mnn_contract_number(params, "cfgScale", cfgScale, error) ||
+        !mnn_contract_boolean(params, "useCfg", useCfg, error) ||
+        !mnn_contract_boolean(params, "unconditionalBranch", unconditionalBranch, error) ||
+        !mnn_contract_string(params, "tokenizerBackend", tokenizerBackend, error) ||
+        !mnn_contract_integer(params, "tokenCount", tokenCount, error) ||
+        !mnn_contract_boolean(params, "promptWeightingSupported", promptWeightingSupported, error) ||
+        !mnn_contract_string(params, "embeddingDiskDataType", embeddingDiskDataType, error) ||
+        !mnn_contract_string(params, "vaeScalingLocation", vaeScalingLocation, error) ||
+        !mnn_contract_number(params, "vaeScalingFactor", vaeScalingFactor, error) ||
+        !mnn_contract_integer(params, "width", width, error) ||
+        !mnn_contract_integer(params, "height", height, error) ||
+        !mnn_contract_integer(params, "seed", seed, error) ||
+        !mnn_contract_string(params, "graphName", graphName, error) ||
+        !mnn_contract_boolean(params, "fallback", fallback, error)) {
+        return false;
+    }
+    runtime = normalize_mnn_contract_enum(runtime);
+    scheduler = normalize_mnn_contract_enum(scheduler);
+    predictionType = normalize_mnn_contract_enum(predictionType);
+    sampleMethod = normalize_mnn_contract_enum(sampleMethod);
+    timestepSpacing = normalize_mnn_contract_enum(timestepSpacing);
+    tokenizerBackend = normalize_mnn_contract_enum(tokenizerBackend);
+    embeddingDiskDataType = normalize_mnn_contract_enum(embeddingDiskDataType);
+    vaeScalingLocation = normalize_mnn_contract_enum(vaeScalingLocation);
+    const int64_t branchCount = useCfg ? 2 : 1;
+    const int64_t actualUnetExecutionCount =
+            static_cast<int64_t>(completedSteps) * branchCount;
+    if (profileRevision <= 0 || modelFingerprint.size() != 64U) {
+        error = "MNN Sana profile binding is invalid.";
+        return false;
+    }
+    if (runtime != "mnn_diffusion" || scheduler != "flow_match" ||
+        predictionType != "flow" || sampleMethod != "flow_match" ||
+        timestepSpacing != "linspace") {
+        error = "MNN Sana requires MNN_DIFFUSION/FLOW_MATCH/FLOW with LINSPACE timesteps.";
+        return false;
+    }
+    if (steps != completedSteps || timetableCount != completedSteps ||
+        expectedTimetableCount != completedSteps ||
+        unetExecutionCount != actualUnetExecutionCount ||
+        expectedUnetExecutionCount != actualUnetExecutionCount ||
+        graphInvocationCount != completedSteps) {
+        error = "MNN Sana native step evidence differs from the resolved scheduler contract.";
+        return false;
+    }
+    if (unconditionalBranch != useCfg || cfgScale < 0.0 || cfgScale > 30.0) {
+        error = "MNN Sana CFG fields are inconsistent.";
+        return false;
+    }
+    const int64_t expectedConditioningBatchSize = useCfg ? 2 : 1;
+    const std::string expectedConditioningOrder =
+            useCfg ? "negative_then_positive" : "positive_only";
+    if (tokenizerBackend != "mnn_mtok" ||
+        tokenCount != conditioningSequenceLength || conditioningSequenceLength <= 0 ||
+        conditioningBatchSize != expectedConditioningBatchSize ||
+        conditioningOrder != expectedConditioningOrder ||
+        promptWeightingSupported || embeddingDiskDataType != "graph_internal") {
+        error = "MNN Sana tokenizer/conditioning contract does not match the executed graph.";
+        return false;
+    }
+    const std::string expectedTokenizerInputOrder =
+            useCfg ? "positive_then_negative" : "positive_only";
+    if (requireExecutionEvidence &&
+        (tokenizerInputSequenceLength <= 0 ||
+         tokenizerInputBatchSize != expectedConditioningBatchSize ||
+         tokenizerNonPaddingTokenCount <= 0 ||
+         static_cast<int64_t>(tokenizerNonPaddingTokenCount) >
+            static_cast<int64_t>(tokenizerInputSequenceLength) *
+                static_cast<int64_t>(tokenizerInputBatchSize) ||
+         tokenizerInputOrder != expectedTokenizerInputOrder ||
+         conditioningArtifactSha256.size() != 64U ||
+         !std::all_of(
+             conditioningArtifactSha256.begin(),
+             conditioningArtifactSha256.end(),
+             [](unsigned char ch) {
+                 return std::isdigit(ch) != 0 || (ch >= 'a' && ch <= 'f');
+             }))) {
+        error = "MNN Sana tokenizer execution evidence is incomplete or invalid.";
+        return false;
+    }
+    if (vaeScalingLocation != "runtime_native" ||
+        std::fabs(vaeScalingFactor - 1.0) > 1e-12) {
+        error = "MNN Sana VAE scaling must remain runtime-native with factor 1.";
+        return false;
+    }
+    if (width <= 0 || height <= 0 || seed < 0 || graphName.empty() || fallback) {
+        error = "MNN Sana dimensions, seed, graph, or fallback contract is invalid.";
+        return false;
+    }
+    nativeEffective = json({
+        {"profileId", profileId},
+        {"profileRevision", profileRevision},
+        {"modelFingerprint", normalize_mnn_diffusion_identifier(modelFingerprint)},
+        {"runtime", "MNN_DIFFUSION"},
+        {"scheduler", "FLOW_MATCH"},
+        {"predictionType", "FLOW"},
+        {"steps", completedSteps},
+        {"timetableCount", completedSteps},
+        {"unetExecutionCount", actualUnetExecutionCount},
+        // One transformer graph invocation consumes the complete CFG batch.
+        // Keep physical graph work distinct from the logical branch count used
+        // by the cross-runtime execution contract.
+        {"graphInvocationCount", graphInvocationCount},
+        {"logicalBranchExecutionCount", actualUnetExecutionCount},
+        {"cfgScale", cfgScale},
+        {"useCfg", useCfg},
+        {"unconditionalBranch", useCfg},
+        {"tokenizerBackend", "MNN_MTOK"},
+        {"tokenCount", conditioningSequenceLength},
+        {"conditioningSequenceLength", conditioningSequenceLength},
+        {"conditioningBatchSize", conditioningBatchSize},
+        {"conditioningOrder", conditioningOrder},
+        {"promptWeightingSupported", false},
+        {"promptWeightingApplied", false},
+        {"positiveWeightedTokenCount", 0},
+        {"negativeWeightedTokenCount", 0},
+        {"promptWeightFingerprint", conditioningArtifactSha256},
+        {"conditioningArtifactSha256", conditioningArtifactSha256},
+        {"tokenizerInputSequenceLength", tokenizerInputSequenceLength},
+        {"tokenizerInputBatchSize", tokenizerInputBatchSize},
+        {"tokenizerNonPaddingTokenCount", tokenizerNonPaddingTokenCount},
+        {"tokenizerInputOrder", tokenizerInputOrder},
+        {"embeddingDiskDataType", "GRAPH_INTERNAL"},
+        {"vaeScalingLocation", "RUNTIME_NATIVE"},
+        {"vaeScalingFactor", 1.0},
+        {"width", width},
+        {"height", height},
+        {"seed", seed},
+        {"graphName", graphName},
         {"fallback", false}
     });
+    return true;
 }
 
 std::string mnn_diffusion_missing_component(const std::string& root, const std::string& family) {
@@ -3555,84 +3776,34 @@ bool run_sdxl_clip_encoder_direct(
     }
     if (pooled != nullptr) {
         const std::vector<int> pooledShape = {1, embeddingSize};
-        const std::vector<std::string> pooledNames = {
-                "pooler_output", "pooled_output", "text_embeds"};
+        const std::vector<std::string> pooledNames = {"text_embeds", "pooled_output"};
         auto* pooledTensor = find_named_output_by_shape(
                 outputs, pooledShape, pooledNames);
-        auto* pooledSequenceTensor = find_named_output_by_shape(
-                outputs, hiddenShape, pooledNames);
-        if (pooledTensor == nullptr && pooledSequenceTensor == nullptr) {
-            pooledTensor = find_output_by_shape(outputs, pooledShape, {});
+        if (pooledTensor == nullptr) {
+            interpreter->releaseSession(session);
+            error = modelFile +
+                    " must expose a projected pooled output named text_embeds or "
+                    "pooled_output with shape [1, " + std::to_string(embeddingSize) +
+                    "]; refusing to substitute an EOS hidden-state row.";
+            return false;
         }
-        if (pooledTensor != nullptr) {
-            if (!copy_tensor_to_float_vector(pooledTensor, *pooled, error)) {
-                interpreter->releaseSession(session);
-                error = modelFile + " pooled output copy failed: " + error;
-                return false;
-            }
-            if (!validate_float_tensor_contract(*pooled, pooledShape, modelFile + " pooled output", error)) {
-                interpreter->releaseSession(session);
-                return false;
-            }
-            if (debug != nullptr) {
-                (*debug)["pooledSource"] = "direct_vector";
-                (*debug)["pooledStats"] = float_vector_stats_json(pooled->values);
-            }
-        } else {
-            int eosIndex = -1;
-            for (size_t i = 0; i < tokenIds.size(); ++i) {
-                if (tokenIds[i] == 49407) {
-                    eosIndex = static_cast<int>(i);
-                    break;
-                }
-            }
-            if (eosIndex < 0) {
-                interpreter->releaseSession(session);
-                error = modelFile + " pooled output requires an EOS token in the executed CLIP sequence.";
-                return false;
-            }
-            FloatTensorData pooledSequence;
-            const FloatTensorData* pooledSource = &hidden;
-            if (pooledSequenceTensor != nullptr) {
-                if (!copy_tensor_to_float_vector(
-                        pooledSequenceTensor, pooledSequence, error)) {
-                    interpreter->releaseSession(session);
-                    error = modelFile + " sequence pooled output copy failed: " + error;
-                    return false;
-                }
-                if (!validate_float_tensor_contract(
-                        pooledSequence,
-                        hiddenShape,
-                        modelFile + " sequence pooled output",
-                        error)) {
-                    interpreter->releaseSession(session);
-                    return false;
-                }
-                pooledSource = &pooledSequence;
-            }
-            const size_t base = static_cast<size_t>(eosIndex) * static_cast<size_t>(embeddingSize);
-            if (pooledSource->values.size() < base + static_cast<size_t>(embeddingSize)) {
-                interpreter->releaseSession(session);
-                error = modelFile + " pooled sequence output is too small for the EOS token row.";
-                return false;
-            }
-            pooled->shape = {1, embeddingSize};
-            pooled->values.assign(
-                    pooledSource->values.begin() + static_cast<std::ptrdiff_t>(base),
-                    pooledSource->values.begin() + static_cast<std::ptrdiff_t>(
-                            base + static_cast<size_t>(embeddingSize)));
-            if (!validate_float_tensor_contract(
-                    *pooled, pooledShape, modelFile + " EOS pooled output", error)) {
-                interpreter->releaseSession(session);
-                return false;
-            }
-            if (debug != nullptr) {
-                (*debug)["pooledSource"] = pooledSequenceTensor != nullptr
-                        ? "sequence_pooled_output"
-                        : "eos_hidden_state";
-                (*debug)["pooledTokenIndex"] = eosIndex;
-                (*debug)["pooledStats"] = float_vector_stats_json(pooled->values);
-            }
+        if (!copy_tensor_to_float_vector(pooledTensor, *pooled, error)) {
+            interpreter->releaseSession(session);
+            error = modelFile + " projected pooled output copy failed: " + error;
+            return false;
+        }
+        if (!validate_float_tensor_contract(
+                *pooled, pooledShape, modelFile + " projected pooled output", error)) {
+            interpreter->releaseSession(session);
+            return false;
+        }
+        if (debug != nullptr) {
+            const auto textEmbeds = outputs.find("text_embeds");
+            (*debug)["pooledSource"] =
+                    textEmbeds != outputs.end() && textEmbeds->second == pooledTensor
+                            ? "text_embeds"
+                            : "pooled_output";
+            (*debug)["pooledStats"] = float_vector_stats_json(pooled->values);
         }
     }
     interpreter->releaseSession(session);
@@ -3697,65 +3868,27 @@ bool has_sdxl_qnn_clip_bundle(const std::string& root) {
             file_exists(root + "/pos_emb_2.bin");
 }
 
-bool apply_clip_pair_weights_to_batched_embeddings(
-        FloatTensorData& embeddings,
+bool validate_clip_pair_weights_for_token_id_graph(
         const mca::image::ClipTokenPair& tokenPair,
         bool includeNegative,
         std::string& error) {
     std::vector<const mca::image::ClipTokenSequence*> sequences;
     if (includeNegative) sequences.push_back(&tokenPair.negative);
     sequences.push_back(&tokenPair.positive);
-    size_t totalTokens = 0;
     for (const auto* sequence : sequences) {
         if (sequence == nullptr || sequence->ids.size() != sequence->weights.size() ||
                 sequence->weights.empty()) {
             error = "Prompt weighting token IDs and weights are inconsistent.";
             return false;
         }
-        if (totalTokens > std::numeric_limits<size_t>::max() - sequence->weights.size()) {
-            error = "Prompt weighting token count overflowed native size limits.";
-            return false;
-        }
-        totalTokens += sequence->weights.size();
-    }
-    if (totalTokens == 0 || embeddings.values.size() % totalTokens != 0) {
-        error = "Text encoder output cannot be divided into prompt token rows.";
-        return false;
-    }
-    const size_t embeddingWidth = embeddings.values.size() / totalTokens;
-    if (embeddingWidth == 0) {
-        error = "Text encoder output has zero embedding width.";
-        return false;
-    }
-    std::vector<float> weighted;
-    weighted.reserve(embeddings.values.size());
-    size_t offset = 0;
-    for (const auto* sequence : sequences) {
-        const size_t elementCount = sequence->weights.size() * embeddingWidth;
-        std::vector<float> input(
-                embeddings.values.begin() + static_cast<std::ptrdiff_t>(offset),
-                embeddings.values.begin() + static_cast<std::ptrdiff_t>(offset + elementCount));
-        std::vector<float> output;
-        mca::image::ClipEmbeddingWeightStats stats;
-        if (!mca::image::apply_clip_token_weights_to_embeddings(
-                input,
-                sequence->weights.size(),
-                embeddingWidth,
+        size_t weightedTokenCount = 0U;
+        if (!mca::image::validate_clip_token_id_graph_prompt_weights(
                 sequence->weights,
-                true,
-                &output,
-                &stats,
+                &weightedTokenCount,
                 &error)) {
             return false;
         }
-        weighted.insert(weighted.end(), output.begin(), output.end());
-        offset += elementCount;
     }
-    if (weighted.size() != embeddings.values.size()) {
-        error = "Weighted text encoder output changed element count.";
-        return false;
-    }
-    embeddings.values = std::move(weighted);
     return true;
 }
 
@@ -4153,6 +4286,13 @@ bool tokenize_mnn_sd15_prompt(
         return false;
     }
     evidence.token_count = ids.size();
+    evidence.prompt_weight_fingerprint = hasExecutedTokenPair
+            ? executedTokenPair.weighting_fingerprint()
+            : mnn_token_id_fingerprint(ids);
+    if (evidence.prompt_weight_fingerprint.size() != 64U) {
+        error = "Conditioning fingerprint could not be derived from executed token sequences.";
+        return false;
+    }
     if (contract.prompt_weighting_supported) {
         if (!hasExecutedTokenPair) {
             error = "Prompt weighting was enabled without executed TOKENIZERS_CPP sequences.";
@@ -4165,12 +4305,6 @@ bool tokenize_mnn_sd15_prompt(
                 executedTokenPair.positive.weighted_token_count;
         evidence.negative_weighted_token_count =
                 executedTokenPair.negative.weighted_token_count;
-        evidence.prompt_weight_fingerprint =
-                executedTokenPair.weighting_fingerprint();
-        if (evidence.prompt_weight_fingerprint.size() != 64U) {
-            error = "Prompt weighting fingerprint could not be derived from executed token sequences.";
-            return false;
-        }
     }
     return true;
 }
@@ -4897,15 +5031,19 @@ json encode_sd15_prompt_embeddings_to_file(
             {"tokenCount", ids.size()}
         });
     }
+    if (hasWeightedTokenPair && !validate_clip_pair_weights_for_token_id_graph(
+            tokenPair, true, error)) {
+        return json({
+                {"ok", false},
+                {"errorCode", "PROMPT_WEIGHTING_EXECUTION_UNSUPPORTED"},
+                {"error", error}
+        });
+    }
     FloatTensorData embeddings;
     if (!run_text_encoder_direct(root, ids, backendMode, threads, embeddings, error)) {
         return json({{"ok", false}, {"error", error}});
     }
     if (!validate_float_tensor_contract(embeddings, {2, 77, 768}, "Text encoder output", error)) {
-        return json({{"ok", false}, {"error", error}});
-    }
-    if (hasWeightedTokenPair && !apply_clip_pair_weights_to_batched_embeddings(
-            embeddings, tokenPair, true, error)) {
         return json({{"ok", false}, {"error", error}});
     }
     if (!write_float_file(outputPath, embeddings.values, error)) {
@@ -4930,8 +5068,14 @@ json encode_sd15_prompt_embeddings_to_file(
         result["promptWeightingApplied"] = false;
         result["positiveWeightedTokenCount"] = 0;
         result["negativeWeightedTokenCount"] = 0;
-        result["promptWeightFingerprint"] =
-                "9b353b1ac542678089ce3d12ee96ddd6ba3b0252ec0675cdf0540e6aa6b1860e";
+        const std::string fingerprint = mnn_token_id_fingerprint(ids);
+        if (fingerprint.size() != 64U) {
+            return json({
+                    {"ok", false},
+                    {"error", "Conditioning fingerprint could not be derived from executed MNN token ids."}
+            });
+        }
+        result["promptWeightFingerprint"] = fingerprint;
     }
     return result;
 }
@@ -4975,7 +5119,6 @@ json run_mnn_sd15_interpreter_direct(
     const auto& negativeTokenWeights = hasExecutedTokenPair
             ? executedTokenPair.negative.weights
             : unitTokenWeights;
-    bool communityClipInputWeightingExecuted = false;
     if (progressCallback) {
         progressCallback(1);
     }
@@ -5075,16 +5218,24 @@ json run_mnn_sd15_interpreter_direct(
             if (includeDebug) debug["communityClip"] = {{"positive", positiveDebug}};
         }
         evidence.embedding_disk_data_type = positiveType;
-        communityClipInputWeightingExecuted = true;
-    } else if (!run_text_encoder_direct(
-            root,
-            contract.use_cfg ? ids : positiveIds,
-            contract.backend_mode,
-            contract.threads,
-            embeddings,
-            error)) {
-        return json({{"ok", false}, {"error", error}});
     } else {
+        if (hasExecutedTokenPair && !validate_clip_pair_weights_for_token_id_graph(
+                executedTokenPair, contract.use_cfg, error)) {
+            return json({
+                    {"ok", false},
+                    {"errorCode", "PROMPT_WEIGHTING_EXECUTION_UNSUPPORTED"},
+                    {"error", error}
+            });
+        }
+        if (!run_text_encoder_direct(
+                root,
+                contract.use_cfg ? ids : positiveIds,
+                contract.backend_mode,
+                contract.threads,
+                embeddings,
+                error)) {
+            return json({{"ok", false}, {"error", error}});
+        }
         evidence.embedding_disk_data_type = "GRAPH_INTERNAL";
     }
     if (!validate_float_tensor_contract(
@@ -5093,18 +5244,6 @@ json run_mnn_sd15_interpreter_direct(
             "Text encoder output",
             error)) {
         return json({{"ok", false}, {"error", error}});
-    }
-    if (contract.prompt_weighting_supported && !communityClipInputWeightingExecuted) {
-        if (!hasExecutedTokenPair || !apply_clip_pair_weights_to_batched_embeddings(
-                embeddings,
-                executedTokenPair,
-                contract.use_cfg,
-                error)) {
-            if (error.empty()) {
-                error = "Prompt weighting execution evidence is unavailable.";
-            }
-            return json({{"ok", false}, {"error", error}});
-        }
     }
     if (evidence.embedding_disk_data_type != contract.embedding_disk_data_type) {
         return json({
@@ -6753,27 +6892,27 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         }).dump();
         return utf8_to_jstring(env, out);
     }
-    const auto backend_mode = sana_family
+    auto backend_mode = sana_family
             ? opt_string(params, "backendMode", "cpu")
             : executionContract.backend_mode;
     const int requested_steps = opt_int(params, "steps", 8);
     const int steps = sana_family
-            ? std::max(2, std::min(50, requested_steps))
+            ? requested_steps
             : executionContract.scheduler.steps;
     const int seed = sana_family
             ? opt_int(params, "seed", opt_int(params, "randomSeed", -1))
             : static_cast<int>(executionContract.seed);
     const int width = sana_family
-            ? std::max(256, opt_int(params, "width", 512))
+            ? opt_int(params, "width", 512)
             : executionContract.width;
     const int height = sana_family
-            ? std::max(256, opt_int(params, "height", 512))
+            ? opt_int(params, "height", 512)
             : executionContract.height;
     const int threads = sana_family
-            ? std::max(1, opt_int(params, "threads", 4))
+            ? opt_int(params, "threads", 4)
             : executionContract.threads;
     const int memory_mode = sana_family
-            ? std::max(0, std::min(2, opt_int(params, "memoryMode", 0)))
+            ? opt_int(params, "memoryMode", 0)
             : executionContract.memory_mode;
     const bool use_cfg = sana_family
             ? opt_bool(params, "useCfg", false)
@@ -6781,6 +6920,136 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
     const float cfg_scale = sana_family
             ? static_cast<float>(opt_double(params, "cfgScale", 4.5))
             : executionContract.cfg_scale;
+    std::string negative_prompt = executionContract.negative_prompt;
+    std::string task_mode;
+    std::string input_image_path;
+    std::string input_image_sha256;
+    std::string mask_image_path;
+    std::string control_image_path;
+    if (!mnn_contract_string(params, "taskMode", task_mode, contractError) ||
+        !optional_json_string(params, "inputImagePath", "", input_image_path, contractError) ||
+        !optional_json_string(params, "inputImageSha256", "", input_image_sha256, contractError) ||
+        !optional_json_string(params, "maskImagePath", "", mask_image_path, contractError) ||
+        !optional_json_string(params, "controlImagePath", "", control_image_path, contractError) ||
+        (sana_family &&
+         !mnn_contract_string(params, "negativePrompt", negative_prompt, contractError, true))) {
+        const auto out = json({
+            {"ok", false},
+            {"backend", "mnn_diffusion"},
+            {"errorCode", "EXECUTION_CONTRACT_INVALID"},
+            {"error", contractError}
+        }).dump();
+        return utf8_to_jstring(env, out);
+    }
+    if (sana_family) {
+        std::string canonicalBackend;
+        if (!canonical_mnn_diffusion_backend(backend_mode, canonicalBackend, contractError)) {
+            const auto out = json({
+                {"ok", false},
+                {"backend", "mnn_diffusion"},
+                {"errorCode", "EXECUTION_CONTRACT_INVALID"},
+                {"field", "backendMode"},
+                {"error", contractError}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+        backend_mode = canonicalBackend;
+        if (steps < 2 || steps > 50 ||
+            width < 256 || width > 2048 || height < 256 || height > 2048 ||
+            width % 32 != 0 || height % 32 != 0 ||
+            threads < 1 || threads > 64 ||
+            memory_mode < 0 || memory_mode > 2 ||
+            seed < 0 || !std::isfinite(cfg_scale) || cfg_scale < 0.0f || cfg_scale > 30.0f) {
+            const auto out = json({
+                {"ok", false},
+                {"backend", "mnn_diffusion"},
+                {"errorCode", "EXECUTION_CONTRACT_INVALID"},
+                {"error", "MNN Sana generation fields are outside their exact supported ranges."}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+        if (task_mode != "text_to_image" && task_mode != "edit") {
+            const auto out = json({
+                {"ok", false},
+                {"backend", "mnn_diffusion"},
+                {"errorCode", "EXECUTION_CONTRACT_UNSUPPORTED"},
+                {"field", "taskMode"},
+                {"error", "MNN Sana supports text_to_image or edit only."}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+        const bool imageEdit = task_mode == "edit";
+        if (imageEdit != (!input_image_path.empty() && !input_image_sha256.empty()) ||
+            (!imageEdit && (!input_image_path.empty() || !input_image_sha256.empty())) ||
+            !mask_image_path.empty() || !control_image_path.empty()) {
+            const auto out = json({
+                {"ok", false},
+                {"backend", "mnn_diffusion"},
+                {"errorCode", "EXECUTION_CONTRACT_INVALID"},
+                {"field", "inputImagePath,inputImageSha256,maskImagePath,controlImagePath"},
+                {"error", "MNN Sana edit requires one input image with its SHA-256 and does not accept mask/control images."}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+        if (!use_cfg && !negative_prompt.empty()) {
+            const auto out = json({
+                {"ok", false},
+                {"backend", "mnn_diffusion"},
+                {"errorCode", "EXECUTION_CONTRACT_UNSUPPORTED"},
+                {"field", "negativePrompt"},
+                {"error", "MNN Sana cannot apply a negative prompt when useCfg=false."}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+        if (params.contains("strength") ||
+            opt_int(params, "batchCount", 1) != 1 ||
+            params.contains("vaeTiling") || params.contains("preview") ||
+            params.contains("clipSkip")) {
+            const auto out = json({
+                {"ok", false},
+                {"backend", "mnn_diffusion"},
+                {"errorCode", "EXECUTION_CONTRACT_UNSUPPORTED"},
+                {"field", "strength,batchCount,vaeTiling,preview,clipSkip"},
+                {"error", "MNN Sana edit does not expose strength, batch, tiling, preview, or clip-skip controls through its native API."}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+        json preflightEffective;
+        if (!mnn_sana_native_effective_json(
+                params,
+                steps,
+                steps,
+                256,
+                use_cfg ? 2 : 1,
+                use_cfg ? "negative_then_positive" : "positive_only",
+                0,
+                0,
+                0,
+                "",
+                "",
+                false,
+                preflightEffective,
+                contractError)) {
+            const auto out = json({
+                {"ok", false},
+                {"backend", "mnn_diffusion"},
+                {"errorCode", "EXECUTION_CONTRACT_INVALID"},
+                {"error", contractError}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+    } else if (task_mode != "text_to_image" ||
+               !input_image_path.empty() || !input_image_sha256.empty() || !mask_image_path.empty() ||
+               !control_image_path.empty()) {
+        const auto out = json({
+            {"ok", false},
+            {"backend", "mnn_diffusion"},
+            {"errorCode", "EXECUTION_CONTRACT_UNSUPPORTED"},
+            {"field", "taskMode"},
+            {"error", "The current MNN SD1.5 direct graph package has no VAE encoder; only text_to_image is executable."}
+        }).dump();
+        return utf8_to_jstring(env, out);
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_mnn_diffusion_mutex);
@@ -6847,6 +7116,12 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         const auto out = fail(missing);
         return utf8_to_jstring(env, out);
     }
+    if (sana_family && task_mode == "edit" &&
+        (!file_exists(root + "/vae_encoder.mnn") ||
+         !file_exists(root + "/vae_encoder.mnn.weight"))) {
+        const auto out = fail("MNN Sana edit bundle is missing vae_encoder.mnn or its weight file.");
+        return utf8_to_jstring(env, out);
+    }
 
     try {
         {
@@ -6887,11 +7162,27 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
                 };
         json result;
         MnnNativeExecutionEvidence executionEvidence;
+        int sanaCompletedSteps = 0;
+        int sanaGraphInvocationCount = 0;
+        int sanaConditioningSequenceLength = 0;
+        int sanaConditioningBatchSize = 0;
+        int sanaTokenizerInputSequenceLength = 0;
+        int sanaTokenizerInputBatchSize = 0;
+        int sanaTokenizerNonPaddingTokenCount = 0;
+        int sanaInputImageExecutionCount = 0;
+        std::string sanaConditioningOrder;
+        std::string sanaTokenizerInputOrder;
+        std::string sanaConditioningArtifactSha256;
+        std::string sanaExecutedInputImageSha256;
         if (sana_family) {
             mca::MnnSanaOptions options;
             options.bundle_root = root;
             options.prompt = prompt;
+            options.negative_prompt = negative_prompt;
             options.output_path = output_path;
+            options.task_mode = task_mode;
+            options.input_image_path = input_image_path;
+            options.input_image_sha256 = input_image_sha256;
             options.backend_mode = backend_mode;
             options.memory_mode = memory_mode;
             options.width = width;
@@ -6920,6 +7211,21 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
                         return g_mnn_diffusion_cancel_requested;
                     });
             const bool sana_ok = session.run();
+            sanaCompletedSteps = session.completed_steps();
+            sanaGraphInvocationCount = session.graph_invocation_count();
+            sanaConditioningSequenceLength = session.conditioning_sequence_length();
+            sanaConditioningBatchSize = session.conditioning_batch_size();
+            sanaConditioningOrder = session.conditioning_order();
+            sanaTokenizerInputSequenceLength =
+                    session.tokenizer_input_sequence_length();
+            sanaTokenizerInputBatchSize = session.tokenizer_input_batch_size();
+            sanaTokenizerNonPaddingTokenCount =
+                    session.tokenizer_non_padding_token_count();
+            sanaTokenizerInputOrder = session.tokenizer_input_order();
+            sanaConditioningArtifactSha256 =
+                    session.conditioning_artifact_sha256();
+            sanaInputImageExecutionCount = session.input_image_execution_count();
+            sanaExecutedInputImageSha256 = session.executed_input_image_sha256();
             result = json({
                 {"ok", sana_ok},
                 {"path", output_path},
@@ -6959,21 +7265,83 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
             set_mnn_diffusion_progress_locked("completed", "Image generation completed.", steps, steps, width, height, threads);
         }
         if (sana_family) {
-            const auto out = json({
+            json nativeEffective;
+            std::string evidenceError;
+            if (!mnn_sana_native_effective_json(
+                    params,
+                    sanaCompletedSteps,
+                    sanaGraphInvocationCount,
+                    sanaConditioningSequenceLength,
+                    sanaConditioningBatchSize,
+                    sanaConditioningOrder,
+                    sanaTokenizerInputSequenceLength,
+                    sanaTokenizerInputBatchSize,
+                    sanaTokenizerNonPaddingTokenCount,
+                    sanaTokenizerInputOrder,
+                    sanaConditioningArtifactSha256,
+                    true,
+                    nativeEffective,
+                    evidenceError)) {
+                const auto out = fail(evidenceError);
+                return utf8_to_jstring(env, out);
+            }
+            nativeEffective["taskMode"] = task_mode;
+            nativeEffective["inputImagePath"] = input_image_path;
+            nativeEffective["maskImagePath"] = "";
+            nativeEffective["controlImagePath"] = "";
+            nativeEffective["inputImageExecutionCount"] =
+                    sanaInputImageExecutionCount;
+            nativeEffective["inputImageSha256"] = sanaExecutedInputImageSha256;
+            nativeEffective["maskImageExecutionCount"] = 0;
+            nativeEffective["controlImageExecutionCount"] = 0;
+            json out = json({
                 {"ok", true},
+                {"nativeExecution", true},
+                {"executionStage", "semantic_generation_passed"},
                 {"backend", "mnn_diffusion"},
                 {"family", "SANA"},
-                {"backendMode", backend_mode == "opencl" || backend_mode == "gpu" ? "opencl" : "cpu"},
+                {"backendMode", backend_mode},
                 {"runner", "sana_varp"},
                 {"path", output_path},
                 {"mimeType", "image/png"},
                 {"steps", steps},
                 {"width", width},
                 {"height", height},
+                {"seed", seed},
+                {"cfgScale", cfg_scale},
+                {"useCfg", use_cfg},
+                {"negativePromptSpecified", params.contains("negativePrompt")},
+                {"sampleMethod", "flow_match"},
+                {"memoryMode", memory_mode},
+                {"taskMode", task_mode},
+                {"inputImagePath", input_image_path},
+                {"maskImagePath", ""},
+                {"controlImagePath", ""},
+                {"inputImageExecutionCount", sanaInputImageExecutionCount},
+                {"inputImageSha256", sanaExecutedInputImageSha256},
+                {"maskImageExecutionCount", 0},
+                {"controlImageExecutionCount", 0},
+                {"graphInvocationCount", sanaGraphInvocationCount},
+                {"logicalBranchExecutionCount", nativeEffective["unetExecutionCount"]},
+                {"conditioningSequenceLength", sanaConditioningSequenceLength},
+                {"conditioningBatchSize", sanaConditioningBatchSize},
+                {"conditioningOrder", sanaConditioningOrder},
+                {"tokenizerInputSequenceLength", sanaTokenizerInputSequenceLength},
+                {"tokenizerInputBatchSize", sanaTokenizerInputBatchSize},
+                {"tokenizerNonPaddingTokenCount", sanaTokenizerNonPaddingTokenCount},
+                {"tokenizerInputOrder", sanaTokenizerInputOrder},
+                {"conditioningArtifactSha256", sanaConditioningArtifactSha256},
+                {"nativeEffective", nativeEffective},
+                {"outputs", json::array({json({
+                    {"index", 0},
+                    {"path", output_path},
+                    {"mimeType", "image/png"},
+                    {"seed", seed}
+                })})},
                 {"nativeGenerationSequence", g_mnn_diffusion_generation_sequence},
                 {"nativeStartedAtMs", g_mnn_diffusion_started_at_ms}
-            }).dump();
-            return utf8_to_jstring(env, out);
+            });
+            return utf8_to_jstring(env, out.dump());
         }
         const auto nativeEffective = mnn_native_effective_json(
                 executionContract,
@@ -6988,11 +7356,25 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         out["runner"] = "direct";
         out["path"] = output_path;
         out["mimeType"] = "image/png";
+        out["taskMode"] = "text_to_image";
+        out["inputImagePath"] = "";
+        out["maskImagePath"] = "";
+        out["controlImagePath"] = "";
+        out["inputImageExecutionCount"] = 0;
+        out["maskImageExecutionCount"] = 0;
+        out["controlImageExecutionCount"] = 0;
+        out["outputs"] = json::array({json({
+            {"index", 0},
+            {"path", output_path},
+            {"mimeType", "image/png"},
+            {"seed", executionContract.seed}
+        })});
         out["nativeEffective"] = nativeEffective;
         out["timesteps"] = executionEvidence.timesteps;
         out["sigmas"] = executionEvidence.sigmas;
         out["initNoiseSigma"] = executionEvidence.init_noise_sigma;
         out["graphInvocationCount"] = executionEvidence.graph_invocation_count;
+        out["logicalBranchExecutionCount"] = executionEvidence.unet_execution_count;
         out["negativePromptSpecified"] = !executionContract.negative_prompt.empty();
         out["nativeGenerationSequence"] = g_mnn_diffusion_generation_sequence;
         out["nativeStartedAtMs"] = g_mnn_diffusion_started_at_ms;

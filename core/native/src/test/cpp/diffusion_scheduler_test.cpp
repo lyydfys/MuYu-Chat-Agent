@@ -227,6 +227,17 @@ void test_dpmpp_2m_epsilon() {
     assert_values_near(second.previous_sample, kDpmppSecondPreviousSample, kTensorTolerance);
 }
 
+void test_dmd2_trailing_four_step_timetable() {
+    auto config = DiffusionSchedulerConfig::stable_diffusion_dpmpp_2m();
+    config.timestep_spacing = TimestepSpacing::Trailing;
+    DiffusionScheduler scheduler(config);
+    std::string error;
+    assert(scheduler.set_timesteps(4, &error));
+    const std::array<double, 4> expected{999.0, 749.0, 499.0, 249.0};
+    assert_values_near(scheduler.timesteps(), expected, 0.0);
+    assert(scheduler.expected_unet_execution_count() == expected.size());
+}
+
 }  // namespace
 
 int main() {
@@ -236,5 +247,6 @@ int main() {
     test_pndm_prk_and_plms_execution_count();
     test_twenty_step_schedule_structure();
     test_dpmpp_2m_epsilon();
+    test_dmd2_trailing_four_step_timetable();
     return 0;
 }

@@ -20,8 +20,6 @@ class LocalImageQnnGenerationOptionsTest {
                 threads = 4,
                 seed = 42,
                 cfgScale = 7.0,
-                distilledGuidance = 3.5,
-                flowShift = -1.0,
                 sampleMethod = "pndm",
                 backendMode = "cpu",
                 tokenEmbeddingMode = "auto",
@@ -39,7 +37,7 @@ class LocalImageQnnGenerationOptionsTest {
     }
 
     @Test
-    fun `qnn rejects silent dimension and sampler fallback`() {
+    fun `qnn rejects silent dimension and unknown sampler fallback`() {
         assertInvalid {
             resolveQnnImageGenerationContract(
                 family = LocalImageModelFamily.SD15,
@@ -57,7 +55,27 @@ class LocalImageQnnGenerationOptionsTest {
                 defaultHeight = 512,
                 defaultThreads = 4,
                 fallbackSeed = 1,
-                options = LocalImageGenerationOptions(sampleMethod = "euler")
+                options = LocalImageGenerationOptions(sampleMethod = "not_a_real_sampler")
+            )
+        }
+        assertInvalid {
+            resolveQnnImageGenerationContract(
+                family = LocalImageModelFamily.SD15,
+                defaultWidth = 512,
+                defaultHeight = 512,
+                defaultThreads = 4,
+                fallbackSeed = 1,
+                options = LocalImageGenerationOptions(distilledGuidance = 3.5)
+            )
+        }
+        assertInvalid {
+            resolveQnnImageGenerationContract(
+                family = LocalImageModelFamily.SD15,
+                defaultWidth = 512,
+                defaultHeight = 512,
+                defaultThreads = 4,
+                fallbackSeed = 1,
+                options = LocalImageGenerationOptions(flowShift = 3.0)
             )
         }
     }

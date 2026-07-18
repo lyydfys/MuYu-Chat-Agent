@@ -117,6 +117,117 @@ class LocalImageWorkerProtocolTest {
     }
 
     @Test
+    fun `all product image modes and controls round trip across worker ipc`() {
+        val model = LocalImageModelRecord(
+            id = "image-modes",
+            displayName = "Image model",
+            path = "/data/user/0/com.muyuchat.mca/files/model.bin",
+            fileName = "model.bin",
+            sizeBytes = 123L,
+            sha256 = "model-sha",
+            runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+            family = LocalImageModelFamily.SD15,
+            bundleRoot = "/data/user/0/com.muyuchat.mca/files/bundle"
+        )
+        fun input(role: String) = LocalImagePreparedInput(
+            path = "/data/user/0/com.muyuchat.mca/cache/local_image_dispatch_inputs/request/$role.img",
+            mimeType = "image/png",
+            sha256 = if (role == "input") "a".repeat(64) else if (role == "mask") "b".repeat(64) else "c".repeat(64),
+            sizeBytes = 100L,
+            width = 512,
+            height = 512
+        )
+        val cases = listOf(
+            LocalImageGenerationOptions(taskMode = LocalImageTaskMode.TEXT_TO_IMAGE),
+            LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.IMG2IMG,
+                inputImage = input("input"),
+                strength = 0.65
+            ),
+            LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.INPAINT,
+                inputImage = input("input"),
+                maskImage = input("mask"),
+                strength = 0.8
+            ),
+            LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.CONTROL,
+                controlImage = input("control"),
+                controlStrength = 1.25
+            )
+        )
+
+        cases.forEachIndexed { index, options ->
+            val requested = options.copy(
+                negativePrompt = "",
+                width = 512,
+                height = 512,
+                steps = 24,
+                seed = 42,
+                cfgScale = 6.5,
+                sampleMethod = "dpmpp_2m",
+                batchCount = 1,
+                preview = LocalImagePreviewOptions(
+                    interval = 2,
+                    mode = LocalImagePreviewMode.PROJECTION
+                )
+            )
+            val parsed = LocalImageWorkerProtocol.parseGenerateRequest(
+                LocalImageWorkerProtocol.generateRequest("mode-$index", model, "prompt", requested)
+            ).options
+
+            assertEquals(requested, parsed)
+        }
+    }
+
+    @Test
+    fun `worker ipc carries prepared inpaint and advanced controls without base64`() {
+        val model = LocalImageModelRecord(
+            id = "model-input",
+            displayName = "Image edit model",
+            path = "/data/user/0/com.muyuchat.mca/files/model.gguf",
+            fileName = "model.gguf",
+            sizeBytes = 123L,
+            sha256 = "model-sha",
+            runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+            family = LocalImageModelFamily.SD15,
+            bundleRoot = "/data/user/0/com.muyuchat.mca/files/bundle"
+        )
+        val input = LocalImagePreparedInput(
+            path = "/data/user/0/com.muyuchat.mca/cache/local_image_dispatch_inputs/r/input.img",
+            mimeType = "image/png",
+            sha256 = "a".repeat(64),
+            sizeBytes = 1024L,
+            width = 512,
+            height = 512
+        )
+        val mask = input.copy(
+            path = "/data/user/0/com.muyuchat.mca/cache/local_image_dispatch_inputs/r/mask.img",
+            sha256 = "b".repeat(64)
+        )
+        val options = LocalImageGenerationOptions(
+            taskMode = LocalImageTaskMode.INPAINT,
+            inputImage = input,
+            maskImage = mask,
+            strength = 0.7,
+            clipSkip = 2,
+            batchCount = 1,
+            vaeTiling = LocalImageVaeTilingOptions(tileSize = 512, overlap = 0.5)
+        )
+
+        val payload = LocalImageWorkerProtocol.generateRequest("input-request", model, "edit", options)
+        val parsed = LocalImageWorkerProtocol.parseGenerateRequest(payload)
+
+        assertTrue(!payload.contains("base64"))
+        assertEquals(LocalImageTaskMode.INPAINT, parsed.options.taskMode)
+        assertEquals(input.path, parsed.options.inputImage?.path)
+        assertEquals(mask.sha256, parsed.options.maskImage?.sha256)
+        assertEquals(0.7, parsed.options.strength ?: 0.0, 0.0)
+        assertEquals(2, parsed.options.clipSkip)
+        assertEquals(512, parsed.options.vaeTiling?.tileSize)
+    }
+
+    @Test
     fun `progress and result expose worker pid`() {
         val progress = LocalImageProgress(
             phase = "sampling",
@@ -131,6 +242,15 @@ class LocalImageWorkerProtocolTest {
             cancelRequested = false,
             requestOptionsJson = "{\"sampleMethod\":\"euler\",\"memoryMode\":0}",
             componentSelectionJson = "{\"mode\":\"manifest_roles\",\"fallback\":false}",
+            previewPath = "/data/user/0/com.muyuchat.mca/cache/local_image_outputs/out.preview-1.png",
+            previewMimeType = "image/png",
+            previewMode = "projection",
+            previewStep = 2,
+            previewRevision = 7L,
+            previewWidth = 64,
+            previewHeight = 64,
+            previewFrameCount = 1,
+            previewNoisy = false,
             stageTrace = listOf(
                 "context_lock",
                 "context_binary_mmap",
@@ -158,10 +278,40 @@ class LocalImageWorkerProtocolTest {
         assertEquals("sampling", parsedProgress.progress.phase)
         assertEquals(progress.requestOptionsJson, parsedProgress.progress.requestOptionsJson)
         assertEquals(progress.componentSelectionJson, parsedProgress.progress.componentSelectionJson)
+        assertEquals(progress.previewPath, parsedProgress.progress.previewPath)
+        assertEquals(progress.previewMimeType, parsedProgress.progress.previewMimeType)
+        assertEquals(progress.previewMode, parsedProgress.progress.previewMode)
+        assertEquals(progress.previewStep, parsedProgress.progress.previewStep)
+        assertEquals(progress.previewRevision, parsedProgress.progress.previewRevision)
+        assertEquals(progress.previewWidth, parsedProgress.progress.previewWidth)
+        assertEquals(progress.previewHeight, parsedProgress.progress.previewHeight)
+        assertEquals(progress.previewFrameCount, parsedProgress.progress.previewFrameCount)
+        assertEquals(progress.previewNoisy, parsedProgress.progress.previewNoisy)
         assertEquals(progress.stageTrace, parsedProgress.progress.stageTrace)
         assertEquals(4321, parsedResult.workerPid)
         assertTrue(parsedResult.outputPath.endsWith("out.png"))
         assertTrue(parsedResult.executionMetadataJson.contains("manifest_roles"))
+        assertEquals(1, parsedResult.outputs.size)
+        assertEquals(0, parsedResult.outputs.single().index)
+    }
+
+    @Test
+    fun `result protocol preserves ordered multi output metadata`() {
+        val payload = LocalImageWorkerProtocol.result(
+            requestId = "batch",
+            workerPid = 99,
+            outputs = listOf(
+                LocalImageWorkerProtocol.OutputEnvelope(0, "/cache/out-000.png", "image/png", 10L),
+                LocalImageWorkerProtocol.OutputEnvelope(1, "/cache/out-001.png", "image/png", 11L)
+            ),
+            executionMetadataJson = "{}"
+        )
+
+        val parsed = LocalImageWorkerProtocol.parseResult(payload)
+
+        assertEquals(2, parsed.outputs.size)
+        assertEquals(listOf(10L, 11L), parsed.outputs.map { it.seed })
+        assertEquals(parsed.outputPath, parsed.outputs.first().outputPath)
     }
 
     @Test

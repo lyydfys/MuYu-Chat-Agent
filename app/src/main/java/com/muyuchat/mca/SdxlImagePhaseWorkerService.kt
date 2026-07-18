@@ -222,6 +222,7 @@ internal abstract class SdxlImagePhaseWorkerService(
                         nativeGenerationSequence = proof.nativeGenerationSequence,
                         nativeStageMask = proof.nativeStageMask,
                         nativeDetailStageMask = proof.nativeDetailStageMask,
+                        conditioningArtifactSha256 = contract.conditioningArtifactSha256,
                         nativeResultJson = nativeRaw
                     )
                 )

@@ -74,6 +74,18 @@ class LocalVisionNpuRunnerTest {
     }
 
     @Test
+    fun completeButUnprobedRuntimeStillReachesRealSmoke() {
+        val bundle = qnnVisionBundle()
+        val report = LiteRtQnnVisionRunner(runnerReady = true).health(
+            device = snapdragonElite(unprobedCompleteRuntime()),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalVisionNpuState.SMOKE_REQUIRED, report.state)
+        assertFalse(report.npuActive)
+    }
+
+    @Test
     fun qnnVisionBundleCanEnterSmokeWhenCdspRpcDiagnosticFails() {
         val bundle = qnnVisionBundle()
         val report = LiteRtQnnVisionRunner(runnerReady = true).health(
@@ -474,6 +486,17 @@ class LocalVisionNpuRunnerTest {
             searchDirectories = listOf("/data/local/tmp/qnn"),
             probeState = QnnRuntimeProbeState.LOAD_FAILED,
             probeMessage = message
+        )
+
+    private fun unprobedCompleteRuntime(): QnnRuntimeStatus =
+        QnnRuntimeStatus(
+            qnnSystemLibraryPresent = true,
+            qnnHtpLibraryPresent = true,
+            htpSkelLibraryPresent = true,
+            htpStubLibraryPresent = true,
+            searchDirectories = listOf("/data/local/tmp/qnn"),
+            probeState = QnnRuntimeProbeState.NOT_REQUESTED,
+            probeMessage = ""
         )
 
     private fun blockedTransportRuntime(message: String): QnnRuntimeStatus =

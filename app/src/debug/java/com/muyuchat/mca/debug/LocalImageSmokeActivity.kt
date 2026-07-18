@@ -123,8 +123,22 @@ class LocalImageSmokeActivity : Activity() {
             val threads = intent.getIntExtra("threads", 4)
             val seed = intent.getIntExtra("seed", 42)
             val cfgScale = intent.numberExtra("cfgScale", 7.0)
-            val distilledGuidance = intent.numberExtra("distilledGuidance", 3.5)
-            val flowShift = intent.numberExtra("flowShift", -1.0)
+            require(isStableDiffusionCpp || !intent.hasExtra("distilledGuidance")) {
+                "Runtime $runtime has no distilled-guidance graph input."
+            }
+            require(isStableDiffusionCpp || !intent.hasExtra("flowShift")) {
+                "Runtime $runtime has no writable native flow-shift control."
+            }
+            val distilledGuidance = if (isStableDiffusionCpp) {
+                intent.numberExtra("distilledGuidance", 3.5)
+            } else {
+                null
+            }
+            val flowShift = if (isStableDiffusionCpp) {
+                intent.numberExtra("flowShift", -1.0)
+            } else {
+                null
+            }
             val sampleMethod = intent.getStringExtra("sampleMethod").orEmpty().ifBlank { "euler" }
             val family = intent.getStringExtra("family").orEmpty().ifBlank { "SD15" }
             val backendMode = intent.getStringExtra("backendMode").orEmpty().ifBlank { "cpu" }
@@ -173,12 +187,12 @@ class LocalImageSmokeActivity : Activity() {
                 .put("seed", seed)
                 .put("randomSeed", seed)
                 .put("cfgScale", cfgScale)
-                .put("distilledGuidance", distilledGuidance)
-                .put("flowShift", flowShift)
                 .put("sampleMethod", sampleMethod)
                 .put("backendMode", backendMode)
                 .put("tokenEmbeddingMode", tokenEmbeddingMode)
                 .put("memoryMode", memoryMode)
+            distilledGuidance?.let { requestJson.put("distilledGuidance", it) }
+            flowShift?.let { requestJson.put("flowShift", it) }
             if (isQnnHtp) {
                 requestJson.put(
                     "pixelRange",
@@ -228,8 +242,6 @@ class LocalImageSmokeActivity : Activity() {
                     .put("threads", threads)
                     .put("seed", seed)
                     .put("cfgScale", cfgScale)
-                    .put("distilledGuidance", distilledGuidance)
-                    .put("flowShift", flowShift)
                     .put("sampleMethod", sampleMethod)
                     .put("backendMode", backendMode)
                     .put("memoryMode", memoryMode)

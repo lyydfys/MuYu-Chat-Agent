@@ -31,15 +31,24 @@ internal fun resolveLocalImageExecutionProfile(
         ?.takeIf(String::isNotBlank)
         ?: manifestJson?.optString("id")?.takeIf(String::isNotBlank)
     val manifestProfile = manifestJson?.let(ImageExecutionProfileJson::parseManifest)
+    val manifestBehavior = if (manifestProfile == null) {
+        manifestJson?.let(ImageExecutionProfileJson::parseManifestBehavior)
+    } else {
+        null
+    }
+    val sidecar = canonicalRoot?.let { root ->
+        parseLocalImageExecutionProfileSidecars(root, manifestProfile)
+    }
     val inferredRecommendationFamily = recommendationId
         ?.let(LocalImageModelFamily::from)
         ?.takeUnless { it == LocalImageModelFamily.CUSTOM }
     val effectiveFamily = familyOverride
         ?: manifestProfile?.family
+        ?: manifestBehavior?.family
+        ?: sidecar?.behavior?.family
         ?: model.family.takeUnless { it == LocalImageModelFamily.CUSTOM }
         ?: inferredRecommendationFamily
         ?: model.family
-    val sidecar = canonicalRoot?.let(ImageExecutionProfileJson::parseSidecars)
     val discovery = canonicalRoot?.let { root ->
         discoverLocalImageExecutionCapabilities(root, model.runtime, effectiveFamily)
     }
@@ -68,6 +77,7 @@ internal fun resolveLocalImageExecutionProfile(
                 ?.optString("revision")
                 ?.takeIf(String::isNotBlank),
             manifestProfile = manifestProfile,
+            manifestBehavior = manifestBehavior,
             sidecar = sidecar,
             capabilityDiscovery = discovery,
             recommendationEvidence = localImageRecommendationEvidence(
@@ -84,8 +94,66 @@ internal fun resolveLocalImageExecutionProfile(
     require(effectiveFamily == LocalImageModelFamily.CUSTOM || resolution.profile.family == effectiveFamily) {
         "Image execution profile family ${resolution.profile.family} does not match $effectiveFamily."
     }
-    return resolution
+    return resolution.withProductDenoisingSchedule(options)
 }
+
+/**
+ * The configured sampler step count remains unchanged for img2img/inpaint, while native starts
+ * later in that schedule according to strength. Bind the strict evidence to the actually visited
+ * timetable instead of pretending every configured step executed.
+ */
+internal fun ImageExecutionProfileResolution.withProductDenoisingSchedule(
+    options: LocalImageGenerationOptions
+): ImageExecutionProfileResolution {
+    if (profile.runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP ||
+        options.taskMode !in setOf(LocalImageTaskMode.IMG2IMG, LocalImageTaskMode.INPAINT)
+    ) {
+        return this
+    }
+    val strength = options.strength ?: 1.0
+    if (strength >= 1.0) return this
+    require(strength.isFinite() && strength > 0.0) {
+        "Image strength must be finite and in (0, 1]."
+    }
+    val resolved = layers.resolved
+    val timetableCount = minOf(
+        resolved.steps,
+        (resolved.steps.toDouble() * strength).toInt() + 1
+    ).coerceAtLeast(1)
+    val branchCount = if (resolved.useCfg) 2 else 1
+    return copy(
+        layers = layers.copy(
+            resolved = resolved.copy(
+                timetableCount = timetableCount,
+                unetExecutionCount = timetableCount * branchCount
+            )
+        )
+    )
+}
+
+/** Reads standard package sidecars plus JSON config sidecars declared by a full manifest profile. */
+internal fun parseLocalImageExecutionProfileSidecars(
+    bundleRoot: File,
+    manifestProfile: ImageExecutionProfile?
+): ImageProfileSidecar? {
+    val graph = manifestProfile?.graph
+    val behaviorSidecars = buildList {
+        add(DEFAULT_IMAGE_BEHAVIOR_SIDECAR)
+        graph?.configSidecars
+            .orEmpty()
+            .filter(::isJsonImageBehaviorSidecar)
+            .forEach(::add)
+    }
+    return ImageExecutionProfileJson.parseSidecars(
+        bundleRoot = bundleRoot,
+        schedulerRelativePath = graph?.schedulerSidecar ?: DEFAULT_IMAGE_SCHEDULER_SIDECAR,
+        tokenizerRelativePath = graph?.tokenizerSidecar ?: DEFAULT_IMAGE_TOKENIZER_SIDECAR,
+        behaviorRelativePaths = behaviorSidecars
+    )
+}
+
+private fun isJsonImageBehaviorSidecar(relativePath: String): Boolean =
+    relativePath.substringAfterLast('/').substringAfterLast('\\').endsWith(".json", ignoreCase = true)
 
 /**
  * Collects package identity without consulting hardware. Exact catalog
@@ -160,6 +228,10 @@ internal fun resolveMnnDiffusionProfileRunner(
     return resolved
 }
 
+private const val DEFAULT_IMAGE_SCHEDULER_SIDECAR = "scheduler/scheduler_config.json"
+private const val DEFAULT_IMAGE_TOKENIZER_SIDECAR = "tokenizer/tokenizer_config.json"
+private const val DEFAULT_IMAGE_BEHAVIOR_SIDECAR = "config.json"
+
 private val PRIMARY_IMAGE_COMPONENT_ROLES = setOf("DIFFUSION", "MODEL", "UNET", "TRANSFORMER")
 
 internal fun imageSchedulerAlgorithmFromProductName(value: String): ImageSchedulerAlgorithm =
@@ -203,6 +275,7 @@ private fun discoverLocalImageExecutionCapabilities(
     val textEncoder = root.findExecutionArtifact("text_encoder.bin", "text_encoder.mnn")
     val unet = root.findExecutionArtifact("unet.bin", "unet.mnn")
     val vae = root.findExecutionArtifact("vae.bin", "vae_decoder.bin", "vae_decoder.mnn")
+    val vaeEncoder = root.findExecutionArtifact("vae_encoder.bin", "vae_encoder.mnn")
     if (tokenizerJson == null && textEncoder == null && unet == null && vae == null) return null
     val maxLength = 77
     val padId = 49_407
@@ -295,6 +368,7 @@ private fun discoverLocalImageExecutionCapabilities(
             textEncoder = textEncoder?.toGraphArtifact(root),
             unet = unet?.toGraphArtifact(root),
             vae = vae?.toGraphArtifact(root),
+            vaeEncoder = vaeEncoder?.toGraphArtifact(root),
             schedulerSidecar = File(root, "scheduler/scheduler_config.json")
                 .takeIf(File::isFile)
                 ?.relativeTo(root)
@@ -349,7 +423,7 @@ private fun modelExecutionFingerprint(model: LocalImageModelRecord): String {
     return primary.sha256ForProfile()
 }
 
-private fun File.sha256ForProfile(): String {
+internal fun File.sha256ForProfile(): String {
     val digest = MessageDigest.getInstance("SHA-256")
     inputStream().buffered().use { input ->
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)

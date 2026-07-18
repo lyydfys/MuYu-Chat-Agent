@@ -195,6 +195,7 @@ internal data class ImageGraphContract(
     val textEncoder: ImageGraphArtifactContract? = null,
     val unet: ImageGraphArtifactContract? = null,
     val vae: ImageGraphArtifactContract? = null,
+    val vaeEncoder: ImageGraphArtifactContract? = null,
     val controlNet: ImageGraphArtifactContract? = null,
     val schedulerSidecar: String? = null,
     val tokenizerSidecar: String? = null,
@@ -413,6 +414,7 @@ internal object ImageExecutionProfileValidator {
         graph.textEncoder?.relativePath?.let { add("graph.textEncoder" to it) }
         graph.unet?.relativePath?.let { add("graph.unet" to it) }
         graph.vae?.relativePath?.let { add("graph.vae" to it) }
+        graph.vaeEncoder?.relativePath?.let { add("graph.vaeEncoder" to it) }
         graph.controlNet?.relativePath?.let { add("graph.controlNet" to it) }
         graph.schedulerSidecar?.let { add("graph.schedulerSidecar" to it) }
         graph.tokenizerSidecar?.let { add("graph.tokenizerSidecar" to it) }
@@ -547,7 +549,19 @@ internal object ImageExecutionContractValidator {
             compare("useCfg", resolved.useCfg, native.useCfg)
             compare("unconditionalBranch", resolved.unconditionalBranch, native.unconditionalBranch)
             compare("tokenizerBackend", resolved.tokenizerBackend, native.tokenizerBackend)
-            compare("tokenCount", resolved.tokenCount, native.tokenCount)
+            if (resolved.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+                if (native.tokenCount <= 0) {
+                    add(
+                        ImageExecutionMismatch(
+                            "tokenCount",
+                            "positive native conditioning count",
+                            native.tokenCount.toString()
+                        )
+                    )
+                }
+            } else {
+                compare("tokenCount", resolved.tokenCount, native.tokenCount)
+            }
             compare(
                 "promptWeightingSupported",
                 resolved.promptWeightingSupported,

@@ -5,18 +5,17 @@ import java.nio.file.Files
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
 class StableDiffusionComponentSelectionTest {
     @Test
-    fun `installed manifest roles override stale record path`() = withTempBundle { root ->
+    fun `installed manifest roles cannot override record primary path`() = withTempBundle { root ->
         val stale = root.touch("stale.gguf")
-        val diffusion = root.touch("weights/diffusion.gguf")
-        val vae = root.touch("components/autoencoder.bin")
-        val textEncoder = root.touch("components/prompt-model.bin")
+        root.touch("weights/diffusion.gguf")
+        root.touch("components/autoencoder.bin")
+        root.touch("components/prompt-model.bin")
         writeRoleManifest(
             root,
             family = LocalImageModelFamily.FLUX,
@@ -27,18 +26,13 @@ class StableDiffusionComponentSelectionTest {
             )
         )
 
-        val selection = resolveStableDiffusionComponentSelection(
-            model(root, stale, LocalImageModelFamily.FLUX)
-        )
+        val error = assertInvalid {
+            resolveStableDiffusionComponentSelection(
+                model(root, stale, LocalImageModelFamily.FLUX)
+            )
+        }
 
-        assertEquals(STABLE_DIFFUSION_COMPONENT_MODE_MANIFEST, selection.mode)
-        assertFalse(selection.fallback)
-        assertEquals(diffusion.canonicalPath, selection.primaryPath)
-        assertEquals("diffusion", selection.primarySlot)
-        assertEquals(vae.canonicalPath, selection.vaePath)
-        assertEquals(textEncoder.canonicalPath, selection.textEncoderPath)
-        assertEquals("llm", selection.textEncoderSlot)
-        assertEquals(diffusion.canonicalPath, selection.toAuditJson().getString("primaryPath"))
+        assertTrue(error.message.orEmpty().contains("does not match"))
     }
 
     @Test
@@ -129,6 +123,32 @@ class StableDiffusionComponentSelectionTest {
 
         assertEquals(STABLE_DIFFUSION_COMPONENT_MODE_MANIFEST, actual.getString("mode"))
         assertEquals(vae.canonicalPath, actual.getString("vaePath"))
+    }
+
+    @Test
+    fun `controlnet manifest role reaches native params and exact echo validation`() = withTempBundle { root ->
+        val diffusion = root.touch("diffusion.safetensors")
+        val controlNet = root.touch("control/controlnet.safetensors")
+        writeRoleManifest(
+            root,
+            family = LocalImageModelFamily.SD15,
+            components = listOf(
+                component("DIFFUSION", "diffusion.safetensors"),
+                component("CONTROLNET", "control/controlnet.safetensors")
+            )
+        )
+
+        val selection = resolveStableDiffusionComponentSelection(
+            model(root, diffusion, LocalImageModelFamily.SD15)
+        )
+        val params = selection.putIntoNativeParams(JSONObject())
+
+        assertEquals(controlNet.canonicalPath, selection.controlNetPath)
+        assertEquals(controlNet.canonicalPath, params.getString("componentControlNetPath"))
+        val echoed = selection.verifyNativeEcho(
+            JSONObject().put("componentSelection", selection.toAuditJson())
+        )
+        assertEquals(controlNet.canonicalPath, echoed.getString("controlNetPath"))
     }
 
     private fun model(

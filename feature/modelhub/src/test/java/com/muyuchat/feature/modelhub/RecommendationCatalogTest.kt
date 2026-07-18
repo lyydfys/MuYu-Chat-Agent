@@ -68,11 +68,11 @@ class RecommendationCatalogTest {
         assertTrue(
             visibleIds.none {
                 it.startsWith("bitcpm") ||
-                    it == "glm47_flash_tq1" ||
-                    it == "mnn_sana_edit_v2" ||
-                    it == "flux2_klein_4b_q4"
+                    it == "glm47_flash_tq1"
             }
         )
+        assertTrue("mnn_sana_edit_v2" in visibleIds)
+        assertTrue("flux2_klein_4b_q4" in visibleIds)
         assertTrue("meinamix_sd15_qnn228" in visibleIds)
     }
 
@@ -88,12 +88,16 @@ class RecommendationCatalogTest {
     }
 
     @Test
-    fun pendingNpuImagePackageIsOpenForExperimentalDownloadOnSnapdragon() {
+    fun gen5VerificationStateChangesTheLabelButNeverTheDownloadAccess() {
         val gen5Sd15 = recommendations.first { it.id == "qualcomm_sd15_gen5_qnn" }
-        val access = recommendationDownloadAccess(gen5Sd15, "SM8850", deviceIsSnapdragon = true)
+        val verifiedAccess = recommendationDownloadAccess(gen5Sd15, "SM8850", deviceIsSnapdragon = true)
+        val controlNet = recommendations.first { it.id == "qualcomm_controlnet_canny_gen5_qnn" }
+        val pendingAccess = recommendationDownloadAccess(controlNet, "SM8850", deviceIsSnapdragon = true)
 
-        assertTrue(access.canDownload)
-        assertTrue(access.experimental)
+        assertTrue(verifiedAccess.canDownload)
+        assertTrue(!verifiedAccess.experimental)
+        assertTrue(pendingAccess.canDownload)
+        assertTrue(pendingAccess.experimental)
     }
 
     @Test
@@ -120,7 +124,7 @@ class RecommendationCatalogTest {
             recommendationDownloadCtaLabel(realisticVision, access.canDownload, access.experimental)
         )
         assertEquals(
-            "验证状态：20-step 产品 worker 三次冷启动和三次复用已通过",
+            "验证状态：默认 8-step、CFG 2.0；产品 worker 三次冷启动和三次复用已通过",
             recommendationVerificationLine(realisticVision, qairtVerified = false)
         )
     }
@@ -270,11 +274,13 @@ class RecommendationCatalogTest {
             catalog.qualityChat.map { it.id }
         )
 
-        assertEquals(5, catalog.cpuImage.size)
+        assertEquals(7, catalog.cpuImage.size)
         assertEquals(
             listOf(
                 "sd_turbo_512_experimental",
+                "flux2_klein_4b_q4",
                 "sd15_mnn_512_quality",
+                "mnn_sana_edit_v2",
                 "z_image_turbo_q4",
                 "longcat_image_q4",
                 "qwen_image_2512_q2"

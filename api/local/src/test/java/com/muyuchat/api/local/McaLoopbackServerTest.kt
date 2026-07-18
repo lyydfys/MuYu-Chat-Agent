@@ -19,10 +19,61 @@ import java.util.concurrent.atomic.AtomicReference
 
 class McaLoopbackServerTest {
     @Test
+    fun nonLoopbackListenerRequiresAuthenticationKey() {
+        val server = McaLoopbackServer(port = freePort(), bindHost = "0.0.0.0", apiKey = "")
+        try {
+            server.start()
+            throw AssertionError("Expected an unauthenticated non-loopback listener to be rejected")
+        } catch (error: IllegalArgumentException) {
+            assertTrue(error.message.orEmpty().contains("requires a non-empty API key"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun oversizedRequestBodyIsRejectedBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val request = "POST /v1/images/generations HTTP/1.1\r\n" +
+                "Host: 127.0.0.1\r\n" +
+                "Authorization: Bearer secret\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: ${64L * 1024L * 1024L + 1L}\r\n\r\n"
+
+            val response = rawHttp(port, request)
+
+            assertTrue(response.startsWith("HTTP/1.1 413 Payload Too Large"))
+            assertTrue(response.contains("request_body_too_large"))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun unauthenticatedLargeBodyIsRejectedBeforeContentLengthAllocation() {
+        withServer(apiKey = "secret") { port ->
+            val request = "POST /v1/images/generations HTTP/1.1\r\n" +
+                "Host: 127.0.0.1\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: ${64L * 1024L * 1024L + 1L}\r\n\r\n"
+
+            val response = rawHttp(port, request)
+
+            assertTrue(response.startsWith("HTTP/1.1 401 Unauthorized"))
+            assertTrue(response.contains("unauthorized"))
+        }
+    }
+
+
+    @Test
     fun authenticatedImagesApiUsesProductionProviderAndKeepsRequestIdentity() {
         val capturedRequestId = AtomicReference<String>()
         val capturedBody = AtomicReference<String>()
-        val body = """{"prompt":"a ceramic cup","size":"1024x1024","steps":1}"""
+        val body = """{"prompt":"a ceramic cup","size":"512x512","steps":20}"""
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
                 capturedRequestId.set(requestId)
@@ -106,6 +157,89 @@ class McaLoopbackServerTest {
     }
 
     @Test
+    fun imagesApiPreservesExplicitEmptyNegativePromptForTheProductionProvider() {
+        val captured = AtomicReference<JSONObject>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                captured.set(JSONObject(requestBody))
+                JSONObject()
+                    .put("request_id", requestId)
+                    .put("execution", strictImageExecution(runtime = "STABLE_DIFFUSION_CPP"))
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"disable defaults","negative_prompt":""}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(captured.get().has("negative_prompt"))
+            assertEquals("", captured.get().getString("negative_prompt"))
+        }
+    }
+
+    @Test
+    fun imagesApiPreservesStructuredWorkerFailureStatusAndCode() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                throw ImageGenerationProviderException.fromWorkerFailure(
+                    code = "unsupported_preview",
+                    message = "Preview publication is not available."
+                )
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/images/generations",
+                    body = """{"prompt":"preview","preview":{"interval":2,"mode":"vae"}}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 422 Unprocessable Entity"))
+            assertTrue(response.contains("unsupported_preview"))
+            assertFalse(response.contains("image_generation_failed"))
+        }
+    }
+
+    @Test
+    fun authenticatedImagesApiAcceptsStrictQnnControlEvidenceWithoutPrivatePaths() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, _ ->
+                JSONObject()
+                    .put("request_id", requestId)
+                    .put("execution", strictControlImageExecution())
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"edges","task_mode":"control","control_image":"data:image/png;base64,AAAA","control_strength":0.8}"""
+                )
+            )
+            val execution = responseJson(response).getJSONObject("execution")
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(execution.getBoolean("npuActive"))
+            assertEquals(1, execution.getJSONObject("imageInput").getInt("controlImageExecutionCount"))
+            assertEquals(
+                "b".repeat(64),
+                execution.getJSONObject("nativeEffective").getString("controlImageSha256")
+            )
+            assertFalse(response.contains("controlImagePath"))
+            assertFalse(response.contains("/data/user/0/"))
+        }
+    }
+
+    @Test
     fun imagesApiRejectsUnsupportedCountBeforeInvokingProvider() {
         val calls = AtomicInteger(0)
         withServer(apiKey = "secret") { port ->
@@ -181,6 +315,31 @@ class McaLoopbackServerTest {
 
             assertTrue(response.startsWith("HTTP/1.1 502 Bad Gateway"))
             assertTrue(response.contains("image_request_identity_mismatch"))
+        }
+    }
+
+    @Test
+    fun imagesApiRejectsProviderThatSilentlySwitchesTheRequestedModel() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, _ ->
+                JSONObject()
+                    .put("request_id", requestId)
+                    .put("model", "different-model")
+                    .put("execution", strictImageExecution("STABLE_DIFFUSION_CPP"))
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"model":"requested-model","prompt":"identity check"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 502 Bad Gateway"))
+            assertTrue(response.contains("image_model_identity_mismatch"))
         }
     }
 
@@ -1749,6 +1908,11 @@ class McaLoopbackServerTest {
             .put("unconditionalBranch", true)
             .put("tokenizerBackend", "TOKENIZERS_CPP")
             .put("tokenCount", 154)
+            .put("promptWeightingSupported", false)
+            .put("promptWeightingApplied", false)
+            .put("positiveWeightedTokenCount", 0)
+            .put("negativeWeightedTokenCount", 0)
+            .put("promptWeightFingerprint", "9b353b1ac542678089ce3d12ee96ddd6ba3b0252ec0675cdf0540e6aa6b1860e")
             .put("embeddingDiskDataType", "GRAPH_INTERNAL")
             .put("vaeScalingLocation", "GRAPH_INTERNAL")
             .put("vaeScalingFactor", 0.18215)
@@ -1767,6 +1931,31 @@ class McaLoopbackServerTest {
             .put("npuActive", runtime == "QNN_HTP")
             .put("qnnGraphExecution", runtime == "QNN_HTP")
             .put("outputBytes", 1024L)
+    }
+
+    private fun strictControlImageExecution(): JSONObject {
+        val sha = "b".repeat(64)
+        val execution = strictImageExecution("QNN_HTP")
+        execution.getJSONObject("nativeEffective")
+            .put("taskMode", "control")
+            .put("batchCount", 1)
+            .put("inputImageExecutionCount", 0)
+            .put("maskImageExecutionCount", 0)
+            .put("controlImageExecutionCount", 1)
+            .put("controlImageSha256", sha)
+            .put("controlStrength", 0.8)
+        return execution.put(
+            "imageInput",
+            JSONObject()
+                .put("nativeExecution", true)
+                .put("taskMode", "control")
+                .put("batchCount", 1)
+                .put("inputImageExecutionCount", 0)
+                .put("maskImageExecutionCount", 0)
+                .put("controlImageExecutionCount", 1)
+                .put("controlImage", JSONObject().put("sha256", sha))
+                .put("controlStrength", 0.8)
+        )
     }
 
     private fun imageData(): org.json.JSONArray =

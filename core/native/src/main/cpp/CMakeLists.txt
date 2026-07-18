@@ -42,6 +42,8 @@ target_sources(mca_mnn_native PRIVATE
         diffusion_scheduler.cpp)
 target_sources(mca_qnn_native PRIVATE
         image_conditioning.cpp
+        image_execution_math.cpp
+        qnn_controlnet_execution.cpp
         diffusion_scheduler.cpp)
 target_compile_definitions(mca_qnn_native PRIVATE MCA_WITH_TOKENIZERS_CPP=0)
 

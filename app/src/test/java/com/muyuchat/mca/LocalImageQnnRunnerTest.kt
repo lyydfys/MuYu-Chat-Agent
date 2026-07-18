@@ -76,6 +76,18 @@ class LocalImageQnnRunnerTest {
     }
 
     @Test
+    fun completeButUnprobedRuntimeStillReachesRealSmoke() {
+        val bundle = qnnImageBundle()
+        val report = QnnHtpImageRunner(runnerReady = true).health(
+            device = snapdragonDevice("SM8750", unprobedCompleteRuntime()),
+            bundleRoot = bundle
+        )
+
+        assertEquals(LocalImageQnnState.SMOKE_REQUIRED, report.state)
+        assertFalse(report.npuActive)
+    }
+
+    @Test
     fun qnn228BundleRequiresExactV73RuntimeInsteadOfReadyGenericRuntime() {
         val bundle = qnnImageBundle(requiredRuntimeArch = 73)
         val report = QnnHtpImageRunner(runnerReady = true).health(
@@ -177,6 +189,25 @@ class LocalImageQnnRunnerTest {
             assertEquals(missingName, LocalImageQnnState.BUNDLE_INCOMPLETE, emptyReport.state)
             assertFalse(missingName, emptyReport.npuActive)
             assertTrue(missingName, emptyReport.message.contains(missingName))
+        }
+    }
+
+    @Test
+    fun controlSemanticBundleRequiresConcreteControlNetGraph() {
+        val root = Files.createTempDirectory("mca-qnn-control-contract").toFile()
+        try {
+            listOf("text_encoder.bin", "unet.bin", "vae_decoder.bin").forEach { name ->
+                File(root, name).writeBytes(byteArrayOf(1))
+            }
+
+            assertEquals(
+                listOf("controlnet.bin"),
+                qnnSemanticGraphBundleMissingComponents(root, requiresControlNet = true)
+            )
+            File(root, "controlnet.bin").writeBytes(byteArrayOf(1))
+            assertTrue(hasCompleteQnnSemanticGraphBundle(root, requiresControlNet = true))
+        } finally {
+            root.deleteRecursively()
         }
     }
 
@@ -764,6 +795,17 @@ class LocalImageQnnRunnerTest {
             searchDirectories = listOf("/data/local/tmp/qnn"),
             probeState = QnnRuntimeProbeState.LOAD_FAILED,
             probeMessage = message
+        )
+
+    private fun unprobedCompleteRuntime(): QnnRuntimeStatus =
+        QnnRuntimeStatus(
+            qnnSystemLibraryPresent = true,
+            qnnHtpLibraryPresent = true,
+            htpSkelLibraryPresent = true,
+            htpStubLibraryPresent = true,
+            searchDirectories = listOf("/data/local/tmp/qnn"),
+            probeState = QnnRuntimeProbeState.NOT_REQUESTED,
+            probeMessage = ""
         )
 
     private fun blockedTransportRuntime(message: String): QnnRuntimeStatus =

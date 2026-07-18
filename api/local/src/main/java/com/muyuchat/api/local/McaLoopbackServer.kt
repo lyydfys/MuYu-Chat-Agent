@@ -33,7 +33,7 @@ import java.util.UUID
 
 class McaLoopbackServer(
     private val port: Int = 11435,
-    private val bindHost: String = "0.0.0.0",
+    private val bindHost: String = "127.0.0.1",
     private val apiKey: String = ""
 ) {
     private var dispatcher: ExecutorCoroutineDispatcher = newDispatcher()
@@ -51,9 +51,13 @@ class McaLoopbackServer(
             dispatcher = newDispatcher()
             scope = CoroutineScope(SupervisorJob() + dispatcher)
         }
+        val bindAddress = InetAddress.getByName(bindHost)
+        require(bindAddress.isLoopbackAddress || apiKey.isNotBlank()) {
+            "A non-loopback Local API listener requires a non-empty API key."
+        }
         val socket = ServerSocket()
         socket.reuseAddress = true
-        socket.bind(InetSocketAddress(InetAddress.getByName(bindHost), port), SERVER_BACKLOG)
+        socket.bind(InetSocketAddress(bindAddress, port), SERVER_BACKLOG)
         serverSocket = socket
         logInfo("Local API listening on $bindHost:$port")
         acceptJob = scope.launch {
@@ -66,13 +70,18 @@ class McaLoopbackServer(
                     launch {
                         runCatching { handle(client) }
                             .onFailure { error ->
-                                logWarning("Request failed: ${error.message}", error)
+                                val rejection = error as? HttpRequestRejected
+                                if (rejection == null) {
+                                    logWarning("Request failed: ${error.message}", error)
+                                } else {
+                                    logDebug("Request rejected: ${rejection.code}")
+                                }
                                 runCatching {
                                     if (!client.isClosed) {
                                         writeError(
                                             client,
-                                            "500 Internal Server Error",
-                                            "request_failed",
+                                            rejection?.status ?: "500 Internal Server Error",
+                                            rejection?.code ?: "request_failed",
                                             error.message ?: "Local API request failed."
                                         )
                                     }
@@ -109,7 +118,12 @@ class McaLoopbackServer(
 
     private suspend fun handle(socket: Socket) {
         socket.use { client ->
-            val request = readHttpRequest(client)
+            val request = try {
+                readHttpRequest(client)
+            } catch (rejection: HttpRequestRejected) {
+                writeError(client, rejection.status, rejection.code, rejection.message.orEmpty())
+                return
+            }
             val headers = request.headers
             val body = request.body
             val parts = request.requestLine.split(" ")
@@ -213,6 +227,16 @@ class McaLoopbackServer(
         val requestId = "img-${UUID.randomUUID()}"
         val providerResponse = try {
             LocalApiRuntime.generateImage(requestId, request.rawBody)
+        } catch (error: ImageGenerationProviderException) {
+            writeError(
+                socket,
+                error.httpStatus.toHttpStatus(),
+                error.code,
+                error.message,
+                detailsJson = error.detailsJson,
+                retryAfterMs = error.retryAfterMs
+            )
+            return
         } catch (error: Throwable) {
             writeError(
                 socket,
@@ -233,7 +257,7 @@ class McaLoopbackServer(
         }
 
         val response = try {
-            ImageGenerationApiContract.parseResponse(requestId, providerResponse)
+            ImageGenerationApiContract.parseResponse(requestId, request, providerResponse)
         } catch (error: ImageGenerationContractException) {
             writeError(
                 socket,
@@ -820,7 +844,8 @@ class McaLoopbackServer(
     }
 
     private fun isPublicRoute(method: String, path: String): Boolean =
-        method == "HEAD" && path == "/health" ||
+        method == "OPTIONS" ||
+            method == "HEAD" && path == "/health" ||
             method == "GET" && (
                 path == "/health" ||
                     path == "/" ||
@@ -1371,7 +1396,13 @@ class McaLoopbackServer(
             if (read < 0) break
             buffer.write(read)
             headerEnd = findHeaderEnd(buffer.toByteArray())
-            if (buffer.size() > MAX_HEADER_BYTES) error("HTTP header too large.")
+            if (buffer.size() > MAX_HEADER_BYTES) {
+                throw HttpRequestRejected(
+                    "431 Request Header Fields Too Large",
+                    "http_header_too_large",
+                    "HTTP header exceeds $MAX_HEADER_BYTES bytes."
+                )
+            }
         }
 
         val raw = buffer.toByteArray()
@@ -1390,7 +1421,49 @@ class McaLoopbackServer(
             val parts = line.split(":", limit = 2)
             if (parts.size == 2) headers[parts[0].trim().lowercase()] = parts[1].trim()
         }
-        val contentLength = headers["content-length"]?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+        val requestParts = requestLine.split(" ")
+        val requestMethod = requestParts.getOrNull(0).orEmpty().uppercase()
+        val requestPath = requestParts.getOrNull(1).orEmpty().substringBefore("?")
+        if (requestMethod.isNotEmpty() && requestPath.isNotEmpty() &&
+            !isPublicRoute(requestMethod, requestPath) && !isAuthorized(headers)
+        ) {
+            throw HttpRequestRejected(
+                "401 Unauthorized",
+                "unauthorized",
+                "API Key 不正确或缺失。"
+            )
+        }
+        val transferEncoding = headers["transfer-encoding"].orEmpty().trim()
+        if (transferEncoding.isNotEmpty() && !transferEncoding.equals("identity", ignoreCase = true)) {
+            throw HttpRequestRejected(
+                "400 Bad Request",
+                "unsupported_transfer_encoding",
+                "Chunked request bodies are not supported."
+            )
+        }
+        val contentLength = headers["content-length"]?.let { rawLength ->
+            val parsed = rawLength.toLongOrNull()
+                ?: throw HttpRequestRejected(
+                    "400 Bad Request",
+                    "invalid_content_length",
+                    "Content-Length must be a non-negative integer."
+                )
+            if (parsed < 0L) {
+                throw HttpRequestRejected(
+                    "400 Bad Request",
+                    "invalid_content_length",
+                    "Content-Length must be a non-negative integer."
+                )
+            }
+            if (parsed > MAX_REQUEST_BODY_BYTES.toLong()) {
+                throw HttpRequestRejected(
+                    "413 Payload Too Large",
+                    "request_body_too_large",
+                    "Request body exceeds $MAX_REQUEST_BODY_BYTES bytes."
+                )
+            }
+            parsed.toInt()
+        } ?: 0
         val alreadyRead = raw.copyOfRange(bodyStart, raw.size)
         val bodyBytes = ByteArray(contentLength)
         val copied = alreadyRead.size.coerceAtMost(contentLength)
@@ -1400,6 +1473,13 @@ class McaLoopbackServer(
             val read = input.read(bodyBytes, offset, contentLength - offset)
             if (read <= 0) break
             offset += read
+        }
+        if (offset != contentLength) {
+            throw HttpRequestRejected(
+                "400 Bad Request",
+                "incomplete_request_body",
+                "Request body ended before Content-Length bytes were received."
+            )
         }
         return HttpRequest(
             requestLine = requestLine,
@@ -1456,6 +1536,12 @@ class McaLoopbackServer(
         val body: String
     )
 
+    private class HttpRequestRejected(
+        val status: String,
+        val code: String,
+        message: String
+    ) : IllegalArgumentException(message)
+
     private data class IdempotencyRecord(
         val fingerprint: String,
         val result: LocalApiControlResult
@@ -1477,6 +1563,7 @@ class McaLoopbackServer(
         private val CRLFCRLF = byteArrayOf('\r'.code.toByte(), '\n'.code.toByte(), '\r'.code.toByte(), '\n'.code.toByte())
         private val LFLF = byteArrayOf('\n'.code.toByte(), '\n'.code.toByte())
         private const val MAX_HEADER_BYTES = 64 * 1024
+        private const val MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
         private const val CLIENT_READ_TIMEOUT_MS = 15_000
         private const val SERVER_BACKLOG = 128
         private const val TAG = "McaLoopbackServer"

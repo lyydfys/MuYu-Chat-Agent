@@ -1,9 +1,41 @@
-﻿diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
-index e15f1aa..fc102ac 100644
+diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
+index e15f1aa7d1eba4db9ab7b35b7b9323c822e5e638..b2059cb7667b308da7acc103f14a0c3ea4fa01b6 100644
 --- a/include/stable-diffusion.h
 +++ b/include/stable-diffusion.h
-@@ -401,10 +401,12 @@ typedef struct sd_ctx_t sd_ctx_t;
+@@ -399,17 +399,57 @@ typedef struct {
  
+ typedef struct sd_ctx_t sd_ctx_t;
+ 
++enum {
++    SD_IMAGE_EXECUTION_EVIDENCE_VERSION = 2,
++};
++
++typedef struct {
++    uint32_t version;
++    uint32_t positive_conditioning_observed;
++    uint32_t negative_conditioning_observed;
++    uint32_t positive_prompt_weighting_capable;
++    uint32_t negative_prompt_weighting_capable;
++    uint32_t prompt_weighting_applied;
++    uint32_t generation_completed;
++    uint32_t flow_shift_applied;
++    uint32_t dynamic_flow_shift;
++    uint32_t distilled_guidance_applied;
++    float effective_flow_shift;
++    float effective_distilled_guidance;
++    uint64_t positive_conditioning_token_count;
++    uint64_t negative_conditioning_token_count;
++    uint64_t positive_non_unity_weight_count;
++    uint64_t negative_non_unity_weight_count;
++    uint64_t completed_sampling_step_count;
++    uint64_t sampling_pass_count;
++    uint64_t diffusion_model_compute_count;
++    uint64_t positive_diffusion_model_compute_count;
++    uint64_t negative_diffusion_model_compute_count;
++    uint64_t auxiliary_diffusion_model_compute_count;
++    uint64_t conditioning_artifact_byte_count;
++} sd_image_execution_evidence_t;
++
  typedef void (*sd_log_cb_t)(enum sd_log_level_t level, const char* text, void* data);
  typedef void (*sd_progress_cb_t)(int step, int steps, float time, void* data);
 +typedef bool (*sd_cancel_cb_t)(void* data);
@@ -15,11 +47,556 @@ index e15f1aa..fc102ac 100644
  SD_API void sd_set_preview_callback(sd_preview_cb_t cb, enum preview_t mode, int interval, bool denoised, bool noisy, void* data);
  SD_API int32_t sd_get_num_physical_cores();
  SD_API const char* sd_get_system_info();
+ SD_API bool sd_ctx_supports_image_generation(const sd_ctx_t* sd_ctx);
+ SD_API bool sd_ctx_supports_video_generation(const sd_ctx_t* sd_ctx);
++SD_API bool sd_ctx_uses_flow_shift(const sd_ctx_t* sd_ctx);
++SD_API bool sd_ctx_uses_dynamic_flow_shift(const sd_ctx_t* sd_ctx);
++SD_API bool sd_ctx_uses_distilled_guidance(const sd_ctx_t* sd_ctx);
++SD_API bool sd_get_last_image_execution_evidence(const sd_ctx_t* sd_ctx,
++                                                  sd_image_execution_evidence_t* evidence);
++SD_API bool sd_copy_last_image_conditioning_artifact(const sd_ctx_t* sd_ctx,
++                                                      uint8_t* destination,
++                                                      size_t destination_size);
+ 
+ SD_API const char* sd_type_name(enum sd_type_t type);
+ SD_API enum sd_type_t str_to_sd_type(const char* str);
+diff --git a/src/conditioner.hpp b/src/conditioner.hpp
+index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155f212dc9c 100644
+--- a/src/conditioner.hpp
++++ b/src/conditioner.hpp
+@@ -1,7 +1,9 @@
+ #ifndef __CONDITIONER_HPP__
+ #define __CONDITIONER_HPP__
+ 
++#include <algorithm>
+ #include <cmath>
++#include <cstdint>
+ #include <limits>
+ #include <optional>
+ 
+@@ -62,6 +64,81 @@ struct SDCondition {
+     }
+ };
+ 
++struct ConditioningExecutionSequenceEvidence {
++    std::vector<int32_t> token_ids;
++    std::vector<float> token_weights;
++    bool weights_applied = false;
++    bool counts_toward_token_totals = true;
++};
++
++struct ConditioningExecutionEvidence {
++    std::vector<ConditioningExecutionSequenceEvidence> sequences;
++
++    bool observed() const {
++        return !sequences.empty();
++    }
++
++    bool prompt_weighting_capable() const {
++        return observed() &&
++               std::all_of(sequences.begin(),
++                           sequences.end(),
++                           [](const ConditioningExecutionSequenceEvidence& sequence) {
++                               return sequence.weights_applied;
++                           });
++    }
++};
++
++static inline void record_conditioning_execution_sequence(
++    ConditioningExecutionEvidence* evidence,
++    const std::vector<int>& tokens,
++    const std::vector<float>& weights,
++    bool weights_applied,
++    bool counts_toward_token_totals = true) {
++    if (evidence == nullptr || tokens.empty() || tokens.size() != weights.size()) {
++        return;
++    }
++    ConditioningExecutionSequenceEvidence sequence;
++    sequence.token_ids.assign(tokens.begin(), tokens.end());
++    sequence.token_weights = weights;
++    sequence.weights_applied = weights_applied;
++    sequence.counts_toward_token_totals = counts_toward_token_totals;
++    evidence->sequences.push_back(std::move(sequence));
++}
++
++static inline void record_conditioning_execution_sequences(
++    ConditioningExecutionEvidence* evidence,
++    const std::vector<std::pair<std::vector<int>, std::vector<float>>>& sequences,
++    bool weights_applied) {
++    size_t counted_sequence = sequences.size();
++    bool counted_sequence_has_non_unity_weights = false;
++    for (size_t index = 0; index < sequences.size(); ++index) {
++        const auto& tokens = sequences[index].first;
++        const auto& weights = sequences[index].second;
++        if (tokens.empty() || tokens.size() != weights.size()) {
++            continue;
++        }
++        const bool has_non_unity_weights = std::any_of(
++            weights.begin(),
++            weights.end(),
++            [](float weight) { return weight != 1.0f; });
++        if (counted_sequence == sequences.size() ||
++            (has_non_unity_weights && !counted_sequence_has_non_unity_weights) ||
++            (has_non_unity_weights == counted_sequence_has_non_unity_weights &&
++             tokens.size() > sequences[counted_sequence].first.size())) {
++            counted_sequence = index;
++            counted_sequence_has_non_unity_weights = has_non_unity_weights;
++        }
++    }
++    for (size_t index = 0; index < sequences.size(); ++index) {
++        const auto& sequence = sequences[index];
++        record_conditioning_execution_sequence(evidence,
++                                               sequence.first,
++                                               sequence.second,
++                                               weights_applied,
++                                               index == counted_sequence);
++    }
++}
++
+ static inline sd::Tensor<float> apply_token_weights(sd::Tensor<float> hidden_states,
+                                                     const std::vector<float>& weights) {
+     if (hidden_states.empty()) {
+@@ -105,6 +182,7 @@ struct ConditionerParams {
+     bool zero_out_masked                             = false;
+     int num_input_imgs                               = 0;        // for photomaker
+     const std::vector<sd::Tensor<float>>* ref_images = nullptr;  // for qwen image edit
++    ConditioningExecutionEvidence* execution_evidence = nullptr;
+ };
+ 
+ struct Conditioner {
+@@ -506,7 +584,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+                                              int clip_skip,
+                                              int width,
+                                              int height,
+-                                             bool zero_out_masked = false) {
++                                             bool zero_out_masked = false,
++                                             ConditioningExecutionEvidence* execution_evidence = nullptr) {
+         int64_t t0 = ggml_time_ms();
+         sd::Tensor<float> hidden_states;  // [n_token, hidden_size] or [n_token, hidden_size + hidden_size2]
+         sd::Tensor<float> pooled;
+@@ -620,6 +699,24 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+         if (!vec.empty()) {
+             result.c_vector = std::move(vec);
+         }
++        record_conditioning_execution_sequence(execution_evidence, tokens, weights, true, true);
++        if (sd_version_is_sdxl(version)) {
++            std::vector<int> secondary_tokens = tokens;
++            for (size_t offset = 0; offset < secondary_tokens.size(); offset += chunk_len) {
++                auto chunk_begin = secondary_tokens.begin() + offset;
++                auto chunk_end = secondary_tokens.begin() +
++                                 std::min(secondary_tokens.size(), offset + chunk_len);
++                auto eos = std::find(chunk_begin, chunk_end, tokenizer.EOS_TOKEN_ID);
++                if (eos != chunk_end) {
++                    std::fill(std::next(eos), chunk_end, 0);
++                }
++            }
++            record_conditioning_execution_sequence(execution_evidence,
++                                                   secondary_tokens,
++                                                   weights,
++                                                   true,
++                                                   false);
++        }
+         return result;
+     }
+ 
+@@ -651,7 +748,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+                                                  conditioner_params.clip_skip,
+                                                  conditioner_params.width,
+                                                  conditioner_params.height,
+-                                                 conditioner_params.zero_out_masked);
++                                                 conditioner_params.zero_out_masked,
++                                                 conditioner_params.execution_evidence);
+         return std::make_tuple(cond, clsm);
+     }
+ 
+@@ -677,7 +775,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+                                             conditioner_params.clip_skip,
+                                             conditioner_params.width,
+                                             conditioner_params.height,
+-                                            conditioner_params.zero_out_masked);
++                                            conditioner_params.zero_out_masked,
++                                            conditioner_params.execution_evidence);
+     }
+ };
+ 
+@@ -944,7 +1043,8 @@ struct SD3CLIPEmbedder : public Conditioner {
+     SDCondition get_learned_condition_common(int n_threads,
+                                              std::vector<std::pair<std::vector<int>, std::vector<float>>> token_and_weights,
+                                              int clip_skip,
+-                                             bool zero_out_masked = false) {
++                                             bool zero_out_masked = false,
++                                             ConditioningExecutionEvidence* execution_evidence = nullptr) {
+         auto& clip_l_tokens  = token_and_weights[0].first;
+         auto& clip_l_weights = token_and_weights[0].second;
+         auto& clip_g_tokens  = token_and_weights[1].first;
+@@ -1098,6 +1198,7 @@ struct SD3CLIPEmbedder : public Conditioner {
+         SDCondition result;
+         result.c_crossattn = std::move(hidden_states);
+         result.c_vector    = std::move(pooled);
++        record_conditioning_execution_sequences(execution_evidence, token_and_weights, true);
+         return result;
+     }
+ 
+@@ -1107,7 +1208,8 @@ struct SD3CLIPEmbedder : public Conditioner {
+         return get_learned_condition_common(n_threads,
+                                             tokens_and_weights,
+                                             conditioner_params.clip_skip,
+-                                            conditioner_params.zero_out_masked);
++                                            conditioner_params.zero_out_masked,
++                                            conditioner_params.execution_evidence);
+     }
+ };
+ 
+@@ -1279,7 +1381,8 @@ struct FluxCLIPEmbedder : public Conditioner {
+     SDCondition get_learned_condition_common(int n_threads,
+                                              std::vector<std::pair<std::vector<int>, std::vector<float>>> token_and_weights,
+                                              int clip_skip,
+-                                             bool zero_out_masked = false) {
++                                             bool zero_out_masked = false,
++                                             ConditioningExecutionEvidence* execution_evidence = nullptr) {
+         auto& clip_l_tokens  = token_and_weights[0].first;
+         auto& clip_l_weights = token_and_weights[0].second;
+         auto& t5_tokens      = token_and_weights[1].first;
+@@ -1356,6 +1459,7 @@ struct FluxCLIPEmbedder : public Conditioner {
+         SDCondition result;
+         result.c_crossattn = std::move(hidden_states);
+         result.c_vector    = std::move(pooled);
++        record_conditioning_execution_sequences(execution_evidence, token_and_weights, true);
+         return result;
+     }
+ 
+@@ -1365,7 +1469,8 @@ struct FluxCLIPEmbedder : public Conditioner {
+         return get_learned_condition_common(n_threads,
+                                             tokens_and_weights,
+                                             conditioner_params.clip_skip,
+-                                            conditioner_params.zero_out_masked);
++                                            conditioner_params.zero_out_masked,
++                                            conditioner_params.execution_evidence);
+     }
+ };
+ 
+@@ -1505,7 +1610,8 @@ struct T5CLIPEmbedder : public Conditioner {
+     SDCondition get_learned_condition_common(int n_threads,
+                                              std::tuple<std::vector<int>, std::vector<float>, std::vector<float>> token_and_weights,
+                                              int clip_skip,
+-                                             bool zero_out_masked = false) {
++                                             bool zero_out_masked = false,
++                                             ConditioningExecutionEvidence* execution_evidence = nullptr) {
+         if (!t5) {
+             SDCondition result;
+             result.c_crossattn = sd::Tensor<float>::zeros({4096, 256});
+@@ -1564,6 +1670,10 @@ struct T5CLIPEmbedder : public Conditioner {
+         SDCondition result;
+         result.c_crossattn = std::move(hidden_states);
+         result.c_vector    = std::move(t5_attn_mask);
++        record_conditioning_execution_sequence(execution_evidence,
++                                               t5_tokens,
++                                               t5_weights,
++                                               true);
+         return result;
+     }
+ 
+@@ -1573,7 +1683,8 @@ struct T5CLIPEmbedder : public Conditioner {
+         return get_learned_condition_common(n_threads,
+                                             tokens_and_weights,
+                                             conditioner_params.clip_skip,
+-                                            conditioner_params.zero_out_masked);
++                                            conditioner_params.zero_out_masked,
++                                            conditioner_params.execution_evidence);
+     }
+ };
+ 
+@@ -1695,6 +1806,10 @@ struct AnimaConditioner : public Conditioner {
+         result.c_crossattn  = std::move(hidden_states);
+         result.c_t5_ids     = std::move(t5_ids_tensor);
+         result.c_t5_weights = std::move(t5_weight_tensor);
++        record_conditioning_execution_sequences(
++            conditioner_params.execution_evidence,
++            {{qwen_tokens, qwen_weights}, {t5_tokens, t5_weights}},
++            true);
+         return result;
+     }
+ };
+@@ -1841,7 +1956,8 @@ struct LLMEmbedder : public Conditioner {
+                                     const std::set<int>& out_layers,
+                                     int prompt_template_encode_start_idx,
+                                     bool spell_quotes = false,
+-                                    int max_length    = 100000000) {
++                                    int max_length    = 100000000,
++                                    ConditioningExecutionEvidence* execution_evidence = nullptr) {
+         auto tokens_weights_mask = tokenize(prompt, prompt_attn_range, min_length, max_length, spell_quotes);
+         auto& tokens             = std::get<0>(tokens_weights_mask);
+         auto& weights            = std::get<1>(tokens_weights_mask);
+@@ -1873,6 +1989,7 @@ struct LLMEmbedder : public Conditioner {
+                                           out_layers);
+         GGML_ASSERT(!hidden_states.empty());
+         hidden_states = apply_token_weights(std::move(hidden_states), weights);
++        record_conditioning_execution_sequence(execution_evidence, tokens, weights, true);
+         GGML_ASSERT(hidden_states.shape()[1] > prompt_template_encode_start_idx);
+ 
+         int64_t zero_pad_len = 0;
+@@ -2162,7 +2279,8 @@ struct LLMEmbedder : public Conditioner {
+                                                out_layers,
+                                                0,
+                                                false,
+-                                               max_length);
++                                               max_length,
++                                               conditioner_params.execution_evidence);
+             GGML_ASSERT(!hidden_states.empty());
+ 
+             if (hidden_states.shape()[1] > pixeldit_max_length) {
+@@ -2193,7 +2311,8 @@ struct LLMEmbedder : public Conditioner {
+                                            out_layers,
+                                            prompt_template_encode_start_idx,
+                                            spell_quotes,
+-                                           max_length);
++                                           max_length,
++                                           conditioner_params.execution_evidence);
+         std::vector<sd::Tensor<float>> extra_hidden_states_vec;
+         for (int i = 0; i < extra_prompts.size(); i++) {
+             auto extra_hidden_states = encode_prompt(n_threads,
+@@ -2205,7 +2324,8 @@ struct LLMEmbedder : public Conditioner {
+                                                      out_layers,
+                                                      prompt_template_encode_start_idx,
+                                                      spell_quotes,
+-                                                     max_length);
++                                                     max_length,
++                                                     conditioner_params.execution_evidence);
+             extra_hidden_states_vec.push_back(std::move(extra_hidden_states));
+         }
+ 
 diff --git a/src/stable-diffusion.cpp b/src/stable-diffusion.cpp
-index 28598eb..b1b98e6 100644
+index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28ebf885a024 100644
 --- a/src/stable-diffusion.cpp
 +++ b/src/stable-diffusion.cpp
-@@ -1990,6 +1990,10 @@ public:
+@@ -1,5 +1,7 @@
+ #include <algorithm>
+ #include <cmath>
++#include <cstdint>
++#include <cstring>
+ #include <cstdlib>
+ 
+ #include "ggml_extend.hpp"
+@@ -136,10 +138,174 @@ static float get_cache_reuse_threshold(const sd_cache_params_t& params) {
+     return std::max(0.0f, reuse_threshold);
+ }
+ 
++enum class DiffusionExecutionBranch : uint32_t {
++    POSITIVE = 1,
++    NEGATIVE = 2,
++    AUXILIARY = 3,
++};
++
++struct ImageExecutionEvidenceState {
++    static constexpr uint32_t VERSION = SD_IMAGE_EXECUTION_EVIDENCE_VERSION;
++
++    sd_image_execution_evidence_t summary = {};
++    std::vector<uint8_t> conditioning_artifact;
++    bool collecting = false;
++
++    void append_u32(uint32_t value) {
++        for (uint32_t shift = 0; shift < 32; shift += 8) {
++            conditioning_artifact.push_back(static_cast<uint8_t>((value >> shift) & 0xffu));
++        }
++    }
++
++    void append_u64(uint64_t value) {
++        for (uint32_t shift = 0; shift < 64; shift += 8) {
++            conditioning_artifact.push_back(static_cast<uint8_t>((value >> shift) & 0xffu));
++        }
++    }
++
++    void reset() {
++        summary = {};
++        summary.version = VERSION;
++        conditioning_artifact.clear();
++        conditioning_artifact.insert(conditioning_artifact.end(), {'I', 'C', 'E', 'V'});
++        append_u32(VERSION);
++        summary.conditioning_artifact_byte_count = conditioning_artifact.size();
++        collecting = true;
++    }
++
++    void stop() {
++        collecting = false;
++    }
++
++    void record_conditioning(DiffusionExecutionBranch branch,
++                             const ConditioningExecutionEvidence& evidence) {
++        if (!collecting || branch == DiffusionExecutionBranch::AUXILIARY) {
++            return;
++        }
++
++        const bool negative = branch == DiffusionExecutionBranch::NEGATIVE;
++        uint32_t* observed = negative
++                                 ? &summary.negative_conditioning_observed
++                                 : &summary.positive_conditioning_observed;
++        uint32_t* weighting_capable = negative
++                                          ? &summary.negative_prompt_weighting_capable
++                                          : &summary.positive_prompt_weighting_capable;
++        uint64_t* token_count = negative
++                                    ? &summary.negative_conditioning_token_count
++                                    : &summary.positive_conditioning_token_count;
++        uint64_t* non_unity_count = negative
++                                        ? &summary.negative_non_unity_weight_count
++                                        : &summary.positive_non_unity_weight_count;
++
++        *observed = evidence.observed() ? 1u : 0u;
++        *weighting_capable = evidence.prompt_weighting_capable() ? 1u : 0u;
++        *token_count = 0;
++        *non_unity_count = 0;
++
++        append_u32(static_cast<uint32_t>(branch));
++        append_u32(*observed);
++        append_u64(static_cast<uint64_t>(evidence.sequences.size()));
++        for (const auto& sequence : evidence.sequences) {
++            append_u32(sequence.weights_applied ? 1u : 0u);
++            append_u32(sequence.counts_toward_token_totals ? 1u : 0u);
++            append_u64(static_cast<uint64_t>(sequence.token_ids.size()));
++            if (sequence.token_ids.size() != sequence.token_weights.size()) {
++                *observed = 0u;
++                continue;
++            }
++            if (sequence.counts_toward_token_totals) {
++                *token_count += static_cast<uint64_t>(sequence.token_ids.size());
++            }
++            for (size_t index = 0; index < sequence.token_ids.size(); ++index) {
++                append_u32(static_cast<uint32_t>(sequence.token_ids[index]));
++                uint32_t weight_bits = 0;
++                static_assert(sizeof(weight_bits) == sizeof(sequence.token_weights[index]),
++                              "conditioning weight must be binary32");
++                std::memcpy(&weight_bits,
++                            &sequence.token_weights[index],
++                            sizeof(weight_bits));
++                append_u32(weight_bits);
++                if (sequence.counts_toward_token_totals &&
++                    sequence.weights_applied &&
++                    sequence.token_weights[index] != 1.0f) {
++                    ++(*non_unity_count);
++                }
++            }
++        }
++        summary.prompt_weighting_applied =
++            summary.positive_non_unity_weight_count > 0 ||
++                    summary.negative_non_unity_weight_count > 0
++                ? 1u
++                : 0u;
++        summary.conditioning_artifact_byte_count = conditioning_artifact.size();
++    }
++
++    void record_sampling_pass() {
++        if (collecting) {
++            ++summary.sampling_pass_count;
++        }
++    }
++
++    void record_completed_sampling_step() {
++        if (collecting) {
++            ++summary.completed_sampling_step_count;
++        }
++    }
++
++    void record_diffusion_compute(DiffusionExecutionBranch branch) {
++        if (!collecting) {
++            return;
++        }
++        ++summary.diffusion_model_compute_count;
++        switch (branch) {
++            case DiffusionExecutionBranch::POSITIVE:
++                ++summary.positive_diffusion_model_compute_count;
++                break;
++            case DiffusionExecutionBranch::NEGATIVE:
++                ++summary.negative_diffusion_model_compute_count;
++                break;
++            case DiffusionExecutionBranch::AUXILIARY:
++                ++summary.auxiliary_diffusion_model_compute_count;
++                break;
++        }
++    }
++
++    void mark_generation_completed(bool flow_shift_applied,
++                                   bool dynamic_flow_shift,
++                                   float effective_flow_shift,
++                                   bool distilled_guidance_applied,
++                                   float effective_distilled_guidance) {
++        if (collecting) {
++            summary.generation_completed = 1u;
++            summary.flow_shift_applied = flow_shift_applied ? 1u : 0u;
++            summary.dynamic_flow_shift = dynamic_flow_shift ? 1u : 0u;
++            summary.distilled_guidance_applied = distilled_guidance_applied ? 1u : 0u;
++            summary.effective_flow_shift = flow_shift_applied ? effective_flow_shift : 0.0f;
++            summary.effective_distilled_guidance = distilled_guidance_applied
++                                                       ? effective_distilled_guidance
++                                                       : 0.0f;
++        }
++    }
++};
++
++struct ImageExecutionEvidenceScope {
++    explicit ImageExecutionEvidenceScope(ImageExecutionEvidenceState& evidence)
++        : evidence(evidence) {
++        evidence.reset();
++    }
++
++    ~ImageExecutionEvidenceScope() {
++        evidence.stop();
++    }
++
++    ImageExecutionEvidenceState& evidence;
++};
++
+ /*=============================================== StableDiffusionGGML ================================================*/
+ 
+ class StableDiffusionGGML {
+ public:
++    ImageExecutionEvidenceState image_execution_evidence;
+     std::vector<MmapTensorStore> mmap_tensor_store;
+     SDBackendManager backend_manager;
+ 
+@@ -155,6 +321,7 @@ public:
+     std::shared_ptr<RNG> sampler_rng = nullptr;
+     int n_threads                    = -1;
+     float default_flow_shift         = INFINITY;
++    bool distilled_guidance_input_enabled = false;
+ 
+     std::shared_ptr<Conditioner> cond_stage_model;
+     std::shared_ptr<FrozenCLIPVisionEmbedder> clip_vision;  // for svd or wan2.1 i2v
+@@ -1141,6 +1308,19 @@ public:
+                 params_memory_location(pmid_params_mem_size, SDBackendModule::PHOTOMAKER));
+         }
+ 
++        distilled_guidance_input_enabled = false;
++        if (sd_version_is_flux(version) ||
++            sd_version_is_flux2(version) ||
++            sd_version_is_longcat(version)) {
++            for (const auto& [name, tensor_storage] : tensor_storage_map) {
++                (void)tensor_storage;
++                if (name.find("guidance_in.in_layer.weight") != std::string::npos) {
++                    distilled_guidance_input_enabled = true;
++                    break;
++                }
++            }
++        }
++
+         // init denoiser
+         {
+             prediction_t pred_type = sd_ctx_params->prediction;
+@@ -1878,6 +2058,7 @@ public:
+     }
+ 
+     void report_sample_progress(int step, size_t total_steps, int64_t t0) {
++        image_execution_evidence.record_completed_sampling_step();
+         int64_t t1 = ggml_time_us();
+         if (step > 0 || step == -(int)total_steps) {
+             int showstep = std::abs(step);
+@@ -1958,6 +2139,7 @@ public:
+         }
+ 
+         size_t steps       = sigmas.size() - 1;
++        image_execution_evidence.record_sampling_pass();
+         bool has_skiplayer = (slg_scale != 0.0f || slg_uncond) && !skip_layers.empty();
+         if (has_skiplayer && !sd_version_is_dit(version)) {
+             has_skiplayer = false;
+@@ -1990,6 +2172,10 @@ public:
          SamplePreviewContext preview = prepare_sample_preview_context();
  
          auto denoise = [&](const sd::Tensor<float>& x, float sigma, int step) -> sd::guidance::GuiderOutput {
@@ -30,7 +607,15 @@ index 28598eb..b1b98e6 100644
              if (step == 1 || step == -1) {
                  pretty_progress(0, (int)steps, 0);
              }
-@@ -2103,7 +2107,15 @@ public:
+@@ -2060,6 +2246,7 @@ public:
+                                     &controls);
+ 
+             auto run_condition = [&](const SDCondition& condition,
++                                     DiffusionExecutionBranch execution_branch,
+                                      const sd::Tensor<float>* c_concat_override = nullptr,
+                                      const std::vector<int>* local_skip_layers  = nullptr) -> sd::Tensor<float> {
+                 diffusion_params.context     = condition.c_crossattn.empty() ? nullptr : &condition.c_crossattn;
+@@ -2103,7 +2290,18 @@ public:
                      return std::move(cached_output);
                  }
  
@@ -39,6 +624,9 @@ index 28598eb..b1b98e6 100644
 +                    return sd::Tensor<float>();
 +                }
                  auto output_opt = work_diffusion_model->compute(n_threads, diffusion_params);
++                if (!output_opt.empty()) {
++                    image_execution_evidence.record_diffusion_compute(execution_branch);
++                }
 +                if (sd_should_cancel()) {
 +                    LOG_WARN("sampling cancelled after diffusion compute at step %d", step);
 +                    return sd::Tensor<float>();
@@ -46,7 +634,50 @@ index 28598eb..b1b98e6 100644
                  if (output_opt.empty()) {
                      LOG_ERROR("diffusion model compute failed");
                      return sd::Tensor<float>();
-@@ -2197,13 +2209,21 @@ public:
+@@ -2114,13 +2312,14 @@ public:
+             };
+ 
+             if (start_merge_step == -1 || step <= start_merge_step) {
+-                cond_out = run_condition(cond);
++                cond_out = run_condition(cond, DiffusionExecutionBranch::POSITIVE);
+                 if (cond_out.empty()) {
+                     return {};
+                 }
+             } else {
+                 GGML_ASSERT(!id_cond.empty());
+                 cond_out = run_condition(id_cond,
++                                         DiffusionExecutionBranch::POSITIVE,
+                                          cond.c_concat.empty() ? nullptr : &cond.c_concat);
+                 if (cond_out.empty()) {
+                     return {};
+@@ -2140,13 +2339,17 @@ public:
+                     LOG_DEBUG("Skipping layers at uncond step %d\n", step);
+                     uncond_skip_layers = &skip_layer_guidance.layers();
+                 }
+-                uncond_out = run_condition(uncond, nullptr, uncond_skip_layers);
++                uncond_out = run_condition(uncond,
++                                           DiffusionExecutionBranch::NEGATIVE,
++                                           nullptr,
++                                           uncond_skip_layers);
+                 if (uncond_out.empty()) {
+                     return {};
+                 }
+             }
+             if (!img_cond.empty()) {
+                 img_cond_out = run_condition(img_cond,
++                                             DiffusionExecutionBranch::AUXILIARY,
+                                              cond.c_concat.empty() ? nullptr : &cond.c_concat);
+                 if (img_cond_out.empty()) {
+                     return {};
+@@ -2169,6 +2372,7 @@ public:
+                 if (!step_cache.is_step_skipped()) {
+                     guidance_input.predict_skip_layer = [&]() -> sd::Tensor<float> {
+                         return run_condition(cond,
++                                             DiffusionExecutionBranch::AUXILIARY,
+                                              cond.c_concat.empty() ? nullptr : &cond.c_concat,
+                                              &skip_layer_guidance.layers());
+                     };
+@@ -2197,13 +2401,21 @@ public:
                  preview_image(step, denoised, version, preview.mode, preview.callback, preview.data, false);
              }
              report_sample_progress(step, steps, t0);
@@ -69,7 +700,135 @@ index 28598eb..b1b98e6 100644
              if (control_net) {
                  control_net->free_control_ctx();
                  control_net->free_compute_buffer();
-@@ -4382,6 +4402,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+@@ -2386,6 +2598,26 @@ public:
+         }
+     }
+ 
++    bool get_effective_flow_shift(float* flow_shift) const {
++        if (flow_shift == nullptr) {
++            return false;
++        }
++        auto flow_denoiser = std::dynamic_pointer_cast<DiscreteFlowDenoiser>(denoiser);
++        if (!flow_denoiser || !std::isfinite(flow_denoiser->shift)) {
++            return false;
++        }
++        *flow_shift = flow_denoiser->shift;
++        return true;
++    }
++
++    bool uses_dynamic_flow_shift() const {
++        return std::dynamic_pointer_cast<Flux2FlowDenoiser>(denoiser) != nullptr;
++    }
++
++    bool uses_distilled_guidance() const {
++        return distilled_guidance_input_enabled;
++    }
++
+     bool is_flow_denoiser() {
+         auto flow_denoiser = std::dynamic_pointer_cast<DiscreteFlowDenoiser>(denoiser);
+         return !!flow_denoiser;
+@@ -3058,6 +3290,54 @@ SD_API bool sd_ctx_supports_video_generation(const sd_ctx_t* sd_ctx) {
+     return sd_version_supports_video_generation(sd_ctx->sd->version);
+ }
+ 
++SD_API bool sd_ctx_uses_flow_shift(const sd_ctx_t* sd_ctx) {
++    if (sd_ctx == nullptr || sd_ctx->sd == nullptr) {
++        return false;
++    }
++    float flow_shift = 0.0f;
++    return sd_ctx->sd->get_effective_flow_shift(&flow_shift);
++}
++
++SD_API bool sd_ctx_uses_dynamic_flow_shift(const sd_ctx_t* sd_ctx) {
++    return sd_ctx != nullptr && sd_ctx->sd != nullptr &&
++           sd_ctx->sd->uses_dynamic_flow_shift();
++}
++
++SD_API bool sd_ctx_uses_distilled_guidance(const sd_ctx_t* sd_ctx) {
++    return sd_ctx != nullptr && sd_ctx->sd != nullptr &&
++           sd_ctx->sd->uses_distilled_guidance();
++}
++
++SD_API bool sd_get_last_image_execution_evidence(const sd_ctx_t* sd_ctx,
++                                                  sd_image_execution_evidence_t* evidence) {
++    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || evidence == nullptr) {
++        return false;
++    }
++    const ImageExecutionEvidenceState& state = sd_ctx->sd->image_execution_evidence;
++    if (state.collecting || state.summary.version != ImageExecutionEvidenceState::VERSION) {
++        return false;
++    }
++    *evidence = state.summary;
++    return true;
++}
++
++SD_API bool sd_copy_last_image_conditioning_artifact(const sd_ctx_t* sd_ctx,
++                                                      uint8_t* destination,
++                                                      size_t destination_size) {
++    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || destination == nullptr) {
++        return false;
++    }
++    const ImageExecutionEvidenceState& state = sd_ctx->sd->image_execution_evidence;
++    if (state.collecting || state.summary.version != ImageExecutionEvidenceState::VERSION ||
++        destination_size != state.conditioning_artifact.size()) {
++        return false;
++    }
++    std::copy(state.conditioning_artifact.begin(),
++              state.conditioning_artifact.end(),
++              destination);
++    return true;
++}
++
+ enum sample_method_t sd_get_default_sample_method(const sd_ctx_t* sd_ctx) {
+     if (sd_ctx != nullptr && sd_ctx->sd != nullptr) {
+         if (sd_version_is_pid(sd_ctx->sd->version)) {
+@@ -4098,13 +4378,19 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
+     auto id_cond                     = sd_ctx->sd->get_pmid_conditon(request->pm_params, condition_params);
+     int64_t prepare_start_ms         = ggml_time_ms();
+     condition_params.zero_out_masked = false;
++    ConditioningExecutionEvidence positive_execution_evidence;
++    condition_params.execution_evidence = &positive_execution_evidence;
+     auto cond                        = sd_ctx->sd->cond_stage_model->get_learned_condition(sd_ctx->sd->n_threads,
+                                                                                            condition_params);
++    sd_ctx->sd->image_execution_evidence.record_conditioning(
++        DiffusionExecutionBranch::POSITIVE,
++        positive_execution_evidence);
+     if (cond.c_concat.empty()) {
+         cond.c_concat = latents->concat_latent;  // TODO: optimize
+     }
+ 
+     SDCondition uncond;
++    ConditioningExecutionEvidence negative_execution_evidence;
+     if (request->use_uncond || request->use_high_noise_uncond) {
+         bool zero_out_masked = false;
+         if (sd_version_is_sdxl(sd_ctx->sd->version) &&
+@@ -4114,12 +4400,17 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
+         }
+         condition_params.text            = request->negative_prompt;
+         condition_params.zero_out_masked = zero_out_masked;
++        condition_params.execution_evidence = &negative_execution_evidence;
+         uncond                           = sd_ctx->sd->cond_stage_model->get_learned_condition(sd_ctx->sd->n_threads,
+                                                                                                condition_params);
+         if (uncond.c_concat.empty()) {
+             uncond.c_concat = latents->uncond_concat_latent;  // TODO: optimize
+         }
+     }
++    sd_ctx->sd->image_execution_evidence.record_conditioning(
++        DiffusionExecutionBranch::NEGATIVE,
++        negative_execution_evidence);
++    condition_params.execution_evidence = nullptr;
+ 
+     int64_t t1 = ggml_time_ms();
+     LOG_INFO("get_learned_condition completed, taking %.2fs", (t1 - prepare_start_ms) * 1.0f / 1000);
+@@ -4364,6 +4655,7 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+     if (sd_ctx == nullptr || sd_img_gen_params == nullptr) {
+         return nullptr;
+     }
++    ImageExecutionEvidenceScope image_execution_scope(sd_ctx->sd->image_execution_evidence);
+ 
+     int64_t t0                    = ggml_time_ms();
+     sd_ctx->sd->vae_tiling_params = sd_img_gen_params->vae_tiling_params;
+@@ -4382,6 +4674,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
                                                          sd_img_gen_params,
                                                          &request,
                                                          &plan);
@@ -80,7 +839,7 @@ index 28598eb..b1b98e6 100644
      if (!latents_opt.has_value()) {
          return nullptr;
      }
-@@ -4392,6 +4416,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+@@ -4392,6 +4688,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
                                                        &request,
                                                        &plan,
                                                        &latents);
@@ -91,7 +850,7 @@ index 28598eb..b1b98e6 100644
      if (!embeds_opt.has_value()) {
          return nullptr;
      }
-@@ -4403,6 +4431,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+@@ -4403,6 +4703,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
          int64_t sampling_start = ggml_time_ms();
          int64_t cur_seed       = request.seed + b;
          LOG_INFO("generating image: %i/%i - seed %" PRId64, b + 1, request.batch_count, cur_seed);
@@ -102,7 +861,7 @@ index 28598eb..b1b98e6 100644
  
          sd_ctx->sd->rng->manual_seed(cur_seed);
          sd_ctx->sd->sampler_rng->manual_seed(cur_seed);
-@@ -4583,6 +4615,16 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+@@ -4583,6 +4887,16 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
      }
  
      auto result = decode_image_outputs(sd_ctx, request, final_latents);
@@ -119,8 +878,24 @@ index 28598eb..b1b98e6 100644
      if (result == nullptr) {
          return nullptr;
      }
+@@ -4591,6 +4905,15 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+ 
+     int64_t t1 = ggml_time_ms();
+     LOG_INFO("generate_image completed in %.2fs", (t1 - t0) * 1.0f / 1000);
++    float effective_flow_shift = 0.0f;
++    const bool flow_shift_applied =
++        sd_ctx->sd->get_effective_flow_shift(&effective_flow_shift);
++    sd_ctx->sd->image_execution_evidence.mark_generation_completed(
++        flow_shift_applied,
++        sd_ctx->sd->uses_dynamic_flow_shift(),
++        effective_flow_shift,
++        sd_ctx->sd->uses_distilled_guidance(),
++        request.guidance.distilled_guidance);
+     return result;
+ }
+ 
 diff --git a/src/tokenizers/vocab/vocab.cpp b/src/tokenizers/vocab/vocab.cpp
-index 4d2a9b8..7763fb6 100644
+index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a6623a61c80 100644
 --- a/src/tokenizers/vocab/vocab.cpp
 +++ b/src/tokenizers/vocab/vocab.cpp
 @@ -1,5 +1,9 @@
@@ -234,7 +1009,7 @@ index 4d2a9b8..7763fb6 100644
 +#endif
 +}
 diff --git a/src/util.cpp b/src/util.cpp
-index 77fc542..05399d3 100644
+index 77fc5429cf832c120fc2f874b901e6db2a4ea6af..05399d33dfa32128456dd64a9d3252a81d67396e 100644
 --- a/src/util.cpp
 +++ b/src/util.cpp
 @@ -340,6 +340,8 @@ int32_t sd_get_num_physical_cores() {
@@ -268,7 +1043,7 @@ index 77fc542..05399d3 100644
  sd_image_t tensor_to_sd_image(const sd::Tensor<float>& tensor, int frame_index) {
      const auto& shape = tensor.shape();
 diff --git a/src/util.h b/src/util.h
-index c3b06b1..e89d511 100644
+index c3b06b1d6b342dd4fe627529c1e30a39df42d019..e89d511dc1ba4033e008ff42dcf705d4794a990d 100644
 --- a/src/util.h
 +++ b/src/util.h
 @@ -88,6 +88,7 @@ std::vector<std::pair<std::string, float>> split_quotation_attention(

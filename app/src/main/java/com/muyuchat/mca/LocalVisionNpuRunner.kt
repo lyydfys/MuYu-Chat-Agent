@@ -99,11 +99,14 @@ internal class LiteRtQnnVisionRunner(
                 message = "The Snapdragon NPU runtime loads, but its device transport is blocked: ${device.accelerationProfile.qnnRuntime.cdspRpcMessage}"
             )
         }
-        if (manifest.requiresQnnRuntime && !device.accelerationProfile.qnnRuntime.usableForSmoke) {
+        if (manifest.requiresQnnRuntime &&
+            (!device.accelerationProfile.qnnRuntime.ready ||
+                !device.accelerationProfile.qnnRuntime.htpStubLibraryPresent)
+        ) {
             return LocalVisionNpuReport(
                 state = LocalVisionNpuState.QNN_RUNTIME_MISSING,
                 backend = backendLabel,
-                message = "Device supports Snapdragon NPU acceleration, but the complete runtime is not load-verified."
+                message = "The complete QNN System, HTP, Skel, and Stub runtime libraries are unavailable."
             )
         }
         val missing = manifest.missingRequiredComponents

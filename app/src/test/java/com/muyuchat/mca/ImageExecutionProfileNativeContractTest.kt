@@ -56,6 +56,95 @@ class ImageExecutionProfileNativeContractTest {
     }
 
     @Test
+    fun `turbo builtins serialize conditional only guidance as cfg one`() {
+        listOf(
+            Triple("sd_turbo_512_experimental", LocalImageModelFamily.SD_TURBO, 4),
+            Triple("z_image_turbo_q4", LocalImageModelFamily.Z_IMAGE, 8)
+        ).forEach { (recommendationId, family, steps) ->
+            val resolution = ImageExecutionProfileResolver.resolve(
+                ImageExecutionProfileResolverInput(
+                    modelFingerprint = "b".repeat(64),
+                    runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                    family = family,
+                    recommendationId = recommendationId
+                )
+            )
+            val json = ImageExecutionProfileNativeContract.toNativeParamsJson(resolution)
+
+            assertEquals(1.0, json.getDouble("cfgScale"), 0.0)
+            assertEquals(false, json.getBoolean("useCfg"))
+            assertEquals(false, json.getBoolean("unconditionalBranch"))
+            assertEquals(steps, json.getInt("steps"))
+            assertEquals(steps, json.getInt("unetExecutionCount"))
+            assertEquals(77, json.getInt("tokenCount"))
+        }
+    }
+
+    @Test
+    fun `stable diffusion validates actual dynamic conditioning separately from resolved capacity`() {
+        val resolution = ImageExecutionProfileResolver.resolve(
+            ImageExecutionProfileResolverInput(
+                modelFingerprint = "b".repeat(64),
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.SD_TURBO,
+                recommendationId = "sd_turbo_512_experimental"
+            )
+        )
+        val native = nativeEcho(resolution).apply {
+            getJSONObject("nativeEffective")
+                .put("tokenCount", 231)
+                .put("resolvedTokenCount", 77)
+                .put("tokenizerMaxLength", 77)
+                .put("positiveConditioningTokenCount", 231)
+                .put("negativeConditioningTokenCount", 0)
+        }
+
+        val parsed = ImageExecutionProfileNativeContract.parseAndValidate(resolution, native)
+        assertEquals(231, parsed.nativeEffective.tokenCount)
+
+        native.getJSONObject("nativeEffective").put("positiveConditioningTokenCount", 230)
+        assertEquals("tokenCount", expectFailure {
+            ImageExecutionProfileNativeContract.parseAndValidate(resolution, native)
+        }.field)
+    }
+
+    @Test
+    fun `MNN Sana requires real 256 query and tokenizer artifact evidence`() {
+        val resolution = ImageExecutionProfileResolver.resolve(
+            ImageExecutionProfileResolverInput(
+                modelFingerprint = "b".repeat(64),
+                runtime = LocalImageRuntime.MNN_DIFFUSION,
+                family = LocalImageModelFamily.SANA,
+                recommendationId = "mnn_sana_edit_v2"
+            )
+        )
+        val artifact = "d".repeat(64)
+        val native = nativeEcho(resolution).apply {
+            getJSONObject("nativeEffective")
+                .put("promptWeightFingerprint", artifact)
+                .put("conditioningArtifactSha256", artifact)
+                .put("conditioningSequenceLength", 256)
+                .put("conditioningBatchSize", 2)
+                .put("conditioningOrder", "negative_then_positive")
+                .put("tokenizerInputSequenceLength", 32)
+                .put("tokenizerInputBatchSize", 2)
+                .put("tokenizerNonPaddingTokenCount", 56)
+                .put("tokenizerInputOrder", "positive_then_negative")
+        }
+
+        val parsed = ImageExecutionProfileNativeContract.parseAndValidate(resolution, native)
+        assertEquals(256, parsed.nativeEffective.tokenCount)
+
+        native.getJSONObject("nativeEffective").put("conditioningSequenceLength", 255)
+        assertEquals(
+            "conditioningSequenceLength,conditioningBatchSize,conditioningOrder",
+            expectFailure {
+                ImageExecutionProfileNativeContract.parseAndValidate(resolution, native)
+            }.field
+        )
+    }
+
+    @Test
     fun `complete native echo parses and validates`() {
         val resolution = resolution()
         val raw = nativeEcho(resolution).toString()
@@ -327,6 +416,22 @@ class ImageExecutionProfileNativeContractTest {
                 .put("positiveWeightedTokenCount", 0)
                 .put("negativeWeightedTokenCount", 0)
                 .put("promptWeightFingerprint", "c".repeat(64))
+                .apply {
+                    if (resolution.layers.resolved.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+                        put("resolvedTokenCount", resolution.layers.resolved.tokenCount)
+                        put("tokenizerMaxLength", resolution.profile.tokenizer.maxLength)
+                        val negative = if (resolution.layers.resolved.useCfg) {
+                            resolution.profile.tokenizer.maxLength
+                        } else {
+                            0
+                        }
+                        put(
+                            "positiveConditioningTokenCount",
+                            resolution.layers.resolved.tokenCount - negative
+                        )
+                        put("negativeConditioningTokenCount", negative)
+                    }
+                }
         )
 
     private fun resolution(): ImageExecutionProfileResolution =

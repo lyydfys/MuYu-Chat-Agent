@@ -21,6 +21,7 @@ internal data class StableDiffusionComponentSelection(
     val vaePath: String? = null,
     val textEncoderPath: String? = null,
     val textEncoderSlot: String? = null,
+    val controlNetPath: String? = null,
     val tokenizerPath: String? = null,
     val manifestPath: String? = null,
     val requireVae: Boolean = false,
@@ -30,6 +31,16 @@ internal data class StableDiffusionComponentSelection(
     val fallback: Boolean
         get() = mode == STABLE_DIFFUSION_COMPONENT_MODE_COMPATIBILITY
 
+    fun withControlNetPath(resolvedPath: String?): StableDiffusionComponentSelection {
+        if (resolvedPath == null) return this
+        controlNetPath?.let { declared ->
+            require(File(declared).canonicalPath == File(resolvedPath).canonicalPath) {
+                "Image profile and component manifest resolve different ControlNet files."
+            }
+        }
+        return copy(controlNetPath = resolvedPath)
+    }
+
     fun putIntoNativeParams(params: JSONObject): JSONObject = params
         .put("componentSelectionMode", mode)
         .put("componentBundleRoot", bundleRoot)
@@ -38,6 +49,7 @@ internal data class StableDiffusionComponentSelection(
         .put("componentVaePath", vaePath.orEmpty())
         .put("componentTextEncoderPath", textEncoderPath.orEmpty())
         .put("componentTextEncoderSlot", textEncoderSlot.orEmpty())
+        .put("componentControlNetPath", controlNetPath.orEmpty())
         .put("componentTokenizerPath", tokenizerPath.orEmpty())
         .put("componentManifestPath", manifestPath.orEmpty())
         .put("componentRequireVae", requireVae)
@@ -54,6 +66,7 @@ internal data class StableDiffusionComponentSelection(
         .put("vaePath", vaePath.orEmpty())
         .put("textEncoderPath", textEncoderPath.orEmpty())
         .put("textEncoderSlot", textEncoderSlot.orEmpty())
+        .put("controlNetPath", controlNetPath.orEmpty())
         .put("tokenizerPath", tokenizerPath.orEmpty())
         .put("manifestPath", manifestPath.orEmpty())
         .put("requireVae", requireVae)
@@ -76,7 +89,7 @@ internal data class StableDiffusionComponentSelection(
         }
         requireSamePath("primaryPath", primaryPath, actual.optString("primaryPath"))
         if (fallback) {
-            listOf("vaePath", "textEncoderPath", "tokenizerPath").forEach { name ->
+            listOf("vaePath", "textEncoderPath", "controlNetPath", "tokenizerPath").forEach { name ->
                 actual.optString(name).takeIf { it.isNotBlank() }?.let { selectedPath ->
                     requirePathInsideBundle(name, selectedPath)
                 }
@@ -89,6 +102,7 @@ internal data class StableDiffusionComponentSelection(
             textEncoderPath,
             actual.optString("textEncoderPath")
         )
+        requireOptionalSamePath("controlNetPath", controlNetPath, actual.optString("controlNetPath"))
         requireOptionalSamePath("tokenizerPath", tokenizerPath, actual.optString("tokenizerPath"))
         if (textEncoderPath != null) {
             require(actual.optString("textEncoderSlot") == textEncoderSlot) {
@@ -122,6 +136,23 @@ internal data class StableDiffusionComponentSelection(
             "stable-diffusion.cpp selected $name=$actualCanonical, expected $expectedCanonical."
         }
     }
+}
+
+internal fun resolveProfileControlNetPath(
+    bundleRoot: File,
+    profile: ImageExecutionProfile
+): String? {
+    val relativePath = profile.graph.controlNet?.relativePath?.trim()?.takeIf(String::isNotEmpty)
+        ?: return null
+    require(!File(relativePath).isAbsolute && !Regex("^[A-Za-z]:[\\\\/]").containsMatchIn(relativePath)) {
+        "Image profile graph.controlNet path must be bundle-relative."
+    }
+    val root = bundleRoot.canonicalFile
+    val candidate = File(root, relativePath).canonicalFile
+    require(candidate.path.startsWith(root.path + File.separator) && candidate.isFile) {
+        "Image profile ControlNet component is missing or escapes the bundle root."
+    }
+    return candidate.path
 }
 
 internal fun resolveStableDiffusionComponentSelection(
@@ -202,10 +233,18 @@ internal fun resolveStableDiffusionComponentSelection(
         ?: throw IllegalArgumentException(
             "Role-based image bundle manifest must declare exactly one DIFFUSION component."
         )
+    require(primaryComponent.file.canonicalPath == primary.canonicalPath) {
+        "Image bundle record primary model does not match the manifest DIFFUSION component."
+    }
     val splitFamily = effectiveFamily.requiresExplicitStableDiffusionCompanions()
     val vae = byRole["VAE"]
     val textEncoder = byRole["TEXT_ENCODER"]
     val tokenizer = byRole["TOKENIZER"]
+    val controlNetCandidates = listOfNotNull(byRole["CONTROL_NET"], byRole["CONTROLNET"])
+    require(controlNetCandidates.size <= 1) {
+        "Image bundle manifest declares more than one ControlNet component."
+    }
+    val controlNet = controlNetCandidates.singleOrNull()
     require(!splitFamily || vae != null) {
         "${effectiveFamily.label} image bundle manifest is missing required VAE role."
     }
@@ -222,6 +261,7 @@ internal fun resolveStableDiffusionComponentSelection(
         vaePath = vae?.file?.path,
         textEncoderPath = textEncoder?.file?.path,
         textEncoderSlot = textEncoder?.let { effectiveFamily.stableDiffusionTextEncoderSlot() },
+        controlNetPath = controlNet?.file?.path,
         tokenizerPath = tokenizer?.file?.path,
         manifestPath = manifestFile.canonicalPath,
         requireVae = splitFamily,

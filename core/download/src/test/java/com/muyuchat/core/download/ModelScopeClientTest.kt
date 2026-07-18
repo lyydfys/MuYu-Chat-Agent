@@ -15,6 +15,12 @@ import org.junit.Test
 
 class ModelScopeClientTest {
     private val client = ModelScopeClient()
+    private val conditionalOnlyImageIds = setOf(
+        "realismsdxl_dmd2_alt_qnn228",
+        "sd_turbo_512_experimental",
+        "z_image_turbo_q4",
+        "flux2_klein_4b_q4"
+    )
 
     @Test
     fun ignoresGitBlobSha1WhenAComponentRequiresSha256() {
@@ -25,6 +31,15 @@ class ModelScopeClientTest {
                 "699cce92eb7c122e2eb7dfdea78e6187fda76a5ed4a8e42319b85610e620e091"
             )
         )
+    }
+
+    @Test
+    fun stableDiffusionCppCfgBranchTreatsOnlyScaleOneAsConditionalOnly() {
+        assertTrue(stableDiffusionCppUsesCfg(0.0))
+        assertFalse(stableDiffusionCppUsesCfg(1.0))
+        assertTrue(stableDiffusionCppUsesCfg(1.0 + 1e-9))
+        assertFalse(stableDiffusionCppUsesCfg(1.0 + 1e-13))
+        assertTrue(stableDiffusionCppUsesCfg(7.0))
     }
 
     @Test
@@ -174,7 +189,7 @@ class ModelScopeClientTest {
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "bitcpm4_cann_8b_tq2" }.chatRuntime)
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "glm47_flash_tq1" }.chatRuntime)
         assertTrue(recommendations.any { it.group == ModelScopeRecommendedGroup.LOCAL_IMAGE && it.downloadable })
-        assertEquals(2, recommendations.count { !it.downloadable })
+        assertEquals(0, recommendations.count { !it.downloadable })
         assertEquals("qwen-image-2512-Q2_K.gguf", recommendations.first { it.id == "qwen_image_2512_q2" }.recommendedFileName)
         assertEquals("unet.mnn", recommendations.first { it.id == "sd15_mnn_512_quality" }.recommendedFileName)
         assertEquals("sd_turbo.safetensors", recommendations.first { it.id == "sd_turbo_512_experimental" }.recommendedFileName)
@@ -235,6 +250,10 @@ class ModelScopeClientTest {
         assertTrue(recommendations.none { it.id == "fastvlm_05b_sm8750_litert_qnn" })
         assertTrue(recommendations.none { it.kind == ModelScopeRecommendedKind.VISION })
         val imageRecommendations = recommendations.filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+        assertTrue(imageRecommendations.all { it.visibleInRecommendations })
+        assertTrue(imageRecommendations.all { it.downloadable })
+        assertTrue(imageRecommendations.none { it.status == RecommendedModelStatus.PENDING_INTEGRATION })
+        assertTrue(imageRecommendations.none { "待接入" in it.description })
         assertTrue(imageRecommendations.all { it.imageEngineBundle != null })
         assertTrue(imageRecommendations.all { it.imageEngineBundle!!.requiredComponents.isNotEmpty() })
         assertTrue(imageRecommendations.all { it.localImageEngineTier != null })
@@ -330,7 +349,9 @@ class ModelScopeClientTest {
         assertEquals("SD_TURBO", sdTurboBundle.modelFamily)
         assertEquals(512, sdTurboBundle.smokeSpec.width)
         assertEquals(512, sdTurboBundle.smokeSpec.height)
-        assertEquals(1, sdTurboBundle.smokeSpec.steps)
+        assertEquals(4, sdTurboBundle.smokeSpec.steps)
+        assertTrue(sdTurbo.description.contains("4-step"))
+        assertTrue(sdTurbo.description.contains("CFG 1.0"))
         assertEquals(1, sdTurboBundle.requiredComponents.size)
         val sdTurboCheckpoint = sdTurboBundle.requiredComponents.single()
         assertEquals(ImageEngineBundleComponentRole.DIFFUSION, sdTurboCheckpoint.role)
@@ -348,12 +369,21 @@ class ModelScopeClientTest {
         assertTrue(recommendations.first { it.id == "sd15_mnn_512_quality" }.downloadable)
         assertEquals(20, recommendations.first { it.id == "sd15_mnn_512_quality" }.imageEngineBundle!!.smokeSpec.steps)
         assertTrue(recommendations.first { it.id == "sd15_mnn_512_quality" }.description.contains("direct + OpenCL"))
-        assertTrue(recommendations.first { it.id == "sd15_mnn_512_quality" }.description.contains("module"))
+        assertTrue(recommendations.first { it.id == "sd15_mnn_512_quality" }.description.contains("VAE encoder"))
+        assertTrue(recommendations.first { it.id == "sd15_mnn_512_quality" }.description.contains("不宣称 img2img"))
         assertNull(recommendations.first { it.id == "sd15_mnn_512_quality" }.downloadBlockReason)
         assertEquals(LocalImageEngineTier.COMPACT_QUALITY, recommendations.first { it.id == "flux2_klein_4b_q4" }.localImageEngineTier)
         assertEquals(LocalImageEngineTier.LARGE_QUALITY, recommendations.first { it.id == "z_image_turbo_q4" }.localImageEngineTier)
         assertEquals(LocalImageEngineTier.HEAVY_EXPERIMENTAL, recommendations.first { it.id == "qwen_image_2512_q2" }.localImageEngineTier)
         assertEquals(LocalImageEngineTier.HEAVY_EXPERIMENTAL, recommendations.first { it.id == "longcat_image_q4" }.localImageEngineTier)
+        assertTrue(
+            recommendations.first { it.id == "qwen_image_2512_q2" }
+                .description.contains("完整三组件包")
+        )
+        assertTrue(
+            recommendations.first { it.id == "longcat_image_q4" }
+                .description.contains("完整三组件包")
+        )
         assertNotNull(
             recommendations.first { it.id == "sd15_mnn_512_quality" }
                 .imageEngineBundle!!
@@ -378,6 +408,46 @@ class ModelScopeClientTest {
                 .components
                 .firstOrNull { it.role == ImageEngineBundleComponentRole.VAE && it.fileName.endsWith("qwen_image_vae.safetensors") }
         )
+    }
+
+    @Test
+    fun recommendedMeinaMixAndFlux2PackagesPinSourceIntegrity() {
+        val recommendations = client.recommendedModels()
+
+        val meinaMix = recommendations.single { it.id == "meinamix_sd15_qnn228" }
+        val meinaArchive = requireNotNull(meinaMix.imageEngineBundle)
+            .requiredComponents
+            .single { it.role == ImageEngineBundleComponentRole.DIFFUSION }
+        assertEquals("17d26a779cf2a53acc6caf0345c663767c293c5a", meinaMix.revision)
+        assertEquals(meinaMix.revision, meinaArchive.revision)
+        assertEquals(1_228_483_146L, meinaArchive.expectedSizeBytes)
+        assertEquals(
+            "120aa73eb843bf24a96fe067baa2c4f97fb3a95620c36caffe080ed7f4503d09",
+            meinaArchive.sha256
+        )
+
+        val fluxComponents = requireNotNull(
+            recommendations.single { it.id == "flux2_klein_4b_q4" }.imageEngineBundle
+        ).requiredComponents.associateBy { it.role }
+        val expectedFluxComponents = mapOf(
+            ImageEngineBundleComponentRole.DIFFUSION to Pair(
+                2_460_378_560L,
+                "d1023499ef3f2f82ff7c50e6778495195c1b6cc34835741778868428111f9ff4"
+            ),
+            ImageEngineBundleComponentRole.VAE to Pair(
+                336_211_292L,
+                "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"
+            ),
+            ImageEngineBundleComponentRole.TEXT_ENCODER to Pair(
+                2_497_281_312L,
+                "f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a"
+            )
+        )
+        assertEquals(expectedFluxComponents.keys, fluxComponents.keys)
+        expectedFluxComponents.forEach { (role, expected) ->
+            assertEquals(expected.first, fluxComponents.getValue(role).expectedSizeBytes)
+            assertEquals(expected.second, fluxComponents.getValue(role).sha256)
+        }
     }
 
     @Test
@@ -418,7 +488,241 @@ class ModelScopeClientTest {
     }
 
     @Test
-    fun sdxlRecommendationsUseTheReal1024Float32GraphContract() {
+    fun everyImageRecommendationPinsTheEffectiveExecutionContract() {
+        val models = client.recommendedModels().filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+        val expected = expectedImageProfiles()
+
+        assertEquals(expected.keys, models.map { it.id }.toSet())
+        models.forEach { model ->
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val profile = requireNotNull(bundle.executionProfile)
+            val contract = expected.getValue(model.id)
+
+            assertEquals(model.id, bundle.recommendationId)
+            assertEquals(contract.profileId, profile.profileId)
+            assertEquals(contract.family, profile.family)
+            assertEquals(contract.variant, profile.variant)
+            assertEquals(contract.task, profile.task)
+            assertEquals(contract.task, bundle.task)
+            assertEquals(contract.scheduler, profile.scheduler.algorithm)
+            assertEquals(contract.steps, profile.scheduler.defaultSteps)
+            assertEquals(contract.steps, profile.defaults.steps)
+            assertEquals(contract.cfgScale, profile.defaults.cfgScale, 0.0)
+            assertEquals(contract.useCfg, profile.defaults.useCfg)
+            assertEquals(contract.width, profile.defaults.width)
+            assertEquals(contract.height, profile.defaults.height)
+            assertEquals(contract.tokenizer, profile.tokenizer.backend)
+            assertEquals(contract.tokenizerMaxLength, profile.tokenizer.maxLength)
+            assertEquals(contract.clip1PadRule, profile.tokenizer.clip1PadRule)
+            assertEquals(contract.clip2PadRule, profile.tokenizer.clip2PadRule)
+            assertEquals(contract.vaeScalingLocation, profile.vae.scalingLocation)
+            assertEquals(contract.vaeScalingFactor, profile.vae.scalingFactor, 0.0)
+            assertEquals(profile.family.name, bundle.modelFamily)
+            assertEquals(profile.defaults.width, bundle.smokeSpec.width)
+            assertEquals(profile.defaults.height, bundle.smokeSpec.height)
+            assertEquals(profile.defaults.steps, bundle.smokeSpec.steps)
+            assertNull("${model.id} must not invent a catalog prompt", profile.defaults.defaultPrompt)
+            assertEquals(
+                "${model.id} must pin its catalog negative-prompt behavior",
+                expectedNegativePrompt(model.id),
+                profile.defaults.defaultNegativePrompt
+            )
+            val conditionalOnly = model.id in conditionalOnlyImageIds
+            assertEquals(
+                "${model.id} negative-prompt capability drifted",
+                !conditionalOnly,
+                profile.capabilities.supportsNegativePrompt
+            )
+            assertEquals(
+                "${model.id} negative token branch drifted",
+                !conditionalOnly,
+                profile.tokenizer.separateNegativePrompt
+            )
+            assertTrue(profile.scheduler.algorithm in profile.capabilities.supportedSchedulers)
+            if (model.visibleInRecommendations && model.downloadable) {
+                listOf("", "UNKNOWN", "MT6989").forEach { chipset ->
+                    val access = model.downloadEligibilityFor(chipset, deviceIsSnapdragon = false)
+                    assertTrue("${model.id} must stay open on unknown device '$chipset'", access.canDownload)
+                    assertNull(access.blockedReason)
+                }
+            }
+        }
+
+        val hyper = models.single { it.id == "realisticvisionhyper_sd15_qnn228" }
+            .imageEngineBundle!!
+            .executionProfile!!
+        assertEquals(8, hyper.defaults.steps)
+        assertEquals(2.0, hyper.defaults.cfgScale, 0.0)
+
+        listOf(
+            "sdxl_base_qnn228",
+            "realismsdxl_dmd2_alt_qnn228",
+            "animagine_xl_v4_qnn228",
+            "cyberrealisticxl_qnn228"
+        ).forEach { id ->
+            val bundle = models.single { it.id == id }.imageEngineBundle!!
+            val scheduler = bundle.executionProfile!!.scheduler
+            assertEquals(ImageEngineSchedulerAlgorithm.DPMPP_2M, scheduler.algorithm)
+            assertEquals(2, scheduler.order)
+            assertNull(bundle.executionProfile!!.graph.htpArch)
+            assertNull(bundle.requiredRuntimeProfile)
+        }
+
+        conditionalOnlyImageIds.forEach { id ->
+            val profile = models.single { it.id == id }.imageEngineBundle!!.executionProfile!!
+            val defaults = profile.defaults
+            assertEquals(1.0, defaults.cfgScale, 0.0)
+            assertFalse(defaults.useCfg)
+            assertFalse(profile.capabilities.supportsNegativePrompt)
+            assertFalse(profile.tokenizer.separateNegativePrompt)
+            assertNull(defaults.defaultNegativePrompt)
+        }
+
+        val sd15Gen5 = models.single { it.id == "qualcomm_sd15_gen5_qnn" }
+            .imageEngineBundle!!
+            .executionProfile!!
+        assertEquals(1, sd15Gen5.scheduler.stepsOffset)
+        assertEquals(1, sd15Gen5.scheduler.minSteps)
+        assertEquals(100, sd15Gen5.scheduler.maxSteps)
+        assertTrue(sd15Gen5.scheduler.skipPrkSteps)
+        assertFalse(sd15Gen5.tokenizer.supportsPromptWeighting)
+        assertFalse(sd15Gen5.capabilities.supportsPromptWeighting)
+
+        listOf("qualcomm_sd21_gen5_qnn", "qualcomm_controlnet_canny_gen5_qnn").forEach { id ->
+            val profile = models.single { it.id == id }.imageEngineBundle!!.executionProfile!!
+            assertFalse(profile.tokenizer.supportsPromptWeighting)
+            assertFalse(profile.capabilities.supportsPromptWeighting)
+        }
+        assertTrue(sd15Gen5.scheduler.scaleModelInput)
+
+        val sd21Gen5 = models.single { it.id == "qualcomm_sd21_gen5_qnn" }
+            .imageEngineBundle!!
+            .executionProfile!!
+        assertEquals(ImageEnginePredictionType.V_PREDICTION, sd21Gen5.scheduler.predictionType)
+        assertEquals(1, sd21Gen5.scheduler.stepsOffset)
+        assertEquals(1, sd21Gen5.scheduler.minSteps)
+        assertEquals(100, sd21Gen5.scheduler.maxSteps)
+        assertTrue(sd21Gen5.scheduler.skipPrkSteps)
+        assertEquals(ImageEngineClipPadRule.ZERO, sd21Gen5.tokenizer.clip1PadRule)
+
+        val control = models.single { it.id == "qualcomm_controlnet_canny_gen5_qnn" }
+            .imageEngineBundle!!
+            .executionProfile!!
+        assertTrue(control.capabilities.requiresControlImage)
+        assertEquals("controlnet.bin", control.graph.controlNet)
+
+        listOf(
+            "z_image_turbo_q4",
+            "flux2_klein_4b_q4",
+            "qwen_image_2512_q2",
+            "longcat_image_q4"
+        ).forEach { id ->
+            val profile = models.single { it.id == id }.imageEngineBundle!!.executionProfile!!
+            assertEquals(
+                "$id must not advertise diffusion-only samplers for a flow checkpoint",
+                setOf(ImageEngineSchedulerAlgorithm.FLOW_MATCH),
+                profile.capabilities.supportedSchedulers
+            )
+        }
+
+        val splitStableDiffusionCppIds = setOf(
+            "z_image_turbo_q4",
+            "flux2_klein_4b_q4",
+            "qwen_image_2512_q2",
+            "longcat_image_q4"
+        )
+        splitStableDiffusionCppIds.forEach { id ->
+            val bundle = requireNotNull(models.single { it.id == id }.imageEngineBundle)
+            assertEquals(
+                "$id must download its complete split runtime package",
+                setOf(
+                    ImageEngineBundleComponentRole.DIFFUSION,
+                    ImageEngineBundleComponentRole.VAE,
+                    ImageEngineBundleComponentRole.TEXT_ENCODER
+                ),
+                bundle.requiredComponents.mapTo(linkedSetOf()) { it.role }
+            )
+        }
+        models.filter { it.imageEngineBundle?.runtime == ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP }
+            .forEach { model ->
+                val profile = requireNotNull(model.imageEngineBundle?.executionProfile)
+                assertEquals(ImageEngineTask.TEXT_TO_IMAGE, profile.task)
+                assertFalse(profile.capabilities.requiresControlImage)
+                assertFalse(profile.capabilities.requiresInputImage)
+                assertFalse(profile.capabilities.supportsMask)
+            }
+
+        val sana = models.single { it.id == "mnn_sana_edit_v2" }
+            .imageEngineBundle!!
+            .executionProfile!!
+        assertEquals(256, sana.tokenizer.maxLength)
+        assertTrue(sana.tokenizer.separateNegativePrompt)
+        assertEquals(listOf(1, 256), sana.conditioning.textEncoderInputShape)
+        assertEquals(listOf(listOf(1, 256, 1)), sana.conditioning.textEncoderOutputShapes)
+        assertEquals("vae_encoder.mnn", sana.graph.vaeEncoder)
+        assertTrue(sana.capabilities.requiresInputImage)
+        assertFalse(sana.capabilities.supportsMask)
+        assertEquals(10, sana.scheduler.defaultSteps)
+        assertEquals(2, sana.scheduler.minSteps)
+        assertEquals(50, sana.scheduler.maxSteps)
+
+        listOf(
+            "cyberrealistic_sd15_qnn228",
+            "realisticvisionhyper_sd15_qnn228",
+            "dreamshaper_sd15_qnn228",
+            "meinamix_sd15_qnn228",
+            "sdxl_base_qnn228",
+            "realismsdxl_dmd2_alt_qnn228",
+            "animagine_xl_v4_qnn228",
+            "cyberrealisticxl_qnn228"
+        ).forEach { id ->
+            assertEquals(
+                "vae_encoder.bin",
+                models.single { it.id == id }.imageEngineBundle!!.executionProfile!!.graph.vaeEncoder
+            )
+        }
+    }
+
+    @Test
+    fun mnnSd15PackageIsPinnedAndDoesNotAdvertiseAMissingVaeEncoder() {
+        val model = client.recommendedModels().single { it.id == "sd15_mnn_512_quality" }
+        val bundle = requireNotNull(model.imageEngineBundle)
+        val repositoryComponents = bundle.components.filter {
+            it.repoId == "MNN/stable-diffusion-v1-5-mnn-opencl"
+        }
+
+        assertEquals("346de5fcde406781a34368140419ac3f62440916", model.revision)
+        assertTrue(repositoryComponents.isNotEmpty())
+        assertTrue(repositoryComponents.all { it.revision == model.revision })
+        assertTrue(bundle.requiredComponents.all { it.expectedSizeBytes != null })
+        assertTrue(bundle.requiredComponents.all { it.sha256?.matches(Regex("[0-9a-f]{64}")) == true })
+        assertTrue(bundle.components.none { it.fileName.startsWith("vae_encoder.") })
+        assertNull(bundle.executionProfile!!.graph.vaeEncoder)
+        assertFalse(bundle.executionProfile!!.capabilities.requiresInputImage)
+        assertFalse(bundle.executionProfile!!.capabilities.supportsMask)
+    }
+
+    @Test
+    fun everyUserFacingImageBundlePinsAllRequiredComponentBytes() {
+        client.userFacingRecommendedModels()
+            .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+            .forEach { model ->
+                val bundle = requireNotNull(model.imageEngineBundle) { model.id }
+                bundle.requiredComponents.forEach { component ->
+                    assertTrue(
+                        "${model.id}/${component.fileName} is missing a fixed positive size",
+                        component.expectedSizeBytes?.let { it > 0L } == true
+                    )
+                    assertTrue(
+                        "${model.id}/${component.fileName} is missing fixed SHA-256",
+                        component.sha256?.matches(Regex("[0-9a-f]{64}")) == true
+                    )
+                }
+            }
+    }
+
+    @Test
+    fun sdxlRecommendationsUse1024UnetAndTiled512VaeGraphContracts() {
         val sdxlIds = setOf(
             "sdxl_base_qnn228",
             "realismsdxl_dmd2_alt_qnn228",
@@ -438,11 +742,11 @@ class ModelScopeClientTest {
             assertTrue(unet.inputs.filterNot { it.name == "timestamp" }.all { it.dataType == "float32" })
             assertEquals(listOf(1, 4, 128, 128), unet.outputs.single().shape)
             assertEquals("float32", unet.outputs.single().dataType)
-            assertEquals(1024, vae.width)
-            assertEquals(1024, vae.height)
-            assertEquals(listOf(1, 4, 128, 128), vae.inputs.single().shape)
+            assertEquals(512, vae.width)
+            assertEquals(512, vae.height)
+            assertEquals(listOf(1, 4, 64, 64), vae.inputs.single().shape)
             assertEquals("float32", vae.inputs.single().dataType)
-            assertEquals(listOf(1, 3, 1024, 1024), vae.outputs.single().shape)
+            assertEquals(listOf(1, 3, 512, 512), vae.outputs.single().shape)
             assertEquals("float32", vae.outputs.single().dataType)
         }
 
@@ -457,7 +761,7 @@ class ModelScopeClientTest {
         val allRecommendations = client.recommendedModels()
         val recommendations = client.userFacingRecommendedModels()
 
-        assertEquals(29, recommendations.size)
+        assertEquals(31, recommendations.size)
         assertTrue(recommendations.all { it.visibleInRecommendations })
 
         val cpuChat = recommendations.filter {
@@ -481,7 +785,7 @@ class ModelScopeClientTest {
 
         assertEquals(9, cpuChat.size)
         assertEquals(4, npuChat.size)
-        assertEquals(5, cpuImage.size)
+        assertEquals(7, cpuImage.size)
         assertEquals(11, npuImage.size)
 
         fun cpuChatIds(group: ModelScopeRecommendedGroup): List<String> = cpuChat
@@ -515,6 +819,8 @@ class ModelScopeClientTest {
             setOf(
                 "sd15_mnn_512_quality",
                 "sd_turbo_512_experimental",
+                "mnn_sana_edit_v2",
+                "flux2_klein_4b_q4",
                 "z_image_turbo_q4",
                 "qwen_image_2512_q2",
                 "longcat_image_q4"
@@ -544,9 +850,7 @@ class ModelScopeClientTest {
                 "bitcpm4_cann_1b_tq2",
                 "bitcpm4_cann_3b_tq2",
                 "bitcpm4_cann_8b_tq2",
-                "glm47_flash_tq1",
-                "mnn_sana_edit_v2",
-                "flux2_klein_4b_q4"
+                "glm47_flash_tq1"
             ),
             hiddenIds
         )
@@ -576,11 +880,25 @@ class ModelScopeClientTest {
             gen5Images.single { it.id == "qualcomm_sd21_gen5_qnn" }.status
         )
         assertEquals(
-            RecommendedModelStatus.PENDING_INTEGRATION,
+            RecommendedModelStatus.EXPERIMENTAL,
             gen5Images.single { it.id == "qualcomm_controlnet_canny_gen5_qnn" }.status
         )
         assertTrue(gen5Images.all { it.downloadable })
         assertTrue(gen5Images.all { it.supportedChipsetCodes == setOf("SM8850", "SM8850P") })
+        val expectedGen5Archives = mapOf(
+            "qualcomm_sd15_gen5_qnn" to Pair(
+                711_934_104L,
+                "3716ba4c32d6dcf1af93857d22889e1e95f9c3e4c62983fff2d2a743eeff644e"
+            ),
+            "qualcomm_sd21_gen5_qnn" to Pair(
+                874_955_354L,
+                "3fc5fc8df77e4952776020d932ee5934ec432b397a456515ae7f8ed2af004ae8"
+            ),
+            "qualcomm_controlnet_canny_gen5_qnn" to Pair(
+                950_517_794L,
+                "582b4dee61584cdd2e0f96bdbaff19a6bf919af365c4a7f258ed260be5e1262d"
+            )
+        )
         gen5Images.forEach { model ->
             assertTrue(model.downloadEligibilityFor("", deviceIsSnapdragon = false).canDownload)
             val bundle = requireNotNull(model.imageEngineBundle)
@@ -588,6 +906,8 @@ class ModelScopeClientTest {
                 it.role == ImageEngineBundleComponentRole.DIFFUSION && it.fileName.endsWith(".zip")
             }
             assertEquals(model.revision, archive.revision)
+            assertEquals(expectedGen5Archives.getValue(model.id).first, archive.expectedSizeBytes)
+            assertEquals(expectedGen5Archives.getValue(model.id).second, archive.sha256)
             val tokenizerJson = bundle.components.single {
                 it.relativePath == "tokenizer/tokenizer.json"
             }
@@ -601,7 +921,25 @@ class ModelScopeClientTest {
             )
             assertTrue(bundle.components.any { it.relativePath == "scheduler/scheduler_config.json" })
             assertTrue(bundle.components.any { it.relativePath == "tokenizer/tokenizer_config.json" })
+            assertEquals(
+                expectedGen5Archives.getValue(model.id),
+                client.pinnedQairtImageReleaseAssetIntegrity(
+                    modelId = model.id,
+                    resolvedName = model.recommendedFileName,
+                    recommendedName = model.recommendedFileName
+                )
+            )
         }
+        assertEquals(
+            Pair(null, null),
+            client.pinnedQairtImageReleaseAssetIntegrity(
+                modelId = "qualcomm_sd15_gen5_qnn",
+                resolvedName = "different-chipset.zip",
+                recommendedName = gen5Images.single {
+                    it.id == "qualcomm_sd15_gen5_qnn"
+                }.recommendedFileName
+            )
+        )
         assertEquals(
             listOf(
                 "qualcomm_sd15_gen5_qnn",
@@ -636,11 +974,8 @@ class ModelScopeClientTest {
         assertEquals("50adc28b4682161542f893c624048adf6dd027ca", recommendation.revision)
         assertEquals(ModelRepositoryProvider.MODELSCOPE, recommendation.provider)
         assertEquals("transformer.mnn", recommendation.recommendedFileName)
-        assertFalse(recommendation.downloadable)
-        assertEquals(
-            "MCA 安装器已能保留 Sana 必需的 llm/ 子目录，但应用侧尚未接通源图片协议、VAE encoder 调度与完整 edit pipeline；在图像编辑链路和真机 smoke test 完成前不开放一键下载。",
-            recommendation.downloadBlockReason
-        )
+        assertTrue(recommendation.downloadable)
+        assertNull(recommendation.downloadBlockReason)
         assertEquals(ImageEngineTask.IMAGE_EDIT, bundle.task)
         assertEquals(ImageEngineBundleRuntime.MNN_DIFFUSION, bundle.runtime)
         assertEquals(ImageEngineAccelerator.CPU, bundle.accelerator)
@@ -671,8 +1006,8 @@ class ModelScopeClientTest {
             "DIFFUSION|transformer.mnn.weight|884435680|b3bab45fbabc8dabd05840b52ea3cd9bd3e54dd990e153ff6fbecd8b6c17f331",
             "VAE|vae_decoder.mnn|751784|9fbe51979b27339b7685cf88f1010a0ff3ab7ff1a7d873fba321eea94b762911",
             "VAE|vae_decoder.mnn.weight|162011594|a6ef7a13ba9af29754adf9b97651cb29a7eaee20b716c16dbe079f500d5eddae",
-            "VAE|vae_encoder.mnn|761568|06da21081f8ee98792bd1838990068e7284351157cafbfa8793282b611eacb24",
-            "VAE|vae_encoder.mnn.weight|155787522|b44ac00f4683697add9578ef4c0f561fb5753fe24a3f4525e7f492028409d05e"
+            "VAE_ENCODER|vae_encoder.mnn|761568|06da21081f8ee98792bd1838990068e7284351157cafbfa8793282b611eacb24",
+            "VAE_ENCODER|vae_encoder.mnn.weight|155787522|b44ac00f4683697add9578ef4c0f561fb5753fe24a3f4525e7f492028409d05e"
         )
         assertEquals(
             expectedComponents,
@@ -696,12 +1031,12 @@ class ModelScopeClientTest {
     }
 
     @Test
-    fun sanaEditV2BundleResolutionStopsBeforeNetworkAccess() {
+    fun sanaEditV2BundleResolutionIsNotStoppedByALegacyIntegrationGuard() {
         val requestCount = AtomicInteger()
         val networkClient = OkHttpClient.Builder()
             .addInterceptor {
                 requestCount.incrementAndGet()
-                throw AssertionError("Sana download guard must run before network access")
+                throw AssertionError("Sana bundle resolution reached its repository lookup")
             }
             .build()
         val guardedClient = ModelScopeClient(client = networkClient)
@@ -711,12 +1046,8 @@ class ModelScopeClientTest {
             guardedClient.recommendedImageBundleFiles(recommendation)
         }.exceptionOrNull()
 
-        assertTrue(failure is IllegalArgumentException)
-        assertEquals(
-            "MCA 安装器已能保留 Sana 必需的 llm/ 子目录，但应用侧尚未接通源图片协议、VAE encoder 调度与完整 edit pipeline；在图像编辑链路和真机 smoke test 完成前不开放一键下载。",
-            failure?.message
-        )
-        assertEquals(0, requestCount.get())
+        assertTrue(requestCount.get() >= 1)
+        assertTrue(failure != null)
     }
 
     @Test
@@ -954,13 +1285,75 @@ class ModelScopeClientTest {
     }
 
     @Test
-    fun qnnImageAssetSelectionPrefersTheExactGen5ForGalaxyPackage() {
+    fun qnnImageAssetSelectionPrefersGenericExactMatchBeforeVendorVariant() {
         val releaseAssets = """
             {
               "precisions": {
                 "w8a16": {
                   "chipset_assets": {
+                    "qualcomm-snapdragon-8-elite": {
+                      "qnn_context_binary": {"download_url": "https://example.com/elite-generic.zip"}
+                    },
                     "qualcomm-snapdragon-8-elite-for-galaxy": {
+                      "qnn_context_binary": {"download_url": "https://example.com/elite.zip"}
+                    },
+                    "qualcomm-snapdragon-8-elite-gen5": {
+                      "qnn_context_binary": {"download_url": "https://example.com/gen5-generic.zip"}
+                    },
+                    "qualcomm-snapdragon-8-elite-gen5-for-galaxy": {
+                      "qnn_context_binary": {"download_url": "https://example.com/gen5.zip"}
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        assertEquals(
+            "qualcomm-snapdragon-8-elite-gen5",
+            client.selectedQnnImageChipsetForTest(
+                releaseAssets,
+                listOf("qualcomm-snapdragon-8-elite-gen5")
+            )
+        )
+        assertEquals(
+            "qualcomm-snapdragon-8-elite",
+            client.selectedQnnImageChipsetForTest(
+                releaseAssets,
+                listOf("qualcomm-snapdragon-8gen3")
+            )
+        )
+
+        val galaxyOnly = """
+            {
+              "precisions": {
+                "w8a16": {
+                  "chipset_assets": {
+                    "qualcomm-snapdragon-8-elite-gen5-for-galaxy": {
+                      "qnn_context_binary": {"download_url": "https://example.com/gen5.zip"}
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+        assertEquals(
+            "qualcomm-snapdragon-8-elite-gen5-for-galaxy",
+            client.selectedQnnImageChipsetForTest(
+                galaxyOnly,
+                listOf("qualcomm-snapdragon-8-elite-gen5")
+            )
+        )
+    }
+
+    @Test
+    fun catalogQnnTargetNeverSilentlyFallsBackToAnotherChipsetArchive() {
+        val releaseAssets = """
+            {
+              "precisions": {
+                "w8a16": {
+                  "chipset_assets": {
+                    "qualcomm-snapdragon-8-elite": {
                       "qnn_context_binary": {"download_url": "https://example.com/elite.zip"}
                     },
                     "qualcomm-snapdragon-8-elite-gen5-for-galaxy": {
@@ -975,17 +1368,23 @@ class ModelScopeClientTest {
         assertEquals(
             "qualcomm-snapdragon-8-elite-gen5-for-galaxy",
             client.selectedQnnImageChipsetForTest(
-                releaseAssets,
-                listOf("qualcomm-snapdragon-8-elite-gen5")
+                releaseAssetsJson = releaseAssets,
+                preferredChipsets = listOf("qualcomm-snapdragon-8-elite"),
+                catalogTargetChipset = "qualcomm-snapdragon-8-elite-gen5"
             )
         )
-        assertEquals(
-            "qualcomm-snapdragon-8-elite-for-galaxy",
+
+        val missingTarget = runCatching {
             client.selectedQnnImageChipsetForTest(
-                releaseAssets,
-                listOf("qualcomm-snapdragon-8gen3")
+                releaseAssetsJson = releaseAssets.replace(
+                    "qualcomm-snapdragon-8-elite-gen5-for-galaxy",
+                    "qualcomm-snapdragon-8gen3"
+                ),
+                preferredChipsets = listOf("qualcomm-snapdragon-8-elite"),
+                catalogTargetChipset = "qualcomm-snapdragon-8-elite-gen5"
             )
-        )
+        }.exceptionOrNull()
+        assertTrue(missingTarget is IllegalStateException)
     }
 
     @Test
@@ -1175,6 +1574,149 @@ class ModelScopeClientTest {
         assertEquals("Gemma 4 E2B GGUF", result.models.single().displayName)
         assertEquals(1200, result.models.single().downloads)
         assertEquals(listOf("text-generation"), result.models.single().tasks)
+    }
+
+    private data class ExpectedImageProfile(
+        val profileId: String,
+        val family: ImageEngineModelFamily,
+        val variant: ImageEngineModelVariant,
+        val steps: Int,
+        val cfgScale: Double,
+        val useCfg: Boolean,
+        val scheduler: ImageEngineSchedulerAlgorithm,
+        val width: Int,
+        val height: Int,
+        val tokenizer: ImageEngineTokenizerBackend,
+        val vaeScalingLocation: ImageEngineVaeScalingLocation,
+        val vaeScalingFactor: Double,
+        val task: ImageEngineTask = ImageEngineTask.TEXT_TO_IMAGE,
+        val tokenizerMaxLength: Int = 77,
+        val clip1PadRule: ImageEngineClipPadRule = ImageEngineClipPadRule.EOS,
+        val clip2PadRule: ImageEngineClipPadRule? = null
+    )
+
+    private fun expectedImageProfiles(): Map<String, ExpectedImageProfile> = mapOf(
+        "cyberrealistic_sd15_qnn228" to ExpectedImageProfile(
+            "community.sd15.qnn228", ImageEngineModelFamily.SD15, ImageEngineModelVariant.STANDARD,
+            20, 7.0, true, ImageEngineSchedulerAlgorithm.DPMPP_2M, 512, 512,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215
+        ),
+        "realisticvisionhyper_sd15_qnn228" to ExpectedImageProfile(
+            "community.sd15.hyper.qnn228", ImageEngineModelFamily.SD15, ImageEngineModelVariant.HYPER,
+            8, 2.0, true, ImageEngineSchedulerAlgorithm.DPMPP_2M, 512, 512,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215
+        ),
+        "dreamshaper_sd15_qnn228" to ExpectedImageProfile(
+            "community.sd15.qnn228", ImageEngineModelFamily.SD15, ImageEngineModelVariant.STANDARD,
+            20, 7.0, true, ImageEngineSchedulerAlgorithm.DPMPP_2M, 512, 512,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215
+        ),
+        "meinamix_sd15_qnn228" to ExpectedImageProfile(
+            "community.sd15.legacy-fp32.qnn228", ImageEngineModelFamily.SD15, ImageEngineModelVariant.LEGACY_FP32,
+            20, 7.0, true, ImageEngineSchedulerAlgorithm.DPMPP_2M, 512, 512,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215
+        ),
+        "sdxl_base_qnn228" to ExpectedImageProfile(
+            "community.sdxl.base.qnn228", ImageEngineModelFamily.SDXL, ImageEngineModelVariant.SDXL_BASE,
+            30, 7.0, true, ImageEngineSchedulerAlgorithm.DPMPP_2M, 1024, 1024,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.13025,
+            clip2PadRule = ImageEngineClipPadRule.ZERO
+        ),
+        "realismsdxl_dmd2_alt_qnn228" to ExpectedImageProfile(
+            "community.sdxl.dmd2-alt.qnn228", ImageEngineModelFamily.SDXL, ImageEngineModelVariant.DMD2_ALT,
+            4, 1.0, false, ImageEngineSchedulerAlgorithm.DPMPP_2M, 1024, 1024,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.13025,
+            clip2PadRule = ImageEngineClipPadRule.ZERO
+        ),
+        "animagine_xl_v4_qnn228" to ExpectedImageProfile(
+            "community.sdxl.base.qnn228", ImageEngineModelFamily.SDXL, ImageEngineModelVariant.SDXL_BASE,
+            RecommendedImageDefaults.ANIMAGINE_XL_STEPS, RecommendedImageDefaults.ANIMAGINE_XL_CFG,
+            true, ImageEngineSchedulerAlgorithm.DPMPP_2M, 1024, 1024,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.13025,
+            clip2PadRule = ImageEngineClipPadRule.ZERO
+        ),
+        "cyberrealisticxl_qnn228" to ExpectedImageProfile(
+            "community.sdxl.base.qnn228", ImageEngineModelFamily.SDXL, ImageEngineModelVariant.SDXL_BASE,
+            RecommendedImageDefaults.CYBERREALISTIC_XL_STEPS, RecommendedImageDefaults.CYBERREALISTIC_XL_CFG,
+            true, ImageEngineSchedulerAlgorithm.DPMPP_2M, 1024, 1024,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.13025,
+            clip2PadRule = ImageEngineClipPadRule.ZERO
+        ),
+        "qualcomm_sd15_gen5_qnn" to ExpectedImageProfile(
+            "qualcomm.sd15.gen5.qnn245", ImageEngineModelFamily.SD15, ImageEngineModelVariant.STANDARD,
+            20, 7.5, true, ImageEngineSchedulerAlgorithm.EULER, 512, 512,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.GRAPH_INTERNAL, 0.18215
+        ),
+        "qualcomm_sd21_gen5_qnn" to ExpectedImageProfile(
+            "qualcomm.sd21.gen5.qnn245", ImageEngineModelFamily.SD21, ImageEngineModelVariant.SD21,
+            20, 7.5, true, ImageEngineSchedulerAlgorithm.DDIM, 512, 512,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.GRAPH_INTERNAL, 0.18215,
+            clip1PadRule = ImageEngineClipPadRule.ZERO
+        ),
+        "qualcomm_controlnet_canny_gen5_qnn" to ExpectedImageProfile(
+            "qualcomm.controlnet-canny.gen5.qnn245", ImageEngineModelFamily.SD15,
+            ImageEngineModelVariant.CONTROLNET_CANNY, 20, 7.5, true, ImageEngineSchedulerAlgorithm.EULER,
+            512, 512, ImageEngineTokenizerBackend.TOKENIZERS_CPP,
+            ImageEngineVaeScalingLocation.GRAPH_INTERNAL, 0.18215,
+            task = ImageEngineTask.CONTROL_IMAGE
+        ),
+        "sd15_mnn_512_quality" to ExpectedImageProfile(
+            "mnn.sd15.official.512", ImageEngineModelFamily.SD15, ImageEngineModelVariant.STANDARD,
+            20, 7.0, true, ImageEngineSchedulerAlgorithm.DPMPP_2M, 512, 512,
+            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215
+        ),
+        "mnn_sana_edit_v2" to ExpectedImageProfile(
+            "mnn.sana-edit.v2", ImageEngineModelFamily.SANA, ImageEngineModelVariant.SANA_EDIT,
+            10, 4.5, true, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 512, 512,
+            ImageEngineTokenizerBackend.MNN_MTOK, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0,
+            task = ImageEngineTask.IMAGE_EDIT,
+            tokenizerMaxLength = 256,
+            clip1PadRule = ImageEngineClipPadRule.MODEL_DECLARED
+        ),
+        "sd_turbo_512_experimental" to ExpectedImageProfile(
+            "sdcpp.sd-turbo", ImageEngineModelFamily.SD_TURBO, ImageEngineModelVariant.SD_TURBO,
+            4, 1.0, false, ImageEngineSchedulerAlgorithm.EULER_A, 512, 512,
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0
+        ),
+        "z_image_turbo_q4" to ExpectedImageProfile(
+            "sdcpp.z-image-turbo", ImageEngineModelFamily.Z_IMAGE, ImageEngineModelVariant.Z_IMAGE_TURBO,
+            8, 1.0, false, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 512, 512,
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0
+        ),
+        "flux2_klein_4b_q4" to ExpectedImageProfile(
+            "sdcpp.flux2-klein", ImageEngineModelFamily.FLUX, ImageEngineModelVariant.FLUX2_KLEIN,
+            4, 1.0, false, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 1024, 1024,
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0
+        ),
+        "qwen_image_2512_q2" to ExpectedImageProfile(
+            "sdcpp.qwen-image", ImageEngineModelFamily.QWEN_IMAGE, ImageEngineModelVariant.QWEN_IMAGE,
+            40, 2.5, true, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 1024, 1024,
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0
+        ),
+        "longcat_image_q4" to ExpectedImageProfile(
+            "sdcpp.longcat-image", ImageEngineModelFamily.LONGCAT_IMAGE, ImageEngineModelVariant.LONGCAT_IMAGE,
+            20, 5.0, true, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 1024, 1024,
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0
+        )
+    )
+
+    private fun expectedNegativePrompt(id: String): String? = when (id) {
+        "cyberrealistic_sd15_qnn228",
+        "realisticvisionhyper_sd15_qnn228" -> RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
+        "dreamshaper_sd15_qnn228",
+        "qualcomm_sd15_gen5_qnn",
+        "qualcomm_sd21_gen5_qnn",
+        "qualcomm_controlnet_canny_gen5_qnn",
+        "sd15_mnn_512_quality" -> RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+        "meinamix_sd15_qnn228",
+        "animagine_xl_v4_qnn228" -> RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT
+        "sdxl_base_qnn228" -> RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT
+        "cyberrealisticxl_qnn228" -> RecommendedImageDefaults.CYBERREALISTIC_XL_NEGATIVE_PROMPT
+        "mnn_sana_edit_v2" -> RecommendedImageDefaults.EDIT_NEGATIVE_PROMPT
+        "qwen_image_2512_q2" -> RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT
+        "longcat_image_q4" -> RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT
+        in conditionalOnlyImageIds -> null
+        else -> error("Missing expected image negative-prompt contract for $id")
     }
 
     private fun remote(name: String): RemoteModelFile = RemoteModelFile(

@@ -23,13 +23,14 @@ import kotlinx.coroutines.launch
 
 class LocalImageWorkerClient(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
+    private val inputDispatcher = LocalImageInputDispatcher(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val stateLock = Any()
 
     private var remote: ILocalImageWorker? = null
     private var remoteBinder: IBinder? = null
     private var remoteDeathRecipient: IBinder.DeathRecipient? = null
-    private var connectionDeferred: CompletableDeferred<ILocalImageWorker>? = null
+    private var bindingSession: BindingSession? = null
     private val bindingLifecycle = LocalImageWorkerBindingLifecycle()
     private var closed = false
     private var preparation: Preparation? = null
@@ -39,52 +40,23 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
     var lastWorkerPid: Int = -1
         private set
 
-    private val connection = object : ServiceConnection {
+    private inner class WorkerServiceConnection(
+        val lease: LocalImageWorkerBindingLifecycle.Session
+    ) : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-            val service = ILocalImageWorker.Stub.asInterface(binder)
-            val deathRecipient = IBinder.DeathRecipient {
-                handleConnectionLoss("Local image worker process died.", bindingDied = false)
-            }
-            try {
-                binder.linkToDeath(deathRecipient, 0)
-            } catch (_: RemoteException) {
-                handleConnectionLoss("Local image worker process died while connecting.", bindingDied = false)
-                return
-            }
-
-            val deferred: CompletableDeferred<ILocalImageWorker>?
-            val shouldUnbind: Boolean
-            synchronized(stateLock) {
-                shouldUnbind = closed || !bindingLifecycle.bindIssued
-                if (shouldUnbind) {
-                    deferred = null
-                } else {
-                    unlinkRemoteDeathRecipientLocked()
-                    remote = service
-                    remoteBinder = binder
-                    remoteDeathRecipient = deathRecipient
-                    deferred = connectionDeferred
-                    connectionDeferred = null
-                }
-            }
-            if (shouldUnbind) {
-                runCatching { binder.unlinkToDeath(deathRecipient, 0) }
-                runCatching { appContext.unbindService(this) }
-                return
-            }
-            deferred?.complete(service)
+            handleServiceConnected(this, binder)
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
-            handleConnectionLoss("Local image worker disconnected.", bindingDied = false)
+            handleConnectionLoss(this, "Local image worker disconnected.")
         }
 
         override fun onBindingDied(name: ComponentName) {
-            handleConnectionLoss("Local image worker binding died.", bindingDied = true)
+            handleConnectionLoss(this, "Local image worker binding died.")
         }
 
         override fun onNullBinding(name: ComponentName) {
-            handleConnectionLoss("Local image worker returned a null binding.", bindingDied = true)
+            handleConnectionLoss(this, "Local image worker returned a null binding.")
         }
     }
 
@@ -99,14 +71,17 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         )
         scope.launch {
             runCatching {
-                val service = awaitService()
+                val endpoint = awaitService { session -> next.bindingSession = session }
                 if (!isCurrentPreparation(next) || next.cancelRequested) {
                     throw LocalImageWorkerCancelledException()
                 }
-                service.begin(LocalImageWorkerProtocol.beginRequest(runtime))
+                runRemoteCall(endpoint) {
+                    endpoint.service.begin(LocalImageWorkerProtocol.beginRequest(runtime))
+                }.getOrThrow()
             }.onSuccess {
                 next.ready.complete(Unit)
             }.onFailure { error ->
+                releaseBindingAfterPreparationFailure(next, error)
                 next.ready.completeExceptionally(remoteFailure(error))
             }
         }
@@ -125,8 +100,10 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP
         if (request == null) {
             pendingPreparation?.ready?.completeExceptionally(LocalImageWorkerCancelledException())
-            currentRemote()?.let { service ->
-                runRemoteCall { service.cancel(LocalImageWorkerProtocol.cancelRequest(null)) }
+            currentEndpoint()?.let { endpoint ->
+                runRemoteCall(endpoint) {
+                    endpoint.service.cancel(LocalImageWorkerProtocol.cancelRequest(null))
+                }
             }
             return supportsNativeCancel
         }
@@ -147,6 +124,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         model: LocalImageModelRecord,
         prompt: String,
         options: LocalImageGenerationOptions = LocalImageGenerationOptions(),
+        inputDraft: LocalImageInputDraft = LocalImageInputDraft(),
         requestId: String = UUID.randomUUID().toString(),
         onProgress: (LocalImageProgress) -> Unit = {}
     ): LocalImageResult {
@@ -163,30 +141,43 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             activeRequest = request
         }
 
+        var inputDispatch: LocalImageInputDispatch? = null
         try {
+            inputDispatch = inputDispatcher.prepare(requestId, inputDraft, options)
+            val dispatchedOptions = inputDispatch.options
             val prepared = currentPreparation(model.runtime) ?: run {
                 begin(model.runtime)
                 requireNotNull(currentPreparation(model.runtime))
             }
             prepared.ready.await()
+            request.bindingSession = prepared.bindingSession
             if (prepared.cancelRequested) {
                 throw LocalImageWorkerCancelledException()
             }
             if (request.completion.isCompleted) return request.completion.await().consumeResult()
 
-            val service = awaitService()
+            val endpoint = awaitService { session -> request.bindingSession = session }
+            val service = endpoint.service
             if (request.completion.isCompleted) return request.completion.await().consumeResult()
             if (!request.handshake.tryBeginRemoteStart()) throw LocalImageWorkerCancelledException()
 
             val callback = callbackFor(request)
             val accepted = try {
                 service.generate(
-                    LocalImageWorkerProtocol.generateRequest(request.requestId, model, prompt, options),
+                    LocalImageWorkerProtocol.generateRequest(
+                        request.requestId,
+                        model,
+                        prompt,
+                        dispatchedOptions
+                    ),
                     callback
                 )
             } catch (error: RemoteException) {
                 request.handshake.markFinished()
-                handleConnectionLoss("Local image worker call failed: ${error.message.orEmpty()}", bindingDied = false)
+                handleConnectionLoss(
+                    endpoint.session.connection,
+                    "Local image worker call failed: ${error.message.orEmpty()}"
+                )
                 throw LocalImageWorkerDisconnectedException("Local image worker call failed.", error)
             }
             val cancelAfterRegistration = request.handshake.completeRemoteStart(accepted)
@@ -211,8 +202,9 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         } finally {
             request.handshake.markFinished()
             if (!request.watchdogTimedOut) request.watchdogJob?.cancel()
-            request.deliveredOutputPath?.let(::deleteResultIfSafe)
+            request.deliveredOutputPaths.forEach(::deleteResultIfSafe)
             releaseBindingAfterRequest(request, model.runtime)
+            inputDispatch?.directory?.deleteRecursively()
         }
     }
 
@@ -221,18 +213,20 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         val request: ActiveRequest?
         val pendingConnection: CompletableDeferred<ILocalImageWorker>?
         val pendingPreparation: Preparation?
+        val session: BindingSession?
         val shouldUnbind: Boolean
         synchronized(stateLock) {
             if (closed) return
             closed = true
             service = remote
             request = activeRequest
-            pendingConnection = connectionDeferred
+            session = bindingSession
+            pendingConnection = session?.deferred
             pendingPreparation = preparation
-            shouldUnbind = bindingLifecycle.release()
+            shouldUnbind = session?.let { bindingLifecycle.release(it.lease) } == true
             activeRequest = null
             preparation = null
-            connectionDeferred = null
+            bindingSession = null
             unlinkRemoteDeathRecipientLocked()
             remote = null
             remoteBinder = null
@@ -249,8 +243,9 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         pendingConnection?.completeExceptionally(closedError)
         pendingPreparation?.ready?.completeExceptionally(closedError)
         scope.cancel()
-        if (shouldUnbind) runCatching { appContext.unbindService(connection) }
-        cleanupWorkerResults()
+        if (shouldUnbind && session != null) {
+            runCatching { appContext.unbindService(session.connection) }
+        }
     }
 
     private fun callbackFor(request: ActiveRequest): ILocalImageWorkerCallback =
@@ -296,14 +291,14 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                 if (envelope.workerPid > 0) lastWorkerPid = envelope.workerPid
                 if (envelope.workerPid > 0) request.workerPid = envelope.workerPid
                 if (envelope.requestId != request.requestId) {
-                    deleteResultIfSafe(envelope.outputPath)
+                    envelope.outputs.forEach { output -> deleteResultIfSafe(output.outputPath) }
                     request.completion.completeExceptionally(
                         LocalImageWorkerException("Local image worker returned a mismatched request id.")
                     )
                 } else {
-                    request.deliveredOutputPath = envelope.outputPath
+                    request.deliveredOutputPaths = envelope.outputs.map { it.outputPath }
                     if (!request.completion.complete(envelope)) {
-                        deleteResultIfSafe(envelope.outputPath)
+                        envelope.outputs.forEach { output -> deleteResultIfSafe(output.outputPath) }
                     }
                 }
             }
@@ -319,8 +314,17 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                 if (envelope.workerPid > 0) lastWorkerPid = envelope.workerPid
                 if (envelope.workerPid > 0) request.workerPid = envelope.workerPid
                 if (envelope.requestId.isBlank() || envelope.requestId == request.requestId) {
-                    request.completion.completeExceptionally(
+                    val failure = if (envelope.code.equals(
+                            LOCAL_IMAGE_GENERATION_CANCELLED_CODE,
+                            ignoreCase = true
+                        )
+                    ) {
+                        LocalImageWorkerCancelledException()
+                    } else {
                         LocalImageWorkerRemoteException(envelope.code, envelope.message)
+                    }
+                    request.completion.completeExceptionally(
+                        failure
                     )
                 } else {
                     request.completion.completeExceptionally(
@@ -330,69 +334,198 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             }
         }
 
-    private suspend fun awaitService(): ILocalImageWorker {
+    private suspend fun awaitService(
+        onSessionSelected: (BindingSession) -> Unit = {}
+    ): BoundWorker {
+        lateinit var session: BindingSession
+        var immediateService: ILocalImageWorker? = null
+        var shouldBind = false
         synchronized(stateLock) {
             check(!closed) { "Local image worker client is closed." }
-            remote?.takeIf { remoteBinder?.isBinderAlive == true }?.let { return it }
-        }
-
-        val deferred: CompletableDeferred<ILocalImageWorker>
-        val shouldBind: Boolean
-        synchronized(stateLock) {
-            check(!closed) { "Local image worker client is closed." }
-            remote?.takeIf { remoteBinder?.isBinderAlive == true }?.let { return it }
-            deferred = connectionDeferred ?: CompletableDeferred<ILocalImageWorker>().also {
-                connectionDeferred = it
+            val current = bindingSession
+            val aliveRemote = remote?.takeIf { remoteBinder?.isBinderAlive == true }
+            if (current != null) {
+                session = current
+                immediateService = aliveRemote
+            } else {
+                val lease = requireNotNull(bindingLifecycle.issueBind()) {
+                    "Local image worker binding lifecycle has no active session but rejected a bind."
+                }
+                val connection = WorkerServiceConnection(lease)
+                session = BindingSession(
+                    lease = lease,
+                    connection = connection,
+                    deferred = CompletableDeferred()
+                )
+                bindingSession = session
+                shouldBind = true
             }
-            shouldBind = bindingLifecycle.issueBind()
+            // Publish the exact epoch to its owner while the selected session is
+            // still protected by stateLock. A concurrent cancellation can then
+            // release this session instead of losing the bind between selection
+            // and owner publication.
+            onSessionSelected(session)
         }
         if (shouldBind) {
             val bound = runCatching {
                 appContext.bindService(
                     Intent(appContext, LocalImageWorkerService::class.java),
-                    connection,
+                    session.connection,
                     Context.BIND_AUTO_CREATE
                 )
             }.getOrElse { error ->
-                failBinding(error)
+                failBinding(session, error)
                 false
             }
             if (!bound) {
-                failBinding(LocalImageWorkerDisconnectedException("Unable to bind local image worker."))
+                failBinding(
+                    session,
+                    LocalImageWorkerDisconnectedException("Unable to bind local image worker.")
+                )
+            } else if (!isCurrentBindingSession(session)) {
+                // The owner may finish while bindService is in progress. In that
+                // case its earlier unbind can run before Android registers this
+                // connection, so the completing bind attempt must retire itself.
+                session.deferred.completeExceptionally(
+                    LocalImageWorkerDisconnectedException(
+                        "Local image worker binding was superseded before connection completed."
+                    )
+                )
+                runCatching { appContext.unbindService(session.connection) }
             }
         }
-        return deferred.await()
+        return BoundWorker(
+            service = immediateService ?: session.deferred.await(),
+            session = session
+        )
     }
 
-    private fun failBinding(error: Throwable) {
-        val deferred = synchronized(stateLock) {
-            bindingLifecycle.release()
-            connectionDeferred.also { connectionDeferred = null }
+    private fun handleServiceConnected(
+        connection: WorkerServiceConnection,
+        binder: IBinder
+    ) {
+        val service = ILocalImageWorker.Stub.asInterface(binder)
+        val deathRecipient = IBinder.DeathRecipient {
+            handleConnectionLoss(connection, "Local image worker process died.")
         }
-        deferred?.completeExceptionally(remoteFailure(error))
+        try {
+            binder.linkToDeath(deathRecipient, 0)
+        } catch (_: RemoteException) {
+            handleConnectionLoss(
+                connection,
+                "Local image worker process died while connecting."
+            )
+            return
+        }
+
+        val deferred: CompletableDeferred<ILocalImageWorker>?
+        val stale: Boolean
+        synchronized(stateLock) {
+            val current = bindingSession
+            stale = closed || current == null || current.connection !== connection ||
+                !bindingLifecycle.isCurrent(connection.lease)
+            if (stale) {
+                deferred = null
+            } else {
+                unlinkRemoteDeathRecipientLocked()
+                remote = service
+                remoteBinder = binder
+                remoteDeathRecipient = deathRecipient
+                deferred = current.deferred
+            }
+        }
+        if (stale) {
+            runCatching { binder.unlinkToDeath(deathRecipient, 0) }
+            runCatching { appContext.unbindService(connection) }
+            return
+        }
+        deferred?.complete(service)
     }
 
-    private fun handleConnectionLoss(message: String, bindingDied: Boolean) {
+    private fun failBinding(session: BindingSession, error: Throwable) {
+        val shouldFail = synchronized(stateLock) {
+            if (bindingSession !== session || !bindingLifecycle.isCurrent(session.lease)) {
+                false
+            } else {
+                bindingLifecycle.release(session.lease)
+                bindingSession = null
+                unlinkRemoteDeathRecipientLocked()
+                remote = null
+                remoteBinder = null
+                true
+            }
+        }
+        if (shouldFail) session.deferred.completeExceptionally(remoteFailure(error))
+    }
+
+    private fun handleConnectionLoss(
+        connection: WorkerServiceConnection,
+        message: String
+    ) {
         val failure = LocalImageWorkerDisconnectedException(message)
-        val pendingConnection: CompletableDeferred<ILocalImageWorker>?
+        val session: BindingSession
         val active: ActiveRequest?
         val pendingPreparation: Preparation?
-        val shouldUnbind: Boolean
         synchronized(stateLock) {
+            val current = bindingSession
+            if (current == null || current.connection !== connection ||
+                !bindingLifecycle.isCurrent(connection.lease)
+            ) {
+                return
+            }
+            session = current
             unlinkRemoteDeathRecipientLocked()
             remote = null
             remoteBinder = null
-            pendingConnection = connectionDeferred
-            connectionDeferred = null
             active = activeRequest
             pendingPreparation = preparation
             preparation = null
-            shouldUnbind = bindingDied && bindingLifecycle.release()
+            check(bindingLifecycle.release(session.lease)) {
+                "Current local image worker binding session could not be released."
+            }
+            bindingSession = null
         }
-        pendingConnection?.completeExceptionally(failure)
+        session.deferred.completeExceptionally(failure)
         pendingPreparation?.ready?.completeExceptionally(failure)
         active?.completion?.completeExceptionally(failure)
-        if (shouldUnbind) runCatching { appContext.unbindService(connection) }
+        runCatching { appContext.unbindService(session.connection) }
+    }
+
+    /**
+     * A preparation can be cancelled and removed before its coroutine is first scheduled. If that
+     * late coroutine subsequently selects a binding session, it must retire the exact epoch it
+     * selected unless a replacement preparation or active request has already claimed it.
+     */
+    private fun releaseBindingAfterPreparationFailure(
+        candidate: Preparation,
+        error: Throwable
+    ) {
+        val releasedSession = synchronized(stateLock) {
+            val expectedSession = candidate.bindingSession ?: return@synchronized null
+            val currentPreparation = preparation
+            val replacementOwnsSession = currentPreparation
+                ?.takeIf { it !== candidate }
+                ?.bindingSession === expectedSession
+            val activeRequestOwnsSession = activeRequest?.bindingSession === expectedSession
+            if (replacementOwnsSession || activeRequestOwnsSession) {
+                return@synchronized null
+            }
+            if (currentPreparation === candidate) preparation = null
+            if (bindingSession !== expectedSession ||
+                !bindingLifecycle.release(expectedSession.lease)
+            ) {
+                return@synchronized null
+            }
+            bindingSession = null
+            unlinkRemoteDeathRecipientLocked()
+            remote = null
+            remoteBinder = null
+            expectedSession
+        }
+        if (releasedSession != null) {
+            releasedSession.deferred.completeExceptionally(remoteFailure(error))
+            runCatching { appContext.unbindService(releasedSession.connection) }
+        }
     }
 
     /**
@@ -402,16 +535,31 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
      */
     private fun releaseBindingAfterRequest(request: ActiveRequest, runtime: LocalImageRuntime) {
         val pendingConnection: CompletableDeferred<ILocalImageWorker>?
-        val shouldUnbind: Boolean
+        val releasedSession: BindingSession?
         synchronized(stateLock) {
             if (activeRequest !== request) return
-            if (preparation?.runtime == runtime) preparation = null
-            pendingConnection = connectionDeferred
-            connectionDeferred = null
-            shouldUnbind = bindingLifecycle.release()
-            unlinkRemoteDeathRecipientLocked()
-            remote = null
-            remoteBinder = null
+            val prepared = preparation
+            val expectedSession = request.bindingSession ?: prepared
+                ?.takeIf { it.runtime == runtime }
+                ?.bindingSession
+            if (prepared?.runtime == runtime &&
+                (expectedSession == null || prepared.bindingSession === expectedSession)
+            ) {
+                preparation = null
+            }
+            val current = bindingSession
+            releasedSession = if (expectedSession != null && current === expectedSession &&
+                bindingLifecycle.release(expectedSession.lease)
+            ) {
+                bindingSession = null
+                unlinkRemoteDeathRecipientLocked()
+                remote = null
+                remoteBinder = null
+                expectedSession
+            } else {
+                null
+            }
+            pendingConnection = releasedSession?.deferred
         }
 
         pendingConnection?.completeExceptionally(
@@ -419,7 +567,9 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                 "Local image worker request finished before its pending connection completed."
             )
         )
-        if (shouldUnbind) runCatching { appContext.unbindService(connection) }
+        if (releasedSession != null) {
+            runCatching { appContext.unbindService(releasedSession.connection) }
+        }
 
         synchronized(stateLock) {
             if (activeRequest === request) activeRequest = null
@@ -427,10 +577,17 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
     }
 
     private fun cancelRemote(request: ActiveRequest): Boolean {
-        val service = currentRemote() ?: return false
-        return runRemoteCall {
-            service.cancel(LocalImageWorkerProtocol.cancelRequest(request.requestId))
+        val endpoint = currentEndpoint() ?: return false
+        val cancelled = runRemoteCall(endpoint) {
+            endpoint.service.cancel(LocalImageWorkerProtocol.cancelRequest(request.requestId))
         }.getOrElse { false }
+        if (cancelled) {
+            // The worker also publishes a cancellation terminal, but a Binder callback is not a
+            // reliable prerequisite for releasing the caller. Complete locally as soon as the
+            // registered remote request confirms cancellation; the callback remains idempotent.
+            request.completion.completeExceptionally(LocalImageWorkerCancelledException())
+        }
+        return cancelled
     }
 
     private fun startWatchdog(request: ActiveRequest, model: LocalImageModelRecord) {
@@ -479,9 +636,17 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         }
     }
 
-    private fun currentRemote(): ILocalImageWorker? = synchronized(stateLock) {
-        remote?.takeIf { remoteBinder?.isBinderAlive == true }
+    private fun currentEndpoint(): BoundWorker? = synchronized(stateLock) {
+        val session = bindingSession ?: return@synchronized null
+        val service = remote?.takeIf { remoteBinder?.isBinderAlive == true }
+            ?: return@synchronized null
+        BoundWorker(service, session)
     }
+
+    private fun isCurrentBindingSession(session: BindingSession): Boolean =
+        synchronized(stateLock) {
+            !closed && bindingSession === session && bindingLifecycle.isCurrent(session.lease)
+        }
 
     private fun currentPreparation(runtime: LocalImageRuntime): Preparation? = synchronized(stateLock) {
         preparation?.takeIf { it.runtime == runtime }
@@ -491,24 +656,46 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         preparation === candidate
     }
 
-    private fun <T> runRemoteCall(block: () -> T): Result<T> = runCatching(block).onFailure { error ->
+    private fun <T> runRemoteCall(
+        endpoint: BoundWorker,
+        block: () -> T
+    ): Result<T> = runCatching(block).onFailure { error ->
         if (error is RemoteException || error is DeadObjectException) {
-            handleConnectionLoss("Local image worker IPC failed.", bindingDied = false)
+            handleConnectionLoss(
+                endpoint.session.connection,
+                "Local image worker IPC failed."
+            )
         }
     }
 
     private fun LocalImageWorkerProtocol.ResultEnvelope.consumeResult(): LocalImageResult {
         if (workerPid > 0) lastWorkerPid = workerPid
-        val file = validatedResultFile(outputPath)
+        val files = outputs.map { output -> output to validatedResultFile(output.outputPath) }
+        require(files.map { it.second.canonicalPath }.distinct().size == files.size) {
+            "Local image worker returned duplicate output paths."
+        }
         return try {
-            require(file.isFile && file.length() > 0L) { "Local image worker returned an empty result." }
+            val localOutputs = files.map { (output, file) ->
+                require(file.isFile && file.length() > 0L) {
+                    "Local image worker returned an empty result at index ${output.index}."
+                }
+                LocalImageOutput(
+                    bytes = file.readBytes(),
+                    mimeType = output.mimeType,
+                    seed = output.seed,
+                    index = output.index
+                )
+            }
+            val first = localOutputs.first()
             LocalImageResult(
-                bytes = file.readBytes(),
-                mimeType = mimeType,
-                executionMetadataJson = executionMetadataJson
+                bytes = first.bytes,
+                mimeType = first.mimeType,
+                executionMetadataJson = executionMetadataJson,
+                seed = first.seed,
+                outputs = localOutputs
             )
         } finally {
-            runCatching { file.delete() }
+            files.forEach { (_, file) -> runCatching { file.delete() } }
         }
     }
 
@@ -523,12 +710,6 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
 
     private fun deleteResultIfSafe(path: String) {
         runCatching { validatedResultFile(path).delete() }
-    }
-
-    private fun cleanupWorkerResults() {
-        resultDirectory().listFiles()?.forEach { file ->
-            if (file.isFile) runCatching { file.delete() }
-        }
     }
 
     private fun resultDirectory(): File =
@@ -553,14 +734,28 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             else -> error
         }
 
-    private class Preparation(val runtime: LocalImageRuntime) {
+    private inner class BindingSession(
+        val lease: LocalImageWorkerBindingLifecycle.Session,
+        val connection: WorkerServiceConnection,
+        val deferred: CompletableDeferred<ILocalImageWorker>
+    )
+
+    private inner class BoundWorker(
+        val service: ILocalImageWorker,
+        val session: BindingSession
+    )
+
+    private inner class Preparation(val runtime: LocalImageRuntime) {
         val ready = CompletableDeferred<Unit>()
 
         @Volatile
         var cancelRequested: Boolean = false
+
+        @Volatile
+        var bindingSession: BindingSession? = null
     }
 
-    private class ActiveRequest(
+    private inner class ActiveRequest(
         val requestId: String,
         val runtime: LocalImageRuntime,
         val requestedSteps: Int?,
@@ -572,7 +767,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         val handshake = LocalImageStartHandshake()
 
         @Volatile
-        var deliveredOutputPath: String? = null
+        var deliveredOutputPaths: List<String> = emptyList()
 
         @Volatile
         var workerPid: Int = -1
@@ -591,6 +786,9 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
 
         @Volatile
         var watchdogJob: Job? = null
+
+        @Volatile
+        var bindingSession: BindingSession? = null
     }
 
     companion object {
@@ -604,19 +802,28 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
  * with their own connection-state lock.
  */
 internal class LocalImageWorkerBindingLifecycle {
-    var bindIssued: Boolean = false
-        private set
+    class Session internal constructor(val epoch: Long)
 
-    fun issueBind(): Boolean {
-        if (bindIssued) return false
-        bindIssued = true
-        return true
+    private var nextEpoch: Long = 0L
+    private var activeSession: Session? = null
+
+    val bindIssued: Boolean
+        get() = activeSession != null
+
+    fun issueBind(): Session? {
+        if (activeSession != null) return null
+        check(nextEpoch < Long.MAX_VALUE) { "Local image worker binding epoch exhausted." }
+        val session = Session(++nextEpoch)
+        activeSession = session
+        return session
     }
 
-    fun release(): Boolean {
-        val shouldUnbind = bindIssued
-        bindIssued = false
-        return shouldUnbind
+    fun isCurrent(session: Session): Boolean = activeSession === session
+
+    fun release(session: Session): Boolean {
+        if (activeSession !== session) return false
+        activeSession = null
+        return true
     }
 }
 

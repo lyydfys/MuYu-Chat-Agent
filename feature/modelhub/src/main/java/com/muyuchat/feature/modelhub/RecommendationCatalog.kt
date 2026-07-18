@@ -147,10 +147,14 @@ internal fun recommendationVerificationLine(
         "验证状态：已有骁龙 8 Elite 正式文本回归证据；兼容设备默认开放并以真实运行结果为准"
     model.id == "cyberrealisticxl_qnn228" ->
         "工程状态：已切换完整 1024×1024 包；安装后执行 UNet/VAE 双图 native smoke"
-    model.id in VERIFIED_QNN_SD15_EXPERIMENT_IDS ->
+    model.id == "realisticvisionhyper_sd15_qnn228" ->
+        "验证状态：默认 8-step、CFG 2.0；产品 worker 三次冷启动和三次复用已通过"
+    model.id in VERIFIED_QNN_SD15_STANDARD_IDS ->
         "验证状态：20-step 产品 worker 三次冷启动和三次复用已通过"
     model.id == "sd15_mnn_512_quality" ->
         "验证状态：direct + OpenCL 产品链路可出图；多提示词质量仍不稳定"
+    model.id == "qualcomm_controlnet_canny_gen5_qnn" ->
+        "工程状态：Canny、ControlNet residual 与强度链路已接线；首次使用以真实 native graph 结果为准"
     model.id.startsWith("gemma4_") ->
         "验证状态：文本隔离方案待产品验收；完整图文包兼容性待验证"
     model.status == RecommendedModelStatus.RECOMMENDED ->
@@ -168,8 +172,7 @@ private val TEXT_VERIFIED_MNN_MODEL_IDS = setOf(
     "qwen35_9b_q4"
 )
 
-private val VERIFIED_QNN_SD15_EXPERIMENT_IDS = setOf(
-    "realisticvisionhyper_sd15_qnn228",
+private val VERIFIED_QNN_SD15_STANDARD_IDS = setOf(
     "dreamshaper_sd15_qnn228"
 )
 

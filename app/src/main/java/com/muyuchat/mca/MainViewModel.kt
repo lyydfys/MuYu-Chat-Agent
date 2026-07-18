@@ -5,12 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.LinearGradient
-import android.graphics.Paint
-import android.graphics.Shader
-import android.graphics.Typeface
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -25,6 +19,8 @@ import com.muyuchat.api.local.LocalApiBusyState
 import com.muyuchat.api.local.LocalApiControlPlane
 import com.muyuchat.api.local.LocalApiPreflightRequest
 import com.muyuchat.api.local.LocalApiPreflightResult
+import com.muyuchat.api.local.ImageGenerationApiContract
+import com.muyuchat.api.local.ImageGenerationProviderException
 import com.muyuchat.api.local.McaLoopbackServer
 import com.muyuchat.core.advisor.AgentAdvisor
 import com.muyuchat.core.advisor.AgentDecisionLog
@@ -206,6 +202,7 @@ data class ImageAssetRecord(
     val sizeBytes: Long = 0L,
     val width: Int = 0,
     val height: Int = 0,
+    val generationMetadataJson: String = "",
     val chatSessionId: String? = null,
     val projectId: String? = null
 ) {
@@ -257,21 +254,98 @@ data class FileAssetRecord(
     }
 }
 
-enum class ImageGenerationStatusRecord(val label: String, val failed: Boolean = false) {
+enum class ImageGenerationStatusRecord(
+    val label: String,
+    val failed: Boolean = false,
+    val terminal: Boolean = false
+) {
     QUEUED("排队"),
     GENERATING("生成中"),
-    DONE("完成"),
-    FAILED("失败", failed = true)
+    DONE("完成", terminal = true),
+    CANCELLED("已取消", terminal = true),
+    FAILED("失败", failed = true, terminal = true)
+}
+
+data class ImageGenerationJobSpec(
+    val prompt: String,
+    val backend: ImageBackend,
+    val localModelSnapshot: LocalImageModelRecord? = null,
+    val cloudConfigSnapshot: CloudApiConfig? = null,
+    val modelId: String,
+    val modelName: String,
+    val inputDraft: LocalImageInputDraft,
+    val options: LocalImageGenerationOptions,
+    val chatSessionId: String? = null
+) {
+    init {
+        require(prompt.isNotBlank()) { "Image generation job prompt must not be blank." }
+        require(modelId.isNotBlank()) { "Image generation job modelId must not be blank." }
+        require(modelName.isNotBlank()) { "Image generation job modelName must not be blank." }
+        require(
+            (backend == ImageBackend.LOCAL && localModelSnapshot != null && cloudConfigSnapshot == null) ||
+                (backend == ImageBackend.CLOUD && cloudConfigSnapshot != null && localModelSnapshot == null)
+        ) { "Image generation job backend must have exactly one matching model snapshot." }
+    }
+
+    fun toHistoryMetadata(nativeExecutionJson: String = ""): ImageGenerationHistoryMetadata =
+        ImageGenerationHistoryMetadata(
+            backend = backend,
+            modelId = modelId,
+            modelName = modelName,
+            requestPrompt = prompt,
+            options = if (backend == ImageBackend.LOCAL) {
+                options.copy(
+                    taskMode = inputDraft.taskMode,
+                    strength = inputDraft.strength,
+                    controlStrength = inputDraft.controlStrength
+                )
+            } else {
+                LocalImageGenerationOptions()
+            },
+            inputDraft = if (backend == ImageBackend.LOCAL) inputDraft else LocalImageInputDraft(),
+            nativeExecutionJson = nativeExecutionJson
+        )
 }
 
 data class ImageGenerationJobRecord(
     val id: String,
     val prompt: String,
     val status: ImageGenerationStatusRecord,
+    val backend: ImageBackend,
+    val modelId: String? = null,
+    val modelName: String = "",
+    val spec: ImageGenerationJobSpec? = null,
     val imageAssetId: String? = null,
+    val previewUriString: String? = null,
+    val previewMode: String = "",
+    val previewStep: Int = 0,
+    val previewRevision: Long = 0L,
+    val previewWidth: Int = 0,
+    val previewHeight: Int = 0,
     val message: String = "",
     val startedAtMillis: Long = System.currentTimeMillis()
 )
+
+private data class PublishedLocalImagePreview(
+    val uriString: String,
+    val mode: String,
+    val step: Int,
+    val revision: Long,
+    val width: Int,
+    val height: Int
+)
+
+private fun LocalImageModelRecord.supportsLiveProjectionPreview(): Boolean =
+    runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP && family in setOf(
+        LocalImageModelFamily.SD15,
+        LocalImageModelFamily.SD21,
+        LocalImageModelFamily.SDXL,
+        LocalImageModelFamily.SD_TURBO,
+        LocalImageModelFamily.Z_IMAGE,
+        LocalImageModelFamily.FLUX,
+        LocalImageModelFamily.QWEN_IMAGE,
+        LocalImageModelFamily.LONGCAT_IMAGE
+    )
 
 private data class AttachmentImportResult(
     val name: String,
@@ -316,13 +390,18 @@ internal fun currentQairtBundleSha256(
 
 /** Verification metadata is diagnostic only; structural readiness is the use gate. */
 internal fun LocalImageModelRecord.localImageReadinessForUi(
-    qnnVerificationCurrent: Boolean?
+    qnnVerificationCurrent: Boolean?,
+    imageCapabilities: LocalImageUiCapabilitiesSnapshot? = null
 ): String? = localImageReadinessMessage()
+    ?: (imageCapabilities ?: imageCapabilitiesForUi()).readinessError
 
 internal fun LocalImageModelRecord.localImageReadinessLabelForUi(
-    qnnVerificationCurrent: Boolean?
+    qnnVerificationCurrent: Boolean?,
+    imageCapabilities: LocalImageUiCapabilitiesSnapshot? = null
 ): String =
-    if (runtime == LocalImageRuntime.QNN_HTP && qnnVerificationCurrent != true) {
+    if ((imageCapabilities ?: imageCapabilitiesForUi()).readinessError != null) {
+        "配置错误"
+    } else if (runtime == LocalImageRuntime.QNN_HTP && qnnVerificationCurrent != true) {
         "NPU 可直接尝试"
     } else {
         localImageReadinessLabel()
@@ -583,11 +662,46 @@ private sealed interface VisionBundleDownloadResult {
     ) : VisionBundleDownloadResult
 }
 
+internal fun writeImageAssetBytesAtomically(
+    directory: File,
+    fileName: String,
+    bytes: ByteArray
+): File {
+    require(bytes.isNotEmpty()) { "Generated image bytes must not be empty." }
+    require(fileName.isNotBlank() && fileName == File(fileName).name) {
+        "Generated image file name must be a safe leaf name."
+    }
+    val root = directory.canonicalFile
+    require(root.isDirectory || root.mkdirs()) {
+        "Unable to create the image asset directory."
+    }
+    val output = File(root, fileName).canonicalFile
+    require(output.parentFile == root) { "Generated image path escaped the image asset directory." }
+    check(!output.exists()) { "Generated image destination already exists." }
+    val temp = File(root, ".$fileName.${UUID.randomUUID()}.part")
+    try {
+        temp.outputStream().use { stream ->
+            stream.write(bytes)
+            stream.flush()
+            stream.fd.sync()
+        }
+        check(temp.isFile && temp.length() == bytes.size.toLong()) {
+            "Generated image staging write was incomplete."
+        }
+        check(temp.renameTo(output)) { "Unable to atomically publish the generated image." }
+        return output
+    } finally {
+        runCatching { temp.delete() }
+    }
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val REST_PORT = 11435
         private const val CLOUD_REASONING_LOCKED_MESSAGE = "云端模型的思考模式由服务商和具体模型决定，MCA 会默认按开启处理；如需关闭或调整，请在云端模型配置中设置相关参数。"
         private const val LOCAL_IMAGE_GENERATION_WATCHDOG_MS = 8 * 60 * 1000L
+        private const val LOCAL_IMAGE_UI_PREVIEW_DIRECTORY = "local_image_ui_previews"
+        private const val MAX_LOCAL_IMAGE_PREVIEW_BYTES = 16L * 1024L * 1024L
         private const val ASSISTANT_MODEL_MODE_FOLLOW_CURRENT = "follow_current"
         private const val ASSISTANT_MODEL_MODE_LOCAL = "local"
         private const val ASSISTANT_MODEL_MODE_CLOUD = "cloud"
@@ -691,8 +805,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var activeModelForRuntimeProfile: ModelManifest? = null
     private val localApiIdempotencyJournalLock = Any()
     private val pendingRuntimeRecoveries = linkedMapOf<String, RuntimeRecoveryPlan>()
-    private var activeImageGenerationJobId: String? = null
-    private var activeImageGenerationBackend: ImageBackend? = null
+    @Volatile private var activeImageGenerationJobId: String? = null
+    @Volatile private var activeImageGenerationBackend: ImageBackend? = null
+    @Volatile private var activeImageGenerationModelId: String? = null
+    @Volatile private var activeLocalApiImageModelId: String? = null
+    private val localImageGenerationCoordinator = LocalImageGenerationCoordinator()
 
     private val _uiState = MutableStateFlow(
         MainUiState(
@@ -740,6 +857,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val uiState = _uiState.asStateFlow()
 
     init {
+        runCatching {
+            File(getApplication<Application>().cacheDir, LOCAL_IMAGE_UI_PREVIEW_DIRECTORY)
+                .deleteRecursively()
+        }
         LocalApiRuntime.engine = engine
         LocalApiRuntime.streamChatWithContextProvider = { request, executionContext ->
             val effectiveRequest = if (
@@ -1373,23 +1494,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         qnnVerificationCurrentByModelId: Map<String, Boolean>
     ): Boolean = localImageReadinessForUi(qnnVerificationCurrentByModelId[id]) == null
 
-    private fun LocalImageModelRecord.isCertifiedForAutomaticSelection(
-        qnnVerificationCurrentByModelId: Map<String, Boolean>
-    ): Boolean = isReadyForManagedSelection(qnnVerificationCurrentByModelId) &&
-        isCertifiedForAutomaticLocalImageSelection()
-
     private fun selectedReadyLocalImageModelId(
         models: List<LocalImageModelRecord>,
         qnnVerificationCurrentByModelId: Map<String, Boolean>,
         preferredId: String?
-    ): String? = preferredId
-        ?.takeIf { id ->
-            models.any { model ->
-                model.id == id && model.isReadyForManagedSelection(qnnVerificationCurrentByModelId)
-            }
-        }
-        ?: models.firstOrNull { it.isCertifiedForAutomaticSelection(qnnVerificationCurrentByModelId) }?.id
-        ?: models.firstOrNull { it.isReadyForManagedSelection(qnnVerificationCurrentByModelId) }?.id
+    ): String? {
+        // Keep the verification map in the call shape for UI refresh bookkeeping, but never use
+        // verification/certification as automatic-selection admission.
+        @Suppress("UNUSED_VARIABLE")
+        val advisoryVerification = qnnVerificationCurrentByModelId
+        return selectStructurallyReadyLocalImageModelId(models, preferredId)
+    }
 
     /** Refreshes product-facing readiness; persisted verification remains advisory. */
     private fun refreshManagedRuntimeReadiness() {
@@ -1467,7 +1582,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 AttachmentImportResult(name, file.text, file.truncated, fileAsset = file)
             }
             result.onSuccess { imported ->
-                var imagesToPersist: List<ImageAssetRecord>? = null
+                imported.imageAsset?.let { image ->
+                    val persistenceError = runCatching {
+                        chatSessionStore.upsertImages(listOf(image))
+                    }.exceptionOrNull()
+                    if (persistenceError != null) {
+                        image.deleteLocalCopy()
+                        fail("图片库保存失败：${persistenceError.message ?: "数据库提交失败"}")
+                        return@onSuccess
+                    }
+                }
                 var filesToPersist: List<FileAssetRecord>? = null
                 _uiState.update { state ->
                     val attachment = buildString {
@@ -1488,7 +1612,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val updatedFiles = imported.fileAsset?.let { file ->
                         (listOf(file) + state.files.filterNot { it.id == file.id }).sortedFilesForLibrary()
                     }
-                    if (updatedImages != null) imagesToPersist = updatedImages
                     if (updatedFiles != null) filesToPersist = updatedFiles
                     state.copy(
                         input = state.input + attachment,
@@ -1497,7 +1620,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         statusMessage = if (imported.imageAsset != null) "已添加图片：${imported.name}" else "已添加文件：${imported.name}"
                     )
                 }
-                imagesToPersist?.let { persistImages(it) }
                 filesToPersist?.let { persistFiles(it) }
             }.onFailure { error ->
                 _uiState.update { it.copy(statusMessage = error.message ?: "文件上传失败") }
@@ -1553,8 +1675,104 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         persistFiles(emptyList())
     }
 
-    fun generateImageAsset(prompt: String) {
-        val cleanPrompt = prompt.trim().take(600)
+    fun generateImageAsset(
+        prompt: String,
+        inputDraft: LocalImageInputDraft = LocalImageInputDraft(),
+        options: LocalImageGenerationOptions = LocalImageGenerationOptions()
+    ) {
+        enqueueImageGeneration(
+            prompt = prompt,
+            inputDraft = inputDraft,
+            options = options,
+            jobSnapshot = null
+        )
+    }
+
+    fun retryImageGeneration(jobId: String) {
+        val sourceJob = _uiState.value.imageJobs.firstOrNull { it.id == jobId }
+        val snapshot = sourceJob?.spec
+        if (sourceJob == null || snapshot == null) {
+            _uiState.update { it.copy(statusMessage = "原图片任务参数已不可用，无法按原任务重试。") }
+            return
+        }
+        if (!sourceJob.status.terminal) {
+            _uiState.update { it.copy(statusMessage = "当前图片任务仍在运行，无需重复提交。") }
+            return
+        }
+        enqueueImageGeneration(
+            prompt = snapshot.prompt,
+            inputDraft = snapshot.inputDraft,
+            options = snapshot.options,
+            jobSnapshot = snapshot
+        )
+    }
+
+    fun recreateImageAsset(imageId: String) {
+        val state = _uiState.value
+        val asset = state.images.firstOrNull { it.id == imageId }
+        val history = ImageGenerationHistoryMetadata.fromJsonOrNull(asset?.generationMetadataJson)
+        if (asset == null || history == null) {
+            _uiState.update { it.copy(statusMessage = "这张图片没有可复现的完整生成参数。") }
+            return
+        }
+        val snapshot = when (history.backend) {
+            ImageBackend.LOCAL -> {
+                val model = state.localImageModels.firstOrNull { it.id == history.modelId }
+                if (model == null) {
+                    _uiState.update {
+                        it.copy(statusMessage = "原本地模型已删除；重新导入同一模型后才能按原参数生成。")
+                    }
+                    return
+                }
+                ImageGenerationJobSpec(
+                    prompt = history.requestPrompt,
+                    backend = ImageBackend.LOCAL,
+                    localModelSnapshot = model,
+                    modelId = model.id,
+                    modelName = history.modelName,
+                    inputDraft = history.inputDraft,
+                    options = history.options,
+                    chatSessionId = asset.chatSessionId
+                )
+            }
+            ImageBackend.CLOUD -> {
+                val config = state.cloudModels
+                    .firstOrNull { it.id == history.modelId && it.kind == CloudModelKind.IMAGE }
+                    ?.toImageConfig()
+                    ?.normalized()
+                if (config == null) {
+                    _uiState.update {
+                        it.copy(statusMessage = "原云端图片模型已移除；恢复同一连接后才能重新生成。")
+                    }
+                    return
+                }
+                ImageGenerationJobSpec(
+                    prompt = history.requestPrompt,
+                    backend = ImageBackend.CLOUD,
+                    cloudConfigSnapshot = config,
+                    modelId = history.modelId,
+                    modelName = history.modelName,
+                    inputDraft = LocalImageInputDraft(),
+                    options = LocalImageGenerationOptions(),
+                    chatSessionId = asset.chatSessionId
+                )
+            }
+        }
+        enqueueImageGeneration(
+            prompt = snapshot.prompt,
+            inputDraft = snapshot.inputDraft,
+            options = snapshot.options,
+            jobSnapshot = snapshot
+        )
+    }
+
+    private fun enqueueImageGeneration(
+        prompt: String,
+        inputDraft: LocalImageInputDraft,
+        options: LocalImageGenerationOptions,
+        jobSnapshot: ImageGenerationJobSpec?
+    ) {
+        val cleanPrompt = (jobSnapshot?.prompt ?: prompt).trim().take(600)
         if (cleanPrompt.isBlank()) {
             _uiState.update { it.copy(statusMessage = "请输入图片描述") }
             return
@@ -1563,14 +1781,84 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(statusMessage = "已有图片生成任务正在运行，请先停止当前任务") }
             return
         }
-        val jobId = "image-${UUID.randomUUID()}"
-        val requestedBackend = _uiState.value.selectedImageBackend
+        val jobId = "ui-img-${UUID.randomUUID()}"
+        val enqueueState = _uiState.value
+        val requestedBackend = jobSnapshot?.backend ?: enqueueState.selectedImageBackend
+        val requestedLocalModel = if (requestedBackend == ImageBackend.LOCAL) {
+            jobSnapshot?.localModelSnapshot ?: enqueueState.selectedLocalImageModel()
+        } else {
+            null
+        }
+        val requestedCloudConfig = if (requestedBackend == ImageBackend.CLOUD) {
+            jobSnapshot?.cloudConfigSnapshot ?: enqueueState.selectedImageCloudConfig()?.normalized()
+        } else {
+            null
+        }
+        if (requestedBackend == ImageBackend.LOCAL && requestedLocalModel == null) {
+            _uiState.update { it.copy(statusMessage = "请先在模型管理的本地页导入并选择图像生成引擎。") }
+            return
+        }
+        if (requestedBackend == ImageBackend.CLOUD && requestedCloudConfig == null) {
+            _uiState.update { it.copy(statusMessage = "请先在模型管理的云端页接入并选择图像生成模型。") }
+            return
+        }
+        val requestedModelId = jobSnapshot?.modelId
+            ?: requestedLocalModel?.id
+            ?: enqueueState.selectedCloudImageModelId
+        val requestedModelName = jobSnapshot?.modelName
+            ?: requestedLocalModel?.displayName
+            ?: requestedCloudConfig?.displayName?.takeIf(String::isNotBlank)
+            ?: requestedCloudConfig?.imageModel.orEmpty()
+        val requestedChatSessionId = jobSnapshot?.chatSessionId ?: enqueueState.activeChatSessionId
+        val baseOptions = jobSnapshot?.options ?: options
+        val queuedOptions = if (
+            requestedBackend == ImageBackend.LOCAL &&
+            requestedLocalModel?.supportsLiveProjectionPreview() == true &&
+            baseOptions.preview == null
+        ) {
+            baseOptions.copy(
+                preview = LocalImagePreviewOptions(
+                    interval = 1,
+                    mode = LocalImagePreviewMode.PROJECTION
+                )
+            )
+        } else {
+            baseOptions
+        }
+        val queuedInputDraft = jobSnapshot?.inputDraft ?: inputDraft
+        val queuedJobSpec = jobSnapshot ?: ImageGenerationJobSpec(
+            prompt = cleanPrompt,
+            backend = requestedBackend,
+            localModelSnapshot = requestedLocalModel,
+            cloudConfigSnapshot = requestedCloudConfig,
+            modelId = requireNotNull(requestedModelId) { "The queued image model id is missing." },
+            modelName = requestedModelName,
+            inputDraft = queuedInputDraft,
+            options = queuedOptions,
+            chatSessionId = requestedChatSessionId
+        )
+        val generationLease = localImageGenerationCoordinator.tryAcquire(jobId)
+        if (generationLease == null) {
+            _uiState.update {
+                it.copy(statusMessage = "已有 UI 或 Local API 图片任务正在运行，请等待完成或先停止当前任务")
+            }
+            return
+        }
         activeImageGenerationJobId = jobId
         activeImageGenerationBackend = requestedBackend
-        if (requestedBackend == ImageBackend.LOCAL) {
-            _uiState.value.selectedLocalImageModel()?.let { model ->
-                localImageWorkerClient.begin(model.runtime)
+        activeImageGenerationModelId = requestedModelId
+        val prepareError = runCatching {
+            requestedLocalModel?.let { model -> localImageWorkerClient.begin(model.runtime) }
+        }.exceptionOrNull()
+        if (prepareError != null) {
+            localImageGenerationCoordinator.release(generationLease)
+            activeImageGenerationJobId = null
+            activeImageGenerationBackend = null
+            activeImageGenerationModelId = null
+            _uiState.update {
+                it.copy(statusMessage = "本地生图 worker 准备失败：${prepareError.message ?: "未知错误"}")
             }
+            return
         }
         _uiState.update { state ->
             state.copy(
@@ -1580,6 +1868,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             id = jobId,
                             prompt = cleanPrompt,
                             status = ImageGenerationStatusRecord.QUEUED,
+                            backend = requestedBackend,
+                            modelId = requestedModelId,
+                            modelName = requestedModelName,
+                            spec = queuedJobSpec,
                             message = if (requestedBackend == ImageBackend.LOCAL) "等待本地生图" else "等待云端生图"
                         )
                     ) + state.imageJobs
@@ -1601,17 +1893,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (requestedBackend == ImageBackend.LOCAL) {
                     startLocalImageGenerationWatchdog(jobId)
                 }
-                val image = runCatching {
+                val generatedImages = runCatching {
                     when (requestedBackend) {
                         ImageBackend.LOCAL -> {
-                            val model = _uiState.value.selectedLocalImageModel()
-                                ?: error("请先在模型管理的本地页导入并选择图像生成引擎。")
+                            val model = requireNotNull(requestedLocalModel) {
+                                "The queued local image model snapshot is missing."
+                            }
                             createLocalGeneratedImageAsset(
+                                requestId = jobId,
                                 prompt = cleanPrompt,
                                 model = model,
-                                chatSessionId = _uiState.value.activeChatSessionId,
+                                options = queuedOptions,
+                                inputDraft = queuedInputDraft,
+                                chatSessionId = requestedChatSessionId,
+                                generationMetadata = queuedJobSpec.toHistoryMetadata(),
                                 onProgress = { progress ->
                                     val message = progress.toImageGenerationMessage()
+                                    val publishedPreview = publishLocalImagePreview(jobId, progress)
                                     _uiState.update { state ->
                                         val job = state.imageJobs.firstOrNull { it.id == jobId }
                                         if (job?.status == ImageGenerationStatusRecord.GENERATING) {
@@ -1619,7 +1917,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                                 imageJobs = state.imageJobs.updateImageJob(
                                                     jobId,
                                                     ImageGenerationStatusRecord.GENERATING,
-                                                    message
+                                                    message,
+                                                    preview = publishedPreview
                                                 )
                                             )
                                         } else {
@@ -1630,44 +1929,100 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             )
                         }
                         ImageBackend.CLOUD -> {
-                            val imageConfig = _uiState.value.selectedImageCloudConfig()
-                                ?: error("请先在模型管理的云端页接入并选择图像生成模型。")
-                            createCloudGeneratedImageAsset(
-                                prompt = cleanPrompt,
-                                config = imageConfig.normalized(),
-                                chatSessionId = _uiState.value.activeChatSessionId
+                            require(queuedInputDraft.taskMode == LocalImageTaskMode.TEXT_TO_IMAGE) {
+                                "The selected cloud image connector does not implement ${queuedInputDraft.taskMode.wireName}; no request was sent."
+                            }
+                            require(queuedOptions.clipSkip == null &&
+                                queuedOptions.vaeTiling == null &&
+                                queuedOptions.preview == null
+                            ) {
+                                "The selected cloud image connector does not implement local advanced image controls."
+                            }
+                            val imageConfig = requireNotNull(requestedCloudConfig) {
+                                "The queued cloud image model snapshot is missing."
+                            }
+                            listOf(
+                                createCloudGeneratedImageAsset(
+                                    prompt = cleanPrompt,
+                                    config = imageConfig,
+                                    chatSessionId = requestedChatSessionId,
+                                    generationMetadata = queuedJobSpec.toHistoryMetadata()
+                                )
                             )
                         }
                     }
                 }.getOrElse { error ->
-                    val message = error.message ?: "图片生成模型调用失败"
+                    val cancelled = error is CancellationException ||
+                        error is LocalImageWorkerCancelledException
+                    val message = if (cancelled) {
+                        "已取消图片生成"
+                    } else {
+                        error.message ?: "图片生成模型调用失败"
+                    }
                     _uiState.update { state ->
                         state.copy(
-                            imageJobs = state.imageJobs.updateImageJob(jobId, ImageGenerationStatusRecord.FAILED, message),
-                            statusMessage = "图片生成失败：$message"
+                            imageJobs = state.imageJobs.updateImageJob(
+                                jobId,
+                                if (cancelled) {
+                                    ImageGenerationStatusRecord.CANCELLED
+                                } else {
+                                    ImageGenerationStatusRecord.FAILED
+                                },
+                                message
+                            ),
+                            statusMessage = if (cancelled) message else "图片生成失败：$message"
                         )
                     }
                     return@launch
                 }
-                var imagesToPersist: List<ImageAssetRecord> = emptyList()
+                val persistenceError = runCatching {
+                    chatSessionStore.upsertImages(generatedImages)
+                }.exceptionOrNull()
+                if (persistenceError != null) {
+                    generatedImages.forEach(ImageAssetRecord::deleteLocalCopy)
+                    val message = persistenceError.message ?: "图片库数据库提交失败"
+                    _uiState.update { state ->
+                        state.copy(
+                            imageJobs = state.imageJobs.updateImageJob(
+                                jobId,
+                                ImageGenerationStatusRecord.FAILED,
+                                message
+                            ),
+                            statusMessage = "图片生成完成，但保存失败：$message"
+                        )
+                    }
+                    return@launch
+                }
                 _uiState.update { state ->
-                    imagesToPersist = (listOf(image) + state.images).sortedImagesForLibrary()
+                    val committedImages = (
+                        generatedImages + state.images.filterNot { existing ->
+                            generatedImages.any { generated -> generated.id == existing.id }
+                        }
+                    ).sortedImagesForLibrary()
                     state.copy(
-                        images = imagesToPersist,
+                        images = committedImages,
                         imageJobs = state.imageJobs.updateImageJob(
                             jobId,
                             ImageGenerationStatusRecord.DONE,
-                            "已保存到图片库",
-                            image.id
+                            if (generatedImages.size == 1) "已保存到图片库" else "已保存 ${generatedImages.size} 张图片",
+                            generatedImages.first().id
                         ),
-                        statusMessage = "已生成图片并保存到图片库：${image.name}"
+                        statusMessage = if (generatedImages.size == 1) {
+                            "已生成图片并保存到图片库：${generatedImages.first().name}"
+                        } else {
+                            "已生成 ${generatedImages.size} 张图片并保存到图片库"
+                        }
                     )
                 }
-                persistImages(imagesToPersist)
             } finally {
+                cleanupLocalImagePreviews(jobId)
+                check(localImageGenerationCoordinator.release(generationLease)) {
+                    "UI image generation lease was replaced before request completion."
+                }
                 if (activeImageGenerationJobId == jobId) {
                     activeImageGenerationJobId = null
                     activeImageGenerationBackend = null
+                    activeImageGenerationModelId = null
                 }
                 imageGenerationJob = null
             }
@@ -1710,7 +2065,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             if (localGeneration && nativeCancelRequested) {
                                 ImageGenerationStatusRecord.GENERATING
                             } else {
-                                ImageGenerationStatusRecord.FAILED
+                                ImageGenerationStatusRecord.CANCELLED
                             },
                             message
                         ),
@@ -1730,7 +2085,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         state.copy(
                             imageJobs = state.imageJobs.updateImageJob(
                                 working.id,
-                                ImageGenerationStatusRecord.FAILED,
+                                ImageGenerationStatusRecord.CANCELLED,
                                 "已停止图片生成"
                             ),
                             statusMessage = "已停止图片生成"
@@ -1740,7 +2095,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
-            activeImageGenerationJobId = null
         }
     }
 
@@ -1771,16 +2125,97 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun deleteImageAsset(imageId: String) {
-        var removed: ImageAssetRecord? = null
-        var imagesToPersist: List<ImageAssetRecord> = emptyList()
-        _uiState.update { state ->
-            removed = state.images.firstOrNull { it.id == imageId }
-            imagesToPersist = state.images.filterNot { it.id == imageId }
-            state.copy(images = imagesToPersist, statusMessage = "已从图片库移除：${removed?.name ?: "图片"}")
+    private fun publishLocalImagePreview(
+        jobId: String,
+        progress: LocalImageProgress
+    ): PublishedLocalImagePreview? = runCatching {
+        if (progress.previewRevision <= 0L || progress.previewPath.isBlank()) return@runCatching null
+        val currentRevision = _uiState.value.imageJobs
+            .firstOrNull { it.id == jobId }
+            ?.previewRevision
+            ?: 0L
+        if (progress.previewRevision <= currentRevision) return@runCatching null
+        require(progress.previewMimeType == "image/png") {
+            "Native image preview must be a PNG."
         }
-        removed?.deleteLocalCopy()
-        persistImages(imagesToPersist)
+        require(progress.previewMode in setOf("projection", "tae", "vae")) {
+            "Native image preview reported an unknown mode."
+        }
+        require(
+            progress.previewStep > 0 && progress.previewWidth > 0 &&
+                progress.previewHeight > 0 && progress.previewFrameCount > 0 &&
+                !progress.previewNoisy
+        ) { "Native image preview metadata is incomplete." }
+
+        val app = getApplication<Application>()
+        val cacheRoot = app.cacheDir.canonicalFile
+        val source = File(progress.previewPath).canonicalFile
+        require(
+            source.isFile && source.path.startsWith(cacheRoot.path + File.separator) &&
+                ".preview-" in source.name && source.length() in 1..MAX_LOCAL_IMAGE_PREVIEW_BYTES
+        ) { "Native image preview path is not a bounded app-cache file." }
+        val bytes = source.readBytes()
+        require(bytes.size.toLong() == source.length()) {
+            "Native image preview changed while it was being copied."
+        }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        require(
+            bounds.outWidth == progress.previewWidth && bounds.outHeight == progress.previewHeight
+        ) { "Native image preview dimensions do not match the decoded PNG." }
+
+        val root = File(cacheRoot, LOCAL_IMAGE_UI_PREVIEW_DIRECTORY).canonicalFile
+        require(root.isDirectory || root.mkdirs()) { "Unable to create the image preview directory." }
+        val requestToken = jobId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(64)
+        val requestDir = File(root, requestToken).canonicalFile
+        require(requestDir.parentFile == root && (requestDir.isDirectory || requestDir.mkdirs())) {
+            "Unable to create the request preview directory."
+        }
+        val fileName = "preview-${progress.previewRevision}.png"
+        val published = File(requestDir, fileName).takeIf(File::isFile)
+            ?: writeImageAssetBytesAtomically(requestDir, fileName, bytes)
+        PublishedLocalImagePreview(
+            uriString = Uri.fromFile(published).toString(),
+            mode = progress.previewMode,
+            step = progress.previewStep,
+            revision = progress.previewRevision,
+            width = progress.previewWidth,
+            height = progress.previewHeight
+        )
+    }.getOrNull()
+
+    private fun cleanupLocalImagePreviews(jobId: String) {
+        runCatching {
+            val cacheRoot = getApplication<Application>().cacheDir.canonicalFile
+            val root = File(cacheRoot, LOCAL_IMAGE_UI_PREVIEW_DIRECTORY).canonicalFile
+            val requestToken = jobId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(64)
+            val requestDir = File(root, requestToken).canonicalFile
+            if (requestDir.parentFile == root && requestDir.exists()) {
+                requestDir.deleteRecursively()
+            }
+        }
+    }
+
+    fun deleteImageAsset(imageId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val removed = _uiState.value.images.firstOrNull { it.id == imageId }
+            if (removed == null) {
+                _uiState.update { it.copy(statusMessage = "未找到要删除的图片") }
+                return@launch
+            }
+            val error = runCatching { chatSessionStore.deleteImages(listOf(imageId)) }.exceptionOrNull()
+            if (error != null) {
+                _uiState.update { it.copy(statusMessage = "图片删除失败：${error.message ?: "数据库提交失败"}") }
+                return@launch
+            }
+            removed.deleteLocalCopy()
+            _uiState.update { state ->
+                state.copy(
+                    images = state.images.filterNot { it.id == imageId },
+                    statusMessage = "已从图片库移除：${removed.name}"
+                )
+            }
+        }
     }
 
     fun clearImageLibrary() {
@@ -1789,23 +2224,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(statusMessage = "图片库已为空") }
             return
         }
-        imagesToRemove.forEach { it.deleteLocalCopy() }
-        _uiState.update {
-            it.copy(
-                images = emptyList(),
-                imageJobs = it.imageJobs.filter { job -> job.status == ImageGenerationStatusRecord.GENERATING },
-                statusMessage = "已清空图片库：${imagesToRemove.size} 张图片"
-            )
+        viewModelScope.launch(Dispatchers.IO) {
+            val error = runCatching { chatSessionStore.clearImages() }.exceptionOrNull()
+            if (error != null) {
+                _uiState.update { it.copy(statusMessage = "图片库清空失败：${error.message ?: "数据库提交失败"}") }
+                return@launch
+            }
+            imagesToRemove.forEach { it.deleteLocalCopy() }
+            _uiState.update {
+                it.copy(
+                    images = emptyList(),
+                    imageJobs = it.imageJobs.filter { job -> job.status == ImageGenerationStatusRecord.GENERATING },
+                    statusMessage = "已清空图片库：${imagesToRemove.size} 张图片"
+                )
+            }
         }
-        persistImages(emptyList())
     }
 
     fun importLocalImageModel(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             busy("正在导入本地图像生成引擎...")
             runCatching {
-                val imported = localImageModelStore.importFromUri(uri)
-                verifyLocalImageRuntimeIfNeeded(imported)
+                localImageModelStore.importFromUri(uri)
             }
                 .onSuccess { model ->
                     val selection = settleLocalImageSelection(model)
@@ -1825,12 +2265,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             } else if (diagnostic != null) {
                                 "已导入本地图像生成引擎：${model.displayName}；$diagnostic"
                             } else {
-                                if (model.runtime == LocalImageRuntime.MNN_DIFFUSION ||
-                                    model.runtime == LocalImageRuntime.QNN_HTP) {
-                                    "已导入并校验本地图像生成引擎：${model.displayName}"
-                                } else {
-                                    "已导入本地图像生成引擎：${model.displayName}"
-                                }
+                                "已导入本地图像生成引擎：${model.displayName}"
                             }
                         )
                     }
@@ -1841,8 +2276,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun rejectImageModelSwitchWhileGenerationIsActive(): Boolean {
+        val activeJobId = activeImageGenerationJobId ?: return false
+        val activeModelName = _uiState.value.imageJobs
+            .firstOrNull { job -> job.id == activeJobId }
+            ?.modelName
+            ?.takeIf(String::isNotBlank)
+        _uiState.update { state ->
+            state.copy(
+                statusMessage = buildString {
+                    append("当前图片任务已锁定")
+                    activeModelName?.let { append("使用 $it") }
+                    append("；完成或取消后再切换模型。")
+                }
+            )
+        }
+        return true
+    }
+
     fun selectLocalImageModel(modelId: String) {
+        if (rejectImageModelSwitchWhileGenerationIsActive()) return
         viewModelScope.launch(Dispatchers.IO) {
+            if (rejectImageModelSwitchWhileGenerationIsActive()) return@launch
             val model = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
             if (model == null) {
                 _uiState.update { it.copy(statusMessage = "未找到本地图像生成引擎") }
@@ -1860,6 +2315,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
             val diagnostic = model.localImageVerificationDiagnosticMessage()
+            val runningModelName = activeImageGenerationModelId
+                ?.let { activeId -> _uiState.value.localImageModels.firstOrNull { it.id == activeId } }
+                ?.displayName
             localImageModelStore.saveSelectedModelId(model.id)
             localImageModelStore.saveSelectedBackend(ImageBackend.LOCAL)
             _uiState.update {
@@ -1870,6 +2328,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     selectedImageBackend = ImageBackend.LOCAL,
                     statusMessage = buildString {
                         append("图片页已切换到本地生图：${model.displayName}")
+                        if (activeImageGenerationJobId != null) {
+                            append("；当前任务仍固定使用")
+                            append(runningModelName?.let { " $it" }.orEmpty())
+                            append("，本次切换从下一任务生效")
+                        }
                         diagnostic?.let { append("；").append(it) }
                     }
                 )
@@ -2113,30 +2576,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             false to (error.message ?: "MNN-Diffusion 校验异常。")
         }
 
-    private suspend fun verifyLocalImageRuntimeIfNeeded(model: LocalImageModelRecord): LocalImageModelRecord {
-        if (model.runtime != LocalImageRuntime.MNN_DIFFUSION && model.runtime != LocalImageRuntime.QNN_HTP) return model
-        val structuralReadiness = model.localImageStructuralReadinessMessage()
-        val verification = if (structuralReadiness != null) {
-            false to structuralReadiness
-        } else if (model.runtime == LocalImageRuntime.QNN_HTP) {
-            verifyQnnImageRuntime(model)
-        } else {
-            verifyMnnDiffusionImageRuntime(model)
-        }
-        val qnnPersistence = qnnVerificationPersistence(model, verification)
-        val verifiedModel = model.copy(
-            verificationStatus = qnnPersistence.verification.toLocalImageVerificationStatus(
-                model.runtime,
-                model.family
-            ),
-            verificationMessage = qnnPersistence.verification.second,
-            verifiedAt = System.currentTimeMillis(),
-            qnnVerificationStamp = qnnPersistence.stamp
-        )
-        localImageModelStore.updateModel(verifiedModel)
-        return verifiedModel
-    }
-
     private data class LocalImageSelection(
         val models: List<LocalImageModelRecord>,
         val selectedId: String?,
@@ -2158,17 +2597,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 it.id == id && it.isReadyForManagedSelection(qnnVerificationCurrentByModelId)
             }
         }
-        val preferredCertified = preferredModel.isCertifiedForAutomaticSelection(qnnVerificationCurrentByModelId)
+        val preferredReady = preferredModel.isReadyForManagedSelection(qnnVerificationCurrentByModelId)
         val selectedId = when {
-            preferredCertified -> preferredModel.id
+            preferredReady -> preferredModel.id
             currentReadyId != null -> currentReadyId
             else -> models.firstOrNull {
-                it.isCertifiedForAutomaticSelection(qnnVerificationCurrentByModelId)
+                it.isReadyForManagedSelection(qnnVerificationCurrentByModelId)
             }?.id
         }
         localImageModelStore.saveSelectedModelId(selectedId)
         val selectedBackend = when {
-            preferredCertified -> ImageBackend.LOCAL
+            preferredReady -> ImageBackend.LOCAL
             selectedId == null && currentBackend == ImageBackend.LOCAL -> ImageBackend.CLOUD
             else -> currentBackend
         }
@@ -2183,6 +2622,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteLocalImageModel(modelId: String) {
         viewModelScope.launch(Dispatchers.IO) {
+            if (activeImageGenerationModelId == modelId || activeLocalApiImageModelId == modelId) {
+                _uiState.update {
+                    it.copy(statusMessage = "当前图片任务正在使用该模型，请停止或等待任务完成后再删除")
+                }
+                return@launch
+            }
             val removed = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
             val success = runCatching { localImageModelStore.deleteModel(modelId) }.getOrDefault(false)
             val models = localImageModelStore.loadModels()
@@ -2212,8 +2657,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             choiceId.startsWith(CLOUD_IMAGE_MODEL_CHOICE_PREFIX) -> {
                 val id = choiceId.removePrefix(CLOUD_IMAGE_MODEL_CHOICE_PREFIX)
                 selectCloudImageModel(id)
-                localImageModelStore.saveSelectedBackend(ImageBackend.CLOUD)
-                _uiState.update { it.copy(selectedImageBackend = ImageBackend.CLOUD) }
             }
         }
     }
@@ -3440,6 +3883,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectCloudImageModel(modelId: String) {
+        if (rejectImageModelSwitchWhileGenerationIsActive()) return
         val model = _uiState.value.cloudModels.firstOrNull { it.id == modelId && it.kind == CloudModelKind.IMAGE }
         if (model == null) {
             _uiState.update { it.copy(statusMessage = "未找到图像生成模型") }
@@ -3994,6 +4438,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val resolvedPrimary = localImageBundleManifestFromRoot(candidateDir)?.primaryFile
                         ?: findPrimaryImageModel(candidateDir)
                         ?: error("生图引擎包内没有可注册的 diffusion 主模型。")
+                    val primarySha256 = resolvedPrimary.sha256ForProfile()
                     val manifestTargets = expandedImageBundleManifestTargets(
                         bundleDir = candidateDir,
                         resolvedPrimary = resolvedPrimary,
@@ -4003,7 +4448,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         displayName = model.title,
                         bundleDir = candidateDir,
                         bundle = installedBundle,
-                        targets = manifestTargets
+                        targets = manifestTargets,
+                        primarySha256 = primarySha256
                     )
                     previousBundleBackup = promoteImageBundleCandidate(candidateDir, bundleDir)
                     promoted = true
@@ -4016,15 +4462,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         primaryRemote = primary,
                         componentCount = components.size,
                         runtimeOverride = bundle.runtime.toLocalImageRuntime(),
-                        imageSizeOverride = "${bundle.smokeSpec.width}x${bundle.smokeSpec.height}"
+                        imageSizeOverride = "${bundle.smokeSpec.width}x${bundle.smokeSpec.height}",
+                        primarySha256 = primarySha256
                     )
-                    val verified = if (model.status == RecommendedModelStatus.RECOMMENDED) {
-                        verifyLocalImageRuntimeIfNeeded(registered)
-                    } else {
-                        registered
-                    }
                     previousBundleBackup?.deleteRecursively()
-                    verified
+                    registered
                 } catch (error: Throwable) {
                     if (promoted) {
                         restoreImageBundleBackup(bundleDir, previousBundleBackup)
@@ -4054,12 +4496,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         } else if (diagnostic != null) {
                             "已下载完整本地生图引擎包：${record.displayName}；$diagnostic"
                         } else {
-                            if (record.runtime == LocalImageRuntime.MNN_DIFFUSION ||
-                                record.runtime == LocalImageRuntime.QNN_HTP) {
-                                "已下载并校验完整本地生图引擎包：${record.displayName}"
-                            } else {
-                                "已下载完整本地生图引擎包：${record.displayName}"
-                            }
+                            "已下载完整本地生图引擎包：${record.displayName}"
                         }
                     )
                 }
@@ -4193,16 +4630,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }.onSuccess { registration ->
-                val registeredImageModels = if (registration is DownloadedModelRegistration.Image) {
-                    localImageModelStore.loadModels()
-                } else {
-                    emptyList()
-                }
-                val registeredImageQnnVerification = if (registeredImageModels.isNotEmpty()) {
-                    currentQnnImageVerificationByModelId(registeredImageModels)
-                } else {
-                    emptyMap()
-                }
+                val registeredImageSelection = (registration as? DownloadedModelRegistration.Image)
+                    ?.let { image -> settleLocalImageSelection(image.model) }
                 _uiState.update {
                     when (registration) {
                         is DownloadedModelRegistration.Chat -> it.copy(
@@ -4228,18 +4657,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         )
                         is DownloadedModelRegistration.Image -> {
+                            val selection = requireNotNull(registeredImageSelection)
                             val readiness = registration.model.localImageReadinessForUi(
-                                registeredImageQnnVerification[registration.model.id]
+                                selection.qnnVerificationCurrentByModelId[registration.model.id]
                             )
                             val diagnostic = registration.model.localImageVerificationDiagnosticMessage()
                             it.copy(
-                                localImageModels = registeredImageModels,
-                                qnnImageVerificationCurrentByModelId = registeredImageQnnVerification,
-                                selectedLocalImageModelId = if (readiness == null) {
-                                    it.selectedLocalImageModelId ?: registration.model.id
-                                } else {
-                                    it.selectedLocalImageModelId
-                                },
+                                localImageModels = selection.models,
+                                qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
+                                selectedLocalImageModelId = selection.selectedId,
+                                selectedImageBackend = selection.selectedBackend,
                                 busy = false,
                                 downloadStatus = DownloadStatus.DONE,
                                 downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
@@ -7210,17 +7637,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun persistImages(images: List<ImageAssetRecord> = _uiState.value.images) {
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { chatSessionStore.saveImages(images) }
-                .onFailure { error ->
-                    _uiState.update {
-                        it.copy(statusMessage = "图片库保存失败：${error.message}")
-                    }
-                }
-        }
-    }
-
     private fun persistFiles(files: List<FileAssetRecord> = _uiState.value.files) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { chatSessionStore.saveFiles(files) }
@@ -7433,14 +7849,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         jobId: String,
         status: ImageGenerationStatusRecord,
         message: String,
-        imageAssetId: String? = null
+        imageAssetId: String? = null,
+        preview: PublishedLocalImagePreview? = null
     ): List<ImageGenerationJobRecord> =
         map { job ->
             if (job.id == jobId) {
                 job.copy(
                     status = status,
                     message = message,
-                    imageAssetId = imageAssetId ?: job.imageAssetId
+                    imageAssetId = imageAssetId ?: job.imageAssetId,
+                    previewUriString = if (status.terminal) null else {
+                        preview?.uriString ?: job.previewUriString
+                    },
+                    previewMode = if (status.terminal) "" else preview?.mode ?: job.previewMode,
+                    previewStep = if (status.terminal) 0 else preview?.step ?: job.previewStep,
+                    previewRevision = if (status.terminal) 0L else {
+                        preview?.revision ?: job.previewRevision
+                    },
+                    previewWidth = if (status.terminal) 0 else preview?.width ?: job.previewWidth,
+                    previewHeight = if (status.terminal) 0 else preview?.height ?: job.previewHeight
                 )
             } else {
                 job
@@ -7664,14 +8091,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun createCloudGeneratedImageAsset(
         prompt: String,
         config: CloudApiConfig,
-        chatSessionId: String? = null
+        chatSessionId: String? = null,
+        generationMetadata: ImageGenerationHistoryMetadata
     ): ImageAssetRecord {
         val app = getApplication<Application>()
         val imageDir = File(app.filesDir, "image_assets").apply { mkdirs() }
         val result = cloudImageProvider.generate(config, prompt)
         val extension = imageExtensionForMime(result.mimeType)
-        val outputFile = File(imageDir, "cloud-image-${System.currentTimeMillis()}.$extension")
-        outputFile.writeBytes(result.bytes)
+        val outputFile = writeImageAssetBytesAtomically(
+            directory = imageDir,
+            fileName = "cloud-image-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(8)}.$extension",
+            bytes = result.bytes
+        )
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
         val displayPrompt = result.revisedPrompt.ifBlank { prompt }
@@ -7684,24 +8115,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             sizeBytes = outputFile.length(),
             width = bounds.outWidth.coerceAtLeast(0),
             height = bounds.outHeight.coerceAtLeast(0),
+            generationMetadataJson = generationMetadata.toJsonString(),
             chatSessionId = chatSessionId
         )
     }
 
     private suspend fun createLocalGeneratedImageAsset(
+        requestId: String,
         prompt: String,
         model: LocalImageModelRecord,
+        options: LocalImageGenerationOptions = LocalImageGenerationOptions(),
+        inputDraft: LocalImageInputDraft = LocalImageInputDraft(),
         chatSessionId: String? = null,
+        generationMetadata: ImageGenerationHistoryMetadata,
         onProgress: (LocalImageProgress) -> Unit = {}
-    ): ImageAssetRecord {
+    ): List<ImageAssetRecord> {
         val app = getApplication<Application>()
         val imageDir = File(app.filesDir, "image_assets").apply { mkdirs() }
         val result = try {
             localImageWorkerClient.generate(
                 model = model,
                 prompt = prompt,
+                options = options,
+                inputDraft = inputDraft,
                 onProgress = onProgress,
-                requestId = "ui-img-${UUID.randomUUID()}"
+                requestId = requestId
             )
         } catch (error: Throwable) {
             if (error !is CancellationException && error !is LocalImageWorkerCancelledException) {
@@ -7710,105 +8148,179 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             throw error
         }
         recordLocalImageExecutionOutcome(model, failureMessage = null)
-        val extension = imageExtensionForMime(result.mimeType)
-        val outputFile = File(imageDir, "local-image-${System.currentTimeMillis()}.$extension")
-        outputFile.writeBytes(result.bytes)
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
-        return ImageAssetRecord(
-            id = UUID.randomUUID().toString(),
-            name = "Local Image ${java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault()).format(java.util.Date())}.$extension",
-            uriString = Uri.fromFile(outputFile).toString(),
-            source = "generated:${model.runtime.label}",
-            prompt = prompt,
-            sizeBytes = outputFile.length(),
-            width = bounds.outWidth.coerceAtLeast(0),
-            height = bounds.outHeight.coerceAtLeast(0),
-            chatSessionId = chatSessionId
-        )
+        val generationMetadataJson = generationMetadata
+            .withNativeExecution(result.executionMetadataJson)
+            .toJsonString()
+        val timestamp = System.currentTimeMillis()
+        val requestToken = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(48)
+        val writtenFiles = mutableListOf<File>()
+        return try {
+            result.outputs.map { output ->
+                val extension = imageExtensionForMime(output.mimeType)
+                val suffix = if (result.outputs.size == 1) "" else "-${output.index.toString().padStart(3, '0')}"
+                val outputFile = writeImageAssetBytesAtomically(
+                    directory = imageDir,
+                    fileName = "local-image-$timestamp-$requestToken$suffix.$extension",
+                    bytes = output.bytes
+                )
+                writtenFiles += outputFile
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
+                require(bounds.outWidth > 0 && bounds.outHeight > 0) {
+                    "Generated image ${output.index} could not be decoded after publication."
+                }
+                ImageAssetRecord(
+                    id = UUID.randomUUID().toString(),
+                    name = "Local Image ${java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault()).format(java.util.Date(timestamp))}$suffix.$extension",
+                    uriString = Uri.fromFile(outputFile).toString(),
+                    source = "generated:${model.runtime.label}",
+                    prompt = prompt,
+                    sizeBytes = outputFile.length(),
+                    width = bounds.outWidth,
+                    height = bounds.outHeight,
+                    generationMetadataJson = generationMetadataJson,
+                    chatSessionId = chatSessionId
+                )
+            }
+        } catch (error: Throwable) {
+            writtenFiles.forEach { file -> runCatching { file.delete() } }
+            throw error
+        }
     }
 
     private suspend fun generateLocalApiImage(requestId: String, body: String): String {
-        val request = JSONObject(body)
-        val prompt = request.optString("prompt").trim()
-        require(prompt.isNotBlank()) { "prompt must not be blank." }
+        val request = ImageGenerationApiContract.parseRequest(body)
         require(requestId.isNotBlank()) { "requestId must not be blank." }
-        val requestedModel = request.optString("model").trim()
+        if (request.preview != null) {
+            throw ImageGenerationProviderException(
+                code = "unsupported_preview_transport",
+                httpStatus = 422,
+                message = "This synchronous Images API response cannot publish live preview frames."
+            )
+        }
+        val requestedModel = request.model.orEmpty()
         val model = if (requestedModel.isNotBlank()) {
-            _uiState.value.localImageModels.firstOrNull {
-                it.id == requestedModel && it.configured
-            } ?: error("The requested local image model is not configured: $requestedModel")
+            val candidate = _uiState.value.localImageModels.firstOrNull { it.id == requestedModel }
+                ?: throw ImageGenerationProviderException(
+                    code = "image_model_not_found",
+                    httpStatus = 404,
+                    message = "The requested local image model was not found."
+                )
+            if (!candidate.configured) {
+                throw ImageGenerationProviderException(
+                    code = "image_model_not_ready",
+                    httpStatus = 409,
+                    message = "The requested local image model is not configured."
+                )
+            }
+            candidate
         } else {
             _uiState.value.selectedLocalImageModel()
-                ?: error("No configured local image model is selected.")
+                ?: throw ImageGenerationProviderException(
+                    code = "image_runtime_unavailable",
+                    httpStatus = 503,
+                    message = "No configured local image model is selected."
+                )
         }
-        val size = request.optString("size").trim()
-        val dimensions = Regex("""^(\d{2,4})[xX](\d{2,4})$""").matchEntire(size)
-        val negativePrompt = if (request.has("negative_prompt") && !request.isNull("negative_prompt")) {
-            (request.get("negative_prompt") as? String)
-                ?: error("negative_prompt must be a string when specified.")
-        } else {
-            null
-        }
-        val options = LocalImageGenerationOptions(
-            negativePrompt = negativePrompt,
-            width = dimensions?.groupValues?.getOrNull(1)?.toIntOrNull(),
-            height = dimensions?.groupValues?.getOrNull(2)?.toIntOrNull(),
-            steps = request.optInt("steps", 0).takeIf { it > 0 },
-            seed = request.optInt("seed", 0).takeIf { request.has("seed") },
-            cfgScale = request.optDouble("cfg_scale", Double.NaN).takeIf { it.isFinite() },
-            sampleMethod = request.optString("sampler").trim().takeIf { it.isNotEmpty() }
-        )
-        val result = localImageWorkerClient.generate(
-            model = model,
-            prompt = prompt,
-            options = options,
-            requestId = requestId
-        )
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(result.bytes, 0, result.bytes.size, bounds)
-        require(bounds.outWidth > 0 && bounds.outHeight > 0) {
-            "The local image worker returned an invalid image."
-        }
-        val execution = runCatching { JSONObject(result.executionMetadataJson) }.getOrElse { JSONObject() }
-        val nativeEffective = execution.optJSONObject("nativeEffective")
-            ?: error("The local image result is missing nativeEffective execution evidence.")
-        require(
-            execution.optBoolean("nativeExecution", false) &&
-                !execution.optBoolean("fallback", true)
-        ) {
-            "The local image result did not prove direct native execution without fallback."
-        }
-        require(execution.optLong("nativeGenerationSequence", 0L) > 0L) {
-            "The local image result is missing a positive native generation sequence."
-        }
-        require(nativeEffective.getString("runtime") == model.runtime.name) {
-            "The local image result runtime does not match the selected model runtime."
-        }
-        if (model.runtime == LocalImageRuntime.QNN_HTP) {
-            require(
-                execution.optBoolean("npuActive", false) &&
-                    execution.optBoolean("qnnGraphExecution", false)
-            ) {
-                "The local image result did not prove native QNN graph execution."
+        val dispatch = request.toLocalImageApiDispatch()
+        val options = dispatch.options
+        val inputDraft = dispatch.inputDraft
+        val generationLease = localImageGenerationCoordinator.tryAcquire(requestId)
+            ?: throw ImageGenerationProviderException(
+                code = "image_generation_busy",
+                httpStatus = 409,
+                message = "Another UI or Local API image request is already running."
+            )
+        activeLocalApiImageModelId = model.id
+        try {
+            val result = try {
+                localImageWorkerClient.generate(
+                    model = model,
+                    prompt = request.prompt,
+                    options = options,
+                    inputDraft = inputDraft,
+                    requestId = requestId
+                )
+            } catch (error: Throwable) {
+                error.toLocalImageApiProviderExceptionOrNull()?.let { throw it }
+                if (error is IllegalArgumentException) {
+                    throw ImageGenerationProviderException(
+                        code = "invalid_image_input",
+                        httpStatus = 422,
+                        message = error.message ?: "The image input could not be prepared."
+                    )
+                }
+                throw error
+            }
+            return try {
+                require(result.outputs.size == request.imageCount) {
+                    "The local image worker returned ${result.outputs.size} images; ${request.imageCount} were requested."
+                }
+                val execution = runCatching { JSONObject(result.executionMetadataJson) }.getOrElse { JSONObject() }
+                val nativeEffective = execution.optJSONObject("nativeEffective")
+                    ?: error("The local image result is missing nativeEffective execution evidence.")
+                require(
+                    execution.optBoolean("nativeExecution", false) &&
+                        !execution.optBoolean("fallback", true)
+                ) {
+                    "The local image result did not prove direct native execution without fallback."
+                }
+                require(execution.optLong("nativeGenerationSequence", 0L) > 0L) {
+                    "The local image result is missing a positive native generation sequence."
+                }
+                require(nativeEffective.getString("runtime") == model.runtime.name) {
+                    "The local image result runtime does not match the selected model runtime."
+                }
+                if (model.runtime == LocalImageRuntime.QNN_HTP) {
+                    require(
+                        execution.optBoolean("npuActive", false) &&
+                            execution.optBoolean("qnnGraphExecution", false)
+                    ) {
+                        "The local image result did not prove native QNN graph execution."
+                    }
+                }
+                JSONObject()
+                    .put("created", System.currentTimeMillis() / 1000L)
+                    .put("request_id", requestId)
+                    .put("model", model.id)
+                    .put("execution", execution)
+                    .put(
+                        "data",
+                        JSONArray().apply {
+                            result.outputs.forEach { output ->
+                                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                BitmapFactory.decodeByteArray(output.bytes, 0, output.bytes.size, bounds)
+                                require(bounds.outWidth > 0 && bounds.outHeight > 0) {
+                                    "The local image worker returned an invalid image at index ${output.index}."
+                                }
+                                put(
+                                    JSONObject()
+                                        .put("index", output.index)
+                                        .put("b64_json", Base64.encodeToString(output.bytes, Base64.NO_WRAP))
+                                        .put("mime_type", output.mimeType)
+                                        .put("width", bounds.outWidth)
+                                        .put("height", bounds.outHeight)
+                                        .apply { output.seed?.let { put("seed", it) } }
+                                )
+                            }
+                        }
+                    )
+                    .toString()
+            } catch (error: ImageGenerationProviderException) {
+                throw error
+            } catch (error: Throwable) {
+                throw ImageGenerationProviderException(
+                    code = "invalid_image_worker_response",
+                    httpStatus = 502,
+                    message = error.message ?: "The local image worker returned invalid execution evidence."
+                )
+            }
+        } finally {
+            if (activeLocalApiImageModelId == model.id) activeLocalApiImageModelId = null
+            check(localImageGenerationCoordinator.release(generationLease)) {
+                "Local API image generation lease was replaced before request completion."
             }
         }
-        return JSONObject()
-            .put("created", System.currentTimeMillis() / 1000L)
-            .put("request_id", requestId)
-            .put("model", model.id)
-            .put("execution", execution)
-            .put(
-                "data",
-                JSONArray().put(
-                    JSONObject()
-                        .put("b64_json", Base64.encodeToString(result.bytes, Base64.NO_WRAP))
-                        .put("mime_type", result.mimeType)
-                        .put("width", bounds.outWidth)
-                        .put("height", bounds.outHeight)
-                )
-            )
-            .toString()
     }
 
     /** Records actual worker execution only; this evidence is never an admission certificate. */
@@ -7839,81 +8351,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         val models = localImageModelStore.updateModel(updated)
         _uiState.update { state -> state.copy(localImageModels = models) }
-    }
-
-    private fun createGeneratedImageAsset(prompt: String, chatSessionId: String? = null): ImageAssetRecord {
-        val app = getApplication<Application>()
-        val imageDir = File(app.filesDir, "image_assets").apply { mkdirs() }
-        val outputFile = File(imageDir, "mca-image-${System.currentTimeMillis()}.png")
-        val bitmap = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        paint.shader = LinearGradient(
-            0f,
-            0f,
-            1024f,
-            1024f,
-            intArrayOf(Color.rgb(34, 94, 168), Color.rgb(58, 154, 125), Color.rgb(244, 180, 78)),
-            null,
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRect(0f, 0f, 1024f, 1024f, paint)
-        paint.shader = null
-        paint.color = Color.argb(235, 255, 255, 255)
-        canvas.drawRoundRect(82f, 710f, 942f, 918f, 36f, 36f, paint)
-        paint.color = Color.rgb(32, 33, 36)
-        paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        paint.textSize = 44f
-        canvas.drawText("MCA Image", 122f, 770f, paint)
-        paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-        paint.textSize = 30f
-        drawWrappedText(canvas, prompt, 122f, 826f, 780f, 38f, paint, maxLines = 3)
-        outputFile.outputStream().use { output ->
-            bitmap.compress(Bitmap.CompressFormat.PNG, 96, output)
-        }
-        bitmap.recycle()
-        return ImageAssetRecord(
-            id = UUID.randomUUID().toString(),
-            name = "MCA Image ${java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault()).format(java.util.Date())}.png",
-            uriString = Uri.fromFile(outputFile).toString(),
-            source = "generated",
-            prompt = prompt,
-            sizeBytes = outputFile.length(),
-            width = 1024,
-            height = 1024,
-            chatSessionId = chatSessionId
-        )
-    }
-
-    private fun drawWrappedText(
-        canvas: Canvas,
-        text: String,
-        x: Float,
-        y: Float,
-        maxWidth: Float,
-        lineHeight: Float,
-        paint: Paint,
-        maxLines: Int
-    ) {
-        var line = ""
-        var lineY = y
-        var lines = 0
-        text.split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { word ->
-            val candidate = if (line.isBlank()) word else "$line $word"
-            if (paint.measureText(candidate) <= maxWidth) {
-                line = candidate
-            } else {
-                if (line.isNotBlank() && lines < maxLines) {
-                    canvas.drawText(line, x, lineY, paint)
-                    lineY += lineHeight
-                    lines += 1
-                }
-                line = word
-            }
-        }
-        if (line.isNotBlank() && lines < maxLines) {
-            canvas.drawText(line, x, lineY, paint)
-        }
     }
 
     private fun imageExtension(name: String): String {
@@ -10041,7 +10478,8 @@ internal fun recommendedQairtArchitecture(model: ModelScopeRecommendedModel): St
 internal fun downloadedImageBundleManifestJson(
     displayName: String,
     bundle: ImageEngineBundleSpec,
-    targets: List<Pair<RemoteModelFile, File>>
+    targets: List<Pair<RemoteModelFile, File>>,
+    primarySha256: String? = null
 ): JSONObject {
     val primary = targets.firstOrNull { it.first.bundleRole == ImageEngineBundleComponentRole.DIFFUSION }
     val familyHint = "${bundle.id}/$displayName/${primary?.second?.name.orEmpty()}"
@@ -10066,7 +10504,9 @@ internal fun downloadedImageBundleManifestJson(
     val manifest = JSONObject()
         .put("schema", "mca.image_engine.bundle.v1")
         .put("id", bundle.id)
+        .put("recommendationId", bundle.recommendationId)
         .put("title", displayName)
+        .put("task", bundle.task.name)
         .put("runtime", bundle.runtime.name)
         .put("accelerator", bundle.accelerator.name)
         .put("minDeviceTier", bundle.minDeviceTier.name)
@@ -10085,6 +10525,19 @@ internal fun downloadedImageBundleManifestJson(
                 .put("expectedOutputMime", bundle.smokeSpec.expectedOutputMime)
         )
         .put("components", components)
+    bundle.executionProfile?.let {
+        val primaryFile = primary?.second?.takeIf(File::isFile)
+            ?: error("Image execution profile requires a concrete downloaded primary model file.")
+        val fingerprint = primarySha256
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf { it.matches(Regex("^[0-9a-f]{64}$")) }
+            ?: primaryFile.sha256ForProfile()
+        val profile = requireNotNull(
+            materializeDownloadedImageExecutionProfile(bundle, fingerprint)
+        ).resolveDownloadedExecutionGraphPaths(targets)
+        manifest.put("executionProfile", ImageExecutionProfileJson.toJson(profile))
+    }
     bundle.requiredRuntimeProfile?.let { profile ->
         manifest.put(
             "requiredRuntimeProfile",
@@ -10164,6 +10617,31 @@ internal fun resolvedDownloadedQnnContextPath(
     return matchingNames.singleOrNull() ?: normalized
 }
 
+private fun ImageExecutionProfile.resolveDownloadedExecutionGraphPaths(
+    targets: List<Pair<RemoteModelFile, File>>
+): ImageExecutionProfile {
+    fun ImageGraphArtifactContract?.resolved(): ImageGraphArtifactContract? = this?.copy(
+        relativePath = resolvedDownloadedQnnContextPath(relativePath, targets)
+    )
+    fun String?.resolvedSidecar(): String? = this?.let { requested ->
+        resolvedDownloadedQnnContextPath(requested, targets)
+    }
+    return copy(
+        graph = graph.copy(
+            textEncoder = graph.textEncoder.resolved(),
+            unet = graph.unet.resolved(),
+            vae = graph.vae.resolved(),
+            vaeEncoder = graph.vaeEncoder.resolved(),
+            controlNet = graph.controlNet.resolved(),
+            schedulerSidecar = graph.schedulerSidecar.resolvedSidecar(),
+            tokenizerSidecar = graph.tokenizerSidecar.resolvedSidecar(),
+            configSidecars = graph.configSidecars.map { path ->
+                resolvedDownloadedQnnContextPath(path, targets)
+            }
+        )
+    )
+}
+
 private fun expandedImageBundleManifestTargets(
     bundleDir: File,
     resolvedPrimary: File,
@@ -10218,14 +10696,16 @@ private fun writeDownloadedImageBundleManifest(
     displayName: String,
     bundleDir: File,
     bundle: ImageEngineBundleSpec,
-    targets: List<Pair<RemoteModelFile, File>>
+    targets: List<Pair<RemoteModelFile, File>>,
+    primarySha256: String
 ) {
     bundleDir.mkdirs()
     File(bundleDir, "manifest.json").writeText(
         downloadedImageBundleManifestJson(
             displayName = displayName,
             bundle = bundle,
-            targets = targets
+            targets = targets,
+            primarySha256 = primarySha256
         ).toString(2),
         Charsets.UTF_8
     )

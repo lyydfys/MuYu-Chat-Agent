@@ -59,6 +59,22 @@ class ChatSessionStore(context: Context) {
         database.chatSessionDao().replaceImages(images)
     }
 
+    fun upsertImages(images: List<ImageAssetRecord>) = runBlocking(Dispatchers.IO) {
+        if (images.isNotEmpty()) {
+            database.chatSessionDao().insertImages(images.map { it.toEntity() })
+        }
+    }
+
+    fun deleteImages(imageIds: List<String>) = runBlocking(Dispatchers.IO) {
+        if (imageIds.isNotEmpty()) {
+            database.chatSessionDao().deleteImages(imageIds.distinct())
+        }
+    }
+
+    fun clearImages() = runBlocking(Dispatchers.IO) {
+        database.chatSessionDao().clearImages()
+    }
+
     fun loadFiles(): List<FileAssetRecord> = runBlocking(Dispatchers.IO) {
         runCatching { database.chatSessionDao().loadFileRecords() }
             .getOrElse { emptyList() }
@@ -144,7 +160,7 @@ class ChatSessionStore(context: Context) {
         MemoryEntity::class,
         AssistantEntity::class
     ],
-    version = 14,
+    version = 15,
     exportSchema = false
 )
 abstract class McaRoomDatabase : RoomDatabase() {
@@ -165,7 +181,7 @@ abstract class McaRoomDatabase : RoomDatabase() {
                 )
                     .addMigrations(MIGRATION_1_2, MIGRATION_2_6, MIGRATION_3_6, MIGRATION_4_6, MIGRATION_5_6)
                     .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
-                    .addMigrations(MIGRATION_12_13, MIGRATION_13_14)
+                    .addMigrations(MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
                     .build()
                     .also { instance = it }
             }
@@ -271,6 +287,12 @@ abstract class McaRoomDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addImageGenerationMetadataColumnIfMissing(db)
+            }
+        }
+
         private fun addProjectIdColumnIfMissing(db: SupportSQLiteDatabase) {
             runCatching {
                 db.execSQL("ALTER TABLE chat_sessions ADD COLUMN projectId TEXT")
@@ -292,6 +314,14 @@ abstract class McaRoomDatabase : RoomDatabase() {
         private fun addMessageWebSearchTraceColumnIfMissing(db: SupportSQLiteDatabase) {
             runCatching {
                 db.execSQL("ALTER TABLE chat_messages ADD COLUMN webSearchTraceJson TEXT NOT NULL DEFAULT '{}'")
+            }
+        }
+
+        private fun addImageGenerationMetadataColumnIfMissing(db: SupportSQLiteDatabase) {
+            if ("generationMetadataJson" !in tableColumns(db, "image_assets")) {
+                db.execSQL(
+                    "ALTER TABLE image_assets ADD COLUMN generationMetadataJson TEXT NOT NULL DEFAULT ''"
+                )
             }
         }
 
@@ -421,6 +451,7 @@ abstract class McaRoomDatabase : RoomDatabase() {
                     sizeBytes INTEGER NOT NULL,
                     width INTEGER NOT NULL,
                     height INTEGER NOT NULL,
+                    generationMetadataJson TEXT NOT NULL DEFAULT '',
                     chatSessionId TEXT,
                     projectId TEXT
                 )
@@ -430,7 +461,7 @@ abstract class McaRoomDatabase : RoomDatabase() {
                 db.execSQL(
                     """
                     INSERT OR REPLACE INTO image_assets_new (
-                        id, name, uriString, source, prompt, createdAt, sizeBytes, width, height, chatSessionId, projectId
+                        id, name, uriString, source, prompt, createdAt, sizeBytes, width, height, generationMetadataJson, chatSessionId, projectId
                     )
                     SELECT
                         ${columnOrDefault(columns, "id", "hex(randomblob(16))")},
@@ -442,6 +473,7 @@ abstract class McaRoomDatabase : RoomDatabase() {
                         ${columnOrDefault(columns, "sizeBytes", "0")},
                         ${columnOrDefault(columns, "width", "0")},
                         ${columnOrDefault(columns, "height", "0")},
+                        ${columnOrDefault(columns, "generationMetadataJson", "''")},
                         ${nullableColumn(columns, "chatSessionId")},
                         ${nullableColumn(columns, "projectId")}
                     FROM image_assets
@@ -646,6 +678,9 @@ interface ChatSessionDao {
     @Query("DELETE FROM image_assets")
     suspend fun clearImages()
 
+    @Query("DELETE FROM image_assets WHERE id IN (:imageIds)")
+    suspend fun deleteImages(imageIds: List<String>)
+
     @Query("SELECT * FROM file_assets ORDER BY createdAt DESC")
     suspend fun files(): List<FileAssetEntity>
 
@@ -777,6 +812,8 @@ data class ImageAssetEntity(
     val sizeBytes: Long,
     val width: Int,
     val height: Int,
+    @ColumnInfo(defaultValue = "")
+    val generationMetadataJson: String,
     val chatSessionId: String?,
     val projectId: String? = null
 )
@@ -881,6 +918,7 @@ private fun ImageAssetRecord.toEntity(): ImageAssetEntity =
         sizeBytes = sizeBytes,
         width = width,
         height = height,
+        generationMetadataJson = generationMetadataJson,
         chatSessionId = chatSessionId,
         projectId = projectId
     )
@@ -966,6 +1004,7 @@ private fun ImageAssetEntity.toImageAssetRecord(): ImageAssetRecord =
         sizeBytes = sizeBytes,
         width = width,
         height = height,
+        generationMetadataJson = generationMetadataJson,
         chatSessionId = chatSessionId,
         projectId = projectId
     )

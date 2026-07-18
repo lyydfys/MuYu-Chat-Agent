@@ -158,6 +158,22 @@ internal object ImageExecutionProfileNativeContract {
         } else {
             null
         }
+        if (resolution.layers.resolved.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+            validateStableDiffusionTokenEvidence(
+                resolution,
+                nativeEffective,
+                nativeEffectiveJson
+            )
+        }
+        if (resolution.profile.family == LocalImageModelFamily.SANA &&
+            resolution.layers.resolved.runtime == LocalImageRuntime.MNN_DIFFUSION
+        ) {
+            validateMnnSanaConditioningEvidence(
+                resolution,
+                nativeEffective,
+                nativeEffectiveJson
+            )
+        }
         val validation = ImageExecutionContractValidator.validate(
             resolution.layers.copy(nativeEffective = nativeEffective)
         )
@@ -185,6 +201,101 @@ internal object ImageExecutionProfileNativeContract {
             "pixelRange",
             "QNN image execution cannot infer a runtime-native VAE output pixel range."
         )
+    }
+
+    private fun validateStableDiffusionTokenEvidence(
+        resolution: ImageExecutionProfileResolution,
+        nativeEffective: ImageNativeEffectiveExecution,
+        nativeEffectiveJson: JSONObject
+    ) {
+        val resolved = resolution.layers.resolved
+        val resolvedCapacity = nativeEffectiveJson.requiredInt("resolvedTokenCount")
+        if (resolvedCapacity != resolved.tokenCount) {
+            invalid(
+                "resolvedTokenCount",
+                "Native stable-diffusion.cpp token capacity differs from the resolved contract."
+            )
+        }
+        val tokenizerMaxLength = nativeEffectiveJson.requiredInt("tokenizerMaxLength")
+        if (tokenizerMaxLength != resolution.profile.tokenizer.maxLength) {
+            invalid(
+                "tokenizerMaxLength",
+                "Native stable-diffusion.cpp tokenizer capacity differs from the selected profile."
+            )
+        }
+        val positive = nativeEffectiveJson.requiredInt("positiveConditioningTokenCount")
+        val negative = nativeEffectiveJson.requiredInt("negativeConditioningTokenCount")
+        if (positive <= 0 || negative < 0 || positive + negative != nativeEffective.tokenCount) {
+            invalid(
+                "tokenCount",
+                "Native stable-diffusion.cpp token count must equal its actual positive/negative conditioning evidence."
+            )
+        }
+        if ((resolved.useCfg && negative <= 0) || (!resolved.useCfg && negative != 0)) {
+            invalid(
+                "negativeConditioningTokenCount",
+                "Native negative conditioning evidence differs from the resolved CFG mode."
+            )
+        }
+    }
+
+    private fun validateMnnSanaConditioningEvidence(
+        resolution: ImageExecutionProfileResolution,
+        nativeEffective: ImageNativeEffectiveExecution,
+        nativeEffectiveJson: JSONObject
+    ) {
+        val resolved = resolution.layers.resolved
+        val artifactSha256 = nativeEffectiveJson
+            .requiredString("conditioningArtifactSha256")
+            .lowercase()
+        if (!SHA256.matches(artifactSha256) ||
+            artifactSha256 != nativeEffective.promptWeightFingerprint
+        ) {
+            invalid(
+                "conditioningArtifactSha256",
+                "MNN Sana must fingerprint the exact executed tokenizer conditioning artifact."
+            )
+        }
+        val conditioningSequenceLength =
+            nativeEffectiveJson.requiredInt("conditioningSequenceLength")
+        val conditioningBatchSize = nativeEffectiveJson.requiredInt("conditioningBatchSize")
+        val conditioningOrder = nativeEffectiveJson.requiredString("conditioningOrder")
+        val tokenizerSequenceLength =
+            nativeEffectiveJson.requiredInt("tokenizerInputSequenceLength")
+        val tokenizerBatchSize = nativeEffectiveJson.requiredInt("tokenizerInputBatchSize")
+        val tokenizerNonPaddingTokenCount =
+            nativeEffectiveJson.requiredInt("tokenizerNonPaddingTokenCount")
+        val tokenizerInputOrder = nativeEffectiveJson.requiredString("tokenizerInputOrder")
+        val expectedBatch = if (resolved.useCfg) 2 else 1
+        if (conditioningSequenceLength != resolved.tokenCount ||
+            conditioningSequenceLength != 256 ||
+            conditioningBatchSize != expectedBatch ||
+            conditioningOrder != if (resolved.useCfg) {
+                "negative_then_positive"
+            } else {
+                "positive_only"
+            }
+        ) {
+            invalid(
+                "conditioningSequenceLength,conditioningBatchSize,conditioningOrder",
+                "MNN Sana conditioning output differs from the executed 256-query graph contract."
+            )
+        }
+        if (tokenizerSequenceLength <= 0 || tokenizerBatchSize != expectedBatch ||
+            tokenizerNonPaddingTokenCount <= 0 ||
+            tokenizerNonPaddingTokenCount.toLong() >
+                tokenizerSequenceLength.toLong() * tokenizerBatchSize.toLong() ||
+            tokenizerInputOrder != if (resolved.useCfg) {
+                "positive_then_negative"
+            } else {
+                "positive_only"
+            }
+        ) {
+            invalid(
+                "tokenizerInputSequenceLength,tokenizerInputBatchSize,tokenizerNonPaddingTokenCount,tokenizerInputOrder",
+                "MNN Sana tokenizer input evidence is incomplete or has the wrong source order."
+            )
+        }
     }
 
     private fun validateQnnPixelRange(

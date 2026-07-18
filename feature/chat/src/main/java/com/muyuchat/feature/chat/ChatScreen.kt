@@ -68,6 +68,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -84,6 +85,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Menu
@@ -181,6 +183,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.Calendar
+import org.json.JSONObject
 import kotlin.math.roundToInt
 
 private const val CLOUD_REASONING_LOCKED_TIP = "云端思考由模型服务商控制，MCA 已默认启用，暂不支持切换。"
@@ -275,7 +278,10 @@ data class ImageAssetUiItem(
     val createdAtText: String,
     val sizeText: String,
     val width: Int,
-    val height: Int
+    val height: Int,
+    val generationDetails: String = "",
+    val generationPrompt: String = "",
+    val canRecreate: Boolean = false
 )
 
 data class FileAssetUiItem(
@@ -292,11 +298,185 @@ data class ImageGenerationUiJob(
     val id: String,
     val prompt: String,
     val statusLabel: String,
+    val modelId: String? = null,
+    val modelName: String = "",
+    val modelIsCloud: Boolean = false,
     val imageAssetId: String? = null,
+    val previewUriString: String? = null,
+    val previewMode: String = "",
+    val previewStep: Int = 0,
+    val previewRevision: Long = 0L,
+    val previewWidth: Int = 0,
+    val previewHeight: Int = 0,
     val failed: Boolean = false,
+    val terminal: Boolean = false,
     val message: String = "",
     val startedAtMillis: Long = System.currentTimeMillis()
 )
+
+internal enum class ImageAssistantCardKind {
+    FAILURE,
+    RESULT,
+    TERMINAL,
+    CREATING
+}
+
+internal fun imageAssistantCardKind(
+    job: ImageGenerationUiJob?,
+    image: ImageAssetUiItem?
+): ImageAssistantCardKind = when {
+    job?.failed == true -> ImageAssistantCardKind.FAILURE
+    image != null -> ImageAssistantCardKind.RESULT
+    job?.terminal == true -> ImageAssistantCardKind.TERMINAL
+    else -> ImageAssistantCardKind.CREATING
+}
+
+enum class ImageGenerationUiTaskMode(val wireName: String, val label: String) {
+    TEXT_TO_IMAGE("text_to_image", "文生图"),
+    IMG2IMG("img2img", "图生图"),
+    INPAINT("inpaint", "局部重绘"),
+    CONTROL("control", "Control"),
+    EDIT("edit", "编辑")
+}
+
+data class ImageGenerationUiOptions(
+    val taskMode: ImageGenerationUiTaskMode = ImageGenerationUiTaskMode.TEXT_TO_IMAGE,
+    val negativePrompt: String? = null,
+    val inputImageUri: String? = null,
+    val maskImageUri: String? = null,
+    val controlImageUri: String? = null,
+    val strength: Double? = null,
+    val controlStrength: Double? = null,
+    val clipSkip: Int? = null,
+    val batchCount: Int = 1,
+    val vaeTileSize: Int? = null,
+    val vaeTileOverlap: Double? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val steps: Int? = null,
+    val cfgScale: Double? = null,
+    val seed: Int? = null,
+    val sampleMethod: String? = null
+)
+
+internal data class ImageGenerationUiParameterSnapshot(
+    val taskModeName: String,
+    val strengthText: String,
+    val controlStrengthText: String,
+    val negativePrompt: String,
+    val disableModelNegativePrompt: Boolean,
+    val clipSkipText: String,
+    val vaeTilingEnabled: Boolean,
+    val batchCount: Int,
+    val widthText: String,
+    val heightText: String,
+    val stepsText: String,
+    val cfgScaleText: String,
+    val seedText: String,
+    val sampler: String,
+    val inputImageUri: String? = null,
+    val maskImageUri: String? = null,
+    val controlImageUri: String? = null
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("version", 2)
+        .put("taskModeName", taskModeName)
+        .put("strengthText", strengthText)
+        .put("controlStrengthText", controlStrengthText)
+        .put("negativePrompt", negativePrompt)
+        .put("disableModelNegativePrompt", disableModelNegativePrompt)
+        .put("clipSkipText", clipSkipText)
+        .put("vaeTilingEnabled", vaeTilingEnabled)
+        .put("batchCount", batchCount)
+        .put("widthText", widthText)
+        .put("heightText", heightText)
+        .put("stepsText", stepsText)
+        .put("cfgScaleText", cfgScaleText)
+        .put("seedText", seedText)
+        .put("sampler", sampler)
+        .apply {
+            inputImageUri?.let { put("inputImageUri", it) }
+            maskImageUri?.let { put("maskImageUri", it) }
+            controlImageUri?.let { put("controlImageUri", it) }
+        }
+
+    companion object {
+        fun fromJsonOrNull(raw: String?): ImageGenerationUiParameterSnapshot? {
+            if (raw.isNullOrBlank()) return null
+            return runCatching {
+                val json = JSONObject(raw)
+                val version = json.optInt("version", -1)
+                require(version == 1 || version == 2)
+                ImageGenerationUiParameterSnapshot(
+                    taskModeName = json.getString("taskModeName"),
+                    strengthText = json.getString("strengthText"),
+                    controlStrengthText = json.getString("controlStrengthText"),
+                    negativePrompt = json.getString("negativePrompt"),
+                    disableModelNegativePrompt = json.getBoolean("disableModelNegativePrompt"),
+                    clipSkipText = json.getString("clipSkipText"),
+                    vaeTilingEnabled = json.getBoolean("vaeTilingEnabled"),
+                    batchCount = json.getInt("batchCount").coerceIn(1, 8),
+                    widthText = json.getString("widthText"),
+                    heightText = json.getString("heightText"),
+                    stepsText = json.getString("stepsText"),
+                    cfgScaleText = json.getString("cfgScaleText"),
+                    seedText = json.getString("seedText"),
+                    sampler = json.getString("sampler"),
+                    inputImageUri = if (version >= 2) {
+                        json.optString("inputImageUri").takeIf(String::isNotBlank)
+                    } else {
+                        null
+                    },
+                    maskImageUri = if (version >= 2) {
+                        json.optString("maskImageUri").takeIf(String::isNotBlank)
+                    } else {
+                        null
+                    },
+                    controlImageUri = if (version >= 2) {
+                        json.optString("controlImageUri").takeIf(String::isNotBlank)
+                    } else {
+                        null
+                    }
+                )
+            }.getOrNull()
+        }
+    }
+}
+
+private const val IMAGE_GENERATION_UI_PARAMETER_PREFS = "mca_image_generation_ui_parameters"
+private const val IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX = "model:"
+
+internal fun persistGenerationImageUri(context: Context, uri: Uri): String? = runCatching {
+    require(uri.scheme.equals("content", ignoreCase = true)) {
+        "Generation image inputs must use a persistable content URI."
+    }
+    context.contentResolver.takePersistableUriPermission(
+        uri,
+        Intent.FLAG_GRANT_READ_URI_PERMISSION
+    )
+    require(
+        context.contentResolver.persistedUriPermissions.any { permission ->
+            permission.isReadPermission && permission.uri == uri
+        }
+    ) { "The document provider did not retain read access." }
+    uri.toString()
+}.getOrNull()
+
+internal fun persistedGenerationImageUriOrNull(context: Context, raw: String?): String? {
+    val value = raw?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    val uri = runCatching { Uri.parse(value) }.getOrNull() ?: return null
+    if (!uri.scheme.equals("content", ignoreCase = true)) return null
+    val permissionStillGranted = context.contentResolver.persistedUriPermissions.any { permission ->
+        permission.isReadPermission && permission.uri == uri
+    }
+    if (!permissionStillGranted) return null
+    val documentStillReadable = runCatching {
+        context.contentResolver.openFileDescriptor(uri, "r")?.use { true }
+            ?: context.contentResolver.openInputStream(uri)?.use { true }
+            ?: false
+    }.getOrDefault(false)
+    return value.takeIf { documentStillReadable }
+}
 
 data class ChatModelChoice(
     val id: String,
@@ -305,7 +485,26 @@ data class ChatModelChoice(
     val sizeBytes: Long = 0L,
     val loaded: Boolean = false,
     val subtitle: String = "",
-    val cloud: Boolean = false
+    val cloud: Boolean = false,
+    val supportedImageTaskModes: Set<ImageGenerationUiTaskMode> =
+        setOf(ImageGenerationUiTaskMode.TEXT_TO_IMAGE),
+    val supportsImageNegativePrompt: Boolean = false,
+    val supportsImageClipSkip: Boolean = false,
+    val supportsImageVaeTiling: Boolean = false,
+    val maxImageBatchCount: Int = 1,
+    val imageDefaultWidth: Int = 512,
+    val imageDefaultHeight: Int = 512,
+    val imageDefaultSteps: Int = 20,
+    val imageDefaultCfgScale: Double = 7.0,
+    val imageDefaultSeed: Int = 42,
+    val imageDefaultSampler: String = "euler",
+    val imageMinWidth: Int = 512,
+    val imageMaxWidth: Int = 512,
+    val imageMinHeight: Int = 512,
+    val imageMaxHeight: Int = 512,
+    val imageWidthMultiple: Int = 8,
+    val imageHeightMultiple: Int = 8,
+    val imageSupportedSamplers: List<String> = listOf("euler")
 )
 
 data class ChatHistoryItem(
@@ -338,7 +537,9 @@ fun ChatScreen(
     onDeleteImageAsset: (String) -> Unit = {},
     onUseFileAsset: (String) -> Unit = {},
     onDeleteFileAsset: (String) -> Unit = {},
-    onGenerateImagePrompt: (String) -> Unit = {},
+    onGenerateImagePrompt: (String, ImageGenerationUiOptions) -> Unit = { _, _ -> },
+    onRetryImageGeneration: (String) -> Unit = {},
+    onRecreateImageAsset: (String) -> Unit = {},
     onCancelImageGeneration: () -> Unit = {},
     onSelectImageModel: (String) -> Unit = {},
     onReasoningModeChange: (ReasoningMode) -> Unit,
@@ -363,14 +564,297 @@ fun ChatScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val imageParameterPreferences = remember(context) {
+        context.applicationContext.getSharedPreferences(
+            IMAGE_GENERATION_UI_PARAMETER_PREFS,
+            Context.MODE_PRIVATE
+        )
+    }
     var showImages by rememberSaveable { mutableStateOf(false) }
     var showAssistants by rememberSaveable { mutableStateOf(false) }
     var showFileLibrary by rememberSaveable { mutableStateOf(false) }
     var imagePrompt by rememberSaveable { mutableStateOf("") }
+    var imageTaskModeName by rememberSaveable {
+        mutableStateOf(ImageGenerationUiTaskMode.TEXT_TO_IMAGE.name)
+    }
+    var imageInputUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var imageMaskUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var imageControlUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var imageStrengthText by rememberSaveable { mutableStateOf("0.75") }
+    var imageControlStrengthText by rememberSaveable { mutableStateOf("1.0") }
+    var imageNegativePrompt by rememberSaveable { mutableStateOf("") }
+    var imageDisableModelNegativePrompt by rememberSaveable { mutableStateOf(false) }
+    var imageClipSkipText by rememberSaveable { mutableStateOf("") }
+    var imageVaeTilingEnabled by rememberSaveable { mutableStateOf(false) }
+    var imageBatchCount by rememberSaveable { mutableStateOf(1) }
+    var imageWidthText by rememberSaveable { mutableStateOf("512") }
+    var imageHeightText by rememberSaveable { mutableStateOf("512") }
+    var imageStepsText by rememberSaveable { mutableStateOf("20") }
+    var imageCfgScaleText by rememberSaveable { mutableStateOf("7") }
+    var imageSeedText by rememberSaveable { mutableStateOf("") }
+    var imageSampler by rememberSaveable { mutableStateOf("euler") }
+    var restoredImageParameterModelId by rememberSaveable { mutableStateOf<String?>(null) }
+    var imageInputRestoreWarning by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingGenerationImageRole by rememberSaveable { mutableStateOf("input") }
+    val imageTaskMode = ImageGenerationUiTaskMode.entries.firstOrNull {
+        it.name == imageTaskModeName
+    } ?: ImageGenerationUiTaskMode.TEXT_TO_IMAGE
+    val selectedImageModelChoice = state.imageModels
+        .firstOrNull { model -> model.id == state.selectedImageModelId }
+    val selectedImageTaskModes = selectedImageModelChoice
+        ?.supportedImageTaskModes
+        ?.takeIf { modes -> modes.isNotEmpty() }
+        ?: setOf(ImageGenerationUiTaskMode.TEXT_TO_IMAGE)
+    val supportsImageNegativePrompt = selectedImageModelChoice?.supportsImageNegativePrompt == true
+    val supportsImageClipSkip = selectedImageModelChoice?.supportsImageClipSkip == true
+    val supportsImageVaeTiling = selectedImageModelChoice?.supportsImageVaeTiling == true
+    val maxImageBatchCount = selectedImageModelChoice?.maxImageBatchCount?.coerceIn(1, 8) ?: 1
+    LaunchedEffect(state.selectedImageModelId) {
+        val modelId = state.selectedImageModelId
+        val model = selectedImageModelChoice
+        if (modelId == null || model == null) {
+            restoredImageParameterModelId = null
+            imageInputRestoreWarning = null
+            return@LaunchedEffect
+        }
+        val snapshot = ImageGenerationUiParameterSnapshot.fromJsonOrNull(
+            imageParameterPreferences.getString(
+                IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX + modelId,
+                null
+            )
+        )
+        imageTaskModeName = snapshot?.taskModeName
+            ?.takeIf { saved -> ImageGenerationUiTaskMode.entries.any { it.name == saved } }
+            ?: ImageGenerationUiTaskMode.TEXT_TO_IMAGE.name
+        imageStrengthText = snapshot?.strengthText ?: "0.75"
+        imageControlStrengthText = snapshot?.controlStrengthText ?: "1.0"
+        imageNegativePrompt = snapshot?.negativePrompt.orEmpty()
+        imageDisableModelNegativePrompt = snapshot?.disableModelNegativePrompt ?: false
+        imageClipSkipText = snapshot?.clipSkipText.orEmpty()
+        imageVaeTilingEnabled = snapshot?.vaeTilingEnabled ?: false
+        imageBatchCount = (snapshot?.batchCount ?: 1).coerceIn(1, model.maxImageBatchCount.coerceIn(1, 8))
+        imageWidthText = snapshot?.widthText ?: model.imageDefaultWidth.toString()
+        imageHeightText = snapshot?.heightText ?: model.imageDefaultHeight.toString()
+        imageStepsText = snapshot?.stepsText ?: model.imageDefaultSteps.toString()
+        imageCfgScaleText = snapshot?.cfgScaleText
+            ?: model.imageDefaultCfgScale.toString().trimEnd('0').trimEnd('.')
+        imageSeedText = snapshot?.seedText.orEmpty()
+        imageSampler = snapshot?.sampler
+            ?.takeIf { it in model.imageSupportedSamplers }
+            ?: model.imageDefaultSampler
+        val restoredInputUri = persistedGenerationImageUriOrNull(context, snapshot?.inputImageUri)
+        val restoredMaskUri = persistedGenerationImageUriOrNull(context, snapshot?.maskImageUri)
+        val restoredControlUri = persistedGenerationImageUriOrNull(context, snapshot?.controlImageUri)
+        imageInputUri = restoredInputUri
+        imageMaskUri = restoredMaskUri
+        imageControlUri = restoredControlUri
+        val invalidatedRoles = buildList {
+            if (!snapshot?.inputImageUri.isNullOrBlank() && restoredInputUri == null) add("原图")
+            if (!snapshot?.maskImageUri.isNullOrBlank() && restoredMaskUri == null) add("蒙版")
+            if (!snapshot?.controlImageUri.isNullOrBlank() && restoredControlUri == null) add("控制图")
+        }
+        imageInputRestoreWarning = invalidatedRoles.takeIf { it.isNotEmpty() }?.let { roles ->
+            "之前选择的${roles.joinToString("、")}已被删除或读取权限已失效，请重新选择。"
+        }
+        restoredImageParameterModelId = modelId
+    }
+    LaunchedEffect(
+        state.selectedImageModelId,
+        restoredImageParameterModelId,
+        imageTaskModeName,
+        imageStrengthText,
+        imageControlStrengthText,
+        imageNegativePrompt,
+        imageDisableModelNegativePrompt,
+        imageClipSkipText,
+        imageVaeTilingEnabled,
+        imageBatchCount,
+        imageWidthText,
+        imageHeightText,
+        imageStepsText,
+        imageCfgScaleText,
+        imageSeedText,
+        imageSampler,
+        imageInputUri,
+        imageMaskUri,
+        imageControlUri
+    ) {
+        val modelId = state.selectedImageModelId ?: return@LaunchedEffect
+        if (restoredImageParameterModelId != modelId) return@LaunchedEffect
+        val snapshot = ImageGenerationUiParameterSnapshot(
+            taskModeName = imageTaskModeName,
+            strengthText = imageStrengthText,
+            controlStrengthText = imageControlStrengthText,
+            negativePrompt = imageNegativePrompt,
+            disableModelNegativePrompt = imageDisableModelNegativePrompt,
+            clipSkipText = imageClipSkipText,
+            vaeTilingEnabled = imageVaeTilingEnabled,
+            batchCount = imageBatchCount,
+            widthText = imageWidthText,
+            heightText = imageHeightText,
+            stepsText = imageStepsText,
+            cfgScaleText = imageCfgScaleText,
+            seedText = imageSeedText,
+            sampler = imageSampler,
+            inputImageUri = imageInputUri,
+            maskImageUri = imageMaskUri,
+            controlImageUri = imageControlUri
+        )
+        imageParameterPreferences.edit()
+            .putString(
+                IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX + modelId,
+                snapshot.toJson().toString()
+            )
+            .apply()
+    }
+    LaunchedEffect(
+        state.selectedImageModelId,
+        selectedImageTaskModes,
+        supportsImageNegativePrompt,
+        supportsImageClipSkip,
+        supportsImageVaeTiling,
+        maxImageBatchCount
+    ) {
+        if (imageTaskMode !in selectedImageTaskModes) {
+            imageTaskModeName = ImageGenerationUiTaskMode.entries
+                .firstOrNull(selectedImageTaskModes::contains)
+                ?.name
+                ?: ImageGenerationUiTaskMode.TEXT_TO_IMAGE.name
+            imageInputUri = null
+            imageMaskUri = null
+            imageControlUri = null
+        }
+        if (!supportsImageNegativePrompt) {
+            imageNegativePrompt = ""
+            imageDisableModelNegativePrompt = false
+        }
+        if (!supportsImageClipSkip) imageClipSkipText = ""
+        if (!supportsImageVaeTiling) imageVaeTilingEnabled = false
+        imageBatchCount = imageBatchCount.coerceIn(1, maxImageBatchCount)
+    }
     fun enqueueImagePrompt(prompt: String) {
         val cleanPrompt = prompt.trim()
         if (cleanPrompt.isBlank()) return
-        onGenerateImagePrompt(cleanPrompt)
+        if (imageTaskMode !in selectedImageTaskModes) {
+            Toast.makeText(context, "当前模型不支持此生成方式", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val requiredInputMissing = when (imageTaskMode) {
+            ImageGenerationUiTaskMode.TEXT_TO_IMAGE -> false
+            ImageGenerationUiTaskMode.IMG2IMG,
+            ImageGenerationUiTaskMode.EDIT -> imageInputUri == null
+            ImageGenerationUiTaskMode.INPAINT -> imageInputUri == null || imageMaskUri == null
+            ImageGenerationUiTaskMode.CONTROL -> imageControlUri == null
+        }
+        if (requiredInputMissing) {
+            Toast.makeText(context, "请先选择当前模式需要的图片输入", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val strengthValue = imageStrengthText.toDoubleOrNull()
+        if (imageTaskMode in setOf(
+                ImageGenerationUiTaskMode.IMG2IMG,
+                ImageGenerationUiTaskMode.INPAINT
+            ) && (strengthValue == null || strengthValue <= 0.0 || strengthValue > 1.0)
+        ) {
+            Toast.makeText(context, "重绘强度必须在 (0, 1]", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val controlStrengthValue = imageControlStrengthText.toDoubleOrNull()
+        if (imageTaskMode == ImageGenerationUiTaskMode.CONTROL &&
+            (controlStrengthValue == null || controlStrengthValue < 0.0 || controlStrengthValue > 2.0)
+        ) {
+            Toast.makeText(context, "控制强度必须在 [0, 2]", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipSkipValue = if (supportsImageClipSkip) {
+            imageClipSkipText.trim().takeIf(String::isNotEmpty)?.toIntOrNull()
+        } else {
+            null
+        }
+        if (imageClipSkipText.isNotBlank() && (clipSkipValue == null || clipSkipValue !in -1..32)) {
+            Toast.makeText(context, "CLIP skip 必须为 -1 或 0-32", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val localControls = selectedImageModelChoice?.takeUnless(ChatModelChoice::cloud)
+        val widthValue = localControls?.let { imageWidthText.toIntOrNull() }
+        val heightValue = localControls?.let { imageHeightText.toIntOrNull() }
+        if (localControls != null && (
+                widthValue == null || heightValue == null ||
+                    widthValue !in localControls.imageMinWidth..localControls.imageMaxWidth ||
+                    heightValue !in localControls.imageMinHeight..localControls.imageMaxHeight ||
+                    widthValue % localControls.imageWidthMultiple != 0 ||
+                    heightValue % localControls.imageHeightMultiple != 0
+                )
+        ) {
+            Toast.makeText(context, "图片尺寸不符合当前模型的范围或步进要求", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val stepsValue = localControls?.let { imageStepsText.toIntOrNull() }
+        if (localControls != null && (stepsValue == null || stepsValue !in 1..1_000)) {
+            Toast.makeText(context, "采样步数必须为 1-1000", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cfgScaleValue = localControls?.let { imageCfgScaleText.toDoubleOrNull() }
+        if (localControls != null &&
+            (cfgScaleValue == null || !cfgScaleValue.isFinite() || cfgScaleValue !in 0.0..30.0)
+        ) {
+            Toast.makeText(context, "CFG 必须为 0-30 的有限数值", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val seedValue = localControls?.let {
+            imageSeedText.trim().takeIf(String::isNotEmpty)?.toIntOrNull()
+        }
+        if (localControls != null && imageSeedText.isNotBlank() &&
+            (seedValue == null || seedValue < 0)
+        ) {
+            Toast.makeText(context, "Seed 必须为非负 32 位整数", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val sampleMethodValue = localControls?.let { imageSampler.trim() }
+        if (localControls != null && (
+                sampleMethodValue.isNullOrBlank() ||
+                    localControls.imageSupportedSamplers.isNotEmpty() &&
+                    sampleMethodValue !in localControls.imageSupportedSamplers
+                )
+        ) {
+            Toast.makeText(context, "请选择当前模型支持的采样器", Toast.LENGTH_SHORT).show()
+            return
+        }
+        onGenerateImagePrompt(
+            cleanPrompt,
+            ImageGenerationUiOptions(
+                taskMode = imageTaskMode,
+                negativePrompt = if (!supportsImageNegativePrompt) {
+                    null
+                } else {
+                    imageNegativePrompt.takeIf(String::isNotBlank)
+                        ?: if (imageDisableModelNegativePrompt) "" else null
+                },
+                inputImageUri = imageInputUri,
+                maskImageUri = imageMaskUri,
+                controlImageUri = imageControlUri,
+                strength = if (imageTaskMode in setOf(
+                        ImageGenerationUiTaskMode.IMG2IMG,
+                        ImageGenerationUiTaskMode.INPAINT
+                    )
+                ) strengthValue else null,
+                controlStrength = if (imageTaskMode == ImageGenerationUiTaskMode.CONTROL) {
+                    controlStrengthValue
+                } else {
+                    null
+                },
+                clipSkip = clipSkipValue,
+                batchCount = imageBatchCount.coerceIn(1, maxImageBatchCount),
+                vaeTileSize = if (supportsImageVaeTiling && imageVaeTilingEnabled) 512 else null,
+                vaeTileOverlap = if (supportsImageVaeTiling && imageVaeTilingEnabled) 0.5 else null,
+                width = widthValue,
+                height = heightValue,
+                steps = stepsValue,
+                cfgScale = cfgScaleValue,
+                seed = seedValue,
+                sampleMethod = sampleMethodValue
+            )
+        )
         imagePrompt = ""
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -378,6 +862,25 @@ fun ChatScreen(
     }
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { onUploadFile(it.toString()) }
+    }
+    val generationPhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { selectedUri ->
+            val selected = persistGenerationImageUri(context, selectedUri)
+            if (selected == null) {
+                Toast.makeText(
+                    context,
+                    "无法保留该图片的读取权限，请重新选择。",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@rememberLauncherForActivityResult
+            }
+            when (pendingGenerationImageRole) {
+                "mask" -> imageMaskUri = selected
+                "control" -> imageControlUri = selected
+                else -> imageInputUri = selected
+            }
+            imageInputRestoreWarning = null
+        }
     }
     val cameraPicker = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
         bitmap?.let { onUploadFile(saveCameraPreview(context, it).toString()) }
@@ -542,13 +1045,82 @@ fun ChatScreen(
                     selectedImageModelId = state.selectedImageModelId,
                     selectedImageModelName = state.selectedImageModelName,
                     selectedImageModelIsCloud = state.selectedImageModelIsCloud,
+                    supportedTaskModes = selectedImageTaskModes,
+                    supportsNegativePrompt = supportsImageNegativePrompt,
+                    supportsClipSkip = supportsImageClipSkip,
+                    supportsVaeTiling = supportsImageVaeTiling,
+                    batchCount = imageBatchCount,
+                    maxBatchCount = maxImageBatchCount,
+                    taskMode = imageTaskMode,
+                    inputImageUri = imageInputUri,
+                    maskImageUri = imageMaskUri,
+                    controlImageUri = imageControlUri,
+                    inputRestoreWarning = imageInputRestoreWarning,
+                    strengthText = imageStrengthText,
+                    controlStrengthText = imageControlStrengthText,
+                    negativePrompt = imageNegativePrompt,
+                    disableModelNegativePrompt = imageDisableModelNegativePrompt,
+                    clipSkipText = imageClipSkipText,
+                    vaeTilingEnabled = imageVaeTilingEnabled,
+                    widthText = imageWidthText,
+                    heightText = imageHeightText,
+                    stepsText = imageStepsText,
+                    cfgScaleText = imageCfgScaleText,
+                    seedText = imageSeedText,
+                    sampler = imageSampler,
                     prompt = imagePrompt,
                     onPromptChange = { imagePrompt = it },
                     onSubmitPrompt = { enqueueImagePrompt(imagePrompt) },
                     onCancelGeneration = onCancelImageGeneration,
-                    onRetryJob = { job -> enqueueImagePrompt(job.prompt) },
+                    onRetryJob = { job -> onRetryImageGeneration(job.id) },
+                    onRecreateImageAsset = onRecreateImageAsset,
                     onBack = closePage,
-                    onOpenPhoto = { photoPicker.launch("image/*") },
+                    onTaskModeChange = { mode ->
+                        imageInputRestoreWarning = null
+                        imageTaskModeName = mode.name
+                        when (mode) {
+                            ImageGenerationUiTaskMode.TEXT_TO_IMAGE -> {
+                                imageInputUri = null
+                                imageMaskUri = null
+                                imageControlUri = null
+                            }
+                            ImageGenerationUiTaskMode.IMG2IMG,
+                            ImageGenerationUiTaskMode.EDIT -> {
+                                imageMaskUri = null
+                                imageControlUri = null
+                            }
+                            ImageGenerationUiTaskMode.INPAINT -> imageControlUri = null
+                            ImageGenerationUiTaskMode.CONTROL -> {
+                                imageInputUri = null
+                                imageMaskUri = null
+                            }
+                        }
+                    },
+                    onPickImageRole = { role ->
+                        pendingGenerationImageRole = role
+                        generationPhotoPicker.launch(arrayOf("image/*"))
+                    },
+                    onClearImageRole = { role ->
+                        imageInputRestoreWarning = null
+                        when (role) {
+                            "mask" -> imageMaskUri = null
+                            "control" -> imageControlUri = null
+                            else -> imageInputUri = null
+                        }
+                    },
+                    onStrengthTextChange = { imageStrengthText = it },
+                    onControlStrengthTextChange = { imageControlStrengthText = it },
+                    onNegativePromptChange = { imageNegativePrompt = it },
+                    onDisableModelNegativePromptChange = { imageDisableModelNegativePrompt = it },
+                    onClipSkipTextChange = { imageClipSkipText = it },
+                    onVaeTilingEnabledChange = { imageVaeTilingEnabled = it },
+                    onBatchCountChange = { imageBatchCount = it.coerceIn(1, maxImageBatchCount) },
+                    onWidthTextChange = { imageWidthText = it },
+                    onHeightTextChange = { imageHeightText = it },
+                    onStepsTextChange = { imageStepsText = it },
+                    onCfgScaleTextChange = { imageCfgScaleText = it },
+                    onSeedTextChange = { imageSeedText = it },
+                    onSamplerChange = { imageSampler = it },
                     onSelectImageModel = onSelectImageModel,
                     onUseImageAsset = {
                         onUseImageAsset(it)
@@ -1255,13 +1827,52 @@ private fun ImagesWorkspaceScreen(
     selectedImageModelId: String?,
     selectedImageModelName: String?,
     selectedImageModelIsCloud: Boolean,
+    supportedTaskModes: Set<ImageGenerationUiTaskMode>,
+    supportsNegativePrompt: Boolean,
+    supportsClipSkip: Boolean,
+    supportsVaeTiling: Boolean,
+    batchCount: Int,
+    maxBatchCount: Int,
+    taskMode: ImageGenerationUiTaskMode,
+    inputImageUri: String?,
+    maskImageUri: String?,
+    controlImageUri: String?,
+    inputRestoreWarning: String?,
+    strengthText: String,
+    controlStrengthText: String,
+    negativePrompt: String,
+    disableModelNegativePrompt: Boolean,
+    clipSkipText: String,
+    vaeTilingEnabled: Boolean,
+    widthText: String,
+    heightText: String,
+    stepsText: String,
+    cfgScaleText: String,
+    seedText: String,
+    sampler: String,
     prompt: String,
     onPromptChange: (String) -> Unit,
     onSubmitPrompt: () -> Unit,
     onCancelGeneration: () -> Unit,
     onRetryJob: (ImageGenerationUiJob) -> Unit,
+    onRecreateImageAsset: (String) -> Unit,
     onBack: () -> Unit,
-    onOpenPhoto: () -> Unit,
+    onTaskModeChange: (ImageGenerationUiTaskMode) -> Unit,
+    onPickImageRole: (String) -> Unit,
+    onClearImageRole: (String) -> Unit,
+    onStrengthTextChange: (String) -> Unit,
+    onControlStrengthTextChange: (String) -> Unit,
+    onNegativePromptChange: (String) -> Unit,
+    onDisableModelNegativePromptChange: (Boolean) -> Unit,
+    onClipSkipTextChange: (String) -> Unit,
+    onVaeTilingEnabledChange: (Boolean) -> Unit,
+    onBatchCountChange: (Int) -> Unit,
+    onWidthTextChange: (String) -> Unit,
+    onHeightTextChange: (String) -> Unit,
+    onStepsTextChange: (String) -> Unit,
+    onCfgScaleTextChange: (String) -> Unit,
+    onSeedTextChange: (String) -> Unit,
+    onSamplerChange: (String) -> Unit,
     onSelectImageModel: (String) -> Unit,
     onUseImageAsset: (String) -> Unit,
     onDeleteImageAsset: (String) -> Unit,
@@ -1281,6 +1892,9 @@ private fun ImagesWorkspaceScreen(
         ?.takeIf { it.statusLabel == "完成" }
         ?.let { doneJob -> images.firstOrNull { it.prompt == doneJob.prompt } }
     val isImageGenerating = activeJob?.isWorking == true
+    val canvasModelId = activeJob?.modelId ?: selectedImageModelId
+    val canvasModelName = activeJob?.modelName?.takeIf(String::isNotBlank) ?: selectedImageModelName
+    val canvasModelIsCloud = activeJob?.modelIsCloud ?: selectedImageModelIsCloud
 
     BackHandler(enabled = showGenerationCanvas) {
         showGenerationCanvas = false
@@ -1292,6 +1906,21 @@ private fun ImagesWorkspaceScreen(
     fun submitFromImages() {
         val cleanPrompt = prompt.trim()
         if (cleanPrompt.isBlank()) return
+        if (taskMode !in supportedTaskModes) {
+            Toast.makeText(context, "当前模型不支持此生成方式", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ready = when (taskMode) {
+            ImageGenerationUiTaskMode.TEXT_TO_IMAGE -> true
+            ImageGenerationUiTaskMode.IMG2IMG,
+            ImageGenerationUiTaskMode.EDIT -> inputImageUri != null
+            ImageGenerationUiTaskMode.INPAINT -> inputImageUri != null && maskImageUri != null
+            ImageGenerationUiTaskMode.CONTROL -> controlImageUri != null
+        }
+        if (!ready) {
+            Toast.makeText(context, "请先选择当前模式需要的图片输入", Toast.LENGTH_SHORT).show()
+            return
+        }
         pendingConversationPrompt = cleanPrompt
         showGenerationCanvas = true
         onSubmitPrompt()
@@ -1309,9 +1938,9 @@ private fun ImagesWorkspaceScreen(
                 job = activeJob,
                 image = activeImage,
                 imageModels = imageModels,
-                selectedImageModelId = selectedImageModelId,
-                selectedImageModelName = selectedImageModelName,
-                selectedImageModelIsCloud = selectedImageModelIsCloud,
+                selectedImageModelId = canvasModelId,
+                selectedImageModelName = canvasModelName,
+                selectedImageModelIsCloud = canvasModelIsCloud,
                 onBackToGallery = { showGenerationCanvas = false },
                 onSelectImageModel = onSelectImageModel,
                 onRetry = { activeJob?.let(onRetryJob) },
@@ -1322,11 +1951,51 @@ private fun ImagesWorkspaceScreen(
             ImageGalleryHome(
                 images = images,
                 imageModels = imageModels,
+                imageModelSwitchEnabled = jobs.none { it.isWorking },
                 selectedImageModelId = selectedImageModelId,
                 selectedImageModelName = selectedImageModelName,
                 selectedImageModelIsCloud = selectedImageModelIsCloud,
+                supportedTaskModes = supportedTaskModes,
+                supportsNegativePrompt = supportsNegativePrompt,
+                supportsClipSkip = supportsClipSkip,
+                supportsVaeTiling = supportsVaeTiling,
+                batchCount = batchCount,
+                maxBatchCount = maxBatchCount,
+                taskMode = taskMode,
+                inputImageUri = inputImageUri,
+                maskImageUri = maskImageUri,
+                controlImageUri = controlImageUri,
+                inputRestoreWarning = inputRestoreWarning,
+                strengthText = strengthText,
+                controlStrengthText = controlStrengthText,
+                negativePrompt = negativePrompt,
+                disableModelNegativePrompt = disableModelNegativePrompt,
+                clipSkipText = clipSkipText,
+                vaeTilingEnabled = vaeTilingEnabled,
+                widthText = widthText,
+                heightText = heightText,
+                stepsText = stepsText,
+                cfgScaleText = cfgScaleText,
+                seedText = seedText,
+                sampler = sampler,
                 onBack = onBack,
                 onSelectImageModel = onSelectImageModel,
+                onTaskModeChange = onTaskModeChange,
+                onPickImageRole = onPickImageRole,
+                onClearImageRole = onClearImageRole,
+                onStrengthTextChange = onStrengthTextChange,
+                onControlStrengthTextChange = onControlStrengthTextChange,
+                onNegativePromptChange = onNegativePromptChange,
+                onDisableModelNegativePromptChange = onDisableModelNegativePromptChange,
+                onClipSkipTextChange = onClipSkipTextChange,
+                onVaeTilingEnabledChange = onVaeTilingEnabledChange,
+                onBatchCountChange = onBatchCountChange,
+                onWidthTextChange = onWidthTextChange,
+                onHeightTextChange = onHeightTextChange,
+                onStepsTextChange = onStepsTextChange,
+                onCfgScaleTextChange = onCfgScaleTextChange,
+                onSeedTextChange = onSeedTextChange,
+                onSamplerChange = onSamplerChange,
                 onPromptChange = onPromptChange,
                 onOpenImagePreview = { previewImageId = it },
                 onDeleteImageAsset = onDeleteImageAsset
@@ -1336,7 +2005,20 @@ private fun ImagesWorkspaceScreen(
         ImagePromptBar(
             prompt = prompt,
             onPromptChange = onPromptChange,
-            onOpenPhoto = onOpenPhoto,
+            onOpenPhoto = {
+                when (taskMode) {
+                    ImageGenerationUiTaskMode.CONTROL -> onPickImageRole("control")
+                    ImageGenerationUiTaskMode.TEXT_TO_IMAGE -> {
+                        if (ImageGenerationUiTaskMode.IMG2IMG in supportedTaskModes) {
+                            onTaskModeChange(ImageGenerationUiTaskMode.IMG2IMG)
+                            onPickImageRole("input")
+                        } else {
+                            Toast.makeText(context, "当前模型不支持图片输入", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    else -> onPickImageRole("input")
+                }
+            },
             onSubmit = ::submitFromImages,
             placeholder = if (showGenerationCanvas) "回复 MCA" else "描述图像",
             isGenerating = isImageGenerating,
@@ -1359,6 +2041,13 @@ private fun ImagesWorkspaceScreen(
                         onDeleteImageAsset(image.id)
                         previewImageId = null
                     },
+                    onRecreate = {
+                        pendingConversationPrompt = image.generationPrompt.ifBlank { image.prompt }
+                        showGenerationCanvas = true
+                        previewImageId = null
+                        onRecreateImageAsset(image.id)
+                    },
+                    recreateEnabled = image.canRecreate && jobs.none { it.isWorking },
                     modifier = Modifier.align(Alignment.Center)
                 )
             }
@@ -1367,17 +2056,57 @@ private fun ImagesWorkspaceScreen(
 }
 
 private val ImageGenerationUiJob.isWorking: Boolean
-    get() = !failed && statusLabel != "完成"
+    get() = !terminal
 
 @Composable
 private fun ImageGalleryHome(
     images: List<ImageAssetUiItem>,
     imageModels: List<ChatModelChoice>,
+    imageModelSwitchEnabled: Boolean,
     selectedImageModelId: String?,
     selectedImageModelName: String?,
     selectedImageModelIsCloud: Boolean,
+    supportedTaskModes: Set<ImageGenerationUiTaskMode>,
+    supportsNegativePrompt: Boolean,
+    supportsClipSkip: Boolean,
+    supportsVaeTiling: Boolean,
+    batchCount: Int,
+    maxBatchCount: Int,
+    taskMode: ImageGenerationUiTaskMode,
+    inputImageUri: String?,
+    maskImageUri: String?,
+    controlImageUri: String?,
+    inputRestoreWarning: String?,
+    strengthText: String,
+    controlStrengthText: String,
+    negativePrompt: String,
+    disableModelNegativePrompt: Boolean,
+    clipSkipText: String,
+    vaeTilingEnabled: Boolean,
+    widthText: String,
+    heightText: String,
+    stepsText: String,
+    cfgScaleText: String,
+    seedText: String,
+    sampler: String,
     onBack: () -> Unit,
     onSelectImageModel: (String) -> Unit,
+    onTaskModeChange: (ImageGenerationUiTaskMode) -> Unit,
+    onPickImageRole: (String) -> Unit,
+    onClearImageRole: (String) -> Unit,
+    onStrengthTextChange: (String) -> Unit,
+    onControlStrengthTextChange: (String) -> Unit,
+    onNegativePromptChange: (String) -> Unit,
+    onDisableModelNegativePromptChange: (Boolean) -> Unit,
+    onClipSkipTextChange: (String) -> Unit,
+    onVaeTilingEnabledChange: (Boolean) -> Unit,
+    onBatchCountChange: (Int) -> Unit,
+    onWidthTextChange: (String) -> Unit,
+    onHeightTextChange: (String) -> Unit,
+    onStepsTextChange: (String) -> Unit,
+    onCfgScaleTextChange: (String) -> Unit,
+    onSeedTextChange: (String) -> Unit,
+    onSamplerChange: (String) -> Unit,
     onPromptChange: (String) -> Unit,
     onOpenImagePreview: (String) -> Unit,
     onDeleteImageAsset: (String) -> Unit
@@ -1399,7 +2128,53 @@ private fun ImageGalleryHome(
                 selectedModelId = selectedImageModelId,
                 selectedModelName = selectedImageModelName,
                 selectedModelIsCloud = selectedImageModelIsCloud,
+                enabled = imageModelSwitchEnabled,
                 onSelectModel = onSelectImageModel
+            )
+        }
+        item {
+            ImageInputOptionsPanel(
+                taskMode = taskMode,
+                selectedModelIsCloud = selectedImageModelIsCloud,
+                executionModel = imageModels.firstOrNull { it.id == selectedImageModelId },
+                supportedTaskModes = supportedTaskModes,
+                supportsNegativePrompt = supportsNegativePrompt,
+                supportsClipSkip = supportsClipSkip,
+                supportsVaeTiling = supportsVaeTiling,
+                batchCount = batchCount,
+                maxBatchCount = maxBatchCount,
+                inputImageUri = inputImageUri,
+                maskImageUri = maskImageUri,
+                controlImageUri = controlImageUri,
+                inputRestoreWarning = inputRestoreWarning,
+                strengthText = strengthText,
+                controlStrengthText = controlStrengthText,
+                negativePrompt = negativePrompt,
+                disableModelNegativePrompt = disableModelNegativePrompt,
+                clipSkipText = clipSkipText,
+                vaeTilingEnabled = vaeTilingEnabled,
+                widthText = widthText,
+                heightText = heightText,
+                stepsText = stepsText,
+                cfgScaleText = cfgScaleText,
+                seedText = seedText,
+                sampler = sampler,
+                onTaskModeChange = onTaskModeChange,
+                onPickImageRole = onPickImageRole,
+                onClearImageRole = onClearImageRole,
+                onStrengthTextChange = onStrengthTextChange,
+                onControlStrengthTextChange = onControlStrengthTextChange,
+                onNegativePromptChange = onNegativePromptChange,
+                onDisableModelNegativePromptChange = onDisableModelNegativePromptChange,
+                onClipSkipTextChange = onClipSkipTextChange,
+                onVaeTilingEnabledChange = onVaeTilingEnabledChange,
+                onBatchCountChange = onBatchCountChange,
+                onWidthTextChange = onWidthTextChange,
+                onHeightTextChange = onHeightTextChange,
+                onStepsTextChange = onStepsTextChange,
+                onCfgScaleTextChange = onCfgScaleTextChange,
+                onSeedTextChange = onSeedTextChange,
+                onSamplerChange = onSamplerChange
             )
         }
         item {
@@ -1476,6 +2251,300 @@ private fun ImageGalleryHome(
         }
     }
 }
+
+@Composable
+private fun ImageInputOptionsPanel(
+    taskMode: ImageGenerationUiTaskMode,
+    selectedModelIsCloud: Boolean,
+    executionModel: ChatModelChoice?,
+    supportedTaskModes: Set<ImageGenerationUiTaskMode>,
+    supportsNegativePrompt: Boolean,
+    supportsClipSkip: Boolean,
+    supportsVaeTiling: Boolean,
+    batchCount: Int,
+    maxBatchCount: Int,
+    inputImageUri: String?,
+    maskImageUri: String?,
+    controlImageUri: String?,
+    inputRestoreWarning: String?,
+    strengthText: String,
+    controlStrengthText: String,
+    negativePrompt: String,
+    disableModelNegativePrompt: Boolean,
+    clipSkipText: String,
+    vaeTilingEnabled: Boolean,
+    widthText: String,
+    heightText: String,
+    stepsText: String,
+    cfgScaleText: String,
+    seedText: String,
+    sampler: String,
+    onTaskModeChange: (ImageGenerationUiTaskMode) -> Unit,
+    onPickImageRole: (String) -> Unit,
+    onClearImageRole: (String) -> Unit,
+    onStrengthTextChange: (String) -> Unit,
+    onControlStrengthTextChange: (String) -> Unit,
+    onNegativePromptChange: (String) -> Unit,
+    onDisableModelNegativePromptChange: (Boolean) -> Unit,
+    onClipSkipTextChange: (String) -> Unit,
+    onVaeTilingEnabledChange: (Boolean) -> Unit,
+    onBatchCountChange: (Int) -> Unit,
+    onWidthTextChange: (String) -> Unit,
+    onHeightTextChange: (String) -> Unit,
+    onStepsTextChange: (String) -> Unit,
+    onCfgScaleTextChange: (String) -> Unit,
+    onSeedTextChange: (String) -> Unit,
+    onSamplerChange: (String) -> Unit
+) {
+    val darkTheme = isSystemInDarkTheme()
+    Surface(
+        color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF6F8FC),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("生成方式", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            inputRestoreWarning?.let { warning ->
+                Text(
+                    warning,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(
+                    ImageGenerationUiTaskMode.entries.filter(supportedTaskModes::contains),
+                    key = { it.name }
+                ) { mode ->
+                    FilterChip(
+                        selected = mode == taskMode,
+                        onClick = { onTaskModeChange(mode) },
+                        label = { Text(mode.label) }
+                    )
+                }
+            }
+            if (selectedModelIsCloud && (
+                    taskMode != ImageGenerationUiTaskMode.TEXT_TO_IMAGE ||
+                        clipSkipText.isNotBlank() || vaeTilingEnabled
+                    )
+            ) {
+                Text(
+                    "当前云端连接器只声明了基础文生图；请选择本地引擎后再运行这些输入或高级控制。",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            when (taskMode) {
+                ImageGenerationUiTaskMode.TEXT_TO_IMAGE -> Unit
+                ImageGenerationUiTaskMode.IMG2IMG -> {
+                    ImageInputRoleRow("原图", "input", inputImageUri, onPickImageRole, onClearImageRole)
+                    ImageStrengthField("重绘强度 (0-1]", strengthText, onStrengthTextChange)
+                }
+                ImageGenerationUiTaskMode.EDIT -> {
+                    ImageInputRoleRow("原图", "input", inputImageUri, onPickImageRole, onClearImageRole)
+                }
+                ImageGenerationUiTaskMode.INPAINT -> {
+                    ImageInputRoleRow("原图", "input", inputImageUri, onPickImageRole, onClearImageRole)
+                    ImageInputRoleRow("蒙版", "mask", maskImageUri, onPickImageRole, onClearImageRole)
+                    ImageStrengthField("重绘强度 (0-1]", strengthText, onStrengthTextChange)
+                }
+                ImageGenerationUiTaskMode.CONTROL -> {
+                    ImageInputRoleRow("控制图", "control", controlImageUri, onPickImageRole, onClearImageRole)
+                    ImageStrengthField("控制强度 [0-2]", controlStrengthText, onControlStrengthTextChange)
+                }
+            }
+            if (!selectedModelIsCloud && executionModel != null) {
+                Text("生成参数", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedTextField(
+                        value = widthText,
+                        onValueChange = onWidthTextChange,
+                        label = { Text("宽度") },
+                        supportingText = {
+                            Text("${executionModel.imageMinWidth}-${executionModel.imageMaxWidth} / ${executionModel.imageWidthMultiple}")
+                        },
+                        singleLine = true,
+                        enabled = executionModel.imageMinWidth != executionModel.imageMaxWidth,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = heightText,
+                        onValueChange = onHeightTextChange,
+                        label = { Text("高度") },
+                        supportingText = {
+                            Text("${executionModel.imageMinHeight}-${executionModel.imageMaxHeight} / ${executionModel.imageHeightMultiple}")
+                        },
+                        singleLine = true,
+                        enabled = executionModel.imageMinHeight != executionModel.imageMaxHeight,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedTextField(
+                        value = stepsText,
+                        onValueChange = onStepsTextChange,
+                        label = { Text("步数") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = cfgScaleText,
+                        onValueChange = onCfgScaleTextChange,
+                        label = { Text("CFG") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = seedText,
+                        onValueChange = onSeedTextChange,
+                        label = { Text("Seed") },
+                        placeholder = { Text("随机") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Text("采样器", style = MaterialTheme.typography.labelMedium)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(executionModel.imageSupportedSamplers.distinct()) { method ->
+                        FilterChip(
+                            selected = method == sampler,
+                            onClick = { onSamplerChange(method) },
+                            label = { Text(method) }
+                        )
+                    }
+                }
+            }
+            if (supportsNegativePrompt) {
+                OutlinedTextField(
+                    value = negativePrompt,
+                    onValueChange = onNegativePromptChange,
+                    label = { Text("负面提示词") },
+                    placeholder = { Text("留空使用模型默认") },
+                    minLines = 2,
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                FilterChip(
+                    selected = disableModelNegativePrompt,
+                    onClick = { onDisableModelNegativePromptChange(!disableModelNegativePrompt) },
+                    label = { Text("关闭模型默认负面词") }
+                )
+            }
+            if (supportsClipSkip || supportsVaeTiling) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (supportsClipSkip) {
+                        OutlinedTextField(
+                            value = clipSkipText,
+                            onValueChange = onClipSkipTextChange,
+                            label = { Text("CLIP skip") },
+                            placeholder = { Text("模型默认") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    if (supportsVaeTiling) {
+                        FilterChip(
+                            selected = vaeTilingEnabled,
+                            onClick = { onVaeTilingEnabledChange(!vaeTilingEnabled) },
+                            label = { Text("VAE 分块") }
+                        )
+                    }
+                }
+            }
+            if (maxBatchCount > 1) {
+                Text("输出张数", style = MaterialTheme.typography.labelMedium)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(listOf(1, 2, 4, 8).filter { it <= maxBatchCount }) { count ->
+                        FilterChip(
+                            selected = count == batchCount,
+                            onClick = { onBatchCountChange(count) },
+                            label = { Text(count.toString()) }
+                        )
+                    }
+                }
+            }
+            Text(
+                buildString {
+                    append("单次输出 ")
+                    append(batchCount.coerceIn(1, maxBatchCount))
+                    append(" 张")
+                    if (supportsVaeTiling && vaeTilingEnabled) {
+                        append(" · VAE 分块 512 / 重叠 0.5")
+                    }
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
+@Composable
+private fun ImageInputRoleRow(
+    label: String,
+    role: String,
+    uri: String?,
+    onPick: (String) -> Unit,
+    onClear: (String) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Button(onClick = { onPick(role) }) {
+            Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(if (uri == null) "选择$label" else "更换$label")
+        }
+        Text(
+            uri?.let(::imageInputDisplayName) ?: "未选择",
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall
+        )
+        if (uri != null) {
+            IconButton(onClick = { onClear(role) }) {
+                Icon(Icons.Default.Close, contentDescription = "清除$label")
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImageStrengthField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth()
+    )
+}
+
+private fun imageInputDisplayName(uriString: String): String = runCatching {
+    Uri.parse(uriString).lastPathSegment?.substringAfterLast('/')
+}.getOrNull()?.takeIf(String::isNotBlank)?.takeLast(64) ?: "已选择图片"
 
 @Composable
 private fun ImageGalleryTitleBar(onBack: () -> Unit) {
@@ -1575,6 +2644,7 @@ private fun ImageGenerationCanvas(
                 selectedModelId = selectedImageModelId,
                 selectedModelName = selectedImageModelName,
                 selectedModelIsCloud = selectedImageModelIsCloud,
+                enabled = false,
                 onSelectModel = onSelectImageModel
             )
         }
@@ -1623,13 +2693,26 @@ private fun ImageAssistantResultCard(
 ) {
     val actionTint = MaterialTheme.colorScheme.onSurfaceVariant
     Column(horizontalAlignment = Alignment.Start, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        when {
-            job?.failed == true -> ImageGenerationFailureCard(job = job, onRetry = onRetry)
-            image != null -> ImageGenerationResultImage(image = image, onUseImageAsset = onUseImageAsset)
-            else -> ImageCreatingPlaceholder(
+        when (imageAssistantCardKind(job, image)) {
+            ImageAssistantCardKind.FAILURE -> ImageGenerationFailureCard(
+                job = requireNotNull(job),
+                onRetry = onRetry
+            )
+            ImageAssistantCardKind.RESULT -> ImageGenerationResultImage(
+                image = requireNotNull(image),
+                onUseImageAsset = onUseImageAsset
+            )
+            ImageAssistantCardKind.TERMINAL -> ImageGenerationTerminalCard(
+                job = requireNotNull(job),
+                onRetry = onRetry
+            )
+            ImageAssistantCardKind.CREATING -> ImageCreatingPlaceholder(
                 statusText = job?.statusLabel ?: "正在创建图片",
                 statusMessage = job?.message.orEmpty(),
                 startedAtMillis = job?.startedAtMillis ?: System.currentTimeMillis(),
+                previewUriString = job?.previewUriString,
+                previewStep = job?.previewStep ?: 0,
+                previewRevision = job?.previewRevision ?: 0L,
                 onCancel = onCancelGeneration
             )
         }
@@ -1652,12 +2735,32 @@ private fun ImageCreatingPlaceholder(
     statusText: String,
     statusMessage: String,
     startedAtMillis: Long,
+    previewUriString: String?,
+    previewStep: Int,
+    previewRevision: Long,
     onCancel: () -> Unit
 ) {
+    val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
+    val previewBitmap = remember(previewUriString, previewRevision) {
+        previewUriString?.let { loadImageBitmap(context, it) }
+    }
+    val showingPreview = previewBitmap != null
     val cardColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF5F8FF)
-    val titleColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF31415F)
-    val bodyColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF66748A)
+    val titleColor = if (showingPreview) {
+        Color.White
+    } else if (darkTheme) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        Color(0xFF31415F)
+    }
+    val bodyColor = if (showingPreview) {
+        Color.White.copy(alpha = 0.88f)
+    } else if (darkTheme) {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    } else {
+        Color(0xFF66748A)
+    }
     val progressTrackColor = if (darkTheme) {
         MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
     } else {
@@ -1686,6 +2789,7 @@ private fun ImageCreatingPlaceholder(
         }
     }
     val waitingText = when {
+        showingPreview && previewStep > 0 -> "实时预览 · 第 $previewStep 步"
         elapsedSeconds >= 240L -> "已等待 ${elapsedSeconds.formatElapsed()}，本地生成仍在运行"
         elapsedSeconds >= 60L -> "已等待 ${elapsedSeconds.formatElapsed()}"
         else -> "已等待 ${elapsedSeconds} 秒"
@@ -1698,6 +2802,19 @@ private fun ImageCreatingPlaceholder(
         shape = RoundedCornerShape(26.dp)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
+            if (previewBitmap != null) {
+                Image(
+                    bitmap = previewBitmap.asImageBitmap(),
+                    contentDescription = "生成中的实际预览，第 $previewStep 步",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.30f))
+                )
+            }
             Column(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -1721,7 +2838,7 @@ private fun ImageCreatingPlaceholder(
                 )
                 Text(
                     waitingText,
-                    color = McaPrimaryBlue,
+                    color = if (showingPreview) Color.White else McaPrimaryBlue,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -1730,22 +2847,24 @@ private fun ImageCreatingPlaceholder(
                 }
             }
             Canvas(modifier = Modifier.fillMaxSize()) {
-                val dot = 1.7.dp.toPx()
-                val gap = 12.dp.toPx()
-                val groups = listOf(
-                    Offset(size.width * 0.25f, size.height * 0.45f),
-                    Offset(size.width * 0.62f, size.height * 0.72f)
-                )
-                groups.forEachIndexed { groupIndex, origin ->
-                    repeat(6) { x ->
-                        repeat(5) { y ->
-                            val wave = ((x + y + groupIndex * 2) / 12f + phase) % 1f
-                            val alpha = (0.18f + (1f - kotlin.math.abs(wave - 0.5f) * 2f) * 0.50f) * pulse
-                            drawCircle(
-                                color = McaPrimaryBlue.copy(alpha = alpha.coerceIn(0.12f, 0.62f)),
-                                radius = dot,
-                                center = Offset(origin.x + x * gap, origin.y + y * gap)
-                            )
+                if (!showingPreview) {
+                    val dot = 1.7.dp.toPx()
+                    val gap = 12.dp.toPx()
+                    val groups = listOf(
+                        Offset(size.width * 0.25f, size.height * 0.45f),
+                        Offset(size.width * 0.62f, size.height * 0.72f)
+                    )
+                    groups.forEachIndexed { groupIndex, origin ->
+                        repeat(6) { x ->
+                            repeat(5) { y ->
+                                val wave = ((x + y + groupIndex * 2) / 12f + phase) % 1f
+                                val alpha = (0.18f + (1f - kotlin.math.abs(wave - 0.5f) * 2f) * 0.50f) * pulse
+                                drawCircle(
+                                    color = McaPrimaryBlue.copy(alpha = alpha.coerceIn(0.12f, 0.62f)),
+                                    radius = dot,
+                                    center = Offset(origin.x + x * gap, origin.y + y * gap)
+                                )
+                            }
                         }
                     }
                 }
@@ -1788,6 +2907,9 @@ private fun ImageGenerationFailureCard(job: ImageGenerationUiJob, onRetry: () ->
             Text("失败", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
             Column(modifier = Modifier.weight(1f)) {
                 Text(job.prompt, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124))
+                if (job.modelName.isNotBlank()) {
+                    Text(job.modelName, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                }
                 Text(job.message.ifBlank { "图片生成失败" }, maxLines = 2, color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF5F6368), fontSize = 13.sp)
             }
             TextButton(onClick = onRetry) { Text("重试") }
@@ -1873,6 +2995,7 @@ private fun ImageEngineSwitcher(
     selectedModelId: String?,
     selectedModelName: String?,
     selectedModelIsCloud: Boolean,
+    enabled: Boolean = true,
     onSelectModel: (String) -> Unit
 ) {
     val darkTheme = isSystemInDarkTheme()
@@ -1886,6 +3009,12 @@ private fun ImageEngineSwitcher(
     val selectedSource = if (selectedModelIsCloud) ImageEngineSource.CLOUD else ImageEngineSource.LOCAL
     val localModels = models.filterNot { it.cloud }.take(3)
     val cloudModels = models.filter { it.cloud }.take(3)
+    LaunchedEffect(enabled) {
+        if (!enabled) {
+            sourceMenuExpanded = false
+            modelMenuSource = null
+        }
+    }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1895,6 +3024,7 @@ private fun ImageEngineSwitcher(
         Box {
             Surface(
                 onClick = { sourceMenuExpanded = true },
+                enabled = enabled,
                 color = chipColor,
                 shape = CircleShape,
                 border = BorderStroke(1.dp, chipBorder)
@@ -1910,7 +3040,7 @@ private fun ImageEngineSwitcher(
                 }
             }
             DropdownMenu(
-                expanded = sourceMenuExpanded,
+                expanded = enabled && sourceMenuExpanded,
                 onDismissRequest = { sourceMenuExpanded = false }
             ) {
                 ImageEngineSource.entries.forEach { source ->
@@ -1927,12 +3057,12 @@ private fun ImageEngineSwitcher(
             }
         }
 
-        AnimatedVisibility(visible = modelMenuSource != null) {
-            val source = modelMenuSource ?: selectedSource
-            val sourceModels = if (source == ImageEngineSource.CLOUD) cloudModels else localModels
-            Box {
+        val source = modelMenuSource ?: selectedSource
+        val sourceModels = if (source == ImageEngineSource.CLOUD) cloudModels else localModels
+        Box {
                 Surface(
                     onClick = { modelMenuSource = source },
+                    enabled = enabled,
                     color = modelChipColor,
                     shape = CircleShape,
                     border = BorderStroke(1.dp, chipBorder),
@@ -1957,7 +3087,7 @@ private fun ImageEngineSwitcher(
                     }
                 }
                 DropdownMenu(
-                    expanded = modelMenuSource == source,
+                    expanded = enabled && modelMenuSource == source,
                     onDismissRequest = { modelMenuSource = null }
                 ) {
                     if (sourceModels.isEmpty()) {
@@ -1988,6 +3118,54 @@ private fun ImageEngineSwitcher(
                         }
                     }
                 }
+        }
+    }
+}
+
+@Composable
+private fun ImageGenerationTerminalCard(job: ImageGenerationUiJob, onRetry: () -> Unit) {
+    val darkTheme = isSystemInDarkTheme()
+    val cancelled = job.statusLabel == "已取消"
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF4F6F9),
+        shape = RoundedCornerShape(22.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                if (cancelled) "已取消" else job.statusLabel,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    job.prompt,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124)
+                )
+                if (job.modelName.isNotBlank()) {
+                    Text(
+                        job.modelName,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = 12.sp
+                    )
+                }
+                Text(
+                    job.message.ifBlank { if (cancelled) "图片生成已取消" else job.statusLabel },
+                    maxLines = 2,
+                    color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF5F6368),
+                    fontSize = 13.sp
+                )
+            }
+            TextButton(onClick = onRetry) {
+                Text(if (cancelled) "按原参数再生成" else "重试")
             }
         }
     }
@@ -2119,6 +3297,15 @@ private fun ImageJobRow(job: ImageGenerationUiJob, onRetry: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124)
                 )
+                if (job.modelName.isNotBlank()) {
+                    Text(
+                        job.modelName,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
                 if (job.message.isNotBlank()) {
                     Text(
                         job.message,
@@ -2189,10 +3376,13 @@ private fun ImageAssetPreviewOverlay(
     onDismiss: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
+    onRecreate: () -> Unit,
+    recreateEnabled: Boolean,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val bitmap = remember(image.uriString) { loadImageBitmap(context, image.uriString) }
+    var showGenerationDetails by rememberSaveable(image.id) { mutableStateOf(false) }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -2220,6 +3410,14 @@ private fun ImageAssetPreviewOverlay(
                 color = Color.White,
                 fontWeight = FontWeight.SemiBold
             )
+            if (image.generationDetails.isNotBlank()) {
+                Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
+                    IconButton(onClick = { showGenerationDetails = true }) {
+                        Icon(Icons.Default.Info, contentDescription = "查看生成参数", tint = Color.White)
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+            }
             Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
                 IconButton(onClick = onShare) {
                     Icon(Icons.Default.Share, contentDescription = "分享图片", tint = Color.White)
@@ -2269,7 +3467,7 @@ private fun ImageAssetPreviewOverlay(
                 Text("无法读取图片", color = Color.White.copy(alpha = 0.82f))
             }
         }
-        if (image.prompt.isNotBlank() || image.createdAtText.isNotBlank()) {
+        if (image.prompt.isNotBlank() || image.createdAtText.isNotBlank() || image.generationDetails.isNotBlank()) {
             Surface(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -2298,9 +3496,63 @@ private fun ImageAssetPreviewOverlay(
                             fontSize = 13.sp
                         )
                     }
+                    if (image.generationDetails.isNotBlank()) {
+                        Text(
+                            image.generationDetails,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                            color = Color.White.copy(alpha = 0.78f),
+                            fontSize = 12.sp
+                        )
+                    }
+                    if (image.canRecreate) {
+                        TextButton(
+                            onClick = onRecreate,
+                            enabled = recreateEnabled
+                        ) {
+                            Text("按原参数再生成", color = Color.White)
+                        }
+                    }
                 }
             }
         }
+    }
+    if (showGenerationDetails) {
+        AlertDialog(
+            onDismissRequest = { showGenerationDetails = false },
+            title = { Text("生成参数") },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(image.generationDetails, style = MaterialTheme.typography.bodyMedium)
+                    val reproduciblePrompt = image.generationPrompt.ifBlank { image.prompt }
+                    if (reproduciblePrompt.isNotBlank()) {
+                        Text("提示词", style = MaterialTheme.typography.titleSmall)
+                        Text(reproduciblePrompt, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            },
+            confirmButton = {
+                Row {
+                    if (image.canRecreate) {
+                        TextButton(
+                            onClick = {
+                                showGenerationDetails = false
+                                onRecreate()
+                            },
+                            enabled = recreateEnabled
+                        ) {
+                            Text("按原参数再生成")
+                        }
+                    }
+                    TextButton(onClick = { showGenerationDetails = false }) {
+                        Text("关闭")
+                    }
+                }
+            }
+        )
     }
 }
 

@@ -64,7 +64,7 @@ index 418658f2e74ab8f3cecc8fb71c0316ec64529e05..afc456901af84aad68ac09e30096e559
                               const std::string &mode,
                               const std::string &inputImagePath,
 diff --git a/transformers/diffusion/engine/include/diffusion/sana_llm.hpp b/transformers/diffusion/engine/include/diffusion/sana_llm.hpp
-index 42af902400bbb086abd35a041da4a416467c39d4..2797eee9be299d3918da5db5dd1f53a85b67795c 100644
+index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc743e9feec2 100644
 --- a/transformers/diffusion/engine/include/diffusion/sana_llm.hpp
 +++ b/transformers/diffusion/engine/include/diffusion/sana_llm.hpp
 @@ -7,6 +7,8 @@
@@ -76,7 +76,31 @@ index 42af902400bbb086abd35a041da4a416467c39d4..2797eee9be299d3918da5db5dd1f53a8
  #if defined(__APPLE__) && defined(__MACH__)
  #include <TargetConditionals.h>
  #if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
-@@ -42,24 +44,63 @@ public:
+@@ -37,29 +39,92 @@ namespace DIFFUSION {
+ using namespace MNN::Express;
+ using namespace MNN::Transformer;
+ 
++struct SanaLlmExecutionEvidence {
++    std::vector<int> padded_token_ids;
++    std::vector<int> attention_mask;
++    int batch_size = 0;
++    int tokenizer_sequence_length = 0;
++    int non_padding_token_count = 0;
++    int meta_query_count = 0;
++
++    bool valid() const {
++        const size_t expected = batch_size > 0 && tokenizer_sequence_length > 0
++            ? static_cast<size_t>(batch_size) *
++                static_cast<size_t>(tokenizer_sequence_length)
++            : 0U;
++        return expected > 0U && padded_token_ids.size() == expected &&
++            attention_mask.size() == expected && non_padding_token_count > 0 &&
++            meta_query_count > 0;
++    }
++};
++
+ class SanaLlm {
+ public:
      SanaLlm(const std::string& config_path) {
          // Load LLM
          mLlm.reset(Llm::createLLM(config_path + "/config.json"));
@@ -124,27 +148,32 @@ index 42af902400bbb086abd35a041da4a416467c39d4..2797eee9be299d3918da5db5dd1f53a8
          } else {
              MNN_ERROR("Failed to load meta_queries.mnn from %s\n", meta_path.c_str());
 +            mMetaQueries.clear();
-+        }
-+    }
-+
+         }
+     }
+ 
 +    bool is_loaded() const {
 +        if (mLlm == nullptr) {
 +            return false;
-         }
++        }
 +        const auto* context = mLlm->getContext();
 +        return context != nullptr && context->status == LlmStatus::RUNNING;
-     }
- 
++    }
++
++    const SanaLlmExecutionEvidence& last_execution_evidence() const {
++        return mLastExecutionEvidence;
++    }
++
      // 处理单个或多个prompts（用于CFG）
      // use_cfg: 如果为true，则生成batch_size=2（用于CFG），negative_prompt可以为空字符串
      VARP process(const std::string& prompt, bool use_cfg = false, const std::string& negative_prompt = "") {
          AUTOTIME;
 -        if (mMetaQueries.empty()) {
++        mLastExecutionEvidence = {};
 +        if (!is_loaded() || mMetaQueries.empty() || mMetaQueries[0].get() == nullptr) {
              return nullptr;
          }
  
-@@ -100,9 +141,14 @@ public:
+@@ -100,9 +165,14 @@ public:
              all_ids.push_back(ids);
              if (ids.size() > max_len) max_len = ids.size();
          }
@@ -160,7 +189,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..2797eee9be299d3918da5db5dd1f53a8
              return nullptr;
          }
  
-@@ -130,10 +176,14 @@ public:
+@@ -130,10 +200,14 @@ public:
          }
  
          auto input_ids_var = _Const(flat_input_ids.data(), {batch, max_len}, NCHW, halide_type_of<int>());
@@ -176,7 +205,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..2797eee9be299d3918da5db5dd1f53a8
              return nullptr;
          }
          
-@@ -143,10 +193,18 @@ public:
+@@ -143,10 +217,18 @@ public:
          }
          // Reshape to [Batch, SeqLen, Hidden]
          inputs_embeds = _Reshape(inputs_embeds, {batch, max_len, -1});
@@ -195,7 +224,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..2797eee9be299d3918da5db5dd1f53a8
          // Expand meta_queries to [Batch, NumQueries, H]
          auto meta_queries_batch = _Unsqueeze(meta_queries, {0}); // [1, 256, H]
          
-@@ -158,9 +216,17 @@ public:
+@@ -158,9 +240,17 @@ public:
              }
              meta_queries_batch = _Concat(meta_list, 0); // [Batch, 256, H]
          }
@@ -213,7 +242,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..2797eee9be299d3918da5db5dd1f53a8
          
          // 5. Update Attention Mask
          // Original mask [Batch, SeqLen]. we need [Batch, SeqLen + NumQueries]
-@@ -288,25 +354,46 @@ public:
+@@ -288,33 +378,62 @@ public:
  
          mLlm->setKVCacheInfo(batch*total_len, 0);
          auto outputs = mLlm->forwardRaw(full_embeds, attention_mask, position_ids);
@@ -261,7 +290,23 @@ index 42af902400bbb086abd35a041da4a416467c39d4..2797eee9be299d3918da5db5dd1f53a8
 +        ((MNN::Tensor*)tensor)->wait(Tensor::MAP_TENSOR_READ, true);
          mLlm.reset();
  #endif
++        mLastExecutionEvidence.padded_token_ids = flat_input_ids;
++        mLastExecutionEvidence.attention_mask = flat_mask;
++        mLastExecutionEvidence.batch_size = batch;
++        mLastExecutionEvidence.tokenizer_sequence_length = max_len;
++        mLastExecutionEvidence.non_padding_token_count = static_cast<int>(std::count(
++            flat_mask.begin(), flat_mask.end(), 1));
++        mLastExecutionEvidence.meta_query_count = num_queries;
          return splits[1];
+     }
+ 
+ private:
+     std::unique_ptr<Llm> mLlm;
+     std::vector<VARP> mMetaQueries; // Store as VARP vector just in case
++    SanaLlmExecutionEvidence mLastExecutionEvidence;
+ };
+ 
+ } // namespace DIFFUSION
 diff --git a/transformers/diffusion/engine/src/sana_diffusion.cpp b/transformers/diffusion/engine/src/sana_diffusion.cpp
 index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f7b4e1fd5 100644
 --- a/transformers/diffusion/engine/src/sana_diffusion.cpp
