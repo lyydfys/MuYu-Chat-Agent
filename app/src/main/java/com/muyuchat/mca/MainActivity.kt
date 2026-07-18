@@ -53,7 +53,13 @@ import com.muyuchat.feature.chat.ChatHistoryItem
 import com.muyuchat.feature.chat.FileAssetUiItem
 import com.muyuchat.feature.chat.ImageAssetUiItem
 import com.muyuchat.feature.chat.ImageGenerationUiJob
+import com.muyuchat.feature.chat.ImageGenerationUiLoraSelection
+import com.muyuchat.feature.chat.ImageGenerationUiPreset
 import com.muyuchat.feature.chat.ImageGenerationUiTaskMode
+import com.muyuchat.feature.chat.ImageLibraryBackupUiState
+import com.muyuchat.feature.chat.ImageLoraUiItem
+import com.muyuchat.feature.chat.ImageUpscalerUiItem
+import com.muyuchat.feature.chat.ImageUpscaleUiJob
 import com.muyuchat.feature.chat.ChatModelChoice
 import com.muyuchat.feature.chat.ChatUiState
 import com.muyuchat.feature.modelhub.ModelHubScreen
@@ -80,6 +86,18 @@ import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.telemetry.SocFamily
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+
+internal fun existingImageModelChoiceIds(
+    localModelIds: Iterable<String>,
+    cloudImageModelIds: Iterable<String>
+): Set<String> = buildSet {
+    localModelIds.forEach { modelId ->
+        if (modelId.isNotBlank()) add(MainViewModel.LOCAL_IMAGE_MODEL_CHOICE_PREFIX + modelId)
+    }
+    cloudImageModelIds.forEach { modelId ->
+        if (modelId.isNotBlank()) add(MainViewModel.CLOUD_IMAGE_MODEL_CHOICE_PREFIX + modelId)
+    }
+}
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -184,6 +202,12 @@ private fun McaApp(
         onTab(AppTab.CHAT)
     }
     val chatVisionCapability = state.chatVisionCapability()
+    val imageGenerationHistoryById = state.images.associate { image ->
+        image.id to ImageGenerationHistoryMetadata.fromJsonOrNull(image.generationMetadataJson)
+    }
+    val generationHistoryInputUris = imageGenerationHistoryById.values
+        .filterNotNull()
+        .flatMapTo(mutableSetOf()) { history -> history.requiredContentInputReferences() }
 
     Scaffold { padding ->
         val modifier = Modifier
@@ -230,7 +254,6 @@ private fun McaApp(
                                     }
                                         .thenByDescending { it.lastLoadedAt ?: it.createdAt }
                                 )
-                                .take(3)
                                 .map { model ->
                                     ChatModelChoice(
                                         id = model.id,
@@ -273,9 +296,10 @@ private fun McaApp(
                                         cloud = false,
                                         supportedImageTaskModes = imageCapabilities.supportedTaskModes,
                                         supportsImageNegativePrompt = imageCapabilities.supportsNegativePrompt,
-                                        supportsImageClipSkip = model.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP,
-                                        supportsImageVaeTiling = model.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP,
-                                        maxImageBatchCount = if (model.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) 8 else 1,
+                                        supportsImageClipSkip = imageCapabilities.supportsClipSkip,
+                                        supportsImageVaeTiling = imageCapabilities.supportsVaeTiling,
+                                        supportsImageLora = imageCapabilities.supportsLora,
+                                        maxImageBatchCount = imageCapabilities.maxBatchCount,
                                         imageDefaultWidth = imageDefaults.width,
                                         imageDefaultHeight = imageDefaults.height,
                                         imageDefaultSteps = imageDefaults.steps,
@@ -308,6 +332,14 @@ private fun McaApp(
                             }
                         )
                     },
+                    existingImageModelIds = existingImageModelChoiceIds(
+                        localModelIds = state.localImageModels.map { model -> model.id },
+                        cloudImageModelIds = state.cloudModels
+                            .asSequence()
+                            .filter { model -> model.kind == CloudModelKind.IMAGE }
+                            .map { model -> model.id }
+                            .asIterable()
+                    ),
                     assistants = state.assistants.map { assistant ->
                         val assistantParams = GenerationParams.fromJson(assistant.paramsJson, state.params)
                         AssistantUiItem(
@@ -337,10 +369,10 @@ private fun McaApp(
                         )
                     },
                     selectedAssistantId = state.selectedAssistantId,
+                    generationHistoryInputUris = generationHistoryInputUris,
                     images = state.images.map { image ->
-                        val generation = ImageGenerationHistoryMetadata.fromJsonOrNull(
-                            image.generationMetadataJson
-                        )
+                        val generation = imageGenerationHistoryById[image.id]
+                        val sourceGeneration = generation?.takeIf { it.sourceGenerationAvailable }
                         ImageAssetUiItem(
                             id = image.id,
                             name = image.name,
@@ -352,11 +384,90 @@ private fun McaApp(
                             sizeText = formatAssetBytes(image.sizeBytes),
                             width = image.width,
                             height = image.height,
+                            sizeBytes = image.sizeBytes,
+                            upscaleTargetScale = generation?.upscaleHistory?.lastOrNull()?.targetScale,
                             generationDetails = generation?.displayDetails().orEmpty(),
-                            generationPrompt = generation?.requestPrompt.orEmpty(),
-                            canRecreate = generation != null
+                            generationPrompt = sourceGeneration?.requestPrompt.orEmpty(),
+                            generationModelId = sourceGeneration?.modelId.orEmpty(),
+                            generationModelName = sourceGeneration?.modelName.orEmpty(),
+                            generationTaskMode = sourceGeneration?.inputDraft?.taskMode?.wireName.orEmpty(),
+                            generationSampler = sourceGeneration?.options?.sampleMethod.orEmpty(),
+                            parameterShareJson = sourceGeneration?.toShareJson().orEmpty(),
+                            generationPreset = sourceGeneration?.let { metadata ->
+                                ImageGenerationUiPreset(
+                                    prompt = metadata.requestPrompt,
+                                    negativePrompt = metadata.options.negativePrompt,
+                                    width = metadata.options.width,
+                                    height = metadata.options.height,
+                                    steps = metadata.options.steps,
+                                    cfgScale = metadata.options.cfgScale,
+                                    seed = metadata.options.seed,
+                                    sampleMethod = metadata.options.sampleMethod,
+                                    clipSkip = metadata.options.clipSkip,
+                                    batchCount = metadata.options.batchCount,
+                                    vaeTileSize = metadata.options.vaeTiling?.tileSize,
+                                    vaeTileOverlap = metadata.options.vaeTiling?.overlap,
+                                    loras = metadata.loras.map { selection ->
+                                        ImageGenerationUiLoraSelection(
+                                            id = selection.id,
+                                            multiplier = selection.multiplier
+                                        )
+                                    }
+                                )
+                            },
+                            favorite = image.favorite,
+                            canRecreate = sourceGeneration?.canRecreate() == true
                         )
                     },
+                    imageLibraryBackup = ImageLibraryBackupUiState(
+                        running = state.imageLibraryBackup.running,
+                        importing = state.imageLibraryBackup.importing,
+                        done = state.imageLibraryBackup.done,
+                        total = state.imageLibraryBackup.total,
+                        message = state.imageLibraryBackup.message,
+                        failed = state.imageLibraryBackup.failed
+                    ),
+                    imageLoras = state.localImageLoras.map { adapter ->
+                        ImageLoraUiItem(
+                            id = adapter.id,
+                            name = adapter.name,
+                            sizeText = formatAssetBytes(adapter.sizeBytes),
+                            sha256 = adapter.sha256,
+                            inUse = adapter.id in state.activeLocalImageLoraIds
+                        )
+                    },
+                    imageLoraImporting = state.localImageLoraImporting,
+                    imageLoraMessage = state.localImageLoraMessage,
+                    imageUpscalers = state.localImageUpscalers.map { upscaler ->
+                        ImageUpscalerUiItem(
+                            id = upscaler.id,
+                            name = upscaler.name,
+                            sizeText = formatAssetBytes(upscaler.sizeBytes),
+                            sha256 = upscaler.sha256,
+                            selected = upscaler.id == state.selectedLocalImageUpscalerId,
+                            inUse = upscaler.id == state.activeLocalImageUpscalerId,
+                            deleting = upscaler.id == state.localImageUpscalerDeletingId
+                        )
+                    },
+                    selectedImageUpscalerId = state.selectedLocalImageUpscalerId,
+                    imageUpscalerImporting = state.localImageUpscalerImporting,
+                    imageUpscalerMessage = state.localImageUpscalerMessage,
+                    imageUpscaleJob = state.imageUpscaleJob?.let { job ->
+                        ImageUpscaleUiJob(
+                            id = job.id,
+                            sourceImageId = job.spec.sourceImageSnapshot.id,
+                            upscalerId = job.spec.upscalerSnapshot.id,
+                            upscalerName = job.spec.upscalerSnapshot.name,
+                            targetScale = job.spec.targetScale,
+                            statusLabel = job.status.label,
+                            running = !job.status.terminal,
+                            failed = job.status.failed,
+                            terminal = job.status.terminal,
+                            resultImageAssetId = job.resultImageAssetId,
+                            message = job.message
+                        )
+                    },
+                    deferGenerationImageGrantRelease = state.deferGenerationImageGrantRelease,
                     files = state.files.map { file ->
                         FileAssetUiItem(
                             id = file.id,
@@ -467,9 +578,30 @@ private fun McaApp(
                 onUploadFile = viewModel::attachFile,
                 onUseImageAsset = viewModel::useImageAsset,
                 onDeleteImageAsset = viewModel::deleteImageAsset,
+                onDeleteImageAssets = viewModel::deleteImageAssets,
+                onSetImageAssetFavorite = viewModel::setImageAssetFavorite,
+                onExportImageLibraryBackup = viewModel::exportImageLibraryBackup,
+                onImportImageLibraryBackup = viewModel::importImageLibraryBackup,
+                onCancelImageLibraryBackup = viewModel::cancelImageLibraryBackup,
+                onImportImageLora = viewModel::importLocalImageLora,
+                onDeleteImageLora = viewModel::deleteLocalImageLora,
+                onImportImageUpscaler = viewModel::importLocalImageUpscaler,
+                onDeleteImageUpscaler = viewModel::deleteLocalImageUpscaler,
+                onSelectImageUpscaler = viewModel::selectLocalImageUpscaler,
+                onUpscaleImageAsset = viewModel::upscaleImageAsset,
+                onCancelImageUpscale = viewModel::cancelImageUpscale,
                 onUseFileAsset = viewModel::useFileAsset,
                 onDeleteFileAsset = viewModel::deleteFileAsset,
-                onGenerateImagePrompt = { prompt, uiOptions ->
+                onGenerateImagePrompt = generateImage@{ prompt, uiOptions ->
+                    val loras = uiOptions.loras.mapNotNull { selection ->
+                        state.localImageLoras
+                            .firstOrNull { adapter -> adapter.id == selection.id }
+                            ?.toPrepared(selection.multiplier)
+                    }
+                    if (loras.size != uiOptions.loras.size) {
+                        viewModel.reportMissingLocalImageLoraSelection()
+                        return@generateImage
+                    }
                     viewModel.generateImageAsset(
                         prompt = prompt,
                         inputDraft = LocalImageInputDraft(
@@ -490,6 +622,7 @@ private fun McaApp(
                             sampleMethod = uiOptions.sampleMethod,
                             clipSkip = uiOptions.clipSkip,
                             batchCount = uiOptions.batchCount,
+                            loras = loras,
                             vaeTiling = uiOptions.vaeTileSize?.let { tileSize ->
                                 LocalImageVaeTilingOptions(
                                     tileSize = tileSize,
@@ -502,6 +635,8 @@ private fun McaApp(
                 onRetryImageGeneration = viewModel::retryImageGeneration,
                 onRecreateImageAsset = viewModel::recreateImageAsset,
                 onCancelImageGeneration = viewModel::cancelImageGeneration,
+                releaseGenerationImageGrantsIfCoordinatorIdle =
+                    viewModel::releaseGenerationImageGrantsIfCoordinatorIdle,
                 onSelectImageModel = viewModel::selectImageGenerationModel,
                 onReasoningModeChange = viewModel::updateReasoningMode,
                 onCloudReasoningModeLocked = viewModel::showCloudReasoningModeLocked,

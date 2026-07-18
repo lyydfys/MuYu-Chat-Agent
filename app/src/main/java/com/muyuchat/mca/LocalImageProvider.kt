@@ -1,6 +1,8 @@
 package com.muyuchat.mca
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
@@ -11,7 +13,9 @@ import com.muyuchat.core.nativebridge.NativeMnnDiffusionBridge
 import com.muyuchat.core.nativebridge.NativeQnnBridge
 import com.muyuchat.core.sdnative.NativeStableDiffusionBridge
 import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStream
+import java.math.BigDecimal
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
@@ -19,11 +23,52 @@ import java.util.zip.ZipInputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+
+private const val MAX_UPSCALE_SOURCE_SIDE = 2_048
+private const val MAX_UPSCALE_SOURCE_PIXELS = 4_000_000L
+private const val MAX_UPSCALE_NATIVE_OUTPUT_SIDE = 8_192
+private const val MAX_UPSCALE_NATIVE_OUTPUT_PIXELS = 64_000_000L
+private const val MAX_UPSCALE_NATIVE_PNG_BYTES = 256L * 1_024L * 1_024L
+private const val MAX_UPSCALE_OUTPUT_SIDE = 4_096
+private const val MAX_UPSCALE_OUTPUT_PIXELS = 16_000_000L
+private const val MAX_UPSCALE_PNG_BYTES = 64L * 1_024L * 1_024L
+private const val OWNED_IMAGE_BUNDLE_SCHEMA = "mca.image_engine.bundle.v1"
+private val OWNED_IMAGE_BUNDLE_SCHEMA_PATTERN = Regex(
+    "\\\"schema\\\"\\s*:\\s*\\\"mca\\.image_engine\\.bundle\\.v1\\\""
+)
+
+internal data class LocalImageUpscalePublicationDimensions(
+    val width: Int,
+    val height: Int,
+    val pixels: Long
+)
+
+internal fun validatedLocalImageUpscalePublicationDimensions(
+    sourceWidth: Int,
+    sourceHeight: Int,
+    targetScale: Int
+): LocalImageUpscalePublicationDimensions {
+    require(targetScale in setOf(2, 3, 4)) { "Upscale target scale must be 2, 3, or 4." }
+    val sourcePixels = Math.multiplyExact(sourceWidth.toLong(), sourceHeight.toLong())
+    require(sourceWidth in 1..MAX_UPSCALE_SOURCE_SIDE &&
+        sourceHeight in 1..MAX_UPSCALE_SOURCE_SIDE &&
+        sourcePixels in 1L..MAX_UPSCALE_SOURCE_PIXELS
+    ) { "Upscale source exceeds the 2048-pixel side or 4-megapixel execution limit." }
+    val width = Math.multiplyExact(sourceWidth, targetScale)
+    val height = Math.multiplyExact(sourceHeight, targetScale)
+    val pixels = Math.multiplyExact(width.toLong(), height.toLong())
+    require(width <= MAX_UPSCALE_OUTPUT_SIDE &&
+        height <= MAX_UPSCALE_OUTPUT_SIDE &&
+        pixels in 1L..MAX_UPSCALE_OUTPUT_PIXELS
+    ) { "Requested upscale output exceeds the bounded Android publication limit." }
+    return LocalImageUpscalePublicationDimensions(width, height, pixels)
+}
 
 enum class ImageBackend {
     LOCAL,
@@ -121,6 +166,12 @@ enum class LocalImageVerificationStatus {
     }
 }
 
+internal data class LocalImageBundleComponentContract(
+    val role: String,
+    val relativePath: String,
+    val required: Boolean
+)
+
 internal data class LocalImageBundleManifest(
     val id: String? = null,
     val displayName: String? = null,
@@ -139,8 +190,27 @@ internal data class LocalImageBundleManifest(
     val qnnSmokeSpec: QnnSmokeSpec = QnnSmokeSpec.Empty,
     val qnnSmokeSpecs: List<QnnSmokeSpec> = emptyList(),
     val primaryFile: File? = null,
+    val components: List<LocalImageBundleComponentContract> = emptyList(),
+    val executionProfileRequiredPaths: List<String> = emptyList(),
+    val executionProfileGraphPaths: Map<String, String> = emptyMap(),
+    val executionProfileDeclared: Boolean = false,
     val componentCount: Int = 0
 )
+
+internal sealed interface LocalImageBundleManifestInspection {
+    data object Undeclared : LocalImageBundleManifestInspection
+    data class Ready(val manifest: LocalImageBundleManifest) : LocalImageBundleManifestInspection
+    data class Invalid(val message: String) : LocalImageBundleManifestInspection
+}
+
+internal sealed interface LocalImageRuntimeComponentContract {
+    data object UndeclaredLegacy : LocalImageRuntimeComponentContract
+    data class Ready(
+        val requiredPaths: List<String>,
+        val missingPaths: List<String>
+    ) : LocalImageRuntimeComponentContract
+    data class Invalid(val message: String) : LocalImageRuntimeComponentContract
+}
 
 internal data class LocalImageQnnRuntimeProfile(
     val qnnSdk: String,
@@ -467,6 +537,7 @@ data class LocalImageGenerationOptions(
     val controlStrength: Double? = null,
     val clipSkip: Int? = null,
     val batchCount: Int = 1,
+    val loras: List<LocalImagePreparedLora> = emptyList(),
     val vaeTiling: LocalImageVaeTilingOptions? = null,
     val preview: LocalImagePreviewOptions? = null
 ) {
@@ -494,6 +565,9 @@ data class LocalImageGenerationOptions(
         controlStrength?.let { put("controlStrength", it) }
         clipSkip?.let { put("clipSkip", it) }
         put("batchCount", batchCount)
+        if (loras.isNotEmpty()) {
+            put("loras", JSONArray().apply { loras.forEach { put(it.toJson()) } })
+        }
         vaeTiling?.let { put("vaeTiling", it.toJson()) }
         preview?.let { put("preview", it.toJson()) }
     }
@@ -542,6 +616,15 @@ data class LocalImageGenerationOptions(
                 } else {
                     null
                 }
+            fun optionalArray(key: String): JSONArray? =
+                if (json.has(key)) {
+                    require(!json.isNull(key)) { "$key must be an array when specified." }
+                    val raw = json.get(key)
+                    require(raw is JSONArray) { "$key must be an array when specified." }
+                    raw
+                } else {
+                    null
+                }
 
             return LocalImageGenerationOptions(
                 negativePrompt = optionalString("negativePrompt", preserveBlank = true)
@@ -575,11 +658,38 @@ data class LocalImageGenerationOptions(
                 controlStrength = optionalDouble("controlStrength"),
                 clipSkip = optionalInt("clipSkip"),
                 batchCount = optionalInt("batchCount") ?: 1,
+                loras = optionalArray("loras")?.let { array ->
+                    require(array.length() <= LocalImagePreparedLora.MAX_COUNT) {
+                        "Too many LoRA adapters."
+                    }
+                    buildList {
+                        for (index in 0 until array.length()) {
+                            add(LocalImagePreparedLora.fromJson(array.getJSONObject(index)))
+                        }
+                    }
+                }.orEmpty(),
                 vaeTiling = optionalObject("vaeTiling")?.let(LocalImageVaeTilingOptions::fromJson),
                 preview = optionalObject("preview")?.let(LocalImagePreviewOptions::fromJson)
             ).also { options -> options.validateProductInputContract() }
         }
     }
+}
+
+/** Preserves a concrete native product error instead of collapsing it into generation_failed. */
+internal fun throwLocalImageNativeFailure(
+    result: JSONObject,
+    fallbackMessage: String
+): Nothing {
+    val message = sequenceOf(
+        result.optString("error"),
+        result.optString("message"),
+        fallbackMessage
+    ).map { it.trim() }.firstOrNull(String::isNotEmpty).orEmpty()
+    val code = result.optString("errorCode").trim()
+    if (code.isNotEmpty()) {
+        throw LocalImageProductContractException(code.lowercase(), message)
+    }
+    error(message)
 }
 
 class LocalImageProvider(context: Context) {
@@ -632,6 +742,256 @@ class LocalImageProvider(context: Context) {
         } else {
             null
         }
+
+    suspend fun upscale(
+        input: LocalImagePreparedInput,
+        upscaler: LocalImagePreparedUpscaler,
+        targetScale: Int,
+        tileSize: Int = 128,
+        threads: Int = defaultLocalImageThreads(),
+        onProgress: (LocalImageProgress) -> Unit = {}
+    ): LocalImageResult = withContext(Dispatchers.IO) {
+        if (activeRuntime != LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+            begin(LocalImageRuntime.STABLE_DIFFUSION_CPP)
+        }
+        val nativeOutput = File(
+            appContext.cacheDir,
+            "local-image-upscale-native-${UUID.randomUUID()}.png"
+        ).canonicalFile
+        val postprocessedOutput = File(
+            appContext.cacheDir,
+            "local-image-upscale-final-${UUID.randomUUID()}.png"
+        ).canonicalFile
+        require(nativeOutput.parentFile == appContext.cacheDir.canonicalFile &&
+            postprocessedOutput.parentFile == appContext.cacheDir.canonicalFile
+        ) {
+            "Upscale output escaped the app cache directory."
+        }
+        try {
+            coroutineContext.ensureActive()
+            require(NativeStableDiffusionBridge.isAvailable) {
+                val reason = NativeStableDiffusionBridge.loadError?.message.orEmpty()
+                "stable-diffusion.cpp upscaler failed to load${if (reason.isBlank()) "" else ": $reason"}"
+            }
+            require(targetScale in setOf(2, 3, 4)) { "Upscale target scale must be 2, 3, or 4." }
+            validatedLocalImageUpscalePublicationDimensions(input.width, input.height, targetScale)
+            require(tileSize in 32..1_024 && tileSize % 8 == 0) {
+                "Upscale tile size must be a multiple of 8 in 32-1024."
+            }
+            require(threads in 1..64) { "Upscale thread count must be in 1-64." }
+            if (cancellationRequested.get()) throw LocalImageWorkerCancelledException()
+            val upscalerRoot = File(upscaler.path).canonicalFile.parentFile
+                ?: error("Upscaler model has no app-private root.")
+            val params = JSONObject()
+                .put("upscalerId", upscaler.id)
+                .put("upscalerSha256", upscaler.sha256)
+                .put("upscalerSizeBytes", upscaler.sizeBytes)
+                .put("inputImageSha256", input.sha256)
+                .put("targetScale", targetScale)
+                .put("tileSize", tileSize)
+                .put("threads", threads)
+            val progressPoller = launch {
+                while (isActive) {
+                    bridge.currentProgressOrNull()?.let(onProgress)
+                    delay(500)
+                }
+            }
+            val raw = try {
+                bridge.upscale(
+                    upscalerPath = upscaler.path,
+                    upscalerRoot = upscalerRoot.canonicalPath,
+                    inputPath = input.path,
+                    paramsJson = params.toString(),
+                    outputPath = nativeOutput.path
+                )
+            } finally {
+                progressPoller.cancelAndJoin()
+                bridge.currentProgressOrNull()?.let(onProgress)
+            }
+            coroutineContext.ensureActive()
+            if (cancellationRequested.get()) throw LocalImageWorkerCancelledException()
+            val json = JSONObject(raw)
+            if (!json.optBoolean("ok", false)) {
+                if (json.optBoolean("cancelled", false)) throw LocalImageWorkerCancelledException()
+                throwLocalImageNativeFailure(json, "stable-diffusion.cpp ESRGAN upscale failed.")
+            }
+            val nativeEffective = json.optJSONObject("nativeEffective")
+                ?: error("ESRGAN upscale did not report nativeEffective execution evidence.")
+            require(json.optBoolean("nativeExecution", false) &&
+                !nativeEffective.optBoolean("fallback", true) &&
+                nativeEffective.optString("operation") == "ESRGAN_UPSCALE" &&
+                nativeEffective.optString("runtime") == LocalImageRuntime.STABLE_DIFFUSION_CPP.name &&
+                nativeEffective.optString("backendMode") == "cpu"
+            ) { "ESRGAN upscale did not prove direct stable-diffusion.cpp execution." }
+            require(nativeEffective.optString("upscalerId") == upscaler.id &&
+                nativeEffective.optString("upscalerFileName") == File(upscaler.path).name &&
+                nativeEffective.optString("upscalerSha256").lowercase() == upscaler.sha256 &&
+                nativeEffective.optLong("upscalerSizeBytes", -1L) == upscaler.sizeBytes &&
+                nativeEffective.optBoolean("modelHashVerified", false) &&
+                nativeEffective.optBoolean("modelFileIdentityStable", false) &&
+                nativeEffective.optString("inputImageSha256").lowercase() == input.sha256
+            ) { "ESRGAN upscale identity or input digest evidence does not match the request." }
+            val sourceWidth = nativeEffective.optInt("sourceWidth", -1)
+            val sourceHeight = nativeEffective.optInt("sourceHeight", -1)
+            val nativeScale = nativeEffective.optInt("nativeScale", -1)
+            val nativeWidth = nativeEffective.optInt("width", -1)
+            val nativeHeight = nativeEffective.optInt("height", -1)
+            val nativePixels = runCatching {
+                Math.multiplyExact(nativeWidth.toLong(), nativeHeight.toLong())
+            }.getOrDefault(-1L)
+            val sourcePixels = runCatching {
+                Math.multiplyExact(sourceWidth.toLong(), sourceHeight.toLong())
+            }.getOrDefault(-1L)
+            require(sourceWidth in 1..MAX_UPSCALE_SOURCE_SIDE &&
+                sourceHeight in 1..MAX_UPSCALE_SOURCE_SIDE &&
+                sourcePixels in 1L..MAX_UPSCALE_SOURCE_PIXELS &&
+                nativeScale in 2..8 &&
+                nativeScale >= targetScale &&
+                nativeWidth.toLong() == sourceWidth.toLong() * nativeScale.toLong() &&
+                nativeHeight.toLong() == sourceHeight.toLong() * nativeScale.toLong() &&
+                nativeWidth <= MAX_UPSCALE_NATIVE_OUTPUT_SIDE &&
+                nativeHeight <= MAX_UPSCALE_NATIVE_OUTPUT_SIDE &&
+                nativePixels in 1L..MAX_UPSCALE_NATIVE_OUTPUT_PIXELS &&
+                nativeEffective.optInt("requestedTargetScale", -1) == targetScale &&
+                nativeEffective.optInt("tileSize", -1) == tileSize &&
+                nativeEffective.optInt("threads", -1) == threads
+            ) { "ESRGAN upscale dimensions or controls do not match the request." }
+            val physicalComputeCount = nativeEffective.optLong("physicalComputeCount", -1L)
+            val physicalComputeSuccessCount =
+                nativeEffective.optLong("physicalComputeSuccessCount", -1L)
+            val physicalTileComputeCount =
+                nativeEffective.optLong("physicalTileComputeCount", -1L)
+            val physicalTileComputeSuccessCount =
+                nativeEffective.optLong("physicalTileComputeSuccessCount", -1L)
+            val expectedTiled = sourceWidth > tileSize || sourceHeight > tileSize
+            require(nativeEffective.optBoolean("executionCompleted", false) &&
+                physicalComputeCount > 0L &&
+                physicalComputeSuccessCount == physicalComputeCount &&
+                nativeEffective.optBoolean("tiledExecution", false) == expectedTiled &&
+                (if (expectedTiled) {
+                    physicalTileComputeCount == physicalComputeCount &&
+                        physicalTileComputeSuccessCount == physicalComputeSuccessCount
+                } else {
+                    physicalComputeCount == 1L &&
+                        physicalTileComputeCount == 0L &&
+                        physicalTileComputeSuccessCount == 0L
+                })
+            ) { "ESRGAN upscale did not prove its physical model compute invocations." }
+            require(json.optBoolean("contextReleased", false) &&
+                json.optLong("nativeGenerationSequence", 0L) > 0L
+            ) { "ESRGAN upscale did not release its native context or publish a sequence." }
+            val requiredStages = 255L
+            listOf("nativeStageMask", "nativeDetailStageMask").forEach { field ->
+                val mask = json.optLong(field, -1L)
+                require(mask >= 0L && mask and requiredStages == requiredStages) {
+                    "ESRGAN upscale $field is missing required execution stages."
+                }
+            }
+            require(nativeOutput.isFile &&
+                nativeOutput.length() in 1L..MAX_UPSCALE_NATIVE_PNG_BYTES
+            ) {
+                "ESRGAN upscale did not publish a bounded non-empty PNG."
+            }
+            val nativeBounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(nativeOutput.path, nativeBounds)
+            require(nativeBounds.outWidth == nativeWidth && nativeBounds.outHeight == nativeHeight) {
+                "ESRGAN native PNG dimensions differ from native execution evidence."
+            }
+            val publicationDimensions = validatedLocalImageUpscalePublicationDimensions(
+                sourceWidth,
+                sourceHeight,
+                targetScale
+            )
+            val finalWidth = publicationDimensions.width
+            val finalHeight = publicationDimensions.height
+            var decodeSampleSize = 1
+            val finalFile = if (targetScale == nativeScale) {
+                nativeOutput
+            } else {
+                coroutineContext.ensureActive()
+                decodeSampleSize = (nativeScale / targetScale).takeIf { ratio ->
+                    nativeScale % targetScale == 0 && ratio >= 2 &&
+                        (ratio and (ratio - 1)) == 0
+                } ?: 1
+                val nativeBitmap = BitmapFactory.decodeFile(
+                    nativeOutput.path,
+                    BitmapFactory.Options().apply { inSampleSize = decodeSampleSize }
+                )
+                    ?: error("ESRGAN native PNG could not be decoded for target-scale resize.")
+                try {
+                    require(nativeBitmap.width > 0 && nativeBitmap.height > 0 &&
+                        nativeBitmap.width <= nativeWidth && nativeBitmap.height <= nativeHeight
+                    ) {
+                        "ESRGAN native PNG downsample could not be decoded safely."
+                    }
+                    coroutineContext.ensureActive()
+                    if (cancellationRequested.get()) throw LocalImageWorkerCancelledException()
+                    val resized = Bitmap.createScaledBitmap(nativeBitmap, finalWidth, finalHeight, true)
+                    try {
+                        coroutineContext.ensureActive()
+                        FileOutputStream(postprocessedOutput).use { output ->
+                            check(resized.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                                "Unable to encode target-scale upscale output."
+                            }
+                            output.fd.sync()
+                        }
+                    } finally {
+                        if (resized !== nativeBitmap) resized.recycle()
+                    }
+                } finally {
+                    nativeBitmap.recycle()
+                }
+                postprocessedOutput
+            }
+            coroutineContext.ensureActive()
+            if (cancellationRequested.get()) throw LocalImageWorkerCancelledException()
+            require(finalFile.isFile && finalFile.length() in 1L..MAX_UPSCALE_PNG_BYTES) {
+                "Final upscale PNG exceeds the bounded worker publication limit."
+            }
+            val finalBounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(finalFile.path, finalBounds)
+            require(finalBounds.outWidth == finalWidth && finalBounds.outHeight == finalHeight) {
+                "Final upscale output dimensions do not match the requested scale."
+            }
+            coroutineContext.ensureActive()
+            val finalBytes = finalFile.readBytes()
+            val executionMetadata = json
+                .put(
+                    "productOutput",
+                    JSONObject()
+                        .put("targetScale", targetScale)
+                        .put("nativeFixedScale", nativeScale)
+                        .put("postResizeApplied", targetScale != nativeScale)
+                        .put(
+                            "postResizeMethod",
+                            if (targetScale == nativeScale) "none" else "android_bitmap_filtered"
+                        )
+                        .put("sourceWidth", sourceWidth)
+                        .put("sourceHeight", sourceHeight)
+                        .put("nativeWidth", nativeWidth)
+                        .put("nativeHeight", nativeHeight)
+                        .put("decodeSampleSize", decodeSampleSize)
+                        .put("width", finalWidth)
+                        .put("height", finalHeight)
+                        .put("mimeType", "image/png")
+                )
+                .toString()
+            LocalImageResult(
+                bytes = finalBytes,
+                mimeType = "image/png",
+                executionMetadataJson = executionMetadata,
+                seed = null
+            )
+        } finally {
+            runCatching { nativeOutput.delete() }
+            runCatching { postprocessedOutput.delete() }
+            runCatching { bridge.shutdown() }
+            if (activeRuntime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+                activeRuntime = null
+                cancellationRequested.set(false)
+            }
+        }
+    }
 
     suspend fun generate(
         model: LocalImageModelRecord,
@@ -688,7 +1048,13 @@ class LocalImageProvider(context: Context) {
                 bundleRoot = bundleRoot
             )
             val profile = profileResolution.profile
+            validateLocalImageProfileProductOptions(profile, effectiveOptions)
             val resolved = profileResolution.layers.resolved
+            val conditioningOrder = if (resolved.useCfg) {
+                "negative_then_positive"
+            } else {
+                "positive_only"
+            }
             val effectiveNegativePrompt =
                 effectiveOptions.negativePrompt ?: profile.defaults.defaultNegativePrompt.orEmpty()
             val effectiveFamily = profile.family
@@ -699,10 +1065,39 @@ class LocalImageProvider(context: Context) {
             // supplies text_encoder.bin.
             val usesQnnClipTokenIds = !isSdxlQnn &&
                 qnnNativeTextEncoderContextPath(bundleRoot) != null
-            val conditioningRoot = if (isSdxlQnn) {
-                resolveSdxlQnnConditioningRoot(bundleRoot)
-            } else {
-                bundleRoot
+            when (profile.graph.workerStrategy) {
+                ImageWorkerStrategy.SHARED_UNET_VAE -> {
+                    require(!usesQnnClipTokenIds &&
+                        profile.graph.textEncoder
+                            ?.relativePath
+                            ?.substringAfterLast('/')
+                            ?.substringAfterLast('\\') == "clip_v2.mnn"
+                    ) {
+                        "Resolved shared QNN UNet/VAE profile must use the installed MNN clip_v2.mnn conditioner."
+                    }
+                }
+                ImageWorkerStrategy.SHARED_TEXT_UNET_VAE -> {
+                    require(usesQnnClipTokenIds &&
+                        profile.graph.textEncoder?.relativePath?.endsWith(".bin", ignoreCase = true) == true
+                    ) {
+                        "Resolved shared QNN text/UNet/VAE profile requires a real text-encoder context."
+                    }
+                }
+                else -> Unit
+            }
+            val conditioningRoot = when {
+                isSdxlQnn -> resolveSdxlQnnConditioningRoot(bundleRoot)
+                profile.graph.workerStrategy == ImageWorkerStrategy.SHARED_UNET_VAE -> {
+                    val relativePath = requireNotNull(profile.graph.textEncoder?.relativePath) {
+                        "Shared QNN UNet/VAE profile is missing its MNN conditioning graph path."
+                    }
+                    requireNotNull(
+                        bundleRoot.safeDescendantOrNull(relativePath)
+                            ?.takeIf { file -> file.isFile && file.length() > 0L }
+                            ?.parentFile
+                    ) { "MNN conditioning graph is missing or empty: $relativePath" }
+                }
+                else -> bundleRoot
             }
             val outputDir = File(
                 appContext.cacheDir,
@@ -783,6 +1178,9 @@ class LocalImageProvider(context: Context) {
                 .put("useCfg", contract.useCfg)
                 .put("progressJournalPath", progressJournalFile.absolutePath)
                 .putQnnSemanticDefaults(bundleRoot, profile)
+            if (profile.graph.workerStrategy == ImageWorkerStrategy.SHARED_UNET_VAE) {
+                params.put("conditioningContractMode", "shared_unet_vae")
+            }
             effectiveOptions.putProductInputNativeParams(params)
             if (isSdxlQnn) {
                 params.put("conditioningFormat", "sdxl_qnn_conditioning")
@@ -845,13 +1243,16 @@ class LocalImageProvider(context: Context) {
                         embeddingFile.absolutePath,
                         contract.backendMode,
                         threads,
-                        contract.tokenEmbeddingMode,
+                        conditioningOrder,
                         resolved.promptWeightingSupported
                     )
                 }
                 val embeddingJson = JSONObject(embeddingRaw)
                 if (!embeddingJson.optBoolean("ok", false)) {
-                    error(embeddingJson.optString("error").ifBlank { "Failed to encode QNN prompt embeddings." })
+                    throwLocalImageNativeFailure(
+                        embeddingJson,
+                        "Failed to encode QNN prompt embeddings."
+                    )
                 }
                 val actualConditioningFormat = embeddingJson
                     .optString("conditioningFormat")
@@ -879,6 +1280,65 @@ class LocalImageProvider(context: Context) {
                     "Prompt conditioning did not produce a concrete artifact."
                 }
                 val conditioningArtifactSha256 = embeddingFile.sha256Contents()
+                if (isSdxlQnn) {
+                    require(
+                        embeddingJson.optString("conditioningExecutionMode") ==
+                            "external_mnn_sdxl_embeddings" &&
+                            embeddingJson.optString("conditioningBackend") == "MNN" &&
+                            embeddingJson.optString("conditioningGraph") ==
+                            SDXL_QNN_CONDITIONING_GRAPH_EVIDENCE &&
+                            embeddingJson.optInt("conditioningEncoderExecutionCount", -1) == 4 &&
+                            embeddingJson.optString("conditioningOrder") ==
+                            "negative_then_positive" &&
+                            embeddingJson.optString("conditioningArtifactSha256").lowercase() ==
+                            conditioningArtifactSha256 &&
+                            embeddingJson.optString("promptWeightFingerprint").lowercase() ==
+                            conditioningArtifactSha256
+                    ) {
+                        "MNN SDXL dual-CLIP conditioning did not publish complete graph and artifact evidence."
+                    }
+                    params.put("conditioningExecutionMode", "external_mnn_sdxl_embeddings")
+                    params.put("conditioningBackend", "MNN")
+                    params.put("conditioningGraph", SDXL_QNN_CONDITIONING_GRAPH_EVIDENCE)
+                    params.put(
+                        "conditioningGraphSha256",
+                        sdxlQnnConditioningGraphSha256(conditioningRoot)
+                    )
+                    params.put("conditioningEncoderExecutionCount", 4)
+                    params.put("conditioningOrder", "negative_then_positive")
+                } else if (profile.graph.workerStrategy == ImageWorkerStrategy.SHARED_UNET_VAE) {
+                    val expectedConditioningExecutions = if (resolved.useCfg) 2 else 1
+                    val conditioningGraphPath = requireNotNull(
+                        profile.graph.textEncoder?.relativePath
+                    ) { "Shared QNN UNet/VAE profile is missing its MNN conditioning graph path." }
+                    val conditioningGraphFile = requireNotNull(
+                        bundleRoot.safeDescendantOrNull(conditioningGraphPath)
+                            ?.takeIf { file -> file.isFile && file.length() > 0L }
+                    ) { "MNN conditioning graph is missing or empty: $conditioningGraphPath" }
+                    val conditioningGraphSha256 = conditioningGraphFile.sha256Contents()
+                    val conditioningShape = embeddingJson.optJSONArray("shape")
+                    require(embeddingJson.optString("conditioningExecutionMode") ==
+                        "external_mnn_embeddings" &&
+                        embeddingJson.optString("conditioningBackend") == "MNN" &&
+                        embeddingJson.optString("conditioningGraph") == "clip_v2.mnn" &&
+                        embeddingJson.optInt("conditioningEncoderExecutionCount", -1) ==
+                        expectedConditioningExecutions &&
+                        embeddingJson.optString("conditioningOrder") == conditioningOrder &&
+                        conditioningShape?.optInt(0, -1) == expectedConditioningExecutions &&
+                        embeddingJson.optString("conditioningArtifactSha256").lowercase() ==
+                        conditioningArtifactSha256 &&
+                        embeddingJson.optString("promptWeightFingerprint").lowercase() ==
+                        conditioningArtifactSha256
+                    ) {
+                        "MNN clip_v2.mnn conditioning did not publish complete native graph and artifact evidence."
+                    }
+                    params.put("conditioningExecutionMode", "external_mnn_embeddings")
+                    params.put("conditioningBackend", "MNN")
+                    params.put("conditioningGraph", "clip_v2.mnn")
+                    params.put("conditioningGraphSha256", conditioningGraphSha256)
+                    params.put("conditioningEncoderExecutionCount", expectedConditioningExecutions)
+                    params.put("conditioningOrder", conditioningOrder)
+                }
                 params.put("conditioningArtifactSha256", conditioningArtifactSha256)
                 if (cancellationRequested.get()) {
                     error("本地生图已停止")
@@ -940,6 +1400,17 @@ class LocalImageProvider(context: Context) {
                 }
                 val json = JSONObject(raw)
                 if (!json.optBoolean("ok", false)) {
+                    json.optString("errorCode")
+                        .trim()
+                        .takeIf(String::isNotEmpty)
+                        ?.let { code ->
+                            throw LocalImageProductContractException(
+                                code.lowercase(),
+                                json.optString("error")
+                                    .ifBlank { json.optString("message") }
+                                    .ifBlank { "Snapdragon NPU image generation failed." }
+                            )
+                        }
                     error(
                         if (json.optBoolean("cancelled", false)) {
                             "本地生图已停止"
@@ -952,7 +1423,12 @@ class LocalImageProvider(context: Context) {
                     val nativeEffective = json.optJSONObject("nativeEffective")
                         ?: error("QNN image generation did not report nativeEffective evidence.")
                     require(json.optString("conditioningArtifactSha256") == conditioningArtifactSha256 &&
-                        nativeEffective.optString("conditioningArtifactSha256") == conditioningArtifactSha256
+                        nativeEffective.optString("conditioningArtifactSha256") == conditioningArtifactSha256 &&
+                        json.optBoolean("conditioningArtifactConsumed", false) &&
+                        nativeEffective.optBoolean("conditioningArtifactConsumed", false) &&
+                        (profile.graph.workerStrategy != ImageWorkerStrategy.SHARED_UNET_VAE ||
+                            nativeEffective.optString("conditioningGraphSha256") ==
+                            params.optString("conditioningGraphSha256"))
                     ) {
                         "QNN image generation did not consume the exact prepared conditioning artifact."
                     }
@@ -1028,6 +1504,7 @@ class LocalImageProvider(context: Context) {
                 bundleRoot = bundleRoot
             )
             val profile = profileResolution.profile
+            validateLocalImageProfileProductOptions(profile, effectiveOptions)
             val resolved = profileResolution.layers.resolved
             val effectiveNegativePrompt =
                 effectiveOptions.negativePrompt ?: profile.defaults.defaultNegativePrompt.orEmpty()
@@ -1108,7 +1585,7 @@ class LocalImageProvider(context: Context) {
             }
             val json = JSONObject(raw)
             if (!json.optBoolean("ok", false)) {
-                error(json.optString("error").ifBlank { "MNN-Diffusion image generation failed." })
+                throwLocalImageNativeFailure(json, "MNN-Diffusion image generation failed.")
             }
             ImageExecutionProfileNativeContract.parseAndValidate(profileResolution, json)
             require(mnnDiffusionBackendMatches(backendMode, json.getString("backendMode"))) {
@@ -1162,6 +1639,7 @@ class LocalImageProvider(context: Context) {
             familyOverride = effectiveFamily
         )
         val profile = profileResolution.profile
+        validateLocalImageProfileProductOptions(profile, effectiveOptions)
         val nativeComponentSelection = componentSelection.withControlNetPath(
             resolveProfileControlNetPath(bundleRoot, profile)
         )
@@ -1248,8 +1726,7 @@ class LocalImageProvider(context: Context) {
         }
         val json = JSONObject(raw)
         if (!json.optBoolean("ok", false)) {
-            val message = json.optString("error").ifBlank { "stable-diffusion.cpp 生成失败。" }
-            error(message)
+            throwLocalImageNativeFailure(json, "stable-diffusion.cpp image generation failed.")
         }
         ImageExecutionProfileNativeContract.parseAndValidate(profileResolution, json)
         require(json.optInt("width", -1) == width && json.optInt("height", -1) == height) {
@@ -1293,16 +1770,19 @@ class LocalImageProvider(context: Context) {
         }
         val componentSelectionAudit = nativeComponentSelection.verifyNativeEcho(json)
         val inputExecutionAudit = verifyAndSanitizeStableDiffusionProductInput(json, effectiveOptions)
-        val executionMetadataJson = json
-            .put("componentSelection", componentSelectionAudit)
-            .put("imageInput", inputExecutionAudit)
-            .toString()
         val outputs = consumeStableDiffusionOutputs(
             result = json,
             expectedCount = effectiveOptions.batchCount,
             expectedSeed = seed,
             legacyOutputFile = outputFile
         )
+        val executionMetadataJson = sanitizeNativeExecutionJson(
+            json
+                .put("componentSelection", componentSelectionAudit)
+                .put("imageInput", inputExecutionAudit)
+                .toString()
+        ).takeIf(String::isNotBlank)
+            ?: error("stable-diffusion.cpp execution evidence could not be sanitized.")
         val first = outputs.first()
         LocalImageResult(
             bytes = first.bytes,
@@ -1555,6 +2035,47 @@ internal fun encodeQnnClipPromptTokenIds(
             outputPath = outputFile.absolutePath
         )
     }
+    if (tokenizerJson != null) {
+        // An int32 token-id graph cannot apply attention weights before its Transformer. Parse
+        // with the same native tokenizer first so a genuinely weighted prompt fails explicitly
+        // instead of being silently reinterpreted as literal punctuation.
+        val probeFile = File(outputFile.parentFile, outputFile.name + ".weight-probe")
+        try {
+            val probe = JSONObject(
+                bridge.encodePromptTokenIdsWithWeightsFromJson(
+                    tokenizerJsonPath = tokenizerJson.absolutePath,
+                    prompt = prompt,
+                    negativePrompt = negativePrompt,
+                    bosId = bosId,
+                    eosId = eosId,
+                    padId = padId,
+                    maxTokens = maxTokens,
+                    outputPath = probeFile.absolutePath
+                )
+            )
+            require(probe.optBoolean("ok", false)) {
+                probe.optString("error").ifBlank { "Failed to inspect CLIP prompt weighting." }
+            }
+            val positiveWeighted = probe.optInt("positiveWeightedTokenCount", -1)
+            val negativeWeighted = probe.optInt("negativeWeightedTokenCount", -1)
+            require(positiveWeighted >= 0 && negativeWeighted >= 0) {
+                "Native CLIP prompt-weighting evidence is incomplete."
+            }
+            val weightedTokenCount = positiveWeighted + negativeWeighted
+            require(
+                probe.optBoolean("promptWeightingApplied", false) == (weightedTokenCount > 0)
+            ) { "Native CLIP prompt-weighting evidence is inconsistent." }
+            if (weightedTokenCount > 0) {
+                throw LocalImageProductContractException(
+                    "prompt_weighting_execution_unsupported",
+                    "This package's int32 token-id text encoder cannot apply non-unity prompt weights before the Transformer."
+                )
+            }
+        } finally {
+            runCatching { probeFile.delete() }
+            runCatching { File(probeFile.absolutePath + ".part").delete() }
+        }
+    }
     val tokenIds = if (tokenizerJson != null) {
         tokenizerBackend = "tokenizers_cpp"
         bridge.tokenizePromptTokenIdsFromJson(
@@ -1608,6 +2129,11 @@ internal fun encodeQnnClipPromptTokenIds(
 }.getOrElse { error ->
     JSONObject()
         .put("ok", false)
+        .apply {
+            if (error is LocalImageProductContractException) {
+                put("errorCode", error.code)
+            }
+        }
         .put("error", error.message ?: "Failed to tokenize QNN CLIP prompt.")
         .toString()
 }
@@ -2593,6 +3119,31 @@ private fun File.sha256Contents(): String {
     }
 }
 
+internal fun sdxlQnnConditioningGraphSha256(conditioningRoot: File): String {
+    val executionAssetNames = buildList {
+        add(SDXL_QNN_CONDITIONING_REQUIRED_EXECUTION_ASSET_NAMES.first())
+        File(conditioningRoot, SDXL_QNN_OPTIONAL_CLIP1_WEIGHT_NAME)
+            .takeIf { file -> file.isFile && file.length() > 0L }
+            ?.let { add(SDXL_QNN_OPTIONAL_CLIP1_WEIGHT_NAME) }
+        addAll(SDXL_QNN_CONDITIONING_REQUIRED_EXECUTION_ASSET_NAMES.drop(1))
+    }
+    val payload = executionAssetNames.joinToString(
+        separator = "\n",
+        postfix = "\n"
+    ) { name ->
+        val asset = File(conditioningRoot, name)
+        require(asset.isFile && asset.length() > 0L) {
+            "MNN SDXL conditioning execution asset is missing or empty: ${asset.absolutePath}"
+        }
+        "$name=${asset.sha256Contents()}"
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(payload.toByteArray(Charsets.UTF_8))
+    return digest.joinToString(separator = "") { byte ->
+        "%02x".format(byte.toInt() and 0xff)
+    }
+}
+
 private val QNN_RUNTIME_LIBRARY_KEYS = listOf(
     "qnn_system" to "qnnSystemLibraryPath",
     "qnn_htp" to "qnnHtpLibraryPath",
@@ -2742,13 +3293,36 @@ private fun LocalImageModelRecord.qnnImageBundleReadinessMessage(): String? {
     val root = bundleRoot?.let(::File)?.takeIf { it.isDirectory }
         ?: File(path).parentFile?.takeIf { it.isDirectory }
         ?: return "QNN image engine requires a complete QNN bundle directory."
-    val manifest = runCatching { localImageBundleManifestFromRoot(root) }.getOrNull()
+    val manifest = when (val inspection = inspectLocalImageBundleManifestFromRoot(root)) {
+        LocalImageBundleManifestInspection.Undeclared -> null
+        is LocalImageBundleManifestInspection.Ready -> inspection.manifest
+        is LocalImageBundleManifestInspection.Invalid ->
+            return "QNN image bundle manifest is invalid: ${inspection.message}"
+    }
     qnnRequiredBundleRuntimeReadinessMessage(root, manifest?.requiredRuntimeProfile)?.let { return it }
+    val requiresControlNet = manifest?.task == "CONTROL_IMAGE" ||
+        manifest?.id.orEmpty().contains("controlnet", ignoreCase = true)
+    if (manifest != null) {
+        when (val contract = manifest.resolveRuntimeComponentContract(root)) {
+            is LocalImageRuntimeComponentContract.Invalid ->
+                return "QNN image bundle runtime contract is invalid: ${contract.message}"
+            is LocalImageRuntimeComponentContract.Ready -> {
+                if (contract.missingPaths.isNotEmpty()) {
+                    return "QNN image bundle manifest requires missing or empty components: " +
+                        contract.missingPaths.joinToString(", ") + "."
+                }
+                return if (requiresControlNet && root.nonEmptyQnnContextPath("controlnet.bin") == null) {
+                    "QNN image bundle is incomplete: controlnet.bin."
+                } else {
+                    null
+                }
+            }
+            LocalImageRuntimeComponentContract.UndeclaredLegacy -> Unit
+        }
+    }
     val files = root.walkTopDown().filter { it.isFile }.toList()
     val names = files.map { it.invariantSeparatorsPath.lowercase() }
     fun hasAny(vararg tokens: String): Boolean = names.any { name -> tokens.any { it in name } }
-    val requiresControlNet = manifest?.task == "CONTROL_IMAGE" ||
-        manifest?.id.orEmpty().contains("controlnet", ignoreCase = true)
     val missing = buildList {
         if (!hasAny("qnn", "context", "unet", "diffusion", "transformer")) add("QNN diffusion/context")
         if (!hasAny("vae", "decoder", "ae")) add("VAE/AE decoder")
@@ -2796,35 +3370,104 @@ private fun inferLocalImageRuntimeForBundle(root: File, primary: File): LocalIma
         else -> LocalImageRuntime.infer(primary.name)
     }
 
-internal fun localImageBundleManifestFromRoot(root: File): LocalImageBundleManifest? {
-    if (!root.isDirectory) return null
-    val manifestFile = root.findDescendantFile("manifest.json") ?: return null
-    val manifest = JSONObject(manifestFile.readText(Charsets.UTF_8))
+internal fun inspectLocalImageBundleManifestFromRoot(
+    root: File,
+    effectiveProfileResolver: LocalImageManifestProfileResolver =
+        ImageExecutionProfileResolver::resolve
+): LocalImageBundleManifestInspection {
+    if (!root.isDirectory) return LocalImageBundleManifestInspection.Undeclared
+    val manifestFile = root.findDescendantFile("manifest.json")
+        ?: return LocalImageBundleManifestInspection.Undeclared
+    val rawManifest = runCatching { manifestFile.readText(Charsets.UTF_8) }
+        .getOrElse { return LocalImageBundleManifestInspection.Undeclared }
+    val manifest = try {
+        JSONObject(rawManifest)
+    } catch (error: Throwable) {
+        return if (OWNED_IMAGE_BUNDLE_SCHEMA_PATTERN.containsMatchIn(rawManifest)) {
+            LocalImageBundleManifestInspection.Invalid(
+                error.message?.takeIf(String::isNotBlank)
+                    ?: "Image bundle manifest is malformed."
+            )
+        } else {
+            LocalImageBundleManifestInspection.Undeclared
+        }
+    }
+    val declaredSchema = (manifest.opt("schema") as? String)
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+    if (declaredSchema != null && declaredSchema != OWNED_IMAGE_BUNDLE_SCHEMA) {
+        return LocalImageBundleManifestInspection.Undeclared
+    }
+    val ownedSchema = declaredSchema == OWNED_IMAGE_BUNDLE_SCHEMA
+    return try {
+        LocalImageBundleManifestInspection.Ready(
+            parseLocalImageBundleManifest(
+                root = root,
+                manifest = manifest,
+                effectiveProfileResolver = effectiveProfileResolver,
+                resolveVersionedProfile = ownedSchema
+            )
+        )
+    } catch (error: Throwable) {
+        if (ownedSchema) {
+            LocalImageBundleManifestInspection.Invalid(
+                error.message?.takeIf(String::isNotBlank)
+                    ?: "Image bundle manifest is malformed."
+            )
+        } else {
+            LocalImageBundleManifestInspection.Undeclared
+        }
+    }
+}
+
+internal fun localImageBundleManifestFromRoot(root: File): LocalImageBundleManifest? =
+    when (val inspection = inspectLocalImageBundleManifestFromRoot(root)) {
+        LocalImageBundleManifestInspection.Undeclared -> null
+        is LocalImageBundleManifestInspection.Ready -> inspection.manifest
+        is LocalImageBundleManifestInspection.Invalid ->
+            throw IllegalArgumentException(inspection.message)
+    }
+
+private fun parseLocalImageBundleManifest(
+    root: File,
+    manifest: JSONObject,
+    effectiveProfileResolver: LocalImageManifestProfileResolver,
+    resolveVersionedProfile: Boolean
+): LocalImageBundleManifest {
     val runtime = manifest.optString("runtime").takeIf { it.isNotBlank() }?.let(LocalImageRuntime::from)
     val family = manifest.optString("family").takeIf { it.isNotBlank() }?.let(LocalImageModelFamily::from)
     val imageSize = manifest.manifestImageSize()
-    val smoke = manifest.optJSONObject("smoke") ?: manifest.optJSONObject("smokeSpec")
-    val qnnSmokeSpecs = manifest.optJSONArray("smokes")
+    val smoke = manifest.strictOptionalObject("smoke")
+        ?: manifest.strictOptionalObject("smokeSpec")
+    val qnnSmokeSpecs = manifest.strictOptionalArray("smokes")
         .takeIf { it != null && it.length() > 0 }
         ?.toQnnSmokeSpecs()
-        ?: manifest.optJSONArray("smokeSpecs")
+        ?: manifest.strictOptionalArray("smokeSpecs")
             .takeIf { it != null && it.length() > 0 }
             ?.toQnnSmokeSpecs()
         ?: smoke?.let { listOf(QnnSmokeSpec.fromSmokeJson(it)) }
         ?: emptyList()
-    val components = manifest.optJSONArray("components")
-    val requiredRuntimeProfile = manifest.optJSONObject("requiredRuntimeProfile")?.let { profile ->
-        val qnnSdk = profile.optString("qnnSdk").trim()
-        val htpArch = profile.optInt("htpArch", 0)
-        if (qnnSdk.isNotBlank() && htpArch > 0) {
-            LocalImageQnnRuntimeProfile(
-                qnnSdk = qnnSdk,
-                htpArch = htpArch,
-                completeBundleRuntime = profile.optBoolean("completeBundleRuntime", true)
+    val components = manifest.strictOptionalArray("components")
+    val componentContracts = components?.toLocalImageBundleComponentContracts().orEmpty()
+    val executionProfileDeclared = manifest.has("executionProfile")
+    val executionProfile = manifest.strictOptionalObject("executionProfile")
+    val effectiveExecutionProfile = executionProfile?.takeIf { resolveVersionedProfile }?.let {
+        resolveEffectiveLocalImageManifestProfile(manifest, effectiveProfileResolver)
+    }
+    val executionProfilePaths = effectiveExecutionProfile?.requiredExecutionProfilePaths()
+        ?: executionProfile?.requiredExecutionProfilePaths()
+        ?: ParsedExecutionProfilePaths.Empty
+    val requiredRuntimeProfile = manifest.strictOptionalObject("requiredRuntimeProfile")?.let { profile ->
+        val qnnSdk = profile.strictRequiredString("qnnSdk")
+        val htpArch = profile.strictRequiredPositiveInt("htpArch")
+        LocalImageQnnRuntimeProfile(
+            qnnSdk = qnnSdk,
+            htpArch = htpArch,
+            completeBundleRuntime = profile.strictOptionalBoolean(
+                "completeBundleRuntime",
+                default = true
             )
-        } else {
-            null
-        }
+        )
     }
     val primaryPath = components?.firstComponentPath("DIFFUSION")
         ?: components?.firstComponentPath("MODEL")
@@ -2835,6 +3478,9 @@ internal fun localImageBundleManifestFromRoot(root: File): LocalImageBundleManif
     val primaryFile = primaryPath
         ?.let { root.safeDescendantOrNull(it) }
         ?.takeIf { it.isFile }
+        ?: executionProfilePaths.graphPaths["unet"]
+            ?.let { root.safeDescendantOrNull(it) }
+            ?.takeIf { it.isFile && it.length() > 0L }
     return LocalImageBundleManifest(
         id = manifest.optString("id").takeIf { it.isNotBlank() },
         displayName = manifest.optString("title").takeIf { it.isNotBlank() }
@@ -2848,9 +3494,12 @@ internal fun localImageBundleManifestFromRoot(root: File): LocalImageBundleManif
         family = family,
         imageSize = imageSize,
         minDeviceTier = manifest.optImageEngineMinDeviceTier(),
-        requiresQnnRuntime = manifest.optBoolean("requiresQnnRuntime", runtime == LocalImageRuntime.QNN_HTP),
+        requiresQnnRuntime = manifest.strictOptionalBoolean(
+            "requiresQnnRuntime",
+            default = runtime == LocalImageRuntime.QNN_HTP
+        ),
         requiredRuntimeProfile = requiredRuntimeProfile,
-        requiresSmokeTest = manifest.optBoolean("requiresSmokeTest", true),
+        requiresSmokeTest = manifest.strictOptionalBoolean("requiresSmokeTest", default = true),
         smokeWidth = smoke?.optInt("width", 0) ?: 0,
         smokeHeight = smoke?.optInt("height", 0) ?: 0,
         smokeSteps = smoke?.optInt("steps", 0) ?: 0,
@@ -2858,14 +3507,343 @@ internal fun localImageBundleManifestFromRoot(root: File): LocalImageBundleManif
         qnnSmokeSpec = qnnSmokeSpecs.firstOrNull() ?: QnnSmokeSpec.Empty,
         qnnSmokeSpecs = qnnSmokeSpecs,
         primaryFile = primaryFile,
+        components = componentContracts,
+        executionProfileRequiredPaths = executionProfilePaths.requiredPaths,
+        executionProfileGraphPaths = executionProfilePaths.graphPaths,
+        executionProfileDeclared = executionProfileDeclared,
         componentCount = components?.length() ?: 0
     )
 }
 
+internal fun LocalImageBundleManifest.resolveRuntimeComponentContract(
+    root: File
+): LocalImageRuntimeComponentContract {
+    fun exists(relativePath: String): Boolean = root.safeDescendantOrNull(relativePath)
+        ?.let { file -> file.isFile && file.length() > 0L }
+        ?: false
+    val smokePaths = qnnSmokeSpecs
+        .asSequence()
+        .map(QnnSmokeSpec::contextBinary)
+        .filter(String::isNotBlank)
+        .toList()
+    val requiredNonArchiveComponents = components
+        .asSequence()
+        .filter(LocalImageBundleComponentContract::required)
+        .filterNot { component -> component.relativePath.isArchiveContainerPath() }
+        .map(LocalImageBundleComponentContract::relativePath)
+        .toList()
+    val requiredArchives = components
+        .asSequence()
+        .filter(LocalImageBundleComponentContract::required)
+        .filter { component -> component.relativePath.isArchiveContainerPath() }
+        .map(LocalImageBundleComponentContract::relativePath)
+        .toList()
+    val communityClipAssets = listOf(
+        "clip_v2.mnn",
+        "tokenizer.json",
+        "token_emb.bin",
+        "pos_emb.bin"
+    )
+    val communityClipLayoutAttempted = communityClipAssets.any(::exists)
+    val inferredLegacyAssets = if (!executionProfileDeclared && communityClipLayoutAttempted) {
+        communityClipAssets
+    } else {
+        emptyList()
+    }
+    val requiredRuntimePaths = (
+        executionProfileRequiredPaths + smokePaths +
+            requiredNonArchiveComponents + inferredLegacyAssets
+        ).distinct()
+    try {
+        requiredRuntimePaths.forEachIndexed { index, path ->
+            requireSafeImageRuntimePath(path, "runtimeComponents[$index]")
+        }
+        requiredArchives.forEachIndexed { index, path ->
+            requireSafeImageRuntimePath(path, "archiveComponents[$index]")
+        }
+    } catch (error: IllegalArgumentException) {
+        return LocalImageRuntimeComponentContract.Invalid(
+            error.message ?: "Image runtime component path is invalid."
+        )
+    }
+
+    val graphTextEncoder = executionProfileGraphPaths["textEncoder"]
+    val graphComplete = listOf("textEncoder", "unet", "vae")
+        .all(executionProfileGraphPaths::containsKey) &&
+        (task != "CONTROL_IMAGE" || executionProfileGraphPaths.containsKey("controlNet"))
+    val declaredCommunityClipComplete = graphTextEncoder
+        ?.substringAfterLast('/')
+        ?.equals("clip_v2.mnn", ignoreCase = true) != true ||
+        listOf("tokenizer.json", "token_emb.bin", "pos_emb.bin")
+            .all(executionProfileRequiredPaths::contains)
+    val profileContractComplete = executionProfileDeclared &&
+        graphComplete && declaredCommunityClipComplete
+
+    val smokeNames = smokePaths.map { it.substringAfterLast('/').lowercase() }
+    val smokeHasUnet = smokeNames.any { name ->
+        "unet" in name || "diffusion" in name || "transformer" in name
+    }
+    val smokeHasVae = smokeNames.any { name -> "vae" in name || "decoder" in name }
+    val smokeHasQnnTextEncoder = smokeNames.any { name ->
+        "text_encoder" in name || "clip" in name
+    }
+    val legacySmokeContractComplete = !executionProfileDeclared &&
+        smokeHasUnet && smokeHasVae &&
+        (smokeHasQnnTextEncoder || communityClipLayoutAttempted)
+
+    val componentRoles = components
+        .asSequence()
+        .filter(LocalImageBundleComponentContract::required)
+        .filterNot { component -> component.relativePath.isArchiveContainerPath() }
+        .map(LocalImageBundleComponentContract::role)
+        .toSet()
+    val directComponentContractComplete =
+        componentRoles.any { role -> role in setOf("DIFFUSION", "UNET", "TRANSFORMER") } &&
+            componentRoles.any { role -> role in setOf("VAE", "VAE_DECODER") } &&
+            componentRoles.any { role -> role in setOf("TEXT_ENCODER", "TOKENIZER") }
+    val expandedContractComplete = profileContractComplete ||
+        legacySmokeContractComplete || directComponentContractComplete
+
+    if (executionProfileDeclared && !profileContractComplete) {
+        return LocalImageRuntimeComponentContract.Invalid(
+            "Image executionProfile does not declare a complete text encoder, UNet, VAE" +
+                if (task == "CONTROL_IMAGE") ", and ControlNet runtime graph contract." else " runtime graph contract."
+        )
+    }
+    val missingRuntimePaths = requiredRuntimePaths.filterNot(::exists)
+    val missingArchives = requiredArchives.filterNot(::exists)
+    if (missingArchives.isNotEmpty() &&
+        (!expandedContractComplete || missingRuntimePaths.isNotEmpty())
+    ) {
+        val missingExtractedRuntime = missingRuntimePaths
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString(
+                prefix = " Missing or empty extracted runtime components: ",
+                postfix = "."
+            )
+            .orEmpty()
+        return LocalImageRuntimeComponentContract.Invalid(
+            "Required archive container is absent before a complete extracted runtime contract was proven: " +
+                missingArchives.joinToString(", ") + "." + missingExtractedRuntime
+        )
+    }
+    if (expandedContractComplete) {
+        return LocalImageRuntimeComponentContract.Ready(
+            requiredPaths = requiredRuntimePaths,
+            missingPaths = missingRuntimePaths
+        )
+    }
+    return LocalImageRuntimeComponentContract.UndeclaredLegacy
+}
+
+internal fun LocalImageBundleManifest.missingRequiredComponentPaths(root: File): List<String> =
+    when (val contract = resolveRuntimeComponentContract(root)) {
+        LocalImageRuntimeComponentContract.UndeclaredLegacy -> emptyList()
+        is LocalImageRuntimeComponentContract.Ready -> contract.missingPaths
+        is LocalImageRuntimeComponentContract.Invalid -> listOf("<invalid-contract: ${contract.message}>")
+    }
+
+internal fun LocalImageBundleManifest.hasExactRuntimeComponentContract(root: File): Boolean =
+    resolveRuntimeComponentContract(root) is LocalImageRuntimeComponentContract.Ready
+
+private fun String.isArchiveContainerPath(): Boolean {
+    val lower = trim().lowercase()
+    return lower.endsWith(".zip") || lower.endsWith(".7z") ||
+        lower.endsWith(".tar") || lower.endsWith(".tgz") ||
+        lower.endsWith(".tar.gz")
+}
+
+private data class ParsedExecutionProfilePaths(
+    val graphPaths: Map<String, String>,
+    val requiredPaths: List<String>
+) {
+    companion object {
+        val Empty = ParsedExecutionProfilePaths(emptyMap(), emptyList())
+    }
+}
+
+private fun JSONObject.requiredExecutionProfilePaths(): ParsedExecutionProfilePaths {
+    val graph = strictOptionalObject("graph")
+        ?: throw IllegalArgumentException(
+            "Image executionProfile must declare a graph object."
+        )
+    val graphPaths = linkedMapOf<String, String>()
+    val requiredPaths = mutableListOf<String>()
+    listOf("textEncoder", "unet", "vae", "vaeEncoder", "controlNet").forEach { field ->
+        if (!graph.has(field) || graph.isNull(field)) return@forEach
+        val artifact = graph.strictOptionalObject(field)
+            ?: throw IllegalArgumentException("Image executionProfile.graph.$field must be an object.")
+        val relativePath = artifact.strictRequiredString("relativePath")
+        requireSafeImageRuntimePath(relativePath, "executionProfile.graph.$field.relativePath")
+        graphPaths[field] = relativePath
+        requiredPaths += relativePath
+    }
+    listOf("schedulerSidecar", "tokenizerSidecar").forEach { field ->
+        if (!graph.has(field) || graph.isNull(field)) return@forEach
+        val relativePath = graph.strictRequiredString(field)
+        requireSafeImageRuntimePath(relativePath, "executionProfile.graph.$field")
+        requiredPaths += relativePath
+    }
+    graph.strictOptionalArray("configSidecars")?.let { sidecars ->
+        for (index in 0 until sidecars.length()) {
+            val value = sidecars.opt(index)
+            val relativePath = (value as? String)
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?: throw IllegalArgumentException(
+                    "Image executionProfile.graph.configSidecars[$index] must be a non-empty string."
+                )
+            requireSafeImageRuntimePath(
+                relativePath,
+                "executionProfile.graph.configSidecars[$index]"
+            )
+            requiredPaths += relativePath
+        }
+    }
+    return ParsedExecutionProfilePaths(
+        graphPaths = graphPaths,
+        requiredPaths = requiredPaths.distinct()
+    )
+}
+
+private fun ImageExecutionProfile.requiredExecutionProfilePaths(): ParsedExecutionProfilePaths {
+    val graphPaths = linkedMapOf<String, String>()
+    val requiredPaths = mutableListOf<String>()
+    listOf(
+        "textEncoder" to graph.textEncoder,
+        "unet" to graph.unet,
+        "vae" to graph.vae,
+        "vaeEncoder" to graph.vaeEncoder,
+        "controlNet" to graph.controlNet
+    ).forEach { (field, artifact) ->
+        val relativePath = artifact?.relativePath ?: return@forEach
+        requireSafeImageRuntimePath(relativePath, "executionProfile.graph.$field.relativePath")
+        graphPaths[field] = relativePath
+        requiredPaths += relativePath
+    }
+    listOfNotNull(graph.schedulerSidecar, graph.tokenizerSidecar)
+        .forEachIndexed { index, relativePath ->
+            requireSafeImageRuntimePath(
+                relativePath,
+                "executionProfile.graph.sidecars[$index]"
+            )
+            requiredPaths += relativePath
+        }
+    graph.configSidecars.forEachIndexed { index, relativePath ->
+        requireSafeImageRuntimePath(
+            relativePath,
+            "executionProfile.graph.configSidecars[$index]"
+        )
+        requiredPaths += relativePath
+    }
+    return ParsedExecutionProfilePaths(
+        graphPaths = graphPaths,
+        requiredPaths = requiredPaths.distinct()
+    )
+}
+
+private fun JSONObject.strictOptionalObject(field: String): JSONObject? {
+    if (!has(field) || isNull(field)) return null
+    return opt(field) as? JSONObject
+        ?: throw IllegalArgumentException("Image bundle manifest $field must be an object.")
+}
+
+private fun JSONObject.strictOptionalArray(field: String): JSONArray? {
+    if (!has(field) || isNull(field)) return null
+    return opt(field) as? JSONArray
+        ?: throw IllegalArgumentException("Image bundle manifest $field must be an array.")
+}
+
+private fun JSONObject.strictRequiredString(field: String): String {
+    val value = opt(field)
+    return (value as? String)
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?: throw IllegalArgumentException("Image bundle manifest $field must be a non-empty string.")
+}
+
+private fun JSONObject.strictRequiredPositiveInt(field: String): Int {
+    val value = opt(field)
+    return (value as? Number)
+        ?.let { number ->
+            val longValue = runCatching { BigDecimal(number.toString()).longValueExact() }
+                .getOrNull()
+            longValue?.takeIf { it in 1..Int.MAX_VALUE }?.toInt()
+        }
+        ?: throw IllegalArgumentException(
+            "Image bundle manifest $field must be a positive integer."
+        )
+}
+
+private fun JSONObject.strictOptionalBoolean(field: String, default: Boolean): Boolean {
+    if (!has(field) || isNull(field)) return default
+    return opt(field) as? Boolean
+        ?: throw IllegalArgumentException("Image bundle manifest $field must be a boolean.")
+}
+
+private fun requireSafeImageRuntimePath(path: String, field: String) {
+    val normalized = path.trim().replace('\\', '/')
+    val unsafe = normalized.isBlank() ||
+        normalized.startsWith('/') ||
+        Regex("^[A-Za-z]:").containsMatchIn(normalized) ||
+        normalized.split('/').any { segment ->
+            segment.isBlank() || segment == "." || segment == ".."
+        }
+    require(!unsafe) { "Image bundle manifest $field escapes the bundle root: $path" }
+}
+
+private fun JSONArray.toLocalImageBundleComponentContracts(): List<LocalImageBundleComponentContract> =
+    buildList {
+        for (index in 0 until length()) {
+            val component = opt(index) as? JSONObject
+                ?: throw IllegalArgumentException(
+                    "Image bundle manifest components[$index] must be an object."
+                )
+            val role = component.strictRequiredString("role").uppercase()
+            val path = (component.opt("path") as? String)
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?: (component.opt("fileName") as? String)
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                ?: throw IllegalArgumentException(
+                    "Image bundle manifest components[$index] must declare path or fileName."
+                )
+            requireSafeImageRuntimePath(path, "components[$index]")
+            val required = if (!component.has("required") || component.isNull("required")) {
+                !role.equals("OPTIONAL", ignoreCase = true)
+            } else {
+                component.opt("required") as? Boolean
+                    ?: throw IllegalArgumentException(
+                        "Image bundle manifest components[$index].required must be a boolean."
+                    )
+            }
+            add(
+                LocalImageBundleComponentContract(
+                    role = role,
+                    relativePath = path,
+                    required = required
+                )
+            )
+        }
+    }
+
 private fun JSONArray.toQnnSmokeSpecs(): List<QnnSmokeSpec> =
     buildList {
         for (index in 0 until length()) {
-            optJSONObject(index)?.let { add(QnnSmokeSpec.fromSmokeJson(it)) }
+            val smoke = opt(index) as? JSONObject
+                ?: throw IllegalArgumentException(
+                    "Image bundle manifest smokes[$index] must be an object."
+                )
+            smoke.opt("contextBinary")?.let { rawPath ->
+                if (rawPath !is String || rawPath.isBlank()) {
+                    throw IllegalArgumentException(
+                        "Image bundle manifest smokes[$index].contextBinary must be a non-empty string."
+                    )
+                }
+                requireSafeImageRuntimePath(rawPath, "smokes[$index].contextBinary")
+            }
+            add(QnnSmokeSpec.fromSmokeJson(smoke))
         }
     }
 
@@ -2967,6 +3945,14 @@ private val SDXL_QNN_CONDITIONING_ASSET_NAMES = setOf(
     "pos_emb.bin",
     "pos_emb_2.bin"
 )
+
+private const val SDXL_QNN_CONDITIONING_GRAPH_EVIDENCE = "clip.mnn+clip_2.mnn"
+private val SDXL_QNN_CONDITIONING_REQUIRED_EXECUTION_ASSET_NAMES = listOf(
+    "clip.mnn",
+    "clip_2.mnn",
+    "clip_2.mnn.weight"
+)
+private const val SDXL_QNN_OPTIONAL_CLIP1_WEIGHT_NAME = "clip.mnn.weight"
 
 private val READINESS_MODEL_EXTENSIONS = setOf("gguf", "safetensors", "ckpt", "pth", "pt", "onnx", "sft", "mnn", "bin", "ctx", "qnn")
 

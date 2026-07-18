@@ -486,6 +486,7 @@ internal fun mergeSdxlPhaseNativeResults(
         .put("vaeScalingFactor", vaeNative.getDouble("vaeScalingFactor"))
         .put("pixelRange", vaeNative.getString("pixelRange"))
         .put("conditioningArtifactSha256", actualConditioningArtifactSha256)
+        .put("runtimeSessionMode", "isolated_unet_then_vae_same_transport")
         .put("sdxlPhaseProof", sdxlPhaseProof)
     val finalResult = JSONObject(nativeEffectiveJson.toString())
     finalResult.put("nativeEffective", nativeEffectiveJson)

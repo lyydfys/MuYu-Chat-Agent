@@ -1,5 +1,9 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.download.ImageEngineBundleComponentRole
+import com.muyuchat.core.download.ImageEngineBundleSpec
+import com.muyuchat.core.download.ModelScopeClient
+import com.muyuchat.core.download.ModelScopeRecommendedKind
 import com.muyuchat.core.download.RecommendedImageDefaults
 
 internal data class ImageProfileSidecar(
@@ -145,7 +149,27 @@ private data class BuiltInImageProfileIdentityRule(
     val modelFingerprints: Set<String> = emptySet()
 )
 
+private data class CatalogImageProfileContract(
+    val bundle: ImageEngineBundleSpec,
+    val aliases: Set<String>,
+    val primaryRepositories: Set<String>,
+    val artifactMarkers: Set<String>,
+    val modelFingerprint: String
+)
+
 internal object ImageExecutionProfileResolver {
+    private const val QNN_SD15_EXECUTION_PROFILE_REVISION = 2
+    private val QNN_SD15_CONDITIONING_RUNTIME_ASSETS = listOf(
+        "tokenizer.json",
+        "token_emb.bin",
+        "pos_emb.bin"
+    )
+    private val MIGRATABLE_PINNED_QNN_SD15_RECOMMENDATIONS = setOf(
+        "cyberrealistic_sd15_qnn228",
+        "realisticvisionhyper_sd15_qnn228",
+        "dreamshaper_sd15_qnn228",
+        "meinamix_sd15_qnn228"
+    )
     val builtInTargets: List<BuiltInImageProfileTarget> = listOf(
         BuiltInImageProfileTarget("cyberrealistic_sd15_qnn228", "community.sd15.qnn228"),
         BuiltInImageProfileTarget("realisticvisionhyper_sd15_qnn228", "community.sd15.hyper.qnn228"),
@@ -168,6 +192,50 @@ internal object ImageExecutionProfileResolver {
     )
 
     private val targetByRecommendationId = builtInTargets.associateBy(BuiltInImageProfileTarget::recommendationId)
+    private val catalogProfileContractsByRecommendationId: Map<String, CatalogImageProfileContract> by lazy {
+        runCatching {
+            val catalogModels = ModelScopeClient().recommendedModels()
+                .asSequence()
+                .filter { model -> model.kind == ModelScopeRecommendedKind.IMAGE }
+                .filter { model -> model.id in targetByRecommendationId }
+                .toList()
+            require(catalogModels.size == catalogModels.map { it.id }.toSet().size) {
+                "Catalog image recommendation identities must be unique."
+            }
+            require(catalogModels.mapTo(linkedSetOf()) { it.id } == targetByRecommendationId.keys) {
+                "Catalog image recommendations and compatibility targets must stay complete."
+            }
+            catalogModels.associate { model ->
+                val bundle = requireNotNull(model.imageEngineBundle)
+                val primary = bundle.requiredComponents.first { component ->
+                    component.role == ImageEngineBundleComponentRole.DIFFUSION
+                }
+                val fingerprint = requireNotNull(
+                    primary.sha256
+                        ?.trim()
+                        ?.lowercase()
+                        ?.takeIf { value -> value.matches(Regex("^[0-9a-f]{64}$")) }
+                )
+                model.id to CatalogImageProfileContract(
+                    bundle = bundle,
+                    aliases = listOfNotNull(
+                        model.id,
+                        bundle.id,
+                        bundle.recommendationId
+                    ).mapTo(linkedSetOf(), ::normalizeIdentityToken),
+                    primaryRepositories = setOf(model.repoId, primary.repoId)
+                        .mapTo(linkedSetOf(), ::normalizeRepositoryIdentity),
+                    artifactMarkers = setOf(
+                        model.recommendedFileName,
+                        primary.fileName,
+                        primary.relativePath,
+                        bundle.id
+                    ).mapTo(linkedSetOf(), ::normalizeIdentityToken),
+                    modelFingerprint = fingerprint
+                )
+            }
+        }.getOrDefault(emptyMap())
+    }
     private val identityRules: List<BuiltInImageProfileIdentityRule> = listOf(
         identityRule(
             "cyberrealistic_sd15_qnn228",
@@ -290,17 +358,18 @@ internal object ImageExecutionProfileResolver {
         val fieldSources = linkedMapOf<String, ImageProfileSource>()
         val sourceChain = mutableListOf<ImageProfileSource>()
         val fingerprint = input.modelFingerprint.trim().lowercase()
-        val packageFamily = if (input.manifestProfile == null) {
+        val manifestProfile = migratePinnedCatalogManifestProfile(input, fingerprint)
+        val packageFamily = if (manifestProfile == null) {
             input.manifestBehavior?.family ?: input.sidecar?.behavior?.family
         } else {
-            input.manifestProfile.family
+            manifestProfile.family
         }
         val fallbackFamily = packageFamily ?: input.capabilityDiscovery?.family ?: input.family
 
-        val base: ImageExecutionProfile = if (input.manifestProfile != null) {
+        val base: ImageExecutionProfile = if (manifestProfile != null) {
             sourceChain += ImageProfileSource.MANIFEST
             markAllProfileFields(fieldSources, ImageProfileSource.MANIFEST)
-            input.manifestProfile
+            manifestProfile
         } else {
             val builtInTarget = resolveBuiltInTarget(input)
             when {
@@ -333,16 +402,16 @@ internal object ImageExecutionProfileResolver {
         // must retain its declared fingerprint so mismatch validation can
         // reject stale or transplanted metadata. Resolver-created templates
         // are materialized against the current model bytes here.
-        var resolvedProfile = if (input.manifestProfile != null) {
+        var resolvedProfile = if (manifestProfile != null) {
             base
         } else {
             base.copy(modelFingerprint = fingerprint)
         }
-        if (input.manifestProfile == null && input.sidecar != null) {
+        if (manifestProfile == null && input.sidecar != null) {
             sourceChain.add(0, ImageProfileSource.SIDECAR)
             resolvedProfile = applySidecar(resolvedProfile, input.sidecar, fieldSources)
         }
-        if (input.manifestProfile == null && input.manifestBehavior != null) {
+        if (manifestProfile == null && input.manifestBehavior != null) {
             sourceChain.add(0, ImageProfileSource.MANIFEST)
             resolvedProfile = applyPackageBehavior(
                 base = resolvedProfile,
@@ -373,8 +442,8 @@ internal object ImageExecutionProfileResolver {
             provenance = ImageProfileProvenance(
                 primarySource = sourceChain.first(),
                 sources = sourceChain.distinct(),
-                recommendationId = resolvedProfile.provenance.recommendationId ?: input.recommendationId,
-                recommendationRevision = input.recommendationRevision,
+                recommendationId = resolvedProfile.provenance.recommendationId,
+                recommendationRevision = resolvedProfile.provenance.recommendationRevision,
                 notes = if (input.deviceHints.localProfileKnown) emptyList() else listOf(
                     "Device-local profile is unavailable; native load and real execution remain authoritative."
                 )
@@ -429,21 +498,15 @@ internal object ImageExecutionProfileResolver {
         // legacy bundle alias. This prevents stale request metadata from
         // silently applying another recommendation's execution profile.
         val fingerprint = input.modelFingerprint.trim().lowercase()
-        identityRules.singleOrNull { rule -> fingerprint in rule.modelFingerprints }
-            ?.let { return targetByRecommendationId.getValue(it.recommendationId) }
-
-        val aliasTokens = buildSet {
-            input.recommendationId
-                ?.takeIf(String::isNotBlank)
-                ?.let { add(normalizeIdentityToken(it)) }
-            input.recommendationEvidence.aliases
-                .asSequence()
-                .filter(String::isNotBlank)
-                .map(::normalizeIdentityToken)
-                .forEach(::add)
+        val fingerprintMatches = if (fingerprint.isBlank()) {
+            emptyList()
+        } else {
+            identityRules.filter { rule -> fingerprint in rule.effectiveModelFingerprints() }
         }
-        identityRules.singleOrNull { rule -> rule.aliases.any(aliasTokens::contains) }
-            ?.let { return targetByRecommendationId.getValue(it.recommendationId) }
+        if (fingerprintMatches.size == 1) {
+            return targetByRecommendationId.getValue(fingerprintMatches.single().recommendationId)
+        }
+        if (fingerprintMatches.isNotEmpty()) return null
 
         val sourceRepositories = input.recommendationEvidence.sourceRepositories
             .asSequence()
@@ -456,20 +519,53 @@ internal object ImageExecutionProfileResolver {
             .flatMap { value -> artifactIdentityTokens(value).asSequence() }
             .toSet()
         val repositoryMatches = identityRules.filter { rule ->
-            rule.primaryRepositories.any(sourceRepositories::contains)
+            rule.effectivePrimaryRepositories().any(sourceRepositories::contains)
         }
-        if (repositoryMatches.size == 1) {
-            return targetByRecommendationId.getValue(repositoryMatches.single().recommendationId)
+        val artifactMatches = identityRules.filter { rule ->
+            rule.effectiveArtifactMarkers().any(artifactTokens::contains)
         }
-        repositoryMatches.singleOrNull { rule ->
-            rule.artifactMarkers.any(artifactTokens::contains)
-        }?.let { return targetByRecommendationId.getValue(it.recommendationId) }
+        val exactEvidenceMatches = when {
+            repositoryMatches.isNotEmpty() && artifactMatches.isNotEmpty() ->
+                repositoryMatches.filter(artifactMatches::contains)
+            repositoryMatches.isNotEmpty() -> repositoryMatches
+            else -> artifactMatches
+        }
+        if (exactEvidenceMatches.size == 1) {
+            return targetByRecommendationId.getValue(exactEvidenceMatches.single().recommendationId)
+        }
+        // Known-but-conflicting package evidence is not an invitation to trust
+        // a stale card id. Preserve the generic compatible path instead.
+        if (repositoryMatches.isNotEmpty() || artifactMatches.isNotEmpty()) return null
 
-        identityRules.singleOrNull { rule ->
-            rule.artifactMarkers.any(artifactTokens::contains)
-        }?.let { return targetByRecommendationId.getValue(it.recommendationId) }
+        val aliasTokens = buildSet {
+            input.recommendationId
+                ?.takeIf(String::isNotBlank)
+                ?.let { add(normalizeIdentityToken(it)) }
+            input.recommendationEvidence.aliases
+                .asSequence()
+                .filter(String::isNotBlank)
+                .map(::normalizeIdentityToken)
+                .forEach(::add)
+        }
+        identityRules.singleOrNull { rule -> rule.effectiveAliases().any(aliasTokens::contains) }
+            ?.let { return targetByRecommendationId.getValue(it.recommendationId) }
         return null
     }
+
+    private fun BuiltInImageProfileIdentityRule.catalogContract(): CatalogImageProfileContract? =
+        catalogProfileContractsByRecommendationId[recommendationId]
+
+    private fun BuiltInImageProfileIdentityRule.effectiveAliases(): Set<String> =
+        aliases + catalogContract()?.aliases.orEmpty()
+
+    private fun BuiltInImageProfileIdentityRule.effectivePrimaryRepositories(): Set<String> =
+        primaryRepositories + catalogContract()?.primaryRepositories.orEmpty()
+
+    private fun BuiltInImageProfileIdentityRule.effectiveArtifactMarkers(): Set<String> =
+        artifactMarkers + catalogContract()?.artifactMarkers.orEmpty()
+
+    private fun BuiltInImageProfileIdentityRule.effectiveModelFingerprints(): Set<String> =
+        modelFingerprints + listOfNotNull(catalogContract()?.modelFingerprint)
 
     private fun identityRule(
         recommendationId: String,
@@ -687,7 +783,12 @@ internal object ImageExecutionProfileResolver {
         val discoveredCapabilities = discovery.capabilities ?: base.capabilities
         val capabilities = discoveredCapabilities.copy(
             supportsPromptWeighting = tokenizer.supportsPromptWeighting &&
-                base.runtime in setOf(LocalImageRuntime.QNN_HTP, LocalImageRuntime.MNN_DIFFUSION)
+                discoveredCapabilities.supportsPromptWeighting &&
+                base.runtime in setOf(
+                    LocalImageRuntime.QNN_HTP,
+                    LocalImageRuntime.MNN_DIFFUSION,
+                    LocalImageRuntime.STABLE_DIFFUSION_CPP
+                )
         )
         return base.copy(
             family = discovery.family ?: base.family,
@@ -817,7 +918,19 @@ internal object ImageExecutionProfileResolver {
         modelFingerprint: String,
         recommendationRevision: String?
     ): ImageExecutionProfile {
-        val profile = profileTemplate(target, modelFingerprint)
+        // New and repaired installs materialize the catalog-owned contract. The
+        // handwritten template remains only as a safe compatibility path when
+        // the catalog cannot be loaded by an old package resolver.
+        val profile = catalogProfileContractsByRecommendationId[target.recommendationId]
+            ?.bundle
+            ?.let { bundle ->
+                runCatching {
+                    materializeDownloadedImageExecutionProfile(bundle, modelFingerprint)
+                }.getOrNull()
+            }
+            ?: requireNotNull(
+                legacyBuiltInProfileForCompatibility(target.recommendationId, modelFingerprint)
+            )
         return profile.copy(
             provenance = ImageProfileProvenance(
                 primarySource = ImageProfileSource.BUILT_IN,
@@ -828,6 +941,162 @@ internal object ImageExecutionProfileResolver {
         )
     }
 
+    /**
+     * Revision migration is deliberately narrower than normal recommendation
+     * resolution. It only repairs an older persisted contract for the exact
+     * pinned archive that authored it; aliases, device hints and profile names
+     * alone can never select a migration target.
+     */
+    private fun migratePinnedCatalogManifestProfile(
+        input: ImageExecutionProfileResolverInput,
+        fingerprint: String
+    ): ImageExecutionProfile? {
+        val persisted = input.manifestProfile ?: return null
+        if (persisted.modelFingerprint.trim().lowercase() != fingerprint) return persisted
+        val target = resolveBuiltInTarget(input)
+            ?.takeIf { it.recommendationId in MIGRATABLE_PINNED_QNN_SD15_RECOMMENDATIONS }
+            ?: return persisted
+        val recommendationId = target.recommendationId
+        val contract = catalogProfileContractsByRecommendationId[recommendationId]
+            ?: return persisted
+        if (!manifestMigrationIdentityAgrees(input, persisted, recommendationId)) return persisted
+        if (!manifestMigrationSourceEvidenceAgrees(input, recommendationId)) return persisted
+
+        val catalogProfile = materializeDownloadedImageExecutionProfile(
+            bundle = contract.bundle,
+            modelFingerprint = fingerprint
+        ) ?: return persisted
+        if (
+            catalogProfile.profileRevision != QNN_SD15_EXECUTION_PROFILE_REVISION ||
+            persisted.profileId != catalogProfile.profileId ||
+            persisted.profileRevision <= 0 ||
+            persisted.profileRevision >= catalogProfile.profileRevision ||
+            persisted.runtime != catalogProfile.runtime ||
+            persisted.family != catalogProfile.family ||
+            persisted.task != catalogProfile.task
+        ) {
+            return persisted
+        }
+        return catalogProfile.copy(
+            provenance = catalogProfile.provenance.copy(
+                primarySource = ImageProfileSource.MANIFEST,
+                sources = listOf(ImageProfileSource.MANIFEST),
+                recommendationId = recommendationId,
+                recommendationRevision = persisted.provenance.recommendationRevision
+                    ?: input.recommendationRevision,
+                notes = persisted.provenance.notes
+            )
+        )
+    }
+
+    private fun manifestMigrationIdentityAgrees(
+        input: ImageExecutionProfileResolverInput,
+        persisted: ImageExecutionProfile,
+        recommendationId: String
+    ): Boolean {
+        val targetRule = identityRules.single { rule -> rule.recommendationId == recommendationId }
+        val targetAliases = targetRule.effectiveAliases()
+        val persistedIdentity = persisted.provenance.recommendationId
+            ?.takeIf(String::isNotBlank)
+            ?.let(::normalizeIdentityToken)
+            ?: return false
+        if (persistedIdentity !in targetAliases) return false
+        input.recommendationId
+            ?.takeIf(String::isNotBlank)
+            ?.let(::normalizeIdentityToken)
+            ?.let { requestedIdentity ->
+                if (requestedIdentity !in targetAliases) return false
+            }
+
+        val conflictingAlias = input.recommendationEvidence.aliases
+            .asSequence()
+            .filter(String::isNotBlank)
+            .map(::normalizeIdentityToken)
+            .any { alias ->
+                identityRules.any { rule ->
+                    rule.recommendationId != recommendationId && alias in rule.effectiveAliases()
+                }
+            }
+        if (conflictingAlias) return false
+        val conflictingRepository = input.recommendationEvidence.sourceRepositories
+            .asSequence()
+            .filter(String::isNotBlank)
+            .map(::normalizeRepositoryIdentity)
+            .any { repository ->
+                identityRules.any { rule ->
+                    rule.recommendationId != recommendationId &&
+                        repository in rule.effectivePrimaryRepositories()
+                }
+            }
+        if (conflictingRepository) return false
+        val conflictingArtifact = input.recommendationEvidence.artifactPaths
+            .asSequence()
+            .filter(String::isNotBlank)
+            .flatMap { path -> artifactIdentityTokens(path).asSequence() }
+            .any { artifact ->
+                identityRules.any { rule ->
+                    rule.recommendationId != recommendationId &&
+                        artifact in rule.effectiveArtifactMarkers()
+                }
+            }
+        return !conflictingArtifact
+    }
+
+    /**
+     * Installed archive profiles fingerprint the extracted diffusion graph, not the deleted ZIP.
+     * Bind migration to both immutable publisher identity fields retained in the generated manifest
+     * so a hand-written recommendation id alone cannot opt an unrelated package into this repair.
+     */
+    private fun manifestMigrationSourceEvidenceAgrees(
+        input: ImageExecutionProfileResolverInput,
+        recommendationId: String
+    ): Boolean {
+        val targetRule = identityRules.single { rule -> rule.recommendationId == recommendationId }
+        val pinnedArchiveNames = catalogProfileContractsByRecommendationId[recommendationId]
+            ?.bundle
+            ?.requiredComponents
+            .orEmpty()
+            .asSequence()
+            .filter { component -> component.role == ImageEngineBundleComponentRole.DIFFUSION }
+            .flatMap { component -> sequenceOf(component.fileName, component.relativePath) }
+            .map { path -> normalizeIdentityToken(path.replace('\\', '/').substringAfterLast('/')) }
+            .filter(String::isNotBlank)
+            .toSet()
+        if (pinnedArchiveNames.isEmpty()) return false
+        val repositoryMatched = input.recommendationEvidence.sourceRepositories
+            .asSequence()
+            .filter(String::isNotBlank)
+            .map(::normalizeRepositoryIdentity)
+            .any { repository -> repository in targetRule.effectivePrimaryRepositories() }
+        val artifactMatched = input.recommendationEvidence.artifactPaths
+            .asSequence()
+            .filter(String::isNotBlank)
+            .any { path -> pinnedArchiveSourcePathMatches(path, pinnedArchiveNames) }
+        return repositoryMatched && artifactMatched
+    }
+
+    private fun pinnedArchiveSourcePathMatches(
+        value: String,
+        pinnedArchiveNames: Set<String>
+    ): Boolean {
+        val normalized = value.trim().replace('\\', '/')
+        val archiveDelimiter = normalized.indexOf("!/")
+        if (archiveDelimiter <= 0) return false
+        val archiveName = normalized
+            .substring(0, archiveDelimiter)
+            .trimEnd('/')
+            .substringAfterLast('/')
+            .let(::normalizeIdentityToken)
+        return archiveName in pinnedArchiveNames
+    }
+
+    /** Retained only for packages installed before catalog profiles were persisted. */
+    internal fun legacyBuiltInProfileForCompatibility(
+        recommendationId: String,
+        modelFingerprint: String
+    ): ImageExecutionProfile? = targetByRecommendationId[recommendationId]
+        ?.let { target -> profileTemplate(target, modelFingerprint.trim().lowercase()) }
+
     private fun profileTemplate(
         target: BuiltInImageProfileTarget,
         fingerprint: String
@@ -835,6 +1104,16 @@ internal object ImageExecutionProfileResolver {
         "community.sd15.qnn228" -> qnnSd15Profile(
             profileId,
             fingerprint,
+            conditioningType = if (target.recommendationId == "dreamshaper_sd15_qnn228") {
+                ImageEmbeddingDiskDataType.FP32
+            } else {
+                ImageEmbeddingDiskDataType.FP16
+            },
+            conversion = if (target.recommendationId == "dreamshaper_sd15_qnn228") {
+                ImageEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING
+            } else {
+                ImageEmbeddingConversionStrategy.NONE
+            },
             defaultNegativePrompt = if (target.recommendationId == "cyberrealistic_sd15_qnn228") {
                 RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
             } else {
@@ -847,6 +1126,8 @@ internal object ImageExecutionProfileResolver {
             ImageModelVariant.HYPER,
             8,
             2.0,
+            conditioningType = ImageEmbeddingDiskDataType.FP32,
+            conversion = ImageEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
             defaultNegativePrompt = RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
         )
         "community.sd15.legacy-fp32.qnn228" -> qnnSd15Profile(
@@ -928,12 +1209,16 @@ internal object ImageExecutionProfileResolver {
         conditioning = conditioning(conditioningType, conversion, 768),
         vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
         graph = qnnGraph(
-            "clip_text_encoder_qnn_context.bin",
+            "clip_v2.mnn",
             "unet.bin",
             "vae_decoder.bin",
             "2.28",
             68,
-            vaeEncoder = "vae_encoder.bin"
+            strategy = ImageWorkerStrategy.SHARED_UNET_VAE,
+            vaeEncoder = "vae_encoder.bin",
+            schedulerSidecar = null,
+            tokenizerSidecar = null,
+            runtimeAssets = QNN_SD15_CONDITIONING_RUNTIME_ASSETS
         ),
         defaults = defaults(
             512,
@@ -942,7 +1227,8 @@ internal object ImageExecutionProfileResolver {
             useCfg = true,
             defaultNegativePrompt = defaultNegativePrompt
         ),
-        capabilities = capabilities(512, setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER, ImageSchedulerAlgorithm.PNDM_PLMS))
+        capabilities = capabilities(512, setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER, ImageSchedulerAlgorithm.PNDM_PLMS)),
+        profileRevision = QNN_SD15_EXECUTION_PROFILE_REVISION
     )
 
     private fun qnnSdxlProfile(
@@ -1078,7 +1364,10 @@ internal object ImageExecutionProfileResolver {
             timestepSpacing = ImageTimestepSpacing.LEADING,
             order = 2
         ),
-        tokenizer = clipTokenizer(ImageTokenizerBackend.TOKENIZERS_CPP),
+        tokenizer = clipTokenizer(
+            ImageTokenizerBackend.TOKENIZERS_CPP,
+            supportsPromptWeighting = false
+        ),
         conditioning = conditioning(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, ImageEmbeddingConversionStrategy.GRAPH_EXECUTION, 768),
         vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
         graph = ImageGraphContract(
@@ -1094,7 +1383,15 @@ internal object ImageExecutionProfileResolver {
             useCfg = true,
             defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
         ),
-        capabilities = capabilities(512, setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER, ImageSchedulerAlgorithm.PNDM_PLMS))
+        capabilities = capabilities(
+            512,
+            setOf(
+                ImageSchedulerAlgorithm.DPMPP_2M,
+                ImageSchedulerAlgorithm.EULER,
+                ImageSchedulerAlgorithm.PNDM_PLMS
+            ),
+            supportsPromptWeighting = false
+        )
     )
 
     private fun sanaEditProfile(profileId: String, fingerprint: String): ImageExecutionProfile = profile(
@@ -1201,6 +1498,7 @@ internal object ImageExecutionProfileResolver {
                 )
                 else -> setOf(algorithm)
             },
+            family = family,
             supportsNegativePrompt = supportsNegativePrompt
         )
     )
@@ -1246,7 +1544,14 @@ internal object ImageExecutionProfileResolver {
             else -> ImageSchedulerAlgorithm.EULER
         }
         val graph = when (runtime) {
-            LocalImageRuntime.QNN_HTP -> qnnGraph("text_encoder.bin", "unet.bin", "vae.bin", null, null)
+            LocalImageRuntime.QNN_HTP -> qnnGraph(
+                "text_encoder.bin",
+                "unet.bin",
+                "vae.bin",
+                null,
+                null,
+                strategy = ImageWorkerStrategy.IN_PROCESS
+            )
             LocalImageRuntime.MNN_DIFFUSION -> ImageGraphContract(
                 textEncoder = ImageGraphArtifactContract("text_encoder.mnn"),
                 unet = ImageGraphArtifactContract("unet.mnn"),
@@ -1302,6 +1607,7 @@ internal object ImageExecutionProfileResolver {
                     } else {
                         stableDiffusionCppSchedulers
                     },
+                    family = family,
                     supportsNegativePrompt = !conditionalOnly
                 )
             } else {
@@ -1333,10 +1639,11 @@ internal object ImageExecutionProfileResolver {
         graph: ImageGraphContract,
         defaults: ImageGenerationDefaults,
         capabilities: ImageGenerationCapabilities,
-        task: ImageTask = ImageTask.TEXT_TO_IMAGE
+        task: ImageTask = ImageTask.TEXT_TO_IMAGE,
+        profileRevision: Int = 1
     ): ImageExecutionProfile = ImageExecutionProfile(
         profileId = profileId,
-        profileRevision = 1,
+        profileRevision = profileRevision,
         modelFingerprint = fingerprint,
         runtime = runtime,
         family = family,
@@ -1392,7 +1699,7 @@ internal object ImageExecutionProfileResolver {
         backend: ImageTokenizerBackend,
         dualClip: Boolean = false,
         padZero: Boolean = false,
-        supportsPromptWeighting: Boolean = backend == ImageTokenizerBackend.TOKENIZERS_CPP,
+        supportsPromptWeighting: Boolean = backend != ImageTokenizerBackend.MNN_MTOK,
         separateNegativePrompt: Boolean = true
     ) = ImageTokenizerContract(
         backend = backend,
@@ -1450,14 +1757,18 @@ internal object ImageExecutionProfileResolver {
         qnnSdk: String?,
         htpArch: Int?,
         strategy: ImageWorkerStrategy = ImageWorkerStrategy.SHARED_TEXT_UNET_VAE,
-        vaeEncoder: String? = null
+        vaeEncoder: String? = null,
+        schedulerSidecar: String? = "scheduler/scheduler_config.json",
+        tokenizerSidecar: String? = "tokenizer/tokenizer_config.json",
+        runtimeAssets: List<String> = emptyList()
     ) = ImageGraphContract(
         textEncoder = ImageGraphArtifactContract(textEncoder),
         unet = ImageGraphArtifactContract(unet),
         vae = ImageGraphArtifactContract(vae),
         vaeEncoder = vaeEncoder?.let(::ImageGraphArtifactContract),
-        schedulerSidecar = "scheduler/scheduler_config.json",
-        tokenizerSidecar = "tokenizer/tokenizer_config.json",
+        schedulerSidecar = schedulerSidecar,
+        tokenizerSidecar = tokenizerSidecar,
+        configSidecars = runtimeAssets,
         qnnSdk = qnnSdk,
         htpArch = htpArch,
         workerStrategy = strategy
@@ -1496,6 +1807,7 @@ internal object ImageExecutionProfileResolver {
 
     private fun stableDiffusionCapabilities(
         schedulers: Set<ImageSchedulerAlgorithm>,
+        family: LocalImageModelFamily,
         supportsNegativePrompt: Boolean = true
     ) = ImageGenerationCapabilities(
         supportedSchedulers = schedulers,
@@ -1506,7 +1818,17 @@ internal object ImageExecutionProfileResolver {
         widthMultiple = 64,
         heightMultiple = 64,
         supportsNegativePrompt = supportsNegativePrompt,
-        supportsPromptWeighting = false
+        supportsPromptWeighting = true,
+        supportsClipSkip = family in setOf(
+            LocalImageModelFamily.SD15,
+            LocalImageModelFamily.SD21,
+            LocalImageModelFamily.SDXL,
+            LocalImageModelFamily.SD_TURBO
+        ),
+        supportsVaeTiling = true,
+        supportsLivePreview = true,
+        supportsLora = true,
+        maxBatchCount = 8
     )
 
     private fun markAllProfileFields(

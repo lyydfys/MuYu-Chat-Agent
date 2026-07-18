@@ -71,6 +71,10 @@ class ChatSessionStore(context: Context) {
         }
     }
 
+    fun setImageFavorite(imageId: String, favorite: Boolean) = runBlocking(Dispatchers.IO) {
+        database.chatSessionDao().setImageFavorite(imageId, favorite)
+    }
+
     fun clearImages() = runBlocking(Dispatchers.IO) {
         database.chatSessionDao().clearImages()
     }
@@ -160,7 +164,7 @@ class ChatSessionStore(context: Context) {
         MemoryEntity::class,
         AssistantEntity::class
     ],
-    version = 15,
+    version = 16,
     exportSchema = false
 )
 abstract class McaRoomDatabase : RoomDatabase() {
@@ -181,7 +185,7 @@ abstract class McaRoomDatabase : RoomDatabase() {
                 )
                     .addMigrations(MIGRATION_1_2, MIGRATION_2_6, MIGRATION_3_6, MIGRATION_4_6, MIGRATION_5_6)
                     .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
-                    .addMigrations(MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
+                    .addMigrations(MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
                     .build()
                     .also { instance = it }
             }
@@ -293,6 +297,12 @@ abstract class McaRoomDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addImageFavoriteColumnIfMissing(db)
+            }
+        }
+
         private fun addProjectIdColumnIfMissing(db: SupportSQLiteDatabase) {
             runCatching {
                 db.execSQL("ALTER TABLE chat_sessions ADD COLUMN projectId TEXT")
@@ -323,6 +333,17 @@ abstract class McaRoomDatabase : RoomDatabase() {
                     "ALTER TABLE image_assets ADD COLUMN generationMetadataJson TEXT NOT NULL DEFAULT ''"
                 )
             }
+        }
+
+        private fun addImageFavoriteColumnIfMissing(db: SupportSQLiteDatabase) {
+            if ("favorite" !in tableColumns(db, "image_assets")) {
+                db.execSQL(
+                    "ALTER TABLE image_assets ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_image_assets_favorite ON image_assets (favorite)"
+            )
         }
 
         private fun addChatSessionBindingColumnsIfMissing(db: SupportSQLiteDatabase) {
@@ -681,6 +702,9 @@ interface ChatSessionDao {
     @Query("DELETE FROM image_assets WHERE id IN (:imageIds)")
     suspend fun deleteImages(imageIds: List<String>)
 
+    @Query("UPDATE image_assets SET favorite = :favorite WHERE id = :imageId")
+    suspend fun setImageFavorite(imageId: String, favorite: Boolean): Int
+
     @Query("SELECT * FROM file_assets ORDER BY createdAt DESC")
     suspend fun files(): List<FileAssetEntity>
 
@@ -800,7 +824,7 @@ data class ChatSessionEntity(
 
 @Entity(
     tableName = "image_assets",
-    indices = [Index("createdAt"), Index("chatSessionId"), Index("projectId")]
+    indices = [Index("createdAt"), Index("chatSessionId"), Index("projectId"), Index("favorite")]
 )
 data class ImageAssetEntity(
     @PrimaryKey val id: String,
@@ -814,6 +838,8 @@ data class ImageAssetEntity(
     val height: Int,
     @ColumnInfo(defaultValue = "")
     val generationMetadataJson: String,
+    @ColumnInfo(defaultValue = "0")
+    val favorite: Boolean = false,
     val chatSessionId: String?,
     val projectId: String? = null
 )
@@ -919,6 +945,7 @@ private fun ImageAssetRecord.toEntity(): ImageAssetEntity =
         width = width,
         height = height,
         generationMetadataJson = generationMetadataJson,
+        favorite = favorite,
         chatSessionId = chatSessionId,
         projectId = projectId
     )
@@ -1005,6 +1032,7 @@ private fun ImageAssetEntity.toImageAssetRecord(): ImageAssetRecord =
         width = width,
         height = height,
         generationMetadataJson = generationMetadataJson,
+        favorite = favorite,
         chatSessionId = chatSessionId,
         projectId = projectId
     )

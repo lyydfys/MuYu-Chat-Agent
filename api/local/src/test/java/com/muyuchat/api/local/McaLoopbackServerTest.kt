@@ -240,7 +240,7 @@ class McaLoopbackServerTest {
     }
 
     @Test
-    fun imagesApiRejectsUnsupportedCountBeforeInvokingProvider() {
+    fun imagesApiRejectsOutOfRangeCountBeforeInvokingProvider() {
         val calls = AtomicInteger(0)
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.imageGenerationProvider = { _, _ ->
@@ -252,7 +252,7 @@ class McaLoopbackServerTest {
                 port,
                 authenticatedPost(
                     "/v1/images/generations",
-                    body = """{"prompt":"one image","n":2}"""
+                    body = """{"prompt":"too many images","n":9}"""
                 )
             )
 
@@ -1919,18 +1919,34 @@ class McaLoopbackServerTest {
             .put("width", 512)
             .put("height", 512)
             .put("seed", 20260717)
+            .put("batchCount", 1)
             .put("graphName", "model")
             .put("fallback", false)
+        if (runtime == "STABLE_DIFFUSION_CPP") {
+            nativeEffective
+                .put("outputCount", 1)
+                .put("n", 1)
+                .put("samplingPassCount", 1)
+                .put("totalUnetExecutionCount", 40)
+        }
         return JSONObject(nativeEffective.toString())
             .put("nativeEffective", nativeEffective)
             .put("backend", if (runtime == "QNN_HTP") "qnn_htp" else "native")
             .put("nativeGenerationSequence", 44L)
             .put("workerPid", 4321)
             .put("nativeExecution", true)
+            .put("batchCount", 1)
             .put("fallback", false)
             .put("npuActive", runtime == "QNN_HTP")
             .put("qnnGraphExecution", runtime == "QNN_HTP")
             .put("outputBytes", 1024L)
+            .apply {
+                if (runtime == "STABLE_DIFFUSION_CPP") {
+                    put("actualSamplingPassCount", 1)
+                    put("actualSamplingStepCount", 20)
+                    put("actualDiffusionModelComputeCount", 40)
+                }
+            }
     }
 
     private fun strictControlImageExecution(): JSONObject {

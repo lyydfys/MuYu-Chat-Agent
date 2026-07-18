@@ -31,6 +31,12 @@ class LocalImageUiCapabilitiesTest {
                 model.supportedImageTaskModesForUi()
             )
             assertEquals(true, model.supportsNegativePromptForUi())
+            val capabilities = model.imageCapabilitiesForUi()
+            assertEquals(false, capabilities.supportsClipSkip)
+            assertEquals(false, capabilities.supportsVaeTiling)
+            assertEquals(false, capabilities.supportsLivePreview)
+            assertEquals(false, capabilities.supportsLora)
+            assertEquals(1, capabilities.maxBatchCount)
         } finally {
             root.deleteRecursively()
         }
@@ -52,6 +58,12 @@ class LocalImageUiCapabilitiesTest {
             assertEquals(true, model.supportsNegativePromptForUi())
             assertEquals("flow_match", defaults.sampler)
             assertEquals(listOf("flow_match"), defaults.supportedSamplers)
+            val capabilities = model.imageCapabilitiesForUi()
+            assertEquals(false, capabilities.supportsClipSkip)
+            assertEquals(false, capabilities.supportsVaeTiling)
+            assertEquals(false, capabilities.supportsLivePreview)
+            assertEquals(false, capabilities.supportsLora)
+            assertEquals(1, capabilities.maxBatchCount)
         } finally {
             root.deleteRecursively()
         }
@@ -181,6 +193,11 @@ class LocalImageUiCapabilitiesTest {
                 model.supportedImageTaskModesForUi()
             )
             val capabilities = model.imageCapabilitiesForUi()
+            assertEquals(true, capabilities.supportsClipSkip)
+            assertEquals(true, capabilities.supportsVaeTiling)
+            assertEquals(true, capabilities.supportsLivePreview)
+            assertEquals(true, capabilities.supportsLora)
+            assertEquals(8, capabilities.maxBatchCount)
             assertNull(capabilities.readinessError)
             assertNull(model.localImageReadinessForUi(null, capabilities))
         } finally {
@@ -332,6 +349,12 @@ class LocalImageUiCapabilitiesTest {
                 assertEquals("flow_match", defaults.sampler)
                 assertEquals(listOf("flow_match"), defaults.supportedSamplers)
                 assertEquals(expected.supportsNegativePrompt, model.supportsNegativePromptForUi())
+                val capabilities = model.imageCapabilitiesForUi()
+                assertEquals(false, capabilities.supportsClipSkip)
+                assertEquals(true, capabilities.supportsVaeTiling)
+                assertEquals(true, capabilities.supportsLivePreview)
+                assertEquals(true, capabilities.supportsLora)
+                assertEquals(8, capabilities.maxBatchCount)
                 assertEquals(
                     setOf(
                         ImageGenerationUiTaskMode.TEXT_TO_IMAGE,

@@ -214,6 +214,46 @@ internal fun validateSdxlUnetNativeEvidence(
     nativeResult: JSONObject
 ) {
     val nativeEffective = contract.requireNativeEffective(nativeResult, SdxlImagePhase.UNET)
+    val nativeEffectiveJson = nativeResult.optJSONObject("nativeEffective")
+        ?: error("UNet native result is missing nativeEffective evidence.")
+    val expectedParams = contract.paramsObject()
+    fun requireMatchingString(field: String, expected: String) {
+        val flat = nativeResult.strictString(field)
+        val nested = nativeEffectiveJson.strictString(field)
+        require(flat == expected && nested == expected && flat == nested) {
+            "UNet $field evidence conflicts with the resolved conditioning contract."
+        }
+    }
+    fun requireMatchingInt(field: String, expected: Int) {
+        val flat = nativeResult.strictInt(field)
+        val nested = nativeEffectiveJson.strictInt(field)
+        require(flat == expected && nested == expected && flat == nested) {
+            "UNet $field evidence conflicts with the resolved conditioning contract."
+        }
+    }
+    val expectedConditioningGraphSha256 = expectedParams
+        .strictString("conditioningGraphSha256")
+        .lowercase()
+    require(SDXL_SHA256.matches(expectedConditioningGraphSha256)) {
+        "Resolved SDXL conditioning graph fingerprint is invalid."
+    }
+    requireMatchingString(
+        "conditioningExecutionMode",
+        "external_mnn_sdxl_embeddings"
+    )
+    requireMatchingString("conditioningBackend", "MNN")
+    requireMatchingString("conditioningGraph", "clip.mnn+clip_2.mnn")
+    requireMatchingString("conditioningGraphSha256", expectedConditioningGraphSha256)
+    requireMatchingString("conditioningOrder", "negative_then_positive")
+    requireMatchingInt("conditioningEncoderExecutionCount", 4)
+    requireMatchingInt("textEncoderExecutionCount", 0)
+    require(
+        nativeResult.strictBoolean("conditioningArtifactConsumed") &&
+            nativeEffectiveJson.strictBoolean("conditioningArtifactConsumed")
+    ) {
+        "UNet did not prove that it consumed the prepared conditioning artifact."
+    }
+    requireMatchingString("runtimeSessionMode", "isolated_unet_phase")
     require(nativeResult.strictString("phase") == SdxlImagePhase.UNET.wireName) {
         "UNet native phase identity mismatch."
     }

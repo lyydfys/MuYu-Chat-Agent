@@ -7,6 +7,7 @@ import android.os.Process
 import android.os.RemoteException
 import android.util.Log
 import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -19,6 +20,88 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 internal const val LOCAL_IMAGE_GENERATION_CANCELLED_CODE = "image_generation_cancelled"
+
+private val LOCAL_IMAGE_SAFE_LOG_COUNT_FIELDS = listOf(
+    "nativeGenerationSequence",
+    "nativeStageMask",
+    "nativeDetailStageMask",
+    "unetExecutionCount",
+    "controlNetExecutionCount",
+    "controlImageExecutionCount",
+    "actualDiffusionModelComputeCount",
+    "actualPositiveDiffusionModelComputeCount",
+    "actualNegativeDiffusionModelComputeCount",
+    "actualAuxiliaryDiffusionModelComputeCount",
+    "physicalComputeCount",
+    "physicalComputeSuccessCount",
+    "physicalTileComputeCount",
+    "physicalTileComputeSuccessCount"
+)
+
+private val LOCAL_IMAGE_SAFE_LOG_BOOLEAN_FIELDS = listOf(
+    "tiledExecution",
+    "executionCompleted"
+)
+
+private val LOCAL_IMAGE_SAFE_LOG_OPERATIONS = setOf(
+    "IMAGE_GENERATION",
+    "ESRGAN_UPSCALE"
+)
+
+internal fun localImageWorkerCompletionLogSummary(
+    requestId: String,
+    workerPid: Int,
+    operation: String,
+    runtime: LocalImageRuntime,
+    outputCount: Int,
+    outputBytes: Long,
+    executionMetadataJson: String
+): String {
+    val summary = JSONObject()
+        .put("requestId", requestId)
+        .put("workerPid", workerPid)
+        .put("operation", operation.takeIf(LOCAL_IMAGE_SAFE_LOG_OPERATIONS::contains) ?: "UNKNOWN")
+        .put("runtime", runtime.name)
+        .put("outputCount", outputCount.coerceAtLeast(0))
+        .put("outputBytes", outputBytes.coerceAtLeast(0L))
+    val metadata = runCatching { JSONObject(executionMetadataJson) }.getOrNull()
+        ?: return summary.toString()
+    val sources = listOfNotNull(metadata.optJSONObject("nativeEffective"), metadata)
+
+    LOCAL_IMAGE_SAFE_LOG_COUNT_FIELDS.forEach { field ->
+        var safeValue: Long? = null
+        for (source in sources) {
+            val raw = source.opt(field) as? Number ?: continue
+            val doubleValue = raw.toDouble()
+            val longValue = raw.toLong()
+            if (doubleValue.isFinite() && doubleValue == longValue.toDouble() && longValue >= 0L) {
+                safeValue = longValue
+                break
+            }
+        }
+        safeValue?.let { summary.put(field, it) }
+    }
+    LOCAL_IMAGE_SAFE_LOG_BOOLEAN_FIELDS.forEach { field ->
+        val safeValue = sources.firstNotNullOfOrNull { source -> source.opt(field) as? Boolean }
+        safeValue?.let { summary.put(field, it) }
+    }
+    return summary.toString()
+}
+
+private fun MutableCollection<File>.deleteWorkerOutputs() {
+    forEach { file -> runCatching { file.delete() } }
+    clear()
+}
+
+private fun logLocalImageWorkerInternalFailure(action: String, error: Throwable) {
+    val safeAction = action.filter { it.isLetterOrDigit() || it == '_' }.take(48)
+        .ifBlank { "unknown" }
+    val safeType = error.javaClass.simpleName
+        .filter { it.isLetterOrDigit() || it == '_' }
+        .take(64)
+        .ifBlank { "Throwable" }
+    Log.w("MCA-LocalImage", "internal_failure action=$safeAction type=$safeType")
+}
 
 class LocalImageWorkerService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -107,7 +190,7 @@ class LocalImageWorkerService : Service() {
             }
 
             val job = scope.launch {
-                var transferredOutputs: List<File> = emptyList()
+                val transferredOutputs = mutableListOf<File>()
                 var workerInputs: LocalImageWorkerInputs? = null
                 try {
                     workerInputs = workerInputStore.materialize(request.requestId, effectiveOptions)
@@ -186,10 +269,10 @@ class LocalImageWorkerService : Service() {
                         )
                         updateJournalOutputPath(request.requestId, target.partial)
                         val output = writeResultFile(target, generated.bytes)
+                        transferredOutputs += output
                         updateJournalOutputPath(request.requestId, output)
                         generated to output
                     }
-                    transferredOutputs = publishedOutputs.map { it.second }
                     val outputBytes = transferredOutputs.sumOf(File::length)
                     if (!active.tryBeginResultPublication()) {
                         throw CancellationException("Image generation was cancelled before result publication.")
@@ -207,23 +290,23 @@ class LocalImageWorkerService : Service() {
                         },
                         executionMetadataJson = result.executionMetadataJson
                     )
-                    Log.i(
-                        "MCA-LocalImage",
-                        JSONObject()
-                            .put("requestId", request.requestId)
-                            .put("workerPid", Process.myPid())
-                            .put("outputBytes", outputBytes)
-                            .put("mimeType", result.mimeType)
-                            .put(
-                                "execution",
-                                runCatching { JSONObject(result.executionMetadataJson) }.getOrElse { JSONObject() }
-                            )
-                            .toString()
-                    )
                     if (delivered) {
                         markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)
-                        transferredOutputs = emptyList()
+                        Log.i(
+                            "MCA-LocalImage",
+                            localImageWorkerCompletionLogSummary(
+                                requestId = request.requestId,
+                                workerPid = Process.myPid(),
+                                operation = "IMAGE_GENERATION",
+                                runtime = request.model.runtime,
+                                outputCount = transferredOutputs.size,
+                                outputBytes = outputBytes,
+                                executionMetadataJson = result.executionMetadataJson
+                            )
+                        )
+                        transferredOutputs.clear()
                     } else {
+                        transferredOutputs.deleteWorkerOutputs()
                         markJournalTerminal(
                             request.requestId,
                             ImageExecutionPhase.FAILED,
@@ -240,6 +323,7 @@ class LocalImageWorkerService : Service() {
                     val errorCode = localImageWorkerErrorCode(error)
                     val message = error.message ?: "Local image generation failed."
                     if (active.tryBeginErrorPublication()) {
+                        transferredOutputs.deleteWorkerOutputs()
                         markJournalTerminal(
                             request.requestId,
                             ImageExecutionPhase.FAILED,
@@ -274,6 +358,250 @@ class LocalImageWorkerService : Service() {
             }
             return true
         }
+
+        override fun upscale(requestJson: String, callback: ILocalImageWorkerCallback): Boolean =
+            acceptUpscale(requestJson, callback)
+    }
+
+    private fun acceptUpscale(
+        requestJson: String,
+        callback: ILocalImageWorkerCallback
+    ): Boolean {
+        val request = runCatching {
+            LocalImageWorkerProtocol.parseUpscaleRequest(requestJson)
+        }.getOrElse { error ->
+            sendError(
+                callback = callback,
+                requestId = requestIdFromMalformedPayload(requestJson),
+                code = "invalid_request",
+                message = error.message ?: "Invalid local image upscale request."
+            )
+            return false
+        }
+        val active = ActiveGeneration(request.requestId, callback)
+        val accepted = synchronized(stateLock) {
+            if (activeGeneration != null) {
+                false
+            } else {
+                provider.begin(LocalImageRuntime.STABLE_DIFFUSION_CPP)
+                activeGeneration = active
+                true
+            }
+        }
+        if (!accepted) {
+            sendError(
+                callback = callback,
+                requestId = request.requestId,
+                code = "worker_busy",
+                message = "Another local image operation is already running."
+            )
+            return false
+        }
+        active.deathRecipient = IBinder.DeathRecipient { cancelForDeadClient(active) }
+        try {
+            callback.asBinder().linkToDeath(requireNotNull(active.deathRecipient), 0)
+        } catch (_: RemoteException) {
+            active.tryRequestCancellation()
+            runCatching { provider.cancel() }
+            finish(active)
+            return false
+        }
+
+        val job = scope.launch {
+            var transferredOutput: File? = null
+            var workerInputs: LocalImageWorkerUpscaleInputs? = null
+            try {
+                val preparingDelivered = sendProgress(
+                    callback,
+                    request.requestId,
+                    LocalImageProgress(
+                        phase = "worker_preparing",
+                        message = "Verifying the local ESRGAN inputs and model lease.",
+                        step = 0,
+                        steps = 1,
+                        elapsedMs = 0L,
+                        secondsPerStep = 0.0,
+                        threads = request.threads,
+                        width = request.input.width,
+                        height = request.input.height,
+                        cancelRequested = false
+                    )
+                )
+                if (!preparingDelivered) cancelForDeadClient(active)
+                coroutineContext.ensureActive()
+                val preparedInputs = workerInputStore.materializeUpscale(
+                    requestId = request.requestId,
+                    input = request.input,
+                    upscaler = request.upscaler,
+                    isCancelled = {
+                        active.cancelRequested || coroutineContext[Job]?.isActive != true
+                    }
+                )
+                workerInputs = preparedInputs
+                coroutineContext.ensureActive()
+                prepareUpscaleExecutionJournal(request, preparedInputs)
+                val startedDelivered = sendProgress(
+                    callback,
+                    request.requestId,
+                    LocalImageProgress(
+                        phase = "worker_started",
+                        message = "Local ESRGAN worker started.",
+                        step = 0,
+                        steps = 1,
+                        elapsedMs = 0L,
+                        secondsPerStep = 0.0,
+                        threads = request.threads,
+                        width = preparedInputs.input.width,
+                        height = preparedInputs.input.height,
+                        cancelRequested = false,
+                        requestOptionsJson = JSONObject()
+                            .put("operation", "ESRGAN_UPSCALE")
+                            .put("targetScale", request.targetScale)
+                            .put("tileSize", request.tileSize)
+                            .put("threads", request.threads)
+                            .put("input", preparedInputs.input.toJson(includePath = false))
+                            .put("upscaler", preparedInputs.upscaler.toJson(includePath = false))
+                            .toString()
+                    )
+                )
+                if (!startedDelivered) cancelForDeadClient(active)
+                var waitingReported = false
+                val result = LocalImageExecutionGate.withLease(
+                    context = applicationContext,
+                    isCancelled = { active.cancelRequested },
+                    onWaiting = {
+                        if (!waitingReported) {
+                            waitingReported = true
+                            val delivered = sendProgress(
+                                callback,
+                                request.requestId,
+                                LocalImageProgress(
+                                    phase = "waiting_for_native_lease",
+                                    message = "Waiting for another native image task to finish.",
+                                    step = 0,
+                                    steps = 1,
+                                    elapsedMs = 0L,
+                                    secondsPerStep = 0.0,
+                                    threads = request.threads,
+                                    width = preparedInputs.input.width,
+                                    height = preparedInputs.input.height,
+                                    cancelRequested = false
+                                )
+                            )
+                            if (!delivered) cancelForDeadClient(active)
+                        }
+                    }
+                ) {
+                    provider.upscale(
+                        input = preparedInputs.input,
+                        upscaler = preparedInputs.upscaler,
+                        targetScale = request.targetScale,
+                        tileSize = request.tileSize,
+                        threads = request.threads,
+                        onProgress = { progress ->
+                            updateJournalFromProgress(request.requestId, progress)
+                            val delivered = sendProgress(
+                                callback,
+                                request.requestId,
+                                active.withAccumulatedStages(progress)
+                            )
+                            if (!delivered) cancelForDeadClient(active)
+                        }
+                    )
+                }
+                preparedInputs.close()
+                coroutineContext.ensureActive()
+                advanceJournalTo(request.requestId, ImageExecutionPhase.PUBLISHING, observedStep = 1)
+                updateJournalFromNativeResult(request.requestId, result.executionMetadataJson)
+                val output = result.outputs.single()
+                val target = prepareResultTarget(
+                    requestId = request.requestId,
+                    mimeType = output.mimeType,
+                    index = 0
+                )
+                updateJournalOutputPath(request.requestId, target.partial)
+                transferredOutput = writeResultFile(target, output.bytes)
+                updateJournalOutputPath(request.requestId, requireNotNull(transferredOutput))
+                if (!active.tryBeginResultPublication()) {
+                    throw CancellationException("Image upscale was cancelled before result publication.")
+                }
+                val delivered = sendComplete(
+                    callback = callback,
+                    requestId = request.requestId,
+                    outputs = listOf(
+                        LocalImageWorkerProtocol.OutputEnvelope(
+                            index = 0,
+                            outputPath = requireNotNull(transferredOutput).canonicalPath,
+                            mimeType = output.mimeType,
+                            seed = null
+                        )
+                    ),
+                    executionMetadataJson = result.executionMetadataJson
+                )
+                if (delivered) {
+                    markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)
+                    Log.i(
+                        "MCA-LocalImage",
+                        localImageWorkerCompletionLogSummary(
+                            requestId = request.requestId,
+                            workerPid = Process.myPid(),
+                            operation = "ESRGAN_UPSCALE",
+                            runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                            outputCount = 1,
+                            outputBytes = transferredOutput?.length() ?: 0L,
+                            executionMetadataJson = result.executionMetadataJson
+                        )
+                    )
+                    transferredOutput = null
+                } else {
+                    transferredOutput?.delete()
+                    transferredOutput = null
+                    markJournalTerminal(
+                        request.requestId,
+                        ImageExecutionPhase.FAILED,
+                        errorCode = "RESULT_DELIVERY_FAILED",
+                        errorMessage = "The upscaled image could not be delivered to the client."
+                    )
+                }
+            } catch (error: CancellationException) {
+                val message = error.message ?: "The image upscale was cancelled."
+                finishJournalCancelled(request.requestId, message)
+                publishCancellationTerminal(active, message)
+            } catch (error: Throwable) {
+                val errorCode = localImageWorkerErrorCode(error)
+                val message = error.message ?: "Local image upscale failed."
+                if (active.tryBeginErrorPublication()) {
+                    transferredOutput?.delete()
+                    transferredOutput = null
+                    markJournalTerminal(
+                        request.requestId,
+                        ImageExecutionPhase.FAILED,
+                        errorCode = errorCode.uppercase(),
+                        errorMessage = message
+                    )
+                    sendError(callback, request.requestId, errorCode, message)
+                } else if (active.cancelRequested) {
+                    finishJournalCancelled(request.requestId, message)
+                    publishCancellationTerminal(active, message)
+                }
+            } finally {
+                transferredOutput?.delete()
+                workerInputs?.close()
+                workerInputStore.cleanup(workerInputs?.directory)
+                finish(active)
+            }
+        }
+        synchronized(stateLock) {
+            if (activeGeneration === active) {
+                active.job = job
+                if (active.cancelRequested) {
+                    job.cancel(CancellationException("Local image upscale was cancelled."))
+                }
+            } else {
+                job.cancel()
+            }
+        }
+        return true
     }
 
     override fun onCreate() {
@@ -408,9 +736,27 @@ class LocalImageWorkerService : Service() {
     }
 
     private fun writeResultFile(target: ResultFileTarget, bytes: ByteArray): File {
-        target.partial.outputStream().use { it.write(bytes) }
-        check(target.partial.renameTo(target.output)) { "Unable to publish local image worker output." }
-        return target.output
+        return try {
+            FileOutputStream(target.partial).use { output ->
+                output.write(bytes)
+                output.flush()
+                output.fd.sync()
+            }
+            durableMoveWithinParent(
+                source = target.partial,
+                target = target.output,
+                move = { source, output ->
+                    check(source.renameTo(output)) {
+                        "Unable to publish local image worker output."
+                    }
+                }
+            )
+            target.output
+        } catch (error: Throwable) {
+            runCatching { target.partial.delete() }
+            runCatching { target.output.delete() }
+            throw error
+        }
     }
 
     private fun prepareExecutionJournal(
@@ -466,6 +812,46 @@ class LocalImageWorkerService : Service() {
         )
     }
 
+    private fun prepareUpscaleExecutionJournal(
+        request: LocalImageWorkerProtocol.UpscaleRequest,
+        inputs: LocalImageWorkerUpscaleInputs
+    ) {
+        executionJournal.read(request.requestId)?.let { existing ->
+            require(existing.phase.terminal) {
+                "A non-terminal image request already uses id ${request.requestId}."
+            }
+            check(executionJournal.deleteTerminal(request.requestId)) {
+                "Unable to replace terminal image journal ${request.requestId}."
+            }
+        }
+        val now = System.currentTimeMillis().coerceAtLeast(1L)
+        val requested = JSONObject()
+            .put("operation", "ESRGAN_UPSCALE")
+            .put("targetScale", request.targetScale)
+            .put("tileSize", request.tileSize)
+            .put("threads", request.threads)
+            .put("input", inputs.input.toJson(includePath = false))
+            .put("upscaler", inputs.upscaler.toJson(includePath = false))
+        executionJournal.create(
+            ImageExecutionJournalEntry(
+                requestId = request.requestId,
+                modelFingerprint = inputs.upscaler.sha256,
+                profileFingerprint = "stable-diffusion-cpp-esrgan-upscale-v1",
+                requestedSummaryJson = requested.toString(),
+                resolvedSummaryJson = JSONObject(requested.toString())
+                    .put("runtime", LocalImageRuntime.STABLE_DIFFUSION_CPP.name)
+                    .put("backendMode", "cpu")
+                    .toString(),
+                phase = ImageExecutionPhase.PREPARING,
+                step = 0,
+                steps = 1,
+                workerPid = Process.myPid(),
+                createdAtMs = now,
+                inputTempPaths = listOf(inputs.input.path, inputs.directory.canonicalPath)
+            )
+        )
+    }
+
     private fun updateJournalFromProgress(requestId: String, progress: LocalImageProgress) {
         val targetPhase = progress.phase.toJournalPhase() ?: return
         runCatching {
@@ -475,7 +861,7 @@ class LocalImageWorkerService : Service() {
                 observedStep = progress.step
             )
         }.onFailure { error ->
-            Log.w("MCA-LocalImage", "Unable to persist image progress", error)
+            logLocalImageWorkerInternalFailure("persist_progress", error)
         }
     }
 
@@ -542,7 +928,7 @@ class LocalImageWorkerService : Service() {
                 )
             )
         }.onFailure { error ->
-            Log.w("MCA-LocalImage", "Unable to persist native image evidence", error)
+            logLocalImageWorkerInternalFailure("persist_native_evidence", error)
         }
     }
 
@@ -568,7 +954,7 @@ class LocalImageWorkerService : Service() {
                 executionJournal.requestCancellation(requestId)
             }
         }.onFailure { error ->
-            Log.w("MCA-LocalImage", "Unable to persist image cancellation", error)
+            logLocalImageWorkerInternalFailure("persist_cancellation", error)
         }
     }
 
@@ -582,7 +968,7 @@ class LocalImageWorkerService : Service() {
                 message = message
             )
         }.onFailure { error ->
-            Log.w("MCA-LocalImage", "Unable to finish cancelled image journal", error)
+            logLocalImageWorkerInternalFailure("finish_cancelled_journal", error)
         }
     }
 
@@ -605,7 +991,7 @@ class LocalImageWorkerService : Service() {
             }
             executionJournal.markTerminal(requestId, phase, errorCode, errorMessage)
         }.onFailure { error ->
-            Log.w("MCA-LocalImage", "Unable to finish image journal", error)
+            logLocalImageWorkerInternalFailure("finish_terminal_journal", error)
         }
     }
 
@@ -623,7 +1009,7 @@ class LocalImageWorkerService : Service() {
                 )
             }
         }.onFailure { error ->
-            Log.w("MCA-LocalImage", "Unable to recover image execution journals", error)
+            logLocalImageWorkerInternalFailure("recover_journals", error)
         }
     }
 
@@ -638,7 +1024,8 @@ class LocalImageWorkerService : Service() {
             normalized.isBlank() -> null
             "condition" in normalized || "text_encoder" in normalized || "tokeniz" in normalized ->
                 ImageExecutionPhase.CONDITIONING
-            "sampl" in normalized || "unet" in normalized || "denois" in normalized ->
+            "sampl" in normalized || "unet" in normalized || "denois" in normalized ||
+                "upscal" in normalized ->
                 ImageExecutionPhase.SAMPLING
             "decod" in normalized || "vae" in normalized -> ImageExecutionPhase.DECODING
             "publish" in normalized || "writing" in normalized || normalized == "completed" ->

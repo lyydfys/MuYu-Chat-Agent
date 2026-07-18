@@ -1,9 +1,13 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.download.ImageEngineBundleComponentRole
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.download.ModelScopeRecommendedKind
 import com.muyuchat.core.download.RecommendedImageDefaults
+import java.io.File
 import java.nio.file.Files
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -12,6 +16,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ImageExecutionProfileResolverTest {
+    private val pinnedQnnSd15Ids = linkedSetOf(
+        "cyberrealistic_sd15_qnn228",
+        "realisticvisionhyper_sd15_qnn228",
+        "dreamshaper_sd15_qnn228",
+        "meinamix_sd15_qnn228"
+    )
+
     @Test
     fun `all eighteen recommendation ids resolve to their target profiles`() {
         val expected = linkedMapOf(
@@ -47,7 +58,7 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
-    fun `all catalog profiles materialize exactly like their legacy built in fallbacks`() {
+    fun `all catalog profiles match both runtime resolution and legacy compatibility templates`() {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
 
@@ -60,12 +71,52 @@ class ImageExecutionProfileResolverTest {
                 )
             )
             val fallbackProfile = resolve(model.id).profile
+            val legacyProfile = requireNotNull(
+                ImageExecutionProfileResolver.legacyBuiltInProfileForCompatibility(
+                    recommendationId = model.id,
+                    modelFingerprint = FINGERPRINT
+                )
+            )
 
             assertEquals(
-                "${model.id} catalog profile drifted from its old-package fallback",
+                "${model.id} runtime resolution drifted from its catalog profile",
                 catalogProfile.copy(provenance = fallbackProfile.provenance),
                 fallbackProfile
             )
+            assertEquals(
+                "${model.id} legacy compatibility template drifted from its catalog profile",
+                catalogProfile.copy(provenance = legacyProfile.provenance),
+                legacyProfile
+            )
+        }
+    }
+
+    @Test
+    fun `all catalog primary fingerprints recover their exact profile despite a stale card id`() {
+        val models = ModelScopeClient().recommendedModels()
+            .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+
+        assertEquals(18, models.size)
+        models.forEach { model ->
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val primary = bundle.requiredComponents.first {
+                it.role == ImageEngineBundleComponentRole.DIFFUSION
+            }
+            val staleId = models.first { it.id != model.id }.id
+            val resolution = ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = staleId,
+                    fingerprint = requireNotNull(primary.sha256),
+                    family = LocalImageModelFamily.CUSTOM,
+                    recommendationEvidence = ImageRecommendationEvidence(
+                        sourceRepositories = listOf(model.repoId),
+                        artifactPaths = listOf(model.recommendedFileName)
+                    )
+                )
+            )
+
+            assertEquals(model.id, resolution.profile.provenance.recommendationId)
+            assertEquals(bundle.executionProfile!!.profileId, resolution.profile.profileId)
         }
     }
 
@@ -158,6 +209,50 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
+    fun `exact repository and artifact evidence outrank stale aliases while conflicts use generic fallback`() {
+        val models = ModelScopeClient().recommendedModels()
+            .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+        listOf(
+            "qualcomm_sd21_gen5_qnn",
+            "qualcomm_controlnet_canny_gen5_qnn"
+        ).forEach { actualId ->
+            val actual = models.single { it.id == actualId }
+            val resolved = ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = "qualcomm_sd15_gen5_qnn",
+                    fingerprint = OTHER_FINGERPRINT,
+                    family = LocalImageModelFamily.CUSTOM,
+                    recommendationEvidence = ImageRecommendationEvidence(
+                        sourceRepositories = listOf(actual.repoId),
+                        artifactPaths = listOf(actual.recommendedFileName)
+                    )
+                )
+            )
+
+            assertEquals(actualId, resolved.profile.provenance.recommendationId)
+            assertEquals(actual.imageEngineBundle!!.executionProfile!!.profileId, resolved.profile.profileId)
+        }
+
+        val sd21 = models.single { it.id == "qualcomm_sd21_gen5_qnn" }
+        val control = models.single { it.id == "qualcomm_controlnet_canny_gen5_qnn" }
+        val conflict = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "qualcomm_sd15_gen5_qnn",
+                fingerprint = OTHER_FINGERPRINT,
+                family = LocalImageModelFamily.SD15,
+                recommendationEvidence = ImageRecommendationEvidence(
+                    sourceRepositories = listOf(sd21.repoId),
+                    artifactPaths = listOf(control.recommendedFileName)
+                )
+            )
+        )
+
+        assertEquals(ImageProfileSource.GENERIC_FALLBACK, conflict.profile.provenance.primarySource)
+        assertNull(conflict.profile.provenance.recommendationId)
+        assertNull(conflict.profile.provenance.recommendationRevision)
+    }
+
+    @Test
     fun `local model source restores recommendation profile even when imported family is custom`() {
         val root = Files.createTempDirectory("image-profile-source-identity").toFile()
         try {
@@ -189,22 +284,39 @@ class ImageExecutionProfileResolverTest {
 
     @Test
     fun `pinned image packages retain their actual conditioning storage contracts`() {
+        val cyber = resolve("cyberrealistic_sd15_qnn228").profile
+        assertEquals(ImageEmbeddingDiskDataType.FP16, cyber.conditioning.diskDataType)
+        assertEquals(ImageEmbeddingConversionStrategy.NONE, cyber.conditioning.conversionStrategy)
+
+        listOf(
+            "realisticvisionhyper_sd15_qnn228",
+            "dreamshaper_sd15_qnn228",
+            "meinamix_sd15_qnn228"
+        ).forEach { id ->
+            val profile = resolve(id).profile
+            assertEquals(ImageEmbeddingDiskDataType.FP32, profile.conditioning.diskDataType)
+            assertEquals(
+                ImageEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
+                profile.conditioning.conversionStrategy
+            )
+        }
         listOf(
             "cyberrealistic_sd15_qnn228",
             "realisticvisionhyper_sd15_qnn228",
-            "dreamshaper_sd15_qnn228"
+            "dreamshaper_sd15_qnn228",
+            "meinamix_sd15_qnn228"
         ).forEach { id ->
             val profile = resolve(id).profile
-            assertEquals(ImageEmbeddingDiskDataType.FP16, profile.conditioning.diskDataType)
-            assertEquals(ImageEmbeddingConversionStrategy.NONE, profile.conditioning.conversionStrategy)
+            assertEquals(2, profile.profileRevision)
+            assertEquals("clip_v2.mnn", profile.graph.textEncoder?.relativePath)
+            assertEquals(ImageWorkerStrategy.SHARED_UNET_VAE, profile.graph.workerStrategy)
+            assertNull(profile.graph.schedulerSidecar)
+            assertNull(profile.graph.tokenizerSidecar)
+            assertEquals(
+                listOf("tokenizer.json", "token_emb.bin", "pos_emb.bin"),
+                profile.graph.configSidecars
+            )
         }
-
-        val legacyFp32 = resolve("meinamix_sd15_qnn228").profile
-        assertEquals(ImageEmbeddingDiskDataType.FP32, legacyFp32.conditioning.diskDataType)
-        assertEquals(
-            ImageEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
-            legacyFp32.conditioning.conversionStrategy
-        )
 
         listOf(
             "sdxl_base_qnn228",
@@ -746,8 +858,37 @@ class ImageExecutionProfileResolverTest {
         assertEquals(1.0, resolution.profile.defaults.cfgScale, 0.0)
         assertEquals(1024, resolution.profile.defaults.width)
         assertEquals(setOf(ImageSchedulerAlgorithm.FLOW_MATCH), resolution.profile.capabilities.supportedSchedulers)
+        assertTrue(resolution.profile.tokenizer.supportsPromptWeighting)
+        assertTrue(resolution.profile.capabilities.supportsPromptWeighting)
+        assertTrue(resolution.layers.resolved.promptWeightingSupported)
         assertEquals(ImageProfileSource.CAPABILITY_DISCOVERY, resolution.profile.provenance.primarySource)
         assertEquals(listOf(ImageProfileSource.CAPABILITY_DISCOVERY), resolution.sourceChain)
+    }
+
+    @Test
+    fun `capability discovery cannot re-enable prompt weighting after an explicit disable`() {
+        val generic = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.CUSTOM
+            )
+        ).profile
+        val resolution = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.CUSTOM,
+                capabilityDiscovery = ImageCapabilityDiscovery(
+                    tokenizer = generic.tokenizer.copy(supportsPromptWeighting = true),
+                    capabilities = generic.capabilities.copy(supportsPromptWeighting = false)
+                )
+            )
+        )
+
+        assertTrue(resolution.profile.tokenizer.supportsPromptWeighting)
+        assertFalse(resolution.profile.capabilities.supportsPromptWeighting)
+        assertFalse(resolution.layers.resolved.promptWeightingSupported)
     }
 
     @Test
@@ -784,17 +925,33 @@ class ImageExecutionProfileResolverTest {
             stable.capabilities.supportedSchedulers
         )
         assertFalse(ImageSchedulerAlgorithm.PNDM_PLMS in stable.capabilities.supportedSchedulers)
-        assertFalse(stable.capabilities.supportsPromptWeighting)
-        assertFalse(stable.tokenizer.supportsPromptWeighting)
+        assertTrue(stable.capabilities.supportsPromptWeighting)
+        assertTrue(stable.tokenizer.supportsPromptWeighting)
+        assertTrue(stable.capabilities.supportsClipSkip)
+        assertTrue(stable.capabilities.supportsVaeTiling)
+        assertTrue(stable.capabilities.supportsLivePreview)
+        assertTrue(stable.capabilities.supportsLora)
+        assertEquals(8, stable.capabilities.maxBatchCount)
 
-        listOf(
-            resolve("cyberrealistic_sd15_qnn228").profile,
-            resolve("sd15_mnn_512_quality").profile
-        ).forEach { profile ->
-            assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, profile.tokenizer.backend)
-            assertTrue(profile.tokenizer.supportsPromptWeighting)
-            assertTrue(profile.capabilities.supportsPromptWeighting)
-        }
+        val communityQnn = resolve("cyberrealistic_sd15_qnn228").profile
+        assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, communityQnn.tokenizer.backend)
+        assertTrue(communityQnn.tokenizer.supportsPromptWeighting)
+        assertTrue(communityQnn.capabilities.supportsPromptWeighting)
+        assertFalse(communityQnn.capabilities.supportsClipSkip)
+        assertFalse(communityQnn.capabilities.supportsVaeTiling)
+        assertFalse(communityQnn.capabilities.supportsLivePreview)
+        assertFalse(communityQnn.capabilities.supportsLora)
+        assertEquals(1, communityQnn.capabilities.maxBatchCount)
+
+        val officialMnn = resolve("sd15_mnn_512_quality").profile
+        assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, officialMnn.tokenizer.backend)
+        assertFalse(officialMnn.tokenizer.supportsPromptWeighting)
+        assertFalse(officialMnn.capabilities.supportsPromptWeighting)
+        assertFalse(officialMnn.capabilities.supportsClipSkip)
+        assertFalse(officialMnn.capabilities.supportsVaeTiling)
+        assertFalse(officialMnn.capabilities.supportsLivePreview)
+        assertFalse(officialMnn.capabilities.supportsLora)
+        assertEquals(1, officialMnn.capabilities.maxBatchCount)
         listOf(
             resolve("qualcomm_sd15_gen5_qnn"),
             resolve("qualcomm_sd21_gen5_qnn"),
@@ -803,12 +960,31 @@ class ImageExecutionProfileResolverTest {
             assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, resolution.profile.tokenizer.backend)
             assertFalse(resolution.profile.tokenizer.supportsPromptWeighting)
             assertFalse(resolution.profile.capabilities.supportsPromptWeighting)
+            assertFalse(resolution.profile.capabilities.supportsClipSkip)
+            assertFalse(resolution.profile.capabilities.supportsVaeTiling)
+            assertFalse(resolution.profile.capabilities.supportsLivePreview)
+            assertFalse(resolution.profile.capabilities.supportsLora)
+            assertEquals(1, resolution.profile.capabilities.maxBatchCount)
             assertFalse(resolution.layers.resolved.promptWeightingSupported)
             assertEquals(154, resolution.layers.resolved.tokenCount)
         }
         val sana = resolve("mnn_sana_edit_v2").profile
         assertFalse(sana.tokenizer.supportsPromptWeighting)
         assertFalse(sana.capabilities.supportsPromptWeighting)
+        assertFalse(sana.capabilities.supportsClipSkip)
+        assertFalse(sana.capabilities.supportsVaeTiling)
+        assertFalse(sana.capabilities.supportsLivePreview)
+        assertFalse(sana.capabilities.supportsLora)
+        assertEquals(1, sana.capabilities.maxBatchCount)
+
+        val flowStable = resolve("z_image_turbo_q4").profile
+        assertTrue(flowStable.tokenizer.supportsPromptWeighting)
+        assertTrue(flowStable.capabilities.supportsPromptWeighting)
+        assertFalse(flowStable.capabilities.supportsClipSkip)
+        assertTrue(flowStable.capabilities.supportsVaeTiling)
+        assertTrue(flowStable.capabilities.supportsLivePreview)
+        assertTrue(flowStable.capabilities.supportsLora)
+        assertEquals(8, flowStable.capabilities.maxBatchCount)
 
         val genericStable = ImageExecutionProfileResolver.resolve(
             input(
@@ -829,6 +1005,8 @@ class ImageExecutionProfileResolverTest {
             ),
             genericStable.capabilities.supportedSchedulers
         )
+        assertTrue(genericStable.tokenizer.supportsPromptWeighting)
+        assertTrue(genericStable.capabilities.supportsPromptWeighting)
         val genericMnn = ImageExecutionProfileResolver.resolve(
             input(
                 recommendationId = null,
@@ -874,7 +1052,7 @@ class ImageExecutionProfileResolverTest {
                 recommendationId = "cyberrealistic_sd15_qnn228",
                 userOverrides = ImageGenerationOverrides(
                     expectedProfileId = "community.sd15.qnn228",
-                    expectedProfileRevision = 1,
+                    expectedProfileRevision = 2,
                     scheduler = ImageSchedulerAlgorithm.EULER,
                     predictionType = ImagePredictionType.EPSILON,
                     steps = 22,
@@ -926,6 +1104,137 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
+    fun `older pinned qnn sd15 manifests migrate only to their exact catalog contract`() {
+        val models = ModelScopeClient().recommendedModels()
+            .filter { model -> model.id in pinnedQnnSd15Ids }
+        assertEquals(pinnedQnnSd15Ids, models.mapTo(linkedSetOf()) { it.id })
+
+        models.forEach { model ->
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val fingerprint = model.id.sha256TestFingerprint()
+            val current = requireNotNull(
+                materializeDownloadedImageExecutionProfile(bundle, fingerprint)
+            )
+            val persisted = current.copy(
+                profileRevision = 1,
+                graph = current.graph.copy(
+                    schedulerSidecar = "scheduler/scheduler_config.json",
+                    tokenizerSidecar = "tokenizer/tokenizer_config.json",
+                    configSidecars = emptyList()
+                )
+            )
+
+            val resolved = ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = model.id,
+                    fingerprint = fingerprint,
+                    manifestProfile = persisted,
+                    recommendationEvidence = pinnedRecommendationEvidence(model.id)
+                )
+            ).profile
+
+            assertEquals(2, resolved.profileRevision)
+            assertEquals(
+                "${model.id} did not migrate to the complete catalog contract",
+                current.copy(provenance = resolved.provenance),
+                resolved
+            )
+            assertEquals(ImageProfileSource.MANIFEST, resolved.provenance.primarySource)
+        }
+    }
+
+    @Test
+    fun `pinned manifest migration rejects changed fingerprints missing source proof and conflicts`() {
+        val model = ModelScopeClient().recommendedModels()
+            .single { it.id == "cyberrealistic_sd15_qnn228" }
+        val bundle = requireNotNull(model.imageEngineBundle)
+        val installedFingerprint = model.id.sha256TestFingerprint()
+        val current = requireNotNull(
+            materializeDownloadedImageExecutionProfile(bundle, installedFingerprint)
+        )
+        val oldGraph = current.graph.copy(
+            schedulerSidecar = "scheduler/scheduler_config.json",
+            tokenizerSidecar = "tokenizer/tokenizer_config.json",
+            configSidecars = emptyList()
+        )
+
+        val fingerprintFailure = expectResolutionFailure {
+            ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = model.id,
+                    fingerprint = OTHER_FINGERPRINT,
+                    manifestProfile = current.copy(profileRevision = 1, graph = oldGraph),
+                    recommendationEvidence = pinnedRecommendationEvidence(model.id)
+                )
+            )
+        }
+        assertTrue(fingerprintFailure.validation.issues.any {
+            it.code == "MODEL_FINGERPRINT_MISMATCH"
+        })
+
+        val missingSourceProof = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = model.id,
+                fingerprint = installedFingerprint,
+                manifestProfile = current.copy(profileRevision = 1, graph = oldGraph)
+            )
+        ).profile
+        assertEquals(1, missingSourceProof.profileRevision)
+        assertEquals("scheduler/scheduler_config.json", missingSourceProof.graph.schedulerSidecar)
+
+        val aliasOnlySourceProof = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = model.id,
+                fingerprint = installedFingerprint,
+                manifestProfile = current.copy(profileRevision = 1, graph = oldGraph),
+                recommendationEvidence = ImageRecommendationEvidence(
+                    aliases = listOf(model.id),
+                    sourceRepositories = listOf(model.repoId),
+                    artifactPaths = listOf(
+                        model.id,
+                        requireNotNull(model.imageEngineBundle).id,
+                        "local/bundle-${model.id}/unet.bin"
+                    )
+                )
+            )
+        ).profile
+        assertEquals(1, aliasOnlySourceProof.profileRevision)
+        assertEquals("scheduler/scheduler_config.json", aliasOnlySourceProof.graph.schedulerSidecar)
+
+        val conflictingIdentity = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = model.id,
+                fingerprint = installedFingerprint,
+                manifestProfile = current.copy(
+                    profileRevision = 1,
+                    provenance = current.provenance.copy(
+                        recommendationId = "dreamshaper_sd15_qnn228"
+                    ),
+                    graph = oldGraph
+                ),
+                recommendationEvidence = pinnedRecommendationEvidence(model.id)
+            )
+        ).profile
+        assertEquals(1, conflictingIdentity.profileRevision)
+        assertEquals("scheduler/scheduler_config.json", conflictingIdentity.graph.schedulerSidecar)
+
+        val conflictingProfileId = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = model.id,
+                fingerprint = installedFingerprint,
+                manifestProfile = current.copy(
+                    profileId = "community.sd15.other.qnn228",
+                    profileRevision = 1,
+                    graph = oldGraph
+                ),
+                recommendationEvidence = pinnedRecommendationEvidence(model.id)
+            )
+        ).profile
+        assertEquals(1, conflictingProfileId.profileRevision)
+        assertEquals("community.sd15.other.qnn228", conflictingProfileId.profileId)
+    }
+
+    @Test
     fun `unsafe graph path and unsupported scheduler fail final validation`() {
         val base = resolve("qualcomm_sd15_gen5_qnn").profile
         val unsafe = base.copy(
@@ -939,6 +1248,18 @@ class ImageExecutionProfileResolverTest {
         )
         val unsupportedReport = ImageExecutionProfileValidator.validate(unsupported, FINGERPRINT)
         assertTrue(unsupportedReport.issues.any { it.code == "SCHEDULER_UNSUPPORTED" })
+
+        val impossiblePromptWeighting = base.copy(
+            tokenizer = base.tokenizer.copy(supportsPromptWeighting = false),
+            capabilities = base.capabilities.copy(supportsPromptWeighting = true)
+        )
+        val weightingReport = ImageExecutionProfileValidator.validate(
+            impossiblePromptWeighting,
+            FINGERPRINT
+        )
+        assertTrue(weightingReport.issues.any {
+            it.code == "CAPABILITY_CONTRACT_INVALID" && it.field == "supportsPromptWeighting"
+        })
     }
 
     @Test
@@ -1049,6 +1370,44 @@ class ImageExecutionProfileResolverTest {
         userOverrides = userOverrides,
         deviceHints = deviceHints
     )
+
+    private fun pinnedRecommendationEvidence(recommendationId: String): ImageRecommendationEvidence {
+        val model = ModelScopeClient().recommendedModels().single { it.id == recommendationId }
+        val bundle = requireNotNull(model.imageEngineBundle)
+        val primary = bundle.requiredComponents.single { component ->
+            component.role == ImageEngineBundleComponentRole.DIFFUSION
+        }
+        val bundleRoot = File("bundle-${model.id}")
+        val record = LocalImageModelRecord(
+            displayName = model.title,
+            path = File(bundleRoot, "unet.bin").path,
+            fileName = "unet.bin",
+            sizeBytes = 1L,
+            sha256 = model.id.sha256TestFingerprint(),
+            runtime = LocalImageRuntime.QNN_HTP,
+            family = LocalImageModelFamily.SD15,
+            bundleRoot = bundleRoot.path
+        )
+        val manifest = JSONObject()
+            .put("recommendationId", model.id)
+            .put("id", bundle.id)
+            .put(
+                "components",
+                JSONArray().put(
+                    JSONObject()
+                        .put("role", "DIFFUSION")
+                        .put("sourceRepo", primary.repoId)
+                        .put("sourcePath", "${primary.fileName}!/unet.bin")
+                        .put("path", "unet.bin")
+                )
+            )
+        return localImageRecommendationEvidence(record, bundleRoot, manifest)
+    }
+
+    private fun String.sha256TestFingerprint(): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private fun expectResolutionFailure(block: () -> Unit): ImageProfileResolutionException {
         return try {

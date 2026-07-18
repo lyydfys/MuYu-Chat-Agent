@@ -76,6 +76,24 @@
 namespace {
 
 using json = nlohmann::json;
+
+bool prompt_has_non_unity_attention_weight(
+        const std::string& prompt,
+        bool& weighted,
+        std::string& error) {
+    std::vector<mca::image::WeightedPromptFragment> fragments;
+    if (!mca::image::parse_clip_prompt_weighting(prompt, &fragments, &error)) {
+        return false;
+    }
+    weighted = std::any_of(
+            fragments.begin(),
+            fragments.end(),
+            [](const mca::image::WeightedPromptFragment& fragment) {
+                return std::fabs(fragment.weight - 1.0f) > 1.0e-6f;
+            });
+    return true;
+}
+
 class MnnDiffusionCancelled final : public std::exception {
 public:
     const char *what() const noexcept override {
@@ -3896,19 +3914,24 @@ bool append_clip_prompt_weighting_evidence(
         json& target,
         const mca::image::ClipTokenPair& tokenPair,
         bool supported,
+        bool includeNegative,
         std::string& error) {
-    const std::string fingerprint = tokenPair.weighting_fingerprint();
+    const std::string fingerprint = includeNegative
+            ? tokenPair.weighting_fingerprint()
+            : tokenPair.positive.weighting_fingerprint;
     if (fingerprint.size() != 64U) {
         error = "Prompt weighting fingerprint could not be derived from executed token sequences.";
         return false;
     }
     target["promptWeightingSupported"] = supported;
     target["promptWeightingApplied"] = supported &&
-            (tokenPair.negative.weighting_applied || tokenPair.positive.weighting_applied);
+            ((includeNegative && tokenPair.negative.weighting_applied) ||
+             tokenPair.positive.weighting_applied);
     target["positiveWeightedTokenCount"] =
             supported ? tokenPair.positive.weighted_token_count : 0U;
-    target["negativeWeightedTokenCount"] =
-            supported ? tokenPair.negative.weighted_token_count : 0U;
+    target["negativeWeightedTokenCount"] = supported && includeNegative
+            ? tokenPair.negative.weighted_token_count
+            : 0U;
     target["promptWeightFingerprint"] = fingerprint;
     return true;
 }
@@ -4057,6 +4080,17 @@ json encode_sdxl_prompt_conditioning_to_file(
     if (!write_float_file(outputPath, combined, error)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
+    std::vector<uint8_t> artifactBytes(combined.size() * sizeof(float));
+    std::memcpy(artifactBytes.data(), combined.data(), artifactBytes.size());
+    const std::string conditioningArtifactSha256 =
+            mca::image::sha256_hex_bytes(artifactBytes);
+    if (conditioningArtifactSha256.size() != 64U) {
+        return json({
+                {"ok", false},
+                {"error", "SDXL conditioning artifact SHA-256 could not be derived."},
+                {"format", "sdxl_qnn_conditioning"}
+        });
+    }
     json result = json({
             {"ok", true},
             {"path", outputPath},
@@ -4066,6 +4100,12 @@ json encode_sdxl_prompt_conditioning_to_file(
             {"hiddenShape", {2, 77, 2048}},
             {"pooledShape", {2, 1280}},
             {"timeIdsShape", {1, 6}},
+            {"conditioningExecutionMode", "external_mnn_sdxl_embeddings"},
+            {"conditioningBackend", "MNN"},
+            {"conditioningGraph", "clip.mnn+clip_2.mnn"},
+            {"conditioningEncoderExecutionCount", 4},
+            {"conditioningOrder", "negative_then_positive"},
+            {"conditioningArtifactSha256", conditioningArtifactSha256},
             {"clip1PadId", clip1TokenizerConfig.pad_id},
             {"clip2PadId", clip2TokenizerConfig.pad_id},
             {"clipPadRules", {
@@ -4080,9 +4120,14 @@ json encode_sdxl_prompt_conditioning_to_file(
             {"backendMode", canonicalBackend}
     });
     if (!append_clip_prompt_weighting_evidence(
-            result, clip1TokenPair, promptWeightingEnabled, error)) {
+            result, clip1TokenPair, promptWeightingEnabled, true, error)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
+    // The isolated QNN consumer receives the serialized dual-CLIP float
+    // artifact, not either tokenizer sequence independently. Bind the
+    // cross-process fingerprint to those exact bytes while retaining the
+    // weighted-token counts as separate execution evidence.
+    result["promptWeightFingerprint"] = conditioningArtifactSha256;
     if (includeDebug) {
         result["debug"] = debug;
     }
@@ -4096,6 +4141,7 @@ json encode_community_clip_embeddings_to_file(
         const std::string& outputPath,
         const std::string& backendMode,
         int threads,
+        bool useCfg,
         bool promptWeightingEnabled = true) {
     std::string error;
     mca::image::ClipTokenizerConfig tokenizerConfig;
@@ -4135,17 +4181,19 @@ json encode_community_clip_embeddings_to_file(
             outputPath.find("\\image_bench\\runs\\") != std::string::npos;
     std::vector<int> neg_ids(ids.begin(), ids.begin() + 77);
     std::vector<int> pos_ids(ids.begin() + 77, ids.end());
-    if (!run_community_clip_encoder_direct(
-            root,
-            neg_ids,
-            tokenPair.negative.weights,
-            backendMode,
-            threads,
-            negative,
-            error,
-            includeDebug ? &negativeDebug : nullptr,
-            &negativeEmbeddingType)) {
-        return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
+    if (useCfg) {
+        if (!run_community_clip_encoder_direct(
+                root,
+                neg_ids,
+                tokenPair.negative.weights,
+                backendMode,
+                threads,
+                negative,
+                error,
+                includeDebug ? &negativeDebug : nullptr,
+                &negativeEmbeddingType)) {
+            return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
+        }
     }
     if (!run_community_clip_encoder_direct(
             root,
@@ -4159,49 +4207,80 @@ json encode_community_clip_embeddings_to_file(
             &positiveEmbeddingType)) {
         return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
     }
-    if (negativeEmbeddingType != positiveEmbeddingType) {
+    if (useCfg && negativeEmbeddingType != positiveEmbeddingType) {
         return json({
             {"ok", false},
             {"error", "PACKAGE_FORMAT_INVALID: negative and positive CLIP reads reported different token embedding dtypes."},
             {"format", "community_clip"}
         });
     }
-    if (!validate_float_tensor_contract(negative, {1, 77, 768}, "Community negative CLIP output", error) ||
-        !validate_float_tensor_contract(positive, {1, 77, 768}, "Community positive CLIP output", error)) {
+    if ((useCfg && !validate_float_tensor_contract(
+            negative, {1, 77, 768}, "Community negative CLIP output", error)) ||
+        !validate_float_tensor_contract(
+            positive, {1, 77, 768}, "Community positive CLIP output", error)) {
         return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
     }
     std::vector<float> combined;
-    combined.reserve(negative.values.size() + positive.values.size());
-    combined.insert(combined.end(), negative.values.begin(), negative.values.end());
+    combined.reserve((useCfg ? negative.values.size() : 0U) + positive.values.size());
+    if (useCfg) {
+        combined.insert(combined.end(), negative.values.begin(), negative.values.end());
+    }
     combined.insert(combined.end(), positive.values.begin(), positive.values.end());
     if (!write_float_file(outputPath, combined, error)) {
         return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
+    }
+    std::vector<uint8_t> artifactBytes(combined.size() * sizeof(float));
+    std::memcpy(artifactBytes.data(), combined.data(), artifactBytes.size());
+    const std::string conditioningArtifactSha256 =
+            mca::image::sha256_hex_bytes(artifactBytes);
+    if (conditioningArtifactSha256.size() != 64U) {
+        return json({
+            {"ok", false},
+            {"error", "Community CLIP conditioning artifact SHA-256 could not be derived."},
+            {"format", "community_clip"}
+        });
     }
     json result = {
         {"ok", true},
         {"path", outputPath},
         {"bytes", static_cast<long long>(combined.size() * sizeof(float))},
         {"elements", static_cast<long long>(combined.size())},
-        {"shape", {2, 77, 768}},
-        {"tokenCount", ids.size()},
-        {"negativeShape", negative.shape},
+        {"shape", {useCfg ? 2 : 1, 77, 768}},
+        {"tokenCount", useCfg ? ids.size() : pos_ids.size()},
         {"positiveShape", positive.shape},
-        {"negativeStats", float_vector_stats_json(negative.values)},
         {"positiveStats", float_vector_stats_json(positive.values)},
-        {"positiveNegativeAbsDiffStats", float_vector_abs_diff_stats_json(positive.values, negative.values)},
         {"format", "community_clip"},
-        {"embeddingDiskDataType", negativeEmbeddingType},
+        {"conditioningExecutionMode", "external_mnn_embeddings"},
+        {"conditioningBackend", "MNN"},
+        {"conditioningGraph", "clip_v2.mnn"},
+        {"conditioningEncoderExecutionCount", useCfg ? 2 : 1},
+        {"conditioningOrder", useCfg ? "negative_then_positive" : "positive_only"},
+        {"conditioningArtifactSha256", conditioningArtifactSha256},
+        {"embeddingDiskDataType", positiveEmbeddingType},
         {"backendMode", backendMode == "opencl" || backendMode == "gpu" ? "opencl" : "cpu"}
     };
+    if (useCfg) {
+        result["negativeShape"] = negative.shape;
+        result["negativeStats"] = float_vector_stats_json(negative.values);
+        result["positiveNegativeAbsDiffStats"] =
+            float_vector_abs_diff_stats_json(positive.values, negative.values);
+    }
     if (!append_clip_prompt_weighting_evidence(
-            result, tokenPair, promptWeightingEnabled, error)) {
+            result, tokenPair, promptWeightingEnabled, useCfg, error)) {
         return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
     }
+    // The artifact digest is the cross-process identity consumed by QNN. Keep
+    // weighting counts as separate evidence, but bind the fingerprint field
+    // to the exact serialized float payload.
+    result["promptWeightFingerprint"] = conditioningArtifactSha256;
+    if (!useCfg) {
+        result["negativeWeightedTokenCount"] = 0;
+        result["promptWeightingApplied"] =
+            result.value("positiveWeightedTokenCount", 0) > 0;
+    }
     if (includeDebug) {
-        result["debug"] = {
-                {"negative", negativeDebug},
-                {"positive", positiveDebug}
-        };
+        result["debug"] = {{"positive", positiveDebug}};
+        if (useCfg) result["debug"]["negative"] = negativeDebug;
     }
     return result;
 }
@@ -4240,7 +4319,10 @@ bool tokenize_mnn_sd15_prompt(
         tokenizerConfig.eos_id = contract.tokenizer_eos_id;
         tokenizerConfig.pad_id = contract.tokenizer_pad_id;
         tokenizerConfig.max_length = contract.tokenizer_max_length;
-        tokenizerConfig.enable_prompt_weighting = contract.prompt_weighting_supported;
+        // Parse attention syntax even when this graph cannot execute it. That keeps ordinary
+        // prompts on the normal path while allowing a non-unity request to fail explicitly
+        // instead of becoming literal punctuation in the token-id graph.
+        tokenizerConfig.enable_prompt_weighting = true;
         mca::image::ClipTokenPair pair;
         if (!mca::image::tokenize_clip_pair_from_json(
                 tokenizerPath,
@@ -4249,6 +4331,12 @@ bool tokenize_mnn_sd15_prompt(
                 tokenizerConfig,
                 &pair,
                 &error)) {
+            return false;
+        }
+        if (!contract.prompt_weighting_supported &&
+            (pair.negative.weighting_applied || pair.positive.weighting_applied)) {
+            error = "This MNN text_encoder.mnn accepts int32 token IDs and cannot apply "
+                    "non-unity prompt weights before the Transformer.";
             return false;
         }
         const auto standardIds = pair.negative_then_positive();
@@ -4286,9 +4374,16 @@ bool tokenize_mnn_sd15_prompt(
         return false;
     }
     evidence.token_count = ids.size();
+    const std::vector<int> activeTokenIds = contract.use_cfg
+            ? ids
+            : std::vector<int>(
+                    ids.end() - contract.tokenizer_max_length,
+                    ids.end());
     evidence.prompt_weight_fingerprint = hasExecutedTokenPair
-            ? executedTokenPair.weighting_fingerprint()
-            : mnn_token_id_fingerprint(ids);
+            ? (contract.use_cfg
+                    ? executedTokenPair.weighting_fingerprint()
+                    : executedTokenPair.positive.weighting_fingerprint)
+            : mnn_token_id_fingerprint(activeTokenIds);
     if (evidence.prompt_weight_fingerprint.size() != 64U) {
         error = "Conditioning fingerprint could not be derived from executed token sequences.";
         return false;
@@ -4299,12 +4394,13 @@ bool tokenize_mnn_sd15_prompt(
             return false;
         }
         evidence.prompt_weighting_applied =
-                executedTokenPair.negative.weighting_applied ||
+                (contract.use_cfg && executedTokenPair.negative.weighting_applied) ||
                 executedTokenPair.positive.weighting_applied;
         evidence.positive_weighted_token_count =
                 executedTokenPair.positive.weighted_token_count;
-        evidence.negative_weighted_token_count =
-                executedTokenPair.negative.weighted_token_count;
+        evidence.negative_weighted_token_count = contract.use_cfg
+                ? executedTokenPair.negative.weighted_token_count
+                : 0U;
     }
     return true;
 }
@@ -4961,6 +5057,7 @@ json encode_sd15_prompt_embeddings_to_file(
         const std::string& outputPath,
         const std::string& backendMode,
         int threads,
+        bool useCfg,
         bool promptWeightingEnabled) {
     if (is_blank_text(prompt)) {
         return json({{"ok", false}, {"error", "Prompt is empty."}});
@@ -4973,6 +5070,7 @@ json encode_sd15_prompt_embeddings_to_file(
                 outputPath,
                 backendMode,
                 threads,
+                useCfg,
                 promptWeightingEnabled);
     }
     std::string error;
@@ -5018,6 +5116,7 @@ json encode_sd15_prompt_embeddings_to_file(
                         outputPath,
                         backendMode,
                         threads,
+                        useCfg,
                         promptWeightingEnabled);
             }
             return json({{"ok", false}, {"error", "Failed to load MNN-Diffusion tokenizer."}});
@@ -5032,7 +5131,7 @@ json encode_sd15_prompt_embeddings_to_file(
         });
     }
     if (hasWeightedTokenPair && !validate_clip_pair_weights_for_token_id_graph(
-            tokenPair, true, error)) {
+            tokenPair, useCfg, error)) {
         return json({
                 {"ok", false},
                 {"errorCode", "PROMPT_WEIGHTING_EXECUTION_UNSUPPORTED"},
@@ -5040,10 +5139,14 @@ json encode_sd15_prompt_embeddings_to_file(
         });
     }
     FloatTensorData embeddings;
-    if (!run_text_encoder_direct(root, ids, backendMode, threads, embeddings, error)) {
+    const std::vector<int> activeIds = useCfg
+            ? ids
+            : std::vector<int>(ids.begin() + 77, ids.end());
+    if (!run_text_encoder_direct(root, activeIds, backendMode, threads, embeddings, error)) {
         return json({{"ok", false}, {"error", error}});
     }
-    if (!validate_float_tensor_contract(embeddings, {2, 77, 768}, "Text encoder output", error)) {
+    if (!validate_float_tensor_contract(
+            embeddings, {useCfg ? 2 : 1, 77, 768}, "Text encoder output", error)) {
         return json({{"ok", false}, {"error", error}});
     }
     if (!write_float_file(outputPath, embeddings.values, error)) {
@@ -5055,20 +5158,25 @@ json encode_sd15_prompt_embeddings_to_file(
         {"bytes", static_cast<long long>(embeddings.values.size() * sizeof(float))},
         {"elements", static_cast<long long>(embeddings.values.size())},
         {"shape", embeddings.shape},
-        {"tokenCount", ids.size()},
+        {"tokenCount", activeIds.size()},
         {"backendMode", backendMode == "opencl" || backendMode == "gpu" ? "opencl" : "cpu"}
     });
     if (hasWeightedTokenPair) {
         if (!append_clip_prompt_weighting_evidence(
-                result, tokenPair, promptWeightingEnabled, error)) {
+                result, tokenPair, promptWeightingEnabled, useCfg, error)) {
             return json({{"ok", false}, {"error", error}});
+        }
+        if (!useCfg) {
+            result["negativeWeightedTokenCount"] = 0;
+            result["promptWeightingApplied"] =
+                result.value("positiveWeightedTokenCount", 0) > 0;
         }
     } else {
         result["promptWeightingSupported"] = false;
         result["promptWeightingApplied"] = false;
         result["positiveWeightedTokenCount"] = 0;
         result["negativeWeightedTokenCount"] = 0;
-        const std::string fingerprint = mnn_token_id_fingerprint(ids);
+        const std::string fingerprint = mnn_token_id_fingerprint(activeIds);
         if (fingerprint.size() != 64U) {
             return json({
                     {"ok", false},
@@ -5103,7 +5211,12 @@ json run_mnn_sd15_interpreter_direct(
             hasExecutedTokenPair,
             evidence,
             error)) {
-        return json({{"ok", false}, {"error", error}});
+        json failure = {{"ok", false}, {"error", error}};
+        if (error.find("cannot apply non-unity prompt weights before the Transformer") !=
+            std::string::npos) {
+            failure["errorCode"] = "PROMPT_WEIGHTING_EXECUTION_UNSUPPORTED";
+        }
+        return failure;
     }
     const bool includeDebug =
             outputPath.find("/image_bench/runs/") != std::string::npos ||
@@ -5257,7 +5370,7 @@ json run_mnn_sd15_interpreter_direct(
     }
     if (includeDebug) {
         const size_t rowSize = 77U * 768U;
-        debug["tokenIds"] = ids;
+        debug["tokenIds"] = contract.use_cfg ? ids : positiveIds;
         if (contract.use_cfg) {
             std::vector<float> negative(embeddings.values.begin(), embeddings.values.begin() + rowSize);
             std::vector<float> positive(embeddings.values.begin() + rowSize, embeddings.values.end());
@@ -6608,7 +6721,7 @@ json encode_prompt_token_ids_with_weights_from_json(
         {"tokenCount", ids.size()},
         {"outputPath", outputPath}
     };
-    if (!append_clip_prompt_weighting_evidence(result, pair, true, error)) {
+    if (!append_clip_prompt_weighting_evidence(result, pair, true, true, error)) {
         ::unlink(outputPath.c_str());
         return json({{"ok", false}, {"error", error}});
     }
@@ -6760,13 +6873,14 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmb
         jstring outputPath,
         jstring backendMode,
         jint threads,
-        jstring tokenEmbeddingMode,
+        jstring conditioningOrder,
         jboolean promptWeightingEnabled) {
 #if MCA_WITH_MNN_DIFFUSION
     const auto root = normalize_mnn_model_path(jstring_to_std(env, bundleRoot));
-    // Retained only for the existing JNI method descriptor. Dtype selection is
-    // derived from token_emb.bin's exact byte size and is never user-tunable.
-    (void)tokenEmbeddingMode;
+    // The JNI slot is unchanged; its local name now reflects the active branch
+    // contract. Dtype remains derived from token_emb.bin's exact size.
+    const auto activeConditioningOrder = jstring_to_std(env, conditioningOrder);
+    const bool useCfg = activeConditioningOrder != "positive_only";
     const auto out = encode_sd15_prompt_embeddings_to_file(
             root,
             jstring_to_std(env, prompt),
@@ -6774,6 +6888,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmb
             jstring_to_std(env, outputPath),
             jstring_to_std(env, backendMode),
             std::max(1, static_cast<int>(threads)),
+            useCfg,
             promptWeightingEnabled == JNI_TRUE).dump();
 #else
     (void)bundleRoot;
@@ -6782,7 +6897,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmb
     (void)outputPath;
     (void)backendMode;
     (void)threads;
-    (void)tokenEmbeddingMode;
+    (void)conditioningOrder;
     (void)promptWeightingEnabled;
     const auto out = json({
         {"ok", false},
@@ -6998,6 +7113,31 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
                 {"errorCode", "EXECUTION_CONTRACT_UNSUPPORTED"},
                 {"field", "negativePrompt"},
                 {"error", "MNN Sana cannot apply a negative prompt when useCfg=false."}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+        bool positiveWeighted = false;
+        bool negativeWeighted = false;
+        if (!prompt_has_non_unity_attention_weight(
+                prompt, positiveWeighted, contractError) ||
+            (use_cfg && !prompt_has_non_unity_attention_weight(
+                negative_prompt, negativeWeighted, contractError))) {
+            const auto out = json({
+                {"ok", false},
+                {"backend", "mnn_diffusion"},
+                {"errorCode", "EXECUTION_CONTRACT_INVALID"},
+                {"field", "prompt,negativePrompt"},
+                {"error", contractError}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+        if (positiveWeighted || negativeWeighted) {
+            const auto out = json({
+                {"ok", false},
+                {"backend", "mnn_diffusion"},
+                {"errorCode", "PROMPT_WEIGHTING_EXECUTION_UNSUPPORTED"},
+                {"field", "prompt,negativePrompt"},
+                {"error", "MNN Sana cannot apply non-unity prompt weights before its Transformer."}
             }).dump();
             return utf8_to_jstring(env, out);
         }

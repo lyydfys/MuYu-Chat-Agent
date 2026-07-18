@@ -5,6 +5,7 @@ import java.nio.file.Files
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -39,7 +40,71 @@ class ImageExecutionProfileJsonTest {
         assertEquals(ImageVaeScalingLocation.GRAPH_INTERNAL, profile.vae.scalingLocation)
         assertEquals("graphs/unet.bin", profile.graph.unet?.relativePath)
         assertEquals(512, profile.defaults.width)
+        assertFalse(profile.capabilities.supportsClipSkip)
+        assertFalse(profile.capabilities.supportsVaeTiling)
+        assertFalse(profile.capabilities.supportsLivePreview)
+        assertFalse(profile.capabilities.supportsLora)
+        assertEquals(1, profile.capabilities.maxBatchCount)
         assertTrue(profile.bindingFingerprint.matches(Regex("^[0-9a-f]{64}$")))
+    }
+
+    @Test
+    fun `advanced capabilities round trip and old manifests default conservatively`() {
+        val explicit = validProfileJson().also { profile ->
+            profile.getJSONObject("capabilities")
+                .put("supportsClipSkip", true)
+                .put("supportsVaeTiling", true)
+                .put("supportsLivePreview", true)
+                .put("supportsLora", true)
+                .put("maxBatchCount", 8)
+        }
+        val parsed = requireNotNull(
+            ImageExecutionProfileJson.parseManifest(JSONObject().put("executionProfile", explicit))
+        )
+        val encoded = ImageExecutionProfileJson.toJson(parsed)
+        val encodedCapabilities = encoded.getJSONObject("capabilities")
+
+        assertTrue(encodedCapabilities.getBoolean("supportsClipSkip"))
+        assertTrue(encodedCapabilities.getBoolean("supportsVaeTiling"))
+        assertTrue(encodedCapabilities.getBoolean("supportsLivePreview"))
+        assertTrue(encodedCapabilities.getBoolean("supportsLora"))
+        assertEquals(8, encodedCapabilities.getInt("maxBatchCount"))
+
+        val legacy = validProfileJson().also { profile ->
+            val capabilities = profile.getJSONObject("capabilities")
+            capabilities.remove("supportsClipSkip")
+            capabilities.remove("supportsVaeTiling")
+            capabilities.remove("supportsLivePreview")
+            capabilities.remove("supportsLora")
+            capabilities.remove("maxBatchCount")
+        }
+        val legacyParsed = requireNotNull(
+            ImageExecutionProfileJson.parseManifest(JSONObject().put("executionProfile", legacy))
+        )
+
+        assertFalse(legacyParsed.capabilities.supportsClipSkip)
+        assertFalse(legacyParsed.capabilities.supportsVaeTiling)
+        assertFalse(legacyParsed.capabilities.supportsLivePreview)
+        assertFalse(legacyParsed.capabilities.supportsLora)
+        assertEquals(1, legacyParsed.capabilities.maxBatchCount)
+    }
+
+    @Test
+    fun `manifest rejects an out of range advanced batch capability`() {
+        listOf(0, 9).forEach { value ->
+            val profile = validProfileJson().also {
+                it.getJSONObject("capabilities").put("maxBatchCount", value)
+            }
+
+            val error = expectJsonFailure {
+                ImageExecutionProfileJson.parseManifest(
+                    JSONObject().put("executionProfile", profile)
+                )
+            }
+
+            assertEquals("PROFILE_VALIDATION_FAILED", error.code)
+            assertEquals("capabilities.maxBatchCount", error.field)
+        }
     }
 
     @Test
@@ -164,6 +229,29 @@ class ImageExecutionProfileJsonTest {
             assertEquals(false, scheduler.lowerOrderFinal)
             assertEquals(if (expected == ImageSchedulerAlgorithm.DPMPP_2M) 2 else 1, scheduler.order)
         }
+    }
+
+    @Test
+    fun `flow match scheduler sidecar never silently resolves as Euler`() {
+        val scheduler = ImageExecutionProfileJson.parseSchedulerConfig(
+            JSONObject()
+                .put("_class_name", "FlowMatchEulerDiscreteScheduler")
+                .put("num_train_timesteps", 1_000)
+                .put("default_steps", 4)
+                .put("min_steps", 1)
+                .put("max_steps", 50)
+        )
+
+        assertEquals(ImageSchedulerAlgorithm.FLOW_MATCH, scheduler.algorithm)
+        assertEquals(ImagePredictionType.FLOW, scheduler.predictionType)
+        assertEquals(ImageNoiseSchedule.SIGMA, scheduler.noiseSchedule)
+        assertNull(scheduler.betaStart)
+        assertNull(scheduler.betaEnd)
+        assertEquals(ImageTimestepSpacing.LEADING, scheduler.timestepSpacing)
+        assertEquals(0, scheduler.stepsOffset)
+        assertFalse(scheduler.setAlphaToOne)
+        assertFalse(scheduler.skipPrkSteps)
+        assertFalse(scheduler.scaleModelInput)
     }
 
     @Test
@@ -336,6 +424,45 @@ class ImageExecutionProfileJsonTest {
         assertEquals(ImageModelVariant.SD_TURBO, turbo.variant)
         assertEquals(LocalImageModelFamily.Z_IMAGE, zImageTurbo.family)
         assertEquals(ImageModelVariant.Z_IMAGE_TURBO, zImageTurbo.variant)
+    }
+
+    @Test
+    fun `package behavior config recognizes modern family variant and flow scheduler aliases`() {
+        val familyAliases = listOf(
+            Triple("flux2", LocalImageModelFamily.FLUX, ImageModelVariant.FLUX2_KLEIN),
+            Triple("flux_2", LocalImageModelFamily.FLUX, ImageModelVariant.FLUX2_KLEIN),
+            Triple("flux2_klein", LocalImageModelFamily.FLUX, ImageModelVariant.FLUX2_KLEIN),
+            Triple("qwen_image_2512", LocalImageModelFamily.QWEN_IMAGE, ImageModelVariant.QWEN_IMAGE),
+            Triple("longcat", LocalImageModelFamily.LONGCAT_IMAGE, ImageModelVariant.LONGCAT_IMAGE),
+            Triple("longcat_image", LocalImageModelFamily.LONGCAT_IMAGE, ImageModelVariant.LONGCAT_IMAGE),
+            Triple("sana_edit", LocalImageModelFamily.SANA, ImageModelVariant.SANA_EDIT),
+            Triple("sana_edit_v2", LocalImageModelFamily.SANA, ImageModelVariant.SANA_EDIT)
+        )
+        familyAliases.forEach { (alias, family, variant) ->
+            val behavior = requireNotNull(
+                ImageExecutionProfileJson.parsePackageBehaviorConfig(
+                    JSONObject()
+                        .put("model_family", alias)
+                        .put("model_variant", alias)
+                )
+            )
+
+            assertEquals(alias, family, behavior.family)
+            assertEquals(alias, variant, behavior.variant)
+        }
+
+        listOf(
+            "flow_match_euler_discrete",
+            "flow_match_euler_discrete_scheduler",
+            "FlowMatchEulerDiscreteScheduler"
+        ).forEach { alias ->
+            val behavior = requireNotNull(
+                ImageExecutionProfileJson.parsePackageBehaviorConfig(
+                    JSONObject().put("scheduler", alias)
+                )
+            )
+            assertEquals(alias, ImageSchedulerAlgorithm.FLOW_MATCH, behavior.scheduler)
+        }
     }
 
     @Test
@@ -613,6 +740,11 @@ class ImageExecutionProfileJsonTest {
                 .put("requiresControlImage", false)
                 .put("requiresInputImage", false)
                 .put("supportsMask", false)
+                .put("supportsClipSkip", false)
+                .put("supportsVaeTiling", false)
+                .put("supportsLivePreview", false)
+                .put("supportsLora", false)
+                .put("maxBatchCount", 1)
         )
 
     private fun graph(path: String): JSONObject = JSONObject()

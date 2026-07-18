@@ -49,27 +49,74 @@ uint32_t rotate_right(uint32_t value, unsigned count) {
     return (value >> count) | (value << (32U - count));
 }
 
-std::array<uint8_t, 32> sha256(const std::vector<uint8_t>& input) {
-    std::vector<uint8_t> padded = input;
-    const uint64_t bit_length = static_cast<uint64_t>(padded.size()) * UINT64_C(8);
-    padded.push_back(UINT8_C(0x80));
-    while (padded.size() % 64U != 56U) padded.push_back(0U);
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        padded.push_back(static_cast<uint8_t>(bit_length >> shift));
+class Sha256State {
+public:
+    bool update(const uint8_t* input, size_t input_size) {
+        if ((input == nullptr && input_size != 0U) ||
+            input_size > (std::numeric_limits<uint64_t>::max() / UINT64_C(8)) - total_bytes_) {
+            return false;
+        }
+        if (input_size == 0U) return true;
+        total_bytes_ += static_cast<uint64_t>(input_size);
+        if (buffer_size_ != 0U) {
+            const size_t copied = std::min(input_size, buffer_.size() - buffer_size_);
+            std::memcpy(buffer_.data() + buffer_size_, input, copied);
+            buffer_size_ += copied;
+            input += copied;
+            input_size -= copied;
+            if (buffer_size_ == buffer_.size()) {
+                transform(buffer_.data());
+                buffer_size_ = 0U;
+            }
+        }
+        while (input_size >= buffer_.size()) {
+            transform(input);
+            input += buffer_.size();
+            input_size -= buffer_.size();
+        }
+        if (input_size != 0U) {
+            std::memcpy(buffer_.data(), input, input_size);
+            buffer_size_ = input_size;
+        }
+        return true;
     }
 
-    std::array<uint32_t, 8> state = {
-        UINT32_C(0x6a09e667), UINT32_C(0xbb67ae85), UINT32_C(0x3c6ef372), UINT32_C(0xa54ff53a),
-        UINT32_C(0x510e527f), UINT32_C(0x9b05688c), UINT32_C(0x1f83d9ab), UINT32_C(0x5be0cd19),
-    };
-    for (size_t block = 0; block < padded.size(); block += 64U) {
+    std::array<uint8_t, 32> finish() {
+        const uint64_t bit_length = total_bytes_ * UINT64_C(8);
+        buffer_[buffer_size_++] = UINT8_C(0x80);
+        if (buffer_size_ > 56U) {
+            std::fill(buffer_.begin() + static_cast<std::ptrdiff_t>(buffer_size_), buffer_.end(), 0U);
+            transform(buffer_.data());
+            buffer_size_ = 0U;
+        }
+        std::fill(
+            buffer_.begin() + static_cast<std::ptrdiff_t>(buffer_size_),
+            buffer_.begin() + 56,
+            0U);
+        for (size_t index = 0U; index < sizeof(bit_length); ++index) {
+            buffer_[63U - index] = static_cast<uint8_t>(bit_length >> (index * 8U));
+        }
+        transform(buffer_.data());
+
+        std::array<uint8_t, 32> digest{};
+        for (size_t index = 0; index < state_.size(); ++index) {
+            digest[index * 4U] = static_cast<uint8_t>(state_[index] >> 24U);
+            digest[index * 4U + 1U] = static_cast<uint8_t>(state_[index] >> 16U);
+            digest[index * 4U + 2U] = static_cast<uint8_t>(state_[index] >> 8U);
+            digest[index * 4U + 3U] = static_cast<uint8_t>(state_[index]);
+        }
+        return digest;
+    }
+
+private:
+    void transform(const uint8_t* block) {
         std::array<uint32_t, 64> words{};
         for (size_t index = 0; index < 16U; ++index) {
-            const size_t offset = block + index * 4U;
-            words[index] = (static_cast<uint32_t>(padded[offset]) << 24U) |
-                           (static_cast<uint32_t>(padded[offset + 1U]) << 16U) |
-                           (static_cast<uint32_t>(padded[offset + 2U]) << 8U) |
-                           static_cast<uint32_t>(padded[offset + 3U]);
+            const size_t offset = index * 4U;
+            words[index] = (static_cast<uint32_t>(block[offset]) << 24U) |
+                           (static_cast<uint32_t>(block[offset + 1U]) << 16U) |
+                           (static_cast<uint32_t>(block[offset + 2U]) << 8U) |
+                           static_cast<uint32_t>(block[offset + 3U]);
         }
         for (size_t index = 16U; index < words.size(); ++index) {
             const uint32_t s0 = rotate_right(words[index - 15U], 7U) ^
@@ -81,14 +128,14 @@ std::array<uint8_t, 32> sha256(const std::vector<uint8_t>& input) {
             words[index] = words[index - 16U] + s0 + words[index - 7U] + s1;
         }
 
-        uint32_t a = state[0];
-        uint32_t b = state[1];
-        uint32_t c = state[2];
-        uint32_t d = state[3];
-        uint32_t e = state[4];
-        uint32_t f = state[5];
-        uint32_t g = state[6];
-        uint32_t h = state[7];
+        uint32_t a = state_[0];
+        uint32_t b = state_[1];
+        uint32_t c = state_[2];
+        uint32_t d = state_[3];
+        uint32_t e = state_[4];
+        uint32_t f = state_[5];
+        uint32_t g = state_[6];
+        uint32_t h = state_[7];
         for (size_t index = 0; index < words.size(); ++index) {
             const uint32_t sum1 = rotate_right(e, 6U) ^ rotate_right(e, 11U) ^ rotate_right(e, 25U);
             const uint32_t choose = (e & f) ^ ((~e) & g);
@@ -105,32 +152,41 @@ std::array<uint8_t, 32> sha256(const std::vector<uint8_t>& input) {
             b = a;
             a = temp1 + temp2;
         }
-        state[0] += a;
-        state[1] += b;
-        state[2] += c;
-        state[3] += d;
-        state[4] += e;
-        state[5] += f;
-        state[6] += g;
-        state[7] += h;
+        state_[0] += a;
+        state_[1] += b;
+        state_[2] += c;
+        state_[3] += d;
+        state_[4] += e;
+        state_[5] += f;
+        state_[6] += g;
+        state_[7] += h;
     }
 
-    std::array<uint8_t, 32> digest{};
-    for (size_t index = 0; index < state.size(); ++index) {
-        digest[index * 4U] = static_cast<uint8_t>(state[index] >> 24U);
-        digest[index * 4U + 1U] = static_cast<uint8_t>(state[index] >> 16U);
-        digest[index * 4U + 2U] = static_cast<uint8_t>(state[index] >> 8U);
-        digest[index * 4U + 3U] = static_cast<uint8_t>(state[index]);
-    }
-    return digest;
+    std::array<uint32_t, 8> state_ = {
+        UINT32_C(0x6a09e667), UINT32_C(0xbb67ae85), UINT32_C(0x3c6ef372), UINT32_C(0xa54ff53a),
+        UINT32_C(0x510e527f), UINT32_C(0x9b05688c), UINT32_C(0x1f83d9ab), UINT32_C(0x5be0cd19),
+    };
+    std::array<uint8_t, 64> buffer_{};
+    size_t buffer_size_ = 0U;
+    uint64_t total_bytes_ = 0U;
+};
+
+std::array<uint8_t, 32> sha256(const std::vector<uint8_t>& input) {
+    Sha256State state;
+    const bool updated = state.update(input.data(), input.size());
+    if (!updated) return {};
+    return state.finish();
 }
 
-std::string sha256_hex(const std::vector<uint8_t>& payload) {
-    const auto digest = sha256(payload);
+std::string sha256_hex_digest(const std::array<uint8_t, 32>& digest) {
     std::ostringstream out;
     out << std::hex << std::setfill('0');
     for (uint8_t value : digest) out << std::setw(2) << static_cast<unsigned>(value);
     return out.str();
+}
+
+std::string sha256_hex(const std::vector<uint8_t>& payload) {
+    return sha256_hex_digest(sha256(payload));
 }
 
 std::string lower_copy(std::string value) {
@@ -598,6 +654,55 @@ std::string residual_role_name(size_t index) {
 
 std::string sha256_hex_bytes(const std::vector<uint8_t>& payload) {
     return sha256_hex(payload);
+}
+
+bool sha256_hex_file(const std::string& path,
+                     std::string* digest,
+                     std::string* error) {
+    if (digest == nullptr || error == nullptr) return false;
+    digest->clear();
+    error->clear();
+    std::error_code size_error;
+    const uintmax_t expected_size = std::filesystem::file_size(path, size_error);
+    if (size_error || expected_size == 0U ||
+        expected_size > std::numeric_limits<uint64_t>::max() / UINT64_C(8)) {
+        *error = "Artifact is missing, empty, or too large for SHA-256 length encoding.";
+        return false;
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input.good()) {
+        *error = "Failed to open the artifact for SHA-256 verification.";
+        return false;
+    }
+    Sha256State state;
+    std::array<uint8_t, 64U * 1024U> buffer{};
+    uint64_t total_read = 0U;
+    while (input.good()) {
+        input.read(reinterpret_cast<char*>(buffer.data()),
+                   static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize read = input.gcount();
+        if (read > 0 && !state.update(buffer.data(), static_cast<size_t>(read))) {
+            *error = "Artifact is too large for SHA-256 length encoding.";
+            return false;
+        }
+        total_read += static_cast<uint64_t>(read);
+    }
+    if (!input.eof()) {
+        *error = "Failed to read the complete artifact for SHA-256 verification.";
+        return false;
+    }
+    std::error_code final_size_error;
+    const uintmax_t final_size = std::filesystem::file_size(path, final_size_error);
+    if (final_size_error || total_read != expected_size || final_size != expected_size) {
+        *error = "Artifact changed or could not be read completely during SHA-256 verification.";
+        return false;
+    }
+    *digest = sha256_hex_digest(state.finish());
+    if (digest->size() != 64U) {
+        *error = "Artifact SHA-256 could not be derived.";
+        return false;
+    }
+    return true;
 }
 
 std::string control_image_preprocess_wire_name(ControlImagePreprocessMode mode) {

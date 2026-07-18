@@ -8,6 +8,7 @@ import android.graphics.BitmapFactory
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.os.Build
@@ -125,6 +126,7 @@ import com.muyuchat.feature.agent.AgentTuningMode
 import com.muyuchat.feature.agent.AgentTuningJobState
 import com.muyuchat.core.telemetry.SocFamily
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -132,6 +134,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
@@ -150,6 +153,7 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
@@ -169,6 +173,63 @@ enum class AppTab(val title: String) {
     API("本地 API"),
     SETTINGS("系统设置")
 }
+
+/**
+ * Monotonic publication gate for the asynchronous managed-model readiness refresh.
+ *
+ * A refresh may hash large model packages for several seconds. Any newer refresh or catalog
+ * mutation invalidates its token so a late result cannot replace a newer UI/catalog projection.
+ */
+internal class ManagedRuntimeReadinessRefreshGate {
+    private val epoch = AtomicLong(0L)
+
+    fun begin(): Long = epoch.incrementAndGet()
+
+    fun invalidate() {
+        epoch.incrementAndGet()
+    }
+
+    fun isCurrent(token: Long): Boolean = epoch.get() == token
+}
+
+/** Keeps advisory verification only while the exact persisted package identity is unchanged. */
+internal fun verifiedModelIdsWithUnchangedSha(
+    verifiedShaByModelId: Map<String, String>,
+    currentShaByModelId: Map<String, String>
+): Set<String> = currentShaByModelId
+    .asSequence()
+    .filter { (modelId, sha256) ->
+        sha256.isNotBlank() && verifiedShaByModelId[modelId] == sha256
+    }
+    .map { it.key }
+    .toSet()
+
+internal fun shouldSurfaceManagedRuntimeRefreshFailure(
+    refreshCurrent: Boolean,
+    busy: Boolean,
+    isGenerating: Boolean,
+    imageLibraryBackupRunning: Boolean,
+    imageLibraryBackupJobActive: Boolean,
+    generationImageGrantReleaseDeferred: Boolean,
+    activeImageGeneration: Boolean,
+    activeImageUpscale: Boolean,
+    activeLocalApiImageGeneration: Boolean,
+    coordinatorActive: Boolean
+): Boolean = refreshCurrent &&
+    !busy &&
+    !isGenerating &&
+    !imageLibraryBackupRunning &&
+    !imageLibraryBackupJobActive &&
+    !generationImageGrantReleaseDeferred &&
+    !activeImageGeneration &&
+    !activeImageUpscale &&
+    !activeLocalApiImageGeneration &&
+    !coordinatorActive
+
+private data class ManagedChatCatalogSnapshot(
+    val models: List<ModelManifest>,
+    val qairtVerifiedLocalModelIds: Set<String>
+)
 
 data class ChatSessionRecord(
     val id: String,
@@ -203,6 +264,7 @@ data class ImageAssetRecord(
     val width: Int = 0,
     val height: Int = 0,
     val generationMetadataJson: String = "",
+    val favorite: Boolean = false,
     val chatSessionId: String? = null,
     val projectId: String? = null
 ) {
@@ -224,14 +286,17 @@ data class ImageAssetRecord(
             sizeBytes = sizeBytes
         )
 
-    fun deleteLocalCopy() {
-        runCatching {
+    fun deleteLocalCopy(ownedRoot: File): Boolean = runCatching {
             val uri = Uri.parse(uriString)
             if (uri.scheme.equals("file", ignoreCase = true)) {
-                uri.path?.let { File(it).delete() }
+                val root = ownedRoot.canonicalFile
+                val file = uri.path?.let(::File)?.canonicalFile ?: return@runCatching false
+                if (file.parentFile != root) return@runCatching false
+                !file.exists() || file.delete() || !file.exists()
+            } else {
+                true
             }
-        }
-    }
+        }.getOrDefault(false)
 }
 
 data class FileAssetRecord(
@@ -261,6 +326,7 @@ enum class ImageGenerationStatusRecord(
 ) {
     QUEUED("排队"),
     GENERATING("生成中"),
+    CANCEL_REQUESTED("停止中"),
     DONE("完成", terminal = true),
     CANCELLED("已取消", terminal = true),
     FAILED("失败", failed = true, terminal = true)
@@ -326,6 +392,48 @@ data class ImageGenerationJobRecord(
     val startedAtMillis: Long = System.currentTimeMillis()
 )
 
+enum class ImageUpscaleStatusRecord(
+    val label: String,
+    val failed: Boolean = false,
+    val terminal: Boolean = false
+) {
+    QUEUED("排队"),
+    RUNNING("放大中"),
+    CANCEL_REQUESTED("停止中"),
+    DONE("完成", terminal = true),
+    CANCELLED("已取消", terminal = true),
+    FAILED("失败", failed = true, terminal = true)
+}
+
+data class ImageUpscaleJobSpec(
+    val sourceImageSnapshot: ImageAssetRecord,
+    val upscalerSnapshot: LocalImagePreparedUpscaler,
+    val targetScale: Int,
+    val tileSize: Int,
+    val threads: Int
+) {
+    init {
+        require(targetScale in setOf(2, 3, 4)) { "Upscale target scale must be 2, 3, or 4." }
+        require(tileSize in 32..1_024 && tileSize % 8 == 0) { "Invalid upscale tile size." }
+        require(threads in 1..64) { "Invalid upscale thread count." }
+    }
+}
+
+data class ImageUpscaleJobRecord(
+    val id: String,
+    val spec: ImageUpscaleJobSpec,
+    val status: ImageUpscaleStatusRecord,
+    val resultImageAssetId: String? = null,
+    val message: String = "",
+    val startedAtMillis: Long = System.currentTimeMillis()
+)
+
+internal fun supportsAuthenticatedLocalImageCount(
+    runtime: LocalImageRuntime,
+    imageCount: Int
+): Boolean = imageCount in 1..8 &&
+    (imageCount == 1 || runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP)
+
 private data class PublishedLocalImagePreview(
     val uriString: String,
     val mode: String,
@@ -336,16 +444,7 @@ private data class PublishedLocalImagePreview(
 )
 
 private fun LocalImageModelRecord.supportsLiveProjectionPreview(): Boolean =
-    runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP && family in setOf(
-        LocalImageModelFamily.SD15,
-        LocalImageModelFamily.SD21,
-        LocalImageModelFamily.SDXL,
-        LocalImageModelFamily.SD_TURBO,
-        LocalImageModelFamily.Z_IMAGE,
-        LocalImageModelFamily.FLUX,
-        LocalImageModelFamily.QWEN_IMAGE,
-        LocalImageModelFamily.LONGCAT_IMAGE
-    )
+    imageCapabilitiesForUi().supportsLivePreview
 
 private data class AttachmentImportResult(
     val name: String,
@@ -559,15 +658,37 @@ private val oldImagePlaceholderRegex = Regex("""\s*（当前文本模型会收�
 private const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
 private const val MAX_VISION_IMAGE_EDGE = 1280
 
+data class ImageLibraryBackupState(
+    val running: Boolean = false,
+    val importing: Boolean = false,
+    val done: Int = 0,
+    val total: Int = 0,
+    val message: String = "",
+    val failed: Boolean = false
+)
+
 data class MainUiState(
     val tab: AppTab = AppTab.CHAT,
     val messages: List<ChatMessage> = emptyList(),
     val chatSessions: List<ChatSessionRecord> = emptyList(),
     val activeChatSessionId: String? = null,
     val images: List<ImageAssetRecord> = emptyList(),
+    val imageLibraryBackup: ImageLibraryBackupState = ImageLibraryBackupState(),
     val files: List<FileAssetRecord> = emptyList(),
     val imageJobs: List<ImageGenerationJobRecord> = emptyList(),
     val localImageModels: List<LocalImageModelRecord> = emptyList(),
+    val localImageLoras: List<LocalImageLoraRecord> = emptyList(),
+    val activeLocalImageLoraIds: Set<String> = emptySet(),
+    val localImageLoraImporting: Boolean = false,
+    val localImageLoraMessage: String = "",
+    val localImageUpscalers: List<LocalImageUpscalerRecord> = emptyList(),
+    val selectedLocalImageUpscalerId: String? = null,
+    val activeLocalImageUpscalerId: String? = null,
+    val localImageUpscalerImporting: Boolean = false,
+    val localImageUpscalerDeletingId: String? = null,
+    val localImageUpscalerMessage: String = "",
+    val imageUpscaleJob: ImageUpscaleJobRecord? = null,
+    val deferGenerationImageGrantRelease: Boolean = false,
     /**
      * Calculated on Dispatchers.IO from each exact QNN stamp.  An absent entry
      * is deliberately treated as not current by UI callers.
@@ -665,7 +786,8 @@ private sealed interface VisionBundleDownloadResult {
 internal fun writeImageAssetBytesAtomically(
     directory: File,
     fileName: String,
-    bytes: ByteArray
+    bytes: ByteArray,
+    parentDirectorySyncer: ParentDirectorySyncer = AndroidParentDirectorySyncer
 ): File {
     require(bytes.isNotEmpty()) { "Generated image bytes must not be empty." }
     require(fileName.isNotBlank() && fileName == File(fileName).name) {
@@ -674,6 +796,11 @@ internal fun writeImageAssetBytesAtomically(
     val root = directory.canonicalFile
     require(root.isDirectory || root.mkdirs()) {
         "Unable to create the image asset directory."
+    }
+    val requiredSpace = Math.addExact(bytes.size.toLong(), MIN_IMAGE_ASSET_FREE_SPACE_BYTES)
+    val usableSpace = root.usableSpace
+    require(usableSpace <= 0L || usableSpace >= requiredSpace) {
+        "Insufficient storage to publish the generated image while preserving the safety reserve."
     }
     val output = File(root, fileName).canonicalFile
     require(output.parentFile == root) { "Generated image path escaped the image asset directory." }
@@ -688,12 +815,233 @@ internal fun writeImageAssetBytesAtomically(
         check(temp.isFile && temp.length() == bytes.size.toLong()) {
             "Generated image staging write was incomplete."
         }
-        check(temp.renameTo(output)) { "Unable to atomically publish the generated image." }
+        durableMoveWithinParent(
+            source = temp,
+            target = output,
+            move = { staged, published ->
+                check(staged.renameTo(published)) {
+                    "Unable to atomically publish the generated image."
+                }
+            },
+            parentDirectorySyncer = parentDirectorySyncer
+        )
         return output
+    } catch (error: Throwable) {
+        runCatching { output.delete() }
+        throw error
     } finally {
         runCatching { temp.delete() }
     }
 }
+
+internal data class ImportedImageAssetFile(
+    val file: File,
+    val sizeBytes: Long,
+    val width: Int,
+    val height: Int,
+    val mimeType: String
+)
+
+internal data class ImageAssetDeletionLease(
+    val original: File?,
+    val staged: File?
+) {
+    fun commit(): Boolean = staged?.let { file ->
+        runCatching { !file.exists() || file.delete() || !file.exists() }.getOrDefault(false)
+    } ?: true
+
+    fun rollback(): Boolean {
+        val source = staged ?: return true
+        val target = original ?: return false
+        return runCatching {
+            !source.exists() || (!target.exists() && source.renameTo(target))
+        }.getOrDefault(false)
+    }
+}
+
+internal data class ImageAssetReconciliationReport(
+    val restoredDeletions: Int = 0,
+    val deletedOrphans: Int = 0,
+    val failed: Int = 0
+)
+
+internal suspend fun copyImageAssetStreamAtomically(
+    directory: File,
+    suggestedExtension: String,
+    input: InputStream,
+    timestamp: Long = System.currentTimeMillis()
+): ImportedImageAssetFile {
+    val root = directory.canonicalFile
+    require(root.isDirectory || root.mkdirs()) { "Unable to create the image asset directory." }
+    val temp = File(root, ".import-${UUID.randomUUID()}.part").canonicalFile
+    require(temp.parentFile == root) { "Image import staging path escaped its directory." }
+    var copied = 0L
+    var publishedOutput: File? = null
+    try {
+        temp.outputStream().use { output ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (read == 0) continue
+                copied = Math.addExact(copied, read.toLong())
+                require(copied <= MAX_IMAGE_ASSET_FILE_BYTES) {
+                    "Image exceeds the 96 MiB library limit."
+                }
+                val remainingSpace = root.usableSpace
+                require(remainingSpace <= 0L ||
+                    remainingSpace >= Math.addExact(read.toLong(), MIN_IMAGE_ASSET_FREE_SPACE_BYTES)
+                ) {
+                    "Insufficient storage to import the image while preserving the safety reserve."
+                }
+                output.write(buffer, 0, read)
+            }
+            output.flush()
+            output.fd.sync()
+        }
+        currentCoroutineContext().ensureActive()
+        require(copied > 0L && temp.length() == copied) { "Image import was empty or incomplete." }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(temp.path, bounds)
+        val pixels = Math.multiplyExact(bounds.outWidth.toLong(), bounds.outHeight.toLong())
+        require(bounds.outWidth in 1..MAX_IMAGE_ASSET_SIDE &&
+            bounds.outHeight in 1..MAX_IMAGE_ASSET_SIDE &&
+            pixels in 1L..MAX_IMAGE_ASSET_PIXELS
+        ) { "Image exceeds the 4096-pixel side or 16-megapixel library limit." }
+        var sampleSize = 1
+        while (bounds.outWidth / sampleSize > 512 || bounds.outHeight / sampleSize > 512) {
+            sampleSize = Math.multiplyExact(sampleSize, 2)
+        }
+        val decoded = BitmapFactory.decodeFile(
+            temp.path,
+            BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        ) ?: error("Image bytes could not be decoded.")
+        try {
+            require(decoded.width > 0 && decoded.height > 0) { "Decoded image is empty." }
+        } finally {
+            decoded.recycle()
+        }
+        val mimeType = bounds.outMimeType?.trim()?.lowercase().orEmpty()
+        val extension = when (mimeType) {
+            "image/png" -> "png"
+            "image/jpeg", "image/jpg" -> "jpg"
+            "image/webp" -> "webp"
+            "image/heif", "image/heic" -> "heic"
+            "" -> suggestedExtension.lowercase().takeIf(IMAGE_ASSET_EXTENSIONS::contains)
+                ?: error("Unsupported image format.")
+            else -> error("Unsupported image format.")
+        }
+        val safeTimestamp = timestamp.coerceAtLeast(0L)
+        val output = File(
+            root,
+            "$safeTimestamp-${UUID.randomUUID().toString().take(8)}.$extension"
+        ).canonicalFile
+        require(output.parentFile == root && !output.exists()) {
+            "Image import destination is invalid."
+        }
+        publishedOutput = output
+        currentCoroutineContext().ensureActive()
+        durableMoveWithinParent(
+            source = temp,
+            target = output,
+            move = { staged, published ->
+                check(staged.renameTo(published)) {
+                    "Unable to atomically publish the imported image."
+                }
+            }
+        )
+        return ImportedImageAssetFile(
+            file = output,
+            sizeBytes = copied,
+            width = bounds.outWidth,
+            height = bounds.outHeight,
+            mimeType = mimeType.ifBlank { "image/$extension" }
+        )
+    } catch (error: Throwable) {
+        runCatching { publishedOutput?.delete() }
+        throw error
+    } finally {
+        runCatching { temp.delete() }
+    }
+}
+
+internal fun ImageAssetRecord.stageLocalCopyDeletion(ownedRoot: File): ImageAssetDeletionLease? =
+    runCatching {
+        val root = ownedRoot.canonicalFile
+        val original = ownedLocalImageFileOrNull(root)
+            ?: return@runCatching ImageAssetDeletionLease(null, null)
+        if (!original.exists()) return@runCatching ImageAssetDeletionLease(original, null)
+        val staged = File(
+            root,
+            ".delete-${UUID.randomUUID()}--${original.name}"
+        ).canonicalFile
+        if (staged.parentFile != root || staged.exists() || !original.renameTo(staged)) {
+            return@runCatching null
+        }
+        ImageAssetDeletionLease(original, staged)
+    }.getOrNull()
+
+internal fun ImageAssetRecord.ownedLocalImageFileOrNull(ownedRoot: File): File? = runCatching {
+    val uri = Uri.parse(uriString)
+    if (!uri.scheme.equals("file", ignoreCase = true)) return@runCatching null
+    val root = ownedRoot.canonicalFile
+    val file = uri.path?.let(::File)?.canonicalFile ?: return@runCatching null
+    file.takeIf { it.parentFile == root }
+}.getOrNull()
+
+internal fun reconcileImageAssetDirectory(
+    directory: File,
+    images: List<ImageAssetRecord>
+): ImageAssetReconciliationReport {
+    val root = runCatching { directory.canonicalFile }.getOrNull()
+        ?: return ImageAssetReconciliationReport(failed = 1)
+    if (!root.exists() && !root.mkdirs()) return ImageAssetReconciliationReport(failed = 1)
+    val referenced = images.mapNotNullTo(mutableSetOf()) { image ->
+        runCatching {
+            val uri = Uri.parse(image.uriString)
+            if (!uri.scheme.equals("file", ignoreCase = true)) return@runCatching null
+            val file = uri.path?.let(::File)?.canonicalFile ?: return@runCatching null
+            file.path.takeIf { file.parentFile == root }
+        }.getOrNull()
+    }
+    var restored = 0
+    var deleted = 0
+    var failed = 0
+    root.listFiles().orEmpty().filter(File::isFile).forEach { raw ->
+        val file = runCatching { raw.canonicalFile }.getOrNull()
+        if (file == null || file.parentFile != root) {
+            failed++
+            return@forEach
+        }
+        val deletionMatch = IMAGE_ASSET_DELETION_STAGE_REGEX.matchEntire(file.name)
+        if (deletionMatch != null) {
+            val original = File(root, deletionMatch.groupValues[1]).canonicalFile
+            if (original.parentFile != root) {
+                failed++
+            } else if (original.path in referenced) {
+                val recovered = if (original.exists()) file.delete() else file.renameTo(original)
+                if (recovered) restored++ else failed++
+            } else if (file.delete() || !file.exists()) {
+                deleted++
+            } else {
+                failed++
+            }
+        } else if (file.path !in referenced) {
+            if (file.delete() || !file.exists()) deleted++ else failed++
+        }
+    }
+    return ImageAssetReconciliationReport(restored, deleted, failed)
+}
+
+private const val MAX_IMAGE_ASSET_FILE_BYTES = 96L * 1024L * 1024L
+private const val MIN_IMAGE_ASSET_FREE_SPACE_BYTES = 64L * 1024L * 1024L
+private const val MAX_IMAGE_ASSET_SIDE = 4_096
+private const val MAX_IMAGE_ASSET_PIXELS = 16_777_216L
+private val IMAGE_ASSET_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "heic", "heif")
+private val IMAGE_ASSET_DELETION_STAGE_REGEX = Regex(
+    "\\.delete-[0-9a-fA-F-]{36}--(.+)"
+)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
@@ -702,6 +1050,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val LOCAL_IMAGE_GENERATION_WATCHDOG_MS = 8 * 60 * 1000L
         private const val LOCAL_IMAGE_UI_PREVIEW_DIRECTORY = "local_image_ui_previews"
         private const val MAX_LOCAL_IMAGE_PREVIEW_BYTES = 16L * 1024L * 1024L
+        private const val IMAGE_UPSCALER_PREFERENCES = "image_upscaler_product_selection_v1"
+        private const val IMAGE_UPSCALER_SELECTED_ID = "selected_id"
+        private const val IMAGE_UPSCALE_TILE_SIZE = 128
         private const val ASSISTANT_MODEL_MODE_FOLLOW_CURRENT = "follow_current"
         private const val ASSISTANT_MODEL_MODE_LOCAL = "local"
         private const val ASSISTANT_MODEL_MODE_CLOUD = "cloud"
@@ -726,6 +1077,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var apiServer: McaLoopbackServer? = null
     private var activeApiBindHost: String? = null
     private val chatSessionStore = ChatSessionStore(application)
+    private val imageLibraryBackup = ImageLibraryBackup(application, chatSessionStore)
+    private val imageAssetDirectory = canonicalImageAssetDirectory(application.filesDir)
     private val assistantStore = AssistantStore(application)
     private val cloudApiStore = CloudApiStore(application)
     private val cloudChatProvider = OpenAiCompatibleChatProvider()
@@ -734,6 +1087,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val webSearchDiagnosticStore = WebSearchDiagnosticStore(application)
     private val webSearchProvider = WebSearchProvider()
     private val localImageModelStore = LocalImageModelStore(application)
+    private val localImageLoraStore = LocalImageLoraStore(application)
+    private val localImageUpscalerStore = LocalImageUpscalerStore(application)
+    private val imageUpscalerPreferences = application.getSharedPreferences(
+        IMAGE_UPSCALER_PREFERENCES,
+        Context.MODE_PRIVATE
+    )
     private val localImageWorkerClient = LocalImageWorkerClient(application)
     private val deviceProfileReader = DeviceProfileReader(application)
     private val advisor = AgentAdvisor()
@@ -755,6 +1114,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val initialSelectedAssistant = initialAssistants.firstOrNull { it.id == initialSelectedAssistantId }
     private val initialEffectiveParams = initialSelectedAssistant?.toGenerationParams(initialParams) ?: initialParams
     private val initialLocalImageModels = localImageModelStore.loadModels()
+    private val initialLocalImageLoras = localImageLoraStore.load()
+    private val initialLocalImageUpscalers = localImageUpscalerStore.load()
+    private val initialSelectedLocalImageUpscalerId = imageUpscalerPreferences
+        .getString(IMAGE_UPSCALER_SELECTED_ID, null)
+        ?.takeIf { id -> initialLocalImageUpscalers.any { it.id == id } }
+        ?: initialLocalImageUpscalers.firstOrNull()?.id
     private val initialSelectedLocalImageModelId = localImageModelStore.loadSelectedModelId()
         ?.takeIf { id ->
             initialLocalImageModels.any {
@@ -792,7 +1157,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var directParameterStageJob: Job? = null
     private val directParameterStageMutex = Mutex()
     private val directParameterStageGeneration = AtomicLong(0L)
+    private val managedRuntimeReadinessRefreshGate = ManagedRuntimeReadinessRefreshGate()
+    private val imageAssetWriteMutex = Mutex()
+    private val imageLibraryMutationMutex = Mutex()
+    private val imageLibraryStartupReconciliation = viewModelScope.async(Dispatchers.IO) {
+        try {
+            imageLibraryMutationMutex.withLock {
+                imageLibraryBackup.reconcile(initialImages)
+                val report = reconcileImageAssetDirectory(imageAssetDirectory, initialImages)
+                check(report.failed == 0) { "Image asset startup reconciliation was incomplete." }
+            }
+            null
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            error
+        }
+    }
+    private val imageFavoriteMutationSequence = AtomicLong(0L)
+    private val latestImageFavoriteMutations =
+        java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>()
     private var imageGenerationJob: Job? = null
+    private var imageUpscaleJob: Job? = null
+    @Volatile private var imageLibraryBackupJob: Job? = null
+    private val imageLibraryBackupSequence = AtomicLong(0L)
+    private val imageLibraryBackupLifecycleLock = Any()
     private var adaptiveTuningJob: Job? = null
     private val adaptiveTuningPauseRequested = AtomicBoolean(false)
     private val adaptiveTuningCancelRequested = AtomicBoolean(false)
@@ -809,7 +1198,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile private var activeImageGenerationBackend: ImageBackend? = null
     @Volatile private var activeImageGenerationModelId: String? = null
     @Volatile private var activeLocalApiImageModelId: String? = null
+    @Volatile private var activeImageUpscaleJobId: String? = null
+    @Volatile private var activeImageUpscaleSourceImageId: String? = null
     private val localImageGenerationCoordinator = LocalImageGenerationCoordinator()
+    private val localImageGenerationCoordinatorObservationLock = Any()
+    private val localImageLoraLifecycleLock = Any()
+    private val localImageUpscaleLifecycleLock = Any()
+
+    private suspend fun awaitImageLibraryStartupReconciliation() {
+        if (imageLibraryStartupReconciliation.await() != null) {
+            _uiState.update { state ->
+                state.copy(statusMessage = "图片库启动清理未完全完成，将在下次启动重试。")
+            }
+        }
+    }
+
+    private fun startImageLibraryBackupJob(
+        reservation: ImageLibraryBackupState,
+        operation: suspend () -> Unit
+    ): Boolean =
+        synchronized(imageLibraryBackupLifecycleLock) {
+            if (imageLibraryBackupJob?.isCompleted == false) return@synchronized false
+            val epoch = imageLibraryBackupSequence.incrementAndGet()
+            lateinit var launchedJob: Job
+            launchedJob = viewModelScope.launch(
+                context = Dispatchers.IO,
+                start = CoroutineStart.LAZY
+            ) {
+                try {
+                    operation()
+                } finally {
+                    synchronized(imageLibraryBackupLifecycleLock) {
+                        if (imageLibraryBackupSequence.get() == epoch &&
+                            imageLibraryBackupJob === launchedJob
+                        ) {
+                            imageLibraryBackupJob = null
+                        }
+                    }
+                }
+            }
+            imageLibraryBackupJob = launchedJob
+            _uiState.update { state -> state.copy(imageLibraryBackup = reservation) }
+            launchedJob.start()
+            true
+        }
 
     private val _uiState = MutableStateFlow(
         MainUiState(
@@ -819,6 +1251,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             images = initialImages,
             files = initialFiles,
             localImageModels = initialLocalImageModels,
+            localImageLoras = initialLocalImageLoras,
+            localImageUpscalers = initialLocalImageUpscalers,
+            selectedLocalImageUpscalerId = initialSelectedLocalImageUpscalerId,
             selectedLocalImageModelId = initialSelectedLocalImageModelId,
             selectedImageBackend = when (initialSelectedImageBackend) {
                 ImageBackend.LOCAL -> if (initialSelectedLocalImageModelId != null) ImageBackend.LOCAL else ImageBackend.CLOUD
@@ -835,7 +1270,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 ChatBackend.LOCAL
             },
-            models = modelStore.listModels(),
+            // Managed model discovery may walk multi-gigabyte package trees. The IO refresh in
+            // init populates this list without blocking the first MainActivity frame.
+            models = emptyList(),
             mnnRuntimeAvailable = engine.isRuntimeAvailable(LocalChatRuntime.MNN_CPU),
             recommendedRemoteModels = sortRecommendedModels(
                 modelScopeClient.userFacingRecommendedModels(),
@@ -855,6 +1292,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     )
     val uiState = _uiState.asStateFlow()
+
+    /**
+     * Publishes coordinator ownership before admission so Compose cannot release a generation-owned
+     * content grant while UI, authenticated Local API, or upscale dispatch is materializing inputs.
+     * A failed contender keeps the flag asserted when another epoch still owns the coordinator.
+     */
+    private fun tryAcquireObservedImageGenerationLease(
+        requestId: String
+    ): LocalImageGenerationCoordinator.Lease? =
+        synchronized(localImageGenerationCoordinatorObservationLock) {
+            updateGenerationImageGrantReleaseDefer(true)
+            localImageGenerationCoordinator.tryAcquire(requestId).also { lease ->
+                if (lease == null && localImageGenerationCoordinator.activeRequestId() == null) {
+                    updateGenerationImageGrantReleaseDefer(false)
+                }
+            }
+        }
+
+    /** A stale epoch cannot clear the observable protection for the current lease holder. */
+    private fun releaseObservedImageGenerationLease(
+        lease: LocalImageGenerationCoordinator.Lease
+    ): Boolean = synchronized(localImageGenerationCoordinatorObservationLock) {
+        val released = localImageGenerationCoordinator.release(lease)
+        updateGenerationImageGrantReleaseDefer(
+            localImageGenerationCoordinator.activeRequestId() != null
+        )
+        released
+    }
+
+    /**
+     * Linearizes persistable-grant release with coordinator admission. The release block runs only
+     * while no UI, authenticated Local API, or upscale epoch owns the coordinator.
+     */
+    fun releaseGenerationImageGrantsIfCoordinatorIdle(releaseBlock: () -> Unit): Boolean =
+        synchronized(localImageGenerationCoordinatorObservationLock) {
+            if (localImageGenerationCoordinator.activeRequestId() != null) {
+                false
+            } else {
+                releaseBlock()
+                true
+            }
+        }
+
+    private fun updateGenerationImageGrantReleaseDefer(defer: Boolean) {
+        _uiState.update { state ->
+            if (state.deferGenerationImageGrantRelease == defer) {
+                state
+            } else {
+                state.copy(deferGenerationImageGrantRelease = defer)
+            }
+        }
+    }
 
     init {
         runCatching {
@@ -1506,41 +1995,139 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return selectStructurallyReadyLocalImageModelId(models, preferredId)
     }
 
-    /** Refreshes product-facing readiness; persisted verification remains advisory. */
-    private fun refreshManagedRuntimeReadiness() {
-        val localImageModels = localImageModelStore.loadModels()
-        val localModels = modelStore.listModels()
-        val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(localImageModels)
-        val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(localModels)
-        val current = _uiState.value
-        val selectedImageModelId = selectedReadyLocalImageModelId(
-            models = localImageModels,
-            qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
-            preferredId = localImageModelStore.loadSelectedModelId()
-        )
-        val selectedImageBackend = when {
-            selectedImageModelId != null && localImageModelStore.loadSelectedBackend() == ImageBackend.LOCAL ->
-                ImageBackend.LOCAL
-            selectedImageModelId == null && current.selectedImageBackend == ImageBackend.LOCAL ->
-                ImageBackend.CLOUD
-            else -> current.selectedImageBackend
-        }
-        localImageModelStore.saveSelectedModelId(selectedImageModelId)
-        localImageModelStore.saveSelectedBackend(selectedImageBackend)
-        _uiState.update {
-            it.copy(
-                models = localModels,
-                localImageModels = localImageModels,
-                qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
+    /**
+     * validateForLoad may rewrite a QAIRT directory fingerprint. Invalidate any in-flight
+     * readiness refresh first, then publish the exact persisted catalog and advisory evidence
+     * before a later canary, load, cancellation, or failure can return.
+     *
+     * Must be called from an IO coroutine.
+     */
+    private fun publishManagedChatCatalogAfterValidation(): ManagedChatCatalogSnapshot {
+        managedRuntimeReadinessRefreshGate.invalidate()
+        val models = modelStore.listModels()
+        val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(models)
+        _uiState.update { state ->
+            state.copy(
+                models = models,
                 qairtVerifiedLocalModelIds = qairtVerifiedLocalModelIds,
                 qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
-                    models = localModels,
+                    models = models,
                     verifiedLocalModelIds = qairtVerifiedLocalModelIds,
-                    recommendations = it.recommendedRemoteModels
-                ),
-                selectedLocalImageModelId = selectedImageModelId,
-                selectedImageBackend = selectedImageBackend
+                    recommendations = state.recommendedRemoteModels
+                )
             )
+        }
+        return ManagedChatCatalogSnapshot(
+            models = models,
+            qairtVerifiedLocalModelIds = qairtVerifiedLocalModelIds
+        )
+    }
+
+    /** Refreshes product-facing readiness; persisted verification remains advisory. */
+    private fun refreshManagedRuntimeReadiness() {
+        val refreshToken = managedRuntimeReadinessRefreshGate.begin()
+        try {
+            // Publish the inexpensive catalog projection before hashing QNN/QAIRT packages. This
+            // keeps cold start responsive while the readiness evidence is still being collected.
+            val localModels = modelStore.listModels()
+            _uiState.update { state ->
+                if (managedRuntimeReadinessRefreshGate.isCurrent(refreshToken)) {
+                    val previouslyVerifiedShaByModelId = state.models
+                        .asSequence()
+                        .filter { it.id in state.qairtVerifiedLocalModelIds }
+                        .associate { it.id to it.sha256 }
+                    val stillVerifiedIds = verifiedModelIdsWithUnchangedSha(
+                        verifiedShaByModelId = previouslyVerifiedShaByModelId,
+                        currentShaByModelId = localModels.associate { it.id to it.sha256 }
+                    )
+                    state.copy(
+                        models = localModels,
+                        qairtVerifiedLocalModelIds = stillVerifiedIds,
+                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
+                            models = localModels,
+                            verifiedLocalModelIds = stillVerifiedIds,
+                            recommendations = state.recommendedRemoteModels
+                        )
+                    )
+                } else {
+                    state
+                }
+            }
+            if (!managedRuntimeReadinessRefreshGate.isCurrent(refreshToken)) return
+
+            val localImageModels = localImageModelStore.loadModels()
+            val persistedImageModelId = localImageModelStore.loadSelectedModelId()
+            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(localImageModels)
+            val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(localModels)
+            if (!managedRuntimeReadinessRefreshGate.isCurrent(refreshToken)) return
+
+            _uiState.update { latest ->
+                if (!managedRuntimeReadinessRefreshGate.isCurrent(refreshToken)) {
+                    latest
+                } else {
+                    // Selection is user-owned state. Merge against the latest StateFlow value at
+                    // publication time and never write a captured background value back to prefs.
+                    val preferredImageModelId = latest.selectedLocalImageModelId
+                        ?.takeIf { selectedId -> localImageModels.any { it.id == selectedId } }
+                        ?: persistedImageModelId
+                    val selectedImageModelId = selectedReadyLocalImageModelId(
+                        models = localImageModels,
+                        qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
+                        preferredId = preferredImageModelId
+                    )
+                    val selectedImageBackend = if (
+                        selectedImageModelId == null && latest.selectedImageBackend == ImageBackend.LOCAL
+                    ) {
+                        ImageBackend.CLOUD
+                    } else {
+                        latest.selectedImageBackend
+                    }
+                    val verifiedQairtShaByModelId = localModels
+                        .asSequence()
+                        .filter { it.id in qairtVerifiedLocalModelIds }
+                        .associate { it.id to it.sha256 }
+                    val currentQairtVerifiedIds = verifiedModelIdsWithUnchangedSha(
+                        verifiedShaByModelId = verifiedQairtShaByModelId,
+                        currentShaByModelId = latest.models.associate { it.id to it.sha256 }
+                    )
+                    latest.copy(
+                        localImageModels = localImageModels,
+                        qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
+                        qairtVerifiedLocalModelIds = currentQairtVerifiedIds,
+                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
+                            models = latest.models,
+                            verifiedLocalModelIds = currentQairtVerifiedIds,
+                            recommendations = latest.recommendedRemoteModels
+                        ),
+                        selectedLocalImageModelId = selectedImageModelId,
+                        selectedImageBackend = selectedImageBackend
+                    )
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            _uiState.update { state ->
+                if (shouldSurfaceManagedRuntimeRefreshFailure(
+                        refreshCurrent = managedRuntimeReadinessRefreshGate.isCurrent(refreshToken),
+                        busy = state.busy,
+                        isGenerating = state.isGenerating,
+                        imageLibraryBackupRunning = state.imageLibraryBackup.running,
+                        imageLibraryBackupJobActive = imageLibraryBackupJob?.isCompleted == false,
+                        generationImageGrantReleaseDeferred = state.deferGenerationImageGrantRelease,
+                        activeImageGeneration = activeImageGenerationJobId != null,
+                        activeImageUpscale = activeImageUpscaleJobId != null,
+                        activeLocalApiImageGeneration = activeLocalApiImageModelId != null,
+                        coordinatorActive = localImageGenerationCoordinator.activeRequestId() != null
+                    )) {
+                    state.copy(
+                        statusMessage = "模型目录后台刷新失败，已保留当前列表：" +
+                            (error.message ?: "请稍后重试")
+                    )
+                } else {
+                    state
+                }
+            }
         }
     }
 
@@ -1558,6 +2145,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val uri = Uri.parse(uriString)
                 val name = displayNameForUri(uri)
                 if (isImageAttachment(uri, name)) {
+                    awaitImageLibraryStartupReconciliation()
                     val image = importImageAsset(
                         uri = uri,
                         displayName = name,
@@ -1581,45 +2169,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 AttachmentImportResult(name, file.text, file.truncated, fileAsset = file)
             }
+            result.exceptionOrNull()?.let { error ->
+                if (error is CancellationException) throw error
+            }
             result.onSuccess { imported ->
-                imported.imageAsset?.let { image ->
-                    val persistenceError = runCatching {
-                        chatSessionStore.upsertImages(listOf(image))
-                    }.exceptionOrNull()
-                    if (persistenceError != null) {
-                        image.deleteLocalCopy()
-                        fail("图片库保存失败：${persistenceError.message ?: "数据库提交失败"}")
-                        return@onSuccess
+                fun publishImportedAttachment(): List<FileAssetRecord>? {
+                    var filesToPersist: List<FileAssetRecord>? = null
+                    _uiState.update { state ->
+                        val attachment = buildString {
+                            if (state.input.isNotBlank()) append("\n\n")
+                            if (imported.imageAsset != null) {
+                                append(imported.text.trim())
+                            } else if (imported.fileAsset != null) {
+                                append(imported.fileAsset.toInputAttachment())
+                            } else {
+                                append("【上传文件：").append(imported.name).append("】\n")
+                                append(imported.text.trim())
+                                if (imported.truncated) append("\n\n（文件较大，已截取前 64KB）")
+                            }
+                        }
+                        val updatedImages = imported.imageAsset?.let { image ->
+                            (listOf(image) + state.images.filterNot { it.id == image.id })
+                                .sortedImagesForLibrary()
+                        }
+                        val updatedFiles = imported.fileAsset?.let { file ->
+                            (listOf(file) + state.files.filterNot { it.id == file.id })
+                                .sortedFilesForLibrary()
+                        }
+                        if (updatedFiles != null) filesToPersist = updatedFiles
+                        state.copy(
+                            input = state.input + attachment,
+                            images = updatedImages ?: state.images,
+                            files = updatedFiles ?: state.files,
+                            statusMessage = if (imported.imageAsset != null) {
+                                "已添加图片：${imported.name}"
+                            } else {
+                                "已添加文件：${imported.name}"
+                            }
+                        )
                     }
+                    return filesToPersist
                 }
-                var filesToPersist: List<FileAssetRecord>? = null
-                _uiState.update { state ->
-                    val attachment = buildString {
-                        if (state.input.isNotBlank()) append("\n\n")
-                        if (imported.imageAsset != null) {
-                            append(imported.text.trim())
-                        } else if (imported.fileAsset != null) {
-                            append(imported.fileAsset.toInputAttachment())
-                        } else {
-                            append("【上传文件：").append(imported.name).append("】\n")
-                            append(imported.text.trim())
-                            if (imported.truncated) append("\n\n（文件较大，已截取前 64KB）")
+
+                val filesToPersist = imported.imageAsset?.let { image ->
+                    val commit = runCatching {
+                        imageLibraryMutationMutex.withLock {
+                            currentCoroutineContext().ensureActive()
+                            chatSessionStore.upsertImages(listOf(image))
+                            publishImportedAttachment()
                         }
                     }
-                    val updatedImages = imported.imageAsset?.let { image ->
-                        (listOf(image) + state.images.filterNot { it.id == image.id }).sortedImagesForLibrary()
+                    val error = commit.exceptionOrNull()
+                    if (error != null) {
+                        image.deleteLocalCopy(imageAssetDirectory)
+                        if (error is CancellationException) throw error
+                        fail("图片库保存失败：${error.message ?: "数据库提交失败"}")
+                        return@onSuccess
                     }
-                    val updatedFiles = imported.fileAsset?.let { file ->
-                        (listOf(file) + state.files.filterNot { it.id == file.id }).sortedFilesForLibrary()
-                    }
-                    if (updatedFiles != null) filesToPersist = updatedFiles
-                    state.copy(
-                        input = state.input + attachment,
-                        images = updatedImages ?: state.images,
-                        files = updatedFiles ?: state.files,
-                        statusMessage = if (imported.imageAsset != null) "已添加图片：${imported.name}" else "已添加文件：${imported.name}"
-                    )
-                }
+                    commit.getOrThrow()
+                } ?: publishImportedAttachment()
                 filesToPersist?.let { persistFiles(it) }
             }.onFailure { error ->
                 _uiState.update { it.copy(statusMessage = error.message ?: "文件上传失败") }
@@ -1675,6 +2283,505 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         persistFiles(emptyList())
     }
 
+    fun importLocalImageLora(uriString: String) {
+        val uri = runCatching { Uri.parse(uriString.trim()) }.getOrNull()
+        if (uri == null || !uri.scheme.equals("content", ignoreCase = true)) {
+            _uiState.update {
+                it.copy(localImageLoraMessage = "请选择可读取的 LoRA 文档。")
+            }
+            return
+        }
+        if (_uiState.value.localImageLoraImporting) return
+        val existingIds = _uiState.value.localImageLoras.mapTo(mutableSetOf(), LocalImageLoraRecord::id)
+        _uiState.update {
+            it.copy(
+                localImageLoraImporting = true,
+                localImageLoraMessage = "正在导入 LoRA…"
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { localImageLoraStore.import(uri) }
+                .onSuccess { record ->
+                    val records = localImageLoraStore.load()
+                    _uiState.update {
+                        it.copy(
+                            localImageLoras = records,
+                            localImageLoraImporting = false,
+                            localImageLoraMessage = if (record.id in existingIds) {
+                                "相同 LoRA 已存在：${record.name}"
+                            } else {
+                                "已导入 LoRA：${record.name}"
+                            }
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            localImageLoraImporting = false,
+                            localImageLoraMessage = "LoRA 导入失败：${error.message ?: "文件无效"}"
+                        )
+                    }
+                }
+        }
+    }
+
+    fun deleteLocalImageLora(id: String) {
+        val adapterId = id.trim()
+        if (adapterId.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val deletion = synchronized(localImageLoraLifecycleLock) {
+                if (adapterId in _uiState.value.activeLocalImageLoraIds) {
+                    false to "该 LoRA 正被当前图片任务使用，任务结束后才能删除。"
+                } else {
+                    val record = _uiState.value.localImageLoras.firstOrNull { it.id == adapterId }
+                    when {
+                        record == null -> false to "LoRA 已不存在。"
+                        localImageLoraStore.delete(adapterId) -> true to "已删除 LoRA：${record.name}"
+                        else -> false to "LoRA 文件删除失败，索引和文件均已保留。"
+                    }
+                }
+            }
+            val records = localImageLoraStore.load()
+            _uiState.update {
+                it.copy(
+                    localImageLoras = records,
+                    localImageLoraMessage = deletion.second
+                )
+            }
+        }
+    }
+
+    fun reportMissingLocalImageLoraSelection() {
+        _uiState.update {
+            it.copy(
+                localImageLoraMessage = "所选 LoRA 已删除，请重新选择。",
+                statusMessage = "所选 LoRA 已删除，请重新选择。"
+            )
+        }
+    }
+
+    fun importLocalImageUpscaler(uriString: String) {
+        val uri = runCatching { Uri.parse(uriString.trim()) }.getOrNull()
+        if (uri == null || !uri.scheme.equals("content", ignoreCase = true)) {
+            _uiState.update {
+                it.copy(localImageUpscalerMessage = "请选择可读取的 ESRGAN 模型文档。")
+            }
+            return
+        }
+        if (_uiState.value.localImageUpscalerImporting) return
+        _uiState.update {
+            it.copy(
+                localImageUpscalerImporting = true,
+                localImageUpscalerMessage = "正在导入放大模型…"
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { localImageUpscalerStore.import(uri) }
+                .onSuccess { imported ->
+                    val records = localImageUpscalerStore.load()
+                    val selectedId = imported.id.takeIf { id -> records.any { it.id == id } }
+                        ?: records.firstOrNull()?.id
+                    val selectionSaved = imageUpscalerPreferences.edit()
+                        .putString(IMAGE_UPSCALER_SELECTED_ID, selectedId)
+                        .commit()
+                    if (!selectionSaved) {
+                        _uiState.update {
+                            it.copy(
+                                localImageUpscalers = records,
+                                localImageUpscalerImporting = false,
+                                localImageUpscalerMessage = "放大模型已导入，但所选模型未能持久化。"
+                            )
+                        }
+                        return@onSuccess
+                    }
+                    _uiState.update {
+                        it.copy(
+                            localImageUpscalers = records,
+                            selectedLocalImageUpscalerId = selectedId,
+                            localImageUpscalerImporting = false,
+                            localImageUpscalerMessage = "已导入并选择放大模型：${imported.name}"
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            localImageUpscalerImporting = false,
+                            localImageUpscalerMessage =
+                                "放大模型导入失败：${error.message ?: "文件无效"}"
+                        )
+                    }
+                }
+        }
+    }
+
+    fun selectLocalImageUpscaler(id: String) {
+        val upscalerId = id.trim()
+        val record = _uiState.value.localImageUpscalers.firstOrNull { it.id == upscalerId }
+        if (record == null) {
+            _uiState.update {
+                it.copy(localImageUpscalerMessage = "所选放大模型已不存在，请重新选择。")
+            }
+            return
+        }
+        val selectionSaved = imageUpscalerPreferences.edit()
+            .putString(IMAGE_UPSCALER_SELECTED_ID, record.id)
+            .commit()
+        if (!selectionSaved) {
+            _uiState.update {
+                it.copy(localImageUpscalerMessage = "所选放大模型未能持久化，请重试。")
+            }
+            return
+        }
+        _uiState.update {
+            it.copy(
+                selectedLocalImageUpscalerId = record.id,
+                localImageUpscalerMessage = "已选择放大模型：${record.name}"
+            )
+        }
+    }
+
+    fun deleteLocalImageUpscaler(id: String) {
+        val upscalerId = id.trim()
+        if (upscalerId.isEmpty()) return
+        _uiState.update { it.copy(localImageUpscalerDeletingId = upscalerId) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val message = synchronized(localImageUpscaleLifecycleLock) {
+                if (activeImageUpscaleJobId != null &&
+                    _uiState.value.activeLocalImageUpscalerId == upscalerId
+                ) {
+                    "该放大模型正被当前任务使用，任务结束后才能删除。"
+                } else {
+                    val record = localImageUpscalerStore.load().firstOrNull { it.id == upscalerId }
+                    when {
+                        record == null -> "放大模型已不存在。"
+                        !localImageUpscalerStore.delete(upscalerId) ->
+                            "放大模型删除失败，索引和文件均已保留。"
+                        else -> "已删除放大模型：${record.name}"
+                    }
+                }
+            }
+            val records = localImageUpscalerStore.load()
+            val previousSelectedId = _uiState.value.selectedLocalImageUpscalerId
+            val selectedId = previousSelectedId?.takeIf { id -> records.any { it.id == id } }
+                ?: records.firstOrNull()?.id
+            val selectionSaved = imageUpscalerPreferences.edit()
+                .putString(IMAGE_UPSCALER_SELECTED_ID, selectedId)
+                .commit()
+            _uiState.update {
+                it.copy(
+                    localImageUpscalers = records,
+                    selectedLocalImageUpscalerId = selectedId,
+                    localImageUpscalerDeletingId = null,
+                    localImageUpscalerMessage = if (selectionSaved) {
+                        message
+                    } else {
+                        "$message；后续选择未能持久化。"
+                    }
+                )
+            }
+        }
+    }
+
+    fun upscaleImageAsset(imageId: String, targetScale: Int) {
+        if (targetScale !in setOf(2, 3, 4)) {
+            _uiState.update { it.copy(statusMessage = "图片放大仅支持 2x、3x 或 4x。") }
+            return
+        }
+        val requestId = "ui-upscale-${UUID.randomUUID()}"
+        val lease = tryAcquireObservedImageGenerationLease(requestId)
+        if (lease == null) {
+            _uiState.update {
+                it.copy(statusMessage = "已有 UI 或 Local API 图片任务正在运行，请等待完成或先停止当前任务")
+            }
+            return
+        }
+        val spec = synchronized(localImageUpscaleLifecycleLock) {
+            val state = _uiState.value
+            val source = state.images.firstOrNull { it.id == imageId }
+            val selectedUpscalerId = state.selectedLocalImageUpscalerId
+            val upscaler = localImageUpscalerStore.load()
+                .firstOrNull { it.id == selectedUpscalerId }
+            if (source == null || upscaler == null) {
+                check(releaseObservedImageGenerationLease(lease)) {
+                    "Upscale lease was replaced during request admission."
+                }
+                _uiState.update {
+                    it.copy(
+                        localImageUpscalers = localImageUpscalerStore.load(),
+                        selectedLocalImageUpscalerId = upscaler?.id,
+                        localImageUpscalerMessage = if (source == null) {
+                            "源图片已不存在。"
+                        } else {
+                            "请先导入并选择一个 ESRGAN 放大模型。"
+                        }
+                    )
+                }
+                return
+            }
+            ImageUpscaleJobSpec(
+                sourceImageSnapshot = source,
+                upscalerSnapshot = upscaler.toPrepared(),
+                targetScale = targetScale,
+                tileSize = IMAGE_UPSCALE_TILE_SIZE,
+                threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 5)
+            ).also { snapshot ->
+                activeImageUpscaleJobId = requestId
+                activeImageUpscaleSourceImageId = source.id
+                _uiState.update {
+                    it.copy(
+                        localImageUpscalers = localImageUpscalerStore.load(),
+                        activeLocalImageUpscalerId = upscaler.id,
+                        imageUpscaleJob = ImageUpscaleJobRecord(
+                            id = requestId,
+                            spec = snapshot,
+                            status = ImageUpscaleStatusRecord.QUEUED,
+                            message = "图片放大任务已排队"
+                        ),
+                        localImageUpscalerMessage = "图片放大任务已排队"
+                    )
+                }
+            }
+        }
+        val executionJob = viewModelScope.launch(Dispatchers.IO) {
+            var unpublishedImage: ImageAssetRecord? = null
+            try {
+                awaitImageLibraryStartupReconciliation()
+                _uiState.update { state ->
+                    val job = state.imageUpscaleJob
+                    if (job?.id == requestId) {
+                        state.copy(
+                            imageUpscaleJob = job.copy(
+                                status = ImageUpscaleStatusRecord.RUNNING,
+                                message = "正在运行本地 ESRGAN 放大"
+                            )
+                        )
+                    } else {
+                        state
+                    }
+                }
+                val result = localImageWorkerClient.upscale(
+                    inputImageReference = spec.sourceImageSnapshot.uriString,
+                    upscaler = spec.upscalerSnapshot,
+                    targetScale = spec.targetScale,
+                    tileSize = spec.tileSize,
+                    threads = spec.threads,
+                    requestId = requestId,
+                    onProgress = { progress ->
+                        _uiState.update { state ->
+                            val job = state.imageUpscaleJob
+                            if (job?.id == requestId && !job.status.terminal) {
+                                state.copy(
+                                    imageUpscaleJob = job.copy(
+                                        message = progress.toImageUpscaleMessage()
+                                    )
+                                )
+                            } else {
+                                state
+                            }
+                        }
+                    }
+                )
+                currentCoroutineContext().ensureActive()
+                if (_uiState.value.imageUpscaleJob?.status == ImageUpscaleStatusRecord.CANCEL_REQUESTED) {
+                    throw CancellationException("Image upscale was cancelled before publication.")
+                }
+                val generated = createUpscaledImageAsset(spec, result, requestId)
+                unpublishedImage = generated
+                val commitError = runCatching {
+                    imageLibraryMutationMutex.withLock {
+                        currentCoroutineContext().ensureActive()
+                        val admittedJob = _uiState.value.imageUpscaleJob
+                        if (activeImageUpscaleJobId != requestId ||
+                            admittedJob == null ||
+                            admittedJob.id != requestId ||
+                            admittedJob.status == ImageUpscaleStatusRecord.CANCEL_REQUESTED ||
+                            admittedJob.status.terminal
+                        ) {
+                            throw CancellationException(
+                                "Image upscale lost ownership before library commit."
+                            )
+                        }
+                        chatSessionStore.upsertImages(listOf(generated))
+                        _uiState.update { state ->
+                            val job = state.imageUpscaleJob
+                            if (activeImageUpscaleJobId != requestId ||
+                                job == null ||
+                                job.id != requestId ||
+                                job.status == ImageUpscaleStatusRecord.CANCEL_REQUESTED ||
+                                job.status.terminal
+                            ) {
+                                state
+                            } else {
+                                state.copy(
+                                    images = (
+                                        listOf(generated) + state.images.filterNot {
+                                            it.id == generated.id
+                                        }
+                                    ).sortedImagesForLibrary(),
+                                    imageUpscaleJob = job.copy(
+                                        status = ImageUpscaleStatusRecord.DONE,
+                                        resultImageAssetId = generated.id,
+                                        message = "放大结果已保存到图片库"
+                                    ),
+                                    localImageUpscalerMessage = "放大结果已保存：${generated.name}",
+                                    statusMessage = "图片放大完成并已保存到图片库"
+                                )
+                            }
+                        }
+                        val published = _uiState.value.imageUpscaleJob?.let { job ->
+                            job.id == requestId &&
+                                job.status == ImageUpscaleStatusRecord.DONE &&
+                                job.resultImageAssetId == generated.id
+                        } == true
+                        if (!published) {
+                            val rolledBack = runCatching {
+                                chatSessionStore.deleteImages(listOf(generated.id))
+                            }.isSuccess
+                            if (rolledBack) {
+                                throw CancellationException(
+                                    "Image upscale was cancelled during library commit."
+                                )
+                            }
+                            // The database owns the file now. Reflect that durable state instead of
+                            // deleting the bytes and leaving a hidden row with a broken URI.
+                            _uiState.update { state ->
+                                val job = state.imageUpscaleJob
+                                if (job?.id != requestId) {
+                                    state
+                                } else {
+                                    state.copy(
+                                        images = (
+                                            listOf(generated) + state.images.filterNot {
+                                                it.id == generated.id
+                                            }
+                                        ).sortedImagesForLibrary(),
+                                        imageUpscaleJob = job.copy(
+                                            status = ImageUpscaleStatusRecord.DONE,
+                                            resultImageAssetId = generated.id,
+                                            message = "放大结果已保存到图片库"
+                                        ),
+                                        localImageUpscalerMessage =
+                                            "放大结果已保存：${generated.name}",
+                                        statusMessage = "图片放大完成并已保存到图片库"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }.exceptionOrNull()
+                if (commitError != null) {
+                    generated.deleteLocalCopy(imageAssetDirectory)
+                    unpublishedImage = null
+                    throw commitError
+                }
+                unpublishedImage = null
+            } catch (error: Throwable) {
+                unpublishedImage?.deleteLocalCopy(imageAssetDirectory)
+                unpublishedImage = null
+                val cancelled = error is CancellationException ||
+                    error is LocalImageWorkerCancelledException
+                val message = if (cancelled) {
+                    "已取消图片放大"
+                } else {
+                    error.message ?: "图片放大失败"
+                }
+                _uiState.update { state ->
+                    val job = state.imageUpscaleJob
+                    if (job?.id != requestId) return@update state
+                    state.copy(
+                        imageUpscaleJob = job.copy(
+                            status = if (cancelled) {
+                                ImageUpscaleStatusRecord.CANCELLED
+                            } else {
+                                ImageUpscaleStatusRecord.FAILED
+                            },
+                            message = message
+                        ),
+                        localImageUpscalerMessage = message,
+                        statusMessage = if (cancelled) message else "图片放大失败：$message"
+                    )
+                }
+            }
+        }
+        imageUpscaleJob = executionJob
+        executionJob.invokeOnCompletion { completion ->
+            synchronized(localImageUpscaleLifecycleLock) {
+                val ownsActiveUpscale = activeImageUpscaleJobId == requestId
+                if (ownsActiveUpscale) {
+                    activeImageUpscaleJobId = null
+                    activeImageUpscaleSourceImageId = null
+                }
+                val released = releaseObservedImageGenerationLease(lease)
+                _uiState.update { state ->
+                    val job = state.imageUpscaleJob
+                    val terminalJob = if (completion is CancellationException &&
+                        job?.id == requestId && !job.status.terminal
+                    ) {
+                        job.copy(
+                            status = ImageUpscaleStatusRecord.CANCELLED,
+                            message = "已取消图片放大"
+                        )
+                    } else {
+                        job
+                    }
+                    state.copy(
+                        activeLocalImageUpscalerId = if (ownsActiveUpscale) {
+                            null
+                        } else {
+                            state.activeLocalImageUpscalerId
+                        },
+                        imageUpscaleJob = terminalJob,
+                        localImageUpscalerMessage = if (terminalJob?.status ==
+                            ImageUpscaleStatusRecord.CANCELLED
+                        ) {
+                            "已取消图片放大"
+                        } else {
+                            state.localImageUpscalerMessage
+                        },
+                        statusMessage = if (!released) {
+                            "图片放大任务已结束，但 coordinator lease 状态不一致。"
+                        } else {
+                            state.statusMessage
+                        }
+                    )
+                }
+            }
+            if (imageUpscaleJob === executionJob) imageUpscaleJob = null
+        }
+    }
+
+    fun cancelImageUpscale() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val requestId = activeImageUpscaleJobId
+            if (requestId == null) {
+                _uiState.update { it.copy(localImageUpscalerMessage = "当前没有正在运行的图片放大任务。") }
+                return@launch
+            }
+            _uiState.update { state ->
+                val job = state.imageUpscaleJob
+                if (job?.id == requestId && !job.status.terminal) {
+                    state.copy(
+                        imageUpscaleJob = job.copy(
+                            status = ImageUpscaleStatusRecord.CANCEL_REQUESTED,
+                            message = "正在停止图片放大，等待 worker 释放本次执行"
+                        ),
+                        localImageUpscalerMessage = "正在停止图片放大…"
+                    )
+                } else {
+                    state
+                }
+            }
+            val nativeCancelRequested = localImageWorkerClient.cancel()
+            if (!nativeCancelRequested) {
+                imageUpscaleJob
+                    ?.takeIf { activeImageUpscaleJobId == requestId }
+                    ?.cancel(CancellationException("Image upscale cancelled by user."))
+            }
+        }
+    }
+
     fun generateImageAsset(
         prompt: String,
         inputDraft: LocalImageInputDraft = LocalImageInputDraft(),
@@ -1707,12 +2814,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun resolveCurrentLocalImageLoras(
+        selections: List<Pair<String, Double>>,
+        records: List<LocalImageLoraRecord> = _uiState.value.localImageLoras
+    ): List<LocalImagePreparedLora> {
+        require(selections.size <= LocalImagePreparedLora.MAX_COUNT) {
+            "单次最多使用 ${LocalImagePreparedLora.MAX_COUNT} 个 LoRA。"
+        }
+        require(selections.map { it.first }.distinct().size == selections.size) {
+            "同一个 LoRA 不能重复选择。"
+        }
+        val recordsById = records.associateBy(LocalImageLoraRecord::id)
+        return selections.map { (id, multiplier) ->
+            val record = recordsById[id]
+                ?: throw LocalImageProductContractException(
+                    "image_lora_not_found",
+                    "所选 LoRA 已删除或不可用：$id"
+                )
+            record.toPrepared(multiplier)
+        }
+    }
+
     fun recreateImageAsset(imageId: String) {
         val state = _uiState.value
         val asset = state.images.firstOrNull { it.id == imageId }
         val history = ImageGenerationHistoryMetadata.fromJsonOrNull(asset?.generationMetadataJson)
         if (asset == null || history == null) {
             _uiState.update { it.copy(statusMessage = "这张图片没有可复现的完整生成参数。") }
+            return
+        }
+        if (!history.canRecreate()) {
+            _uiState.update {
+                it.copy(statusMessage = "历史记录缺少当前生成方式必需的输入图片，无法直接重现。")
+            }
             return
         }
         val snapshot = when (history.backend) {
@@ -1724,6 +2858,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     return
                 }
+                val resolvedLoras = runCatching {
+                    resolveCurrentLocalImageLoras(
+                        history.loras.map { selection -> selection.id to selection.multiplier }
+                    )
+                }.getOrElse { error ->
+                    _uiState.update {
+                        it.copy(
+                            statusMessage = "历史任务需要的 LoRA 已缺失：${error.message ?: "请重新导入后再试"}"
+                        )
+                    }
+                    return
+                }
                 ImageGenerationJobSpec(
                     prompt = history.requestPrompt,
                     backend = ImageBackend.LOCAL,
@@ -1731,7 +2877,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     modelId = model.id,
                     modelName = history.modelName,
                     inputDraft = history.inputDraft,
-                    options = history.options,
+                    options = history.options.copy(loras = resolvedLoras),
                     chatSessionId = asset.chatSessionId
                 )
             }
@@ -1758,12 +2904,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+        val unreadableInput = history.requiredContentInputReferences().firstOrNull { reference ->
+            !canReadGenerationHistoryInput(reference)
+        }
+        if (unreadableInput != null) {
+            _uiState.update {
+                it.copy(statusMessage = "历史输入图片的读取权限已失效，请重新选择输入后再生成。")
+            }
+            return
+        }
         enqueueImageGeneration(
             prompt = snapshot.prompt,
             inputDraft = snapshot.inputDraft,
             options = snapshot.options,
             jobSnapshot = snapshot
         )
+    }
+
+    private fun canReadGenerationHistoryInput(reference: String): Boolean {
+        val uri = runCatching { Uri.parse(reference.trim()) }.getOrNull()
+            ?.takeIf { it.scheme.equals("content", ignoreCase = true) }
+            ?: return false
+        return runCatching {
+            getApplication<Application>().contentResolver.openInputStream(uri)
+                ?.use { stream -> stream.read() >= 0 }
+                ?: false
+        }.getOrDefault(false)
     }
 
     private fun enqueueImageGeneration(
@@ -1811,22 +2977,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ?: requestedCloudConfig?.imageModel.orEmpty()
         val requestedChatSessionId = jobSnapshot?.chatSessionId ?: enqueueState.activeChatSessionId
         val baseOptions = jobSnapshot?.options ?: options
-        val queuedOptions = if (
+        val currentOptions = if (requestedBackend == ImageBackend.LOCAL) {
+            runCatching {
+                baseOptions.copy(
+                    loras = resolveCurrentLocalImageLoras(
+                        baseOptions.loras.map { adapter -> adapter.id to adapter.multiplier }
+                    )
+                )
+            }.getOrElse { error ->
+                _uiState.update {
+                    it.copy(statusMessage = "图片任务的 LoRA 不可用：${error.message ?: "请重新选择"}")
+                }
+                return
+            }
+        } else {
+            if (baseOptions.loras.isNotEmpty()) {
+                _uiState.update { it.copy(statusMessage = "云端图片连接器不接受本地 LoRA。") }
+                return
+            }
+            baseOptions
+        }
+        var queuedOptions = if (
             requestedBackend == ImageBackend.LOCAL &&
             requestedLocalModel?.supportsLiveProjectionPreview() == true &&
-            baseOptions.preview == null
+            currentOptions.preview == null
         ) {
-            baseOptions.copy(
+            currentOptions.copy(
                 preview = LocalImagePreviewOptions(
                     interval = 1,
                     mode = LocalImagePreviewMode.PROJECTION
                 )
             )
         } else {
-            baseOptions
+            currentOptions
         }
         val queuedInputDraft = jobSnapshot?.inputDraft ?: inputDraft
-        val queuedJobSpec = jobSnapshot ?: ImageGenerationJobSpec(
+        var queuedJobSpec = (jobSnapshot ?: ImageGenerationJobSpec(
             prompt = cleanPrompt,
             backend = requestedBackend,
             localModelSnapshot = requestedLocalModel,
@@ -1836,14 +3022,55 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             inputDraft = queuedInputDraft,
             options = queuedOptions,
             chatSessionId = requestedChatSessionId
+        )).copy(
+            localModelSnapshot = requestedLocalModel,
+            cloudConfigSnapshot = requestedCloudConfig,
+            options = queuedOptions
         )
-        val generationLease = localImageGenerationCoordinator.tryAcquire(jobId)
+        val generationLease = tryAcquireObservedImageGenerationLease(jobId)
         if (generationLease == null) {
             _uiState.update {
                 it.copy(statusMessage = "已有 UI 或 Local API 图片任务正在运行，请等待完成或先停止当前任务")
             }
             return
         }
+        val leasedLoraRefreshError = synchronized(localImageLoraLifecycleLock) {
+            runCatching {
+                val currentLoras = localImageLoraStore.load()
+                queuedOptions = queuedOptions.copy(
+                    loras = resolveCurrentLocalImageLoras(
+                        queuedOptions.loras.map { adapter -> adapter.id to adapter.multiplier },
+                        currentLoras
+                    )
+                )
+                queuedJobSpec = queuedJobSpec.copy(options = queuedOptions)
+                _uiState.update {
+                    it.copy(
+                        localImageLoras = currentLoras,
+                        activeLocalImageLoraIds = queuedOptions.loras
+                            .mapTo(mutableSetOf()) { adapter -> adapter.id }
+                    )
+                }
+            }.exceptionOrNull()
+        }
+        if (leasedLoraRefreshError != null) {
+            check(releaseObservedImageGenerationLease(generationLease)) {
+                "UI image generation lease was replaced during LoRA refresh."
+            }
+            synchronized(localImageLoraLifecycleLock) {
+                _uiState.update {
+                    it.copy(
+                        activeLocalImageLoraIds = emptySet(),
+                        statusMessage = "图片任务的 LoRA 不可用：${leasedLoraRefreshError.message ?: "请重新选择"}"
+                    )
+                }
+            }
+            return
+        }
+        // Nothing after the lease-protected refresh may observe another value. Keeping these
+        // snapshots immutable also makes the coroutine capture explicit for retry/history parity.
+        val executionOptions = queuedOptions
+        val executionJobSpec = queuedJobSpec
         activeImageGenerationJobId = jobId
         activeImageGenerationBackend = requestedBackend
         activeImageGenerationModelId = requestedModelId
@@ -1851,10 +3078,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             requestedLocalModel?.let { model -> localImageWorkerClient.begin(model.runtime) }
         }.exceptionOrNull()
         if (prepareError != null) {
-            localImageGenerationCoordinator.release(generationLease)
+            releaseObservedImageGenerationLease(generationLease)
             activeImageGenerationJobId = null
             activeImageGenerationBackend = null
             activeImageGenerationModelId = null
+            synchronized(localImageLoraLifecycleLock) {
+                _uiState.update { it.copy(activeLocalImageLoraIds = emptySet()) }
+            }
             _uiState.update {
                 it.copy(statusMessage = "本地生图 worker 准备失败：${prepareError.message ?: "未知错误"}")
             }
@@ -1871,7 +3101,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             backend = requestedBackend,
                             modelId = requestedModelId,
                             modelName = requestedModelName,
-                            spec = queuedJobSpec,
+                            spec = executionJobSpec,
                             message = if (requestedBackend == ImageBackend.LOCAL) "等待本地生图" else "等待云端生图"
                         )
                     ) + state.imageJobs
@@ -1879,8 +3109,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 statusMessage = "图片任务已排队"
             )
         }
-        imageGenerationJob = viewModelScope.launch(Dispatchers.IO) {
+        val executionJob = viewModelScope.launch(Dispatchers.IO) {
             try {
+                awaitImageLibraryStartupReconciliation()
                 _uiState.update { state ->
                     state.copy(
                         imageJobs = state.imageJobs.updateImageJob(
@@ -1903,10 +3134,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 requestId = jobId,
                                 prompt = cleanPrompt,
                                 model = model,
-                                options = queuedOptions,
+                                options = executionOptions,
                                 inputDraft = queuedInputDraft,
                                 chatSessionId = requestedChatSessionId,
-                                generationMetadata = queuedJobSpec.toHistoryMetadata(),
+                                generationMetadata = executionJobSpec.toHistoryMetadata(),
                                 onProgress = { progress ->
                                     val message = progress.toImageGenerationMessage()
                                     val publishedPreview = publishLocalImagePreview(jobId, progress)
@@ -1932,9 +3163,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             require(queuedInputDraft.taskMode == LocalImageTaskMode.TEXT_TO_IMAGE) {
                                 "The selected cloud image connector does not implement ${queuedInputDraft.taskMode.wireName}; no request was sent."
                             }
-                            require(queuedOptions.clipSkip == null &&
-                                queuedOptions.vaeTiling == null &&
-                                queuedOptions.preview == null
+                            require(executionOptions.clipSkip == null &&
+                                executionOptions.vaeTiling == null &&
+                                executionOptions.preview == null
                             ) {
                                 "The selected cloud image connector does not implement local advanced image controls."
                             }
@@ -1946,7 +3177,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     prompt = cleanPrompt,
                                     config = imageConfig,
                                     chatSessionId = requestedChatSessionId,
-                                    generationMetadata = queuedJobSpec.toHistoryMetadata()
+                                    generationMetadata = executionJobSpec.toHistoryMetadata()
                                 )
                             )
                         }
@@ -1975,57 +3206,176 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     return@launch
                 }
-                val persistenceError = runCatching {
-                    chatSessionStore.upsertImages(generatedImages)
+                val commitError = runCatching {
+                    imageLibraryMutationMutex.withLock {
+                        currentCoroutineContext().ensureActive()
+                        val admittedJob = _uiState.value.imageJobs.firstOrNull { it.id == jobId }
+                        if (activeImageGenerationJobId != jobId ||
+                            admittedJob?.status != ImageGenerationStatusRecord.GENERATING
+                        ) {
+                            throw CancellationException(
+                                "Image generation lost ownership before library commit."
+                            )
+                        }
+                        chatSessionStore.upsertImages(generatedImages)
+                        _uiState.update { state ->
+                            val job = state.imageJobs.firstOrNull { it.id == jobId }
+                            if (activeImageGenerationJobId != jobId ||
+                                job?.status != ImageGenerationStatusRecord.GENERATING
+                            ) {
+                                state
+                            } else {
+                                val committedImages = (
+                                    generatedImages + state.images.filterNot { existing ->
+                                        generatedImages.any { generated ->
+                                            generated.id == existing.id
+                                        }
+                                    }
+                                ).sortedImagesForLibrary()
+                                state.copy(
+                                    images = committedImages,
+                                    imageJobs = state.imageJobs.updateImageJob(
+                                        jobId,
+                                        ImageGenerationStatusRecord.DONE,
+                                        if (generatedImages.size == 1) {
+                                            "已保存到图片库"
+                                        } else {
+                                            "已保存 ${generatedImages.size} 张图片"
+                                        },
+                                        generatedImages.first().id
+                                    ),
+                                    statusMessage = if (generatedImages.size == 1) {
+                                        "已生成图片并保存到图片库：${generatedImages.first().name}"
+                                    } else {
+                                        "已生成 ${generatedImages.size} 张图片并保存到图片库"
+                                    }
+                                )
+                            }
+                        }
+                        val published = _uiState.value.imageJobs.firstOrNull {
+                            it.id == jobId
+                        }?.let { job ->
+                            job.status == ImageGenerationStatusRecord.DONE &&
+                                job.imageAssetId == generatedImages.first().id
+                        } == true
+                        if (!published) {
+                            val generatedIds = generatedImages.map(ImageAssetRecord::id)
+                            val rolledBack = runCatching {
+                                chatSessionStore.deleteImages(generatedIds)
+                            }.isSuccess
+                            if (rolledBack) {
+                                throw CancellationException(
+                                    "Image generation was cancelled during library commit."
+                                )
+                            }
+                            // If rollback fails, Room owns these files. Publish that durable state
+                            // so memory and the database cannot silently diverge.
+                            _uiState.update { state ->
+                                val job = state.imageJobs.firstOrNull { it.id == jobId }
+                                if (job == null) {
+                                    state
+                                } else {
+                                    state.copy(
+                                        images = (
+                                            generatedImages + state.images.filterNot { existing ->
+                                                generatedImages.any { generated ->
+                                                    generated.id == existing.id
+                                                }
+                                            }
+                                        ).sortedImagesForLibrary(),
+                                        imageJobs = state.imageJobs.updateImageJob(
+                                            jobId,
+                                            ImageGenerationStatusRecord.DONE,
+                                            if (generatedImages.size == 1) {
+                                                "已保存到图片库"
+                                            } else {
+                                                "已保存 ${generatedImages.size} 张图片"
+                                            },
+                                            generatedImages.first().id
+                                        ),
+                                        statusMessage = if (generatedImages.size == 1) {
+                                            "已生成图片并保存到图片库：${generatedImages.first().name}"
+                                        } else {
+                                            "已生成 ${generatedImages.size} 张图片并保存到图片库"
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }.exceptionOrNull()
-                if (persistenceError != null) {
-                    generatedImages.forEach(ImageAssetRecord::deleteLocalCopy)
-                    val message = persistenceError.message ?: "图片库数据库提交失败"
+                if (commitError != null) {
+                    generatedImages.forEach { image ->
+                        image.deleteLocalCopy(imageAssetDirectory)
+                    }
+                    val cancelled = commitError is CancellationException ||
+                        _uiState.value.imageJobs.firstOrNull { it.id == jobId }?.status ==
+                        ImageGenerationStatusRecord.CANCEL_REQUESTED
+                    val message = if (cancelled) {
+                        "已取消图片生成"
+                    } else {
+                        commitError.message ?: "图片库数据库提交失败"
+                    }
                     _uiState.update { state ->
-                        state.copy(
-                            imageJobs = state.imageJobs.updateImageJob(
-                                jobId,
-                                ImageGenerationStatusRecord.FAILED,
-                                message
-                            ),
-                            statusMessage = "图片生成完成，但保存失败：$message"
-                        )
+                        val job = state.imageJobs.firstOrNull { it.id == jobId }
+                        if (job?.status == ImageGenerationStatusRecord.DONE) {
+                            state
+                        } else {
+                            state.copy(
+                                imageJobs = state.imageJobs.updateImageJob(
+                                    jobId,
+                                    if (cancelled) {
+                                        ImageGenerationStatusRecord.CANCELLED
+                                    } else {
+                                        ImageGenerationStatusRecord.FAILED
+                                    },
+                                    message
+                                ),
+                                statusMessage = if (cancelled) {
+                                    message
+                                } else {
+                                    "图片生成完成，但保存失败：$message"
+                                }
+                            )
+                        }
                     }
                     return@launch
                 }
-                _uiState.update { state ->
-                    val committedImages = (
-                        generatedImages + state.images.filterNot { existing ->
-                            generatedImages.any { generated -> generated.id == existing.id }
-                        }
-                    ).sortedImagesForLibrary()
-                    state.copy(
-                        images = committedImages,
-                        imageJobs = state.imageJobs.updateImageJob(
-                            jobId,
-                            ImageGenerationStatusRecord.DONE,
-                            if (generatedImages.size == 1) "已保存到图片库" else "已保存 ${generatedImages.size} 张图片",
-                            generatedImages.first().id
-                        ),
-                        statusMessage = if (generatedImages.size == 1) {
-                            "已生成图片并保存到图片库：${generatedImages.first().name}"
-                        } else {
-                            "已生成 ${generatedImages.size} 张图片并保存到图片库"
-                        }
-                    )
-                }
             } finally {
                 cleanupLocalImagePreviews(jobId)
-                check(localImageGenerationCoordinator.release(generationLease)) {
-                    "UI image generation lease was replaced before request completion."
-                }
-                if (activeImageGenerationJobId == jobId) {
+            }
+        }
+        imageGenerationJob = executionJob
+        executionJob.invokeOnCompletion { completion ->
+            synchronized(localImageLoraLifecycleLock) {
+                val ownsActiveGeneration = activeImageGenerationJobId == jobId
+                if (ownsActiveGeneration) {
                     activeImageGenerationJobId = null
                     activeImageGenerationBackend = null
                     activeImageGenerationModelId = null
+                    _uiState.update { state ->
+                        val job = state.imageJobs.firstOrNull { it.id == jobId }
+                        state.copy(
+                            activeLocalImageLoraIds = emptySet(),
+                            imageJobs = if (completion is CancellationException &&
+                                job != null && !job.status.terminal
+                            ) {
+                                state.imageJobs.updateImageJob(
+                                    jobId,
+                                    ImageGenerationStatusRecord.CANCELLED,
+                                    "已取消图片生成"
+                                )
+                            } else {
+                                state.imageJobs
+                            }
+                        )
+                    }
                 }
-                imageGenerationJob = null
+                check(releaseObservedImageGenerationLease(generationLease)) {
+                    "UI image generation lease was replaced before request completion."
+                }
             }
+            if (imageGenerationJob === executionJob) imageGenerationJob = null
         }
     }
 
@@ -2051,35 +3401,60 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val jobId = activeImageGenerationJobId
             val localGeneration = activeImageGenerationBackend == ImageBackend.LOCAL
-            val nativeCancelRequested = if (localGeneration) localImageWorkerClient.cancel() else false
             if (jobId != null) {
                 _uiState.update { state ->
-                    val message = if (localGeneration && nativeCancelRequested) {
-                        "正在停止本地生图，当前图执行结束后退出"
+                    val job = state.imageJobs.firstOrNull { it.id == jobId }
+                    if (job == null || job.status.terminal) return@update state
+                    val message = if (localGeneration) {
+                        "正在停止本地生图，等待 worker 释放本次执行"
                     } else {
                         "已停止图片生成"
                     }
                     state.copy(
                         imageJobs = state.imageJobs.updateImageJob(
                             jobId,
-                            if (localGeneration && nativeCancelRequested) {
-                                ImageGenerationStatusRecord.GENERATING
+                            if (localGeneration) {
+                                ImageGenerationStatusRecord.CANCEL_REQUESTED
                             } else {
                                 ImageGenerationStatusRecord.CANCELLED
                             },
                             message
                         ),
-                        statusMessage = message
+                        statusMessage = if (localGeneration) "正在停止本地生图…" else message
                     )
                 }
+                val nativeCancelRequested = if (localGeneration) {
+                    localImageWorkerClient.cancel()
+                } else {
+                    false
+                }
                 if (!(localGeneration && nativeCancelRequested)) {
-                    imageGenerationJob?.cancel()
+                    _uiState.update { state ->
+                        val job = state.imageJobs.firstOrNull { it.id == jobId }
+                        if (job?.status != ImageGenerationStatusRecord.CANCEL_REQUESTED) {
+                            state
+                        } else {
+                            state.copy(
+                                imageJobs = state.imageJobs.updateImageJob(
+                                    jobId,
+                                    ImageGenerationStatusRecord.CANCELLED,
+                                    "已停止图片生成"
+                                ),
+                                statusMessage = "已停止图片生成"
+                            )
+                        }
+                    }
+                    imageGenerationJob
+                        ?.takeIf { activeImageGenerationJobId == jobId }
+                        ?.cancel()
                 }
             } else {
                 imageGenerationJob?.cancel()
                 _uiState.update { state ->
                     val working = state.imageJobs.firstOrNull {
-                        it.status == ImageGenerationStatusRecord.QUEUED || it.status == ImageGenerationStatusRecord.GENERATING
+                        it.status == ImageGenerationStatusRecord.QUEUED ||
+                            it.status == ImageGenerationStatusRecord.GENERATING ||
+                            it.status == ImageGenerationStatusRecord.CANCEL_REQUESTED
                     }
                     if (working != null) {
                         state.copy(
@@ -2122,6 +3497,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             phase == "completed" -> "本地生图完成 · ${elapsedSeconds}s"
             phase == "failed" -> message.ifBlank { "本地生图失败" }
             else -> "正在准备本地生图 · ${elapsedSeconds}s$threadText"
+        }
+    }
+
+    private fun LocalImageProgress.toImageUpscaleMessage(): String {
+        val elapsedSeconds = (elapsedMs / 1_000L).coerceAtLeast(0L)
+        val size = if (width > 0 && height > 0) " · ${width}x$height" else ""
+        return when {
+            cancelRequested || phase == "cancelling" -> "正在停止图片放大 · ${elapsedSeconds}s"
+            phase == "loading" || phase == "loading_upscaler" ->
+                "正在加载 ESRGAN 放大模型 · ${elapsedSeconds}s"
+            phase == "upscaling" || phase == "sampling" ->
+                "正在分块放大图片 · ${elapsedSeconds}s$size"
+            phase == "writing" -> "正在写入放大结果 · ${elapsedSeconds}s$size"
+            phase == "completed" -> "图片放大完成 · ${elapsedSeconds}s$size"
+            phase == "failed" -> message.ifBlank { "图片放大失败" }
+            else -> "正在准备图片放大 · ${elapsedSeconds}s$size"
         }
     }
 
@@ -2173,7 +3564,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val fileName = "preview-${progress.previewRevision}.png"
         val published = File(requestDir, fileName).takeIf(File::isFile)
-            ?: writeImageAssetBytesAtomically(requestDir, fileName, bytes)
+            ?: run {
+                if (!imageAssetWriteMutex.tryLock()) return@runCatching null
+                try {
+                    writeImageAssetBytesAtomically(requestDir, fileName, bytes)
+                } finally {
+                    imageAssetWriteMutex.unlock()
+                }
+            }
         PublishedLocalImagePreview(
             uriString = Uri.fromFile(published).toString(),
             mode = progress.previewMode,
@@ -2197,48 +3595,484 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteImageAsset(imageId: String) {
+        deleteImageAssets(listOf(imageId))
+    }
+
+    private data class ImageAssetDeletionStaging(
+        val leases: List<ImageAssetDeletionLease>?,
+        val rollbackFailures: Int = 0
+    )
+
+    private fun stageImageAssetDeletionLeases(
+        images: List<ImageAssetRecord>,
+        retainedImages: List<ImageAssetRecord>
+    ): ImageAssetDeletionStaging {
+        val retainedPaths = retainedImages.mapNotNullTo(mutableSetOf()) { image ->
+            image.ownedLocalImageFileOrNull(imageAssetDirectory)?.path
+        }
+        val leases = ArrayList<ImageAssetDeletionLease>(images.size)
+        for (image in images) {
+            val ownedPath = image.ownedLocalImageFileOrNull(imageAssetDirectory)?.path
+            val lease = if (ownedPath != null && ownedPath in retainedPaths) {
+                ImageAssetDeletionLease(original = null, staged = null)
+            } else {
+                image.stageLocalCopyDeletion(imageAssetDirectory)
+            }
+            if (lease == null) {
+                val rollbackFailures = leases.asReversed().count { staged -> !staged.rollback() }
+                return ImageAssetDeletionStaging(leases = null, rollbackFailures = rollbackFailures)
+            }
+            leases += lease
+        }
+        return ImageAssetDeletionStaging(leases = leases)
+    }
+
+    private fun rollbackImageAssetDeletionLeases(
+        leases: List<ImageAssetDeletionLease>
+    ): Int = leases.asReversed().count { lease -> !lease.rollback() }
+
+    private fun commitImageAssetDeletionLeases(
+        leases: List<ImageAssetDeletionLease>
+    ): Int = leases.count { lease -> !lease.commit() }
+
+    fun deleteImageAssets(imageIds: List<String>) {
+        val requestedIds = imageIds.asSequence()
+            .map { it.trim() }
+            .filter(String::isNotEmpty)
+            .distinct()
+            .toSet()
+        if (requestedIds.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
-            val removed = _uiState.value.images.firstOrNull { it.id == imageId }
-            if (removed == null) {
-                _uiState.update { it.copy(statusMessage = "未找到要删除的图片") }
-                return@launch
+            awaitImageLibraryStartupReconciliation()
+            val (removed, cleanupFailures) = imageLibraryMutationMutex.withLock {
+                synchronized(localImageUpscaleLifecycleLock) {
+                    val activeSourceId = activeImageUpscaleSourceImageId
+                    if (activeSourceId != null && activeSourceId in requestedIds) {
+                        _uiState.update {
+                            it.copy(statusMessage = "源图片正被放大任务使用，任务结束后才能删除。")
+                        }
+                        return@withLock emptyList<ImageAssetRecord>() to 0
+                    }
+                    val candidates = _uiState.value.images.filter { it.id in requestedIds }
+                    if (candidates.isEmpty()) {
+                        _uiState.update { it.copy(statusMessage = "未找到要删除的图片") }
+                        return@withLock emptyList<ImageAssetRecord>() to 0
+                    }
+                    val staging = stageImageAssetDeletionLeases(
+                        images = candidates,
+                        retainedImages = _uiState.value.images.filterNot { image ->
+                            image.id in requestedIds
+                        }
+                    )
+                    val leases = staging.leases
+                    if (leases == null) {
+                        _uiState.update {
+                            it.copy(
+                                statusMessage = buildString {
+                                    append("图片删除失败：无法安全暂存本地文件")
+                                    if (staging.rollbackFailures > 0) {
+                                        append("；")
+                                        append(staging.rollbackFailures)
+                                        append(" 个文件等待启动恢复")
+                                    }
+                                }
+                            )
+                        }
+                        return@withLock emptyList<ImageAssetRecord>() to 0
+                    }
+                    val removedIds = candidates.map(ImageAssetRecord::id)
+                    val error = runCatching { chatSessionStore.deleteImages(removedIds) }.exceptionOrNull()
+                    if (error != null) {
+                        val rollbackFailures = rollbackImageAssetDeletionLeases(leases)
+                        _uiState.update {
+                            it.copy(
+                                statusMessage = buildString {
+                                    append("图片删除失败：")
+                                    append(error.message ?: "数据库提交失败")
+                                    if (rollbackFailures > 0) {
+                                        append("；")
+                                        append(rollbackFailures)
+                                        append(" 个文件等待启动恢复")
+                                    }
+                                }
+                            )
+                        }
+                        return@withLock emptyList<ImageAssetRecord>() to 0
+                    }
+                    removedIds.forEach(latestImageFavoriteMutations::remove)
+                    _uiState.update { state ->
+                        state.copy(images = state.images.filterNot { it.id in removedIds })
+                    }
+                    candidates to commitImageAssetDeletionLeases(leases)
+                }
             }
-            val error = runCatching { chatSessionStore.deleteImages(listOf(imageId)) }.exceptionOrNull()
-            if (error != null) {
-                _uiState.update { it.copy(statusMessage = "图片删除失败：${error.message ?: "数据库提交失败"}") }
-                return@launch
-            }
-            removed.deleteLocalCopy()
+            if (removed.isEmpty()) return@launch
             _uiState.update { state ->
+                val successMessage = if (removed.size == 1) {
+                    "已从图片库移除：${removed.single().name}"
+                } else {
+                    "已从图片库移除 ${removed.size} 张图片"
+                }
                 state.copy(
-                    images = state.images.filterNot { it.id == imageId },
-                    statusMessage = "已从图片库移除：${removed.name}"
+                    statusMessage = if (cleanupFailures == 0) {
+                        successMessage
+                    } else {
+                        "$successMessage；$cleanupFailures 个本地文件未能清理"
+                    }
                 )
             }
         }
     }
 
+    fun setImageAssetFavorite(imageId: String, favorite: Boolean) {
+        val image = _uiState.value.images.firstOrNull { it.id == imageId }
+        if (image == null) {
+            _uiState.update { it.copy(statusMessage = "未找到要收藏的图片") }
+            return
+        }
+        val mutation = imageFavoriteMutationSequence.incrementAndGet() to favorite
+        latestImageFavoriteMutations[imageId] = mutation
+        viewModelScope.launch(Dispatchers.IO) {
+            imageLibraryMutationMutex.withLock {
+                if (latestImageFavoriteMutations[imageId] != mutation) return@withLock
+                val updateResult = runCatching {
+                    chatSessionStore.setImageFavorite(imageId, favorite)
+                }
+                if (latestImageFavoriteMutations[imageId] != mutation) return@withLock
+                updateResult
+                    .onSuccess { updateCount ->
+                        if (updateCount == 1) {
+                            _uiState.update { state ->
+                                state.copy(
+                                    images = state.images.map { current ->
+                                        if (current.id == imageId) current.copy(favorite = favorite) else current
+                                    },
+                                    statusMessage = if (favorite) {
+                                        "已收藏：${image.name}"
+                                    } else {
+                                        "已取消收藏：${image.name}"
+                                    }
+                                )
+                            }
+                        } else {
+                            _uiState.update {
+                                it.copy(statusMessage = "收藏状态更新失败：图片记录已不存在")
+                            }
+                        }
+                    }
+                    .onFailure { error ->
+                        _uiState.update {
+                            it.copy(statusMessage = "收藏状态更新失败：${error.message ?: "数据库提交失败"}")
+                        }
+                    }
+                latestImageFavoriteMutations.remove(imageId, mutation)
+            }
+        }
+    }
+
     fun clearImageLibrary() {
-        val imagesToRemove = _uiState.value.images
-        if (imagesToRemove.isEmpty()) {
+        if (_uiState.value.images.isEmpty()) {
             _uiState.update { it.copy(statusMessage = "图片库已为空") }
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
-            val error = runCatching { chatSessionStore.clearImages() }.exceptionOrNull()
-            if (error != null) {
-                _uiState.update { it.copy(statusMessage = "图片库清空失败：${error.message ?: "数据库提交失败"}") }
-                return@launch
+            awaitImageLibraryStartupReconciliation()
+            val (removed, cleanupFailures) = imageLibraryMutationMutex.withLock {
+                synchronized(localImageUpscaleLifecycleLock) {
+                    if (activeImageUpscaleSourceImageId != null) {
+                        _uiState.update {
+                            it.copy(statusMessage = "源图片正被放大任务使用，任务结束后才能清空图片库。")
+                        }
+                        return@withLock emptyList<ImageAssetRecord>() to 0
+                    }
+                    val currentImages = _uiState.value.images
+                    if (currentImages.isEmpty()) {
+                        _uiState.update { it.copy(statusMessage = "图片库已为空") }
+                        return@withLock emptyList<ImageAssetRecord>() to 0
+                    }
+                    val staging = stageImageAssetDeletionLeases(
+                        images = currentImages,
+                        retainedImages = emptyList()
+                    )
+                    val leases = staging.leases
+                    if (leases == null) {
+                        _uiState.update {
+                            it.copy(
+                                statusMessage = buildString {
+                                    append("图片库清空失败：无法安全暂存本地文件")
+                                    if (staging.rollbackFailures > 0) {
+                                        append("；")
+                                        append(staging.rollbackFailures)
+                                        append(" 个文件等待启动恢复")
+                                    }
+                                }
+                            )
+                        }
+                        return@withLock emptyList<ImageAssetRecord>() to 0
+                    }
+                    val error = runCatching { chatSessionStore.clearImages() }.exceptionOrNull()
+                    if (error != null) {
+                        val rollbackFailures = rollbackImageAssetDeletionLeases(leases)
+                        _uiState.update {
+                            it.copy(
+                                statusMessage = buildString {
+                                    append("图片库清空失败：")
+                                    append(error.message ?: "数据库提交失败")
+                                    if (rollbackFailures > 0) {
+                                        append("；")
+                                        append(rollbackFailures)
+                                        append(" 个文件等待启动恢复")
+                                    }
+                                }
+                            )
+                        }
+                        return@withLock emptyList<ImageAssetRecord>() to 0
+                    }
+                    latestImageFavoriteMutations.clear()
+                    _uiState.update {
+                        it.copy(
+                            images = emptyList(),
+                            imageJobs = it.imageJobs.filter { job -> !job.status.terminal }
+                        )
+                    }
+                    currentImages to commitImageAssetDeletionLeases(leases)
+                }
             }
-            imagesToRemove.forEach { it.deleteLocalCopy() }
+            if (removed.isEmpty()) return@launch
             _uiState.update {
                 it.copy(
-                    images = emptyList(),
-                    imageJobs = it.imageJobs.filter { job -> job.status == ImageGenerationStatusRecord.GENERATING },
-                    statusMessage = "已清空图片库：${imagesToRemove.size} 张图片"
+                    statusMessage = buildString {
+                        append("已清空图片库：")
+                        append(removed.size)
+                        append(" 张图片")
+                        if (cleanupFailures > 0) {
+                            append("；")
+                            append(cleanupFailures)
+                            append(" 个本地文件未能清理")
+                        }
+                    }
                 )
             }
         }
+    }
+
+    fun exportImageLibraryBackup(uriString: String, favoritesOnly: Boolean) {
+        val destination = runCatching { Uri.parse(uriString) }
+            .getOrNull()
+            ?.takeIf { !it.scheme.isNullOrBlank() }
+        if (destination == null) {
+            _uiState.update {
+                it.copy(
+                    imageLibraryBackup = ImageLibraryBackupState(
+                        message = "备份目标无效",
+                        failed = true
+                    )
+                )
+            }
+            return
+        }
+        val started = startImageLibraryBackupJob(
+            reservation = ImageLibraryBackupState(
+                running = true,
+                importing = false,
+                total = 0
+            )
+        ) {
+            try {
+                awaitImageLibraryStartupReconciliation()
+                val result = imageLibraryMutationMutex.withLock {
+                    val snapshot = _uiState.value.images
+                    val total = snapshot.count { !favoritesOnly || it.favorite }
+                    _uiState.update { state ->
+                        state.copy(
+                            imageLibraryBackup = state.imageLibraryBackup.copy(total = total)
+                        )
+                    }
+                    imageLibraryBackup.export(
+                        destination = destination,
+                        images = snapshot,
+                        favoritesOnly = favoritesOnly
+                    ) { done, progressTotal ->
+                        _uiState.update { state ->
+                            state.copy(
+                                imageLibraryBackup = state.imageLibraryBackup.copy(
+                                    done = done,
+                                    total = progressTotal
+                                )
+                            )
+                        }
+                    }
+                }
+                val message = buildString {
+                    append("已导出 ")
+                    append(result.exported)
+                    append(" 张图片")
+                    if (result.skipped > 0) {
+                        append("；跳过 ")
+                        append(result.skipped)
+                        append(" 个缺失或无效文件")
+                    }
+                }
+                _uiState.update {
+                    it.copy(
+                        imageLibraryBackup = ImageLibraryBackupState(message = message),
+                        statusMessage = message
+                    )
+                }
+            } catch (error: CancellationException) {
+                val deleted = withContext(NonCancellable + Dispatchers.IO) {
+                    deleteIncompleteImageLibraryBackup(destination)
+                }
+                _uiState.update {
+                    it.copy(
+                        imageLibraryBackup = ImageLibraryBackupState(
+                            message = if (deleted) {
+                                "已取消导出"
+                            } else {
+                                "已取消导出；未能删除不完整的备份文件"
+                            },
+                            failed = !deleted
+                        )
+                    )
+                }
+                throw error
+            } catch (error: Throwable) {
+                val deleted = withContext(Dispatchers.IO) {
+                    deleteIncompleteImageLibraryBackup(destination)
+                }
+                val message = buildString {
+                    append(error.imageLibraryBackupFailureMessage())
+                    if (!deleted) append("；未能删除不完整的备份文件")
+                }
+                _uiState.update {
+                    it.copy(
+                        imageLibraryBackup = ImageLibraryBackupState(message = message, failed = true),
+                        statusMessage = message
+                    )
+                }
+            }
+        }
+        if (!started) {
+            _uiState.update { it.copy(statusMessage = "图片库备份任务正在进行") }
+        }
+    }
+
+    private fun deleteIncompleteImageLibraryBackup(destination: Uri): Boolean =
+        runCatching {
+            DocumentsContract.deleteDocument(
+                getApplication<Application>().contentResolver,
+                destination
+            )
+        }.getOrDefault(false)
+
+    fun importImageLibraryBackup(uriString: String) {
+        val source = runCatching { Uri.parse(uriString) }
+            .getOrNull()
+            ?.takeIf { !it.scheme.isNullOrBlank() }
+        if (source == null) {
+            _uiState.update {
+                it.copy(
+                    imageLibraryBackup = ImageLibraryBackupState(
+                        message = "备份文件无效",
+                        failed = true
+                    )
+                )
+            }
+            return
+        }
+        val started = startImageLibraryBackupJob(
+            reservation = ImageLibraryBackupState(
+                running = true,
+                importing = true
+            )
+        ) {
+            try {
+                awaitImageLibraryStartupReconciliation()
+                val installedModelIds = _uiState.value.localImageModels.mapTo(mutableSetOf()) { it.id }
+                    .apply {
+                        addAll(
+                            _uiState.value.cloudModels
+                                .filter { it.kind == CloudModelKind.IMAGE }
+                                .map { it.id }
+                        )
+                    }
+                val result = imageAssetWriteMutex.withLock {
+                    imageLibraryMutationMutex.withLock {
+                        val imported = imageLibraryBackup.import(
+                            source = source,
+                            existingImages = _uiState.value.images,
+                            installedModelIds = installedModelIds
+                        ) { done, total ->
+                            _uiState.update { state ->
+                                state.copy(
+                                    imageLibraryBackup = state.imageLibraryBackup.copy(
+                                        done = done,
+                                        total = total
+                                    )
+                                )
+                            }
+                        }
+                        val restoredImages = chatSessionStore.loadImages().sortedImagesForLibrary()
+                        _uiState.update { it.copy(images = restoredImages) }
+                        imported
+                    }
+                }
+                val message = buildString {
+                    append("已恢复 ")
+                    append(result.imported)
+                    append(" 张图片")
+                    if (result.duplicates > 0) {
+                        append("；跳过重复 ")
+                        append(result.duplicates)
+                        append(" 张")
+                    }
+                    if (result.failed > 0) {
+                        append("；失败 ")
+                        append(result.failed)
+                        append(" 张")
+                    }
+                    if (result.missingModelIds.isNotEmpty()) {
+                        append("；")
+                        append(result.missingModelIds.size)
+                        append(" 个原模型当前未安装，历史仍已保留")
+                    }
+                }
+                _uiState.update {
+                    it.copy(
+                        imageLibraryBackup = ImageLibraryBackupState(message = message),
+                        statusMessage = message
+                    )
+                }
+            } catch (error: CancellationException) {
+                withContext(NonCancellable + Dispatchers.IO) {
+                    val restoredImages = chatSessionStore.loadImages().sortedImagesForLibrary()
+                    _uiState.update {
+                        it.copy(
+                            images = restoredImages,
+                            imageLibraryBackup = ImageLibraryBackupState(
+                                message = "已取消恢复；已完成提交的图片仍会保留"
+                            )
+                        )
+                    }
+                }
+                throw error
+            } catch (error: Throwable) {
+                val message = error.imageLibraryBackupFailureMessage()
+                _uiState.update {
+                    it.copy(
+                        imageLibraryBackup = ImageLibraryBackupState(message = message, failed = true),
+                        statusMessage = message
+                    )
+                }
+            }
+        }
+        if (!started) {
+            _uiState.update { it.copy(statusMessage = "图片库备份任务正在进行") }
+        }
+    }
+
+    fun cancelImageLibraryBackup() {
+        synchronized(imageLibraryBackupLifecycleLock) { imageLibraryBackupJob }?.cancel()
     }
 
     fun importLocalImageModel(uri: Uri) {
@@ -2253,6 +4087,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         selection.qnnVerificationCurrentByModelId[model.id]
                     )
                     val diagnostic = model.localImageVerificationDiagnosticMessage()
+                    managedRuntimeReadinessRefreshGate.invalidate()
                     _uiState.update {
                         it.copy(
                             localImageModels = selection.models,
@@ -2391,6 +4226,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 "图像引擎校验失败：${verification.second}"
             }
+            managedRuntimeReadinessRefreshGate.invalidate()
             _uiState.update {
                 it.copy(
                     localImageModels = models,
@@ -2637,6 +4473,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
                 preferredId = localImageModelStore.loadSelectedModelId()
             )
+            managedRuntimeReadinessRefreshGate.invalidate()
             _uiState.update {
                 it.copy(
                     localImageModels = models,
@@ -4001,6 +5838,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 modelStore.importFromUris(uris)
             }.onSuccess { model ->
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update {
                     it.copy(
                         models = modelStore.listModels(),
@@ -4107,6 +5945,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 modelStore.attachVisionProjector(modelId, uri)
             }.onSuccess { model ->
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update {
                     it.copy(
                         models = modelStore.listModels(),
@@ -4173,6 +6012,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onSuccess { registered ->
                 val localModels = modelStore.listModels()
                 val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(localModels)
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update {
                     it.copy(
                         models = localModels,
@@ -4256,6 +6096,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     requiredFiles = bundle.requiredComponents.map { it.relativePath }
                 )
             }.onSuccess { registered ->
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update {
                     it.copy(
                         models = modelStore.listModels(),
@@ -4348,6 +6189,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }.onSuccess { result ->
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update {
                     val status = when (result) {
                         is VisionBundleDownloadResult.ChatModel ->
@@ -4480,6 +6322,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     selection.qnnVerificationCurrentByModelId[record.id]
                 )
                 val diagnostic = record.localImageVerificationDiagnosticMessage()
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update {
                     it.copy(
                         localImageModels = selection.models,
@@ -4632,6 +6475,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onSuccess { registration ->
                 val registeredImageSelection = (registration as? DownloadedModelRegistration.Image)
                     ?.let { image -> settleLocalImageSelection(image.model) }
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update {
                     when (registration) {
                         is DownloadedModelRegistration.Chat -> it.copy(
@@ -4740,7 +6584,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         persistChatSessions(sessionsToPersist)
     }
 
-    fun loadModel(model: ModelManifest) {
+    fun loadModel(requestedModel: ModelManifest) {
         viewModelScope.launch(Dispatchers.IO) {
             val runtimeBeforeLoad = captureLoadedRuntimeSnapshot()
             fun failBeforeNativeReplacement(message: String) {
@@ -4766,18 +6610,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     busy = true,
                     engineLifecycle = AgentEngineLifecycle.LOADING,
-                    statusMessage = "正在加载 ${model.displayName}..."
+                    statusMessage = "正在加载 ${requestedModel.displayName}..."
                 )
             }
-            val preflight = modelStore.validateForLoad(model.id)
+            val preflight = modelStore.validateForLoad(requestedModel.id)
+            val validatedCatalog = publishManagedChatCatalogAfterValidation()
             if (!preflight.canLoad) {
                 failBeforeNativeReplacement("加载前检查失败：${preflight.message}")
                 return@launch
             }
             val params = _uiState.value.params
-            var persistedModels = modelStore.listModels()
+            var persistedModels = validatedCatalog.models
+            var model = persistedModels.firstOrNull { it.id == requestedModel.id } ?: requestedModel
             var qairtVerifiedIds = if (model.runtime == ChatModelRuntime.GENIEX_QAIRT) {
-                currentQairtVerifiedLocalModelIds(persistedModels)
+                validatedCatalog.qairtVerifiedLocalModelIds
             } else {
                 emptySet()
             }
@@ -4882,8 +6728,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         error
                     )
                 }
-                persistedModels = modelStore.listModels()
-                qairtVerifiedIds = currentQairtVerifiedLocalModelIds(persistedModels)
+                val certifiedCatalog = publishManagedChatCatalogAfterValidation()
+                persistedModels = certifiedCatalog.models
+                qairtVerifiedIds = certifiedCatalog.qairtVerifiedLocalModelIds
+                model = persistedModels.firstOrNull { it.id == model.id } ?: model
                 if (model.id !in qairtVerifiedIds) {
                     error(
                         "QAIRT 自动安全启动未生成真实 create/generate/destroy 证据，已停止正式加载。"
@@ -4891,13 +6739,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 _uiState.update {
                     it.copy(
-                        models = persistedModels,
-                        qairtVerifiedLocalModelIds = qairtVerifiedIds,
-                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
-                            models = persistedModels,
-                            verifiedLocalModelIds = qairtVerifiedIds,
-                            recommendations = it.recommendedRemoteModels
-                        ),
                         statusMessage = "自动安全启动通过，正在正式加载 ${model.displayName}…"
                     )
                 }
@@ -5040,6 +6881,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val pendingTransaction = runtimeProfileStore.pendingTransaction(identity.identityHash)
                 val nativeStatsAfterLoad = currentNativeStatsJson()
                 val logsAfterLoad = currentEngineLogs()
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update { state ->
                     cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
                     sessionsToPersist = state.chatSessions.bindSession(
@@ -5130,10 +6972,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             busy("正在校验 ${model.displayName}...")
             val result = modelStore.validateForLoad(model.id)
+            val validatedCatalog = publishManagedChatCatalogAfterValidation()
+            val validatedModel = validatedCatalog.models.firstOrNull { it.id == model.id } ?: model
             val qairtDryRun = if (
                 result.canLoad &&
-                model.runtime == ChatModelRuntime.GENIEX_QAIRT &&
-                model.id !in currentQairtVerifiedLocalModelIds(modelStore.listModels())
+                validatedModel.runtime == ChatModelRuntime.GENIEX_QAIRT &&
+                validatedModel.id !in validatedCatalog.qairtVerifiedLocalModelIds
             ) {
                 _uiState.update {
                     it.copy(statusMessage = "模型包校验通过，正在独立进程执行 QAIRT create/generate/destroy 诊断…")
@@ -5141,7 +6985,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 runCatching {
                     val params = _uiState.value.params
                     QairtDryRunWorkerClient(getApplication<Application>()).certify(
-                        modelId = model.id,
+                        modelId = validatedModel.id,
                         nCtx = params.nCtx,
                         nThreads = params.nThreads
                     ) { progress ->
@@ -5155,7 +6999,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             val localModels = modelStore.listModels()
             val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(localModels)
-            val qairtVerified = model.id in qairtVerifiedIds
+            val qairtVerified = validatedModel.id in qairtVerifiedIds
+            managedRuntimeReadinessRefreshGate.invalidate()
             _uiState.update {
                 it.copy(
                     busy = false,
@@ -5172,11 +7017,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             "QAIRT 运行诊断失败：${qairtDryRun.exceptionOrNull()?.message.orEmpty()}。仍可点击加载重新自动安全启动。"
                         qairtDryRun?.isSuccess == true && !qairtVerified ->
                             "QAIRT 运行诊断完成但未写入证据记录；这不会阻止模型加载。"
-                        model.runtime == ChatModelRuntime.GENIEX_QAIRT && !qairtVerified ->
+                        validatedModel.runtime == ChatModelRuntime.GENIEX_QAIRT && !qairtVerified ->
                             "模型包完整性校验通过；首次加载会自动隔离安全启动。"
                         qairtDryRun?.isSuccess == true ->
                             "QAIRT 运行诊断通过：已确认骁龙 NPU、固定回答与干净卸载。"
-                        model.runtime == ChatModelRuntime.GENIEX_QAIRT ->
+                        validatedModel.runtime == ChatModelRuntime.GENIEX_QAIRT ->
                             "模型包完整性校验通过，且已有当前设备运行诊断证据。"
                         else -> "模型校验通过：${result.message}"
                     }
@@ -5254,6 +7099,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         activeProfileTransactionId = null
         val nativeStats = currentNativeStatsJson()
         val recentLogs = currentEngineLogs()
+        managedRuntimeReadinessRefreshGate.invalidate()
         _uiState.update { state ->
             state.copy(
                 models = modelStore.listModels(),
@@ -5396,9 +7242,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 check(modelStore.deleteModel(model.id)) { "模型文件或记录未能删除" }
             }.onSuccess {
+                val remainingModels = modelStore.listModels()
+                val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(remainingModels)
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update {
                     it.copy(
-                        models = modelStore.listModels(),
+                        models = remainingModels,
+                        qairtVerifiedLocalModelIds = qairtVerifiedIds,
+                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
+                            models = remainingModels,
+                            verifiedLocalModelIds = qairtVerifiedIds,
+                            recommendations = it.recommendedRemoteModels
+                        ),
                         loadedModelId = it.loadedModelId?.takeUnless { id -> id == model.id },
                         loadedModelName = if (wasLoaded) null else it.loadedModelName,
                         busy = false,
@@ -5413,9 +7268,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }.onFailure { error ->
+                val currentModels = modelStore.listModels()
+                val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(currentModels)
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update {
                     it.copy(
-                        models = modelStore.listModels(),
+                        models = currentModels,
+                        qairtVerifiedLocalModelIds = qairtVerifiedIds,
+                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
+                            models = currentModels,
+                            verifiedLocalModelIds = qairtVerifiedIds,
+                            recommendations = it.recommendedRemoteModels
+                        ),
                         busy = false,
                         statusMessage = if (nativeReleased) {
                             buildString {
@@ -6158,8 +8022,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(statusMessage = "请先停止当前生成，再运行稳定性自检") }
                 return@launch
             }
-            val model = initialState.models.firstOrNull { it.id == initialState.loadedModelId }
-            if (model == null) {
+            val requestedModel = initialState.models.firstOrNull { it.id == initialState.loadedModelId }
+            if (requestedModel == null) {
                 _uiState.update { it.copy(statusMessage = "请先加载一个本地推理模型，再运行稳定性自检") }
                 return@launch
             }
@@ -6167,8 +8031,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 generationJob?.cancel()
                 engine.stopGeneration()
-                val preflight = modelStore.validateForLoad(model.id)
+                val preflight = modelStore.validateForLoad(requestedModel.id)
+                val validatedCatalog = publishManagedChatCatalogAfterValidation()
                 if (!preflight.canLoad) error("加载前检查失败：${preflight.message}")
+                val model = validatedCatalog.models.firstOrNull { it.id == requestedModel.id }
+                    ?: requestedModel
                 LocalModelMemoryAdmissionPolicy.evaluate(model, currentDeviceProfile()).blocker
                     ?.let { error("加载前内存检查失败：$it") }
 
@@ -6189,6 +8056,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 modelStore.markLoaded(model.id)
                 cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
+                managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update { state ->
                     state.copy(
                         loadedModelId = model.id,
@@ -6851,9 +8719,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 appendBenchmarkHistory(device, benchmark, mergeExecutionProfile(_uiState.value.params, candidateProfile.engineProfile))
                 modelStore.markLoaded(model.id)
+                val refreshedModels = modelStore.listModels()
+                managedRuntimeReadinessRefreshGate.invalidate()
                 val profileState = runtimeProfileStore.currentRuntimeState(identity.identityHash)
                 _uiState.update { state ->
                     state.copy(
+                        models = refreshedModels,
                         params = mergeExecutionProfile(state.params, candidateProfile.engineProfile),
                         benchmark = benchmark,
                         benchmarkHistory = benchmarkHistoryLogger.recent(),
@@ -7781,6 +9652,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             else -> null
         }
 
+    private fun Throwable.imageLibraryBackupFailureMessage(): String = when (this) {
+        is ImageLibraryBackupFormatException ->
+            "备份文件格式无效：${message ?: "清单或文件校验失败"}"
+        else -> "图片库备份失败：${message ?: "未知错误"}"
+    }
+
     private fun List<ChatMessage>.chatTitle(): String {
         val userText = firstOrNull { it.role == Role.USER }?.content.orEmpty()
         val fileName = Regex("""【上传文件：([^】]+)】""").find(userText)?.groupValues?.getOrNull(1)
@@ -8051,7 +9928,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }.getOrDefault(0L)
     }
 
-    private fun importImageAsset(
+    private suspend fun importImageAsset(
         uri: Uri,
         displayName: String,
         source: String,
@@ -8059,33 +9936,103 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         chatSessionId: String? = null
     ): ImageAssetRecord {
         val app = getApplication<Application>()
-        val imageDir = File(app.filesDir, "image_assets").apply { mkdirs() }
         val extension = imageExtension(displayName)
-        val fileName = "${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(8)}.$extension"
-        val outputFile = File(imageDir, fileName)
-        val input = if (uri.scheme.equals("file", ignoreCase = true)) {
-            uri.path?.let { File(it).inputStream() }
-        } else {
-            app.contentResolver.openInputStream(uri)
-        } ?: error("无法读取图片")
-        input.use { sourceStream ->
-            outputFile.outputStream().use { targetStream ->
-                sourceStream.copyTo(targetStream)
+        val imported = imageAssetWriteMutex.withLock {
+            val input = if (uri.scheme.equals("file", ignoreCase = true)) {
+                uri.path?.let { File(it).inputStream() }
+            } else {
+                app.contentResolver.openInputStream(uri)
+            } ?: error("无法读取图片")
+            input.use { sourceStream ->
+                copyImageAssetStreamAtomically(
+                    directory = imageAssetDirectory,
+                    suggestedExtension = extension,
+                    input = sourceStream
+                )
             }
         }
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
         return ImageAssetRecord(
             id = UUID.randomUUID().toString(),
             name = displayName.ifBlank { "图片" },
-            uriString = Uri.fromFile(outputFile).toString(),
+            uriString = Uri.fromFile(imported.file).toString(),
             source = source,
             prompt = prompt,
-            sizeBytes = outputFile.length(),
-            width = bounds.outWidth.coerceAtLeast(0),
-            height = bounds.outHeight.coerceAtLeast(0),
+            sizeBytes = imported.sizeBytes,
+            width = imported.width,
+            height = imported.height,
             chatSessionId = chatSessionId
         )
+    }
+
+    private suspend fun createUpscaledImageAsset(
+        spec: ImageUpscaleJobSpec,
+        result: LocalImageResult,
+        requestId: String
+    ): ImageAssetRecord = imageAssetWriteMutex.withLock {
+        require(result.outputs.size == 1 && result.mimeType == "image/png") {
+            "ESRGAN product upscale must publish exactly one PNG output."
+        }
+        val requestToken = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(48)
+        val timestamp = System.currentTimeMillis()
+        val outputFile = writeImageAssetBytesAtomically(
+            directory = imageAssetDirectory,
+            fileName = "upscaled-image-$timestamp-$requestToken.png",
+            bytes = result.bytes
+        )
+        try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
+            require(bounds.outWidth > 0 && bounds.outHeight > 0) {
+                "Upscaled image could not be decoded after atomic publication."
+            }
+            val source = spec.sourceImageSnapshot
+            val sourceDimensionsAreNative = source.source.startsWith("generated", true) ||
+                source.source.startsWith("upscaled", true)
+            val lineage = ImageUpscaleHistoryMetadata.fromNativeExecution(
+                sourceImageId = source.id,
+                sourceWidthHint = source.width.takeIf { sourceDimensionsAreNative } ?: 0,
+                sourceHeightHint = source.height.takeIf { sourceDimensionsAreNative } ?: 0,
+                upscaler = spec.upscalerSnapshot,
+                targetScale = spec.targetScale,
+                tileSize = spec.tileSize,
+                threads = spec.threads,
+                outputWidth = bounds.outWidth,
+                outputHeight = bounds.outHeight,
+                nativeExecutionJson = result.executionMetadataJson
+            )
+            val sourceMetadata = ImageGenerationHistoryMetadata.fromJsonOrNull(
+                source.generationMetadataJson
+            ) ?: ImageGenerationHistoryMetadata(
+                backend = ImageBackend.LOCAL,
+                modelId = "source-image:${source.id}",
+                modelName = "原始图片",
+                requestPrompt = source.prompt.trim().takeIf(String::isNotEmpty)
+                    ?: source.name.ifBlank { "Source image" },
+                options = LocalImageGenerationOptions(
+                    width = source.width.takeIf { it > 0 },
+                    height = source.height.takeIf { it > 0 }
+                ),
+                inputDraft = LocalImageInputDraft(),
+                sourceGenerationAvailable = false
+            )
+            val metadata = sourceMetadata.withUpscale(lineage).toJsonString()
+            ImageAssetRecord(
+                id = UUID.randomUUID().toString(),
+                name = "Upscaled Image ${java.text.SimpleDateFormat("HHmmss", Locale.getDefault()).format(java.util.Date(timestamp))}.png",
+                uriString = Uri.fromFile(outputFile).toString(),
+                source = "upscaled:ESRGAN",
+                prompt = source.prompt,
+                sizeBytes = outputFile.length(),
+                width = bounds.outWidth,
+                height = bounds.outHeight,
+                generationMetadataJson = metadata,
+                chatSessionId = source.chatSessionId,
+                projectId = source.projectId
+            )
+        } catch (error: Throwable) {
+            runCatching { outputFile.delete() }
+            throw error
+        }
     }
 
     private suspend fun createCloudGeneratedImageAsset(
@@ -8094,30 +10041,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         chatSessionId: String? = null,
         generationMetadata: ImageGenerationHistoryMetadata
     ): ImageAssetRecord {
-        val app = getApplication<Application>()
-        val imageDir = File(app.filesDir, "image_assets").apply { mkdirs() }
         val result = cloudImageProvider.generate(config, prompt)
         val extension = imageExtensionForMime(result.mimeType)
-        val outputFile = writeImageAssetBytesAtomically(
-            directory = imageDir,
-            fileName = "cloud-image-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(8)}.$extension",
-            bytes = result.bytes
-        )
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
-        val displayPrompt = result.revisedPrompt.ifBlank { prompt }
-        return ImageAssetRecord(
-            id = UUID.randomUUID().toString(),
-            name = "Cloud Image ${java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault()).format(java.util.Date())}.$extension",
-            uriString = Uri.fromFile(outputFile).toString(),
-            source = "generated:${config.imageApiFormat.label}",
-            prompt = displayPrompt,
-            sizeBytes = outputFile.length(),
-            width = bounds.outWidth.coerceAtLeast(0),
-            height = bounds.outHeight.coerceAtLeast(0),
-            generationMetadataJson = generationMetadata.toJsonString(),
-            chatSessionId = chatSessionId
-        )
+        return imageAssetWriteMutex.withLock {
+            val outputFile = writeImageAssetBytesAtomically(
+                directory = imageAssetDirectory,
+                fileName = "cloud-image-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(8)}.$extension",
+                bytes = result.bytes
+            )
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
+            val displayPrompt = result.revisedPrompt.ifBlank { prompt }
+            ImageAssetRecord(
+                id = UUID.randomUUID().toString(),
+                name = "Cloud Image ${java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault()).format(java.util.Date())}.$extension",
+                uriString = Uri.fromFile(outputFile).toString(),
+                source = "generated:${config.imageApiFormat.label}",
+                prompt = displayPrompt,
+                sizeBytes = outputFile.length(),
+                width = bounds.outWidth.coerceAtLeast(0),
+                height = bounds.outHeight.coerceAtLeast(0),
+                generationMetadataJson = generationMetadata.toJsonString(),
+                chatSessionId = chatSessionId
+            )
+        }
     }
 
     private suspend fun createLocalGeneratedImageAsset(
@@ -8130,8 +10077,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         generationMetadata: ImageGenerationHistoryMetadata,
         onProgress: (LocalImageProgress) -> Unit = {}
     ): List<ImageAssetRecord> {
-        val app = getApplication<Application>()
-        val imageDir = File(app.filesDir, "image_assets").apply { mkdirs() }
         val result = try {
             localImageWorkerClient.generate(
                 model = model,
@@ -8153,38 +10098,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .toJsonString()
         val timestamp = System.currentTimeMillis()
         val requestToken = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(48)
-        val writtenFiles = mutableListOf<File>()
-        return try {
-            result.outputs.map { output ->
-                val extension = imageExtensionForMime(output.mimeType)
-                val suffix = if (result.outputs.size == 1) "" else "-${output.index.toString().padStart(3, '0')}"
-                val outputFile = writeImageAssetBytesAtomically(
-                    directory = imageDir,
-                    fileName = "local-image-$timestamp-$requestToken$suffix.$extension",
-                    bytes = output.bytes
-                )
-                writtenFiles += outputFile
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
-                require(bounds.outWidth > 0 && bounds.outHeight > 0) {
-                    "Generated image ${output.index} could not be decoded after publication."
+        return imageAssetWriteMutex.withLock {
+            val writtenFiles = mutableListOf<File>()
+            try {
+                result.outputs.map { output ->
+                    val extension = imageExtensionForMime(output.mimeType)
+                    val suffix = if (result.outputs.size == 1) "" else "-${output.index.toString().padStart(3, '0')}"
+                    val outputFile = writeImageAssetBytesAtomically(
+                        directory = imageAssetDirectory,
+                        fileName = "local-image-$timestamp-$requestToken$suffix.$extension",
+                        bytes = output.bytes
+                    )
+                    writtenFiles += outputFile
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
+                    require(bounds.outWidth > 0 && bounds.outHeight > 0) {
+                        "Generated image ${output.index} could not be decoded after publication."
+                    }
+                    ImageAssetRecord(
+                        id = UUID.randomUUID().toString(),
+                        name = "Local Image ${java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault()).format(java.util.Date(timestamp))}$suffix.$extension",
+                        uriString = Uri.fromFile(outputFile).toString(),
+                        source = "generated:${model.runtime.label}",
+                        prompt = prompt,
+                        sizeBytes = outputFile.length(),
+                        width = bounds.outWidth,
+                        height = bounds.outHeight,
+                        generationMetadataJson = generationMetadataJson,
+                        chatSessionId = chatSessionId
+                    )
                 }
-                ImageAssetRecord(
-                    id = UUID.randomUUID().toString(),
-                    name = "Local Image ${java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault()).format(java.util.Date(timestamp))}$suffix.$extension",
-                    uriString = Uri.fromFile(outputFile).toString(),
-                    source = "generated:${model.runtime.label}",
-                    prompt = prompt,
-                    sizeBytes = outputFile.length(),
-                    width = bounds.outWidth,
-                    height = bounds.outHeight,
-                    generationMetadataJson = generationMetadataJson,
-                    chatSessionId = chatSessionId
-                )
+            } catch (error: Throwable) {
+                writtenFiles.forEach { file -> runCatching { file.delete() } }
+                throw error
             }
-        } catch (error: Throwable) {
-            writtenFiles.forEach { file -> runCatching { file.delete() } }
-            throw error
         }
     }
 
@@ -8222,16 +10169,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     message = "No configured local image model is selected."
                 )
         }
+        if (!supportsAuthenticatedLocalImageCount(model.runtime, request.imageCount)) {
+            throw ImageGenerationProviderException(
+                code = "unsupported_image_count",
+                httpStatus = 422,
+                message = "The selected local image runtime does not support n=${request.imageCount}."
+            )
+        }
         val dispatch = request.toLocalImageApiDispatch()
-        val options = dispatch.options
+        var options = runCatching {
+            dispatch.options.copy(
+                loras = resolveCurrentLocalImageLoras(
+                    request.loras.map { selection -> selection.id to selection.multiplier }
+                )
+            )
+        }.getOrElse { error ->
+            throw ImageGenerationProviderException(
+                code = "image_lora_not_found",
+                httpStatus = 404,
+                message = error.message ?: "A requested LoRA adapter is unavailable."
+            )
+        }
         val inputDraft = dispatch.inputDraft
-        val generationLease = localImageGenerationCoordinator.tryAcquire(requestId)
+        val generationLease = tryAcquireObservedImageGenerationLease(requestId)
             ?: throw ImageGenerationProviderException(
                 code = "image_generation_busy",
                 httpStatus = 409,
                 message = "Another UI or Local API image request is already running."
             )
         activeLocalApiImageModelId = model.id
+        val leasedLoraRefreshError = synchronized(localImageLoraLifecycleLock) {
+            runCatching {
+                val currentLoras = localImageLoraStore.load()
+                options = options.copy(
+                    loras = resolveCurrentLocalImageLoras(
+                        request.loras.map { selection -> selection.id to selection.multiplier },
+                        currentLoras
+                    )
+                )
+                _uiState.update {
+                    it.copy(
+                        localImageLoras = currentLoras,
+                        activeLocalImageLoraIds = options.loras
+                            .mapTo(mutableSetOf()) { adapter -> adapter.id }
+                    )
+                }
+            }.exceptionOrNull()
+        }
+        if (leasedLoraRefreshError != null) {
+            activeLocalApiImageModelId = null
+            check(releaseObservedImageGenerationLease(generationLease)) {
+                "Local API image generation lease was replaced during LoRA refresh."
+            }
+            throw ImageGenerationProviderException(
+                code = "image_lora_not_found",
+                httpStatus = 404,
+                message = leasedLoraRefreshError.message ?: "A requested LoRA adapter is unavailable."
+            )
+        }
         try {
             val result = try {
                 localImageWorkerClient.generate(
@@ -8256,7 +10251,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 require(result.outputs.size == request.imageCount) {
                     "The local image worker returned ${result.outputs.size} images; ${request.imageCount} were requested."
                 }
-                val execution = runCatching { JSONObject(result.executionMetadataJson) }.getOrElse { JSONObject() }
+                val execution = runCatching {
+                    sanitizedLocalImageApiExecution(result.executionMetadataJson)
+                }.getOrElse { JSONObject() }
                 val nativeEffective = execution.optJSONObject("nativeEffective")
                     ?: error("The local image result is missing nativeEffective execution evidence.")
                 require(
@@ -8317,7 +10314,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         } finally {
             if (activeLocalApiImageModelId == model.id) activeLocalApiImageModelId = null
-            check(localImageGenerationCoordinator.release(generationLease)) {
+            synchronized(localImageLoraLifecycleLock) {
+                _uiState.update { it.copy(activeLocalImageLoraIds = emptySet()) }
+            }
+            check(releaseObservedImageGenerationLease(generationLease)) {
                 "Local API image generation lease was replaced before request completion."
             }
         }
@@ -8350,6 +10350,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             verifiedAt = System.currentTimeMillis()
         )
         val models = localImageModelStore.updateModel(updated)
+        managedRuntimeReadinessRefreshGate.invalidate()
         _uiState.update { state -> state.copy(localImageModels = models) }
     }
 

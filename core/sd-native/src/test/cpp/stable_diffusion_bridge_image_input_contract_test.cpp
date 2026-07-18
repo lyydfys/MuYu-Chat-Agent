@@ -59,7 +59,13 @@ int main(int argc, char** argv) {
     require_contains(source, "gen.control_image = control_image.view()");
     require_contains(source, "!paths.control_net.empty()");
     require_contains(source, "controlnet_residual");
+    require_contains(source, "execution_evidence.control_net_compute_attempt_count");
+    require_contains(source, "actual_control_net_residual_consumption_count");
+    require_contains(source, "actual_positive_control_net_compute_attempt_count != actual_positive_execution_count");
+    require_contains(source, "actual_negative_control_net_compute_attempt_count != actual_negative_execution_count");
+    require_contains(source, "controlNetEvidence");
     require_contains(source, "refusing to claim pixel consumption");
+    require_absent(source, "native_effective[\"controlImageExecutionCount\"] = control_image_wired ? 1 : 0");
 
     // Strength changes the actual native denoising timetable and must be
     // validated independently from configured sample steps.
@@ -77,6 +83,13 @@ int main(int argc, char** argv) {
 
     // VAE overlap is the public API's ratio, never an integer pixel count.
     require_contains(source, "gen.vae_tiling_params.target_overlap = contract.vae_tiling_enabled");
+    require_contains(source, "gen.vae_tiling_params.rel_size_x = contract.vae_tiling_enabled");
+    require_contains(source, "actual_vae_decode_tile_compute_success_count");
+    require_contains(source, "requestedTileSize");
+    require_contains(source, "plannedTileCount");
+    require_contains(source, "actual_vae_decode_tiling_invocation_count != contract.batch_count");
+    require_contains(source, "input_image_wired && actual_vae_encode_tiling_invocation_count <= 0");
     require_absent(source, "vae_tile_overlap_pixels");
+    require_absent(source, "{\"tileSize\", gen.vae_tiling_params.tile_size_x}");
     return 0;
 }

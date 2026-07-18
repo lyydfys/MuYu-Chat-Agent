@@ -4,6 +4,9 @@ import java.io.File
 import java.security.MessageDigest
 import org.json.JSONObject
 
+internal typealias LocalImageManifestProfileResolver =
+    (ImageExecutionProfileResolverInput) -> ImageExecutionProfileResolution
+
 /** Resolves the immutable execution contract used by one concrete generation request. */
 internal fun resolveLocalImageExecutionProfile(
     model: LocalImageModelRecord,
@@ -98,6 +101,56 @@ internal fun resolveLocalImageExecutionProfile(
 }
 
 /**
+ * Resolves only a complete, versioned manifest profile before readiness
+ * inspects required paths. A narrowly migrated catalog profile must not be
+ * rejected because an older persisted revision named sidecars that were never
+ * present in the extracted archive. This path intentionally reuses the
+ * persisted fingerprint and never hashes a large graph during UI readiness;
+ * real generation rebinds the profile to LocalImageModelRecord.sha256.
+ *
+ * Graph-only legacy manifests are left to the lightweight manifest parser.
+ * A versioned profile, however, is owned by this app and is therefore parsed
+ * and validated fail-closed instead of being downgraded to legacy discovery.
+ */
+internal fun resolveEffectiveLocalImageManifestProfile(
+    manifestJson: JSONObject,
+    resolver: LocalImageManifestProfileResolver = ImageExecutionProfileResolver::resolve
+): ImageExecutionProfile? {
+    val rawProfile = manifestJson.opt("executionProfile") as? JSONObject ?: return null
+    val isVersionedProfile = listOf(
+        "schemaVersion",
+        "profileId",
+        "profileRevision",
+        "modelFingerprint"
+    ).any(rawProfile::has)
+    if (!isVersionedProfile) return null
+
+    val persisted = requireNotNull(ImageExecutionProfileJson.parseManifest(manifestJson))
+    // Readiness must stay O(manifest + directory entries). The persisted
+    // fingerprint is the migration identity here; real generation resolves
+    // the LocalImageModelRecord fingerprint again and rejects any mismatch
+    // before native execution.
+    val installedFingerprint = persisted.modelFingerprint.trim().lowercase()
+    val recommendationId = manifestJson
+        .optString("recommendationId")
+        .takeIf(String::isNotBlank)
+        ?: manifestJson.optString("id").takeIf(String::isNotBlank)
+    return resolver(
+        ImageExecutionProfileResolverInput(
+            modelFingerprint = installedFingerprint,
+            runtime = persisted.runtime,
+            family = persisted.family,
+            recommendationId = recommendationId,
+            recommendationRevision = manifestJson
+                .optString("revision")
+                .takeIf(String::isNotBlank),
+            manifestProfile = persisted,
+            recommendationEvidence = localImageManifestRecommendationEvidence(manifestJson)
+        )
+    ).profile
+}
+
+/**
  * The configured sampler step count remains unchanged for img2img/inpaint, while native starts
  * later in that schedule according to strength. Bind the strict evidence to the actually visited
  * timetable instead of pretending every configured step executed.
@@ -152,8 +205,13 @@ internal fun parseLocalImageExecutionProfileSidecars(
     )
 }
 
-private fun isJsonImageBehaviorSidecar(relativePath: String): Boolean =
-    relativePath.substringAfterLast('/').substringAfterLast('\\').endsWith(".json", ignoreCase = true)
+private fun isJsonImageBehaviorSidecar(relativePath: String): Boolean {
+    val fileName = relativePath
+        .substringAfterLast('/')
+        .substringAfterLast('\\')
+        .lowercase()
+    return fileName.endsWith(".json") && fileName !in NON_BEHAVIOR_RUNTIME_JSON_FILES
+}
 
 /**
  * Collects package identity without consulting hardware. Exact catalog
@@ -165,15 +223,35 @@ internal fun localImageRecommendationEvidence(
     bundleRoot: File?,
     manifestJson: JSONObject?
 ): ImageRecommendationEvidence {
+    val manifestEvidence = manifestJson?.let(::localImageManifestRecommendationEvidence)
+        ?: ImageRecommendationEvidence()
+    val modelArtifactPaths = buildList {
+        add(model.displayName)
+        add(model.fileName)
+        add(model.path)
+        model.bundleRoot?.takeIf(String::isNotBlank)?.let(::add)
+        bundleRoot?.absolutePath?.takeIf(String::isNotBlank)?.let(::add)
+    }
+    return ImageRecommendationEvidence(
+        aliases = (listOf(model.id) + manifestEvidence.aliases).distinct(),
+        sourceRepositories = (
+            listOf(model.source).filter(String::isNotBlank) +
+                manifestEvidence.sourceRepositories
+            ).distinct(),
+        artifactPaths = (modelArtifactPaths + manifestEvidence.artifactPaths).distinct()
+    )
+}
+
+private fun localImageManifestRecommendationEvidence(
+    manifestJson: JSONObject
+): ImageRecommendationEvidence {
     val aliases = buildList {
-        add(model.id)
-        manifestJson?.optString("recommendationId")?.takeIf(String::isNotBlank)?.let(::add)
-        manifestJson?.optString("id")?.takeIf(String::isNotBlank)?.let(::add)
+        manifestJson.optString("recommendationId").takeIf(String::isNotBlank)?.let(::add)
+        manifestJson.optString("id").takeIf(String::isNotBlank)?.let(::add)
     }
     val sourceRepositories = buildList {
-        model.source.takeIf(String::isNotBlank)?.let(::add)
-        manifestJson?.optString("sourceRepo")?.takeIf(String::isNotBlank)?.let(::add)
-        val components = manifestJson?.optJSONArray("components")
+        manifestJson.optString("sourceRepo").takeIf(String::isNotBlank)?.let(::add)
+        val components = manifestJson.optJSONArray("components")
         if (components != null) {
             for (index in 0 until components.length()) {
                 val component = components.optJSONObject(index) ?: continue
@@ -185,15 +263,10 @@ internal fun localImageRecommendationEvidence(
         }
     }
     val artifactPaths = buildList {
-        add(model.displayName)
-        add(model.fileName)
-        add(model.path)
-        model.bundleRoot?.takeIf(String::isNotBlank)?.let(::add)
-        bundleRoot?.absolutePath?.takeIf(String::isNotBlank)?.let(::add)
         listOf("title", "recommendedFileName", "primary", "primaryFile").forEach { field ->
-            manifestJson?.optString(field)?.takeIf(String::isNotBlank)?.let(::add)
+            manifestJson.optString(field).takeIf(String::isNotBlank)?.let(::add)
         }
-        val components = manifestJson?.optJSONArray("components")
+        val components = manifestJson.optJSONArray("components")
         if (components != null) {
             for (index in 0 until components.length()) {
                 val component = components.optJSONObject(index) ?: continue
@@ -231,6 +304,15 @@ internal fun resolveMnnDiffusionProfileRunner(
 private const val DEFAULT_IMAGE_SCHEDULER_SIDECAR = "scheduler/scheduler_config.json"
 private const val DEFAULT_IMAGE_TOKENIZER_SIDECAR = "tokenizer/tokenizer_config.json"
 private const val DEFAULT_IMAGE_BEHAVIOR_SIDECAR = "config.json"
+
+private val NON_BEHAVIOR_RUNTIME_JSON_FILES = setOf(
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "vocab.json",
+    "scheduler_config.json"
+)
 
 private val PRIMARY_IMAGE_COMPONENT_ROLES = setOf("DIFFUSION", "MODEL", "UNET", "TRANSFORMER")
 

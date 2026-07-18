@@ -1,11 +1,65 @@
 package com.muyuchat.mca
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalImageWorkerClientLifecycleTest {
+    @Test
+    fun upscaleStartsBoundedWatchdogAfterAcceptanceAndPreservesTimeoutTermination() {
+        val source = localImageWorkerClientSource()
+        val upscale = functionBody(source, "suspend fun upscale(")
+        val accepted = upscale.indexOf("request.handshake.completeRemoteStart(accepted)")
+        val watchdog = upscale.indexOf("startUpscaleWatchdog(request)", accepted)
+        val awaitTerminal = upscale.indexOf("request.completion.await()", watchdog)
+
+        assertTrue(accepted >= 0)
+        assertTrue(watchdog > accepted)
+        assertTrue(awaitTerminal > watchdog)
+        assertTrue(upscale.contains("if (!request.watchdogTimedOut) request.watchdogJob?.cancel()"))
+        assertEquals("esrgan_worker_timeout", LOCAL_IMAGE_UPSCALE_WATCHDOG_TIMEOUT_CODE)
+        assertTrue(LOCAL_IMAGE_UPSCALE_MAX_RUNTIME_MS > localImageUpscaleHeartbeatTimeoutMs("upscaling"))
+    }
+
+    @Test
+    fun upscaleWatchdogUsesWorkerCallbacksAsHeartbeatWithoutDeviceAdmission() {
+        val source = localImageWorkerClientSource()
+        val callback = functionBody(source, "private fun callbackFor(")
+        val watchdog = functionBody(source, "private fun startUpscaleWatchdog(")
+
+        assertTrue(callback.contains("request.lastWorkerCallbackAtMs = SystemClock.elapsedRealtime()"))
+        assertTrue(watchdog.contains("localImageUpscaleHeartbeatTimeoutMs("))
+        assertTrue(watchdog.contains("LOCAL_IMAGE_UPSCALE_MAX_RUNTIME_MS"))
+        assertTrue(watchdog.contains("cancelRemote(request)"))
+        assertTrue(watchdog.contains("Process.killProcess(workerPid)"))
+        assertFalse(watchdog.contains("deviceProfile"))
+        assertFalse(watchdog.contains("chipset"))
+        assertTrue(
+            localImageUpscaleHeartbeatTimeoutMs("worker_preparing") >
+                localImageUpscaleHeartbeatTimeoutMs("upscaling")
+        )
+        assertTrue(
+            localImageUpscaleHeartbeatTimeoutMs("waiting_for_native_lease") >
+                localImageUpscaleHeartbeatTimeoutMs("worker_preparing")
+        )
+    }
+
+    @Test
+    fun upscaleWorkerPublishesPreparationHeartbeatAndClosesModelLease() {
+        val service = functionBody(localImageWorkerServiceSource(), "private fun acceptUpscale(")
+        val heartbeat = service.indexOf("phase = \"worker_preparing\"")
+        val materialize = service.indexOf("workerInputStore.materializeUpscale(")
+        val closeLease = service.indexOf("workerInputs?.close()")
+
+        assertTrue(heartbeat >= 0)
+        assertTrue(materialize > heartbeat)
+        assertTrue(service.contains("isCancelled = {"))
+        assertTrue(service.contains("preparedInputs.close()"))
+        assertTrue(closeLease > materialize)
+    }
+
     @Test
     fun terminalOutcomesReleaseTheBindingAndAllowTheNextBind() {
         listOf("success", "failure", "cancelled").forEach { outcome ->
@@ -270,7 +324,9 @@ class LocalImageWorkerClientLifecycleTest {
             "markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)"
         )
         val deliveryFailed = job.indexOf("errorCode = \"RESULT_DELIVERY_FAILED\"")
+        val cleanupBeforeFailure = job.indexOf("transferredOutputs.deleteWorkerOutputs()")
         val onDestroy = functionBody(source, "override fun onDestroy()")
+        val writeResult = functionBody(source, "private fun writeResultFile(")
 
         assertTrue("worker job must contain its result callback", deliver >= 0)
         assertTrue(
@@ -287,6 +343,13 @@ class LocalImageWorkerClientLifecycleTest {
             "a callback delivery failure must remain FAILED rather than COMPLETED",
             deliveryFailed > completed
         )
+        assertTrue(
+            "undelivered outputs must be removed before the FAILED journal terminal",
+            cleanupBeforeFailure in (completed + 1) until deliveryFailed
+        )
+        assertTrue(writeResult.contains("output.fd.sync()"))
+        assertTrue(writeResult.contains("durableMoveWithinParent("))
+        assertTrue(writeResult.contains("target.partial.delete()"))
     }
 
     @Test

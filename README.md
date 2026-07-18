@@ -57,7 +57,8 @@ quality MP4 is available at [docs/assets/demo/mca-demo.mp4](docs/assets/demo/mca
 
 This repository is an active Android app workspace. The chat and model
 management surfaces are usable, while local image generation is still
-experimental and should be tested per device and model bundle.
+experimental. A complete model bundle is admitted on every compatible device;
+its first real native load and graph execution determine compatibility.
 
 Current release status:
 
@@ -339,8 +340,10 @@ Gradle applies this patch when needed before the native CMake build.
 
 Local image generation is model-bundle sensitive. Some newer image models need
 a diffusion model plus VAE/AE and text encoder/LLM components in the same
-engine directory. It is currently an experimental capability and should be
-validated on each target device before being promoted as stable.
+engine directory. Compatibility is decided by the complete bundle contract and
+the first real native load/graph execution. Unknown devices remain eligible and
+use the generic compatible path; hardware detection only ranks packages and
+selects runtime tuning.
 
 ## Model and API Compatibility
 

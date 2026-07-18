@@ -8,20 +8,25 @@
 #include <cctype>
 #include <cerrno>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <dirent.h>
 #include <exception>
+#include <fcntl.h>
 #include <limits.h>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 #include "json.hpp"
@@ -64,11 +69,23 @@ constexpr uint32_t kStageContextReleased = 1u << 6u;
 constexpr uint32_t kStageInputImageDecoded = 1u << 7u;
 constexpr uint32_t kStageMaskImageDecoded = 1u << 8u;
 constexpr uint32_t kStageControlImageDecoded = 1u << 9u;
+constexpr uint32_t kStageLoraValidated = 1u << 10u;
 
 constexpr size_t kMaxInputImageBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxInputImageSide = 8192u;
 constexpr uint64_t kMaxInputImagePixels = 64u * 1024u * 1024u;
 constexpr int kMaxBatchCount = 8;
+constexpr size_t kMaxLoraCount = 8u;
+constexpr uint64_t kMaxLoraBytes = 2ull * 1024ull * 1024ull * 1024ull;
+constexpr uint64_t kMaxUpscalerBytes = 2ull * 1024ull * 1024ull * 1024ull;
+constexpr uint32_t kMaxUpscaleInputSide = 2048u;
+constexpr uint64_t kMaxUpscaleInputPixels = 4000000ull;
+constexpr uint32_t kMaxUpscaleProductOutputSide = 4096u;
+constexpr uint64_t kMaxUpscaleProductOutputPixels = 16000000ull;
+// A fixed-scale model may produce a larger intermediate before Android publishes
+// the requested 2x/3x/4x result. Keep that intermediate bounded independently.
+constexpr uint32_t kMaxUpscaleNativeOutputSide = 8192u;
+constexpr uint64_t kMaxUpscaleNativeOutputPixels = 64000000ull;
 
 void mark_generation_stage(uint32_t stage) {
     g_generation_stage_mask.fetch_or(stage, std::memory_order_relaxed);
@@ -447,6 +464,15 @@ bool is_sha256(const std::string &value) {
     });
 }
 
+struct ContractLoraAdapter {
+    std::string id;
+    std::string name;
+    std::string path;
+    std::string sha256;
+    uint64_t size_bytes = 0u;
+    double multiplier = 1.0;
+};
+
 struct StableDiffusionExecutionContract {
     std::string profile_id;
     int profile_revision = 0;
@@ -490,6 +516,8 @@ struct StableDiffusionExecutionContract {
     bool control_strength_specified = false;
     int clip_skip = -1;
     int batch_count = 1;
+    std::string lora_root_path;
+    std::vector<ContractLoraAdapter> loras;
     bool vae_tiling_enabled = false;
     int vae_tile_size = 0;
     double vae_tile_overlap = 0.0;
@@ -776,6 +804,51 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
     if (contract.seed > std::numeric_limits<int64_t>::max() - (contract.batch_count - 1)) {
         invalid_contract("seed", "seed plus batch index overflows signed 64-bit range");
     }
+    const int lora_count = required_int32(params, "loraCount");
+    if (lora_count < 0 || static_cast<size_t>(lora_count) > kMaxLoraCount) {
+        invalid_contract("loraCount", "must be in [0, 8]");
+    }
+    contract.lora_root_path = required_string(params, "loraRootPath", true);
+    const json &loras = required_field(params, "loras");
+    if (!loras.is_array() || loras.size() != static_cast<size_t>(lora_count)) {
+        invalid_contract("loras", "must be an array whose length exactly matches loraCount");
+    }
+    if ((lora_count == 0) != contract.lora_root_path.empty()) {
+        invalid_contract(
+                "loraRootPath",
+                lora_count == 0
+                ? "must be empty when no LoRA is requested"
+                : "is required when LoRA adapters are requested");
+    }
+    std::unordered_set<std::string> lora_ids;
+    std::unordered_set<std::string> lora_paths;
+    contract.loras.reserve(static_cast<size_t>(lora_count));
+    for (size_t index = 0; index < loras.size(); ++index) {
+        const json &item = loras[index];
+        if (!item.is_object()) invalid_contract("loras", "every LoRA item must be an object");
+        ContractLoraAdapter adapter;
+        adapter.id = required_string(item, "id");
+        adapter.name = required_string(item, "name");
+        adapter.path = required_string(item, "path");
+        adapter.sha256 = lower_copy(required_string(item, "sha256"));
+        const int64_t size_bytes = required_integer(item, "sizeBytes");
+        adapter.multiplier = required_number(item, "multiplier");
+        if (!is_sha256(adapter.sha256)) {
+            invalid_contract("loras.sha256", "must be a 64-character SHA-256 value");
+        }
+        if (size_bytes < 16 || static_cast<uint64_t>(size_bytes) > kMaxLoraBytes) {
+            invalid_contract("loras.sizeBytes", "must describe a bounded non-empty LoRA file");
+        }
+        if (adapter.multiplier < -4.0 || adapter.multiplier > 4.0 ||
+            std::fabs(adapter.multiplier) < 0.01) {
+            invalid_contract("loras.multiplier", "must be in [-4, -0.01] or [0.01, 4]");
+        }
+        if (!lora_ids.insert(adapter.id).second || !lora_paths.insert(adapter.path).second) {
+            invalid_contract("loras", "LoRA ids and paths must be unique per request");
+        }
+        adapter.size_bytes = static_cast<uint64_t>(size_bytes);
+        contract.loras.push_back(std::move(adapter));
+    }
     const auto tiling = params.find("vaeTiling");
     if (tiling != params.end()) {
         if (!tiling->is_object()) invalid_contract("vaeTiling", "must be an object when present");
@@ -786,8 +859,8 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
             contract.vae_tile_size % 8 != 0) {
             invalid_contract("vaeTiling.tileSize", "must be a multiple of 8 in [64, 4096]");
         }
-        if (contract.vae_tile_overlap < 0.0 || contract.vae_tile_overlap >= 1.0) {
-            invalid_contract("vaeTiling.overlap", "must be a finite ratio in [0, 1)");
+        if (contract.vae_tile_overlap < 0.0 || contract.vae_tile_overlap > 0.5) {
+            invalid_contract("vaeTiling.overlap", "must be a finite ratio in [0, 0.5]");
         }
     }
     const auto preview = params.find("preview");
@@ -1006,19 +1079,19 @@ void set_progress_from_sd_log(const char *text) {
     }
     if (!g_generation_active.load(std::memory_order_relaxed)) return;
     if (contains(lower, "get_learned_condition")) {
-        set_progress_stage("conditioning", message);
+        set_progress_stage("conditioning", "running native text conditioning");
     } else if (contains(lower, "encode_first_stage")) {
-        set_progress_stage("encoding", message);
+        set_progress_stage("encoding", "encoding the native input latent");
     } else if (contains(lower, "decode_first_stage") ||
                contains(lower, "decode image") ||
                contains(lower, "decoding")) {
-        set_progress_stage("decoding", message);
+        set_progress_stage("decoding", "decoding the native image output");
     } else if (contains(lower, "generating image") ||
                contains(lower, "denoise") ||
                contains(lower, "sample")) {
-        set_progress_stage("sampling", message);
+        set_progress_stage("sampling", "running native diffusion sampling");
     } else if (contains(lower, "generate_image")) {
-        set_progress_stage("preparing", message);
+        set_progress_stage("preparing", "preparing native image generation");
     } else if (contains(lower, "loading") ||
                contains(lower, "load ") ||
                contains(lower, "model") ||
@@ -1026,19 +1099,58 @@ void set_progress_from_sd_log(const char *text) {
                contains(lower, "clip") ||
                contains(lower, "t5") ||
                contains(lower, "llm")) {
-        set_progress_stage("loading", message);
+        set_progress_stage("loading", "loading native model components");
     }
 }
 
+std::string safe_sd_runtime_message(sd_log_level_t level, const char *text) {
+    const std::string lower = lower_copy(text == nullptr ? "" : text);
+    const char *severity = level == SD_LOG_ERROR ? "error" : "warning";
+    if (contains(lower, "cancel")) {
+        return std::string("native runtime ") + severity + ": operation cancelled";
+    }
+    if (contains(lower, "out of memory") || contains(lower, "alloc") ||
+        contains(lower, "buffer")) {
+        return std::string("native runtime ") + severity + ": memory allocation failed";
+    }
+    if (contains(lower, "backend") || contains(lower, "vulkan") ||
+        contains(lower, "opencl")) {
+        return std::string("native runtime ") + severity + ": backend initialization failed";
+    }
+    if (contains(lower, "token") || contains(lower, "condition") ||
+        contains(lower, "clip") || contains(lower, "t5") || contains(lower, "llm")) {
+        return std::string("native runtime ") + severity + ": text conditioning failed";
+    }
+    if (contains(lower, "vae") || contains(lower, "decode") ||
+        contains(lower, "encode_first_stage")) {
+        return std::string("native runtime ") + severity + ": image codec stage failed";
+    }
+    if (contains(lower, "lora")) {
+        return std::string("native runtime ") + severity + ": LoRA application failed";
+    }
+    if (contains(lower, "control")) {
+        return std::string("native runtime ") + severity + ": control conditioning failed";
+    }
+    if (contains(lower, "model") || contains(lower, "load") ||
+        contains(lower, "file") || contains(lower, "mmap")) {
+        return std::string("native runtime ") + severity + ": model loading failed";
+    }
+    if (contains(lower, "compute") || contains(lower, "sample") ||
+        contains(lower, "denois")) {
+        return std::string("native runtime ") + severity + ": model execution failed";
+    }
+    return std::string("native runtime reported a ") + severity;
+}
+
 void sd_log_callback(sd_log_level_t level, const char *text, void *) {
-    const int android_level = level == SD_LOG_ERROR ? ANDROID_LOG_ERROR :
-                              level == SD_LOG_WARN ? ANDROID_LOG_WARN :
-                              level == SD_LOG_DEBUG ? ANDROID_LOG_DEBUG :
-                              ANDROID_LOG_INFO;
-    __android_log_print(android_level, "MCA-SD", "%s", text == nullptr ? "" : text);
     set_progress_from_sd_log(text);
     if ((level == SD_LOG_ERROR || level == SD_LOG_WARN) && text != nullptr && text[0] != '\0') {
-        g_last_sd_error = text;
+        g_last_sd_error = safe_sd_runtime_message(level, text);
+        __android_log_print(
+                level == SD_LOG_ERROR ? ANDROID_LOG_ERROR : ANDROID_LOG_WARN,
+                "MCA-SD",
+                "%s",
+                g_last_sd_error.c_str());
     }
 }
 
@@ -1206,34 +1318,180 @@ bool canonical_existing_file_within_root(const std::string &raw_path,
     return true;
 }
 
+bool validate_lora_file(const std::string &raw_root,
+                        const ContractLoraAdapter &adapter,
+                        std::string &canonical_path,
+                        std::string &error) {
+    char root_buffer[PATH_MAX] = {};
+    char path_buffer[PATH_MAX] = {};
+    if (raw_root.empty() || realpath(raw_root.c_str(), root_buffer) == nullptr ||
+        !dir_exists(root_buffer)) {
+        error = "LoRA root does not exist";
+        return false;
+    }
+    struct stat link_stat {};
+    if (adapter.path.empty() || lstat(adapter.path.c_str(), &link_stat) != 0 ||
+        !S_ISREG(link_stat.st_mode)) {
+        error = "LoRA must be a regular non-symlink file";
+        return false;
+    }
+    if (link_stat.st_size < 0 ||
+        static_cast<uint64_t>(link_stat.st_size) != adapter.size_bytes) {
+        error = "LoRA size differs from the worker-verified contract";
+        return false;
+    }
+    if (realpath(adapter.path.c_str(), path_buffer) == nullptr || !file_exists(path_buffer)) {
+        error = "LoRA file does not exist";
+        return false;
+    }
+    const std::string root(root_buffer);
+    const std::string path(path_buffer);
+    if (path != adapter.path) {
+        error = "LoRA path must already be canonical";
+        return false;
+    }
+    const size_t separator = path.find_last_of('/');
+    if (separator == std::string::npos || path.substr(0, separator) != root) {
+        error = "LoRA must be a direct child of the app-owned LoRA root";
+        return false;
+    }
+    const std::string lower = lower_copy(path);
+    if (!ends_with(lower, ".safetensors") && !ends_with(lower, ".ckpt")) {
+        error = "LoRA file extension is unsupported";
+        return false;
+    }
+    canonical_path = path;
+    return true;
+}
+
+bool validate_upscaler_file(const std::string &raw_root,
+                            const std::string &raw_path,
+                            uint64_t expected_size,
+                            std::string &canonical_path,
+                            std::string &error) {
+    char root_buffer[PATH_MAX] = {};
+    char path_buffer[PATH_MAX] = {};
+    if (raw_root.empty() || realpath(raw_root.c_str(), root_buffer) == nullptr ||
+        !dir_exists(root_buffer)) {
+        error = "upscaler root does not exist";
+        return false;
+    }
+    struct stat link_stat {};
+    if (raw_path.empty() || lstat(raw_path.c_str(), &link_stat) != 0 ||
+        !S_ISREG(link_stat.st_mode)) {
+        error = "upscaler model must be a regular non-symlink file";
+        return false;
+    }
+    if (link_stat.st_size < 0 || static_cast<uint64_t>(link_stat.st_size) != expected_size) {
+        error = "upscaler model size differs from the worker-verified contract";
+        return false;
+    }
+    if (realpath(raw_path.c_str(), path_buffer) == nullptr || !file_exists(path_buffer)) {
+        error = "upscaler model does not exist";
+        return false;
+    }
+    const std::string root(root_buffer);
+    const std::string path(path_buffer);
+    if (path != raw_path) {
+        error = "upscaler path must already be canonical";
+        return false;
+    }
+    const size_t separator = path.find_last_of('/');
+    if (separator == std::string::npos || path.substr(0, separator) != root) {
+        error = "upscaler model must be a direct child of the app-owned upscaler root";
+        return false;
+    }
+    const std::string lower = lower_copy(path);
+    if (!ends_with(lower, ".pth") && !ends_with(lower, ".safetensors") &&
+        !ends_with(lower, ".ckpt") && !ends_with(lower, ".bin")) {
+        error = "upscaler model extension is unsupported";
+        return false;
+    }
+    canonical_path = path;
+    return true;
+}
+
 uint32_t rotate_right(uint32_t value, uint32_t amount) {
     return (value >> amount) | (value << (32u - amount));
 }
 
-std::string sha256_hex(const std::vector<uint8_t> &bytes) {
-    static constexpr std::array<uint32_t, 64> constants = {{
-            0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
-            0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
-            0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
-            0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
-            0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
-            0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
-            0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
-            0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
-            0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
-            0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
-            0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
-            0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
-            0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
-            0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
-            0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
-            0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
-    }};
-    std::array<uint32_t, 8> state = {{
-            0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-            0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
-    }};
-    const auto transform = [&](const uint8_t *block) {
+class Sha256Accumulator {
+public:
+    void update(const uint8_t *bytes, size_t size) {
+        if (size == 0u) {
+            return;
+        }
+        total_bytes_ += static_cast<uint64_t>(size);
+        if (buffer_size_ > 0u) {
+            const size_t consumed = std::min(size, buffer_.size() - buffer_size_);
+            std::memcpy(buffer_.data() + buffer_size_, bytes, consumed);
+            buffer_size_ += consumed;
+            bytes += consumed;
+            size -= consumed;
+            if (buffer_size_ == buffer_.size()) {
+                transform(buffer_.data());
+                buffer_size_ = 0u;
+            }
+        }
+        while (size >= buffer_.size()) {
+            transform(bytes);
+            bytes += buffer_.size();
+            size -= buffer_.size();
+        }
+        if (size > 0u) {
+            std::memcpy(buffer_.data(), bytes, size);
+            buffer_size_ = size;
+        }
+    }
+
+    std::string finish_hex() {
+        const uint64_t bit_count = total_bytes_ * 8u;
+        buffer_[buffer_size_++] = 0x80u;
+        if (buffer_size_ > 56u) {
+            std::fill(buffer_.begin() + static_cast<ptrdiff_t>(buffer_size_), buffer_.end(), 0u);
+            transform(buffer_.data());
+            buffer_size_ = 0u;
+        }
+        std::fill(
+                buffer_.begin() + static_cast<ptrdiff_t>(buffer_size_),
+                buffer_.begin() + 56,
+                0u);
+        for (size_t index = 0; index < 8u; ++index) {
+            buffer_[63u - index] = static_cast<uint8_t>(bit_count >> (index * 8u));
+        }
+        transform(buffer_.data());
+
+        static constexpr char hex[] = "0123456789abcdef";
+        std::string result(64, '0');
+        size_t output = 0;
+        for (uint32_t word: state_) {
+            for (int shift = 28; shift >= 0; shift -= 4) {
+                result[output++] = hex[(word >> static_cast<uint32_t>(shift)) & 0x0fu];
+            }
+        }
+        return result;
+    }
+
+private:
+    void transform(const uint8_t *block) {
+        static constexpr std::array<uint32_t, 64> constants = {{
+                0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+                0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+                0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+                0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+                0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+                0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+                0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+                0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+                0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+                0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+                0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+                0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+                0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+                0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+                0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+                0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
+        }};
         std::array<uint32_t, 64> words = {};
         for (size_t i = 0; i < 16; ++i) {
             const size_t offset = i * 4;
@@ -1251,14 +1509,14 @@ std::string sha256_hex(const std::vector<uint8_t> &bytes) {
                                 (words[i - 2] >> 10u);
             words[i] = words[i - 16] + s0 + words[i - 7] + s1;
         }
-        uint32_t a = state[0];
-        uint32_t b = state[1];
-        uint32_t c = state[2];
-        uint32_t d = state[3];
-        uint32_t e = state[4];
-        uint32_t f = state[5];
-        uint32_t g = state[6];
-        uint32_t h = state[7];
+        uint32_t a = state_[0];
+        uint32_t b = state_[1];
+        uint32_t c = state_[2];
+        uint32_t d = state_[3];
+        uint32_t e = state_[4];
+        uint32_t f = state_[5];
+        uint32_t g = state_[6];
+        uint32_t h = state_[7];
         for (size_t i = 0; i < words.size(); ++i) {
             const uint32_t sigma1 = rotate_right(e, 6u) ^
                                     rotate_right(e, 11u) ^
@@ -1279,42 +1537,31 @@ std::string sha256_hex(const std::vector<uint8_t> &bytes) {
             b = a;
             a = temp1 + temp2;
         }
-        state[0] += a;
-        state[1] += b;
-        state[2] += c;
-        state[3] += d;
-        state[4] += e;
-        state[5] += f;
-        state[6] += g;
-        state[7] += h;
-    };
+        state_[0] += a;
+        state_[1] += b;
+        state_[2] += c;
+        state_[3] += d;
+        state_[4] += e;
+        state_[5] += f;
+        state_[6] += g;
+        state_[7] += h;
+    }
 
-    const uint64_t bit_count = static_cast<uint64_t>(bytes.size()) * 8u;
-    size_t offset = 0;
-    while (offset + 64u <= bytes.size()) {
-        transform(bytes.data() + offset);
-        offset += 64u;
-    }
-    std::array<uint8_t, 128> tail = {};
-    const size_t remaining = bytes.size() - offset;
-    if (remaining > 0) std::memcpy(tail.data(), bytes.data() + offset, remaining);
-    tail[remaining] = 0x80u;
-    const size_t padded_size = remaining < 56u ? 64u : 128u;
-    for (size_t i = 0; i < 8; ++i) {
-        tail[padded_size - 1u - i] = static_cast<uint8_t>(bit_count >> (i * 8u));
-    }
-    transform(tail.data());
-    if (padded_size == 128u) transform(tail.data() + 64u);
+    std::array<uint32_t, 8> state_ = {{
+            0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+            0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
+    }};
+    std::array<uint8_t, 64> buffer_ = {};
+    size_t buffer_size_ = 0u;
+    uint64_t total_bytes_ = 0u;
+};
 
-    static constexpr char hex[] = "0123456789abcdef";
-    std::string result(64, '0');
-    size_t output = 0;
-    for (uint32_t word: state) {
-        for (int shift = 28; shift >= 0; shift -= 4) {
-            result[output++] = hex[(word >> static_cast<uint32_t>(shift)) & 0x0fu];
-        }
+std::string sha256_hex(const std::vector<uint8_t> &bytes) {
+    Sha256Accumulator accumulator;
+    if (!bytes.empty()) {
+        accumulator.update(bytes.data(), bytes.size());
     }
-    return result;
+    return accumulator.finish_hex();
 }
 
 bool sha256_implementation_ready() {
@@ -1327,6 +1574,129 @@ bool sha256_implementation_ready() {
                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     }();
     return ready;
+}
+
+struct RegularFileIdentity {
+    uint64_t device = 0;
+    uint64_t inode = 0;
+    uint64_t size = 0;
+    int64_t modification_time = 0;
+    int64_t status_change_time = 0;
+};
+
+RegularFileIdentity regular_file_identity(const struct stat &value) {
+    return RegularFileIdentity{
+            static_cast<uint64_t>(value.st_dev),
+            static_cast<uint64_t>(value.st_ino),
+            value.st_size >= 0 ? static_cast<uint64_t>(value.st_size) : 0u,
+            static_cast<int64_t>(value.st_mtime),
+            static_cast<int64_t>(value.st_ctime)};
+}
+
+bool same_regular_file_identity(const RegularFileIdentity &left,
+                                const RegularFileIdentity &right) {
+    return left.device == right.device &&
+           left.inode == right.inode &&
+           left.size == right.size &&
+           left.modification_time == right.modification_time &&
+           left.status_change_time == right.status_change_time;
+}
+
+class ScopedFileDescriptor {
+public:
+    explicit ScopedFileDescriptor(int descriptor) : descriptor_(descriptor) {}
+
+    ~ScopedFileDescriptor() {
+        if (descriptor_ >= 0) {
+            close(descriptor_);
+        }
+    }
+
+    int get() const { return descriptor_; }
+
+private:
+    int descriptor_;
+};
+
+bool read_regular_file_identity(const std::string &path,
+                                uint64_t expected_size,
+                                RegularFileIdentity &identity,
+                                std::string &error) {
+    struct stat value {};
+    if (lstat(path.c_str(), &value) != 0 || !S_ISREG(value.st_mode)) {
+        error = "upscaler model is no longer a regular non-symlink file";
+        return false;
+    }
+    identity = regular_file_identity(value);
+    if (identity.size != expected_size) {
+        error = "upscaler model size changed during native execution";
+        return false;
+    }
+    return true;
+}
+
+bool sha256_regular_file(const std::string &path,
+                         uint64_t expected_size,
+                         std::string &digest,
+                         RegularFileIdentity &identity,
+                         std::string &error) {
+    if (!sha256_implementation_ready()) {
+        error = "native SHA-256 self-test failed";
+        return false;
+    }
+    ScopedFileDescriptor file(open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    if (file.get() < 0) {
+        error = "upscaler model could not be opened for native hashing";
+        return false;
+    }
+    struct stat before {};
+    if (fstat(file.get(), &before) != 0 || !S_ISREG(before.st_mode)) {
+        error = "upscaler model descriptor is not a regular file";
+        return false;
+    }
+    identity = regular_file_identity(before);
+    if (identity.size != expected_size) {
+        error = "upscaler model size changed before native hashing";
+        return false;
+    }
+
+    Sha256Accumulator accumulator;
+    std::array<uint8_t, 64u * 1024u> buffer = {};
+    uint64_t bytes_read = 0u;
+    while (true) {
+        if (g_cancel_requested.load(std::memory_order_relaxed)) {
+            error = "cancelled";
+            return false;
+        }
+        const ssize_t count = read(file.get(), buffer.data(), buffer.size());
+        if (count == 0) {
+            break;
+        }
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            error = "upscaler model could not be read for native hashing";
+            return false;
+        }
+        const size_t chunk = static_cast<size_t>(count);
+        accumulator.update(buffer.data(), chunk);
+        bytes_read += static_cast<uint64_t>(chunk);
+        if (bytes_read > expected_size) {
+            error = "upscaler model grew during native hashing";
+            return false;
+        }
+    }
+
+    struct stat after {};
+    if (fstat(file.get(), &after) != 0 ||
+        !same_regular_file_identity(identity, regular_file_identity(after)) ||
+        bytes_read != expected_size) {
+        error = "upscaler model changed while native was hashing it";
+        return false;
+    }
+    digest = accumulator.finish_hex();
+    return true;
 }
 
 preview_t preview_mode_from_contract(const std::string &mode) {
@@ -1552,7 +1922,11 @@ bool load_canonical_input_image(const std::string &raw_path,
                                 const std::string &expected_sha256,
                                 int requested_channels,
                                 LoadedInputImage &image,
-                                std::string &error) {
+                                std::string &error,
+                                uint32_t maximum_side = kMaxInputImageSide,
+                                uint64_t maximum_pixels = kMaxInputImagePixels,
+                                const char *size_limit_error =
+                                        "worker input image exceeds the 8192-pixel side or 64-megapixel limit") {
     if (raw_path.empty() || raw_path.front() != '/') {
         error = "worker input image path must be an absolute canonical path";
         return false;
@@ -1616,10 +1990,10 @@ bool load_canonical_input_image(const std::string &raw_path,
         return false;
     }
     const uint64_t pixel_count = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-    if (static_cast<uint32_t>(width) > kMaxInputImageSide ||
-        static_cast<uint32_t>(height) > kMaxInputImageSide ||
-        pixel_count > kMaxInputImagePixels) {
-        error = "worker input image exceeds the 8192-pixel side or 64-megapixel limit";
+    if (static_cast<uint32_t>(width) > maximum_side ||
+        static_cast<uint32_t>(height) > maximum_side ||
+        pixel_count > maximum_pixels) {
+        error = size_limit_error;
         return false;
     }
     const int inspected_width = width;
@@ -1987,6 +2361,7 @@ sd_ctx_t *ensure_context(const ComponentPaths &paths,
     params.enable_mmap = true;
     params.rng_type = CPU_RNG;
     params.sampler_rng_type = CPU_RNG;
+    params.lora_apply_mode = LORA_APPLY_AT_RUNTIME;
     params.offload_params_to_cpu = false;
     params.keep_clip_on_cpu = true;
     params.keep_vae_on_cpu = true;
@@ -2172,6 +2547,21 @@ std::string generate_impl(const std::string &model_path,
                     "MASK_IMAGE_SHAPE_MISMATCH",
                     "inpaint mask dimensions must match the input image dimensions").dump();
         }
+        std::vector<std::string> canonical_lora_paths;
+        canonical_lora_paths.reserve(contract.loras.size());
+        for (const auto &adapter: contract.loras) {
+            std::string canonical_path;
+            std::string lora_error;
+            if (!validate_lora_file(
+                    contract.lora_root_path,
+                    adapter,
+                    canonical_path,
+                    lora_error)) {
+                return runtime_failure("LORA_FILE_INVALID", lora_error).dump();
+            }
+            canonical_lora_paths.push_back(std::move(canonical_path));
+        }
+        if (!canonical_lora_paths.empty()) mark_generation_stage(kStageLoraValidated);
 
         set_progress(
                 "initializing",
@@ -2290,6 +2680,17 @@ std::string generate_impl(const std::string &model_path,
 
         sd_img_gen_params_t gen;
         sd_img_gen_params_init(&gen);
+        std::vector<sd_lora_t> native_loras;
+        native_loras.reserve(contract.loras.size());
+        for (size_t index = 0; index < contract.loras.size(); ++index) {
+            sd_lora_t native_lora{};
+            native_lora.is_high_noise = false;
+            native_lora.multiplier = static_cast<float>(contract.loras[index].multiplier);
+            native_lora.path = canonical_lora_paths[index].c_str();
+            native_loras.push_back(native_lora);
+        }
+        gen.loras = native_loras.empty() ? nullptr : native_loras.data();
+        gen.lora_count = static_cast<uint32_t>(native_loras.size());
         gen.prompt = contract.prompt.c_str();
         gen.negative_prompt = contract.use_cfg ? contract.negative_prompt.c_str() : nullptr;
         gen.width = contract.width;
@@ -2303,11 +2704,21 @@ std::string generate_impl(const std::string &model_path,
         if (!mask_image.pixels.empty()) gen.mask_image = mask_image.view();
         if (!control_image.pixels.empty()) gen.control_image = control_image.view();
         gen.vae_tiling_params.enabled = contract.vae_tiling_enabled;
-        gen.vae_tiling_params.tile_size_x = contract.vae_tile_size;
-        gen.vae_tiling_params.tile_size_y = contract.vae_tile_size;
+        gen.vae_tiling_params.tile_size_x = 0;
+        gen.vae_tiling_params.tile_size_y = 0;
         gen.vae_tiling_params.target_overlap = contract.vae_tiling_enabled
                 ? static_cast<float>(contract.vae_tile_overlap)
                 : 0.5f;
+        gen.vae_tiling_params.rel_size_x = contract.vae_tiling_enabled
+                ? std::min(1.0f,
+                           static_cast<float>(contract.vae_tile_size) /
+                               static_cast<float>(contract.width))
+                : 0.0f;
+        gen.vae_tiling_params.rel_size_y = contract.vae_tiling_enabled
+                ? std::min(1.0f,
+                           static_cast<float>(contract.vae_tile_size) /
+                               static_cast<float>(contract.height))
+                : 0.0f;
         gen.sample_params.sample_steps = contract.steps;
         gen.sample_params.guidance.txt_cfg = static_cast<float>(contract.cfg_scale);
         gen.sample_params.guidance.distilled_guidance =
@@ -2448,6 +2859,21 @@ std::string generate_impl(const std::string &model_path,
             free_generated_images(images, contract.batch_count);
             execution_mismatch(field, message);
         };
+        auto release_images_and_lora_failure = [&](const std::string &code,
+                                                   const std::string &message) -> std::string {
+            free_generated_images(images, contract.batch_count);
+            remove_output_files(output_paths);
+            set_progress(
+                    "failed",
+                    message,
+                    0,
+                    contract.steps,
+                    0.0f,
+                    contract.width,
+                    contract.height,
+                    contract.threads);
+            return runtime_failure(code, message).dump();
+        };
 
         sd_image_execution_evidence_t execution_evidence{};
         if (!sd_get_last_image_execution_evidence(ctx, &execution_evidence)) {
@@ -2460,6 +2886,32 @@ std::string generate_impl(const std::string &model_path,
             release_images_and_mismatch(
                     "nativeExecutionEvidence",
                     "native image execution evidence is incomplete or has an unsupported version");
+        }
+        const uint32_t expected_lora_count = static_cast<uint32_t>(contract.loras.size());
+        if (execution_evidence.lora_requested_count != expected_lora_count) {
+            return release_images_and_lora_failure(
+                    "LORA_NATIVE_REQUEST_MISMATCH",
+                    "stable-diffusion.cpp did not receive the complete requested LoRA set");
+        }
+        if (execution_evidence.lora_loaded_count != expected_lora_count) {
+            return release_images_and_lora_failure(
+                    "LORA_NATIVE_LOAD_INCOMPLETE",
+                    "stable-diffusion.cpp could not load every requested LoRA adapter");
+        }
+        if (execution_evidence.lora_applied_count != expected_lora_count) {
+            return release_images_and_lora_failure(
+                    "LORA_NATIVE_APPLY_INCOMPLETE",
+                    "stable-diffusion.cpp did not apply every requested LoRA adapter to the executed graph");
+        }
+        if (expected_lora_count > 0u && execution_evidence.lora_applied_tensor_count == 0u) {
+            return release_images_and_lora_failure(
+                    "LORA_NATIVE_TENSOR_EVIDENCE_MISSING",
+                    "stable-diffusion.cpp did not execute any tensor adapted by the requested LoRA set");
+        }
+        if (expected_lora_count == 0u && execution_evidence.lora_applied_tensor_count != 0u) {
+            return release_images_and_lora_failure(
+                    "LORA_NATIVE_UNEXPECTED_EVIDENCE",
+                    "stable-diffusion.cpp reported applied LoRA tensors for a request without LoRA adapters");
         }
         const bool actual_flow_shift_applied =
                 execution_evidence.flow_shift_applied != 0u;
@@ -2562,6 +3014,86 @@ std::string generate_impl(const std::string &model_path,
         const int actual_auxiliary_execution_count = evidence_per_image(
                 execution_evidence.auxiliary_diffusion_model_compute_count,
                 "auxiliaryDiffusionExecutionCount");
+        const int actual_control_net_compute_attempt_count = evidence_per_image(
+                execution_evidence.control_net_compute_attempt_count,
+                "controlNetComputeAttemptCount");
+        const int actual_control_net_compute_success_count = evidence_per_image(
+                execution_evidence.control_net_compute_success_count,
+                "controlNetComputeSuccessCount");
+        const int actual_positive_control_net_compute_attempt_count = evidence_per_image(
+                execution_evidence.positive_control_net_compute_attempt_count,
+                "positiveControlNetComputeAttemptCount");
+        const int actual_positive_control_net_compute_success_count = evidence_per_image(
+                execution_evidence.positive_control_net_compute_success_count,
+                "positiveControlNetComputeSuccessCount");
+        const int actual_negative_control_net_compute_attempt_count = evidence_per_image(
+                execution_evidence.negative_control_net_compute_attempt_count,
+                "negativeControlNetComputeAttemptCount");
+        const int actual_negative_control_net_compute_success_count = evidence_per_image(
+                execution_evidence.negative_control_net_compute_success_count,
+                "negativeControlNetComputeSuccessCount");
+        const int actual_control_net_residual_consumption_count = evidence_per_image(
+                execution_evidence.control_net_residual_consumption_count,
+                "controlNetResidualConsumptionCount");
+        const int actual_positive_control_net_residual_consumption_count = evidence_per_image(
+                execution_evidence.positive_control_net_residual_consumption_count,
+                "positiveControlNetResidualConsumptionCount");
+        const int actual_negative_control_net_residual_consumption_count = evidence_per_image(
+                execution_evidence.negative_control_net_residual_consumption_count,
+                "negativeControlNetResidualConsumptionCount");
+        const int actual_auxiliary_control_net_residual_consumption_count = evidence_per_image(
+                execution_evidence.auxiliary_control_net_residual_consumption_count,
+                "auxiliaryControlNetResidualConsumptionCount");
+        const int actual_vae_encode_tiling_invocation_count = evidence_int(
+                execution_evidence.vae_encode_tiling_invocation_count,
+                "vaeEncodeTilingInvocationCount");
+        const int actual_vae_encode_tiling_success_count = evidence_int(
+                execution_evidence.vae_encode_tiling_success_count,
+                "vaeEncodeTilingSuccessCount");
+        const int actual_vae_decode_tiling_invocation_count = evidence_int(
+                execution_evidence.vae_decode_tiling_invocation_count,
+                "vaeDecodeTilingInvocationCount");
+        const int actual_vae_decode_tiling_success_count = evidence_int(
+                execution_evidence.vae_decode_tiling_success_count,
+                "vaeDecodeTilingSuccessCount");
+        const int actual_vae_encode_planned_tile_count = evidence_int(
+                execution_evidence.vae_encode_planned_tile_count,
+                "vaeEncodePlannedTileCount");
+        const int actual_vae_decode_planned_tile_count = evidence_int(
+                execution_evidence.vae_decode_planned_tile_count,
+                "vaeDecodePlannedTileCount");
+        const int actual_vae_encode_tile_compute_attempt_count = evidence_int(
+                execution_evidence.vae_encode_tile_compute_attempt_count,
+                "vaeEncodeTileComputeAttemptCount");
+        const int actual_vae_encode_tile_compute_success_count = evidence_int(
+                execution_evidence.vae_encode_tile_compute_success_count,
+                "vaeEncodeTileComputeSuccessCount");
+        const int actual_vae_decode_tile_compute_attempt_count = evidence_int(
+                execution_evidence.vae_decode_tile_compute_attempt_count,
+                "vaeDecodeTileComputeAttemptCount");
+        const int actual_vae_decode_tile_compute_success_count = evidence_int(
+                execution_evidence.vae_decode_tile_compute_success_count,
+                "vaeDecodeTileComputeSuccessCount");
+        const int actual_vae_encode_tile_size_x = evidence_int(
+                execution_evidence.vae_encode_tile_size_x,
+                "vaeEncodeTileSizeX");
+        const int actual_vae_encode_tile_size_y = evidence_int(
+                execution_evidence.vae_encode_tile_size_y,
+                "vaeEncodeTileSizeY");
+        const int actual_vae_decode_tile_size_x = evidence_int(
+                execution_evidence.vae_decode_tile_size_x,
+                "vaeDecodeTileSizeX");
+        const int actual_vae_decode_tile_size_y = evidence_int(
+                execution_evidence.vae_decode_tile_size_y,
+                "vaeDecodeTileSizeY");
+        const double actual_vae_encode_tile_overlap_x =
+                static_cast<double>(execution_evidence.vae_encode_tile_overlap_x);
+        const double actual_vae_encode_tile_overlap_y =
+                static_cast<double>(execution_evidence.vae_encode_tile_overlap_y);
+        const double actual_vae_decode_tile_overlap_x =
+                static_cast<double>(execution_evidence.vae_decode_tile_overlap_x);
+        const double actual_vae_decode_tile_overlap_y =
+                static_cast<double>(execution_evidence.vae_decode_tile_overlap_y);
         const uint64_t classified_compute_count =
                 execution_evidence.positive_diffusion_model_compute_count +
                 execution_evidence.negative_diffusion_model_compute_count +
@@ -2570,6 +3102,20 @@ std::string generate_impl(const std::string &model_path,
             release_images_and_mismatch(
                     "unetExecutionCount",
                     "physical diffusion computes were not completely classified by execution branch");
+        }
+        if (execution_evidence.control_net_compute_attempt_count !=
+                    execution_evidence.positive_control_net_compute_attempt_count +
+                    execution_evidence.negative_control_net_compute_attempt_count ||
+            execution_evidence.control_net_compute_success_count !=
+                    execution_evidence.positive_control_net_compute_success_count +
+                    execution_evidence.negative_control_net_compute_success_count ||
+            execution_evidence.control_net_residual_consumption_count !=
+                    execution_evidence.positive_control_net_residual_consumption_count +
+                    execution_evidence.negative_control_net_residual_consumption_count +
+                    execution_evidence.auxiliary_control_net_residual_consumption_count) {
+            release_images_and_mismatch(
+                    "controlNetEvidence",
+                    "ControlNet execution evidence was not completely classified by branch");
         }
         if (actual_sampling_pass_count != contract.batch_count) {
             release_images_and_mismatch(
@@ -2595,6 +3141,115 @@ std::string generate_impl(const std::string &model_path,
             release_images_and_mismatch(
                     "useCfg",
                     "actual negative diffusion execution does not match the configured CFG mode");
+        }
+        const bool actual_control_image_consumed =
+                control_image_wired && actual_control_net_residual_consumption_count > 0;
+        if (control_image_wired) {
+            if (actual_control_net_compute_attempt_count != actual_unet_execution_count ||
+                actual_control_net_compute_success_count != actual_control_net_compute_attempt_count ||
+                actual_positive_control_net_compute_attempt_count != actual_positive_execution_count ||
+                actual_positive_control_net_compute_success_count != actual_positive_execution_count ||
+                actual_negative_control_net_compute_attempt_count != actual_negative_execution_count ||
+                actual_negative_control_net_compute_success_count != actual_negative_execution_count ||
+                actual_control_net_residual_consumption_count != actual_unet_execution_count ||
+                actual_positive_control_net_residual_consumption_count != actual_positive_execution_count ||
+                actual_negative_control_net_residual_consumption_count != actual_negative_execution_count ||
+                actual_auxiliary_control_net_residual_consumption_count != 0) {
+                release_images_and_mismatch(
+                        "controlNetEvidence",
+                        "ControlNet did not successfully compute and feed residuals into every physical diffusion branch");
+            }
+        } else if (actual_control_net_compute_attempt_count != 0 ||
+                   actual_control_net_compute_success_count != 0 ||
+                   actual_control_net_residual_consumption_count != 0 ||
+                   actual_positive_control_net_compute_attempt_count != 0 ||
+                   actual_positive_control_net_compute_success_count != 0 ||
+                   actual_negative_control_net_compute_attempt_count != 0 ||
+                   actual_negative_control_net_compute_success_count != 0 ||
+                   actual_positive_control_net_residual_consumption_count != 0 ||
+                   actual_negative_control_net_residual_consumption_count != 0 ||
+                   actual_auxiliary_control_net_residual_consumption_count != 0) {
+            release_images_and_mismatch(
+                    "controlNetEvidence",
+                    "native execution reported ControlNet work for a request without a control image");
+        }
+        const bool actual_vae_tiling_enabled =
+                actual_vae_encode_tiling_invocation_count > 0 ||
+                actual_vae_decode_tiling_invocation_count > 0;
+        auto valid_vae_overlap = [](double value) {
+            return std::isfinite(value) && value >= 0.0 && value <= 0.5;
+        };
+        auto validate_vae_tiling_phase = [&](const char *phase,
+                                             int invocation_count,
+                                             int success_count,
+                                             int planned_tile_count,
+                                             int tile_compute_attempt_count,
+                                             int tile_compute_success_count,
+                                             int tile_size_x,
+                                             int tile_size_y,
+                                             double overlap_x,
+                                             double overlap_y) {
+            if (invocation_count == 0) {
+                if (success_count != 0 || planned_tile_count != 0 ||
+                    tile_compute_attempt_count != 0 || tile_compute_success_count != 0 ||
+                    tile_size_x != 0 || tile_size_y != 0 || overlap_x != 0.0 ||
+                    overlap_y != 0.0) {
+                    release_images_and_mismatch(
+                            "vaeTiling",
+                            std::string("native VAE ") + phase +
+                                " evidence exists without a tiled invocation");
+                }
+                return;
+            }
+            if (success_count != invocation_count || planned_tile_count <= 0 ||
+                tile_compute_attempt_count != planned_tile_count ||
+                tile_compute_success_count != tile_compute_attempt_count ||
+                tile_size_x <= 0 || tile_size_y <= 0 ||
+                !valid_vae_overlap(overlap_x) || !valid_vae_overlap(overlap_y)) {
+                release_images_and_mismatch(
+                        "vaeTiling",
+                        std::string("native VAE ") + phase +
+                            " tiling did not complete its physical tile plan");
+            }
+        };
+        validate_vae_tiling_phase(
+                "encode",
+                actual_vae_encode_tiling_invocation_count,
+                actual_vae_encode_tiling_success_count,
+                actual_vae_encode_planned_tile_count,
+                actual_vae_encode_tile_compute_attempt_count,
+                actual_vae_encode_tile_compute_success_count,
+                actual_vae_encode_tile_size_x,
+                actual_vae_encode_tile_size_y,
+                actual_vae_encode_tile_overlap_x,
+                actual_vae_encode_tile_overlap_y);
+        validate_vae_tiling_phase(
+                "decode",
+                actual_vae_decode_tiling_invocation_count,
+                actual_vae_decode_tiling_success_count,
+                actual_vae_decode_planned_tile_count,
+                actual_vae_decode_tile_compute_attempt_count,
+                actual_vae_decode_tile_compute_success_count,
+                actual_vae_decode_tile_size_x,
+                actual_vae_decode_tile_size_y,
+                actual_vae_decode_tile_overlap_x,
+                actual_vae_decode_tile_overlap_y);
+        if (contract.vae_tiling_enabled) {
+            if (!actual_vae_tiling_enabled ||
+                actual_vae_decode_tiling_invocation_count != contract.batch_count) {
+                release_images_and_mismatch(
+                        "vaeTiling",
+                        "requested VAE tiling did not execute exactly once for every final image decode");
+            }
+            if (input_image_wired && actual_vae_encode_tiling_invocation_count <= 0) {
+                release_images_and_mismatch(
+                        "vaeTiling",
+                        "requested VAE tiling did not execute while encoding the prepared input image");
+            }
+        } else if (actual_vae_tiling_enabled) {
+            release_images_and_mismatch(
+                    "vaeTiling",
+                    "native VAE tiling executed even though the request disabled it");
         }
         if (execution_evidence.positive_conditioning_observed == 0u ||
             execution_evidence.positive_conditioning_token_count == 0u) {
@@ -2715,7 +3370,7 @@ std::string generate_impl(const std::string &model_path,
                 ? control_image.canonical_path : "";
         native_effective["inputImageExecutionCount"] = input_image_wired ? 1 : 0;
         native_effective["maskImageExecutionCount"] = mask_image_wired ? 1 : 0;
-        native_effective["controlImageExecutionCount"] = control_image_wired ? 1 : 0;
+        native_effective["controlImageExecutionCount"] = actual_control_image_consumed ? 1 : 0;
         native_effective["inputImageSha256"] = input_image.sha256;
         native_effective["maskImageSha256"] = mask_image.sha256;
         native_effective["controlImageSha256"] = control_image.sha256;
@@ -2724,13 +3379,35 @@ std::string generate_impl(const std::string &model_path,
         native_effective["controlStrength"] = control_image_wired
                 ? static_cast<double>(gen.control_strength) : contract.control_strength;
         native_effective["strengthApplied"] = input_image_wired;
-        native_effective["controlStrengthApplied"] = control_image_wired;
+        native_effective["controlStrengthApplied"] = actual_control_image_consumed;
         native_effective["clipSkip"] = gen.clip_skip;
         native_effective["batchCount"] = gen.batch_count;
         native_effective["vaeTiling"] = {
-                {"enabled", gen.vae_tiling_params.enabled},
-                {"tileSize", gen.vae_tiling_params.tile_size_x},
-                {"overlap", static_cast<double>(gen.vae_tiling_params.target_overlap)}
+                {"enabled", actual_vae_tiling_enabled},
+                {"requestedTileSize", contract.vae_tiling_enabled ? contract.vae_tile_size : 0},
+                {"requestedOverlap", contract.vae_tiling_enabled ? contract.vae_tile_overlap : 0.0},
+                {"encode", {
+                        {"invocationCount", actual_vae_encode_tiling_invocation_count},
+                        {"successCount", actual_vae_encode_tiling_success_count},
+                        {"plannedTileCount", actual_vae_encode_planned_tile_count},
+                        {"tileComputeAttemptCount", actual_vae_encode_tile_compute_attempt_count},
+                        {"tileComputeSuccessCount", actual_vae_encode_tile_compute_success_count},
+                        {"tileSizeX", actual_vae_encode_tile_size_x},
+                        {"tileSizeY", actual_vae_encode_tile_size_y},
+                        {"overlapX", actual_vae_encode_tile_overlap_x},
+                        {"overlapY", actual_vae_encode_tile_overlap_y}
+                }},
+                {"decode", {
+                        {"invocationCount", actual_vae_decode_tiling_invocation_count},
+                        {"successCount", actual_vae_decode_tiling_success_count},
+                        {"plannedTileCount", actual_vae_decode_planned_tile_count},
+                        {"tileComputeAttemptCount", actual_vae_decode_tile_compute_attempt_count},
+                        {"tileComputeSuccessCount", actual_vae_decode_tile_compute_success_count},
+                        {"tileSizeX", actual_vae_decode_tile_size_x},
+                        {"tileSizeY", actual_vae_decode_tile_size_y},
+                        {"overlapX", actual_vae_decode_tile_overlap_x},
+                        {"overlapY", actual_vae_decode_tile_overlap_y}
+                }}
         };
         native_effective["outputCount"] = contract.batch_count;
         native_effective["n"] = contract.batch_count;
@@ -2766,7 +3443,33 @@ std::string generate_impl(const std::string &model_path,
         native_effective["imageInputConsumption"] = {
                 {"input", input_image_wired ? "init_latent" : "none"},
                 {"mask", mask_image_wired ? "denoise_mask" : "none"},
-                {"control", control_image_wired ? "controlnet_residual" : "none"}
+                {"control", actual_control_image_consumed ? "controlnet_residual" : "none"}
+        };
+        native_effective["controlNetEvidence"] = {
+                {"computeAttemptCount", actual_control_net_compute_attempt_count},
+                {"computeSuccessCount", actual_control_net_compute_success_count},
+                {"positiveComputeAttemptCount", actual_positive_control_net_compute_attempt_count},
+                {"positiveComputeSuccessCount", actual_positive_control_net_compute_success_count},
+                {"negativeComputeAttemptCount", actual_negative_control_net_compute_attempt_count},
+                {"negativeComputeSuccessCount", actual_negative_control_net_compute_success_count},
+                {"residualConsumptionCount", actual_control_net_residual_consumption_count},
+                {"positiveResidualConsumptionCount", actual_positive_control_net_residual_consumption_count},
+                {"negativeResidualConsumptionCount", actual_negative_control_net_residual_consumption_count},
+                {"auxiliaryResidualConsumptionCount", actual_auxiliary_control_net_residual_consumption_count}
+        };
+        native_effective["loras"] = json::array();
+        for (size_t index = 0; index < contract.loras.size(); ++index) {
+            native_effective["loras"].push_back({
+                    {"id", contract.loras[index].id},
+                    {"sha256", contract.loras[index].sha256},
+                    {"multiplier", static_cast<double>(native_loras[index].multiplier)}
+            });
+        }
+        native_effective["loraEvidence"] = {
+                {"requestedCount", execution_evidence.lora_requested_count},
+                {"loadedCount", execution_evidence.lora_loaded_count},
+                {"appliedCount", execution_evidence.lora_applied_count},
+                {"appliedTensorCount", execution_evidence.lora_applied_tensor_count}
         };
 
         set_progress(
@@ -2886,7 +3589,7 @@ std::string generate_impl(const std::string &model_path,
         out["controlImagePath"] = control_image_wired ? control_image.canonical_path : "";
         out["inputImageExecutionCount"] = input_image_wired ? 1 : 0;
         out["maskImageExecutionCount"] = mask_image_wired ? 1 : 0;
-        out["controlImageExecutionCount"] = control_image_wired ? 1 : 0;
+        out["controlImageExecutionCount"] = actual_control_image_consumed ? 1 : 0;
         out["inputImageSha256"] = input_image.sha256;
         out["maskImageSha256"] = mask_image.sha256;
         out["controlImageSha256"] = control_image.sha256;
@@ -2912,11 +3615,14 @@ std::string generate_impl(const std::string &model_path,
         out["controlImageChannels"] = control_image.channels;
         out["controlImageExifOrientation"] = control_image.exif_orientation;
         out["imageInputConsumption"] = native_effective["imageInputConsumption"];
+        out["controlNetEvidence"] = native_effective["controlNetEvidence"];
         out["strength"] = native_effective["strength"];
         out["controlStrength"] = native_effective["controlStrength"];
         out["clipSkip"] = native_effective["clipSkip"];
         out["batchCount"] = native_effective["batchCount"];
         out["vaeTiling"] = native_effective["vaeTiling"];
+        out["loras"] = native_effective["loras"];
+        out["loraEvidence"] = native_effective["loraEvidence"];
         out["backendMode"] = "cpu";
         out["backend"] = "stable-diffusion.cpp";
         out["runtimeBackend"] = sd_runtime_backend_label();
@@ -2937,6 +3643,346 @@ std::string generate_impl(const std::string &model_path,
     } catch (const std::exception &error) {
         set_progress("failed", error.what());
         return runtime_failure("NATIVE_BRIDGE_FAILURE", error.what()).dump();
+    }
+}
+
+std::string upscale_impl(const std::string &raw_upscaler_path,
+                         const std::string &raw_upscaler_root,
+                         const std::string &raw_input_path,
+                         const std::string &raw_params,
+                         const std::string &raw_output_path) {
+    try {
+        const json params = json::parse(raw_params);
+        const std::string upscaler_id = required_string(params, "upscalerId");
+        const std::string requested_upscaler_sha256 =
+                lower_copy(required_string(params, "upscalerSha256"));
+        const int64_t upscaler_size_signed = required_integer(params, "upscalerSizeBytes");
+        const std::string input_sha256 =
+                lower_copy(required_string(params, "inputImageSha256"));
+        const int target_scale = required_int32(params, "targetScale");
+        const int tile_size = required_int32(params, "tileSize");
+        const int threads = required_int32(params, "threads");
+        if (!is_sha256(requested_upscaler_sha256)) {
+            invalid_contract("upscalerSha256", "must be a 64-character SHA-256 value");
+        }
+        if (!is_sha256(input_sha256)) {
+            invalid_contract("inputImageSha256", "must be a 64-character SHA-256 value");
+        }
+        if (upscaler_size_signed < 16 ||
+            static_cast<uint64_t>(upscaler_size_signed) > kMaxUpscalerBytes) {
+            invalid_contract("upscalerSizeBytes", "must describe a bounded non-empty model file");
+        }
+        if (target_scale != 2 && target_scale != 3 && target_scale != 4) {
+            invalid_contract("targetScale", "must be 2, 3, or 4");
+        }
+        if (tile_size < 32 || tile_size > 1024 || tile_size % 8 != 0) {
+            invalid_contract("tileSize", "must be a multiple of 8 in [32, 1024]");
+        }
+        if (threads < 1 || threads > 64) {
+            invalid_contract("threads", "must be in [1, 64]");
+        }
+
+        std::string upscaler_path;
+        std::string validation_error;
+        if (!validate_upscaler_file(
+                raw_upscaler_root,
+                raw_upscaler_path,
+                static_cast<uint64_t>(upscaler_size_signed),
+                upscaler_path,
+                validation_error)) {
+            return runtime_failure("UPSCALER_FILE_INVALID", validation_error).dump();
+        }
+        const size_t upscaler_leaf_separator = upscaler_path.find_last_of('/');
+        const std::string upscaler_file_name = upscaler_leaf_separator == std::string::npos
+                ? upscaler_path
+                : upscaler_path.substr(upscaler_leaf_separator + 1u);
+        const std::string expected_upscaler_name_prefix = "upscaler-" + upscaler_id + ".";
+        if (upscaler_file_name.rfind(expected_upscaler_name_prefix, 0u) != 0u) {
+            return runtime_failure(
+                    "UPSCALER_IDENTITY_MISMATCH",
+                    "upscaler id does not match the app-owned model file identity").dump();
+        }
+        std::string output_path;
+        if (!validate_canonical_output_path(raw_output_path, output_path, validation_error)) {
+            return runtime_failure("OUTPUT_PATH_INVALID", validation_error).dump();
+        }
+        mark_generation_stage(kStageContractValidated);
+
+        set_progress(
+                "verifying_upscaler",
+                "verifying ESRGAN model bytes",
+                0,
+                1,
+                0.0f,
+                0,
+                0,
+                threads);
+        const uint64_t upscaler_size = static_cast<uint64_t>(upscaler_size_signed);
+        std::string actual_upscaler_sha256;
+        RegularFileIdentity hashed_upscaler_identity;
+        if (!sha256_regular_file(
+                upscaler_path,
+                upscaler_size,
+                actual_upscaler_sha256,
+                hashed_upscaler_identity,
+                validation_error)) {
+            if (g_cancel_requested.load(std::memory_order_relaxed)) {
+                return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+            }
+            return runtime_failure("UPSCALER_NATIVE_HASH_FAILED", validation_error).dump();
+        }
+        if (actual_upscaler_sha256 != requested_upscaler_sha256) {
+            return runtime_failure(
+                    "UPSCALER_SHA256_MISMATCH",
+                    "native SHA-256 does not match the worker-verified upscaler contract").dump();
+        }
+
+        LoadedInputImage input;
+        if (!load_canonical_input_image(
+                raw_input_path,
+                input_sha256,
+                3,
+                input,
+                validation_error,
+                kMaxUpscaleInputSide,
+                kMaxUpscaleInputPixels,
+                "upscale input exceeds the 2048-pixel side or 4-megapixel execution limit")) {
+            return runtime_failure(
+                    validation_error ==
+                            "upscale input exceeds the 2048-pixel side or 4-megapixel execution limit"
+                            ? "UPSCALE_INPUT_TOO_LARGE"
+                            : "UPSCALE_INPUT_INVALID",
+                    validation_error).dump();
+        }
+        mark_generation_stage(kStageInputImageDecoded);
+        const uint64_t requested_width =
+                static_cast<uint64_t>(input.width) * static_cast<uint64_t>(target_scale);
+        const uint64_t requested_height =
+                static_cast<uint64_t>(input.height) * static_cast<uint64_t>(target_scale);
+        const uint64_t requested_pixels = requested_width * requested_height;
+        if (requested_width > kMaxUpscaleProductOutputSide ||
+            requested_height > kMaxUpscaleProductOutputSide ||
+            requested_pixels > kMaxUpscaleProductOutputPixels) {
+            return runtime_failure(
+                    "UPSCALE_OUTPUT_TOO_LARGE",
+                    "requested upscale output exceeds the bounded 4096-pixel side or 16-megapixel product limit").dump();
+        }
+        set_progress(
+                "loading_upscaler",
+                "loading ESRGAN upscaler",
+                0,
+                1,
+                0.0f,
+                static_cast<int>(input.width),
+                static_cast<int>(input.height),
+                threads);
+
+        std::unique_ptr<upscaler_ctx_t, decltype(&free_upscaler_ctx)> upscaler_ctx(
+                new_upscaler_ctx(
+                        upscaler_path.c_str(),
+                        false,
+                        false,
+                        threads,
+                        tile_size,
+                        "cpu",
+                        "cpu"),
+                &free_upscaler_ctx);
+        if (!upscaler_ctx) {
+            return runtime_failure(
+                    "UPSCALER_NATIVE_LOAD_FAILED",
+                    "stable-diffusion.cpp could not load the selected ESRGAN model").dump();
+        }
+        mark_generation_stage(kStageContextReady);
+        RegularFileIdentity loaded_upscaler_identity;
+        if (!read_regular_file_identity(
+                upscaler_path,
+                upscaler_size,
+                loaded_upscaler_identity,
+                validation_error) ||
+            !same_regular_file_identity(hashed_upscaler_identity, loaded_upscaler_identity)) {
+            return runtime_failure(
+                    "UPSCALER_FILE_CHANGED_DURING_LOAD",
+                    validation_error.empty()
+                            ? "upscaler model identity changed between hashing and native load"
+                            : validation_error).dump();
+        }
+        const int native_scale = get_upscale_factor(upscaler_ctx.get());
+        if (native_scale < target_scale || native_scale < 2 || native_scale > 8) {
+            return runtime_failure(
+                    "UPSCALER_SCALE_UNSUPPORTED",
+                    "the selected ESRGAN model cannot produce the requested target scale").dump();
+        }
+        const uint64_t expected_width =
+                static_cast<uint64_t>(input.width) * static_cast<uint64_t>(native_scale);
+        const uint64_t expected_height =
+                static_cast<uint64_t>(input.height) * static_cast<uint64_t>(native_scale);
+        const uint64_t expected_pixels = expected_width * expected_height;
+        if (expected_width > kMaxUpscaleNativeOutputSide ||
+            expected_height > kMaxUpscaleNativeOutputSide ||
+            expected_pixels > kMaxUpscaleNativeOutputPixels) {
+            return runtime_failure(
+                    "UPSCALE_OUTPUT_TOO_LARGE",
+                    "native ESRGAN intermediate exceeds the bounded 8192-pixel side or 64-megapixel limit").dump();
+        }
+        if (g_cancel_requested.load(std::memory_order_relaxed)) {
+            return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+        }
+
+        const uint64_t sequence =
+                g_generation_sequence.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        g_active_generation_sequence.store(sequence, std::memory_order_relaxed);
+        mark_generation_stage(kStageGenerationInvoked);
+        set_progress(
+                "upscaling",
+                "running ESRGAN upscale",
+                0,
+                1,
+                0.0f,
+                static_cast<int>(expected_width),
+                static_cast<int>(expected_height),
+                threads);
+        sd_image_t upscaled = upscale(
+                upscaler_ctx.get(),
+                input.view(),
+                static_cast<uint32_t>(native_scale));
+        sd_upscaler_execution_evidence_t execution_evidence{};
+        const bool has_execution_evidence = sd_get_upscaler_execution_evidence(
+                upscaler_ctx.get(),
+                &execution_evidence);
+        upscaler_ctx.reset();
+        mark_generation_stage(kStageContextReleased);
+        if (g_cancel_requested.load(std::memory_order_relaxed)) {
+            if (upscaled.data != nullptr) std::free(upscaled.data);
+            return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+        }
+        const bool expected_tiled = input.width > static_cast<uint32_t>(tile_size) ||
+                                    input.height > static_cast<uint32_t>(tile_size);
+        const bool compute_counts_valid =
+                execution_evidence.compute_invocation_count > 0u &&
+                execution_evidence.compute_success_count ==
+                        execution_evidence.compute_invocation_count;
+        const bool tile_counts_valid = expected_tiled
+                ? execution_evidence.tiled == 1u &&
+                  execution_evidence.tile_compute_invocation_count ==
+                          execution_evidence.compute_invocation_count &&
+                  execution_evidence.tile_compute_success_count ==
+                          execution_evidence.compute_success_count
+                : execution_evidence.tiled == 0u &&
+                  execution_evidence.compute_invocation_count == 1u &&
+                  execution_evidence.tile_compute_invocation_count == 0u &&
+                  execution_evidence.tile_compute_success_count == 0u;
+        if (!has_execution_evidence ||
+            execution_evidence.version != SD_UPSCALER_EXECUTION_EVIDENCE_VERSION ||
+            execution_evidence.completed != 1u || execution_evidence.cancelled != 0u ||
+            execution_evidence.requested_scale != static_cast<uint32_t>(native_scale) ||
+            execution_evidence.native_scale != static_cast<uint32_t>(native_scale) ||
+            execution_evidence.source_width != input.width ||
+            execution_evidence.source_height != input.height ||
+            execution_evidence.output_width != static_cast<uint32_t>(expected_width) ||
+            execution_evidence.output_height != static_cast<uint32_t>(expected_height) ||
+            !compute_counts_valid || !tile_counts_valid) {
+            if (upscaled.data != nullptr) std::free(upscaled.data);
+            return runtime_failure(
+                    "UPSCALER_EXECUTION_EVIDENCE_INVALID",
+                    "ESRGAN physical compute evidence is missing or inconsistent").dump();
+        }
+        if (upscaled.data == nullptr ||
+            upscaled.width != static_cast<uint32_t>(expected_width) ||
+            upscaled.height != static_cast<uint32_t>(expected_height) ||
+            upscaled.channel != 3u) {
+            if (upscaled.data != nullptr) std::free(upscaled.data);
+            return runtime_failure(
+                    "UPSCALER_NATIVE_OUTPUT_INVALID",
+                    "stable-diffusion.cpp returned an invalid ESRGAN output tensor").dump();
+        }
+        mark_generation_stage(kStageSamplingObserved);
+        mark_generation_stage(kStageImageReturned);
+        if (upscaled.width > static_cast<uint32_t>(
+                std::numeric_limits<int>::max() / static_cast<int>(upscaled.channel))) {
+            std::free(upscaled.data);
+            return runtime_failure("OUTPUT_WRITE_FAILED", "upscale output row stride is too large").dump();
+        }
+        set_progress(
+                "writing",
+                "writing upscaled PNG",
+                1,
+                1,
+                0.0f,
+                static_cast<int>(upscaled.width),
+                static_cast<int>(upscaled.height),
+                threads);
+        const int write_ok = stbi_write_png(
+                output_path.c_str(),
+                static_cast<int>(upscaled.width),
+                static_cast<int>(upscaled.height),
+                static_cast<int>(upscaled.channel),
+                upscaled.data,
+                static_cast<int>(upscaled.width * upscaled.channel));
+        std::free(upscaled.data);
+        if (write_ok == 0) {
+            std::remove(output_path.c_str());
+            return runtime_failure("OUTPUT_WRITE_FAILED", "failed to write the upscaled PNG").dump();
+        }
+        mark_generation_stage(kStageOutputWritten);
+        set_progress(
+                "completed",
+                "upscale completed",
+                1,
+                1,
+                0.0f,
+                static_cast<int>(expected_width),
+                static_cast<int>(expected_height),
+                threads);
+
+        json native_effective = {
+                {"operation", "ESRGAN_UPSCALE"},
+                {"runtime", "STABLE_DIFFUSION_CPP"},
+                {"backendMode", "cpu"},
+                {"fallback", false},
+                {"upscalerId", upscaler_id},
+                {"upscalerFileName", upscaler_file_name},
+                {"upscalerSha256", actual_upscaler_sha256},
+                {"upscalerSizeBytes", upscaler_size},
+                {"modelHashVerified", true},
+                {"modelFileIdentityStable", true},
+                {"inputImageSha256", input.sha256},
+                {"sourceWidth", input.width},
+                {"sourceHeight", input.height},
+                {"nativeScale", native_scale},
+                {"requestedTargetScale", target_scale},
+                {"width", expected_width},
+                {"height", expected_height},
+                {"channels", 3},
+                {"tileSize", tile_size},
+                {"threads", threads},
+                {"physicalComputeCount", execution_evidence.compute_invocation_count},
+                {"physicalComputeSuccessCount", execution_evidence.compute_success_count},
+                {"physicalTileComputeCount", execution_evidence.tile_compute_invocation_count},
+                {"physicalTileComputeSuccessCount", execution_evidence.tile_compute_success_count},
+                {"tiledExecution", execution_evidence.tiled == 1u},
+                {"executionCompleted", execution_evidence.completed == 1u},
+                {"nativeGenerationSequence", sequence}
+        };
+        json result = native_effective;
+        result["ok"] = true;
+        result["nativeExecution"] = true;
+        result["path"] = output_path;
+        result["mimeType"] = "image/png";
+        result["nativeEffective"] = native_effective;
+        result["nativeGenerationSequence"] = sequence;
+        return result.dump();
+    } catch (const ContractError &error) {
+        set_progress("failed", error.what());
+        return contract_failure_json(error).dump();
+    } catch (const json::exception &error) {
+        set_progress("failed", error.what());
+        return contract_failure_json(ContractError(
+                "IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID",
+                "upscaleParams",
+                error.what())).dump();
+    } catch (const std::exception &error) {
+        set_progress("failed", error.what());
+        return runtime_failure("UPSCALER_NATIVE_FAILURE", error.what()).dump();
     }
 }
 
@@ -2989,6 +4035,52 @@ Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_generate(
     }
     g_generation_active.store(false, std::memory_order_relaxed);
     sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, false, false, nullptr);
+    sd_set_cancel_callback(nullptr, nullptr);
+    return string_to_jstring(env, result);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_upscale(
+        JNIEnv *env,
+        jobject,
+        jstring upscaler_path,
+        jstring upscaler_root,
+        jstring input_path,
+        jstring params_json,
+        jstring output_path) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_active.store(true, std::memory_order_relaxed);
+    reset_generation_evidence();
+    reset_progress_state();
+    set_progress("initializing", "starting local image upscale");
+    set_progress_component_selection("{}");
+    sd_set_log_callback(sd_log_callback, nullptr);
+    sd_set_cancel_callback(sd_cancel_callback, nullptr);
+    std::string result = upscale_impl(
+            jstring_to_string(env, upscaler_path),
+            jstring_to_string(env, upscaler_root),
+            jstring_to_string(env, input_path),
+            jstring_to_string(env, params_json),
+            jstring_to_string(env, output_path));
+    mark_generation_stage(kStageContextReleased);
+    try {
+        json result_json = json::parse(result);
+        result_json["contextReleased"] = true;
+        const uint64_t sequence =
+                g_active_generation_sequence.load(std::memory_order_relaxed);
+        if (sequence > 0u) result_json["nativeGenerationSequence"] = sequence;
+        result_json["nativeStageMask"] =
+                g_generation_stage_mask.load(std::memory_order_relaxed);
+        result_json["nativeDetailStageMask"] =
+                static_cast<uint64_t>(g_generation_stage_mask.load(std::memory_order_relaxed));
+        result = result_json.dump();
+    } catch (const json::exception &) {
+        if (!result.empty() && result.back() == '}') {
+            result.insert(result.size() - 1, ",\"contextReleased\":true");
+        }
+    }
+    g_generation_active.store(false, std::memory_order_relaxed);
     sd_set_cancel_callback(nullptr, nullptr);
     return string_to_jstring(env, result);
 }

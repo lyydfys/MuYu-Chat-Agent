@@ -33,6 +33,11 @@ internal data class LocalImageUiExecutionDefaults(
 internal data class LocalImageUiCapabilitiesSnapshot(
     val supportedTaskModes: Set<ImageGenerationUiTaskMode>,
     val supportsNegativePrompt: Boolean,
+    val supportsClipSkip: Boolean,
+    val supportsVaeTiling: Boolean,
+    val supportsLivePreview: Boolean,
+    val supportsLora: Boolean,
+    val maxBatchCount: Int,
     val executionDefaults: LocalImageUiExecutionDefaults,
     val readinessError: String?
 )
@@ -65,12 +70,34 @@ internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabil
         ?.capabilities
         ?.supportsNegativePrompt
         ?: legacySupportsNegativePromptForUi()
+    val resolvedCapabilities = resolution?.profile?.capabilities
+    val legacyStableDiffusionCpp = runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP
+    val supportsClipSkip = resolvedCapabilities?.supportsClipSkip
+        ?: (legacyStableDiffusionCpp && family in setOf(
+            LocalImageModelFamily.SD15,
+            LocalImageModelFamily.SD21,
+            LocalImageModelFamily.SDXL,
+            LocalImageModelFamily.SD_TURBO
+        ))
+    val supportsVaeTiling = resolvedCapabilities?.supportsVaeTiling
+        ?: legacyStableDiffusionCpp
+    val supportsLivePreview = resolvedCapabilities?.supportsLivePreview
+        ?: legacyStableDiffusionCpp
+    val supportsLora = resolvedCapabilities?.supportsLora
+        ?: legacyStableDiffusionCpp
+    val maxBatchCount = resolvedCapabilities?.maxBatchCount
+        ?: if (legacyStableDiffusionCpp) 8 else 1
     val executionDefaults = resolution
         ?.let(::executionDefaultsFromResolutionForUi)
         ?: legacyExecutionDefaultsForUi()
     return LocalImageUiCapabilitiesSnapshot(
         supportedTaskModes = supportedTaskModes,
         supportsNegativePrompt = supportsNegativePrompt,
+        supportsClipSkip = supportsClipSkip,
+        supportsVaeTiling = supportsVaeTiling,
+        supportsLivePreview = supportsLivePreview,
+        supportsLora = supportsLora,
+        maxBatchCount = maxBatchCount.coerceIn(1, 8),
         executionDefaults = executionDefaults,
         readinessError = outcome.readinessError
     )

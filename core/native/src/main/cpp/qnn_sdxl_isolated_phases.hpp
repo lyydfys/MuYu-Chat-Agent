@@ -366,6 +366,20 @@ std::string qnn_sdxl_unet_phase_json(
         conditioning_evidence.negative_weighted_token_count;
     native_evidence.prompt_weight_fingerprint =
         conditioning_evidence.prompt_weight_fingerprint;
+    native_evidence.conditioning_artifact_sha256 =
+        conditioning_evidence.conditioning_artifact_sha256;
+    native_evidence.conditioning_execution_mode =
+        conditioning_evidence.conditioning_execution_mode;
+    native_evidence.conditioning_backend = conditioning_evidence.conditioning_backend;
+    native_evidence.conditioning_graph = conditioning_evidence.conditioning_graph;
+    native_evidence.conditioning_graph_sha256 =
+        conditioning_evidence.conditioning_graph_sha256;
+    native_evidence.conditioning_order = conditioning_evidence.conditioning_order;
+    native_evidence.conditioning_encoder_execution_count =
+        conditioning_evidence.conditioning_encoder_execution_count;
+    native_evidence.text_encoder_execution_count = 0U;
+    native_evidence.conditioning_artifact_consumed = unet_execution_count > 0U;
+    native_evidence.runtime_session_mode = "isolated_unet_phase";
     const std::string native_effective = qnn_native_effective_json(
         execution_contract,
         native_evidence);
@@ -397,6 +411,19 @@ std::string qnn_sdxl_unet_phase_json(
         << "\"promptWeightFingerprint\":" << quote(conditioning_evidence.prompt_weight_fingerprint) << ","
         << "\"conditioningArtifactSha256\":"
         << quote(conditioning_evidence.conditioning_artifact_sha256) << ","
+        << "\"conditioningExecutionMode\":"
+        << quote(native_evidence.conditioning_execution_mode) << ","
+        << "\"conditioningBackend\":" << quote(native_evidence.conditioning_backend) << ","
+        << "\"conditioningGraph\":" << quote(native_evidence.conditioning_graph) << ","
+        << "\"conditioningGraphSha256\":"
+        << quote(native_evidence.conditioning_graph_sha256) << ","
+        << "\"conditioningOrder\":" << quote(native_evidence.conditioning_order) << ","
+        << "\"conditioningEncoderExecutionCount\":"
+        << native_evidence.conditioning_encoder_execution_count << ","
+        << "\"textEncoderExecutionCount\":0,"
+        << "\"conditioningArtifactConsumed\":"
+        << (native_evidence.conditioning_artifact_consumed ? "true" : "false") << ","
+        << "\"runtimeSessionMode\":\"isolated_unet_phase\","
         << "\"embeddingDiskDataType\":" << quote(conditioning_evidence.embedding_disk_data_type) << ","
         << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
         << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","

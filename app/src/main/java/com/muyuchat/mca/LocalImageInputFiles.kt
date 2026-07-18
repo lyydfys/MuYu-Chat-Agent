@@ -8,8 +8,13 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
+import java.io.RandomAccessFile
+import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
+import java.nio.channels.OverlappingFileLockException
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 
 internal data class LocalImageInputDispatch(
     val options: LocalImageGenerationOptions,
@@ -126,11 +131,33 @@ internal data class LocalImageWorkerInputs(
     val directory: File
 )
 
+internal class LocalImageWorkerUpscaleInputs(
+    val input: LocalImagePreparedInput,
+    val upscaler: LocalImagePreparedUpscaler,
+    val directory: File,
+    private val upscalerLease: LocalImageUpscalerLease
+) : AutoCloseable {
+    override fun close() = upscalerLease.close()
+}
+
+internal class LocalImageUpscalerLease(
+    private val channel: FileChannel,
+    private val lock: FileLock
+) : AutoCloseable {
+    @Synchronized
+    override fun close() {
+        runCatching { if (lock.isValid) lock.release() }
+        runCatching { channel.close() }
+    }
+}
+
 /** Copies dispatch inputs into the worker-owned request directory and revalidates every byte. */
 internal class LocalImageWorkerInputStore(context: Context) {
     private val appContext = context.applicationContext
     private val root = File(appContext.cacheDir, WORKER_INPUT_DIRECTORY)
     private val dispatchRoot = File(appContext.cacheDir, LocalImageInputDispatcher.DISPATCH_DIRECTORY)
+    private val loraRoot = File(appContext.filesDir, "image_loras")
+    private val upscalerRoot = File(appContext.filesDir, LocalImageUpscalerStore.DIRECTORY)
 
     fun materialize(requestId: String, options: LocalImageGenerationOptions): LocalImageWorkerInputs {
         options.validateProductInputContract()
@@ -143,11 +170,44 @@ internal class LocalImageWorkerInputStore(context: Context) {
             val materialized = options.copy(
                 inputImage = options.inputImage?.let { copyPrepared(directory, "input", it) },
                 maskImage = options.maskImage?.let { copyPrepared(directory, "mask", it) },
-                controlImage = options.controlImage?.let { copyPrepared(directory, "control", it) }
+                controlImage = options.controlImage?.let { copyPrepared(directory, "control", it) },
+                loras = options.loras.map(::validateLora)
             ).also { it.validateProductInputContract() }
             LocalImageWorkerInputs(materialized, directory)
         } catch (error: Throwable) {
             directory.deleteRecursively()
+            throw error
+        }
+    }
+
+    fun materializeUpscale(
+        requestId: String,
+        input: LocalImagePreparedInput,
+        upscaler: LocalImagePreparedUpscaler,
+        isCancelled: () -> Boolean = { false }
+    ): LocalImageWorkerUpscaleInputs {
+        throwIfUpscaleCancelled(isCancelled)
+        val materialized = materialize(
+            requestId = requestId,
+            options = LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.IMG2IMG,
+                inputImage = input,
+                strength = 1.0
+            )
+        )
+        var lockedUpscaler: LockedUpscaler? = null
+        return try {
+            throwIfUpscaleCancelled(isCancelled)
+            lockedUpscaler = validateUpscaler(upscaler, isCancelled)
+            LocalImageWorkerUpscaleInputs(
+                input = requireNotNull(materialized.options.inputImage),
+                upscaler = requireNotNull(lockedUpscaler).prepared,
+                directory = materialized.directory,
+                upscalerLease = requireNotNull(lockedUpscaler).lease
+            )
+        } catch (error: Throwable) {
+            lockedUpscaler?.lease?.close()
+            cleanup(materialized.directory)
             throw error
         }
     }
@@ -192,6 +252,115 @@ internal class LocalImageWorkerInputStore(context: Context) {
             "Prepared $role image dimensions changed before the worker copied it."
         }
         return actual
+    }
+
+    private fun validateLora(expected: LocalImagePreparedLora): LocalImagePreparedLora {
+        val source = File(expected.path).canonicalFile
+        val canonicalRoot = loraRoot.canonicalFile
+        require(source.parentFile == canonicalRoot) {
+            "LoRA adapter must be a direct child of the app-owned LoRA directory."
+        }
+        require(source.isFile && source.canRead() && source.length() == expected.sizeBytes) {
+            "LoRA adapter is missing or changed before worker execution."
+        }
+        val actualSha256 = source.sha256()
+        require(actualSha256 == expected.sha256) {
+            "LoRA adapter content hash changed before worker execution."
+        }
+        return expected.copy(path = source.path)
+    }
+
+    private fun validateUpscaler(
+        expected: LocalImagePreparedUpscaler,
+        isCancelled: () -> Boolean
+    ): LockedUpscaler {
+        val source = File(expected.path).canonicalFile
+        val canonicalRoot = upscalerRoot.canonicalFile
+        require(source.parentFile == canonicalRoot) {
+            "Upscaler model must be a direct child of the app-owned upscaler directory."
+        }
+        require(source.name == "upscaler-${expected.id}.${source.extension.lowercase()}") {
+            "Upscaler model id does not match its app-owned file identity."
+        }
+        val lockFile = File(
+            canonicalRoot,
+            LocalImageUpscalerStore.lockFileName(source.name)
+        ).canonicalFile
+        require(lockFile.parentFile == canonicalRoot) { "Upscaler model lock path is invalid." }
+        val channel = RandomAccessFile(lockFile, "rw").channel
+        val lease = try {
+            acquireUpscalerLease(channel, isCancelled)
+        } catch (error: Throwable) {
+            runCatching { channel.close() }
+            throw error
+        }
+        return try {
+            require(source.isFile && source.canRead() && source.length() == expected.sizeBytes) {
+                "Upscaler model is missing or changed before worker execution."
+            }
+            require(source.extension.lowercase() in setOf("pth", "safetensors", "ckpt", "bin")) {
+                "Upscaler model extension is unsupported."
+            }
+            require(source.sha256(isCancelled) == expected.sha256) {
+                "Upscaler model content hash changed before worker execution."
+            }
+            throwIfUpscaleCancelled(isCancelled)
+            LockedUpscaler(
+                prepared = expected.copy(path = source.path),
+                lease = lease
+            )
+        } catch (error: Throwable) {
+            lease.close()
+            throw error
+        }
+    }
+
+    private fun acquireUpscalerLease(
+        channel: FileChannel,
+        isCancelled: () -> Boolean
+    ): LocalImageUpscalerLease {
+        while (true) {
+            throwIfUpscaleCancelled(isCancelled)
+            val lock = try {
+                channel.tryLock(0L, Long.MAX_VALUE, true)
+            } catch (_: OverlappingFileLockException) {
+                null
+            }
+            if (lock != null) return LocalImageUpscalerLease(channel, lock)
+            try {
+                Thread.sleep(50L)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw CancellationException("Local image upscale was cancelled while waiting for the model lease.")
+            }
+        }
+    }
+
+    private fun File.sha256(isCancelled: () -> Boolean = { false }): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        FileInputStream(this).use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                throwIfUpscaleCancelled(isCancelled)
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { byte ->
+            "%02x".format(byte.toInt() and 0xff)
+        }
+    }
+
+    private data class LockedUpscaler(
+        val prepared: LocalImagePreparedUpscaler,
+        val lease: LocalImageUpscalerLease
+    )
+
+    private fun throwIfUpscaleCancelled(isCancelled: () -> Boolean) {
+        if (isCancelled()) {
+            throw CancellationException("Local image upscale was cancelled during input verification.")
+        }
     }
 
     companion object {

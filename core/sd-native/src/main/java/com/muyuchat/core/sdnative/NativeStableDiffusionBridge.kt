@@ -17,6 +17,14 @@ class NativeStableDiffusionBridge {
         outputPath: String
     ): String
 
+    external fun upscale(
+        upscalerPath: String,
+        upscalerRoot: String,
+        inputPath: String,
+        paramsJson: String,
+        outputPath: String
+    ): String
+
     external fun getSystemInfo(): String
     external fun getProgress(): String
     external fun getNativeConfig(): String

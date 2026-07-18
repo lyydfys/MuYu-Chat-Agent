@@ -142,7 +142,6 @@ class LocalImageSmokeActivity : Activity() {
             val sampleMethod = intent.getStringExtra("sampleMethod").orEmpty().ifBlank { "euler" }
             val family = intent.getStringExtra("family").orEmpty().ifBlank { "SD15" }
             val backendMode = intent.getStringExtra("backendMode").orEmpty().ifBlank { "cpu" }
-            val tokenEmbeddingMode = intent.getStringExtra("tokenEmbeddingMode").orEmpty().ifBlank { "auto" }
             val memoryMode = intent.getIntExtra("memoryMode", 0)
             val runner = intent.getStringExtra("runner").orEmpty()
             val directUnetSmoke = intent.getBooleanExtra("directUnetSmoke", false)
@@ -189,7 +188,6 @@ class LocalImageSmokeActivity : Activity() {
                 .put("cfgScale", cfgScale)
                 .put("sampleMethod", sampleMethod)
                 .put("backendMode", backendMode)
-                .put("tokenEmbeddingMode", tokenEmbeddingMode)
                 .put("memoryMode", memoryMode)
             distilledGuidance?.let { requestJson.put("distilledGuidance", it) }
             flowShift?.let { requestJson.put("flowShift", it) }
@@ -948,6 +946,11 @@ class LocalImageSmokeActivity : Activity() {
                 .put("embeddingPath", embeddingFile.absolutePath)
                 .put("outputPath", outputFile.absolutePath)
         )
+        val conditioningOrder = if (requestJson.optBoolean("useCfg", true)) {
+            "negative_then_positive"
+        } else {
+            "positive_only"
+        }
         val embeddingRaw = if (isSdxlQnn) {
             mnnBridge.encodeSdxlPromptConditioning(
                 bundleRoot,
@@ -968,7 +971,7 @@ class LocalImageSmokeActivity : Activity() {
                 embeddingFile.absolutePath,
                 requestJson.optString("backendMode", "cpu"),
                 requestJson.optInt("threads", 4),
-                requestJson.optString("tokenEmbeddingMode", "auto"),
+                conditioningOrder,
                 requestJson.optBoolean("promptWeightingSupported", false)
             )
         }

@@ -314,7 +314,8 @@ class LocalImageQnnRunnerTest {
 
         assertEquals(LocalImageQnnState.SMOKE_METADATA_INVALID, report.state)
         assertFalse(report.npuActive)
-        assertTrue(report.message.contains("safe relative bundle path"))
+        assertTrue(report.message.contains("escapes the bundle root"))
+        assertTrue(report.message.contains("../bad_context.bin"))
     }
 
     @Test
@@ -325,9 +326,8 @@ class LocalImageQnnRunnerTest {
             bundleRoot = bundle
         )
 
-        assertEquals(LocalImageQnnState.SMOKE_METADATA_INVALID, report.state)
+        assertEquals(LocalImageQnnState.BUNDLE_INCOMPLETE, report.state)
         assertFalse(report.npuActive)
-        assertTrue(report.message.contains("contextBinary is missing"))
         assertTrue(report.message.contains("diffusion/missing_context.bin"))
     }
 
@@ -339,9 +339,9 @@ class LocalImageQnnRunnerTest {
             bundleRoot = bundle
         )
 
-        assertEquals(LocalImageQnnState.SMOKE_METADATA_INVALID, report.state)
+        assertEquals(LocalImageQnnState.BUNDLE_INCOMPLETE, report.state)
         assertFalse(report.npuActive)
-        assertTrue(report.message.contains("contextBinary is missing"))
+        assertTrue(report.message.contains("diffusion/unet_context.bin"))
     }
 
     @Test
@@ -625,7 +625,170 @@ class LocalImageQnnRunnerTest {
 
         assertEquals(LocalImageQnnState.BUNDLE_INCOMPLETE, report.state)
         assertFalse(report.npuActive)
-        assertTrue(report.message.contains("VAE"))
+        assertTrue(report.message.contains("vae/vae_decoder_context.bin"))
+    }
+
+    @Test
+    fun malformedOwnedManifestSchemaFailsInsteadOfFallingBackToLegacyDiscovery() {
+        val cases = listOf(
+            "execution-profile-type" to JSONObject()
+                .put("executionProfile", "not-an-object"),
+            "execution-profile-escape" to JSONObject()
+                .put(
+                    "executionProfile",
+                    JSONObject().put(
+                        "graph",
+                        JSONObject()
+                            .put("textEncoder", graphArtifact("clip_v2.mnn"))
+                            .put("unet", graphArtifact("../unet.bin"))
+                            .put("vae", graphArtifact("vae_decoder.bin"))
+                    )
+                ),
+            "runtime-profile" to JSONObject()
+                .put(
+                    "requiredRuntimeProfile",
+                    JSONObject()
+                        .put("qnnSdk", "")
+                        .put("htpArch", 73)
+                ),
+            "required-flag" to JSONObject()
+                .put(
+                    "components",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("role", "DIFFUSION")
+                            .put("path", "unet.bin")
+                            .put("required", "true")
+                    )
+                )
+        )
+        cases.forEach { (name, mutation) ->
+            val root = completeExtractedQnnBundle("malformed-$name")
+            try {
+                val manifest = baseSemanticManifest()
+                mutation.keys().forEach { key -> manifest.put(key, mutation.get(key)) }
+                File(root, "manifest.json").writeText(manifest.toString(2), Charsets.UTF_8)
+
+                val report = QnnHtpImageRunner(runnerReady = true).health(
+                    device = snapdragonElite(qnnReady = true),
+                    bundleRoot = root
+                )
+
+                assertEquals(name, LocalImageQnnState.SMOKE_METADATA_INVALID, report.state)
+                assertFalse(name, report.npuActive)
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun deletedArchiveIsAcceptedOnlyWithACompleteExtractedRuntimeContract() {
+        val complete = completeExtractedQnnBundle("archive-complete")
+        try {
+            File(complete, "manifest.json").writeText(
+                baseSemanticManifest()
+                    .put("components", archiveComponentArray())
+                    .put("executionProfile", exactCommunityExecutionProfile())
+                    .toString(2),
+                Charsets.UTF_8
+            )
+
+            val ready = QnnHtpImageRunner(runnerReady = true).health(
+                device = snapdragonElite(qnnReady = true),
+                bundleRoot = complete
+            )
+
+            assertEquals(LocalImageQnnState.SMOKE_REQUIRED, ready.state)
+            assertFalse(ready.npuActive)
+        } finally {
+            complete.deleteRecursively()
+        }
+
+        val incomplete = completeExtractedQnnBundle("archive-incomplete")
+        try {
+            File(incomplete, "pos_emb.bin").delete()
+            File(incomplete, "manifest.json").writeText(
+                baseSemanticManifest()
+                    .put("components", archiveComponentArray())
+                    .put("executionProfile", exactCommunityExecutionProfile())
+                    .toString(2),
+                Charsets.UTF_8
+            )
+
+            val rejected = QnnHtpImageRunner(runnerReady = true).health(
+                device = snapdragonElite(qnnReady = true),
+                bundleRoot = incomplete
+            )
+
+            assertEquals(LocalImageQnnState.SMOKE_METADATA_INVALID, rejected.state)
+            assertTrue(rejected.message.contains("pos_emb.bin"))
+        } finally {
+            incomplete.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun legacyCommunityClipBundleWithoutNewProfileMetadataStillReachesRealSmoke() {
+        val root = completeExtractedQnnBundle("legacy-community-clip")
+        try {
+            File(root, "manifest.json").writeText(
+                baseSemanticManifest()
+                    .put(
+                        "components",
+                        JSONArray()
+                            .put(requiredComponent("DIFFUSION", "unet.bin"))
+                            .put(requiredComponent("VAE", "vae_decoder.bin"))
+                            .put(requiredComponent("TEXT_ENCODER", "clip_v2.mnn"))
+                    )
+                    .toString(2),
+                Charsets.UTF_8
+            )
+
+            val report = QnnHtpImageRunner(runnerReady = true).health(
+                device = snapdragonElite(qnnReady = true),
+                bundleRoot = root
+            )
+
+            assertEquals(LocalImageQnnState.SMOKE_REQUIRED, report.state)
+            assertFalse(report.npuActive)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun undeclaredAndThirdPartyManifestsKeepLegacySemanticDiscoveryOpen() {
+        listOf("absent", "third-party").forEach { mode ->
+            val root = completeExtractedQnnBundle("legacy-$mode")
+            try {
+                if (mode == "third-party") {
+                    File(root, "manifest.json").writeText(
+                        JSONObject()
+                            .put("schema", "publisher.image.bundle.v9")
+                            .put(
+                                "executionProfile",
+                                JSONObject().put(
+                                    "graph",
+                                    JSONObject().put("unet", graphArtifact("../ignored.bin"))
+                                )
+                            )
+                            .toString(2),
+                        Charsets.UTF_8
+                    )
+                }
+
+                val report = QnnHtpImageRunner(runnerReady = true).health(
+                    device = snapdragonElite(qnnReady = true),
+                    bundleRoot = root
+                )
+
+                assertEquals(mode, LocalImageQnnState.SMOKE_REQUIRED, report.state)
+                assertFalse(mode, report.npuActive)
+            } finally {
+                root.deleteRecursively()
+            }
+        }
     }
 
     @Test
@@ -735,6 +898,53 @@ class LocalImageQnnRunnerTest {
         )
         return root
     }
+
+    private fun completeExtractedQnnBundle(prefix: String): File =
+        Files.createTempDirectory(prefix).toFile().apply {
+            listOf(
+                "unet.bin",
+                "vae_decoder.bin",
+                "vae_encoder.bin",
+                "clip_v2.mnn",
+                "tokenizer.json",
+                "token_emb.bin",
+                "pos_emb.bin"
+            ).forEach { name -> touch(name) }
+        }
+
+    private fun baseSemanticManifest(): JSONObject = JSONObject()
+        .put("schema", "mca.image_engine.bundle.v1")
+        .put("id", "community-qnn-test")
+        .put("runtime", "QNN_HTP")
+        .put("family", "SD15")
+        .put("requiresQnnRuntime", false)
+        .put("requiresSmokeTest", true)
+
+    private fun exactCommunityExecutionProfile(): JSONObject = JSONObject()
+        .put(
+            "graph",
+            JSONObject()
+                .put("textEncoder", graphArtifact("clip_v2.mnn"))
+                .put("unet", graphArtifact("unet.bin"))
+                .put("vae", graphArtifact("vae_decoder.bin"))
+                .put("vaeEncoder", graphArtifact("vae_encoder.bin"))
+                .put(
+                    "configSidecars",
+                    JSONArray(listOf("tokenizer.json", "token_emb.bin", "pos_emb.bin"))
+                )
+        )
+
+    private fun graphArtifact(path: String): JSONObject =
+        JSONObject().put("relativePath", path)
+
+    private fun archiveComponentArray(): JSONArray = JSONArray().put(
+        requiredComponent("DIFFUSION", "publisher-qnn-package.zip")
+    )
+
+    private fun requiredComponent(role: String, path: String): JSONObject = JSONObject()
+        .put("role", role)
+        .put("path", path)
+        .put("required", true)
 
     private fun snapdragonElite(qnnReady: Boolean): DeviceProfile =
         snapdragonDevice("SM8750", qnnReady)

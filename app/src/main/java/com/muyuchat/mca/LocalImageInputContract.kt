@@ -1,9 +1,15 @@
 package com.muyuchat.mca
 
 import java.io.File
+import org.json.JSONArray
 import org.json.JSONObject
 
 private const val NATIVE_FLOAT_RELATIVE_TOLERANCE = 1e-6
+private const val SDCPP_STAGE_INPUT_IMAGE_DECODED = 128L
+private const val SDCPP_STAGE_MASK_IMAGE_DECODED = 256L
+private const val SDCPP_STAGE_CONTROL_IMAGE_DECODED = 512L
+private const val SDCPP_STAGE_LORA_VALIDATED = 1_024L
+private const val SDCPP_REQUIRED_SUCCESS_STAGES = 127L
 
 private fun nativeFloatMatches(first: Double, second: Double): Boolean {
     if (!first.isFinite() || !second.isFinite()) return false
@@ -48,6 +54,59 @@ enum class LocalImagePreviewMode(val wireName: String) {
     }
 }
 
+data class LocalImagePreparedLora(
+    val id: String,
+    val name: String,
+    val path: String,
+    val sha256: String,
+    val sizeBytes: Long,
+    val multiplier: Double
+) {
+    init {
+        require(ID_PATTERN.matches(id)) { "LoRA id must be a UUID." }
+        require(name.isNotBlank() && name.length <= MAX_NAME_CHARS) { "LoRA name is invalid." }
+        require(path.isNotBlank() && path.length <= MAX_PATH_CHARS) { "LoRA path is invalid." }
+        require(SHA256_PATTERN.matches(sha256)) { "LoRA sha256 is invalid." }
+        require(sizeBytes in 16..MAX_LORA_BYTES) { "LoRA size is invalid." }
+        require(multiplier.isFinite() &&
+            multiplier in MIN_MULTIPLIER..MAX_MULTIPLIER &&
+            kotlin.math.abs(multiplier) >= MIN_ABSOLUTE_MULTIPLIER
+        ) {
+            "LoRA multiplier must be in [-4, -0.01] or [0.01, 4]."
+        }
+    }
+
+    fun toJson(includePath: Boolean = true): JSONObject = JSONObject()
+        .put("id", id)
+        .put("name", name)
+        .put("sha256", sha256)
+        .put("sizeBytes", sizeBytes)
+        .put("multiplier", multiplier)
+        .apply { if (includePath) put("path", path) }
+
+    companion object {
+        const val MAX_COUNT = 8
+        const val MIN_MULTIPLIER = -4.0
+        const val MAX_MULTIPLIER = 4.0
+        const val MIN_ABSOLUTE_MULTIPLIER = 0.01
+        private const val MAX_NAME_CHARS = 128
+        private const val MAX_PATH_CHARS = 4_096
+        private const val MAX_LORA_BYTES = 2L * 1024L * 1024L * 1024L
+        private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
+        private val ID_PATTERN =
+            Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+        fun fromJson(json: JSONObject): LocalImagePreparedLora = LocalImagePreparedLora(
+            id = json.requiredString("id"),
+            name = json.requiredString("name"),
+            path = json.requiredString("path"),
+            sha256 = json.requiredString("sha256").lowercase(),
+            sizeBytes = json.requiredExactLong("sizeBytes"),
+            multiplier = json.requiredFiniteDouble("multiplier")
+        )
+    }
+}
+
 data class LocalImageVaeTilingOptions(
     val tileSize: Int,
     val overlap: Double
@@ -56,8 +115,8 @@ data class LocalImageVaeTilingOptions(
         require(tileSize in MIN_TILE_SIZE..MAX_TILE_SIZE && tileSize % 8 == 0) {
             "vaeTiling.tileSize must be an 8-pixel multiple between $MIN_TILE_SIZE and $MAX_TILE_SIZE."
         }
-        require(overlap.isFinite() && overlap >= 0.0 && overlap < 1.0) {
-            "vaeTiling.overlap must be a finite ratio in [0, 1)."
+        require(overlap.isFinite() && overlap >= 0.0 && overlap <= 0.5) {
+            "vaeTiling.overlap must be a finite ratio in [0, 0.5]."
         }
     }
 
@@ -181,6 +240,32 @@ data class LocalImageInputDraft(
         }
     }
 
+    internal fun validateForHistory() {
+        validateImageInputShape(
+            taskMode = taskMode,
+            inputPresent = !inputImageReference.isNullOrBlank(),
+            maskPresent = !maskImageReference.isNullOrBlank(),
+            controlPresent = !controlImageReference.isNullOrBlank(),
+            strength = strength,
+            controlStrength = controlStrength,
+            allowMissingRequiredInputs = true
+        )
+        listOfNotNull(inputImageReference, maskImageReference, controlImageReference).forEach { reference ->
+            require(reference.length <= MAX_REFERENCE_CHARS) {
+                "Image input reference exceeds the $MAX_REFERENCE_CHARS character limit."
+            }
+        }
+    }
+
+    internal fun hasRequiredInputReferences(): Boolean = when (taskMode) {
+        LocalImageTaskMode.TEXT_TO_IMAGE -> true
+        LocalImageTaskMode.IMG2IMG,
+        LocalImageTaskMode.EDIT -> !inputImageReference.isNullOrBlank()
+        LocalImageTaskMode.INPAINT ->
+            !inputImageReference.isNullOrBlank() && !maskImageReference.isNullOrBlank()
+        LocalImageTaskMode.CONTROL -> !controlImageReference.isNullOrBlank()
+    }
+
     companion object {
         const val MAX_REFERENCE_CHARS: Int = 48 * 1024 * 1024
     }
@@ -198,6 +283,15 @@ internal fun LocalImageGenerationOptions.validateProductInputContract(
         controlStrength = controlStrength
     )
     require(batchCount in 1..8) { "batchCount must be between 1 and 8." }
+    require(loras.size <= LocalImagePreparedLora.MAX_COUNT) {
+        "At most ${LocalImagePreparedLora.MAX_COUNT} LoRA adapters may be used per request."
+    }
+    require(loras.map(LocalImagePreparedLora::id).distinct().size == loras.size) {
+        "LoRA adapter ids must be unique per request."
+    }
+    require(loras.map { File(it.path).canonicalPath }.distinct().size == loras.size) {
+        "LoRA adapter paths must be unique per request."
+    }
     clipSkip?.let { value ->
         require(value in -1..32) { "clipSkip must be -1 (model default) or between 0 and 32." }
     }
@@ -246,6 +340,22 @@ internal fun LocalImageGenerationOptions.putProductInputNativeParams(target: JSO
     strength?.let { target.put("strength", it) }
     controlStrength?.let { target.put("controlStrength", it) }
     clipSkip?.let { target.put("clipSkip", it) }
+    target.put("loraCount", loras.size)
+    if (loras.isNotEmpty()) {
+        val canonicalParents = loras.map { File(it.path).canonicalFile.parentFile?.canonicalPath }.distinct()
+        val loraRoot = canonicalParents.singleOrNull()
+        require(!loraRoot.isNullOrBlank()) {
+            "All LoRA adapters must be direct children of one app-private root."
+        }
+        target.put("loraRootPath", loraRoot)
+        target.put(
+            "loras",
+            JSONArray().apply { loras.forEach { adapter -> put(adapter.toJson()) } }
+        )
+    } else {
+        target.put("loraRootPath", "")
+        target.put("loras", JSONArray())
+    }
     vaeTiling?.let { target.put("vaeTiling", it.toJson()) }
     preview?.let { target.put("preview", it.toJson()) }
     return target
@@ -266,6 +376,24 @@ internal fun validateLocalImageRuntimeProductOptions(
         rejectProductInput(
             "unsupported_preview",
             "Runtime ${runtime.name} does not expose a native preview callback."
+        )
+    }
+    if (options.clipSkip != null && runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+        rejectProductInput(
+            "unsupported_clip_skip",
+            "Runtime ${runtime.name} does not consume clipSkip; native execution was not started."
+        )
+    }
+    if (options.vaeTiling != null && runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+        rejectProductInput(
+            "unsupported_vae_tiling",
+            "Runtime ${runtime.name} does not expose native VAE tiling controls."
+        )
+    }
+    if (options.loras.isNotEmpty() && runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+        rejectProductInput(
+            "unsupported_lora",
+            "Runtime ${runtime.name} does not expose a native LoRA execution path."
         )
     }
     if (runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP &&
@@ -291,16 +419,52 @@ internal fun validateLocalImageRuntimeProductOptions(
                 "This MNN edit execution path does not consume strength; native execution was not started."
             )
         }
-        if (options.clipSkip != null || options.vaeTiling != null) {
-            rejectProductInput(
-                "unsupported_edit_option",
-                "This MNN edit execution path does not consume clipSkip or vaeTiling; native execution was not started."
-            )
-        }
     }
     // Runtime/profile capability checks belong to the resolved execution path. This generic
     // boundary only enforces product-wide lifecycle limits; it must not pre-emptively block an
     // edit or control request merely because a runtime is new or was not previously validated.
+}
+
+/**
+ * Enforces the selected package's executable capability contract after profile resolution.
+ * Runtime-wide checks above remain the early safety boundary; this check prevents a runtime
+ * feature from being exposed to a model family whose native conditioner cannot consume it.
+ */
+internal fun validateLocalImageProfileProductOptions(
+    profile: ImageExecutionProfile,
+    options: LocalImageGenerationOptions
+) {
+    val capabilities = profile.capabilities
+    if (options.batchCount > capabilities.maxBatchCount) {
+        rejectProductInput(
+            "unsupported_batch_count",
+            "Profile ${profile.profileId} supports at most ${capabilities.maxBatchCount} output(s) per request."
+        )
+    }
+    if (options.clipSkip != null && !capabilities.supportsClipSkip) {
+        rejectProductInput(
+            "unsupported_clip_skip",
+            "Profile ${profile.profileId} has no CLIP layer-skip execution path."
+        )
+    }
+    if (options.vaeTiling != null && !capabilities.supportsVaeTiling) {
+        rejectProductInput(
+            "unsupported_vae_tiling",
+            "Profile ${profile.profileId} does not consume native VAE tiling controls."
+        )
+    }
+    if (options.preview != null && !capabilities.supportsLivePreview) {
+        rejectProductInput(
+            "unsupported_preview",
+            "Profile ${profile.profileId} does not expose a native live-preview callback."
+        )
+    }
+    if (options.loras.isNotEmpty() && !capabilities.supportsLora) {
+        rejectProductInput(
+            "unsupported_lora",
+            "Profile ${profile.profileId} does not expose LoRA adapter execution."
+        )
+    }
 }
 
 /**
@@ -381,6 +545,109 @@ internal fun verifyAndSanitizeStableDiffusionProductInput(
     requireExactInt("clipSkip", options.clipSkip ?: -1)
     requireExactInt("batchCount", options.batchCount)
 
+    val timetableCount = result.optInt("timetableCount", -1)
+    require(timetableCount > 0 &&
+        nativeEffective.optInt("timetableCount", -1) == timetableCount
+    ) { "stable-diffusion.cpp timetableCount evidence is missing or inconsistent." }
+    require(result.has("useCfg") && !result.isNull("useCfg") &&
+        nativeEffective.has("useCfg") && !nativeEffective.isNull("useCfg")
+    ) { "stable-diffusion.cpp did not report its actual CFG mode." }
+    val useCfg = result.getBoolean("useCfg")
+    require(nativeEffective.getBoolean("useCfg") == useCfg) {
+        "stable-diffusion.cpp CFG evidence differs between the result and nativeEffective."
+    }
+    val expectedUnetExecutionCountLong =
+        timetableCount.toLong() * (if (useCfg) 2L else 1L)
+    require(expectedUnetExecutionCountLong <= Int.MAX_VALUE.toLong()) {
+        "stable-diffusion.cpp CFG execution count exceeds the supported range."
+    }
+    val expectedUnetExecutionCount = expectedUnetExecutionCountLong.toInt()
+    require(result.optInt("unetExecutionCount", -1) == expectedUnetExecutionCount &&
+        nativeEffective.optInt("unetExecutionCount", -1) == expectedUnetExecutionCount
+    ) {
+        "stable-diffusion.cpp physical diffusion count does not match timetableCount and CFG."
+    }
+
+    val outerControlNetEvidence = result.optJSONObject("controlNetEvidence")
+        ?: error("stable-diffusion.cpp did not report outer ControlNet execution evidence.")
+    val nativeControlNetEvidence = nativeEffective.optJSONObject("controlNetEvidence")
+        ?: error("stable-diffusion.cpp did not report nativeEffective ControlNet execution evidence.")
+    val controlEvidenceFields = listOf(
+        "computeAttemptCount",
+        "computeSuccessCount",
+        "positiveComputeAttemptCount",
+        "positiveComputeSuccessCount",
+        "negativeComputeAttemptCount",
+        "negativeComputeSuccessCount",
+        "residualConsumptionCount",
+        "positiveResidualConsumptionCount",
+        "negativeResidualConsumptionCount",
+        "auxiliaryResidualConsumptionCount"
+    )
+    val controlCounts = controlEvidenceFields.associateWith { field ->
+        val outer = outerControlNetEvidence.optLong(field, -1L)
+        val native = nativeControlNetEvidence.optLong(field, -1L)
+        require(outer >= 0L && native == outer) {
+            "stable-diffusion.cpp ControlNet $field evidence is missing or inconsistent."
+        }
+        outer
+    }
+    val controlAttemptCount = controlCounts.getValue("computeAttemptCount")
+    val controlSuccessCount = controlCounts.getValue("computeSuccessCount")
+    val positiveControlAttemptCount = controlCounts.getValue("positiveComputeAttemptCount")
+    val positiveControlSuccessCount = controlCounts.getValue("positiveComputeSuccessCount")
+    val negativeControlAttemptCount = controlCounts.getValue("negativeComputeAttemptCount")
+    val negativeControlSuccessCount = controlCounts.getValue("negativeComputeSuccessCount")
+    val residualConsumptionCount = controlCounts.getValue("residualConsumptionCount")
+    val positiveResidualConsumptionCount =
+        controlCounts.getValue("positiveResidualConsumptionCount")
+    val negativeResidualConsumptionCount =
+        controlCounts.getValue("negativeResidualConsumptionCount")
+    val auxiliaryResidualConsumptionCount =
+        controlCounts.getValue("auxiliaryResidualConsumptionCount")
+    require(controlAttemptCount == positiveControlAttemptCount + negativeControlAttemptCount &&
+        controlSuccessCount == positiveControlSuccessCount + negativeControlSuccessCount &&
+        residualConsumptionCount == positiveResidualConsumptionCount +
+        negativeResidualConsumptionCount + auxiliaryResidualConsumptionCount
+    ) { "stable-diffusion.cpp ControlNet evidence is not completely classified by branch." }
+    val expectedControl = options.controlImage != null
+    val outerControlStrengthApplied = result.optBoolean("controlStrengthApplied", false)
+    val nativeControlStrengthApplied =
+        nativeEffective.optBoolean("controlStrengthApplied", false)
+    val expectedPositiveControlCount = if (expectedControl) timetableCount.toLong() else 0L
+    val expectedNegativeControlCount =
+        if (expectedControl && useCfg) timetableCount.toLong() else 0L
+    val expectedTotalControlCount =
+        expectedPositiveControlCount + expectedNegativeControlCount
+    val outerImageInputConsumption = result.optJSONObject("imageInputConsumption")
+        ?: error("stable-diffusion.cpp did not report outer imageInputConsumption evidence.")
+    val nativeImageInputConsumption = nativeEffective.optJSONObject("imageInputConsumption")
+        ?: error("stable-diffusion.cpp did not report nativeEffective imageInputConsumption evidence.")
+    val expectedControlConsumption = if (expectedControl) "controlnet_residual" else "none"
+    require(outerImageInputConsumption.optString("control") == expectedControlConsumption &&
+        nativeImageInputConsumption.optString("control") == expectedControlConsumption
+    ) { "stable-diffusion.cpp ControlNet residual-consumption evidence is inconsistent." }
+    if (expectedControl) {
+        require(controlAttemptCount == expectedTotalControlCount &&
+            controlSuccessCount == expectedTotalControlCount &&
+            positiveControlAttemptCount == expectedPositiveControlCount &&
+            positiveControlSuccessCount == expectedPositiveControlCount &&
+            negativeControlAttemptCount == expectedNegativeControlCount &&
+            negativeControlSuccessCount == expectedNegativeControlCount &&
+            residualConsumptionCount == expectedTotalControlCount &&
+            positiveResidualConsumptionCount == expectedPositiveControlCount &&
+            negativeResidualConsumptionCount == expectedNegativeControlCount &&
+            auxiliaryResidualConsumptionCount == 0L &&
+            outerControlStrengthApplied && nativeControlStrengthApplied
+        ) {
+            "stable-diffusion.cpp did not prove successful ControlNet compute and residual consumption."
+        }
+    } else {
+        require(controlCounts.values.all { it == 0L } &&
+            !outerControlStrengthApplied && !nativeControlStrengthApplied
+        ) { "stable-diffusion.cpp reported unrequested ControlNet execution." }
+    }
+
     val nativeTiling = nativeEffective.optJSONObject("vaeTiling")
         ?: error("stable-diffusion.cpp did not report vaeTiling evidence.")
     val outerTiling = result.optJSONObject("vaeTiling")
@@ -390,17 +657,80 @@ internal fun verifyAndSanitizeStableDiffusionProductInput(
     require(nativeTiling.optBoolean("enabled") == expectedEnabled &&
         outerTiling.optBoolean("enabled") == expectedEnabled
     ) { "stable-diffusion.cpp VAE tiling enablement did not match the request." }
-    if (expectedTiling != null) {
-        listOf(nativeTiling, outerTiling).forEach { tiling ->
-            require(tiling.optInt("tileSize", -1) == expectedTiling.tileSize) {
-                "stable-diffusion.cpp VAE tileSize did not match the request."
+    val expectedRequestedTileSize = expectedTiling?.tileSize ?: 0
+    val expectedRequestedOverlap = expectedTiling?.overlap ?: 0.0
+    listOf(nativeTiling, outerTiling).forEach { tiling ->
+        require(tiling.optInt("requestedTileSize", -1) == expectedRequestedTileSize &&
+            nativeFloatMatches(
+                tiling.optDouble("requestedOverlap", Double.NaN),
+                expectedRequestedOverlap
+            )
+        ) { "stable-diffusion.cpp VAE tiling request evidence is inconsistent." }
+    }
+    fun verifyVaeTilingPhase(
+        phase: String,
+        requireExecution: Boolean,
+        exactInvocationCount: Long? = null
+    ) {
+        val outerPhase = outerTiling.optJSONObject(phase)
+            ?: error("stable-diffusion.cpp did not report outer VAE $phase evidence.")
+        val nativePhase = nativeTiling.optJSONObject(phase)
+            ?: error("stable-diffusion.cpp did not report nativeEffective VAE $phase evidence.")
+        val integerFields = listOf(
+            "invocationCount",
+            "successCount",
+            "plannedTileCount",
+            "tileComputeAttemptCount",
+            "tileComputeSuccessCount",
+            "tileSizeX",
+            "tileSizeY"
+        )
+        val values = integerFields.associateWith { field ->
+            val outer = outerPhase.optLong(field, -1L)
+            val native = nativePhase.optLong(field, -1L)
+            require(outer >= 0L && native == outer) {
+                "stable-diffusion.cpp VAE $phase $field evidence is missing or inconsistent."
             }
-            val overlap = tiling.optDouble("overlap", Double.NaN)
-            require(nativeFloatMatches(overlap, expectedTiling.overlap)) {
-                "stable-diffusion.cpp VAE overlap did not match the request."
+            outer
+        }
+        val overlapX = outerPhase.optDouble("overlapX", Double.NaN)
+        val overlapY = outerPhase.optDouble("overlapY", Double.NaN)
+        require(nativeFloatMatches(nativePhase.optDouble("overlapX", Double.NaN), overlapX) &&
+            nativeFloatMatches(nativePhase.optDouble("overlapY", Double.NaN), overlapY)
+        ) { "stable-diffusion.cpp VAE $phase overlap evidence is inconsistent." }
+        val invocationCount = values.getValue("invocationCount")
+        if (invocationCount == 0L) {
+            require(!requireExecution && values.values.all { it == 0L } &&
+                overlapX == 0.0 && overlapY == 0.0
+            ) { "stable-diffusion.cpp did not execute required VAE $phase tiling." }
+            return
+        }
+        exactInvocationCount?.let { expectedCount ->
+            require(invocationCount == expectedCount) {
+                "stable-diffusion.cpp VAE $phase invocation count differs from the physical output plan."
             }
         }
+        require(expectedEnabled &&
+            values.getValue("successCount") == invocationCount &&
+            values.getValue("plannedTileCount") > 0L &&
+            values.getValue("tileComputeAttemptCount") ==
+                values.getValue("plannedTileCount") &&
+            values.getValue("tileComputeSuccessCount") ==
+                values.getValue("tileComputeAttemptCount") &&
+            values.getValue("tileSizeX") > 0L && values.getValue("tileSizeY") > 0L &&
+            overlapX.isFinite() && overlapX in 0.0..0.5 &&
+            overlapY.isFinite() && overlapY in 0.0..0.5
+        ) { "stable-diffusion.cpp VAE $phase tiling did not complete its physical tile plan." }
     }
+    verifyVaeTilingPhase(
+        "encode",
+        requireExecution = expectedEnabled && options.inputImage != null
+    )
+    verifyVaeTilingPhase(
+        "decode",
+        requireExecution = expectedEnabled,
+        exactInvocationCount = if (expectedEnabled) options.batchCount.toLong() else null
+    )
 
     val expectedPreview = options.preview
     val previewRequested = result.optBoolean("previewRequested", false)
@@ -426,11 +756,70 @@ internal fun verifyAndSanitizeStableDiffusionProductInput(
         ) { "stable-diffusion.cpp did not prove publication of a real preview frame." }
     }
 
+    val outerLoras = result.optJSONArray("loras")
+        ?: error("stable-diffusion.cpp did not report outer LoRA execution evidence.")
+    val nativeLoras = nativeEffective.optJSONArray("loras")
+        ?: error("stable-diffusion.cpp did not report nativeEffective LoRA execution evidence.")
+    require(outerLoras.length() == options.loras.size &&
+        nativeLoras.length() == options.loras.size
+    ) { "stable-diffusion.cpp LoRA evidence count differs from the request." }
+    options.loras.forEachIndexed { index, expected ->
+        listOf(outerLoras, nativeLoras).forEach { array ->
+            val item = array.optJSONObject(index)
+                ?: error("stable-diffusion.cpp LoRA evidence item must be an object.")
+            require(!item.has("path")) {
+                "stable-diffusion.cpp exposed a worker-private LoRA path."
+            }
+            require(item.optString("id") == expected.id &&
+                item.optString("sha256").lowercase() == expected.sha256 &&
+                nativeFloatMatches(
+                    item.optDouble("multiplier", Double.NaN),
+                    expected.multiplier
+                )
+            ) { "stable-diffusion.cpp LoRA identity or multiplier differs from the request." }
+        }
+    }
+    val outerLoraEvidence = result.optJSONObject("loraEvidence")
+        ?: error("stable-diffusion.cpp did not report outer LoRA count evidence.")
+    val nativeLoraEvidence = nativeEffective.optJSONObject("loraEvidence")
+        ?: error("stable-diffusion.cpp did not report nativeEffective LoRA count evidence.")
+    listOf(outerLoraEvidence, nativeLoraEvidence).forEach { evidence ->
+        val expectedCount = options.loras.size
+        require(evidence.optInt("requestedCount", -1) == expectedCount &&
+            evidence.optInt("loadedCount", -1) == expectedCount &&
+            evidence.optInt("appliedCount", -1) == expectedCount
+        ) { "stable-diffusion.cpp did not load and apply the complete LoRA set." }
+        val appliedTensorCount = evidence.optLong("appliedTensorCount", -1L)
+        require(
+            if (expectedCount == 0) appliedTensorCount == 0L else appliedTensorCount > 0L
+        ) { "stable-diffusion.cpp LoRA tensor execution evidence is invalid." }
+    }
+
+    var requiredStageMask = SDCPP_REQUIRED_SUCCESS_STAGES
+    if (options.inputImage != null) requiredStageMask =
+        requiredStageMask or SDCPP_STAGE_INPUT_IMAGE_DECODED
+    if (options.maskImage != null) requiredStageMask =
+        requiredStageMask or SDCPP_STAGE_MASK_IMAGE_DECODED
+    if (options.controlImage != null) requiredStageMask =
+        requiredStageMask or SDCPP_STAGE_CONTROL_IMAGE_DECODED
+    if (options.loras.isNotEmpty()) requiredStageMask =
+        requiredStageMask or SDCPP_STAGE_LORA_VALIDATED
+    listOf("nativeStageMask", "nativeDetailStageMask").forEach { field ->
+        val stageMask = result.optLong(field, -1L)
+        require(stageMask >= 0L && (stageMask and requiredStageMask) == requiredStageMask) {
+            "stable-diffusion.cpp $field is missing required execution stages."
+        }
+    }
+
     val audit = options.inputAuditJson()
         .put("nativeExecution", true)
         .put("inputImageExecutionCount", if (options.inputImage == null) 0 else 1)
         .put("maskImageExecutionCount", if (options.maskImage == null) 0 else 1)
         .put("controlImageExecutionCount", if (options.controlImage == null) 0 else 1)
+        .put("controlNetEvidence", JSONObject(nativeControlNetEvidence.toString()))
+        .put("vaeTiling", JSONObject(nativeTiling.toString()))
+        .put("loras", JSONArray(nativeLoras.toString()))
+        .put("loraEvidence", JSONObject(nativeLoraEvidence.toString()))
     return audit
 }
 
@@ -717,7 +1106,8 @@ private fun validateImageInputShape(
     maskPresent: Boolean,
     controlPresent: Boolean,
     strength: Double?,
-    controlStrength: Double?
+    controlStrength: Double?,
+    allowMissingRequiredInputs: Boolean = false
 ) {
     strength?.let { value ->
         require(value.isFinite() && value > 0.0 && value <= 1.0) {
@@ -739,22 +1129,24 @@ private fun validateImageInputShape(
             }
         }
         LocalImageTaskMode.IMG2IMG -> {
-            require(inputPresent) { "img2img requires inputImage." }
+            require(inputPresent || allowMissingRequiredInputs) { "img2img requires inputImage." }
             require(!maskPresent && !controlPresent) { "img2img accepts only inputImage." }
             require(controlStrength == null) { "img2img does not accept controlStrength." }
         }
         LocalImageTaskMode.INPAINT -> {
-            require(inputPresent && maskPresent) { "inpaint requires inputImage and maskImage." }
+            require(inputPresent && maskPresent || allowMissingRequiredInputs) {
+                "inpaint requires inputImage and maskImage."
+            }
             require(!controlPresent) { "inpaint does not accept controlImage." }
             require(controlStrength == null) { "inpaint does not accept controlStrength." }
         }
         LocalImageTaskMode.CONTROL -> {
-            require(controlPresent) { "control requires controlImage." }
+            require(controlPresent || allowMissingRequiredInputs) { "control requires controlImage." }
             require(!inputPresent && !maskPresent) { "control accepts only controlImage." }
             require(strength == null) { "control does not accept img2img strength." }
         }
         LocalImageTaskMode.EDIT -> {
-            require(inputPresent) { "edit requires inputImage." }
+            require(inputPresent || allowMissingRequiredInputs) { "edit requires inputImage." }
             require(!maskPresent && !controlPresent) { "edit accepts only inputImage." }
             require(controlStrength == null) { "edit does not accept controlStrength." }
         }

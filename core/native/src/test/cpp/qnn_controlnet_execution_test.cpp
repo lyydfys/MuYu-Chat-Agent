@@ -1,8 +1,12 @@
 #include "../../main/cpp/qnn_controlnet_execution.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
@@ -103,6 +107,35 @@ void test_preprocessed_canny_is_strictly_grayscale() {
         ControlImagePreprocessMode::PreprocessedCanny,
         &tensor, &edge_pixels, &hash, &error));
     assert(error.find("grayscale") != std::string::npos);
+}
+
+void test_file_sha256_streams_artifacts_larger_than_64_mib() {
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path path = std::filesystem::temp_directory_path() /
+        ("mca-qnn-sha256-" + std::to_string(unique) + ".bin");
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        assert(output.good());
+        std::array<uint8_t, 64U * 1024U> zeros{};
+        for (size_t chunk = 0U; chunk < 65U * 16U; ++chunk) {
+            output.write(
+                reinterpret_cast<const char*>(zeros.data()),
+                static_cast<std::streamsize>(zeros.size()));
+            assert(output.good());
+        }
+        const std::array<uint8_t, 3> suffix = {1U, 2U, 3U};
+        output.write(
+            reinterpret_cast<const char*>(suffix.data()),
+            static_cast<std::streamsize>(suffix.size()));
+        assert(output.good());
+    }
+    std::string digest;
+    std::string error;
+    assert(mca::qnn::controlnet::sha256_hex_file(path.string(), &digest, &error));
+    assert(digest == "d164e9ef1253f00d766aa820f0048917964e53b5b5dbbe53038cf70a11a3ea2a");
+    std::error_code remove_error;
+    std::filesystem::remove(path, remove_error);
+    assert(!remove_error);
 }
 
 void test_canny_runs_before_non_square_lanczos_resize() {
@@ -248,6 +281,7 @@ void test_control_strength_scales_actual_residuals_and_rejects_invalid_values() 
 int main() {
     test_control_image_modes_and_real_canny_pixels();
     test_preprocessed_canny_is_strictly_grayscale();
+    test_file_sha256_streams_artifacts_larger_than_64_mib();
     test_canny_runs_before_non_square_lanczos_resize();
     test_canny_keeps_source_border_pixels_like_opencv();
     test_lanczos_matches_pillow_11_3_fixed_point_rgb();

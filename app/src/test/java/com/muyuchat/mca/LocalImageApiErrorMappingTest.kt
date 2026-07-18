@@ -1,9 +1,21 @@
 package com.muyuchat.mca
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalImageApiErrorMappingTest {
+    @Test
+    fun `authenticated image count capability is explicit per runtime`() {
+        assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.STABLE_DIFFUSION_CPP, 8))
+        assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.MNN_DIFFUSION, 1))
+        assertFalse(supportsAuthenticatedLocalImageCount(LocalImageRuntime.MNN_DIFFUSION, 2))
+        assertFalse(supportsAuthenticatedLocalImageCount(LocalImageRuntime.QNN_HTP, 8))
+        assertFalse(supportsAuthenticatedLocalImageCount(LocalImageRuntime.STABLE_DIFFUSION_CPP, 9))
+    }
+
     @Test
     fun `structured worker errors retain code and select a non generic API status`() {
         val unsupported = requireNotNull(
@@ -68,5 +80,29 @@ class LocalImageApiErrorMappingTest {
                 )
             )
         )
+    }
+
+    @Test
+    fun `native prompt weighting rejection keeps its code through worker and API mapping`() {
+        val nativeFailure = try {
+            throwLocalImageNativeFailure(
+                JSONObject()
+                    .put("ok", false)
+                    .put("errorCode", "PROMPT_WEIGHTING_EXECUTION_UNSUPPORTED")
+                    .put("error", "The selected graph cannot apply prompt weights."),
+                fallbackMessage = "Generation failed."
+            )
+        } catch (error: LocalImageProductContractException) {
+            error
+        }
+
+        assertEquals("prompt_weighting_execution_unsupported", nativeFailure.code)
+        assertEquals(
+            "prompt_weighting_execution_unsupported",
+            localImageWorkerErrorCode(nativeFailure)
+        )
+        val apiFailure = requireNotNull(nativeFailure.toLocalImageApiProviderExceptionOrNull())
+        assertEquals("prompt_weighting_execution_unsupported", apiFailure.code)
+        assertEquals(422, apiFailure.httpStatus)
     }
 }

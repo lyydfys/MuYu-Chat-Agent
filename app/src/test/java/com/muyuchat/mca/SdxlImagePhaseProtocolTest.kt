@@ -155,8 +155,7 @@ class SdxlImagePhaseProtocolTest {
         val metadataFile = File(temporaryFolder.root, "contract-latent.json")
         val params = contractParams(steps = 30)
         val contract = SdxlImageExecutionContract.fromParams(params.toString())
-        val native = JSONObject(params.toString())
-            .putAll(nativePromptWeightingEvidence())
+        val native = nativeEffectiveParams(steps = 30)
             .put("runtimeProfile", "V79")
             .put("htpArchVersion", 79)
             .put("latentDtype", "float32-le")
@@ -347,6 +346,7 @@ class SdxlImagePhaseProtocolTest {
     @Test
     fun `final execution metadata preserves dynamic transport and isolated process proof`() {
         val nativeExecution = nativeEffectiveParams(steps = 30)
+            .put("runtimeSessionMode", "isolated_unet_then_vae_same_transport")
             .put("sdxlPhaseProof", sdxlPhaseProofEvidence())
         val metadata = qnnImageExecutionMetadata(
             nativeRequestId = "qnn-native-1",
@@ -400,7 +400,19 @@ class SdxlImagePhaseProtocolTest {
         assertEquals(7L, metadata.getLong("nativeGenerationSequence"))
         assertEquals(123_456L, metadata.getLong("nativeStartedAtMonotonicMs"))
         assertEquals("sdxl_qnn_conditioning", metadata.getString("conditioningFormat"))
+        assertEquals(
+            "external_mnn_sdxl_embeddings",
+            metadata.getString("conditioningExecutionMode")
+        )
+        assertEquals("clip.mnn+clip_2.mnn", metadata.getString("conditioningGraph"))
+        assertEquals(4, metadata.getInt("conditioningEncoderExecutionCount"))
+        assertEquals(0, metadata.getInt("textEncoderExecutionCount"))
+        assertTrue(metadata.getBoolean("conditioningArtifactConsumed"))
         assertEquals(30, metadata.getInt("steps"))
+        assertEquals(
+            "isolated_unet_then_vae_same_transport",
+            metadata.getJSONObject("nativeEffective").getString("runtimeSessionMode")
+        )
         assertEquals(
             9,
             metadata.getJSONObject("nativeEffective")
@@ -430,8 +442,7 @@ class SdxlImagePhaseProtocolTest {
             .apply { writeBytes(ByteArray(1 * 4 * 128 * 128 * 4)) }
         val metadataFile = File(temporaryFolder.root, "merge-latent.json")
         val output = temporaryFolder.newFile("merge-output.png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
-        val unetNative = JSONObject(params.toString())
-            .putAll(nativePromptWeightingEvidence())
+        val unetNative = nativeEffectiveParams(steps = 30)
             .put("ok", true)
             .put("runtimeProfile", "V79")
             .put("htpArchVersion", 79)
@@ -616,6 +627,39 @@ class SdxlImagePhaseProtocolTest {
     }
 
     @Test
+    fun `unet evidence rejects forged conditioning consumption fields`() {
+        val contract = SdxlImageExecutionContract.fromParams(contractParams(steps = 30).toString())
+        val mutations: List<Pair<String, Any>> = listOf(
+            "conditioningExecutionMode" to "declared_only",
+            "conditioningBackend" to "CPU",
+            "conditioningGraph" to "clip.mnn",
+            "conditioningGraphSha256" to "f".repeat(64),
+            "conditioningOrder" to "positive_then_negative",
+            "conditioningEncoderExecutionCount" to 2,
+            "textEncoderExecutionCount" to 1,
+            "conditioningArtifactConsumed" to false,
+            "runtimeSessionMode" to "shared_process"
+        )
+        mutations.forEach { (field, value) ->
+            val flatForgery = nativeEffectiveParams(steps = 30)
+                .putAll(unetPhaseEvidence())
+                .put(field, value)
+            assertTrue(
+                "Flat forged field unexpectedly passed: $field",
+                runCatching { validateSdxlUnetNativeEvidence(contract, flatForgery) }.isFailure
+            )
+
+            val nestedForgery = nativeEffectiveParams(steps = 30)
+                .putAll(unetPhaseEvidence())
+            nestedForgery.getJSONObject("nativeEffective").put(field, value)
+            assertTrue(
+                "Nested forged field unexpectedly passed: $field",
+                runCatching { validateSdxlUnetNativeEvidence(contract, nestedForgery) }.isFailure
+            )
+        }
+    }
+
+    @Test
     fun `dmd2 single branch still reuses one unet context for all four steps`() {
         val contract = SdxlImageExecutionContract.fromParams(
             contractParams(steps = 4, useCfg = false).toString()
@@ -693,6 +737,12 @@ class SdxlImagePhaseProtocolTest {
             .put("vaeScalingFactor", 0.13025)
             .put("pixelRange", ImagePixelRange.NEGATIVE_ONE_TO_ONE.name)
             .put("conditioningArtifactSha256", conditioningArtifactSha256)
+            .put("conditioningExecutionMode", "external_mnn_sdxl_embeddings")
+            .put("conditioningBackend", "MNN")
+            .put("conditioningGraph", "clip.mnn+clip_2.mnn")
+            .put("conditioningGraphSha256", "e".repeat(64))
+            .put("conditioningOrder", "negative_then_positive")
+            .put("conditioningEncoderExecutionCount", 4)
             .put("width", 1024)
             .put("height", 1024)
             .put("seed", 1234L)
@@ -703,6 +753,15 @@ class SdxlImagePhaseProtocolTest {
     private fun nativeEffectiveParams(steps: Int, useCfg: Boolean = true): JSONObject =
         JSONObject(contractParams(steps, useCfg).toString())
             .putAll(nativePromptWeightingEvidence())
+            .put("conditioningExecutionMode", "external_mnn_sdxl_embeddings")
+            .put("conditioningBackend", "MNN")
+            .put("conditioningGraph", "clip.mnn+clip_2.mnn")
+            .put("conditioningGraphSha256", "e".repeat(64))
+            .put("conditioningOrder", "negative_then_positive")
+            .put("conditioningEncoderExecutionCount", 4)
+            .put("textEncoderExecutionCount", 0)
+            .put("conditioningArtifactConsumed", true)
+            .put("runtimeSessionMode", "isolated_unet_phase")
 
     private fun nativePromptWeightingEvidence(): JSONObject = JSONObject()
         .put("promptWeightingApplied", false)

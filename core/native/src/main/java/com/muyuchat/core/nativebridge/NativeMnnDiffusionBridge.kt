@@ -76,7 +76,7 @@ class NativeMnnDiffusionBridge {
         outputPath: String,
         backendMode: String,
         threads: Int,
-        tokenEmbeddingMode: String,
+        conditioningOrder: String,
         promptWeightingEnabled: Boolean
     ): String
     external fun encodeSdxlPromptConditioning(

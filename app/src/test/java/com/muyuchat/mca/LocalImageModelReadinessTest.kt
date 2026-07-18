@@ -22,6 +22,8 @@ import java.io.File
 import java.nio.file.Files
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -946,6 +948,7 @@ class LocalImageModelReadinessTest {
         File(root, "manifest.json").writeText(
             """
             {
+              "schema": "mca.image_engine.bundle.v1",
               "runtime": "QNN_HTP",
               "family": "SD15",
               "components": [
@@ -956,11 +959,9 @@ class LocalImageModelReadinessTest {
             """.trimIndent()
         )
 
-        val manifest = localImageBundleManifestFromRoot(root)
+        val inspection = inspectLocalImageBundleManifestFromRoot(root)
 
-        assertNotNull(manifest)
-        assertFalse(manifest!!.primaryFile?.canonicalPath?.startsWith(root.canonicalPath) == true)
-        assertNull(manifest.primaryFile)
+        assertTrue(inspection is LocalImageBundleManifestInspection.Invalid)
     }
 
     @Test
@@ -1078,6 +1079,8 @@ class LocalImageModelReadinessTest {
         root.touch("vae_decoder.bin")
         root.touch("clip_v2.mnn")
         root.touch("tokenizer.json")
+        root.touch("token_emb.bin")
+        root.touch("pos_emb.bin")
         val bundle = ImageEngineBundleSpec(
             id = "cyberrealistic_sd15_qnn228",
             title = "CyberRealistic SD1.5 QNN 2.28",
@@ -1141,6 +1144,57 @@ class LocalImageModelReadinessTest {
         assertTrue(manifest.qnnSmokeSpecs.all { it.completeForGraphSmoke })
         assertNull(manifest.primaryFile)
         assertNull(record.localImageStructuralReadinessMessage())
+    }
+
+    @Test
+    fun qnnManifestRequiredPathsRejectZeroLengthComponentsInsteadOfSubstringPlaceholders() {
+        val root = Files.createTempDirectory("qnn-exact-components").toFile()
+        try {
+            val unet = root.touch("graphs/unet.bin")
+            File(root, "graphs/vae_decoder.bin").apply {
+                parentFile?.mkdirs()
+                createNewFile()
+            }
+            root.touch("clip_v2.mnn")
+            root.touch("qnn-vae-clip-placeholder.txt")
+            File(root, "manifest.json").writeText(
+                JSONObject()
+                    .put("id", "exact-qnn")
+                    .put("runtime", "QNN_HTP")
+                    .put(
+                        "components",
+                        JSONArray()
+                            .put(
+                                JSONObject()
+                                    .put("role", "DIFFUSION")
+                                    .put("path", "graphs/unet.bin")
+                                    .put("required", true)
+                            )
+                            .put(
+                                JSONObject()
+                                    .put("role", "VAE")
+                                    .put("path", "graphs/vae_decoder.bin")
+                                    .put("required", true)
+                            )
+                            .put(
+                                JSONObject()
+                                    .put("role", "TEXT_ENCODER")
+                                    .put("path", "clip_v2.mnn")
+                                    .put("required", true)
+                            )
+                    )
+                    .toString(2),
+                Charsets.UTF_8
+            )
+            val record = localImageRecord(root, unet, LocalImageRuntime.QNN_HTP)
+
+            val message = requireNotNull(record.localImageStructuralReadinessMessage())
+
+            assertTrue(message.contains("graphs/vae_decoder.bin"))
+            assertFalse(message.contains("device", ignoreCase = true))
+        } finally {
+            root.deleteRecursively()
+        }
     }
 
     @Test

@@ -212,6 +212,7 @@ enum class ImageEngineWorkerStrategy {
     IN_PROCESS,
     DEDICATED_WORKER,
     SPLIT_UNET_VAE,
+    SHARED_UNET_VAE,
     SHARED_TEXT_UNET_VAE
 }
 
@@ -304,6 +305,11 @@ data class ImageEngineGraphContractSpec(
     val controlNet: String? = null,
     val schedulerSidecar: String? = null,
     val tokenizerSidecar: String? = null,
+    /**
+     * Immutable non-graph files required by execution. The historical field
+     * name is retained for manifest compatibility; entries may include binary
+     * conditioning tables as well as configuration sidecars.
+     */
     val configSidecars: List<String> = emptyList(),
     val qnnSdk: String? = null,
     val htpArch: Int? = null,
@@ -340,12 +346,18 @@ data class ImageEngineGenerationCapabilitiesSpec(
     val supportsTextualInversion: Boolean = false,
     val requiresControlImage: Boolean = false,
     val requiresInputImage: Boolean = false,
-    val supportsMask: Boolean = false
+    val supportsMask: Boolean = false,
+    val supportsClipSkip: Boolean = false,
+    val supportsVaeTiling: Boolean = false,
+    val supportsLivePreview: Boolean = false,
+    val supportsLora: Boolean = false,
+    val maxBatchCount: Int = 1
 ) {
     init {
         require(supportedSchedulers.isNotEmpty()) { "At least one image scheduler must be supported." }
         require(minWidth in 1..maxWidth && minHeight in 1..maxHeight) { "Image capability bounds are invalid." }
         require(widthMultiple > 0 && heightMultiple > 0) { "Image dimension multiples must be positive." }
+        require(maxBatchCount in 1..8) { "Image batch capability must be between 1 and 8." }
     }
 }
 
@@ -392,11 +404,20 @@ data class ImageEngineExecutionProfileSpec(
         require(task != ImageEngineTask.CONTROL_IMAGE || capabilities.requiresControlImage) {
             "Control-image profiles must require a control image."
         }
+        require((task == ImageEngineTask.CONTROL_IMAGE) == capabilities.requiresControlImage) {
+            "Control-image capability and profile task must match exactly."
+        }
         require(!capabilities.requiresControlImage || !graph.controlNet.isNullOrBlank()) {
             "Control-image profiles must declare a ControlNet graph."
         }
         require(task != ImageEngineTask.IMAGE_EDIT || capabilities.requiresInputImage) {
             "Image-edit profiles must require an input image."
+        }
+        require((task == ImageEngineTask.IMAGE_EDIT) == capabilities.requiresInputImage) {
+            "Input-image capability and profile task must match exactly."
+        }
+        require(!capabilities.supportsMask || capabilities.requiresInputImage) {
+            "Mask support requires an input-image task."
         }
         require(defaults.useCfg || defaults.cfgScale == 1.0) {
             "CFG-disabled defaults must retain the conditional branch at scale 1.0."
@@ -491,6 +512,21 @@ data class ImageEngineBundleSpec(
 ) {
     init {
         executionProfile?.let { profile ->
+            fun normalizedBundlePath(value: String): String = value
+                .trim()
+                .replace('\\', '/')
+                .trimStart('/')
+
+            fun ImageEngineBundleComponentSpec.matchesPath(path: String): Boolean {
+                val expected = normalizedBundlePath(path)
+                return sequenceOf(fileName, relativePath)
+                    .map(::normalizedBundlePath)
+                    .any { candidate ->
+                        candidate == expected ||
+                            ('/' !in expected && candidate.substringAfterLast('/') == expected)
+                    }
+            }
+
             require(recommendationId?.isNotBlank() == true) {
                 "Catalog image bundles with an execution profile require a recommendation id."
             }
@@ -499,6 +535,134 @@ data class ImageEngineBundleSpec(
             require(smokeSpec.width == profile.defaults.width) { "Image smoke width and execution default width must match." }
             require(smokeSpec.height == profile.defaults.height) { "Image smoke height and execution default height must match." }
             require(smokeSpec.steps == profile.defaults.steps) { "Image smoke steps and execution default steps must match." }
+
+            val required = components.filter(ImageEngineBundleComponentSpec::required)
+            require(required.isNotEmpty()) { "Catalog image bundles must declare required components." }
+            required.forEach { component ->
+                val relativePath = component.relativePath.trim().replace('\\', '/')
+                require(
+                    relativePath.isNotBlank() &&
+                        !relativePath.startsWith('/') &&
+                        !Regex("^[A-Za-z]:").containsMatchIn(relativePath) &&
+                        relativePath.split('/').all { segment ->
+                            segment.isNotBlank() && segment != "." && segment != ".."
+                        }
+                ) {
+                    "Required image component paths must stay inside the installed bundle."
+                }
+                require(component.expectedSizeBytes?.let { it > 0L } == true) {
+                    "Required image component ${component.relativePath} must pin a positive source size."
+                }
+                require(component.sha256?.matches(Regex("^[0-9a-fA-F]{64}$")) == true) {
+                    "Required image component ${component.relativePath} must pin a source SHA-256."
+                }
+            }
+            require(
+                required.map { normalizedBundlePath(it.relativePath).lowercase() }.distinct().size == required.size
+            ) {
+                "Required image components must use unique installed paths."
+            }
+
+            val diffusionComponents = required.filter {
+                it.role == ImageEngineBundleComponentRole.DIFFUSION
+            }
+            require(diffusionComponents.isNotEmpty()) {
+                "Catalog image bundles must declare a required diffusion main component."
+            }
+            val archiveComponents = diffusionComponents.filter { component ->
+                normalizedBundlePath(component.relativePath).endsWith(".zip", ignoreCase = true)
+            }
+            require(archiveComponents.size <= 1) {
+                "Catalog image bundles cannot declare more than one required diffusion archive."
+            }
+            if (archiveComponents.isNotEmpty()) {
+                require(diffusionComponents.size == 1) {
+                    "A diffusion archive is the bundle's single primary model component."
+                }
+            } else {
+                val graphArtifacts = listOf(
+                    Triple("text encoder", profile.graph.textEncoder, ImageEngineBundleComponentRole.TEXT_ENCODER),
+                    Triple("diffusion graph", profile.graph.unet, ImageEngineBundleComponentRole.DIFFUSION),
+                    Triple("VAE decoder", profile.graph.vae, ImageEngineBundleComponentRole.VAE),
+                    Triple("VAE encoder", profile.graph.vaeEncoder, ImageEngineBundleComponentRole.VAE_ENCODER)
+                )
+                graphArtifacts.forEach { (label, path, role) ->
+                    path?.takeIf(String::isNotBlank)?.let { requiredPath ->
+                        require(required.any { component ->
+                            component.role == role && component.matchesPath(requiredPath)
+                        }) {
+                            "Image execution profile $label path $requiredPath has no matching required component."
+                        }
+                    }
+                }
+                (listOfNotNull(
+                    profile.graph.controlNet,
+                    profile.graph.schedulerSidecar,
+                    profile.graph.tokenizerSidecar
+                ) + profile.graph.configSidecars).forEach { requiredPath ->
+                    require(required.any { component -> component.matchesPath(requiredPath) }) {
+                        "Image execution profile path $requiredPath has no matching required component."
+                    }
+                }
+                profile.graph.unet?.takeIf(String::isNotBlank)?.let { mainPath ->
+                    require(diffusionComponents.count { it.matchesPath(mainPath) } == 1) {
+                        "A direct image bundle must bind exactly one diffusion main graph."
+                    }
+                } ?: require(diffusionComponents.size == 1) {
+                    "A runtime-native image bundle must declare exactly one diffusion main component."
+                }
+            }
+
+            if (
+                runtime == ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP &&
+                profile.family in setOf(
+                    ImageEngineModelFamily.Z_IMAGE,
+                    ImageEngineModelFamily.FLUX,
+                    ImageEngineModelFamily.QWEN_IMAGE,
+                    ImageEngineModelFamily.LONGCAT_IMAGE
+                )
+            ) {
+                val roles = required.mapTo(linkedSetOf(), ImageEngineBundleComponentSpec::role)
+                require(
+                    roles.containsAll(
+                        setOf(
+                            ImageEngineBundleComponentRole.DIFFUSION,
+                            ImageEngineBundleComponentRole.VAE,
+                            ImageEngineBundleComponentRole.TEXT_ENCODER
+                        )
+                    )
+                ) {
+                    "Split runtime image bundles require diffusion, VAE and text-encoder components."
+                }
+            }
+            if (profile.task == ImageEngineTask.CONTROL_IMAGE) {
+                require(
+                    listOf(
+                        profile.graph.textEncoder,
+                        profile.graph.unet,
+                        profile.graph.vae,
+                        profile.graph.controlNet
+                    ).all { !it.isNullOrBlank() }
+                ) {
+                    "Control-image profiles require text encoder, diffusion, VAE and ControlNet graphs."
+                }
+            }
+            if (
+                runtime == ImageEngineBundleRuntime.MNN_DIFFUSION &&
+                profile.task == ImageEngineTask.IMAGE_EDIT
+            ) {
+                val vaeEncoderPath = requireNotNull(
+                    profile.graph.vaeEncoder?.takeIf(String::isNotBlank)
+                ) {
+                    "MNN image-edit profiles must declare a VAE encoder graph."
+                }
+                require(required.any { component ->
+                    component.role == ImageEngineBundleComponentRole.VAE_ENCODER &&
+                        component.matchesPath(vaeEncoderPath)
+                }) {
+                    "MNN image-edit bundles must include the declared VAE encoder component."
+                }
+            }
         }
     }
 
@@ -801,6 +965,35 @@ data class ModelScopeRecommendedModel(
     val imageEngineBundle: ImageEngineBundleSpec? = null,
     val visionModelBundle: VisionModelBundleSpec? = null
 ) {
+    init {
+        if (kind == ModelScopeRecommendedKind.IMAGE) {
+            val bundle = requireNotNull(imageEngineBundle) {
+                "Image recommendations require an executable image bundle."
+            }
+            require(bundle.recommendationId == id) {
+                "Image recommendation and bundle identities must match."
+            }
+            require(bundle.executionProfile != null) {
+                "Image recommendations require a catalog execution profile."
+            }
+            val expected = recommendedFileName.trim().replace('\\', '/').substringAfterLast('/')
+            val diffusionComponents = bundle.requiredComponents.filter {
+                it.role == ImageEngineBundleComponentRole.DIFFUSION
+            }
+            val primaryMatches = diffusionComponents.filter { component ->
+                sequenceOf(component.fileName, component.relativePath)
+                    .map { it.trim().replace('\\', '/').substringAfterLast('/') }
+                    .any { it.equals(expected, ignoreCase = true) }
+            }
+            require(primaryMatches.size == 1) {
+                "Image recommendation $id must bind its recommended file to exactly one diffusion main component."
+            }
+            require(diffusionComponents.firstOrNull() == primaryMatches.single()) {
+                "Image recommendation $id must place its declared diffusion main component first."
+            }
+        }
+    }
+
     val section: RecommendedModelSection
         get() = when {
             kind == ModelScopeRecommendedKind.IMAGE &&

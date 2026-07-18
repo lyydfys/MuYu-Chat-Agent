@@ -140,7 +140,12 @@ internal fun materializeDownloadedImageExecutionProfile(
             supportsTextualInversion = source.capabilities.supportsTextualInversion,
             requiresControlImage = source.capabilities.requiresControlImage,
             requiresInputImage = source.capabilities.requiresInputImage,
-            supportsMask = source.capabilities.supportsMask
+            supportsMask = source.capabilities.supportsMask,
+            supportsClipSkip = source.capabilities.supportsClipSkip,
+            supportsVaeTiling = source.capabilities.supportsVaeTiling,
+            supportsLivePreview = source.capabilities.supportsLivePreview,
+            supportsLora = source.capabilities.supportsLora,
+            maxBatchCount = source.capabilities.maxBatchCount
         )
     )
     val validation = ImageExecutionProfileValidator.validate(profile, modelFingerprint)

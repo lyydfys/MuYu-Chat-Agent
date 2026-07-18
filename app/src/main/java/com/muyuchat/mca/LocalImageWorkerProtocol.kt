@@ -4,13 +4,22 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 internal object LocalImageWorkerProtocol {
-    private const val VERSION = 2
+    private const val VERSION = 3
 
     data class GenerateRequest(
         val requestId: String,
         val model: LocalImageModelRecord,
         val prompt: String,
         val options: LocalImageGenerationOptions = LocalImageGenerationOptions()
+    )
+
+    data class UpscaleRequest(
+        val requestId: String,
+        val input: LocalImagePreparedInput,
+        val upscaler: LocalImagePreparedUpscaler,
+        val targetScale: Int,
+        val tileSize: Int,
+        val threads: Int
     )
 
     data class ProgressEnvelope(
@@ -106,6 +115,50 @@ internal object LocalImageWorkerProtocol {
             } else {
                 parsedOptions
             }
+        )
+    }
+
+    fun upscaleRequest(
+        requestId: String,
+        input: LocalImagePreparedInput,
+        upscaler: LocalImagePreparedUpscaler,
+        targetScale: Int,
+        tileSize: Int,
+        threads: Int
+    ): String {
+        require(targetScale in UPSCALE_TARGET_SCALES) { "Unsupported upscale target scale." }
+        require(tileSize in 32..1_024 && tileSize % 8 == 0) { "Invalid upscale tile size." }
+        require(threads in 1..64) { "Invalid upscale thread count." }
+        return JSONObject()
+            .put("version", VERSION)
+            .put("requestId", requestId)
+            .put("input", input.toJson())
+            .put("upscaler", upscaler.toJson())
+            .put("targetScale", targetScale)
+            .put("tileSize", tileSize)
+            .put("threads", threads)
+            .toString()
+    }
+
+    fun parseUpscaleRequest(raw: String): UpscaleRequest {
+        val json = JSONObject(raw).also { it.requireCurrentVersion() }
+        val targetScale = json.optInt("targetScale", -1)
+        val tileSize = json.optInt("tileSize", -1)
+        val threads = json.optInt("threads", -1)
+        require(targetScale in UPSCALE_TARGET_SCALES) { "Unsupported upscale target scale." }
+        require(tileSize in 32..1_024 && tileSize % 8 == 0) { "Invalid upscale tile size." }
+        require(threads in 1..64) { "Invalid upscale thread count." }
+        return UpscaleRequest(
+            requestId = json.requireString("requestId"),
+            input = LocalImagePreparedInput.fromJson(
+                json.optJSONObject("input") ?: error("Missing upscale input image.")
+            ),
+            upscaler = LocalImagePreparedUpscaler.fromJson(
+                json.optJSONObject("upscaler") ?: error("Missing upscale model.")
+            ),
+            targetScale = targetScale,
+            tileSize = tileSize,
+            threads = threads
         )
     }
 
@@ -322,4 +375,6 @@ internal object LocalImageWorkerProtocol {
         val value = raw.trim()
         return value.takeIf { preserveEmpty || it.isNotEmpty() }
     }
+
+    private val UPSCALE_TARGET_SCALES = setOf(2, 3, 4)
 }

@@ -4173,28 +4173,11 @@ bool qnn_file_sha256(
         std::string* error) {
     if (digest == nullptr || error == nullptr) return false;
     const long long bytes = file_size_or_zero(path);
-    constexpr long long kMaxAuditedArtifactBytes = 64LL * 1024LL * 1024LL;
-    if (bytes <= 0 || bytes > kMaxAuditedArtifactBytes) {
-        *error = "Artifact is missing, empty, or exceeds the native SHA-256 audit limit.";
+    if (bytes <= 0) {
+        *error = "Artifact is missing or empty.";
         return false;
     }
-    std::ifstream input(path.c_str(), std::ios::binary);
-    if (!input.good()) {
-        *error = "Failed to open the artifact for SHA-256 verification.";
-        return false;
-    }
-    std::vector<uint8_t> payload(static_cast<size_t>(bytes));
-    input.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
-    if (!input.good()) {
-        *error = "Failed to read the complete artifact for SHA-256 verification.";
-        return false;
-    }
-    *digest = mca::qnn::controlnet::sha256_hex_bytes(payload);
-    if (digest->size() != 64U) {
-        *error = "Artifact SHA-256 could not be derived.";
-        return false;
-    }
-    return true;
+    return mca::qnn::controlnet::sha256_hex_file(path, digest, error);
 }
 
 enum class QnnVaeScalingLocation {
@@ -4249,6 +4232,15 @@ struct QnnNativeEffectiveEvidence {
     size_t negative_weighted_token_count = 0;
     std::string prompt_weight_fingerprint;
     std::string conditioning_artifact_sha256;
+    std::string conditioning_execution_mode;
+    std::string conditioning_backend;
+    std::string conditioning_graph;
+    std::string conditioning_graph_sha256;
+    std::string conditioning_order;
+    size_t conditioning_encoder_execution_count = 0;
+    size_t text_encoder_execution_count = 0;
+    bool conditioning_artifact_consumed = false;
+    std::string runtime_session_mode;
     std::string task_mode = "text_to_image";
     std::string control_image_path;
     std::string control_image_sha256;
@@ -4285,6 +4277,12 @@ struct QnnConditioningEvidence {
     std::string prompt_weight_fingerprint;
     std::string conditioning_artifact_sha256;
     std::string embedding_disk_data_type;
+    std::string conditioning_execution_mode;
+    std::string conditioning_backend;
+    std::string conditioning_graph;
+    std::string conditioning_graph_sha256;
+    std::string conditioning_order;
+    size_t conditioning_encoder_execution_count = 0;
 };
 
 uint32_t qnn_u32_little_endian(const uint8_t* bytes) {
@@ -5021,6 +5019,45 @@ std::string qnn_nonempty_bundle_file_named(
     return "";
 }
 
+bool qnn_sdxl_conditioning_graph_sha256(
+        const std::vector<std::string>& files,
+        std::string* digest,
+        std::string* error) {
+    if (digest == nullptr || error == nullptr) return false;
+    std::vector<std::string> execution_asset_names = {"clip.mnn"};
+    if (!qnn_nonempty_bundle_file_named(files, "clip.mnn.weight").empty()) {
+        execution_asset_names.emplace_back("clip.mnn.weight");
+    }
+    execution_asset_names.emplace_back("clip_2.mnn");
+    execution_asset_names.emplace_back("clip_2.mnn.weight");
+    std::ostringstream payload;
+    for (const auto& asset_name : execution_asset_names) {
+        const std::string asset_path = qnn_nonempty_bundle_file_named(files, asset_name);
+        if (asset_path.empty()) {
+            *error = "MNN SDXL conditioning execution asset is missing or empty: " +
+                asset_name;
+            return false;
+        }
+        std::string asset_sha256;
+        if (!qnn_file_sha256(asset_path, &asset_sha256, error)) {
+            *error = "MNN SDXL conditioning execution asset SHA-256 failed for " +
+                asset_name + ": " + *error;
+            return false;
+        }
+        payload << asset_name << "=" << asset_sha256 << "\n";
+    }
+    const std::string canonical_payload = payload.str();
+    const std::vector<uint8_t> payload_bytes(
+        canonical_payload.begin(),
+        canonical_payload.end());
+    *digest = mca::qnn::controlnet::sha256_hex_bytes(payload_bytes);
+    if (digest->size() != 64U) {
+        *error = "MNN SDXL conditioning execution-closure fingerprint could not be derived.";
+        return false;
+    }
+    return true;
+}
+
 bool resolve_qnn_conditioning_evidence(
         const std::string& bundle_root,
         const std::string& consumed_artifact_sha256,
@@ -5082,6 +5119,10 @@ bool resolve_qnn_conditioning_evidence(
     }
 
     const std::string format = normalized_contract_enum(conditioning_format);
+    const bool strict_external_conditioning_contract =
+        normalized_contract_enum(
+            string_field(params_json, "conditioningContractMode")) ==
+        "shared_unet_vae";
     const bool weighted_token_payload =
         format == "qnn_clip_token_ids_weights_v1";
     if (format == "qnn_clip_token_ids_i32" || weighted_token_payload) {
@@ -5206,6 +5247,9 @@ bool resolve_qnn_conditioning_evidence(
     const bool token_conditioning =
         format == "qnn_clip_token_ids_i32" || weighted_token_payload;
     if (token_conditioning) {
+        evidence->conditioning_execution_mode = "qnn_text_encoder";
+        evidence->conditioning_backend = "QNN";
+        evidence->conditioning_graph = "text_encoder.bin";
         if (evidence->prompt_weight_fingerprint.size() != 64U ||
             !std::all_of(
                 evidence->prompt_weight_fingerprint.begin(),
@@ -5282,12 +5326,197 @@ bool resolve_qnn_conditioning_evidence(
             *error = "Float conditioning reported weights for a negative branch that was not executed.";
             return false;
         }
+        if ((strict_external_conditioning_contract || format == "sdxl_qnn_conditioning") &&
+            reported_fingerprint != evidence->conditioning_artifact_sha256) {
+            *error = "External MNN promptWeightFingerprint must identify the exact consumed conditioning artifact.";
+            return false;
+        }
         evidence->prompt_weighting_applied = reported_applied;
         evidence->positive_weighted_token_count =
             static_cast<size_t>(reported_positive);
         evidence->negative_weighted_token_count =
             static_cast<size_t>(reported_negative);
         evidence->prompt_weight_fingerprint = reported_fingerprint;
+    }
+    if (!token_conditioning && format == "sdxl_qnn_conditioning") {
+        std::string conditioning_execution_mode;
+        std::string conditioning_backend;
+        std::string conditioning_graph;
+        std::string conditioning_graph_sha256;
+        std::string conditioning_order;
+        long long conditioning_encoder_execution_count = 0;
+        if (!qnn_required_string_field(
+                params_json,
+                "conditioningExecutionMode",
+                &conditioning_execution_mode,
+                error) ||
+            !qnn_required_string_field(
+                params_json,
+                "conditioningBackend",
+                &conditioning_backend,
+                error) ||
+            !qnn_required_string_field(
+                params_json,
+                "conditioningGraph",
+                &conditioning_graph,
+                error) ||
+            !qnn_required_string_field(
+                params_json,
+                "conditioningGraphSha256",
+                &conditioning_graph_sha256,
+                error) ||
+            !qnn_required_string_field(
+                params_json,
+                "conditioningOrder",
+                &conditioning_order,
+                error) ||
+            !qnn_required_integer_field(
+                params_json,
+                "conditioningEncoderExecutionCount",
+                &conditioning_encoder_execution_count,
+                error)) {
+            return false;
+        }
+        if (conditioning_execution_mode != "external_mnn_sdxl_embeddings" ||
+            conditioning_backend != "MNN" ||
+            conditioning_graph != "clip.mnn+clip_2.mnn" ||
+            conditioning_order != "negative_then_positive" ||
+            conditioning_encoder_execution_count != 4) {
+            *error = "SDXL conditioning evidence does not match the four-execution MNN dual-CLIP contract.";
+            return false;
+        }
+        conditioning_graph_sha256 = normalized_contract_enum(conditioning_graph_sha256);
+        std::string executed_graph_sha256;
+        if (!qnn_sdxl_conditioning_graph_sha256(
+                files,
+                &executed_graph_sha256,
+                error)) {
+            return false;
+        }
+        if (conditioning_graph_sha256 != executed_graph_sha256) {
+            *error = "The installed MNN SDXL conditioning execution assets differ from conditioningGraphSha256.";
+            return false;
+        }
+        evidence->conditioning_execution_mode = conditioning_execution_mode;
+        evidence->conditioning_backend = conditioning_backend;
+        evidence->conditioning_graph = conditioning_graph;
+        evidence->conditioning_graph_sha256 = executed_graph_sha256;
+        evidence->conditioning_order = conditioning_order;
+        evidence->conditioning_encoder_execution_count = 4U;
+    } else if (!token_conditioning && strict_external_conditioning_contract &&
+        (format == "community_clip" || format == "sd15_qnn_conditioning" ||
+         format == "sd15_qnn_embeddings_f32")) {
+        std::string conditioning_execution_mode;
+        std::string conditioning_backend;
+        std::string conditioning_graph;
+        std::string conditioning_graph_sha256;
+        std::string conditioning_order;
+        long long conditioning_encoder_execution_count = 0;
+        if (!qnn_required_string_field(
+                params_json,
+                "conditioningExecutionMode",
+                &conditioning_execution_mode,
+                error) ||
+            !qnn_required_string_field(
+                params_json,
+                "conditioningBackend",
+                &conditioning_backend,
+                error) ||
+            !qnn_required_string_field(
+                params_json,
+                "conditioningGraph",
+                &conditioning_graph,
+                error) ||
+            !qnn_required_string_field(
+                params_json,
+                "conditioningGraphSha256",
+                &conditioning_graph_sha256,
+                error) ||
+            !qnn_required_string_field(
+                params_json,
+                "conditioningOrder",
+                &conditioning_order,
+                error) ||
+            !qnn_required_integer_field(
+                params_json,
+                "conditioningEncoderExecutionCount",
+                &conditioning_encoder_execution_count,
+                error)) {
+            return false;
+        }
+        const size_t expected_execution_count = contract.use_cfg ? 2U : 1U;
+        const std::string expected_order = contract.use_cfg
+            ? "negative_then_positive"
+            : "positive_only";
+        if (conditioning_execution_mode != "external_mnn_embeddings" ||
+            conditioning_backend != "MNN" || conditioning_graph != "clip_v2.mnn" ||
+            conditioning_graph_sha256.size() != 64U ||
+            !std::all_of(
+                conditioning_graph_sha256.begin(),
+                conditioning_graph_sha256.end(),
+                [](unsigned char value) { return std::isxdigit(value) != 0; }) ||
+            conditioning_order != expected_order ||
+            conditioning_encoder_execution_count !=
+                static_cast<long long>(expected_execution_count)) {
+            *error = "External SD1.5 conditioning evidence does not match the MNN clip_v2.mnn execution contract.";
+            return false;
+        }
+        conditioning_graph_sha256 = normalized_contract_enum(conditioning_graph_sha256);
+        const std::string conditioning_graph_path = qnn_nonempty_bundle_file_named(
+            files,
+            conditioning_graph);
+        if (conditioning_graph_path.empty()) {
+            *error = "The declared external MNN conditioning graph is missing or empty in the bundle.";
+            return false;
+        }
+        std::string executed_graph_sha256;
+        if (!qnn_file_sha256(conditioning_graph_path, &executed_graph_sha256, error)) {
+            *error = "External MNN conditioning graph SHA-256 could not be derived: " + *error;
+            return false;
+        }
+        if (conditioning_graph_sha256 != executed_graph_sha256) {
+            *error = "The installed external MNN conditioning graph differs from conditioningGraphSha256.";
+            return false;
+        }
+        evidence->conditioning_execution_mode = conditioning_execution_mode;
+        evidence->conditioning_backend = conditioning_backend;
+        evidence->conditioning_graph = conditioning_graph;
+        evidence->conditioning_graph_sha256 = executed_graph_sha256;
+        evidence->conditioning_order = conditioning_order;
+        evidence->conditioning_encoder_execution_count = expected_execution_count;
+    } else if (!token_conditioning &&
+        (format == "community_clip" || format == "sd15_qnn_conditioning" ||
+         format == "sd15_qnn_embeddings_f32")) {
+        // Old community packages did not publish the new cross-process fields.
+        // Preserve their real execution path, while deriving graph identity
+        // independently from installed bytes instead of trusting request echo.
+        std::string conditioning_graph_path = qnn_nonempty_bundle_file_named(
+            files,
+            "clip_v2.mnn");
+        std::string conditioning_graph = "clip_v2.mnn";
+        if (conditioning_graph_path.empty()) {
+            conditioning_graph_path = qnn_nonempty_bundle_file_named(
+                files,
+                "text_encoder.mnn");
+            conditioning_graph = "text_encoder.mnn";
+        }
+        if (conditioning_graph_path.empty()) {
+            *error = "Float conditioning requires a concrete MNN text encoder graph in the bundle.";
+            return false;
+        }
+        std::string executed_graph_sha256;
+        if (!qnn_file_sha256(conditioning_graph_path, &executed_graph_sha256, error)) {
+            *error = "Legacy external MNN conditioning graph SHA-256 could not be derived: " + *error;
+            return false;
+        }
+        evidence->conditioning_execution_mode = "external_mnn_embeddings";
+        evidence->conditioning_backend = "MNN";
+        evidence->conditioning_graph = conditioning_graph;
+        evidence->conditioning_graph_sha256 = executed_graph_sha256;
+        evidence->conditioning_order = contract.use_cfg
+            ? "negative_then_positive"
+            : "positive_only";
+        evidence->conditioning_encoder_execution_count = contract.use_cfg ? 2U : 1U;
     }
     return true;
 }
@@ -5330,6 +5559,18 @@ std::string qnn_native_effective_json(
         << "\"promptWeightFingerprint\":" << quote(evidence.prompt_weight_fingerprint) << ","
         << "\"conditioningArtifactSha256\":"
         << quote(evidence.conditioning_artifact_sha256) << ","
+        << "\"conditioningExecutionMode\":" << quote(evidence.conditioning_execution_mode) << ","
+        << "\"conditioningBackend\":" << quote(evidence.conditioning_backend) << ","
+        << "\"conditioningGraph\":" << quote(evidence.conditioning_graph) << ","
+        << "\"conditioningGraphSha256\":"
+        << quote(evidence.conditioning_graph_sha256) << ","
+        << "\"conditioningOrder\":" << quote(evidence.conditioning_order) << ","
+        << "\"conditioningEncoderExecutionCount\":"
+        << evidence.conditioning_encoder_execution_count << ","
+        << "\"textEncoderExecutionCount\":" << evidence.text_encoder_execution_count << ","
+        << "\"conditioningArtifactConsumed\":"
+        << (evidence.conditioning_artifact_consumed ? "true" : "false") << ","
+        << "\"runtimeSessionMode\":" << quote(evidence.runtime_session_mode) << ","
         << "\"embeddingDiskDataType\":" << quote(evidence.embedding_disk_data_type) << ","
         << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(contract.vae_scaling_location)) << ","
         << "\"vaeScalingFactor\":" << contract.vae_scaling_factor << ","
@@ -6254,6 +6495,8 @@ std::string qnn_semantic_generate_json(
     std::string text_encoder_input_data_type;
     std::string text_encoder_inputs_debug = "[]";
     std::string text_encoder_outputs_debug = "[]";
+    std::string conditioning_graph_sha256 =
+        conditioning_evidence.conditioning_graph_sha256;
     std::string prompt_weighting_execution_mode = qnn_token_conditioning
         ? "token_ids_unweighted"
         : "external_float_conditioning";
@@ -6272,6 +6515,15 @@ std::string qnn_semantic_generate_json(
         }
         text_encoder_context_load_ms = text_encoder.context_load_ms;
         loaded_text_encoder_graph = text_encoder.graph_name;
+        if (!qnn_file_sha256(
+                text_encoder_path,
+                &conditioning_graph_sha256,
+                &error)) {
+            return qnn_semantic_failure_json(
+                "text_encoder_sha256_failed",
+                "EXECUTION_EVIDENCE_INVALID",
+                "QNN text encoder graph SHA-256 could not be derived: " + error);
+        }
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
 
         int token_index = tensor_index_by_name(
@@ -6667,6 +6919,20 @@ std::string qnn_semantic_generate_json(
             conditioning_evidence.negative_weighted_token_count;
         native_evidence.prompt_weight_fingerprint =
             conditioning_evidence.prompt_weight_fingerprint;
+        native_evidence.conditioning_artifact_sha256 =
+            conditioning_evidence.conditioning_artifact_sha256;
+        native_evidence.conditioning_execution_mode =
+            conditioning_evidence.conditioning_execution_mode;
+        native_evidence.conditioning_backend = conditioning_evidence.conditioning_backend;
+        native_evidence.conditioning_graph = conditioning_evidence.conditioning_graph;
+        native_evidence.conditioning_graph_sha256 = conditioning_graph_sha256;
+        native_evidence.conditioning_order = conditioning_evidence.conditioning_order;
+        native_evidence.conditioning_encoder_execution_count =
+            conditioning_evidence.conditioning_encoder_execution_count;
+        native_evidence.text_encoder_execution_count = text_encoder_execute_count;
+        native_evidence.conditioning_artifact_consumed =
+            conditioning_artifact_consumed && unet_execution_count > 0U;
+        native_evidence.runtime_session_mode = "shared_unet_vae";
         const std::string native_effective = qnn_native_effective_json(
             execution_contract,
             native_evidence);
@@ -6700,6 +6966,17 @@ std::string qnn_semantic_generate_json(
             << "\"positiveWeightedTokenCount\":" << conditioning_evidence.positive_weighted_token_count << ","
             << "\"negativeWeightedTokenCount\":" << conditioning_evidence.negative_weighted_token_count << ","
             << "\"promptWeightFingerprint\":" << quote(conditioning_evidence.prompt_weight_fingerprint) << ","
+            << "\"conditioningArtifactSha256\":"
+            << quote(conditioning_evidence.conditioning_artifact_sha256) << ","
+            << "\"conditioningExecutionMode\":"
+            << quote(native_evidence.conditioning_execution_mode) << ","
+            << "\"conditioningBackend\":" << quote(native_evidence.conditioning_backend) << ","
+            << "\"conditioningGraph\":" << quote(native_evidence.conditioning_graph) << ","
+            << "\"conditioningGraphSha256\":"
+            << quote(native_evidence.conditioning_graph_sha256) << ","
+            << "\"conditioningOrder\":" << quote(native_evidence.conditioning_order) << ","
+            << "\"conditioningEncoderExecutionCount\":"
+            << native_evidence.conditioning_encoder_execution_count << ","
             << "\"embeddingDiskDataType\":" << quote(conditioning_evidence.embedding_disk_data_type) << ","
             << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
             << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","
@@ -6716,6 +6993,8 @@ std::string qnn_semantic_generate_json(
             << "\"initNoiseSigma\":" << scheduler.init_noise_sigma() << ","
             << "\"scaleModelInput\":" << (execution_contract.scheduler.scale_model_input ? "true" : "false") << ","
             << "\"textEncoderExecutionCount\":" << text_encoder_execute_count << ","
+            << "\"conditioningArtifactConsumed\":"
+            << (native_evidence.conditioning_artifact_consumed ? "true" : "false") << ","
             << "\"vaeExecutionCount\":" << vae_decode.execution_count << ","
             << "\"vaeTileCount\":" << vae_decode.plan.tiles.size() << ","
             << "\"vaeTiled\":" << (vae_decode.plan.tiled() ? "true" : "false") << ","
@@ -7027,6 +7306,29 @@ std::string qnn_semantic_generate_json(
             execution_contract.scheduler.expected_unet_execution_count,
             unet_execution_count);
     }
+    conditioning_artifact_consumed = conditioning_artifact_consumed &&
+        unet_execution_count > 0U;
+    const size_t expected_text_encoder_execution_count = qnn_token_conditioning
+        ? (execution_contract.use_cfg ? 2U : 1U)
+        : 0U;
+    if (text_encoder_execute_count != expected_text_encoder_execution_count) {
+        return qnn_execution_contract_mismatch_json(
+            "textEncoderExecutionCount",
+            expected_text_encoder_execution_count,
+            text_encoder_execute_count);
+    }
+    if (conditioning_graph_sha256.size() != 64U) {
+        return qnn_semantic_failure_json(
+            "conditioning_graph_sha256_missing",
+            "EXECUTION_EVIDENCE_INVALID",
+            "The executed conditioning graph lacks a SHA-256 identity proof.");
+    }
+    if (!conditioning_artifact_consumed) {
+        return qnn_semantic_failure_json(
+            "conditioning_artifact_not_consumed",
+            "EXECUTION_EVIDENCE_INVALID",
+            "The prepared conditioning artifact was not consumed by a successful QNN UNet execution.");
+    }
     if (request_controlnet) {
         const size_t expected_controlnet_executions = timesteps.size();
         const size_t expected_residual_writes =
@@ -7123,6 +7425,29 @@ std::string qnn_semantic_generate_json(
         conditioning_evidence.prompt_weight_fingerprint;
     native_evidence.conditioning_artifact_sha256 =
         conditioning_evidence.conditioning_artifact_sha256;
+    native_evidence.conditioning_execution_mode = qnn_token_conditioning
+        ? "qnn_text_encoder"
+        : conditioning_evidence.conditioning_execution_mode;
+    native_evidence.conditioning_backend = qnn_token_conditioning
+        ? "QNN"
+        : conditioning_evidence.conditioning_backend;
+    native_evidence.conditioning_graph = qnn_token_conditioning
+        ? loaded_text_encoder_graph
+        : conditioning_evidence.conditioning_graph;
+    native_evidence.conditioning_graph_sha256 = conditioning_graph_sha256;
+    native_evidence.conditioning_order = execution_contract.use_cfg
+        ? "negative_then_positive"
+        : "positive_only";
+    native_evidence.conditioning_encoder_execution_count = qnn_token_conditioning
+        ? text_encoder_execute_count
+        : conditioning_evidence.conditioning_encoder_execution_count;
+    native_evidence.text_encoder_execution_count = text_encoder_execute_count;
+    native_evidence.conditioning_artifact_consumed = conditioning_artifact_consumed;
+    native_evidence.runtime_session_mode = request_controlnet
+        ? (qnn_token_conditioning
+            ? "shared_text_unet_controlnet_vae"
+            : "shared_unet_controlnet_vae")
+        : (qnn_token_conditioning ? "shared_text_unet_vae" : "shared_unet_vae");
     native_evidence.task_mode = task_mode;
     native_evidence.control_strength = request_controlnet ? control_strength : 0.0;
     if (request_controlnet) {
@@ -7200,6 +7525,15 @@ std::string qnn_semantic_generate_json(
         << "\"promptWeightFingerprint\":" << quote(conditioning_evidence.prompt_weight_fingerprint) << ","
         << "\"conditioningArtifactSha256\":"
         << quote(conditioning_evidence.conditioning_artifact_sha256) << ","
+        << "\"conditioningExecutionMode\":"
+        << quote(native_evidence.conditioning_execution_mode) << ","
+        << "\"conditioningBackend\":" << quote(native_evidence.conditioning_backend) << ","
+        << "\"conditioningGraph\":" << quote(native_evidence.conditioning_graph) << ","
+        << "\"conditioningGraphSha256\":"
+        << quote(native_evidence.conditioning_graph_sha256) << ","
+        << "\"conditioningOrder\":" << quote(native_evidence.conditioning_order) << ","
+        << "\"conditioningEncoderExecutionCount\":"
+        << native_evidence.conditioning_encoder_execution_count << ","
         << "\"embeddingDiskDataType\":" << quote(conditioning_evidence.embedding_disk_data_type) << ","
         << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
         << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","
@@ -7272,12 +7606,7 @@ std::string qnn_semantic_generate_json(
         << "\"nativeStartedAtMonotonicMs\":" << g_qnn_image_generation_started_ms.load() << ","
         << "\"nativeStageMask\":" << g_qnn_image_generation_stage_mask.load() << ","
         << "\"nativeDetailStageMask\":" << g_qnn_image_generation_detail_stage_mask.load() << ","
-        << "\"runtimeSessionMode\":"
-        << quote(request_controlnet
-            ? (qnn_token_conditioning
-                ? "shared_text_unet_controlnet_vae"
-                : "shared_unet_controlnet_vae")
-            : (qnn_token_conditioning ? "shared_text_unet_vae" : "shared_unet_vae")) << ","
+        << "\"runtimeSessionMode\":" << quote(native_evidence.runtime_session_mode) << ","
         << "\"message\":" << quote(request_controlnet
             ? "QNN control generation completed with verified image preprocessing, one positive-conditioned ControlNet execution per scheduler step, residual reuse across CFG UNet branches, the resolved scheduler, Control-UNet, and QNN VAE decode."
             : (qnn_token_conditioning

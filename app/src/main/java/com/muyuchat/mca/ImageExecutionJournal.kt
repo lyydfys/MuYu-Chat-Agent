@@ -184,6 +184,7 @@ internal data class ImageExecutionTerminalResult(
  */
 internal class ImageExecutionJournalStore(
     private val directory: File,
+    private val parentDirectorySyncer: ParentDirectorySyncer = AndroidParentDirectorySyncer,
     private val clock: () -> Long = System::currentTimeMillis
 ) {
     fun create(entry: ImageExecutionJournalEntry): ImageExecutionJournalEntry {
@@ -281,7 +282,11 @@ internal class ImageExecutionJournalStore(
                     stillRunning += entry
                     return@forEach
                 }
-                cleanup += cleanupTransientFiles(entry, cleanupRoots)
+                cleanup += cleanupTransientFiles(
+                    entry = entry,
+                    cleanupRoots = cleanupRoots,
+                    preservePublishedOutputs = entry.phase == ImageExecutionPhase.PUBLISHING
+                )
                 val recovered = update(
                     entry.copy(
                         phase = ImageExecutionPhase.INTERRUPTED,
@@ -308,9 +313,14 @@ internal class ImageExecutionJournalStore(
 
     private fun cleanupTransientFiles(
         entry: ImageExecutionJournalEntry,
-        cleanupRoots: List<File>
-    ): ImageExecutionCleanupReport = sequenceOf(entry.latentTempPath, entry.outputTempPath)
-        .plus(entry.outputTempPaths.asSequence())
+        cleanupRoots: List<File>,
+        preservePublishedOutputs: Boolean = false
+    ): ImageExecutionCleanupReport = sequenceOf(entry.latentTempPath)
+        .plus(
+            sequenceOf(entry.outputTempPath)
+                .plus(entry.outputTempPaths.asSequence())
+                .filter { path -> !preservePublishedOutputs || path.endsWith(".part") }
+        )
         .plus(entry.inputTempPaths.asSequence())
         .filter(String::isNotBlank)
         .distinct()
@@ -446,16 +456,27 @@ internal class ImageExecutionJournalStore(
                 output.write(entry.toJson().toString().toByteArray(Charsets.UTF_8))
                 output.fd.sync()
             }
-            try {
-                Files.move(
-                    temp.toPath(),
-                    file.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            }
+            durableMoveWithinParent(
+                source = temp,
+                target = file,
+                move = { source, target ->
+                    try {
+                        Files.move(
+                            source.toPath(),
+                            target.toPath(),
+                            StandardCopyOption.ATOMIC_MOVE,
+                            StandardCopyOption.REPLACE_EXISTING
+                        )
+                    } catch (_: AtomicMoveNotSupportedException) {
+                        Files.move(
+                            source.toPath(),
+                            target.toPath(),
+                            StandardCopyOption.REPLACE_EXISTING
+                        )
+                    }
+                },
+                parentDirectorySyncer = parentDirectorySyncer
+            )
         } finally {
             if (temp.exists()) temp.delete()
         }

@@ -188,6 +188,7 @@ internal enum class ImageWorkerStrategy {
     IN_PROCESS,
     DEDICATED_WORKER,
     SPLIT_UNET_VAE,
+    SHARED_UNET_VAE,
     SHARED_TEXT_UNET_VAE
 }
 
@@ -230,7 +231,12 @@ internal data class ImageGenerationCapabilities(
     val supportsTextualInversion: Boolean = false,
     val requiresControlImage: Boolean = false,
     val requiresInputImage: Boolean = false,
-    val supportsMask: Boolean = false
+    val supportsMask: Boolean = false,
+    val supportsClipSkip: Boolean = false,
+    val supportsVaeTiling: Boolean = false,
+    val supportsLivePreview: Boolean = false,
+    val supportsLora: Boolean = false,
+    val maxBatchCount: Int = 1
 )
 
 internal data class ImageExecutionProfile(
@@ -328,13 +334,13 @@ internal object ImageExecutionProfileValidator {
                 issue("TOKENIZER_CONTRACT_INVALID", "tokenizer.maxLength", "Tokenizer max length must be positive.")
             }
             if (
-                profile.tokenizer.supportsPromptWeighting !=
-                profile.capabilities.supportsPromptWeighting
+                profile.capabilities.supportsPromptWeighting &&
+                !profile.tokenizer.supportsPromptWeighting
             ) {
                 issue(
                     "CAPABILITY_CONTRACT_INVALID",
                     "supportsPromptWeighting",
-                    "Tokenizer and generation capabilities must agree on prompt weighting support."
+                    "Image generation cannot advertise prompt weighting without tokenizer support."
                 )
             }
             if ((profile.conditioning.exactByteSize ?: 1L) <= 0L) {
@@ -403,6 +409,13 @@ internal object ImageExecutionProfileValidator {
             }
             if (profile.task == ImageTask.IMAGE_EDIT && !capabilities.requiresInputImage) {
                 issue("CAPABILITY_CONTRACT_INVALID", "capabilities.requiresInputImage", "Image-edit task must require an input image.")
+            }
+            if (capabilities.maxBatchCount !in 1..8) {
+                issue(
+                    "CAPABILITY_CONTRACT_INVALID",
+                    "capabilities.maxBatchCount",
+                    "Maximum image batch count must be between 1 and 8."
+                )
             }
         }
         return ImageProfileValidationReport(issues)

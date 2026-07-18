@@ -66,7 +66,19 @@ internal object ImageExecutionProfileNativeContract {
     )
 
     /** QNN-only nativeEffective fields; these must not become global runtime requirements. */
-    val qnnNativeEffectiveFields: Set<String> = linkedSetOf("pixelRange")
+    val qnnNativeEffectiveFields: Set<String> = linkedSetOf(
+        "pixelRange",
+        "conditioningArtifactSha256",
+        "conditioningExecutionMode",
+        "conditioningBackend",
+        "conditioningGraph",
+        "conditioningGraphSha256",
+        "conditioningOrder",
+        "conditioningEncoderExecutionCount",
+        "textEncoderExecutionCount",
+        "conditioningArtifactConsumed",
+        "runtimeSessionMode"
+    )
 
     /** QNN VAE conversion proof emitted only after actual native pixel conversion. */
     val qnnPixelRangeEvidenceFields: Set<String> = linkedSetOf(
@@ -157,6 +169,9 @@ internal object ImageExecutionProfileNativeContract {
             validateQnnPixelRange(resolution, nativeEffectiveJson)
         } else {
             null
+        }
+        if (resolution.layers.resolved.runtime == LocalImageRuntime.QNN_HTP) {
+            validateQnnConditioningExecutionEvidence(resolution, nativeEffectiveJson)
         }
         if (resolution.layers.resolved.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
             validateStableDiffusionTokenEvidence(
@@ -294,6 +309,72 @@ internal object ImageExecutionProfileNativeContract {
             invalid(
                 "tokenizerInputSequenceLength,tokenizerInputBatchSize,tokenizerNonPaddingTokenCount,tokenizerInputOrder",
                 "MNN Sana tokenizer input evidence is incomplete or has the wrong source order."
+            )
+        }
+    }
+
+    private fun validateQnnConditioningExecutionEvidence(
+        resolution: ImageExecutionProfileResolution,
+        nativeEffective: JSONObject
+    ) {
+        val strategy = resolution.profile.graph.workerStrategy
+        if (strategy != ImageWorkerStrategy.SHARED_UNET_VAE &&
+            strategy != ImageWorkerStrategy.SHARED_TEXT_UNET_VAE
+        ) {
+            return
+        }
+        val resolved = resolution.layers.resolved
+        val qnnTextEncoder = strategy == ImageWorkerStrategy.SHARED_TEXT_UNET_VAE
+        val control = resolution.profile.task == ImageTask.CONTROL_IMAGE
+        val expectedMode = if (qnnTextEncoder) "qnn_text_encoder" else "external_mnn_embeddings"
+        val expectedBackend = if (qnnTextEncoder) "QNN" else "MNN"
+        val expectedGraph = if (qnnTextEncoder) {
+            resolution.profile.graph.textEncoder?.graphName.orEmpty()
+        } else {
+            resolution.profile.graph.textEncoder
+                ?.relativePath
+                .orEmpty()
+                .substringAfterLast('/')
+                .substringAfterLast('\\')
+        }
+        val expectedExecutionCount = if (resolved.useCfg) 2 else 1
+        val expectedOrder = if (resolved.useCfg) {
+            "negative_then_positive"
+        } else {
+            "positive_only"
+        }
+        val expectedRuntimeSessionMode = when {
+            qnnTextEncoder && control -> "shared_text_unet_controlnet_vae"
+            qnnTextEncoder -> "shared_text_unet_vae"
+            control -> "shared_unet_controlnet_vae"
+            else -> "shared_unet_vae"
+        }
+        val artifactSha256 = nativeEffective.requiredString("conditioningArtifactSha256")
+            .lowercase()
+        val graphSha256 = nativeEffective.requiredString("conditioningGraphSha256")
+            .lowercase()
+        val promptWeightFingerprint = nativeEffective.requiredString("promptWeightFingerprint")
+            .lowercase()
+        if (!SHA256.matches(artifactSha256) ||
+            !SHA256.matches(graphSha256) ||
+            (!qnnTextEncoder && promptWeightFingerprint != artifactSha256) ||
+            nativeEffective.requiredString("conditioningExecutionMode") != expectedMode ||
+            nativeEffective.requiredString("conditioningBackend") != expectedBackend ||
+            nativeEffective.requiredString("conditioningGraph") != expectedGraph ||
+            nativeEffective.requiredString("conditioningOrder") != expectedOrder ||
+            nativeEffective.requiredInt("conditioningEncoderExecutionCount") !=
+            expectedExecutionCount ||
+            nativeEffective.requiredInt("textEncoderExecutionCount") !=
+            (if (qnnTextEncoder) expectedExecutionCount else 0) ||
+            !nativeEffective.requiredBoolean("conditioningArtifactConsumed") ||
+            nativeEffective.requiredString("runtimeSessionMode") != expectedRuntimeSessionMode
+        ) {
+            invalid(
+                "conditioningExecutionMode,conditioningBackend,conditioningGraph," +
+                    "conditioningGraphSha256,promptWeightFingerprint,conditioningOrder," +
+                    "conditioningEncoderExecutionCount,textEncoderExecutionCount," +
+                    "conditioningArtifactConsumed,runtimeSessionMode",
+                "QNN conditioning and runtime-session evidence differs from the selected worker strategy."
             )
         }
     }

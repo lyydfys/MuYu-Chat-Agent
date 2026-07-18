@@ -1,8 +1,10 @@
 package com.muyuchat.mca
 
 import java.nio.file.Files
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalImageExecutionProfileIntegrationTest {
@@ -95,6 +97,13 @@ class LocalImageExecutionProfileIntegrationTest {
             )
             root.resolve("runtime").mkdirs()
             root.resolve("runtime/state.bin").writeText("not-json", Charsets.UTF_8)
+            root.resolve("tokenizer.json").writeText(
+                JSONObject()
+                    .put("defaultSteps", 99)
+                    .put("defaultPrompt", "must not be parsed as behavior")
+                    .toString(),
+                Charsets.UTF_8
+            )
 
             val base = ImageExecutionProfileResolver.resolve(
                 ImageExecutionProfileResolverInput(
@@ -107,7 +116,11 @@ class LocalImageExecutionProfileIntegrationTest {
                 graph = base.graph.copy(
                     schedulerSidecar = "metadata/scheduler.json",
                     tokenizerSidecar = "metadata/tokenizer.json",
-                    configSidecars = listOf("runtime/state.bin", "metadata/behavior.json")
+                    configSidecars = listOf(
+                        "runtime/state.bin",
+                        "tokenizer.json",
+                        "metadata/behavior.json"
+                    )
                 )
             )
 
@@ -152,7 +165,167 @@ class LocalImageExecutionProfileIntegrationTest {
         assertEquals(26, adjusted.layers.resolved.unetExecutionCount)
     }
 
+    @Test
+    fun `readiness consumes migrated extracted assets before obsolete archive sidecars`() {
+        val root = Files.createTempDirectory("image-profile-effective-readiness").toFile()
+        try {
+            val unet = root.resolve("unet.bin").apply { writeBytes(byteArrayOf(1, 2, 3, 4)) }
+            listOf(
+                "vae_decoder.bin",
+                "vae_encoder.bin",
+                "clip_v2.mnn",
+                "tokenizer.json",
+                "token_emb.bin",
+                "pos_emb.bin"
+            ).forEachIndexed { index, path ->
+                root.resolve(path).writeBytes(byteArrayOf((index + 5).toByte()))
+            }
+            val fingerprint = unet.sha256ForProfile()
+            val oldProfile = requireNotNull(
+                ImageExecutionProfileResolver.legacyBuiltInProfileForCompatibility(
+                    recommendationId = PINNED_RECOMMENDATION,
+                    modelFingerprint = fingerprint
+                )
+            ).copy(
+                profileRevision = 1,
+                graph = requireNotNull(
+                    ImageExecutionProfileResolver.legacyBuiltInProfileForCompatibility(
+                        recommendationId = PINNED_RECOMMENDATION,
+                        modelFingerprint = fingerprint
+                    )
+                ).graph.copy(
+                    schedulerSidecar = "scheduler/scheduler_config.json",
+                    tokenizerSidecar = "tokenizer/tokenizer_config.json",
+                    configSidecars = emptyList()
+                )
+            )
+            val migratedProfile = oldProfile.copy(
+                profileRevision = 2,
+                graph = oldProfile.graph.copy(
+                    schedulerSidecar = null,
+                    tokenizerSidecar = null,
+                    configSidecars = listOf(
+                        "tokenizer.json",
+                        "token_emb.bin",
+                        "pos_emb.bin"
+                    )
+                )
+            )
+            val manifest = pinnedArchiveManifest(oldProfile)
+            root.resolve("manifest.json").writeText(manifest.toString(2), Charsets.UTF_8)
+            val effectiveResolver: LocalImageManifestProfileResolver = { input ->
+                assertEquals(fingerprint, input.modelFingerprint)
+                val exactIdentity = PINNED_REPOSITORY in
+                    input.recommendationEvidence.sourceRepositories &&
+                    input.recommendationEvidence.artifactPaths.any { path ->
+                        path == "$PINNED_ARCHIVE!/unet.bin"
+                    }
+                resolveManifestProfileWithoutFurtherMigration(
+                    input = input,
+                    profile = if (exactIdentity) migratedProfile else requireNotNull(input.manifestProfile)
+                )
+            }
+
+            val effective = requireNotNull(
+                resolveEffectiveLocalImageManifestProfile(manifest, effectiveResolver)
+            )
+            val inspection = inspectLocalImageBundleManifestFromRoot(root, effectiveResolver)
+            val parsed = (inspection as LocalImageBundleManifestInspection.Ready).manifest
+            val contract = parsed.resolveRuntimeComponentContract(root)
+
+            assertEquals(2, effective.profileRevision)
+            assertEquals(unet.canonicalFile, parsed.primaryFile?.canonicalFile)
+            assertTrue(contract is LocalImageRuntimeComponentContract.Ready)
+            contract as LocalImageRuntimeComponentContract.Ready
+            assertTrue(contract.missingPaths.isEmpty())
+            assertTrue("scheduler/scheduler_config.json" !in contract.requiredPaths)
+            assertTrue("tokenizer/tokenizer_config.json" !in contract.requiredPaths)
+
+            manifest.getJSONArray("components").getJSONObject(0)
+                .put("sourceRepo", "unrelated/publisher")
+                .put("sourcePath", "unrelated.zip!/unet.bin")
+            root.resolve("manifest.json").writeText(manifest.toString(2), Charsets.UTF_8)
+            val conflicting = (
+                inspectLocalImageBundleManifestFromRoot(root, effectiveResolver) as
+                    LocalImageBundleManifestInspection.Ready
+                ).manifest.resolveRuntimeComponentContract(root)
+            assertTrue(conflicting is LocalImageRuntimeComponentContract.Invalid)
+
+            manifest.getJSONArray("components").getJSONObject(0)
+                .put("sourceRepo", PINNED_REPOSITORY)
+                .put("sourcePath", "$PINNED_ARCHIVE!/unet.bin")
+            root.resolve("pos_emb.bin").delete()
+            root.resolve("manifest.json").writeText(manifest.toString(2), Charsets.UTF_8)
+            val missingAsset = (
+                inspectLocalImageBundleManifestFromRoot(root, effectiveResolver) as
+                    LocalImageBundleManifestInspection.Ready
+                ).manifest.resolveRuntimeComponentContract(root)
+            assertTrue(missingAsset is LocalImageRuntimeComponentContract.Invalid)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `readiness migration uses persisted fingerprint without reading graph bytes`() {
+        val persisted = requireNotNull(
+            ImageExecutionProfileResolver.legacyBuiltInProfileForCompatibility(
+                recommendationId = PINNED_RECOMMENDATION,
+                modelFingerprint = FINGERPRINT
+            )
+        ).copy(profileRevision = 1)
+        val manifest = pinnedArchiveManifest(persisted)
+        var resolverFingerprint: String? = null
+
+        val effective = requireNotNull(
+            resolveEffectiveLocalImageManifestProfile(manifest) { input ->
+                resolverFingerprint = input.modelFingerprint
+                resolveManifestProfileWithoutFurtherMigration(input, persisted)
+            }
+        )
+
+        assertEquals(FINGERPRINT, resolverFingerprint)
+        assertEquals(FINGERPRINT, effective.modelFingerprint)
+    }
+
+    private fun pinnedArchiveManifest(profile: ImageExecutionProfile): JSONObject = JSONObject()
+        .put("schema", "mca.image_engine.bundle.v1")
+        .put("id", PINNED_RECOMMENDATION)
+        .put("recommendationId", PINNED_RECOMMENDATION)
+        .put("revision", "master")
+        .put("runtime", "QNN_HTP")
+        .put("family", "SD15")
+        .put("requiresQnnRuntime", false)
+        .put("sourceRepo", PINNED_REPOSITORY)
+        .put(
+            "components",
+            JSONArray().put(
+                JSONObject()
+                    .put("role", "DIFFUSION")
+                    .put("path", PINNED_ARCHIVE)
+                    .put("fileName", PINNED_ARCHIVE)
+                    .put("sourceRepo", PINNED_REPOSITORY)
+                    .put("sourcePath", "$PINNED_ARCHIVE!/unet.bin")
+                    .put("required", true)
+            )
+        )
+        .put("executionProfile", ImageExecutionProfileJson.toJson(profile))
+
+    private fun resolveManifestProfileWithoutFurtherMigration(
+        input: ImageExecutionProfileResolverInput,
+        profile: ImageExecutionProfile
+    ): ImageExecutionProfileResolution = ImageExecutionProfileResolver.resolve(
+        input.copy(
+            recommendationId = null,
+            manifestProfile = profile,
+            recommendationEvidence = ImageRecommendationEvidence()
+        )
+    )
+
     private companion object {
         val FINGERPRINT: String = "a".repeat(64)
+        const val PINNED_RECOMMENDATION = "cyberrealistic_sd15_qnn228"
+        const val PINNED_REPOSITORY = "Mr-J-369/CyberRealistic_Final-SD1.5-qnn2.28"
+        const val PINNED_ARCHIVE = "cyberrealistic_final_qnn2.28_8gen2.zip"
     }
 }

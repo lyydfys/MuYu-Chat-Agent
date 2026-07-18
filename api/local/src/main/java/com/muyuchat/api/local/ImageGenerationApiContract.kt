@@ -38,6 +38,15 @@ data class ImageGenerationApiPreview(
         .put("mode", mode)
 }
 
+data class ImageGenerationApiLora(
+    val id: String,
+    val multiplier: Double
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("id", id)
+        .put("multiplier", multiplier)
+}
+
 data class ImageGenerationApiRequest(
     val rawBody: String,
     val model: String?,
@@ -59,6 +68,7 @@ data class ImageGenerationApiRequest(
     val strength: Double?,
     val controlStrength: Double?,
     val clipSkip: Int?,
+    val loras: List<ImageGenerationApiLora>,
     val vaeTiling: ImageGenerationApiVaeTiling?,
     val preview: ImageGenerationApiPreview?
 ) {
@@ -81,6 +91,7 @@ data class ImageGenerationApiRequest(
         strength?.let { put("strength", it) }
         controlStrength?.let { put("controlStrength", it) }
         clipSkip?.let { put("clipSkip", it) }
+        put("loras", JSONArray().apply { loras.forEach { put(it.toJson()) } })
         vaeTiling?.let { put("vaeTiling", it.toJson()) }
         preview?.let { put("preview", it.toJson()) }
     }
@@ -135,6 +146,8 @@ class ImageGenerationProviderException(
                 "result_delivery_failed"
             ) -> 502
             code.startsWith("unsupported_") ||
+                code.startsWith("lora_native_") ||
+                code == "prompt_weighting_execution_unsupported" ||
                 code.startsWith("invalid_image_input") ||
                 code == "invalid_image_execution_profile" -> 422
             code.contains("cancel") -> 409
@@ -162,10 +175,10 @@ object ImageGenerationApiContract {
         }
         val dimensions = root.optionalString("size", allowEmpty = false)?.let(::parseSize)
         val imageCount = root.optionalInt("n") ?: 1
-        if (imageCount != 1) {
+        if (imageCount !in 1..MAX_IMAGE_COUNT) {
             reject(
                 "unsupported_image_count",
-                "Image generation currently supports n=1 only; no partial batch is executed."
+                "Image generation n must be between 1 and $MAX_IMAGE_COUNT."
             )
         }
         val responseFormat = root.optionalString("response_format", allowEmpty = false)
@@ -218,6 +231,38 @@ object ImageGenerationApiContract {
                 reject("invalid_clip_skip", "clip_skip must be -1 or between 0 and 32.")
             }
         }
+        val loras = if (root.has("loras")) {
+            val array = root.opt("loras") as? JSONArray
+                ?: reject("invalid_lora", "loras must be an array of {id, multiplier} objects.")
+            if (array.length() > MAX_LORA_COUNT) {
+                reject("invalid_lora", "At most $MAX_LORA_COUNT LoRA adapters may be requested.")
+            }
+            buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index)
+                        ?: reject("invalid_lora", "Every loras item must be an object.")
+                    item.rejectUnknownFields(LORA_FIELDS, "loras[$index]")
+                    val id = item.requiredString("id", allowEmpty = false).lowercase()
+                    if (!UUID_PATTERN.matches(id)) {
+                        reject("invalid_lora", "loras[$index].id must be a UUID.")
+                    }
+                    val multiplier = item.requiredDouble("multiplier")
+                    if (multiplier !in -4.0..4.0 || kotlin.math.abs(multiplier) < 0.01) {
+                        reject(
+                            "invalid_lora",
+                            "loras[$index].multiplier must be in [-4, -0.01] or [0.01, 4]."
+                        )
+                    }
+                    add(ImageGenerationApiLora(id, multiplier))
+                }
+            }.also { parsed ->
+                if (parsed.map(ImageGenerationApiLora::id).distinct().size != parsed.size) {
+                    reject("invalid_lora", "LoRA ids must be unique per request.")
+                }
+            }
+        } else {
+            emptyList()
+        }
         val vaeTiling = root.optionalObject("vae_tiling")?.let(::parseVaeTiling)
         val preview = root.optionalObject("preview")?.let(::parsePreview)
 
@@ -241,12 +286,13 @@ object ImageGenerationApiContract {
             strength = strength,
             controlStrength = controlStrength,
             clipSkip = clipSkip,
+            loras = loras,
             vaeTiling = vaeTiling,
             preview = preview
         )
     }
 
-    fun parseResponse(expectedRequestId: String, rawBody: String): ImageGenerationApiResponse =
+    internal fun parseResponse(expectedRequestId: String, rawBody: String): ImageGenerationApiResponse =
         parseResponse(expectedRequestId, expectedRequest = null, rawBody = rawBody)
 
     fun parseResponse(
@@ -297,6 +343,7 @@ object ImageGenerationApiContract {
         expectedRequest?.let {
             validateRequestedControlEvidence(it, execution)
             validateRequestedInputEvidence(it, execution)
+            validateRequestedLoraEvidence(it, execution)
         }
         validateImageData(
             data = data,
@@ -335,8 +382,8 @@ object ImageGenerationApiContract {
         if (tileSize !in 64..4_096 || tileSize % 8 != 0) {
             reject("invalid_vae_tiling", "vae_tiling.tile_size must be an 8-pixel multiple from 64 to 4096.")
         }
-        if (overlap < 0.0 || overlap >= 1.0) {
-            reject("invalid_vae_tiling", "vae_tiling.overlap must be in the interval [0, 1).")
+        if (overlap < 0.0 || overlap > 0.5) {
+            reject("invalid_vae_tiling", "vae_tiling.overlap must be in the interval [0, 0.5].")
         }
         return ImageGenerationApiVaeTiling(tileSize, overlap)
     }
@@ -417,6 +464,7 @@ object ImageGenerationApiContract {
     }
 
     private fun validateExecutionEvidence(execution: JSONObject) {
+        rejectPrivateInputPaths(execution)
         if (!execution.requiredBoolean("nativeExecution")) {
             reject("invalid_image_execution_evidence", "Image execution must prove nativeExecution=true.")
         }
@@ -591,6 +639,16 @@ object ImageGenerationApiContract {
         execution: JSONObject
     ) {
         val nativeEffective = execution.getJSONObject("nativeEffective")
+        val nativeBatchCount = nativeEffective.requiredInteger("batchCount", minimum = 1L)
+        if (nativeBatchCount != request.imageCount.toLong() ||
+            execution.requiredInteger("batchCount", minimum = 1L) != nativeBatchCount
+        ) {
+            reject(
+                "invalid_image_input_execution_evidence",
+                "Native batchCount does not match the requested image count."
+            )
+        }
+        validateStableDiffusionBatchEvidence(execution, nativeEffective, nativeBatchCount)
         listOf("inputImagePath", "maskImagePath", "controlImagePath").forEach { privateField ->
             if (execution.has(privateField) || nativeEffective.has(privateField)) {
                 reject(
@@ -622,9 +680,7 @@ object ImageGenerationApiContract {
                 "nativeEffective taskMode does not match the requested task_mode."
             )
         }
-        if (evidence.requiredInteger("batchCount", minimum = 1L) != request.imageCount.toLong() ||
-            nativeEffective.requiredInteger("batchCount", minimum = 1L) != request.imageCount.toLong()
-        ) {
+        if (evidence.requiredInteger("batchCount", minimum = 1L) != nativeBatchCount) {
             reject(
                 "invalid_image_input_execution_evidence",
                 "Native batchCount does not match the requested image count."
@@ -690,18 +746,174 @@ object ImageGenerationApiContract {
         }
     }
 
+    private fun validateStableDiffusionBatchEvidence(
+        execution: JSONObject,
+        nativeEffective: JSONObject,
+        batchCount: Long
+    ) {
+        if (nativeEffective.requiredNonBlankString("runtime") != "STABLE_DIFFUSION_CPP") return
+        listOf("outputCount", "n", "samplingPassCount").forEach { field ->
+            if (nativeEffective.requiredInteger(field, minimum = 1L) != batchCount ||
+                execution.requiredInteger(field, minimum = 1L) != batchCount
+            ) {
+                reject(
+                    "invalid_image_input_execution_evidence",
+                    "stable-diffusion.cpp $field does not match the requested image count."
+                )
+            }
+        }
+        if (execution.requiredInteger("actualSamplingPassCount", minimum = 1L) != batchCount) {
+            reject(
+                "invalid_image_input_execution_evidence",
+                "stable-diffusion.cpp physical sampling passes do not match the requested image count."
+            )
+        }
+        val timetableCount = nativeEffective.requiredInteger("timetableCount", minimum = 1L)
+        val unetExecutionCount = nativeEffective.requiredInteger("unetExecutionCount", minimum = 1L)
+        val expectedTotalSteps = runCatching { Math.multiplyExact(timetableCount, batchCount) }
+            .getOrElse {
+                reject(
+                    "invalid_image_input_execution_evidence",
+                    "stable-diffusion.cpp total sampling-step evidence overflowed."
+                )
+            }
+        val expectedTotalCompute = runCatching { Math.multiplyExact(unetExecutionCount, batchCount) }
+            .getOrElse {
+                reject(
+                    "invalid_image_input_execution_evidence",
+                    "stable-diffusion.cpp total compute evidence overflowed."
+                )
+            }
+        if (execution.requiredInteger("actualSamplingStepCount", minimum = 1L) != expectedTotalSteps ||
+            nativeEffective.requiredInteger("totalUnetExecutionCount", minimum = 1L) != expectedTotalCompute ||
+            execution.requiredInteger("totalUnetExecutionCount", minimum = 1L) != expectedTotalCompute ||
+            execution.requiredInteger("actualDiffusionModelComputeCount", minimum = 1L) != expectedTotalCompute
+        ) {
+            reject(
+                "invalid_image_input_execution_evidence",
+                "stable-diffusion.cpp total physical execution evidence does not match per-image evidence times n."
+            )
+        }
+    }
+
+    private fun validateRequestedLoraEvidence(
+        request: ImageGenerationApiRequest,
+        execution: JSONObject
+    ) {
+        val nativeEffective = execution.getJSONObject("nativeEffective")
+        val optionalOuterLoras = execution.optJSONArray("loras")
+        val optionalNativeLoras = nativeEffective.optJSONArray("loras")
+        val optionalOuterCounts = execution.optJSONObject("loraEvidence")
+        val optionalNativeCounts = nativeEffective.optJSONObject("loraEvidence")
+        if (request.loras.isEmpty() &&
+            optionalOuterLoras == null && optionalNativeLoras == null &&
+            optionalOuterCounts == null && optionalNativeCounts == null
+        ) {
+            return
+        }
+        val outerLoras = optionalOuterLoras
+            ?: reject("invalid_lora_execution_evidence", "Outer LoRA execution evidence is missing.")
+        val nativeLoras = optionalNativeLoras
+            ?: reject(
+                "invalid_lora_execution_evidence",
+                "nativeEffective LoRA execution evidence is missing."
+            )
+        if (outerLoras.length() != request.loras.size || nativeLoras.length() != request.loras.size) {
+            reject(
+                "invalid_lora_execution_evidence",
+                "Native LoRA evidence count does not match the request."
+            )
+        }
+        request.loras.forEachIndexed { index, expected ->
+            val outer = outerLoras.optJSONObject(index)
+                ?: reject("invalid_lora_execution_evidence", "Outer LoRA item is invalid.")
+            val native = nativeLoras.optJSONObject(index)
+                ?: reject("invalid_lora_execution_evidence", "nativeEffective LoRA item is invalid.")
+            rejectPrivateInputPaths(outer)
+            rejectPrivateInputPaths(native)
+            val outerSha = outer.requiredNonBlankString("sha256")
+            val nativeSha = native.requiredNonBlankString("sha256")
+            if (outer.requiredNonBlankString("id") != expected.id ||
+                native.requiredNonBlankString("id") != expected.id ||
+                outerSha != nativeSha ||
+                !SHA256_PATTERN.matches(outerSha) ||
+                !numbersMatch(outer.requiredFiniteNumber("multiplier"), expected.multiplier) ||
+                !numbersMatch(native.requiredFiniteNumber("multiplier"), expected.multiplier)
+            ) {
+                reject(
+                    "invalid_lora_execution_evidence",
+                    "Native LoRA identity, digest, or multiplier does not match the request."
+                )
+            }
+        }
+        val outerCounts = optionalOuterCounts
+            ?: reject("invalid_lora_execution_evidence", "Outer LoRA count evidence is missing.")
+        val nativeCounts = optionalNativeCounts
+            ?: reject(
+                "invalid_lora_execution_evidence",
+                "nativeEffective LoRA count evidence is missing."
+            )
+        listOf(outerCounts, nativeCounts).forEach { counts ->
+            val expectedCount = request.loras.size.toLong()
+            val appliedTensorCount = counts.requiredInteger("appliedTensorCount", minimum = 0L)
+            val tensorEvidenceInvalid = if (expectedCount == 0L) {
+                appliedTensorCount != 0L
+            } else {
+                appliedTensorCount <= 0L
+            }
+            if (counts.requiredInteger("requestedCount", minimum = 0L) != expectedCount ||
+                counts.requiredInteger("loadedCount", minimum = 0L) != expectedCount ||
+                counts.requiredInteger("appliedCount", minimum = 0L) != expectedCount ||
+                tensorEvidenceInvalid
+            ) {
+                reject(
+                    "invalid_lora_execution_evidence",
+                    "Native execution did not load and apply the complete requested LoRA set."
+                )
+            }
+        }
+        val countFields = listOf("requestedCount", "loadedCount", "appliedCount", "appliedTensorCount")
+        if (countFields.any { field ->
+                outerCounts.requiredInteger(field, minimum = 0L) !=
+                    nativeCounts.requiredInteger(field, minimum = 0L)
+            }
+        ) {
+            reject(
+                "invalid_lora_execution_evidence",
+                "Outer and nativeEffective LoRA count evidence do not match."
+            )
+        }
+    }
+
     private fun rejectPrivateInputPaths(evidence: JSONObject) {
         val keys = evidence.keys()
         while (keys.hasNext()) {
             val key = keys.next()
-            if (key.equals("path", ignoreCase = true) || key.endsWith("Path", ignoreCase = true)) {
+            val normalizedKey = key.lowercase().filter(Char::isLetterOrDigit)
+            if ("path" in normalizedKey || normalizedKey in PRIVATE_DIRECTORY_KEYS) {
                 reject(
                     "private_image_input_path_exposed",
-                    "Image provider response exposed a worker-private input path."
+                    "Image provider response exposed a worker-private path."
                 )
             }
-            val nested = evidence.optJSONObject(key) ?: continue
-            rejectPrivateInputPaths(nested)
+            rejectPrivatePathValue(evidence.opt(key))
+        }
+    }
+
+    private fun rejectPrivatePathValue(value: Any?) {
+        when (value) {
+            is JSONObject -> rejectPrivateInputPaths(value)
+            is JSONArray -> {
+                for (index in 0 until value.length()) {
+                    rejectPrivatePathValue(value.opt(index))
+                }
+            }
+            is String -> if (value.looksLikePrivateExecutionPath()) {
+                reject(
+                    "private_image_input_path_exposed",
+                    "Image provider response exposed a worker-private path."
+                )
+            }
         }
     }
 
@@ -910,6 +1122,8 @@ object ImageGenerationApiContract {
         RegexOption.IGNORE_CASE
     )
     private val SHA256_PATTERN = Regex("[a-f0-9]{64}")
+    private val UUID_PATTERN =
+        Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
     private val PREVIEW_MODES = setOf("none", "projection", "tae", "vae")
     private val SUPPORTED_SAMPLERS = setOf(
         "euler",
@@ -940,13 +1154,29 @@ object ImageGenerationApiContract {
         "strength",
         "control_strength",
         "clip_skip",
+        "loras",
         "vae_tiling",
         "preview"
     )
     private val VAE_TILING_FIELDS = setOf("tile_size", "overlap")
     private val PREVIEW_FIELDS = setOf("interval", "mode")
+    private val LORA_FIELDS = setOf("id", "multiplier")
+    private const val MAX_LORA_COUNT = 8
+    private const val MAX_IMAGE_COUNT = 8
     private const val MAX_IMAGE_INPUT_BYTES = 32L * 1024L * 1024L
     private const val MAX_IMAGE_REFERENCE_CHARS = 48 * 1024 * 1024
+    private val PRIVATE_DIRECTORY_KEYS = setOf(
+        "bundleroot",
+        "modelroot",
+        "upscalerroot",
+        "loraroot",
+        "cachedir",
+        "filesdir",
+        "tempdir",
+        "temporarydirectory",
+        "workingdirectory",
+        "outputdirectory"
+    )
     private val NATIVE_STRING_FIELDS = listOf(
         "profileId",
         "modelFingerprint",
@@ -979,3 +1209,17 @@ private fun normalizeProviderErrorCode(raw: String): String = raw
     .trim('_')
     .take(80)
     .ifBlank { "image_generation_failed" }
+
+private fun String.looksLikePrivateExecutionPath(): Boolean {
+    val value = trim()
+    if (value.startsWith("/") ||
+        value.startsWith("\\\\") ||
+        value.contains("file:", ignoreCase = true) ||
+        value.contains("content:", ignoreCase = true) ||
+        value.contains("android.resource:", ignoreCase = true)
+    ) return true
+    if (Regex("[A-Za-z]:[\\\\/]").containsMatchIn(value)) return true
+    val lowered = value.lowercase()
+    return listOf("/data/", "/storage/", "/sdcard/", "/mnt/", "/cache/", "/tmp/")
+        .any(lowered::contains)
+}

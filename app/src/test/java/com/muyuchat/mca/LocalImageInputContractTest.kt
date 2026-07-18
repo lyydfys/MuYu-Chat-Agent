@@ -11,6 +11,22 @@ import org.junit.Test
 
 class LocalImageInputContractTest {
     @Test
+    fun `portable history may omit source images without weakening product validation`() {
+        val restoredHistoryDraft = LocalImageInputDraft(
+            taskMode = LocalImageTaskMode.INPAINT,
+            strength = 0.6
+        )
+
+        restoredHistoryDraft.validateForHistory()
+        try {
+            restoredHistoryDraft.validate()
+            fail("Expected live product input validation to require source images")
+        } catch (_: IllegalArgumentException) {
+            // Expected: backup history is readable, but cannot execute until inputs are selected again.
+        }
+    }
+
+    @Test
     fun `native params use canonical role paths and strict controls`() {
         val input = prepared("/cache/worker/input.img", "a", width = 768, height = 512)
         val options = LocalImageGenerationOptions(
@@ -34,6 +50,7 @@ class LocalImageInputContractTest {
 
     @Test
     fun `invalid role combinations fail but runtime discovery never blocks a valid task`() {
+        assertInvalid { LocalImageVaeTilingOptions(512, 0.5001) }
         assertInvalid {
             LocalImageGenerationOptions(
                 taskMode = LocalImageTaskMode.INPAINT,
@@ -84,6 +101,26 @@ class LocalImageInputContractTest {
         } catch (error: LocalImageProductContractException) {
             assertEquals("unsupported_preview", error.code)
         }
+        assertProductRejected("unsupported_clip_skip") {
+            validateLocalImageRuntimeProductOptions(
+                LocalImageRuntime.QNN_HTP,
+                LocalImageGenerationOptions(clipSkip = 1)
+            )
+        }
+        assertProductRejected("unsupported_vae_tiling") {
+            validateLocalImageRuntimeProductOptions(
+                LocalImageRuntime.MNN_DIFFUSION,
+                LocalImageGenerationOptions(
+                    vaeTiling = LocalImageVaeTilingOptions(512, 0.5)
+                )
+            )
+        }
+        assertProductRejected("unsupported_lora") {
+            validateLocalImageRuntimeProductOptions(
+                LocalImageRuntime.MNN_DIFFUSION,
+                LocalImageGenerationOptions(loras = listOf(preparedLora()))
+            )
+        }
         try {
             validateLocalImageRuntimeProductOptions(
                 LocalImageRuntime.MNN_DIFFUSION,
@@ -114,6 +151,61 @@ class LocalImageInputContractTest {
     }
 
     @Test
+    fun `resolved profile rejects advanced controls before unsupported native execution`() {
+        val stableClassic = resolvedProfile(
+            recommendationId = "sd_turbo_512_experimental",
+            runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+            family = LocalImageModelFamily.SD_TURBO
+        )
+        validateLocalImageProfileProductOptions(
+            stableClassic,
+            LocalImageGenerationOptions(
+                clipSkip = 1,
+                batchCount = 8,
+                vaeTiling = LocalImageVaeTilingOptions(512, 0.5),
+                preview = LocalImagePreviewOptions(2, LocalImagePreviewMode.PROJECTION)
+            )
+        )
+
+        val stableFlow = resolvedProfile(
+            recommendationId = "z_image_turbo_q4",
+            runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+            family = LocalImageModelFamily.Z_IMAGE
+        )
+        assertProductRejected("unsupported_clip_skip") {
+            validateLocalImageProfileProductOptions(
+                stableFlow,
+                LocalImageGenerationOptions(clipSkip = 1)
+            )
+        }
+
+        val qnn = resolvedProfile(
+            recommendationId = "cyberrealistic_sd15_qnn228",
+            runtime = LocalImageRuntime.QNN_HTP,
+            family = LocalImageModelFamily.SD15
+        )
+        assertProductRejected("unsupported_batch_count") {
+            validateLocalImageProfileProductOptions(qnn, LocalImageGenerationOptions(batchCount = 2))
+        }
+        assertProductRejected("unsupported_vae_tiling") {
+            validateLocalImageProfileProductOptions(
+                qnn,
+                LocalImageGenerationOptions(
+                    vaeTiling = LocalImageVaeTilingOptions(512, 0.5)
+                )
+            )
+        }
+        assertProductRejected("unsupported_preview") {
+            validateLocalImageProfileProductOptions(
+                qnn,
+                LocalImageGenerationOptions(
+                    preview = LocalImagePreviewOptions(2, LocalImagePreviewMode.PROJECTION)
+                )
+            )
+        }
+    }
+
+    @Test
     fun `native input evidence is verified then private paths are replaced by hashes`() {
         val root = Files.createTempDirectory("native-input-evidence").toFile()
         try {
@@ -137,6 +229,186 @@ class LocalImageInputContractTest {
             assertTrue(audit.getBoolean("nativeExecution"))
         } finally {
             root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `stable diffusion control image requires physical ControlNet evidence`() {
+        val root = Files.createTempDirectory("stable-controlnet-evidence").toFile()
+        try {
+            val source = root.resolve("control.png").apply { writeText("control") }.canonicalFile
+            val options = LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.CONTROL,
+                controlImage = prepared(source.path, "c"),
+                controlStrength = 0.8
+            )
+            val nativeEffective = nativeInputEvidence(options)
+            val result = JSONObject(nativeEffective.toString())
+                .put("nativeEffective", nativeEffective)
+
+            val audit = verifyAndSanitizeStableDiffusionProductInput(result, options)
+
+            assertEquals(1, audit.getInt("controlImageExecutionCount"))
+            val failedNative = nativeInputEvidence(options)
+            val failedCompute = JSONObject(failedNative.toString())
+                .put("nativeEffective", failedNative)
+            listOf(
+                failedCompute.getJSONObject("controlNetEvidence"),
+                failedNative.getJSONObject("controlNetEvidence")
+            ).forEach { it.put("computeSuccessCount", 0L) }
+            assertInvalid {
+                verifyAndSanitizeStableDiffusionProductInput(failedCompute, options)
+            }
+            val missingResidualNative = nativeInputEvidence(options)
+            val missingResidual = JSONObject(missingResidualNative.toString())
+                .put("nativeEffective", missingResidualNative)
+            listOf(
+                missingResidual.getJSONObject("controlNetEvidence"),
+                missingResidualNative.getJSONObject("controlNetEvidence")
+            ).forEach { it.put("residualConsumptionCount", 0L) }
+            assertInvalid {
+                verifyAndSanitizeStableDiffusionProductInput(missingResidual, options)
+            }
+
+            val shortNative = nativeInputEvidence(options)
+            val shortResult = JSONObject(shortNative.toString())
+                .put("nativeEffective", shortNative)
+            listOf(
+                shortResult.getJSONObject("controlNetEvidence"),
+                shortNative.getJSONObject("controlNetEvidence")
+            ).forEach { evidence ->
+                listOf(
+                    "computeAttemptCount",
+                    "computeSuccessCount",
+                    "positiveComputeAttemptCount",
+                    "positiveComputeSuccessCount",
+                    "residualConsumptionCount",
+                    "positiveResidualConsumptionCount"
+                ).forEach { evidence.put(it, 19L) }
+            }
+            assertInvalid {
+                verifyAndSanitizeStableDiffusionProductInput(shortResult, options)
+            }
+
+            val missingConsumptionNative = nativeInputEvidence(options)
+            val missingConsumption = JSONObject(missingConsumptionNative.toString())
+                .put("nativeEffective", missingConsumptionNative)
+            listOf(
+                missingConsumption.getJSONObject("imageInputConsumption"),
+                missingConsumptionNative.getJSONObject("imageInputConsumption")
+            ).forEach { it.put("control", "none") }
+            assertInvalid {
+                verifyAndSanitizeStableDiffusionProductInput(missingConsumption, options)
+            }
+
+            val cfgNative = nativeInputEvidence(options, useCfg = true)
+            val cfgResult = JSONObject(cfgNative.toString())
+                .put("nativeEffective", cfgNative)
+            verifyAndSanitizeStableDiffusionProductInput(cfgResult, options)
+            assertEquals(
+                40L,
+                cfgResult.getJSONObject("controlNetEvidence").getLong("computeSuccessCount")
+            )
+            assertEquals(
+                20L,
+                cfgResult.getJSONObject("controlNetEvidence").getLong("negativeComputeSuccessCount")
+            )
+
+            val shortCfgNative = nativeInputEvidence(options, useCfg = true)
+            val shortCfg = JSONObject(shortCfgNative.toString())
+                .put("nativeEffective", shortCfgNative)
+            listOf(
+                shortCfg.getJSONObject("controlNetEvidence"),
+                shortCfgNative.getJSONObject("controlNetEvidence")
+            ).forEach { evidence ->
+                listOf(
+                    "negativeComputeAttemptCount",
+                    "negativeComputeSuccessCount",
+                    "negativeResidualConsumptionCount"
+                ).forEach { evidence.put(it, 19L) }
+                listOf(
+                    "computeAttemptCount",
+                    "computeSuccessCount",
+                    "residualConsumptionCount"
+                ).forEach { evidence.put(it, 39L) }
+            }
+            assertInvalid {
+                verifyAndSanitizeStableDiffusionProductInput(shortCfg, options)
+            }
+
+            val wrongUnetNative = nativeInputEvidence(options, useCfg = true)
+                .put("unetExecutionCount", 39)
+            val wrongUnet = JSONObject(wrongUnetNative.toString())
+                .put("nativeEffective", wrongUnetNative)
+            assertInvalid {
+                verifyAndSanitizeStableDiffusionProductInput(wrongUnet, options)
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `stable diffusion VAE tiling requires completed physical decode tiles`() {
+        val options = LocalImageGenerationOptions(
+            batchCount = 2,
+            vaeTiling = LocalImageVaeTilingOptions(tileSize = 512, overlap = 0.5)
+        )
+        val nativeEffective = nativeInputEvidence(options)
+        val result = JSONObject(nativeEffective.toString())
+            .put("nativeEffective", nativeEffective)
+
+        val audit = verifyAndSanitizeStableDiffusionProductInput(result, options)
+
+        assertTrue(audit.getJSONObject("vaeTiling").getBoolean("enabled"))
+        val failedNative = nativeInputEvidence(options)
+        val failed = JSONObject(failedNative.toString())
+            .put("nativeEffective", failedNative)
+        listOf(
+            failed.getJSONObject("vaeTiling").getJSONObject("decode"),
+            failedNative.getJSONObject("vaeTiling").getJSONObject("decode")
+        ).forEach { it.put("tileComputeSuccessCount", 0L) }
+        assertInvalid { verifyAndSanitizeStableDiffusionProductInput(failed, options) }
+
+        val requestEchoOnlyNative = nativeInputEvidence(options)
+        val requestEchoOnly = JSONObject(requestEchoOnlyNative.toString())
+            .put("nativeEffective", requestEchoOnlyNative)
+        listOf(
+            requestEchoOnly.getJSONObject("vaeTiling").getJSONObject("decode"),
+            requestEchoOnlyNative.getJSONObject("vaeTiling").getJSONObject("decode")
+        ).forEach { phase ->
+            listOf(
+                "invocationCount",
+                "successCount",
+                "plannedTileCount",
+                "tileComputeAttemptCount",
+                "tileComputeSuccessCount",
+                "tileSizeX",
+                "tileSizeY"
+            ).forEach { phase.put(it, 0L) }
+            phase.put("overlapX", 0.0).put("overlapY", 0.0)
+        }
+        assertInvalid {
+            verifyAndSanitizeStableDiffusionProductInput(requestEchoOnly, options)
+        }
+
+        val shortDecodeNative = nativeInputEvidence(options)
+        val shortDecode = JSONObject(shortDecodeNative.toString())
+            .put("nativeEffective", shortDecodeNative)
+        listOf(
+            shortDecode.getJSONObject("vaeTiling").getJSONObject("decode"),
+            shortDecodeNative.getJSONObject("vaeTiling").getJSONObject("decode")
+        ).forEach { phase ->
+            listOf(
+                "invocationCount",
+                "successCount",
+                "plannedTileCount",
+                "tileComputeAttemptCount",
+                "tileComputeSuccessCount"
+            ).forEach { phase.put(it, 1L) }
+        }
+        assertInvalid {
+            verifyAndSanitizeStableDiffusionProductInput(shortDecode, options)
         }
     }
 
@@ -176,13 +448,35 @@ class LocalImageInputContractTest {
             val nativeEffective = nativeInputEvidence(options)
                 .put("strength", 0.6499999761581421)
             nativeEffective.getJSONObject("vaeTiling")
-                .put("overlap", 0.30000001192092896)
+                .put("requestedOverlap", 0.30000001192092896)
             val result = JSONObject(nativeEffective.toString())
                 .put("nativeEffective", nativeEffective)
 
             val audit = verifyAndSanitizeStableDiffusionProductInput(result, options)
 
             assertTrue(audit.getBoolean("nativeExecution"))
+
+            val missingEncodeNative = nativeInputEvidence(options)
+            val missingEncode = JSONObject(missingEncodeNative.toString())
+                .put("nativeEffective", missingEncodeNative)
+            listOf(
+                missingEncode.getJSONObject("vaeTiling").getJSONObject("encode"),
+                missingEncodeNative.getJSONObject("vaeTiling").getJSONObject("encode")
+            ).forEach { phase ->
+                listOf(
+                    "invocationCount",
+                    "successCount",
+                    "plannedTileCount",
+                    "tileComputeAttemptCount",
+                    "tileComputeSuccessCount",
+                    "tileSizeX",
+                    "tileSizeY"
+                ).forEach { phase.put(it, 0L) }
+                phase.put("overlapX", 0.0).put("overlapY", 0.0)
+            }
+            assertInvalid {
+                verifyAndSanitizeStableDiffusionProductInput(missingEncode, options)
+            }
         } finally {
             root.deleteRecursively()
         }
@@ -214,6 +508,28 @@ class LocalImageInputContractTest {
         } finally {
             root.deleteRecursively()
         }
+    }
+
+    @Test
+    fun `stable diffusion LoRA result requires applied native tensors and exposes no path`() {
+        val options = LocalImageGenerationOptions(loras = listOf(preparedLora(multiplier = 0.75)))
+        val nativeEffective = nativeInputEvidence(options)
+        val result = JSONObject(nativeEffective.toString()).put("nativeEffective", nativeEffective)
+
+        val audit = verifyAndSanitizeStableDiffusionProductInput(result, options)
+
+        assertEquals(1, audit.getJSONArray("loras").length())
+        assertFalse(audit.getJSONArray("loras").getJSONObject(0).has("path"))
+        assertEquals(1, audit.getJSONObject("loraEvidence").getInt("appliedCount"))
+
+        val missingApplication = JSONObject(result.toString())
+        missingApplication.getJSONObject("nativeEffective")
+            .getJSONObject("loraEvidence")
+            .put("appliedTensorCount", 0)
+        assertInvalid { verifyAndSanitizeStableDiffusionProductInput(missingApplication, options) }
+
+        val missingStage = JSONObject(result.toString()).put("nativeStageMask", 127L)
+        assertInvalid { verifyAndSanitizeStableDiffusionProductInput(missingStage, options) }
     }
 
     @Test
@@ -386,8 +702,80 @@ class LocalImageInputContractTest {
 
     private fun nativeInputEvidence(
         options: LocalImageGenerationOptions,
-        includeUnusedHashes: Boolean = true
-    ): JSONObject = JSONObject()
+        includeUnusedHashes: Boolean = true,
+        timetableCount: Int = 20,
+        useCfg: Boolean = false
+    ): JSONObject {
+        var stageMask = 127L
+        if (options.inputImage != null) stageMask = stageMask or 128L
+        if (options.maskImage != null) stageMask = stageMask or 256L
+        if (options.controlImage != null) stageMask = stageMask or 512L
+        if (options.loras.isNotEmpty()) stageMask = stageMask or 1_024L
+        val loras = JSONArray().apply {
+            options.loras.forEach { adapter ->
+                put(
+                    JSONObject()
+                        .put("id", adapter.id)
+                        .put("sha256", adapter.sha256)
+                        .put("multiplier", adapter.multiplier)
+                )
+            }
+        }
+        val loraEvidence = JSONObject()
+            .put("requestedCount", options.loras.size)
+            .put("loadedCount", options.loras.size)
+            .put("appliedCount", options.loras.size)
+            .put("appliedTensorCount", if (options.loras.isEmpty()) 0L else 12L)
+        val controlNetEvidence = JSONObject().apply {
+            val positiveCount = if (options.controlImage == null) 0L else timetableCount.toLong()
+            val negativeCount = if (options.controlImage == null || !useCfg) {
+                0L
+            } else {
+                timetableCount.toLong()
+            }
+            val totalCount = positiveCount + negativeCount
+            put("computeAttemptCount", totalCount)
+            put("computeSuccessCount", totalCount)
+            put("positiveComputeAttemptCount", positiveCount)
+            put("positiveComputeSuccessCount", positiveCount)
+            put("negativeComputeAttemptCount", negativeCount)
+            put("negativeComputeSuccessCount", negativeCount)
+            put("residualConsumptionCount", totalCount)
+            put("positiveResidualConsumptionCount", positiveCount)
+            put("negativeResidualConsumptionCount", negativeCount)
+            put("auxiliaryResidualConsumptionCount", 0L)
+        }
+        fun vaePhaseEvidence(invocationCount: Long): JSONObject = JSONObject()
+            .put("invocationCount", invocationCount)
+            .put("successCount", invocationCount)
+            .put("plannedTileCount", invocationCount)
+            .put("tileComputeAttemptCount", invocationCount)
+            .put("tileComputeSuccessCount", invocationCount)
+            .put("tileSizeX", if (invocationCount > 0L) 64 else 0)
+            .put("tileSizeY", if (invocationCount > 0L) 64 else 0)
+            .put("overlapX", 0.0)
+            .put("overlapY", 0.0)
+        val vaeEncodeInvocationCount = if (options.vaeTiling != null && options.inputImage != null) {
+            1L
+        } else {
+            0L
+        }
+        val vaeDecodeInvocationCount = if (options.vaeTiling != null) {
+            options.batchCount.toLong()
+        } else {
+            0L
+        }
+        val vaeTilingEvidence = JSONObject()
+            .put("enabled", options.vaeTiling != null)
+            .put("requestedTileSize", options.vaeTiling?.tileSize ?: 0)
+            .put("requestedOverlap", options.vaeTiling?.overlap ?: 0.0)
+            .put("encode", vaePhaseEvidence(vaeEncodeInvocationCount))
+            .put("decode", vaePhaseEvidence(vaeDecodeInvocationCount))
+        val imageInputConsumption = JSONObject()
+            .put("input", if (options.inputImage == null) "none" else "init_latent")
+            .put("mask", if (options.maskImage == null) "none" else "denoise_mask")
+            .put("control", if (options.controlImage == null) "none" else "controlnet_residual")
+        return JSONObject()
         .put("taskMode", options.taskMode.wireName)
         .put("inputImagePath", options.inputImage?.path.orEmpty())
         .put("maskImagePath", options.maskImage?.path.orEmpty())
@@ -397,21 +785,28 @@ class LocalImageInputContractTest {
         .put("controlImageExecutionCount", if (options.controlImage == null) 0 else 1)
         .put("strength", options.strength ?: 1.0)
         .put("controlStrength", options.controlStrength ?: 1.0)
+        .put("controlStrengthApplied", options.controlImage != null)
         .put("clipSkip", options.clipSkip ?: -1)
         .put("batchCount", options.batchCount)
         .put("steps", 20)
+        .put("timetableCount", timetableCount)
+        .put("unetExecutionCount", timetableCount * (if (useCfg) 2 else 1))
+        .put("useCfg", useCfg)
+        .put("imageInputConsumption", imageInputConsumption)
         .put("previewRequested", options.preview != null)
         .put("previewMode", options.preview?.mode?.wireName ?: "none")
         .put("previewInterval", options.preview?.interval ?: 0)
         .put("previewPublicationCount", if (options.preview == null) 0 else 3)
         .put("previewLastStep", if (options.preview == null) 0 else 6)
         .put("previewLastRevision", if (options.preview == null) 0L else 9L)
+        .put("loras", loras)
+        .put("loraEvidence", loraEvidence)
+        .put("controlNetEvidence", controlNetEvidence)
+        .put("nativeStageMask", stageMask)
+        .put("nativeDetailStageMask", stageMask)
         .put(
             "vaeTiling",
-            JSONObject()
-                .put("enabled", options.vaeTiling != null)
-                .put("tileSize", options.vaeTiling?.tileSize ?: 0)
-                .put("overlap", options.vaeTiling?.overlap ?: 0.5)
+            vaeTilingEvidence
         )
         .apply {
             if (includeUnusedHashes) {
@@ -424,6 +819,7 @@ class LocalImageInputContractTest {
                 options.controlImage?.let { put("controlImageSha256", it.sha256) }
             }
         }
+    }
 
     private fun mnnResultEvidence(
         options: LocalImageGenerationOptions,
@@ -486,6 +882,38 @@ class LocalImageInputContractTest {
         width = width,
         height = height
     )
+
+    private fun preparedLora(multiplier: Double = 1.0): LocalImagePreparedLora =
+        LocalImagePreparedLora(
+            id = "11111111-1111-4111-8111-111111111111",
+            name = "Portrait",
+            path = "/cache/image_loras/lora.safetensors",
+            sha256 = "d".repeat(64),
+            sizeBytes = 1_024L,
+            multiplier = multiplier
+        )
+
+    private fun resolvedProfile(
+        recommendationId: String,
+        runtime: LocalImageRuntime,
+        family: LocalImageModelFamily
+    ): ImageExecutionProfile = ImageExecutionProfileResolver.resolve(
+        ImageExecutionProfileResolverInput(
+            modelFingerprint = "a".repeat(64),
+            runtime = runtime,
+            family = family,
+            recommendationId = recommendationId
+        )
+    ).profile
+
+    private fun assertProductRejected(expectedCode: String, block: () -> Unit) {
+        try {
+            block()
+            fail("Expected product input rejection: $expectedCode")
+        } catch (error: LocalImageProductContractException) {
+            assertEquals(expectedCode, error.code)
+        }
+    }
 
     private fun assertInvalid(block: () -> Unit) {
         try {

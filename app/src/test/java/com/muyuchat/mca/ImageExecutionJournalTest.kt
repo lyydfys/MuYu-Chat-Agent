@@ -11,10 +11,34 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class ImageExecutionJournalTest {
+    private val noOpParentDirectorySyncer = ParentDirectorySyncer { }
+
+    @Test
+    fun `journal syncs its parent directory after atomic publication`() =
+        withTempDirectory { root ->
+            var now = 500L
+            val journalRoot = File(root, "journal")
+            val synced = mutableListOf<File>()
+            val store = ImageExecutionJournalStore(
+                directory = journalRoot,
+                parentDirectorySyncer = ParentDirectorySyncer { directory ->
+                    synced += directory
+                },
+                clock = { ++now }
+            )
+
+            store.create(entry(requestId = "durable", createdAtMs = now))
+
+            assertEquals(listOf(journalRoot.canonicalFile), synced)
+        }
+
     @Test
     fun `journal atomically round trips lifecycle and native evidence`() = withTempDirectory { root ->
         var now = 1000L
-        val store = ImageExecutionJournalStore(File(root, "journal")) { ++now }
+        val store = ImageExecutionJournalStore(
+            File(root, "journal"),
+            noOpParentDirectorySyncer
+        ) { ++now }
         val initial = entry(
             requestId = "request-1",
             createdAtMs = now,
@@ -79,7 +103,7 @@ class ImageExecutionJournalTest {
         val input = File(cleanupRoot, "request.input.img").apply { writeText("input") }
         val secondOutput = File(cleanupRoot, "request-001.png.part").apply { writeText("output") }
         val outside = File(outsideRoot, "must-remain.tmp").apply { writeText("outside") }
-        val store = ImageExecutionJournalStore(journalRoot) { ++now }
+        val store = ImageExecutionJournalStore(journalRoot, noOpParentDirectorySyncer) { ++now }
         store.create(
             entry(
                 requestId = "cancel-me",
@@ -112,7 +136,7 @@ class ImageExecutionJournalTest {
         val cleanupRoot = File(root, "transient").apply { mkdirs() }
         val deadOutput = File(cleanupRoot, "dead.tmp.png").apply { writeText("partial") }
         val liveOutput = File(cleanupRoot, "live.tmp.png").apply { writeText("partial") }
-        val store = ImageExecutionJournalStore(journalRoot) { ++now }
+        val store = ImageExecutionJournalStore(journalRoot, noOpParentDirectorySyncer) { ++now }
         val deadInitial = store.create(
             entry(
                 requestId = "dead",
@@ -176,7 +200,10 @@ class ImageExecutionJournalTest {
         val input = File(requestDirectory, "input.img").apply { writeText("input") }
         val inputPath = input.canonicalPath
         val directoryPath = requestDirectory.canonicalPath
-        val store = ImageExecutionJournalStore(File(root, "journal")) { ++now }
+        val store = ImageExecutionJournalStore(
+            File(root, "journal"),
+            noOpParentDirectorySyncer
+        ) { ++now }
         store.create(
             entry(
                 requestId = "dead-input",
@@ -196,9 +223,67 @@ class ImageExecutionJournalTest {
     }
 
     @Test
+    fun `publishing recovery preserves complete result long enough for client consumption`() =
+        withTempDirectory { root ->
+            var now = 3750L
+            val cleanupRoot = File(root, "cache").apply { mkdirs() }
+            val complete = File(cleanupRoot, "result.png").apply { writeText("complete") }
+            val partial = File(cleanupRoot, "result-2.png.part").apply { writeText("partial") }
+            val input = File(cleanupRoot, "input.png").apply { writeText("input") }
+            val store = ImageExecutionJournalStore(
+                File(root, "journal"),
+                noOpParentDirectorySyncer
+            ) { ++now }
+            val preparing = store.create(
+                entry(
+                    requestId = "publishing-dead",
+                    createdAtMs = now,
+                    workerPid = 444,
+                    inputTempPaths = listOf(input.canonicalPath)
+                )
+            )
+            val sampling = store.update(
+                preparing.copy(
+                    phase = ImageExecutionPhase.SAMPLING,
+                    updatedAtMs = ++now
+                )
+            )
+            val decoding = store.update(
+                sampling.copy(
+                    phase = ImageExecutionPhase.DECODING,
+                    updatedAtMs = ++now
+                )
+            )
+            val publishing = store.update(
+                decoding.copy(
+                    phase = ImageExecutionPhase.PUBLISHING,
+                    updatedAtMs = ++now
+                )
+            )
+            store.update(
+                publishing.copy(
+                    outputTempPath = complete.canonicalPath,
+                    outputTempPaths = listOf(complete.canonicalPath, partial.canonicalPath),
+                    updatedAtMs = ++now
+                )
+            )
+
+            val report = store.recoverInterrupted(cleanupRoots = listOf(cleanupRoot)) { false }
+
+            assertEquals(listOf("publishing-dead"), report.interrupted.map { it.requestId })
+            assertTrue(complete.exists())
+            assertFalse(partial.exists())
+            assertFalse(input.exists())
+            assertFalse(report.cleanup.deletedPaths.contains(complete.canonicalPath))
+        }
+
+    @Test
     fun `terminal and regressive transitions fail closed`() = withTempDirectory { root ->
         var now = 4000L
-        val store = ImageExecutionJournalStore(File(root, "journal")) { ++now }
+        val store = ImageExecutionJournalStore(
+            File(root, "journal"),
+            noOpParentDirectorySyncer
+        ) { ++now }
         val initial = entry(requestId = "strict", createdAtMs = now, steps = 4)
         store.create(initial)
         val sampling = store.update(

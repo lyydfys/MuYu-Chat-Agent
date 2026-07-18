@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -34,9 +35,12 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
@@ -83,6 +87,9 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
@@ -100,8 +107,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.ThumbDown
-import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
@@ -155,6 +160,9 @@ import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role as SemanticsRole
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -178,11 +186,16 @@ import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.Calendar
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
 
@@ -199,9 +212,21 @@ data class ChatUiState(
     val history: List<ChatHistoryItem> = emptyList(),
     val localModels: List<ChatModelChoice> = emptyList(),
     val imageModels: List<ChatModelChoice> = emptyList(),
+    val existingImageModelIds: Set<String> = emptySet(),
     val assistants: List<AssistantUiItem> = emptyList(),
     val selectedAssistantId: String = "default",
     val images: List<ImageAssetUiItem> = emptyList(),
+    val generationHistoryInputUris: Set<String> = emptySet(),
+    val imageLibraryBackup: ImageLibraryBackupUiState = ImageLibraryBackupUiState(),
+    val imageLoras: List<ImageLoraUiItem> = emptyList(),
+    val imageLoraImporting: Boolean = false,
+    val imageLoraMessage: String = "",
+    val imageUpscalers: List<ImageUpscalerUiItem> = emptyList(),
+    val selectedImageUpscalerId: String? = null,
+    val imageUpscalerImporting: Boolean = false,
+    val imageUpscalerMessage: String = "",
+    val imageUpscaleJob: ImageUpscaleUiJob? = null,
+    val deferGenerationImageGrantRelease: Boolean = false,
     val files: List<FileAssetUiItem> = emptyList(),
     val imageJobs: List<ImageGenerationUiJob> = emptyList(),
     val activeConversationId: String? = null,
@@ -231,6 +256,88 @@ data class ChatUiState(
     val visionCapabilityDetail: String = "请加载云端多模态模型，或绑定本地 mmproj 视觉投影器。",
     val visionCapabilityReady: Boolean = false
 )
+
+data class ImageLibraryBackupUiState(
+    val running: Boolean = false,
+    val importing: Boolean = false,
+    val done: Int = 0,
+    val total: Int = 0,
+    val message: String = "",
+    val failed: Boolean = false
+)
+
+data class ImageLoraUiItem(
+    val id: String,
+    val name: String,
+    val sizeText: String,
+    val sha256: String,
+    val inUse: Boolean = false
+)
+
+data class ImageUpscalerUiItem(
+    val id: String,
+    val name: String,
+    val sizeText: String,
+    val sha256: String,
+    val selected: Boolean = false,
+    val inUse: Boolean = false,
+    val deleting: Boolean = false
+)
+
+data class ImageUpscaleUiJob(
+    val id: String,
+    val sourceImageId: String,
+    val upscalerId: String,
+    val upscalerName: String,
+    val targetScale: Int,
+    val statusLabel: String,
+    val running: Boolean,
+    val failed: Boolean,
+    val terminal: Boolean,
+    val resultImageAssetId: String? = null,
+    val message: String = ""
+)
+
+internal val IMAGE_UPSCALE_TARGET_SCALES: List<Int> = listOf(2, 3, 4)
+
+internal fun upscaleOutputDimensionsOrNull(width: Int, height: Int, scale: Int): Pair<Int, Int>? {
+    if (width !in 1..2_048 || height !in 1..2_048 ||
+        scale !in IMAGE_UPSCALE_TARGET_SCALES
+    ) return null
+    return runCatching {
+        val sourcePixels = Math.multiplyExact(width.toLong(), height.toLong())
+        val outputWidth = Math.multiplyExact(width, scale)
+        val outputHeight = Math.multiplyExact(height, scale)
+        val outputPixels = Math.multiplyExact(outputWidth.toLong(), outputHeight.toLong())
+        (outputWidth to outputHeight).takeIf {
+            sourcePixels <= 4_000_000L &&
+                outputWidth <= 4_096 && outputHeight <= 4_096 &&
+                outputPixels <= 16_000_000L
+        }
+    }.getOrNull()
+}
+
+data class ImageGenerationUiLoraSelection(
+    val id: String,
+    val multiplier: Double
+)
+
+internal data class ImageGenerationUiLoraDraft(
+    val id: String,
+    val multiplierText: String
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("id", id)
+        .put("multiplierText", multiplierText)
+
+    companion object {
+        fun fromJson(json: JSONObject): ImageGenerationUiLoraDraft =
+            ImageGenerationUiLoraDraft(
+                id = json.getString("id").trim().also { require(it.isNotEmpty()) },
+                multiplierText = json.getString("multiplierText").trim().take(32)
+            )
+    }
+}
 
 data class AssistantUiItem(
     val id: String,
@@ -279,10 +386,59 @@ data class ImageAssetUiItem(
     val sizeText: String,
     val width: Int,
     val height: Int,
+    val sizeBytes: Long = 0L,
+    val upscaleTargetScale: Int? = null,
     val generationDetails: String = "",
     val generationPrompt: String = "",
+    val generationModelId: String = "",
+    val generationModelName: String = "",
+    val generationTaskMode: String = "",
+    val generationSampler: String = "",
+    val parameterShareJson: String = "",
+    val generationPreset: ImageGenerationUiPreset? = null,
+    val favorite: Boolean = false,
     val canRecreate: Boolean = false
 )
+
+internal fun imageAssetBadgeText(image: ImageAssetUiItem): String = when {
+    image.source.startsWith("upscaled:", ignoreCase = true) ->
+        image.upscaleTargetScale
+            ?.takeIf(IMAGE_UPSCALE_TARGET_SCALES::contains)
+            ?.let { scale -> "ESRGAN ${scale}×" }
+            ?: "高清放大"
+    image.width > 0 && image.height > 0 -> "${image.width}×${image.height}"
+    else -> ""
+}
+
+data class ImageGenerationUiPreset(
+    val prompt: String,
+    val negativePrompt: String? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val steps: Int? = null,
+    val cfgScale: Double? = null,
+    val seed: Int? = null,
+    val sampleMethod: String? = null,
+    val clipSkip: Int? = null,
+    val batchCount: Int? = null,
+    val vaeTileSize: Int? = null,
+    val vaeTileOverlap: Double? = null,
+    val loras: List<ImageGenerationUiLoraSelection> = emptyList()
+)
+
+internal enum class ImageGenerationPresetField(val label: String) {
+    PROMPT("提示词"),
+    NEGATIVE_PROMPT("负向提示词"),
+    SIZE("尺寸"),
+    STEPS("步数"),
+    CFG("CFG"),
+    SEED("Seed"),
+    SAMPLER("采样器"),
+    CLIP_SKIP("CLIP skip"),
+    LORA("LoRA"),
+    BATCH("批次数量"),
+    VAE_TILING("VAE 分块")
+}
 
 data class FileAssetUiItem(
     val id: String,
@@ -349,6 +505,7 @@ data class ImageGenerationUiOptions(
     val controlStrength: Double? = null,
     val clipSkip: Int? = null,
     val batchCount: Int = 1,
+    val loras: List<ImageGenerationUiLoraSelection> = emptyList(),
     val vaeTileSize: Int? = null,
     val vaeTileOverlap: Double? = null,
     val width: Int? = null,
@@ -374,12 +531,13 @@ internal data class ImageGenerationUiParameterSnapshot(
     val cfgScaleText: String,
     val seedText: String,
     val sampler: String,
+    val loras: List<ImageGenerationUiLoraDraft> = emptyList(),
     val inputImageUri: String? = null,
     val maskImageUri: String? = null,
     val controlImageUri: String? = null
 ) {
     fun toJson(): JSONObject = JSONObject()
-        .put("version", 2)
+        .put("version", 3)
         .put("taskModeName", taskModeName)
         .put("strengthText", strengthText)
         .put("controlStrengthText", controlStrengthText)
@@ -394,6 +552,7 @@ internal data class ImageGenerationUiParameterSnapshot(
         .put("cfgScaleText", cfgScaleText)
         .put("seedText", seedText)
         .put("sampler", sampler)
+        .put("loras", JSONArray().apply { loras.forEach { put(it.toJson()) } })
         .apply {
             inputImageUri?.let { put("inputImageUri", it) }
             maskImageUri?.let { put("maskImageUri", it) }
@@ -406,7 +565,7 @@ internal data class ImageGenerationUiParameterSnapshot(
             return runCatching {
                 val json = JSONObject(raw)
                 val version = json.optInt("version", -1)
-                require(version == 1 || version == 2)
+                require(version in 1..3)
                 ImageGenerationUiParameterSnapshot(
                     taskModeName = json.getString("taskModeName"),
                     strengthText = json.getString("strengthText"),
@@ -422,6 +581,19 @@ internal data class ImageGenerationUiParameterSnapshot(
                     cfgScaleText = json.getString("cfgScaleText"),
                     seedText = json.getString("seedText"),
                     sampler = json.getString("sampler"),
+                    loras = if (version >= 3) {
+                        val array = json.getJSONArray("loras")
+                        require(array.length() <= 8)
+                        buildList {
+                            for (index in 0 until array.length()) {
+                                add(ImageGenerationUiLoraDraft.fromJson(array.getJSONObject(index)))
+                            }
+                        }.also { drafts ->
+                            require(drafts.map(ImageGenerationUiLoraDraft::id).distinct().size == drafts.size)
+                        }
+                    } else {
+                        emptyList()
+                    },
                     inputImageUri = if (version >= 2) {
                         json.optString("inputImageUri").takeIf(String::isNotBlank)
                     } else {
@@ -445,22 +617,266 @@ internal data class ImageGenerationUiParameterSnapshot(
 
 private const val IMAGE_GENERATION_UI_PARAMETER_PREFS = "mca_image_generation_ui_parameters"
 private const val IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX = "model:"
+private const val IMAGE_GENERATION_OWNED_GRANTS_KEY = "owned:persistable_image_uris"
+private val generationImageGrantOwnershipLock = Any()
+private val pendingGenerationImageGrantUriEpochs = mutableMapOf<String, Long>()
+private var nextPendingGenerationImageGrantEpoch = 0L
+
+private fun imageLoraDraftsFromJson(raw: String): List<ImageGenerationUiLoraDraft> = runCatching {
+    val array = JSONArray(raw)
+    require(array.length() <= 8)
+    buildList {
+        for (index in 0 until array.length()) {
+            add(ImageGenerationUiLoraDraft.fromJson(array.getJSONObject(index)))
+        }
+    }.also { drafts ->
+        require(drafts.map(ImageGenerationUiLoraDraft::id).distinct().size == drafts.size)
+    }
+}.getOrDefault(emptyList())
+
+private fun imageLoraDraftsToJson(drafts: List<ImageGenerationUiLoraDraft>): String {
+    require(drafts.size <= 8) { "At most 8 LoRA adapters may be selected." }
+    return JSONArray().apply { drafts.forEach { put(it.toJson()) } }.toString()
+}
+
+internal data class GenerationImageGrantReconciliationPlan(
+    val retainedOwnedUris: Set<String>,
+    val releaseOwnedUris: Set<String>,
+    val forgetOwnedUris: Set<String>
+)
+
+internal fun generationImageSnapshotReferences(
+    preferences: Map<String, *>,
+    currentImageModelIds: Set<String>
+): Set<String> = buildSet {
+    preferences.forEach { (key, value) ->
+        if (!key.startsWith(IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX)) return@forEach
+        val modelId = key.removePrefix(IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX)
+        if (modelId !in currentImageModelIds) return@forEach
+        val snapshot = ImageGenerationUiParameterSnapshot.fromJsonOrNull(value as? String)
+            ?: return@forEach
+        listOf(snapshot.inputImageUri, snapshot.maskImageUri, snapshot.controlImageUri)
+            .mapNotNull { raw -> raw?.trim()?.takeIf { it.startsWith("content://", true) } }
+            .forEach(::add)
+    }
+}
+
+internal fun normalizedGenerationImageHistoryReferences(
+    references: Iterable<String>
+): Set<String> = references.mapNotNullTo(mutableSetOf()) { raw ->
+    raw.trim().takeIf { it.startsWith("content://", ignoreCase = true) }
+}
+
+internal fun combinedGenerationImageGrantReferences(
+    snapshotReferencedUris: Set<String>,
+    historyReferencedUris: Set<String>,
+    transientReferencedUris: Set<String>,
+    pendingUris: Set<String>
+): Set<String> = snapshotReferencedUris +
+    historyReferencedUris +
+    transientReferencedUris +
+    pendingUris
+
+internal fun obsoleteGenerationImageSnapshotKeys(
+    preferences: Map<String, *>,
+    currentImageModelIds: Set<String>
+): Set<String> = preferences.keys.filterTo(mutableSetOf()) { key ->
+    key.startsWith(IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX) &&
+        key.removePrefix(IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX) !in currentImageModelIds
+}
+
+internal fun planGenerationImageGrantReconciliation(
+    ownedUris: Set<String>,
+    persistedReadUris: Set<String>,
+    referencedUris: Set<String>,
+    deferRelease: Boolean
+): GenerationImageGrantReconciliationPlan {
+    val validOwned = ownedUris intersect persistedReadUris
+    val forget = ownedUris - persistedReadUris
+    val release = if (deferRelease) emptySet() else validOwned - referencedUris
+    return GenerationImageGrantReconciliationPlan(
+        retainedOwnedUris = validOwned - release,
+        releaseOwnedUris = release,
+        forgetOwnedUris = forget
+    )
+}
+
+/**
+ * Resolves only pending entries that existed when a reconciliation was scheduled. This prevents a
+ * stale IO effect from pruning a grant taken by a newer picker callback before Compose has exposed
+ * that URI as transient state. Any durable UI/history reference or a successful snapshot commit
+ * resolves pending protection immediately; otherwise it remains only while a transient role uses it.
+ */
+internal fun pendingGenerationImageGrantUrisAfterReconciliation(
+    pendingUriEpochs: Map<String, Long>,
+    eligibleForPruneUriEpochs: Map<String, Long>,
+    snapshotReferencedUris: Set<String>,
+    transientReferencedUris: Set<String>,
+    committedReferencedUris: Set<String> = emptySet()
+): Map<String, Long> {
+    val currentReferences = snapshotReferencedUris + transientReferencedUris
+    return pendingUriEpochs.filterNot { (uri, epoch) ->
+        eligibleForPruneUriEpochs[uri] == epoch &&
+            (uri in committedReferencedUris ||
+                uri in snapshotReferencedUris ||
+                uri !in currentReferences)
+    }
+}
+
+private fun pendingGenerationImageGrantUriEpochsSnapshot(): Map<String, Long> =
+    synchronized(generationImageGrantOwnershipLock) {
+        pendingGenerationImageGrantUriEpochs.toMap()
+    }
+
+private fun registerPendingGenerationImageGrantUri(raw: String) {
+    check(nextPendingGenerationImageGrantEpoch < Long.MAX_VALUE) {
+        "Generation image grant pending epoch exhausted."
+    }
+    pendingGenerationImageGrantUriEpochs[raw] = ++nextPendingGenerationImageGrantEpoch
+}
+
+private fun ownedGenerationImageUris(preferences: SharedPreferences): Set<String> =
+    preferences.getStringSet(IMAGE_GENERATION_OWNED_GRANTS_KEY, emptySet())
+        ?.mapNotNullTo(mutableSetOf()) { raw ->
+            raw.trim().takeIf { it.startsWith("content://", ignoreCase = true) }
+        }
+        .orEmpty()
 
 internal fun persistGenerationImageUri(context: Context, uri: Uri): String? = runCatching {
-    require(uri.scheme.equals("content", ignoreCase = true)) {
-        "Generation image inputs must use a persistable content URI."
-    }
-    context.contentResolver.takePersistableUriPermission(
-        uri,
-        Intent.FLAG_GRANT_READ_URI_PERMISSION
-    )
-    require(
-        context.contentResolver.persistedUriPermissions.any { permission ->
+    synchronized(generationImageGrantOwnershipLock) {
+        require(uri.scheme.equals("content", ignoreCase = true)) {
+            "Generation image inputs must use a persistable content URI."
+        }
+        val appContext = context.applicationContext
+        val preferences = appContext.getSharedPreferences(
+            IMAGE_GENERATION_UI_PARAMETER_PREFS,
+            Context.MODE_PRIVATE
+        )
+        val raw = uri.toString()
+        val ownedBefore = ownedGenerationImageUris(preferences)
+        val alreadyPersisted = appContext.contentResolver.persistedUriPermissions.any { permission ->
             permission.isReadPermission && permission.uri == uri
         }
-    ) { "The document provider did not retain read access." }
-    uri.toString()
+        // A pre-existing grant may belong to model import, the file library, or another feature.
+        // Use it without claiming ownership so generation reconciliation can never release it.
+        if (alreadyPersisted && raw !in ownedBefore) {
+            return@synchronized raw
+        }
+        if (!alreadyPersisted) {
+            check(
+                preferences.edit()
+                    .putStringSet(IMAGE_GENERATION_OWNED_GRANTS_KEY, ownedBefore + raw)
+                    .commit()
+            ) { "Unable to register generation image grant ownership." }
+            try {
+                appContext.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (error: Throwable) {
+                preferences.edit()
+                    .putStringSet(IMAGE_GENERATION_OWNED_GRANTS_KEY, ownedBefore)
+                    .commit()
+                throw error
+            }
+        }
+        val retained = appContext.contentResolver.persistedUriPermissions.any { permission ->
+            permission.isReadPermission && permission.uri == uri
+        }
+        if (!retained) {
+            runCatching {
+                appContext.contentResolver.releasePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            preferences.edit()
+                .putStringSet(IMAGE_GENERATION_OWNED_GRANTS_KEY, ownedBefore)
+                .commit()
+            pendingGenerationImageGrantUriEpochs.remove(raw)
+            error("The document provider did not retain read access.")
+        }
+        registerPendingGenerationImageGrantUri(raw)
+        raw
+    }
 }.getOrNull()
+
+private fun reconcileGenerationImageUriGrants(
+    context: Context,
+    preferences: SharedPreferences,
+    currentImageModelIds: Set<String>,
+    deferRelease: Boolean,
+    releaseOwnedUrisIfCoordinatorIdle: ((() -> Unit) -> Boolean),
+    libraryHistoryReferencedUris: Set<String> = emptySet(),
+    transientReferencedUris: Set<String> = emptySet(),
+    committedReferencedUris: Set<String> = emptySet(),
+    pendingUriEpochsEligibleForPrune: Map<String, Long> = emptyMap()
+) = synchronized(generationImageGrantOwnershipLock) {
+    val obsoleteKeys = obsoleteGenerationImageSnapshotKeys(
+        preferences = preferences.all,
+        currentImageModelIds = currentImageModelIds
+    )
+    if (obsoleteKeys.isNotEmpty()) {
+        val editor = preferences.edit()
+        obsoleteKeys.forEach(editor::remove)
+        editor.commit()
+    }
+    val uiSnapshotReferencedUris = generationImageSnapshotReferences(
+        preferences = preferences.all,
+        currentImageModelIds = currentImageModelIds
+    )
+    val persistentReferencedUris = uiSnapshotReferencedUris + libraryHistoryReferencedUris
+    val retainedPendingUris = pendingGenerationImageGrantUrisAfterReconciliation(
+        pendingUriEpochs = pendingGenerationImageGrantUriEpochs,
+        eligibleForPruneUriEpochs = pendingUriEpochsEligibleForPrune,
+        snapshotReferencedUris = persistentReferencedUris,
+        transientReferencedUris = transientReferencedUris,
+        committedReferencedUris = committedReferencedUris
+    )
+    pendingGenerationImageGrantUriEpochs.clear()
+    pendingGenerationImageGrantUriEpochs.putAll(retainedPendingUris)
+    val referencedUris = combinedGenerationImageGrantReferences(
+        snapshotReferencedUris = uiSnapshotReferencedUris,
+        historyReferencedUris = libraryHistoryReferencedUris,
+        transientReferencedUris = transientReferencedUris,
+        pendingUris = retainedPendingUris.keys
+    )
+    val persistedReadUris = context.contentResolver.persistedUriPermissions
+        .asSequence()
+        .filter { it.isReadPermission }
+        .map { it.uri.toString() }
+        .toSet()
+    val plan = planGenerationImageGrantReconciliation(
+        ownedUris = ownedGenerationImageUris(preferences),
+        persistedReadUris = persistedReadUris,
+        referencedUris = referencedUris,
+        deferRelease = deferRelease
+    )
+    val retained = plan.retainedOwnedUris.toMutableSet()
+    val releaseWindowOpened = plan.releaseOwnedUris.isEmpty() ||
+        releaseOwnedUrisIfCoordinatorIdle {
+            plan.releaseOwnedUris.forEach { raw ->
+                val uri = runCatching { Uri.parse(raw) }.getOrNull()
+                if (uri == null) return@forEach
+                val released = runCatching {
+                    context.contentResolver.releasePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }.isSuccess
+                val stillPersisted = context.contentResolver.persistedUriPermissions.any { permission ->
+                    permission.isReadPermission && permission.uri == uri
+                }
+                if (!released || stillPersisted) retained += raw
+            }
+        }
+    if (!releaseWindowOpened) {
+        retained += plan.releaseOwnedUris
+    }
+    preferences.edit()
+        .putStringSet(IMAGE_GENERATION_OWNED_GRANTS_KEY, retained)
+        .commit()
+}
 
 internal fun persistedGenerationImageUriOrNull(context: Context, raw: String?): String? {
     val value = raw?.trim()?.takeIf(String::isNotEmpty) ?: return null
@@ -491,6 +907,7 @@ data class ChatModelChoice(
     val supportsImageNegativePrompt: Boolean = false,
     val supportsImageClipSkip: Boolean = false,
     val supportsImageVaeTiling: Boolean = false,
+    val supportsImageLora: Boolean = false,
     val maxImageBatchCount: Int = 1,
     val imageDefaultWidth: Int = 512,
     val imageDefaultHeight: Int = 512,
@@ -506,6 +923,56 @@ data class ChatModelChoice(
     val imageHeightMultiple: Int = 8,
     val imageSupportedSamplers: List<String> = listOf("euler")
 )
+
+internal fun normalizedImageGenerationDimensionText(
+    rawValue: String,
+    defaultValue: Int,
+    minValue: Int,
+    maxValue: Int,
+    multiple: Int
+): String {
+    val safeMin = minValue.coerceAtLeast(1)
+    val safeMax = maxValue.coerceAtLeast(safeMin)
+    if (safeMin == safeMax) return safeMin.toString()
+
+    val step = multiple.coerceAtLeast(1).toLong()
+    val min = safeMin.toLong()
+    val max = safeMax.toLong()
+    val firstAligned = ((min + step - 1L) / step) * step
+    val lastAligned = (max / step) * step
+    if (firstAligned > lastAligned) {
+        return defaultValue.coerceIn(safeMin, safeMax).toString()
+    }
+
+    val requested = rawValue.trim().toLongOrNull() ?: defaultValue.toLong()
+    val bounded = requested.coerceIn(firstAligned, lastAligned)
+    val lower = ((bounded / step) * step).coerceAtLeast(firstAligned)
+    val upper = (lower + step).coerceAtMost(lastAligned)
+    val normalized = if (bounded - lower <= upper - bounded) lower else upper
+    return normalized.toString()
+}
+
+internal fun ImageGenerationUiParameterSnapshot.normalizedForImageModel(
+    model: ChatModelChoice
+): ImageGenerationUiParameterSnapshot {
+    if (model.cloud) return this
+    return copy(
+        widthText = normalizedImageGenerationDimensionText(
+            rawValue = widthText,
+            defaultValue = model.imageDefaultWidth,
+            minValue = model.imageMinWidth,
+            maxValue = model.imageMaxWidth,
+            multiple = model.imageWidthMultiple
+        ),
+        heightText = normalizedImageGenerationDimensionText(
+            rawValue = heightText,
+            defaultValue = model.imageDefaultHeight,
+            minValue = model.imageMinHeight,
+            maxValue = model.imageMaxHeight,
+            multiple = model.imageHeightMultiple
+        )
+    )
+}
 
 data class ChatHistoryItem(
     val id: String,
@@ -535,12 +1002,25 @@ fun ChatScreen(
     onUploadFile: (String) -> Unit,
     onUseImageAsset: (String) -> Unit = {},
     onDeleteImageAsset: (String) -> Unit = {},
+    onDeleteImageAssets: (List<String>) -> Unit = {},
+    onSetImageAssetFavorite: (String, Boolean) -> Unit = { _, _ -> },
+    onExportImageLibraryBackup: (String, Boolean) -> Unit = { _, _ -> },
+    onImportImageLibraryBackup: (String) -> Unit = {},
+    onCancelImageLibraryBackup: () -> Unit = {},
+    onImportImageLora: (String) -> Unit = {},
+    onDeleteImageLora: (String) -> Unit = {},
+    onImportImageUpscaler: (String) -> Unit = {},
+    onDeleteImageUpscaler: (String) -> Unit = {},
+    onSelectImageUpscaler: (String) -> Unit = {},
+    onUpscaleImageAsset: (String, Int) -> Unit = { _, _ -> },
+    onCancelImageUpscale: () -> Unit = {},
     onUseFileAsset: (String) -> Unit = {},
     onDeleteFileAsset: (String) -> Unit = {},
     onGenerateImagePrompt: (String, ImageGenerationUiOptions) -> Unit = { _, _ -> },
     onRetryImageGeneration: (String) -> Unit = {},
     onRecreateImageAsset: (String) -> Unit = {},
     onCancelImageGeneration: () -> Unit = {},
+    releaseGenerationImageGrantsIfCoordinatorIdle: ((() -> Unit) -> Boolean),
     onSelectImageModel: (String) -> Unit = {},
     onReasoningModeChange: (ReasoningMode) -> Unit,
     onCloudReasoningModeLocked: () -> Unit = {},
@@ -570,6 +1050,7 @@ fun ChatScreen(
             Context.MODE_PRIVATE
         )
     }
+    val generationImageGrantMutex = remember { Mutex() }
     var showImages by rememberSaveable { mutableStateOf(false) }
     var showAssistants by rememberSaveable { mutableStateOf(false) }
     var showFileLibrary by rememberSaveable { mutableStateOf(false) }
@@ -593,8 +1074,10 @@ fun ChatScreen(
     var imageCfgScaleText by rememberSaveable { mutableStateOf("7") }
     var imageSeedText by rememberSaveable { mutableStateOf("") }
     var imageSampler by rememberSaveable { mutableStateOf("euler") }
+    var imageLoraDraftJson by rememberSaveable { mutableStateOf("[]") }
     var restoredImageParameterModelId by rememberSaveable { mutableStateOf<String?>(null) }
     var imageInputRestoreWarning by rememberSaveable { mutableStateOf<String?>(null) }
+    var imageLoraRestoreWarning by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingGenerationImageRole by rememberSaveable { mutableStateOf("input") }
     val imageTaskMode = ImageGenerationUiTaskMode.entries.firstOrNull {
         it.name == imageTaskModeName
@@ -608,13 +1091,49 @@ fun ChatScreen(
     val supportsImageNegativePrompt = selectedImageModelChoice?.supportsImageNegativePrompt == true
     val supportsImageClipSkip = selectedImageModelChoice?.supportsImageClipSkip == true
     val supportsImageVaeTiling = selectedImageModelChoice?.supportsImageVaeTiling == true
+    val supportsImageLora = selectedImageModelChoice?.supportsImageLora == true
     val maxImageBatchCount = selectedImageModelChoice?.maxImageBatchCount?.coerceIn(1, 8) ?: 1
-    LaunchedEffect(state.selectedImageModelId) {
+    val currentImageModelIds = state.existingImageModelIds.ifEmpty {
+        state.imageModels.mapTo(mutableSetOf(), ChatModelChoice::id)
+    }
+    val transientGenerationImageUris = setOfNotNull(
+        imageInputUri,
+        imageMaskUri,
+        imageControlUri
+    )
+    val libraryHistoryGenerationImageUris = normalizedGenerationImageHistoryReferences(
+        state.generationHistoryInputUris
+    )
+    LaunchedEffect(
+        currentImageModelIds,
+        state.deferGenerationImageGrantRelease,
+        transientGenerationImageUris,
+        libraryHistoryGenerationImageUris
+    ) {
+        val pendingUriEpochsEligibleForPrune = pendingGenerationImageGrantUriEpochsSnapshot()
+        withContext(Dispatchers.IO) {
+            generationImageGrantMutex.withLock {
+                reconcileGenerationImageUriGrants(
+                    context = context.applicationContext,
+                    preferences = imageParameterPreferences,
+                    currentImageModelIds = currentImageModelIds,
+                    deferRelease = state.deferGenerationImageGrantRelease,
+                    releaseOwnedUrisIfCoordinatorIdle =
+                        releaseGenerationImageGrantsIfCoordinatorIdle,
+                    libraryHistoryReferencedUris = libraryHistoryGenerationImageUris,
+                    transientReferencedUris = transientGenerationImageUris,
+                    pendingUriEpochsEligibleForPrune = pendingUriEpochsEligibleForPrune
+                )
+            }
+        }
+    }
+    LaunchedEffect(state.selectedImageModelId, selectedImageModelChoice?.id) {
         val modelId = state.selectedImageModelId
         val model = selectedImageModelChoice
         if (modelId == null || model == null) {
             restoredImageParameterModelId = null
             imageInputRestoreWarning = null
+            imageLoraRestoreWarning = null
             return@LaunchedEffect
         }
         val snapshot = ImageGenerationUiParameterSnapshot.fromJsonOrNull(
@@ -622,7 +1141,7 @@ fun ChatScreen(
                 IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX + modelId,
                 null
             )
-        )
+        )?.normalizedForImageModel(model)
         imageTaskModeName = snapshot?.taskModeName
             ?.takeIf { saved -> ImageGenerationUiTaskMode.entries.any { it.name == saved } }
             ?: ImageGenerationUiTaskMode.TEXT_TO_IMAGE.name
@@ -633,8 +1152,20 @@ fun ChatScreen(
         imageClipSkipText = snapshot?.clipSkipText.orEmpty()
         imageVaeTilingEnabled = snapshot?.vaeTilingEnabled ?: false
         imageBatchCount = (snapshot?.batchCount ?: 1).coerceIn(1, model.maxImageBatchCount.coerceIn(1, 8))
-        imageWidthText = snapshot?.widthText ?: model.imageDefaultWidth.toString()
-        imageHeightText = snapshot?.heightText ?: model.imageDefaultHeight.toString()
+        imageWidthText = snapshot?.widthText ?: normalizedImageGenerationDimensionText(
+            rawValue = model.imageDefaultWidth.toString(),
+            defaultValue = model.imageDefaultWidth,
+            minValue = model.imageMinWidth,
+            maxValue = model.imageMaxWidth,
+            multiple = model.imageWidthMultiple
+        )
+        imageHeightText = snapshot?.heightText ?: normalizedImageGenerationDimensionText(
+            rawValue = model.imageDefaultHeight.toString(),
+            defaultValue = model.imageDefaultHeight,
+            minValue = model.imageMinHeight,
+            maxValue = model.imageMaxHeight,
+            multiple = model.imageHeightMultiple
+        )
         imageStepsText = snapshot?.stepsText ?: model.imageDefaultSteps.toString()
         imageCfgScaleText = snapshot?.cfgScaleText
             ?: model.imageDefaultCfgScale.toString().trimEnd('0').trimEnd('.')
@@ -642,6 +1173,19 @@ fun ChatScreen(
         imageSampler = snapshot?.sampler
             ?.takeIf { it in model.imageSupportedSamplers }
             ?: model.imageDefaultSampler
+        val availableLoraIds = state.imageLoras.mapTo(mutableSetOf(), ImageLoraUiItem::id)
+        val restoredLoras = snapshot?.loras.orEmpty().filter { draft -> draft.id in availableLoraIds }
+        imageLoraDraftJson = imageLoraDraftsToJson(
+            if (model.supportsImageLora) restoredLoras else emptyList()
+        )
+        val missingLoraCount = snapshot?.loras.orEmpty().size - restoredLoras.size
+        imageLoraRestoreWarning = when {
+            !model.supportsImageLora && snapshot?.loras?.isNotEmpty() == true ->
+                "当前模型不支持 LoRA，已停用之前保存的选择。"
+            missingLoraCount > 0 ->
+                "之前选择的 $missingLoraCount 个 LoRA 已删除，请重新导入后选择。"
+            else -> null
+        }
         val restoredInputUri = persistedGenerationImageUriOrNull(context, snapshot?.inputImageUri)
         val restoredMaskUri = persistedGenerationImageUriOrNull(context, snapshot?.maskImageUri)
         val restoredControlUri = persistedGenerationImageUriOrNull(context, snapshot?.controlImageUri)
@@ -660,6 +1204,7 @@ fun ChatScreen(
     }
     LaunchedEffect(
         state.selectedImageModelId,
+        selectedImageModelChoice,
         restoredImageParameterModelId,
         imageTaskModeName,
         imageStrengthText,
@@ -675,11 +1220,13 @@ fun ChatScreen(
         imageCfgScaleText,
         imageSeedText,
         imageSampler,
+        imageLoraDraftJson,
         imageInputUri,
         imageMaskUri,
         imageControlUri
     ) {
         val modelId = state.selectedImageModelId ?: return@LaunchedEffect
+        val model = selectedImageModelChoice ?: return@LaunchedEffect
         if (restoredImageParameterModelId != modelId) return@LaunchedEffect
         val snapshot = ImageGenerationUiParameterSnapshot(
             taskModeName = imageTaskModeName,
@@ -696,16 +1243,51 @@ fun ChatScreen(
             cfgScaleText = imageCfgScaleText,
             seedText = imageSeedText,
             sampler = imageSampler,
+            loras = imageLoraDraftsFromJson(imageLoraDraftJson),
             inputImageUri = imageInputUri,
             maskImageUri = imageMaskUri,
             controlImageUri = imageControlUri
+        ).normalizedForImageModel(model)
+        if (!model.cloud && model.imageMinWidth == model.imageMaxWidth &&
+            imageWidthText != snapshot.widthText
+        ) {
+            imageWidthText = snapshot.widthText
+        }
+        if (!model.cloud && model.imageMinHeight == model.imageMaxHeight &&
+            imageHeightText != snapshot.heightText
+        ) {
+            imageHeightText = snapshot.heightText
+        }
+        val committedReferencedUris = setOfNotNull(
+            snapshot.inputImageUri,
+            snapshot.maskImageUri,
+            snapshot.controlImageUri
         )
-        imageParameterPreferences.edit()
-            .putString(
-                IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX + modelId,
-                snapshot.toJson().toString()
-            )
-            .apply()
+        val pendingUriEpochsEligibleForPrune = pendingGenerationImageGrantUriEpochsSnapshot()
+        withContext(Dispatchers.IO) {
+            generationImageGrantMutex.withLock {
+                check(
+                    imageParameterPreferences.edit()
+                        .putString(
+                            IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX + modelId,
+                            snapshot.toJson().toString()
+                        )
+                        .commit()
+                ) { "Unable to persist image generation UI parameters." }
+                reconcileGenerationImageUriGrants(
+                    context = context.applicationContext,
+                    preferences = imageParameterPreferences,
+                    currentImageModelIds = currentImageModelIds,
+                    deferRelease = state.deferGenerationImageGrantRelease,
+                    releaseOwnedUrisIfCoordinatorIdle =
+                        releaseGenerationImageGrantsIfCoordinatorIdle,
+                    libraryHistoryReferencedUris = libraryHistoryGenerationImageUris,
+                    transientReferencedUris = transientGenerationImageUris,
+                    committedReferencedUris = committedReferencedUris,
+                    pendingUriEpochsEligibleForPrune = pendingUriEpochsEligibleForPrune
+                )
+            }
+        }
     }
     LaunchedEffect(
         state.selectedImageModelId,
@@ -713,6 +1295,8 @@ fun ChatScreen(
         supportsImageNegativePrompt,
         supportsImageClipSkip,
         supportsImageVaeTiling,
+        supportsImageLora,
+        state.imageLoras.map(ImageLoraUiItem::id),
         maxImageBatchCount
     ) {
         if (imageTaskMode !in selectedImageTaskModes) {
@@ -730,6 +1314,19 @@ fun ChatScreen(
         }
         if (!supportsImageClipSkip) imageClipSkipText = ""
         if (!supportsImageVaeTiling) imageVaeTilingEnabled = false
+        val availableLoraIds = state.imageLoras.mapTo(mutableSetOf(), ImageLoraUiItem::id)
+        val currentLoras = imageLoraDraftsFromJson(imageLoraDraftJson)
+        val retainedLoras = if (supportsImageLora) {
+            currentLoras.filter { draft -> draft.id in availableLoraIds }
+        } else {
+            emptyList()
+        }
+        if (retainedLoras != currentLoras) {
+            imageLoraDraftJson = imageLoraDraftsToJson(retainedLoras)
+            if (supportsImageLora && currentLoras.isNotEmpty()) {
+                imageLoraRestoreWarning = "所选 LoRA 已删除，请重新导入后选择。"
+            }
+        }
         imageBatchCount = imageBatchCount.coerceIn(1, maxImageBatchCount)
     }
     fun enqueueImagePrompt(prompt: String) {
@@ -771,7 +1368,10 @@ fun ChatScreen(
         } else {
             null
         }
-        if (imageClipSkipText.isNotBlank() && (clipSkipValue == null || clipSkipValue !in -1..32)) {
+        if (supportsImageClipSkip &&
+            imageClipSkipText.isNotBlank() &&
+            (clipSkipValue == null || clipSkipValue !in -1..32)
+        ) {
             Toast.makeText(context, "CLIP skip 必须为 -1 或 0-32", Toast.LENGTH_SHORT).show()
             return
         }
@@ -820,6 +1420,31 @@ fun ChatScreen(
             Toast.makeText(context, "请选择当前模型支持的采样器", Toast.LENGTH_SHORT).show()
             return
         }
+        val loraSelections = if (supportsImageLora) {
+            val availableIds = state.imageLoras.mapTo(mutableSetOf(), ImageLoraUiItem::id)
+            val drafts = imageLoraDraftsFromJson(imageLoraDraftJson)
+            if (drafts.any { it.id !in availableIds }) {
+                Toast.makeText(context, "所选 LoRA 已删除，请重新选择", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val invalid = drafts.firstOrNull { draft ->
+                val value = draft.multiplierText.toDoubleOrNull()
+                value == null || !value.isFinite() || value !in -4.0..4.0 ||
+                    kotlin.math.abs(value) < 0.01
+            }
+            if (invalid != null) {
+                Toast.makeText(context, "LoRA 倍率必须在 [-4, -0.01] 或 [0.01, 4]", Toast.LENGTH_SHORT).show()
+                return
+            }
+            drafts.map { draft ->
+                ImageGenerationUiLoraSelection(
+                    id = draft.id,
+                    multiplier = requireNotNull(draft.multiplierText.toDoubleOrNull())
+                )
+            }
+        } else {
+            emptyList()
+        }
         onGenerateImagePrompt(
             cleanPrompt,
             ImageGenerationUiOptions(
@@ -845,6 +1470,7 @@ fun ChatScreen(
                 },
                 clipSkip = clipSkipValue,
                 batchCount = imageBatchCount.coerceIn(1, maxImageBatchCount),
+                loras = loraSelections,
                 vaeTileSize = if (supportsImageVaeTiling && imageVaeTilingEnabled) 512 else null,
                 vaeTileOverlap = if (supportsImageVaeTiling && imageVaeTilingEnabled) 0.5 else null,
                 width = widthValue,
@@ -881,6 +1507,14 @@ fun ChatScreen(
             }
             imageInputRestoreWarning = null
         }
+    }
+    val generationLoraPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { selectedUri -> onImportImageLora(selectedUri.toString()) }
+    }
+    val generationUpscalerPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { selectedUri -> onImportImageUpscaler(selectedUri.toString()) }
     }
     val cameraPicker = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
         bitmap?.let { onUploadFile(saveCameraPreview(context, it).toString()) }
@@ -1040,6 +1674,7 @@ fun ChatScreen(
             ) { pageModifier, closePage ->
                 ImagesWorkspaceScreen(
                     images = state.images,
+                    backupState = state.imageLibraryBackup,
                     jobs = state.imageJobs,
                     imageModels = state.imageModels,
                     selectedImageModelId = state.selectedImageModelId,
@@ -1049,6 +1684,17 @@ fun ChatScreen(
                     supportsNegativePrompt = supportsImageNegativePrompt,
                     supportsClipSkip = supportsImageClipSkip,
                     supportsVaeTiling = supportsImageVaeTiling,
+                    supportsLora = supportsImageLora,
+                    loras = state.imageLoras,
+                    selectedLoras = imageLoraDraftsFromJson(imageLoraDraftJson),
+                    loraRestoreWarning = imageLoraRestoreWarning,
+                    loraImporting = state.imageLoraImporting,
+                    loraMessage = state.imageLoraMessage,
+                    upscalers = state.imageUpscalers,
+                    selectedUpscalerId = state.selectedImageUpscalerId,
+                    upscalerImporting = state.imageUpscalerImporting,
+                    upscalerMessage = state.imageUpscalerMessage,
+                    upscaleJob = state.imageUpscaleJob,
                     batchCount = imageBatchCount,
                     maxBatchCount = maxImageBatchCount,
                     taskMode = imageTaskMode,
@@ -1114,6 +1760,36 @@ fun ChatScreen(
                     onDisableModelNegativePromptChange = { imageDisableModelNegativePrompt = it },
                     onClipSkipTextChange = { imageClipSkipText = it },
                     onVaeTilingEnabledChange = { imageVaeTilingEnabled = it },
+                    onToggleLora = { id ->
+                        val current = imageLoraDraftsFromJson(imageLoraDraftJson)
+                        val alreadySelected = current.any { it.id == id }
+                        if (!alreadySelected && current.size >= 8) {
+                            Toast.makeText(context, "单次最多选择 8 个 LoRA", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val next = if (alreadySelected) {
+                                current.filterNot { it.id == id }
+                            } else {
+                                current + ImageGenerationUiLoraDraft(id, "1.0")
+                            }
+                            imageLoraDraftJson = imageLoraDraftsToJson(next)
+                            imageLoraRestoreWarning = null
+                        }
+                    },
+                    onLoraMultiplierChange = { id, value ->
+                        val current = imageLoraDraftsFromJson(imageLoraDraftJson)
+                        imageLoraDraftJson = imageLoraDraftsToJson(
+                            current.map { draft ->
+                                if (draft.id == id) draft.copy(multiplierText = value.take(32)) else draft
+                            }
+                        )
+                    },
+                    onImportLora = { generationLoraPicker.launch(arrayOf("*/*")) },
+                    onDeleteLora = onDeleteImageLora,
+                    onImportUpscaler = { generationUpscalerPicker.launch(arrayOf("*/*")) },
+                    onDeleteUpscaler = onDeleteImageUpscaler,
+                    onSelectUpscaler = onSelectImageUpscaler,
+                    onUpscaleImage = onUpscaleImageAsset,
+                    onCancelUpscale = onCancelImageUpscale,
                     onBatchCountChange = { imageBatchCount = it.coerceIn(1, maxImageBatchCount) },
                     onWidthTextChange = { imageWidthText = it },
                     onHeightTextChange = { imageHeightText = it },
@@ -1127,6 +1803,11 @@ fun ChatScreen(
                         closePage()
                     },
                     onDeleteImageAsset = onDeleteImageAsset,
+                    onDeleteImageAssets = onDeleteImageAssets,
+                    onSetImageAssetFavorite = onSetImageAssetFavorite,
+                    onExportBackup = onExportImageLibraryBackup,
+                    onImportBackup = onImportImageLibraryBackup,
+                    onCancelBackup = onCancelImageLibraryBackup,
                     modifier = pageModifier
                 )
             }
@@ -1822,6 +2503,7 @@ private fun String.toAssistantInt(default: Int, min: Int, max: Int): Int =
 @Composable
 private fun ImagesWorkspaceScreen(
     images: List<ImageAssetUiItem>,
+    backupState: ImageLibraryBackupUiState,
     jobs: List<ImageGenerationUiJob>,
     imageModels: List<ChatModelChoice>,
     selectedImageModelId: String?,
@@ -1831,6 +2513,17 @@ private fun ImagesWorkspaceScreen(
     supportsNegativePrompt: Boolean,
     supportsClipSkip: Boolean,
     supportsVaeTiling: Boolean,
+    supportsLora: Boolean,
+    loras: List<ImageLoraUiItem>,
+    selectedLoras: List<ImageGenerationUiLoraDraft>,
+    loraRestoreWarning: String?,
+    loraImporting: Boolean,
+    loraMessage: String,
+    upscalers: List<ImageUpscalerUiItem>,
+    selectedUpscalerId: String?,
+    upscalerImporting: Boolean,
+    upscalerMessage: String,
+    upscaleJob: ImageUpscaleUiJob?,
     batchCount: Int,
     maxBatchCount: Int,
     taskMode: ImageGenerationUiTaskMode,
@@ -1866,6 +2559,15 @@ private fun ImagesWorkspaceScreen(
     onDisableModelNegativePromptChange: (Boolean) -> Unit,
     onClipSkipTextChange: (String) -> Unit,
     onVaeTilingEnabledChange: (Boolean) -> Unit,
+    onToggleLora: (String) -> Unit,
+    onLoraMultiplierChange: (String, String) -> Unit,
+    onImportLora: () -> Unit,
+    onDeleteLora: (String) -> Unit,
+    onImportUpscaler: () -> Unit,
+    onDeleteUpscaler: (String) -> Unit,
+    onSelectUpscaler: (String) -> Unit,
+    onUpscaleImage: (String, Int) -> Unit,
+    onCancelUpscale: () -> Unit,
     onBatchCountChange: (Int) -> Unit,
     onWidthTextChange: (String) -> Unit,
     onHeightTextChange: (String) -> Unit,
@@ -1876,13 +2578,80 @@ private fun ImagesWorkspaceScreen(
     onSelectImageModel: (String) -> Unit,
     onUseImageAsset: (String) -> Unit,
     onDeleteImageAsset: (String) -> Unit,
+    onDeleteImageAssets: (List<String>) -> Unit,
+    onSetImageAssetFavorite: (String, Boolean) -> Unit,
+    onExportBackup: (String, Boolean) -> Unit,
+    onImportBackup: (String) -> Unit,
+    onCancelBackup: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val darkTheme = isSystemInDarkTheme()
     var showGenerationCanvas by rememberSaveable { mutableStateOf(false) }
     var pendingConversationPrompt by rememberSaveable { mutableStateOf("") }
     var previewImageId by rememberSaveable { mutableStateOf<String?>(null) }
+    var libraryQuery by rememberSaveable { mutableStateOf("") }
+    var favoritesOnly by rememberSaveable { mutableStateOf(false) }
+    var libraryModelId by rememberSaveable { mutableStateOf<String?>(null) }
+    var libraryTaskMode by rememberSaveable { mutableStateOf<String?>(null) }
+    var newestFirst by rememberSaveable { mutableStateOf(true) }
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
+    var selectedImageIds by remember { mutableStateOf(emptySet<String>()) }
+    var pendingDeleteIds by remember { mutableStateOf(emptySet<String>()) }
+    var batchSaving by remember { mutableStateOf(false) }
+    var showBackupDialog by rememberSaveable { mutableStateOf(false) }
+    var backupFavoritesOnly by rememberSaveable { mutableStateOf(false) }
+    val backupExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        uri?.let { onExportBackup(it.toString(), backupFavoritesOnly) }
+    }
+    val backupImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { onImportBackup(it.toString()) }
+    }
+    val libraryModels = remember(images) {
+        images.mapNotNull { image ->
+            image.generationModelId.takeIf(String::isNotBlank)?.let { id ->
+                id to image.generationModelName.ifBlank { id }
+            }
+        }.distinctBy { it.first }
+    }
+    val libraryTaskModes = remember(images) {
+        images.map(ImageAssetUiItem::generationTaskMode)
+            .filter(String::isNotBlank)
+            .distinct()
+    }
+    val filteredImages = remember(
+        images,
+        libraryQuery,
+        favoritesOnly,
+        libraryModelId,
+        libraryTaskMode,
+        newestFirst
+    ) {
+        val query = libraryQuery.trim().lowercase()
+        images.asSequence()
+            .filter { !favoritesOnly || it.favorite }
+            .filter { libraryModelId == null || it.generationModelId == libraryModelId }
+            .filter { libraryTaskMode == null || it.generationTaskMode == libraryTaskMode }
+            .filter { image ->
+                query.isEmpty() || listOf(
+                    image.name,
+                    image.prompt,
+                    image.generationPrompt,
+                    image.generationModelName,
+                    image.generationSampler,
+                    image.generationTaskMode,
+                    "${image.width}x${image.height}"
+                ).any { value -> query in value.lowercase() }
+            }
+            .let { sequence ->
+                if (newestFirst) sequence.toList() else sequence.toList().asReversed()
+            }
+    }
     val latestJob = jobs.firstOrNull()
     val activeJob = if (showGenerationCanvas) latestJob else null
     val activePrompt = activeJob?.prompt ?: pendingConversationPrompt
@@ -1895,6 +2664,13 @@ private fun ImagesWorkspaceScreen(
     val canvasModelId = activeJob?.modelId ?: selectedImageModelId
     val canvasModelName = activeJob?.modelName?.takeIf(String::isNotBlank) ?: selectedImageModelName
     val canvasModelIsCloud = activeJob?.modelIsCloud ?: selectedImageModelIsCloud
+
+    LaunchedEffect(images.map(ImageAssetUiItem::id)) {
+        val available = images.mapTo(mutableSetOf(), ImageAssetUiItem::id)
+        selectedImageIds = selectedImageIds.intersect(available)
+        pendingDeleteIds = pendingDeleteIds.intersect(available)
+        if (selectedImageIds.isEmpty() && images.isEmpty()) selectionMode = false
+    }
 
     BackHandler(enabled = showGenerationCanvas) {
         showGenerationCanvas = false
@@ -1949,7 +2725,18 @@ private fun ImagesWorkspaceScreen(
             )
         } else {
             ImageGalleryHome(
-                images = images,
+                images = filteredImages,
+                totalImageCount = images.size,
+                libraryQuery = libraryQuery,
+                favoritesOnly = favoritesOnly,
+                selectedLibraryModelId = libraryModelId,
+                selectedLibraryTaskMode = libraryTaskMode,
+                newestFirst = newestFirst,
+                libraryModels = libraryModels,
+                libraryTaskModes = libraryTaskModes,
+                selectionMode = selectionMode,
+                selectedImageIds = selectedImageIds,
+                batchSaving = batchSaving,
                 imageModels = imageModels,
                 imageModelSwitchEnabled = jobs.none { it.isWorking },
                 selectedImageModelId = selectedImageModelId,
@@ -1959,6 +2746,12 @@ private fun ImagesWorkspaceScreen(
                 supportsNegativePrompt = supportsNegativePrompt,
                 supportsClipSkip = supportsClipSkip,
                 supportsVaeTiling = supportsVaeTiling,
+                supportsLora = supportsLora,
+                loras = loras,
+                selectedLoras = selectedLoras,
+                loraRestoreWarning = loraRestoreWarning,
+                loraImporting = loraImporting,
+                loraMessage = loraMessage,
                 batchCount = batchCount,
                 maxBatchCount = maxBatchCount,
                 taskMode = taskMode,
@@ -1989,6 +2782,10 @@ private fun ImagesWorkspaceScreen(
                 onDisableModelNegativePromptChange = onDisableModelNegativePromptChange,
                 onClipSkipTextChange = onClipSkipTextChange,
                 onVaeTilingEnabledChange = onVaeTilingEnabledChange,
+                onToggleLora = onToggleLora,
+                onLoraMultiplierChange = onLoraMultiplierChange,
+                onImportLora = onImportLora,
+                onDeleteLora = onDeleteLora,
                 onBatchCountChange = onBatchCountChange,
                 onWidthTextChange = onWidthTextChange,
                 onHeightTextChange = onHeightTextChange,
@@ -1998,7 +2795,64 @@ private fun ImagesWorkspaceScreen(
                 onSamplerChange = onSamplerChange,
                 onPromptChange = onPromptChange,
                 onOpenImagePreview = { previewImageId = it },
-                onDeleteImageAsset = onDeleteImageAsset
+                onDeleteImageAsset = { pendingDeleteIds = setOf(it) },
+                onSetImageAssetFavorite = onSetImageAssetFavorite,
+                onLibraryQueryChange = { libraryQuery = it },
+                onFavoritesOnlyChange = { favoritesOnly = it },
+                onLibraryModelChange = { libraryModelId = it },
+                onLibraryTaskModeChange = { libraryTaskMode = it },
+                onNewestFirstChange = { newestFirst = it },
+                onSelectionModeChange = { enabled ->
+                    selectionMode = enabled
+                    if (!enabled) selectedImageIds = emptySet()
+                },
+                onToggleImageSelection = { imageId ->
+                    selectedImageIds = if (imageId in selectedImageIds) {
+                        selectedImageIds - imageId
+                    } else {
+                        selectedImageIds + imageId
+                    }
+                },
+                onSelectAllVisible = {
+                    val visibleIds = filteredImages.mapTo(mutableSetOf(), ImageAssetUiItem::id)
+                    selectedImageIds = if (
+                        visibleIds.isNotEmpty() && visibleIds.all(selectedImageIds::contains)
+                    ) {
+                        selectedImageIds - visibleIds
+                    } else {
+                        selectedImageIds + visibleIds
+                    }
+                },
+                onBatchSave = {
+                    val selected = images.filter { it.id in selectedImageIds }
+                    if (selected.isNotEmpty() && !batchSaving) {
+                        scope.launch {
+                            batchSaving = true
+                            try {
+                                val failures = withContext(Dispatchers.IO) {
+                                    selected.count { image ->
+                                        downloadImageAssetToGallery(context, image).isFailure
+                                    }
+                                }
+                                Toast.makeText(
+                                    context,
+                                    if (failures == 0) {
+                                        "已保存 ${selected.size} 张图片"
+                                    } else {
+                                        "已保存 ${selected.size - failures} 张，失败 $failures 张"
+                                    },
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            } finally {
+                                batchSaving = false
+                            }
+                        }
+                    }
+                },
+                onBatchDelete = {
+                    if (selectedImageIds.isNotEmpty()) pendingDeleteIds = selectedImageIds
+                },
+                onOpenBackup = { showBackupDialog = true }
             )
         }
 
@@ -2028,18 +2882,107 @@ private fun ImagesWorkspaceScreen(
 
         previewImageId?.let { imageId ->
             images.firstOrNull { it.id == imageId }?.let { image ->
+                val sourcePresetFields = image.generationPreset
+                    ?.let(::availableImageGenerationPresetFields)
+                    .orEmpty()
+                val reusablePresetFields = image.generationPreset?.let { preset ->
+                    compatibleImageGenerationPresetFields(
+                        preset = preset,
+                        selectedModel = imageModels.firstOrNull { it.id == selectedImageModelId },
+                        selectedModelIsCloud = selectedImageModelIsCloud,
+                        supportsNegativePrompt = supportsNegativePrompt,
+                        supportsClipSkip = supportsClipSkip,
+                        supportsVaeTiling = supportsVaeTiling,
+                        supportsLora = supportsLora,
+                        availableLoraIds = loras.mapTo(mutableSetOf(), ImageLoraUiItem::id),
+                        maxBatchCount = maxBatchCount
+                    )
+                }.orEmpty()
                 ImageAssetPreviewOverlay(
                     image = image,
+                    upscalers = upscalers,
+                    selectedUpscalerId = selectedUpscalerId,
+                    upscalerImporting = upscalerImporting,
+                    upscalerMessage = upscalerMessage,
+                    upscaleJob = upscaleJob,
                     onDismiss = { previewImageId = null },
                     onShare = {
-                        shareImageAsset(context, image)
-                            .onFailure { error ->
-                                Toast.makeText(context, error.message ?: "图片分享失败", Toast.LENGTH_SHORT).show()
+                        scope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                createCachedImageShareIntent(context, image)
                             }
+                            result
+                                .mapCatching { intent -> context.startActivity(intent) }
+                                .onFailure { error ->
+                                    Toast.makeText(
+                                        context,
+                                        error.message?.takeIf(String::isNotBlank) ?: "图片分享失败",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                        }
                     },
                     onDelete = {
-                        onDeleteImageAsset(image.id)
+                        pendingDeleteIds = setOf(image.id)
+                    },
+                    onImportUpscaler = onImportUpscaler,
+                    onDeleteUpscaler = onDeleteUpscaler,
+                    onSelectUpscaler = onSelectUpscaler,
+                    onUpscale = { scale -> onUpscaleImage(image.id, scale) },
+                    onCancelUpscale = onCancelUpscale,
+                    onSetFavorite = { favorite -> onSetImageAssetFavorite(image.id, favorite) },
+                    reusablePresetFields = reusablePresetFields,
+                    hiddenPresetFieldCount = sourcePresetFields.size - reusablePresetFields.size,
+                    onUseParameters = { preset, fields ->
+                        if (ImageGenerationPresetField.PROMPT in fields) {
+                            onPromptChange(preset.prompt)
+                        }
+                        if (ImageGenerationPresetField.NEGATIVE_PROMPT in fields) {
+                            onNegativePromptChange(preset.negativePrompt.orEmpty())
+                            onDisableModelNegativePromptChange(preset.negativePrompt == "")
+                        }
+                        if (ImageGenerationPresetField.SIZE in fields) {
+                            preset.width?.let { onWidthTextChange(it.toString()) }
+                            preset.height?.let { onHeightTextChange(it.toString()) }
+                        }
+                        if (ImageGenerationPresetField.STEPS in fields) {
+                            preset.steps?.let { onStepsTextChange(it.toString()) }
+                        }
+                        if (ImageGenerationPresetField.CFG in fields) {
+                            preset.cfgScale?.let { onCfgScaleTextChange(it.toString()) }
+                        }
+                        if (ImageGenerationPresetField.SEED in fields) {
+                            preset.seed?.let { onSeedTextChange(it.toString()) }
+                        }
+                        if (ImageGenerationPresetField.SAMPLER in fields) {
+                            val selectedModel = imageModels.firstOrNull { it.id == selectedImageModelId }
+                            preset.sampleMethod
+                                ?.takeIf { selectedModel?.imageSupportedSamplers?.contains(it) != false }
+                                ?.let(onSamplerChange)
+                        }
+                        if (ImageGenerationPresetField.CLIP_SKIP in fields && supportsClipSkip) {
+                            preset.clipSkip?.let { onClipSkipTextChange(it.toString()) }
+                        }
+                        if (ImageGenerationPresetField.BATCH in fields) {
+                            preset.batchCount?.let { onBatchCountChange(it.coerceIn(1, maxBatchCount)) }
+                        }
+                        if (ImageGenerationPresetField.VAE_TILING in fields && supportsVaeTiling) {
+                            onVaeTilingEnabledChange(preset.vaeTileSize != null)
+                        }
+                        if (ImageGenerationPresetField.LORA in fields && supportsLora) {
+                            val desiredIds = preset.loras.mapTo(mutableSetOf(), ImageGenerationUiLoraSelection::id)
+                            selectedLoras
+                                .filterNot { draft -> draft.id in desiredIds }
+                                .forEach { draft -> onToggleLora(draft.id) }
+                            preset.loras.forEach { selection ->
+                                if (selectedLoras.none { draft -> draft.id == selection.id }) {
+                                    onToggleLora(selection.id)
+                                }
+                                onLoraMultiplierChange(selection.id, selection.multiplier.toString())
+                            }
+                        }
                         previewImageId = null
+                        Toast.makeText(context, "已将所选参数应用到生成面板", Toast.LENGTH_SHORT).show()
                     },
                     onRecreate = {
                         pendingConversationPrompt = image.generationPrompt.ifBlank { image.prompt }
@@ -2053,6 +2996,192 @@ private fun ImagesWorkspaceScreen(
             }
         }
     }
+    if (pendingDeleteIds.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { pendingDeleteIds = emptySet() },
+            title = { Text(if (pendingDeleteIds.size == 1) "删除图片" else "批量删除") },
+            text = {
+                Text(
+                    if (pendingDeleteIds.size == 1) {
+                        "确定删除这张图片吗？此操作无法撤销。"
+                    } else {
+                        "确定删除选中的 ${pendingDeleteIds.size} 张图片吗？此操作无法撤销。"
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val ids = pendingDeleteIds.toList()
+                        if (ids.size == 1) onDeleteImageAsset(ids.single())
+                        else onDeleteImageAssets(ids)
+                        if (previewImageId?.let(pendingDeleteIds::contains) == true) {
+                            previewImageId = null
+                        }
+                        selectedImageIds = selectedImageIds - pendingDeleteIds
+                        pendingDeleteIds = emptySet()
+                        if (selectedImageIds.isEmpty()) selectionMode = false
+                    }
+                ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteIds = emptySet() }) { Text("取消") }
+            }
+        )
+    }
+    if (showBackupDialog) {
+        ImageLibraryBackupDialog(
+            state = backupState,
+            totalCount = images.size,
+            totalBytes = images.sumOf(ImageAssetUiItem::sizeBytes),
+            favoriteCount = images.count(ImageAssetUiItem::favorite),
+            favoriteBytes = images.asSequence()
+                .filter(ImageAssetUiItem::favorite)
+                .sumOf(ImageAssetUiItem::sizeBytes),
+            favoritesOnly = backupFavoritesOnly,
+            onFavoritesOnlyChange = { backupFavoritesOnly = it },
+            onExport = {
+                val timestamp = java.text.SimpleDateFormat(
+                    "yyyyMMdd_HHmmss",
+                    java.util.Locale.US
+                ).format(java.util.Date())
+                backupExportLauncher.launch("MCA_image_library_$timestamp.zip")
+            },
+            onImport = {
+                backupImportLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+            },
+            onCancel = onCancelBackup,
+            onDismiss = { if (!backupState.running) showBackupDialog = false }
+        )
+    }
+}
+
+@Composable
+private fun ImageLibraryBackupDialog(
+    state: ImageLibraryBackupUiState,
+    totalCount: Int,
+    totalBytes: Long,
+    favoriteCount: Int,
+    favoriteBytes: Long,
+    favoritesOnly: Boolean,
+    onFavoritesOnlyChange: (Boolean) -> Unit,
+    onExport: () -> Unit,
+    onImport: () -> Unit,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { if (!state.running) onDismiss() },
+        title = { Text("图片库备份与恢复") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "导出会保存图片、生成参数和收藏状态；恢复会与当前图片库合并，不会覆盖未知设备或未安装模型的历史。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "全部：$totalCount 张 · ${formatImageLibraryBytes(totalBytes)}\n" +
+                        "收藏：$favoriteCount 张 · ${formatImageLibraryBytes(favoriteBytes)}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                if (!state.running) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = !favoritesOnly,
+                            onClick = { onFavoritesOnlyChange(false) },
+                            label = { Text("导出全部") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = favoritesOnly,
+                            onClick = { onFavoritesOnlyChange(true) },
+                            label = { Text("仅导出收藏") },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                if (state.running) {
+                    if (state.total > 0) {
+                        LinearProgressIndicator(
+                            progress = { state.done.coerceIn(0, state.total).toFloat() / state.total },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    Text(
+                        if (state.importing) {
+                            "正在恢复 ${state.done}/${state.total}"
+                        } else {
+                            "正在导出 ${state.done}/${state.total}"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    if (state.message.isNotBlank()) {
+                        Text(
+                            state.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (state.failed) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onExport,
+                            enabled = if (favoritesOnly) favoriteCount > 0 else totalCount > 0,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("导出 ZIP")
+                        }
+                        Button(
+                            onClick = onImport,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("合并恢复")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (state.running) {
+                TextButton(onClick = onCancel) { Text("取消") }
+            } else {
+                TextButton(onClick = onDismiss) { Text("关闭") }
+            }
+        }
+    )
+}
+
+private fun formatImageLibraryBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB")
+    var value = bytes.toDouble()
+    var index = 0
+    while (value >= 1024.0 && index < units.lastIndex) {
+        value /= 1024.0
+        index++
+    }
+    return if (index == 0) {
+        "${value.toLong()} ${units[index]}"
+    } else {
+        "${"%.1f".format(value)} ${units[index]}"
+    }
 }
 
 private val ImageGenerationUiJob.isWorking: Boolean
@@ -2061,6 +3190,17 @@ private val ImageGenerationUiJob.isWorking: Boolean
 @Composable
 private fun ImageGalleryHome(
     images: List<ImageAssetUiItem>,
+    totalImageCount: Int,
+    libraryQuery: String,
+    favoritesOnly: Boolean,
+    selectedLibraryModelId: String?,
+    selectedLibraryTaskMode: String?,
+    newestFirst: Boolean,
+    libraryModels: List<Pair<String, String>>,
+    libraryTaskModes: List<String>,
+    selectionMode: Boolean,
+    selectedImageIds: Set<String>,
+    batchSaving: Boolean,
     imageModels: List<ChatModelChoice>,
     imageModelSwitchEnabled: Boolean,
     selectedImageModelId: String?,
@@ -2070,6 +3210,12 @@ private fun ImageGalleryHome(
     supportsNegativePrompt: Boolean,
     supportsClipSkip: Boolean,
     supportsVaeTiling: Boolean,
+    supportsLora: Boolean,
+    loras: List<ImageLoraUiItem>,
+    selectedLoras: List<ImageGenerationUiLoraDraft>,
+    loraRestoreWarning: String?,
+    loraImporting: Boolean,
+    loraMessage: String,
     batchCount: Int,
     maxBatchCount: Int,
     taskMode: ImageGenerationUiTaskMode,
@@ -2100,6 +3246,10 @@ private fun ImageGalleryHome(
     onDisableModelNegativePromptChange: (Boolean) -> Unit,
     onClipSkipTextChange: (String) -> Unit,
     onVaeTilingEnabledChange: (Boolean) -> Unit,
+    onToggleLora: (String) -> Unit,
+    onLoraMultiplierChange: (String, String) -> Unit,
+    onImportLora: () -> Unit,
+    onDeleteLora: (String) -> Unit,
     onBatchCountChange: (Int) -> Unit,
     onWidthTextChange: (String) -> Unit,
     onHeightTextChange: (String) -> Unit,
@@ -2109,11 +3259,22 @@ private fun ImageGalleryHome(
     onSamplerChange: (String) -> Unit,
     onPromptChange: (String) -> Unit,
     onOpenImagePreview: (String) -> Unit,
-    onDeleteImageAsset: (String) -> Unit
+    onDeleteImageAsset: (String) -> Unit,
+    onSetImageAssetFavorite: (String, Boolean) -> Unit,
+    onLibraryQueryChange: (String) -> Unit,
+    onFavoritesOnlyChange: (Boolean) -> Unit,
+    onLibraryModelChange: (String?) -> Unit,
+    onLibraryTaskModeChange: (String?) -> Unit,
+    onNewestFirstChange: (Boolean) -> Unit,
+    onSelectionModeChange: (Boolean) -> Unit,
+    onToggleImageSelection: (String) -> Unit,
+    onSelectAllVisible: () -> Unit,
+    onBatchSave: () -> Unit,
+    onBatchDelete: () -> Unit,
+    onOpenBackup: () -> Unit
 ) {
     val darkTheme = isSystemInDarkTheme()
     val titleColor = if (darkTheme) MaterialTheme.colorScheme.onBackground else Color(0xFF202124)
-    val emptyTileColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1)
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -2141,6 +3302,12 @@ private fun ImageGalleryHome(
                 supportsNegativePrompt = supportsNegativePrompt,
                 supportsClipSkip = supportsClipSkip,
                 supportsVaeTiling = supportsVaeTiling,
+                supportsLora = supportsLora,
+                loras = loras,
+                selectedLoras = selectedLoras,
+                loraRestoreWarning = loraRestoreWarning,
+                loraImporting = loraImporting,
+                loraMessage = loraMessage,
                 batchCount = batchCount,
                 maxBatchCount = maxBatchCount,
                 inputImageUri = inputImageUri,
@@ -2168,6 +3335,10 @@ private fun ImageGalleryHome(
                 onDisableModelNegativePromptChange = onDisableModelNegativePromptChange,
                 onClipSkipTextChange = onClipSkipTextChange,
                 onVaeTilingEnabledChange = onVaeTilingEnabledChange,
+                onToggleLora = onToggleLora,
+                onLoraMultiplierChange = onLoraMultiplierChange,
+                onImportLora = onImportLora,
+                onDeleteLora = onDeleteLora,
                 onBatchCountChange = onBatchCountChange,
                 onWidthTextChange = onWidthTextChange,
                 onHeightTextChange = onHeightTextChange,
@@ -2213,17 +3384,53 @@ private fun ImageGalleryHome(
                 color = titleColor
             )
         }
+        item {
+            ImageLibraryToolbar(
+                query = libraryQuery,
+                resultCount = images.size,
+                totalCount = totalImageCount,
+                favoritesOnly = favoritesOnly,
+                selectedModelId = selectedLibraryModelId,
+                selectedTaskMode = selectedLibraryTaskMode,
+                newestFirst = newestFirst,
+                models = libraryModels,
+                taskModes = libraryTaskModes,
+                selectionMode = selectionMode,
+                selectedCount = selectedImageIds.size,
+                batchSaving = batchSaving,
+                allVisibleSelected = images.isNotEmpty() && images.all { it.id in selectedImageIds },
+                onQueryChange = onLibraryQueryChange,
+                onFavoritesOnlyChange = onFavoritesOnlyChange,
+                onModelChange = onLibraryModelChange,
+                onTaskModeChange = onLibraryTaskModeChange,
+                onNewestFirstChange = onNewestFirstChange,
+                onSelectionModeChange = onSelectionModeChange,
+                onSelectAllVisible = onSelectAllVisible,
+                onBatchSave = onBatchSave,
+                onBatchDelete = onBatchDelete,
+                onOpenBackup = onOpenBackup
+            )
+        }
         if (images.isEmpty()) {
-            items(2) {
-                Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    repeat(3) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(112.dp)
-                                .background(emptyTileColor)
-                        )
-                    }
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = if (favoritesOnly) Icons.Default.FavoriteBorder else Icons.Default.Image,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(30.dp)
+                    )
+                    Text(
+                        if (totalImageCount == 0) "生成完成的图片会自动保存在这里" else "没有符合当前筛选条件的图片",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         } else {
@@ -2232,21 +3439,226 @@ private fun ImageGalleryHome(
                     row.forEach { image ->
                         ImageAssetTile(
                             image = image,
-                            onOpen = { onOpenImagePreview(image.id) },
-                            onDelete = { onDeleteImageAsset(image.id) },
+                            selected = image.id in selectedImageIds,
+                            selectionMode = selectionMode,
+                            onOpen = {
+                                if (selectionMode) onToggleImageSelection(image.id)
+                                else onOpenImagePreview(image.id)
+                            },
+                            onLongPress = {
+                                if (!selectionMode) onSelectionModeChange(true)
+                                onToggleImageSelection(image.id)
+                            },
+                            onToggleFavorite = {
+                                onSetImageAssetFavorite(image.id, !image.favorite)
+                            },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(118.dp)
+                                .aspectRatio(1f)
                         )
                     }
                     repeat(3 - row.size) {
                         Spacer(
                             modifier = Modifier
                                 .weight(1f)
-                                .height(118.dp)
+                                .aspectRatio(1f)
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImageLibraryToolbar(
+    query: String,
+    resultCount: Int,
+    totalCount: Int,
+    favoritesOnly: Boolean,
+    selectedModelId: String?,
+    selectedTaskMode: String?,
+    newestFirst: Boolean,
+    models: List<Pair<String, String>>,
+    taskModes: List<String>,
+    selectionMode: Boolean,
+    selectedCount: Int,
+    batchSaving: Boolean,
+    allVisibleSelected: Boolean,
+    onQueryChange: (String) -> Unit,
+    onFavoritesOnlyChange: (Boolean) -> Unit,
+    onModelChange: (String?) -> Unit,
+    onTaskModeChange: (String?) -> Unit,
+    onNewestFirstChange: (Boolean) -> Unit,
+    onSelectionModeChange: (Boolean) -> Unit,
+    onSelectAllVisible: () -> Unit,
+    onBatchSave: () -> Unit,
+    onBatchDelete: () -> Unit,
+    onOpenBackup: () -> Unit
+) {
+    var showModelMenu by remember { mutableStateOf(false) }
+    var showTaskMenu by remember { mutableStateOf(false) }
+    val selectedModelLabel = models.firstOrNull { it.first == selectedModelId }?.second
+    val selectedTaskLabel = ImageGenerationUiTaskMode.entries
+        .firstOrNull { it.wireName == selectedTaskMode }
+        ?.label
+        ?: selectedTaskMode
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            label = { Text("搜索图片、提示词或模型") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            trailingIcon = if (query.isNotEmpty()) {
+                {
+                    IconButton(onClick = { onQueryChange("") }) {
+                        Icon(Icons.Default.Close, contentDescription = "清空搜索")
+                    }
+                }
+            } else {
+                null
+            },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = favoritesOnly,
+                onClick = { onFavoritesOnlyChange(!favoritesOnly) },
+                label = { Text("收藏") },
+                leadingIcon = {
+                    Icon(
+                        if (favoritesOnly) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            )
+            if (models.isNotEmpty()) {
+                Box {
+                    FilterChip(
+                        selected = selectedModelId != null,
+                        onClick = { showModelMenu = true },
+                        label = { Text(selectedModelLabel ?: "模型") },
+                        leadingIcon = {
+                            Icon(Icons.Default.FilterList, contentDescription = null, modifier = Modifier.size(18.dp))
+                        }
+                    )
+                    DropdownMenu(
+                        expanded = showModelMenu,
+                        onDismissRequest = { showModelMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("全部模型") },
+                            onClick = {
+                                onModelChange(null)
+                                showModelMenu = false
+                            }
+                        )
+                        models.forEach { (id, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    onModelChange(id)
+                                    showModelMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            if (taskModes.isNotEmpty()) {
+                Box {
+                    FilterChip(
+                        selected = selectedTaskMode != null,
+                        onClick = { showTaskMenu = true },
+                        label = { Text(selectedTaskLabel ?: "模式") }
+                    )
+                    DropdownMenu(
+                        expanded = showTaskMenu,
+                        onDismissRequest = { showTaskMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("全部模式") },
+                            onClick = {
+                                onTaskModeChange(null)
+                                showTaskMenu = false
+                            }
+                        )
+                        taskModes.forEach { mode ->
+                            val label = ImageGenerationUiTaskMode.entries
+                                .firstOrNull { it.wireName == mode }
+                                ?.label
+                                ?: mode
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    onTaskModeChange(mode)
+                                    showTaskMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            FilterChip(
+                selected = !newestFirst,
+                onClick = { onNewestFirstChange(!newestFirst) },
+                label = { Text(if (newestFirst) "最新优先" else "最早优先") }
+            )
+            FilterChip(
+                selected = selectionMode,
+                onClick = { onSelectionModeChange(!selectionMode) },
+                label = { Text(if (selectionMode) "完成选择" else "选择") }
+            )
+        }
+        if (selectionMode) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "已选 $selectedCount 张",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    TextButton(onClick = onSelectAllVisible, enabled = resultCount > 0 && !batchSaving) {
+                        Text(if (allVisibleSelected) "取消全选" else "全选结果")
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = onBatchSave, enabled = selectedCount > 0 && !batchSaving) {
+                        Text(if (batchSaving) "保存中…" else "保存")
+                    }
+                    TextButton(onClick = onBatchDelete, enabled = selectedCount > 0 && !batchSaving) {
+                        Text("删除", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (resultCount == totalCount) "$totalCount 张图片" else "$resultCount / $totalCount 张图片",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            TextButton(onClick = onOpenBackup) {
+                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("备份与恢复")
             }
         }
     }
@@ -2261,6 +3673,12 @@ private fun ImageInputOptionsPanel(
     supportsNegativePrompt: Boolean,
     supportsClipSkip: Boolean,
     supportsVaeTiling: Boolean,
+    supportsLora: Boolean,
+    loras: List<ImageLoraUiItem>,
+    selectedLoras: List<ImageGenerationUiLoraDraft>,
+    loraRestoreWarning: String?,
+    loraImporting: Boolean,
+    loraMessage: String,
     batchCount: Int,
     maxBatchCount: Int,
     inputImageUri: String?,
@@ -2288,6 +3706,10 @@ private fun ImageInputOptionsPanel(
     onDisableModelNegativePromptChange: (Boolean) -> Unit,
     onClipSkipTextChange: (String) -> Unit,
     onVaeTilingEnabledChange: (Boolean) -> Unit,
+    onToggleLora: (String) -> Unit,
+    onLoraMultiplierChange: (String, String) -> Unit,
+    onImportLora: () -> Unit,
+    onDeleteLora: (String) -> Unit,
     onBatchCountChange: (Int) -> Unit,
     onWidthTextChange: (String) -> Unit,
     onHeightTextChange: (String) -> Unit,
@@ -2297,10 +3719,24 @@ private fun ImageInputOptionsPanel(
     onSamplerChange: (String) -> Unit
 ) {
     val darkTheme = isSystemInDarkTheme()
-    Surface(
-        color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF6F8FC),
-        shape = RoundedCornerShape(20.dp)
-    ) {
+    val selectedLoraById = selectedLoras.associateBy(ImageGenerationUiLoraDraft::id)
+    val loraSelectionLimitReached = selectedLoras.size >= 8
+    var pendingLoraDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
+    var advancedParametersExpanded by rememberSaveable(
+        executionModel?.id,
+        selectedModelIsCloud
+    ) { mutableStateOf(false) }
+    LaunchedEffect(pendingLoraDeleteId, loras) {
+        val pendingId = pendingLoraDeleteId ?: return@LaunchedEffect
+        if (loras.none { adapter -> adapter.id == pendingId && !adapter.inUse }) {
+            pendingLoraDeleteId = null
+        }
+    }
+    Box {
+        Surface(
+            color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF6F8FC),
+            shape = RoundedCornerShape(20.dp)
+        ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2357,32 +3793,106 @@ private fun ImageInputOptionsPanel(
                     ImageStrengthField("控制强度 [0-2]", controlStrengthText, onControlStrengthTextChange)
                 }
             }
+            val parameterSummary = if (!selectedModelIsCloud && executionModel != null) {
+                buildString {
+                    append(widthText)
+                    append('×')
+                    append(heightText)
+                    append(" · ")
+                    append(stepsText)
+                    append(" 步 · CFG ")
+                    append(cfgScaleText)
+                    append(" · ")
+                    append(if (seedText.isBlank()) "随机 seed" else "seed $seedText")
+                    if (batchCount > 1) append(" · ${batchCount} 张")
+                }
+            } else {
+                "负面提示词、批量与高级控制"
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .semantics(mergeDescendants = true) {
+                        stateDescription = if (advancedParametersExpanded) "已展开" else "已收起"
+                    }
+                    .clickable(
+                        role = SemanticsRole.Button,
+                        onClickLabel = if (advancedParametersExpanded) {
+                            "收起生成参数"
+                        } else {
+                            "展开生成参数"
+                        }
+                    ) {
+                        advancedParametersExpanded = !advancedParametersExpanded
+                    }
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "生成参数",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        parameterSummary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Icon(
+                    imageVector = if (advancedParametersExpanded) {
+                        Icons.Default.KeyboardArrowUp
+                    } else {
+                        Icons.Default.KeyboardArrowDown
+                    },
+                    contentDescription = null
+                )
+            }
+            if (advancedParametersExpanded) {
             if (!selectedModelIsCloud && executionModel != null) {
-                Text("生成参数", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                val fixedWidth = executionModel.imageMinWidth == executionModel.imageMaxWidth
+                val fixedHeight = executionModel.imageMinHeight == executionModel.imageMaxHeight
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     OutlinedTextField(
                         value = widthText,
-                        onValueChange = onWidthTextChange,
+                        onValueChange = { value -> if (!fixedWidth) onWidthTextChange(value) },
                         label = { Text("宽度") },
                         supportingText = {
-                            Text("${executionModel.imageMinWidth}-${executionModel.imageMaxWidth} / ${executionModel.imageWidthMultiple}")
+                            Text(
+                                if (fixedWidth) {
+                                    "模型固定尺寸"
+                                } else {
+                                    "${executionModel.imageMinWidth}-${executionModel.imageMaxWidth} / ${executionModel.imageWidthMultiple}"
+                                }
+                            )
                         },
                         singleLine = true,
-                        enabled = executionModel.imageMinWidth != executionModel.imageMaxWidth,
+                        readOnly = fixedWidth,
                         modifier = Modifier.weight(1f)
                     )
                     OutlinedTextField(
                         value = heightText,
-                        onValueChange = onHeightTextChange,
+                        onValueChange = { value -> if (!fixedHeight) onHeightTextChange(value) },
                         label = { Text("高度") },
                         supportingText = {
-                            Text("${executionModel.imageMinHeight}-${executionModel.imageMaxHeight} / ${executionModel.imageHeightMultiple}")
+                            Text(
+                                if (fixedHeight) {
+                                    "模型固定尺寸"
+                                } else {
+                                    "${executionModel.imageMinHeight}-${executionModel.imageMaxHeight} / ${executionModel.imageHeightMultiple}"
+                                }
+                            )
                         },
                         singleLine = true,
-                        enabled = executionModel.imageMinHeight != executionModel.imageMaxHeight,
+                        readOnly = fixedHeight,
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -2440,6 +3950,143 @@ private fun ImageInputOptionsPanel(
                     label = { Text("关闭模型默认负面词") }
                 )
             }
+            if (supportsLora) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "LoRA",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            "最多选择 8 个；倍率可为负值，不能为 0。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    TextButton(onClick = onImportLora, enabled = !loraImporting) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (loraImporting) "导入中…" else "导入")
+                    }
+                }
+                loraRestoreWarning?.let { warning ->
+                    Text(
+                        warning,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                if (loraMessage.isNotBlank()) {
+                    val isError = loraMessage.contains("失败") || loraMessage.contains("无效")
+                    Text(
+                        loraMessage,
+                        color = if (isError) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                if (loras.isEmpty()) {
+                    Text(
+                        "尚未导入 LoRA。支持 .safetensors 与 .ckpt 文件。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else {
+                    loras.forEachIndexed { index, adapter ->
+                        val selection = selectedLoraById[adapter.id]
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FilterChip(
+                                    selected = selection != null,
+                                    onClick = { onToggleLora(adapter.id) },
+                                    enabled = selection != null || !loraSelectionLimitReached,
+                                    label = {
+                                        Text(
+                                            when {
+                                                selection != null -> "已启用"
+                                                loraSelectionLimitReached -> "已达上限"
+                                                else -> "启用"
+                                            }
+                                        )
+                                    }
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        adapter.name,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        "${adapter.sizeText} · ${adapter.sha256.take(10)}…",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { pendingLoraDeleteId = adapter.id },
+                                    enabled = !adapter.inUse && !loraImporting
+                                ) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = if (adapter.inUse) {
+                                            "当前任务使用中，无法删除 ${adapter.name}"
+                                        } else {
+                                            "删除 ${adapter.name}"
+                                        },
+                                        tint = if (adapter.inUse) {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        } else {
+                                            MaterialTheme.colorScheme.error
+                                        }
+                                    )
+                                }
+                            }
+                            if (selection != null) {
+                                val multiplier = selection.multiplierText.toDoubleOrNull()
+                                val multiplierValid = multiplier != null && multiplier.isFinite() &&
+                                    multiplier in -4.0..4.0 && kotlin.math.abs(multiplier) >= 0.01
+                                OutlinedTextField(
+                                    value = selection.multiplierText,
+                                    onValueChange = { onLoraMultiplierChange(adapter.id, it) },
+                                    label = { Text("倍率") },
+                                    supportingText = {
+                                        Text(if (multiplierValid) "范围 -4 到 4" else "请输入 [-4, -0.01] 或 [0.01, 4]")
+                                    },
+                                    isError = !multiplierValid,
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            if (adapter.inUse) {
+                                Text(
+                                    "当前图片任务正在使用此 LoRA，任务结束后可删除。",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            if (index != loras.lastIndex) HorizontalDivider()
+                        }
+                    }
+                }
+            }
             if (supportsClipSkip || supportsVaeTiling) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -2485,12 +4132,41 @@ private fun ImageInputOptionsPanel(
                     if (supportsVaeTiling && vaeTilingEnabled) {
                         append(" · VAE 分块 512 / 重叠 0.5")
                     }
+                    if (supportsLora && selectedLoras.isNotEmpty()) {
+                        append(" · LoRA ")
+                        append(selectedLoras.size)
+                    }
                 },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall
             )
+            }
+        }
+        }
+
+        pendingLoraDeleteId?.let { adapterId ->
+            val adapter = loras.firstOrNull { it.id == adapterId }
+            if (adapter != null && !adapter.inUse) {
+                AlertDialog(
+                    onDismissRequest = { pendingLoraDeleteId = null },
+                    title = { Text("删除 LoRA") },
+                    text = { Text("确定删除“${adapter.name}”吗？文件会从本机移除，此操作无法撤销。") },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                pendingLoraDeleteId = null
+                                onDeleteLora(adapter.id)
+                            }
+                        ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingLoraDeleteId = null }) { Text("取消") }
+                    }
+                )
+            }
         }
     }
+
 }
 
 @Composable
@@ -2619,23 +4295,6 @@ private fun ImageGenerationCanvas(
                     }
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                Surface(
-                    color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
-                    shape = CircleShape,
-                    shadowElevation = 7.dp
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(onClick = {}, modifier = Modifier.size(40.dp)) {
-                            Icon(Icons.Default.Edit, contentDescription = "新建图片对话", modifier = Modifier.size(23.dp))
-                        }
-                        IconButton(onClick = {}, modifier = Modifier.size(40.dp)) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "更多", modifier = Modifier.size(24.dp))
-                        }
-                    }
-                }
             }
         }
         item {
@@ -2691,7 +4350,6 @@ private fun ImageAssistantResultCard(
     onCancelGeneration: () -> Unit,
     onUseImageAsset: (String) -> Unit
 ) {
-    val actionTint = MaterialTheme.colorScheme.onSurfaceVariant
     Column(horizontalAlignment = Alignment.Start, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         when (imageAssistantCardKind(job, image)) {
             ImageAssistantCardKind.FAILURE -> ImageGenerationFailureCard(
@@ -2715,17 +4373,6 @@ private fun ImageAssistantResultCard(
                 previewRevision = job?.previewRevision ?: 0L,
                 onCancel = onCancelGeneration
             )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = {}, modifier = Modifier.size(34.dp)) {
-                Icon(Icons.Default.ThumbUp, contentDescription = "喜欢", tint = actionTint, modifier = Modifier.size(20.dp))
-            }
-            IconButton(onClick = {}, modifier = Modifier.size(34.dp)) {
-                Icon(Icons.Default.ThumbDown, contentDescription = "不喜欢", tint = actionTint, modifier = Modifier.size(20.dp))
-            }
-            IconButton(onClick = {}, modifier = Modifier.size(34.dp)) {
-                Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = actionTint, modifier = Modifier.size(22.dp))
-            }
         }
     }
 }
@@ -2920,6 +4567,7 @@ private fun ImageGenerationFailureCard(job: ImageGenerationUiJob, onRetry: () ->
 @Composable
 private fun ImageGenerationResultImage(image: ImageAssetUiItem, onUseImageAsset: (String) -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val darkTheme = isSystemInDarkTheme()
     val bitmap = remember(image.uriString) { loadImageBitmap(context, image.uriString) }
     val ratio = remember(image.width, image.height) {
@@ -2931,8 +4579,8 @@ private fun ImageGenerationResultImage(image: ImageAssetUiItem, onUseImageAsset:
     }
     Box(
         modifier = Modifier
-            .widthIn(max = 336.dp)
-            .fillMaxWidth(0.86f)
+            .widthIn(max = 480.dp)
+            .fillMaxWidth(0.92f)
             .aspectRatio(ratio)
             .clip(RoundedCornerShape(22.dp))
             .background(if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1))
@@ -2970,15 +4618,44 @@ private fun ImageGenerationResultImage(image: ImageAssetUiItem, onUseImageAsset:
                 fontSize = 15.sp
             )
         }
-        Surface(
+        Box(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(16.dp),
-            color = Color.Black.copy(alpha = 0.54f),
-            shape = CircleShape
+                .padding(13.dp)
+                .size(48.dp)
         ) {
-            IconButton(onClick = {}, modifier = Modifier.size(42.dp)) {
-                Icon(Icons.Default.Share, contentDescription = "分享", tint = Color.White, modifier = Modifier.size(22.dp))
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(42.dp),
+                color = Color.Black.copy(alpha = 0.54f),
+                shape = CircleShape
+            ) {}
+            IconButton(
+                onClick = {
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            createCachedImageShareIntent(context, image)
+                        }
+                        result
+                            .mapCatching { intent -> context.startActivity(intent) }
+                            .onFailure { error ->
+                                Toast.makeText(
+                                    context,
+                                    error.message?.takeIf(String::isNotBlank) ?: "图片分享失败",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Icon(
+                    Icons.Default.Share,
+                    contentDescription = "分享图片",
+                    tint = Color.White,
+                    modifier = Modifier.size(22.dp)
+                )
             }
         }
     }
@@ -3007,8 +4684,8 @@ private fun ImageEngineSwitcher(
     var sourceMenuExpanded by rememberSaveable { mutableStateOf(false) }
     var modelMenuSource by rememberSaveable { mutableStateOf<ImageEngineSource?>(null) }
     val selectedSource = if (selectedModelIsCloud) ImageEngineSource.CLOUD else ImageEngineSource.LOCAL
-    val localModels = models.filterNot { it.cloud }.take(3)
-    val cloudModels = models.filter { it.cloud }.take(3)
+    val localModels = models.filterNot { it.cloud }
+    val cloudModels = models.filter { it.cloud }
     LaunchedEffect(enabled) {
         if (!enabled) {
             sourceMenuExpanded = false
@@ -3059,8 +4736,9 @@ private fun ImageEngineSwitcher(
 
         val source = modelMenuSource ?: selectedSource
         val sourceModels = if (source == ImageEngineSource.CLOUD) cloudModels else localModels
-        Box {
+        Box(modifier = Modifier.weight(1f)) {
                 Surface(
+                    modifier = Modifier.fillMaxWidth(),
                     onClick = { modelMenuSource = source },
                     enabled = enabled,
                     color = modelChipColor,
@@ -3070,7 +4748,7 @@ private fun ImageEngineSwitcher(
                 ) {
                     Row(
                         modifier = Modifier
-                            .widthIn(max = 210.dp)
+                            .fillMaxWidth()
                             .padding(horizontal = 13.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -3081,14 +4759,17 @@ private fun ImageEngineSwitcher(
                             overflow = TextOverflow.Ellipsis,
                             color = chipTextColor,
                             fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.weight(1f, fill = false)
+                            modifier = Modifier.weight(1f)
                         )
                         Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = chipMutedColor)
                     }
                 }
                 DropdownMenu(
                     expanded = enabled && modelMenuSource == source,
-                    onDismissRequest = { modelMenuSource = null }
+                    onDismissRequest = { modelMenuSource = null },
+                    modifier = Modifier
+                        .widthIn(min = 220.dp, max = 320.dp)
+                        .heightIn(max = 360.dp)
                 ) {
                     if (sourceModels.isEmpty()) {
                         DropdownMenuItem(
@@ -3322,11 +5003,15 @@ private fun ImageJobRow(job: ImageGenerationUiJob, onRetry: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ImageAssetTile(
     image: ImageAssetUiItem,
+    selected: Boolean,
+    selectionMode: Boolean,
     onOpen: () -> Unit,
-    onDelete: () -> Unit,
+    onLongPress: () -> Unit,
+    onToggleFavorite: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -3336,7 +5021,14 @@ private fun ImageAssetTile(
         modifier = modifier
             .clip(RoundedCornerShape(2.dp))
             .background(if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1))
-            .clickable(onClick = onOpen)
+            .then(
+                if (selected) {
+                    Modifier.border(3.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp))
+                } else {
+                    Modifier
+                }
+            )
+            .combinedClickable(onClick = onOpen, onLongClick = onLongPress)
     ) {
         if (bitmap != null) {
             Image(
@@ -3355,16 +5047,71 @@ private fun ImageAssetTile(
                     .size(28.dp)
             )
         }
-        Surface(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(4.dp)
-                .size(28.dp),
-            color = if (darkTheme) MaterialTheme.colorScheme.surface.copy(alpha = 0.88f) else Color.White.copy(alpha = 0.88f),
-            shape = CircleShape
-        ) {
-            IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "删除图片", modifier = Modifier.size(16.dp), tint = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124))
+        if (image.favorite && !selectionMode) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .size(48.dp)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .padding(6.dp)
+                        .size(28.dp),
+                    color = if (darkTheme) {
+                        MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
+                    } else {
+                        Color.White.copy(alpha = 0.9f)
+                    },
+                    shape = CircleShape
+                ) {}
+                IconButton(onClick = onToggleFavorite, modifier = Modifier.fillMaxSize()) {
+                    Icon(
+                        Icons.Default.Favorite,
+                        contentDescription = "取消收藏",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+        if (selectionMode) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .size(28.dp),
+                color = if (darkTheme) {
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
+                } else {
+                    Color.White.copy(alpha = 0.9f)
+                },
+                shape = CircleShape
+            ) {
+                Icon(
+                    if (selected) Icons.Default.Check else Icons.Default.Add,
+                    contentDescription = if (selected) "已选择" else "选择图片",
+                    modifier = Modifier.padding(6.dp).size(16.dp),
+                    tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+        val badgeText = imageAssetBadgeText(image)
+        if (badgeText.isNotBlank()) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(7.dp),
+                color = Color.Black.copy(alpha = 0.62f),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text(
+                    badgeText,
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }
@@ -3373,16 +5120,42 @@ private fun ImageAssetTile(
 @Composable
 private fun ImageAssetPreviewOverlay(
     image: ImageAssetUiItem,
+    upscalers: List<ImageUpscalerUiItem>,
+    selectedUpscalerId: String?,
+    upscalerImporting: Boolean,
+    upscalerMessage: String,
+    upscaleJob: ImageUpscaleUiJob?,
     onDismiss: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
+    onImportUpscaler: () -> Unit,
+    onDeleteUpscaler: (String) -> Unit,
+    onSelectUpscaler: (String) -> Unit,
+    onUpscale: (Int) -> Unit,
+    onCancelUpscale: () -> Unit,
+    onSetFavorite: (Boolean) -> Unit,
+    reusablePresetFields: Set<ImageGenerationPresetField>,
+    hiddenPresetFieldCount: Int,
+    onUseParameters: (ImageGenerationUiPreset, Set<ImageGenerationPresetField>) -> Unit,
     onRecreate: () -> Unit,
     recreateEnabled: Boolean,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
     val bitmap = remember(image.uriString) { loadImageBitmap(context, image.uriString) }
     var showGenerationDetails by rememberSaveable(image.id) { mutableStateOf(false) }
+    var showParameterReuse by rememberSaveable(image.id) { mutableStateOf(false) }
+    var showUpscaleDialog by rememberSaveable(image.id) { mutableStateOf(false) }
+    var upscaleTargetScale by rememberSaveable(image.id) { mutableStateOf(2) }
+    var pendingUpscalerDeleteId by rememberSaveable(image.id) { mutableStateOf<String?>(null) }
+    var showActionsMenu by remember(image.id) { mutableStateOf(false) }
+    var savingToGallery by remember(image.id) { mutableStateOf(false) }
+    var selectedPresetFields by remember(image.id) {
+        mutableStateOf(emptySet<ImageGenerationPresetField>())
+    }
+    val sourceUpscaleRunning = upscaleJob?.running == true && upscaleJob.sourceImageId == image.id
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -3410,39 +5183,101 @@ private fun ImageAssetPreviewOverlay(
                 color = Color.White,
                 fontWeight = FontWeight.SemiBold
             )
-            if (image.generationDetails.isNotBlank()) {
+            Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
+                IconButton(onClick = { onSetFavorite(!image.favorite) }) {
+                    Icon(
+                        if (image.favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        contentDescription = if (image.favorite) "取消收藏" else "收藏图片",
+                        tint = Color.White
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Box {
                 Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
-                    IconButton(onClick = { showGenerationDetails = true }) {
-                        Icon(Icons.Default.Info, contentDescription = "查看生成参数", tint = Color.White)
+                    IconButton(onClick = { showActionsMenu = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "更多图片操作", tint = Color.White)
                     }
                 }
-                Spacer(modifier = Modifier.width(8.dp))
-            }
-            Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
-                IconButton(onClick = onShare) {
-                    Icon(Icons.Default.Share, contentDescription = "分享图片", tint = Color.White)
-                }
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
-                IconButton(
-                    onClick = {
-                        downloadImageAssetToGallery(context, image)
-                            .onSuccess { path ->
-                                Toast.makeText(context, "已保存到 $path", Toast.LENGTH_SHORT).show()
-                            }
-                            .onFailure { error ->
-                                Toast.makeText(context, error.message ?: "图片保存失败", Toast.LENGTH_SHORT).show()
-                            }
-                    }
+                DropdownMenu(
+                    expanded = showActionsMenu,
+                    onDismissRequest = { showActionsMenu = false }
                 ) {
-                    Icon(Icons.Default.Download, contentDescription = "下载图片", tint = Color.White)
-                }
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Default.Delete, contentDescription = "删除图片", tint = Color.White)
+                    if (image.generationDetails.isNotBlank()) {
+                        DropdownMenuItem(
+                            text = { Text("查看生成参数") },
+                            leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
+                            onClick = {
+                                showActionsMenu = false
+                                showGenerationDetails = true
+                            }
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = { Text("高清放大") },
+                        leadingIcon = { Icon(Icons.Default.Image, contentDescription = null) },
+                        onClick = {
+                            showActionsMenu = false
+                            showUpscaleDialog = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("分享图片") },
+                        leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                        onClick = {
+                            showActionsMenu = false
+                            onShare()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (savingToGallery) "保存中…" else "保存到系统图片库") },
+                        leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
+                        enabled = !savingToGallery,
+                        onClick = {
+                            showActionsMenu = false
+                            scope.launch {
+                                savingToGallery = true
+                                try {
+                                    val result = withContext(Dispatchers.IO) {
+                                        downloadImageAssetToGallery(context, image)
+                                    }
+                                    result
+                                        .onSuccess { path ->
+                                            Toast.makeText(context, "已保存到 $path", Toast.LENGTH_SHORT).show()
+                                        }
+                                        .onFailure { error ->
+                                            Toast.makeText(
+                                                context,
+                                                error.message ?: "图片保存失败",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                } finally {
+                                    savingToGallery = false
+                                }
+                            }
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (sourceUpscaleRunning) "放大中，暂不可删除" else "删除图片",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        enabled = !sourceUpscaleRunning,
+                        onClick = {
+                            showActionsMenu = false
+                            onDelete()
+                        }
+                    )
                 }
             }
         }
@@ -3514,8 +5349,164 @@ private fun ImageAssetPreviewOverlay(
                         }
                     }
                 }
+                }
             }
         }
+    if (showUpscaleDialog && pendingUpscalerDeleteId == null) {
+        val selectedUpscaler = upscalers.firstOrNull { it.id == selectedUpscalerId }
+        val currentImageJob = upscaleJob?.takeIf { it.sourceImageId == image.id }
+        val anotherImageRunning = upscaleJob?.running == true && currentImageJob == null
+        val outputDimensions = upscaleOutputDimensionsOrNull(
+            image.width,
+            image.height,
+            upscaleTargetScale
+        )
+        AlertDialog(
+            onDismissRequest = { showUpscaleDialog = false },
+            title = { Text("高清放大") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        "选择本地 ESRGAN 模型和目标倍率。任务会保留当前源图与模型快照，结果完成后自动进入图片库。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text("放大模型", style = MaterialTheme.typography.titleSmall)
+                    if (upscalers.isEmpty()) {
+                        Text(
+                            if (upscalerImporting) "正在导入放大模型…" else "尚未导入放大模型。",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    } else {
+                        upscalers.forEach { upscaler ->
+                            FilterChip(
+                                selected = upscaler.id == selectedUpscalerId,
+                                onClick = { onSelectUpscaler(upscaler.id) },
+                                enabled = upscaleJob?.running != true && !upscaler.deleting,
+                                label = {
+                                    Column {
+                                        Text(upscaler.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(
+                                            "${upscaler.sizeText} · ${upscaler.sha256.take(12)}…",
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                }
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = onImportUpscaler,
+                            enabled = !upscalerImporting && upscaleJob?.running != true
+                        ) {
+                            Text(if (upscalerImporting) "导入中…" else "导入模型")
+                        }
+                        TextButton(
+                            onClick = {
+                                selectedUpscaler?.let { pendingUpscalerDeleteId = it.id }
+                            },
+                            enabled = selectedUpscaler != null &&
+                                !selectedUpscaler.inUse &&
+                                !selectedUpscaler.deleting &&
+                                upscaleJob?.running != true
+                        ) {
+                            Text("删除所选", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    Text("目标倍率", style = MaterialTheme.typography.titleSmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        IMAGE_UPSCALE_TARGET_SCALES.forEach { scale ->
+                            FilterChip(
+                                selected = upscaleTargetScale == scale,
+                                onClick = { upscaleTargetScale = scale },
+                                enabled = upscaleJob?.running != true,
+                                label = { Text("${scale}x") }
+                            )
+                        }
+                    }
+                    outputDimensions?.let { (width, height) ->
+                        Text(
+                            "${image.width}x${image.height} → ${width}x$height",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (image.width > 0 && image.height > 0 && outputDimensions == null) {
+                        Text(
+                            "当前尺寸与倍率超出本地放大上限（输入 2048/4MP，输出 4096/16MP）。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    val status = when {
+                        currentImageJob != null -> currentImageJob.message.ifBlank {
+                            currentImageJob.statusLabel
+                        }
+                        anotherImageRunning -> "另一张图片正在放大，请等待完成或先停止该任务。"
+                        else -> upscalerMessage
+                    }
+                    if (status.isNotBlank()) {
+                        Text(
+                            status,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (currentImageJob?.failed == true) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                    if (currentImageJob?.running == true) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            },
+            confirmButton = {
+                if (currentImageJob?.running == true) {
+                    Button(onClick = onCancelUpscale) { Text("停止") }
+                } else {
+                    Button(
+                        onClick = { onUpscale(upscaleTargetScale) },
+                        enabled = selectedUpscaler != null &&
+                            !upscalerImporting &&
+                            !anotherImageRunning &&
+                            (image.width <= 0 || image.height <= 0 || outputDimensions != null)
+                    ) {
+                        Text(if (currentImageJob?.failed == true) "重试放大" else "开始放大")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUpscaleDialog = false }) { Text("关闭") }
+            }
+        )
+    }
+    pendingUpscalerDeleteId?.let { upscalerId ->
+        val upscaler = upscalers.firstOrNull { it.id == upscalerId }
+        AlertDialog(
+            onDismissRequest = { pendingUpscalerDeleteId = null },
+            title = { Text("删除放大模型") },
+            text = {
+                Text("确定删除 ${upscaler?.name ?: "所选模型"}？模型文件会从本机移除。")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingUpscalerDeleteId = null
+                        onDeleteUpscaler(upscalerId)
+                    }
+                ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingUpscalerDeleteId = null }) { Text("取消") }
+            }
+        )
     }
     if (showGenerationDetails) {
         AlertDialog(
@@ -3536,6 +5527,36 @@ private fun ImageAssetPreviewOverlay(
             },
             confirmButton = {
                 Row {
+                    if (image.parameterShareJson.isNotBlank()) {
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    clipboard.setClipEntry(
+                                        ClipEntry(
+                                            ClipData.newPlainText(
+                                                "MCA image parameters",
+                                                image.parameterShareJson
+                                            )
+                                        )
+                                    )
+                                    Toast.makeText(context, "生成参数已复制", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        ) {
+                            Text("复制参数")
+                        }
+                    }
+                    if (image.generationPreset != null) {
+                        TextButton(
+                            onClick = {
+                                selectedPresetFields = reusablePresetFields
+                                showGenerationDetails = false
+                                showParameterReuse = true
+                            }
+                        ) {
+                            Text("复用参数")
+                        }
+                    }
                     if (image.canRecreate) {
                         TextButton(
                             onClick = {
@@ -3553,6 +5574,151 @@ private fun ImageAssetPreviewOverlay(
                 }
             }
         )
+    }
+    if (showParameterReuse) {
+        val preset = image.generationPreset
+        if (preset == null) {
+            showParameterReuse = false
+        } else {
+            val availableFields = reusablePresetFields
+            AlertDialog(
+                onDismissRequest = { showParameterReuse = false },
+                title = { Text("选择要复用的参数") },
+                text = {
+                    Column(
+                        modifier = Modifier.verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            buildString {
+                                append("参数会填入当前模型的生成面板，不会立即开始生成。")
+                                if (hiddenPresetFieldCount > 0) {
+                                    append(" 当前模型不兼容的 ")
+                                    append(hiddenPresetFieldCount)
+                                    append(" 项参数已隐藏。")
+                                }
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        availableFields.forEach { field ->
+                            FilterChip(
+                                selected = field in selectedPresetFields,
+                                onClick = {
+                                    selectedPresetFields = if (field in selectedPresetFields) {
+                                        selectedPresetFields - field
+                                    } else {
+                                        selectedPresetFields + field
+                                    }
+                                },
+                                label = { Text(field.label) }
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            onUseParameters(preset, selectedPresetFields)
+                            showParameterReuse = false
+                        },
+                        enabled = selectedPresetFields.isNotEmpty()
+                    ) { Text("应用") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showParameterReuse = false }) { Text("取消") }
+                }
+            )
+        }
+    }
+}
+
+private fun availableImageGenerationPresetFields(
+    preset: ImageGenerationUiPreset
+): Set<ImageGenerationPresetField> = buildSet {
+    add(ImageGenerationPresetField.PROMPT)
+    add(ImageGenerationPresetField.NEGATIVE_PROMPT)
+    if (preset.width != null && preset.height != null) add(ImageGenerationPresetField.SIZE)
+    if (preset.steps != null) add(ImageGenerationPresetField.STEPS)
+    if (preset.cfgScale != null) add(ImageGenerationPresetField.CFG)
+    if (preset.seed != null) add(ImageGenerationPresetField.SEED)
+    if (!preset.sampleMethod.isNullOrBlank()) add(ImageGenerationPresetField.SAMPLER)
+    if (preset.clipSkip != null) add(ImageGenerationPresetField.CLIP_SKIP)
+    if (preset.loras.isNotEmpty()) add(ImageGenerationPresetField.LORA)
+    if (preset.batchCount != null) add(ImageGenerationPresetField.BATCH)
+    if (preset.vaeTileSize != null) add(ImageGenerationPresetField.VAE_TILING)
+}
+
+internal fun compatibleImageGenerationPresetFields(
+    preset: ImageGenerationUiPreset,
+    selectedModel: ChatModelChoice?,
+    selectedModelIsCloud: Boolean,
+    supportsNegativePrompt: Boolean,
+    supportsClipSkip: Boolean,
+    supportsVaeTiling: Boolean,
+    supportsLora: Boolean,
+    availableLoraIds: Set<String>,
+    maxBatchCount: Int
+): Set<ImageGenerationPresetField> {
+    val available = availableImageGenerationPresetFields(preset)
+    return buildSet {
+        if (ImageGenerationPresetField.PROMPT in available) add(ImageGenerationPresetField.PROMPT)
+        if (supportsNegativePrompt && ImageGenerationPresetField.NEGATIVE_PROMPT in available) {
+            add(ImageGenerationPresetField.NEGATIVE_PROMPT)
+        }
+        if (!selectedModelIsCloud && selectedModel != null) {
+            val width = preset.width
+            val height = preset.height
+            if (ImageGenerationPresetField.SIZE in available &&
+                width != null && height != null &&
+                width in selectedModel.imageMinWidth..selectedModel.imageMaxWidth &&
+                height in selectedModel.imageMinHeight..selectedModel.imageMaxHeight &&
+                width % selectedModel.imageWidthMultiple == 0 &&
+                height % selectedModel.imageHeightMultiple == 0
+            ) {
+                add(ImageGenerationPresetField.SIZE)
+            }
+            if (ImageGenerationPresetField.STEPS in available &&
+                preset.steps?.let { it in 1..1_000 } == true
+            ) {
+                add(ImageGenerationPresetField.STEPS)
+            }
+            if (ImageGenerationPresetField.CFG in available &&
+                preset.cfgScale?.let { it.isFinite() && it in 0.0..30.0 } == true
+            ) {
+                add(ImageGenerationPresetField.CFG)
+            }
+            if (ImageGenerationPresetField.SEED in available && preset.seed?.let { it >= 0 } == true) {
+                add(ImageGenerationPresetField.SEED)
+            }
+            if (ImageGenerationPresetField.SAMPLER in available &&
+                preset.sampleMethod in selectedModel.imageSupportedSamplers
+            ) {
+                add(ImageGenerationPresetField.SAMPLER)
+            }
+            if (ImageGenerationPresetField.BATCH in available &&
+                preset.batchCount?.let { it in 1..maxBatchCount.coerceAtLeast(1) } == true
+            ) {
+                add(ImageGenerationPresetField.BATCH)
+            }
+        }
+        if (supportsClipSkip && ImageGenerationPresetField.CLIP_SKIP in available) {
+            add(ImageGenerationPresetField.CLIP_SKIP)
+        }
+        if (supportsVaeTiling &&
+            ImageGenerationPresetField.VAE_TILING in available &&
+            preset.vaeTileSize == 512 &&
+            preset.vaeTileOverlap?.let { kotlin.math.abs(it - 0.5) < 0.000_001 } == true
+        ) {
+            add(ImageGenerationPresetField.VAE_TILING)
+        }
+        if (supportsLora &&
+            ImageGenerationPresetField.LORA in available &&
+            preset.loras.isNotEmpty() &&
+            preset.loras.all { selection -> selection.id in availableLoraIds }
+        ) {
+            add(ImageGenerationPresetField.LORA)
+        }
     }
 }
 
@@ -3665,21 +5831,6 @@ private fun loadImageBitmap(context: Context, uriString: String): Bitmap? =
 private fun downloadImageAssetToGallery(context: Context, image: ImageAssetUiItem): Result<String> =
     runCatching { copyImageAssetToGallery(context, image).displayPath }
 
-private fun shareImageAsset(context: Context, image: ImageAssetUiItem): Result<Unit> =
-    runCatching {
-        val saved = copyImageAssetToGallery(context, image)
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = saved.mimeType
-            putExtra(Intent.EXTRA_STREAM, saved.uri)
-            if (image.prompt.isNotBlank()) {
-                putExtra(Intent.EXTRA_TEXT, image.prompt)
-            }
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            clipData = ClipData.newUri(context.contentResolver, image.name, saved.uri)
-        }
-        context.startActivity(Intent.createChooser(intent, "分享图片"))
-    }
-
 private data class SavedImageCopy(
     val uri: Uri,
     val displayPath: String,
@@ -3759,6 +5910,7 @@ private fun String.imageMimeType(): String =
 
 private fun String.displayImageSource(): String =
     when {
+        startsWith("upscaled:", ignoreCase = true) -> "高清放大"
         startsWith("generated:", ignoreCase = true) -> removePrefix("generated:")
             .replace('-', ' ')
             .replace('_', ' ')
@@ -4491,10 +6643,9 @@ private fun ModelSwitcherDropdown(
     val context = LocalContext.current
     var reasoningExpanded by rememberSaveable { mutableStateOf(false) }
     var sourceExpanded by rememberSaveable { mutableStateOf<InferenceSource?>(null) }
-    val localModels = models.filterNot { it.cloud }.take(3)
-    val cloudModels = models.filter { it.cloud }.take(3)
+    val localModels = models.filterNot { it.cloud }
+    val cloudModels = models.filter { it.cloud }
     val activeReasoningMode = if (selectedModelIsCloud) ReasoningMode.STANDARD else reasoningMode
-    val drawerVisible = (reasoningExpanded && !selectedModelIsCloud) || sourceExpanded != null
     LaunchedEffect(selectedModelIsCloud) {
         if (selectedModelIsCloud) reasoningExpanded = false
     }
@@ -4506,15 +6657,15 @@ private fun ModelSwitcherDropdown(
         tonalElevation = 0.dp,
         shadowElevation = 18.dp,
         modifier = Modifier
-            .widthIn(min = if (drawerVisible) 380.dp else 238.dp, max = if (drawerVisible) 432.dp else 284.dp)
+            .widthIn(min = 238.dp, max = 320.dp)
             .clip(RoundedCornerShape(30.dp))
             .padding(vertical = 10.dp, horizontal = 0.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier.padding(horizontal = 0.dp),
-            verticalAlignment = Alignment.Top
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Column(modifier = Modifier.width(238.dp)) {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
                     text = "推理来源",
                     modifier = Modifier.padding(horizontal = 18.dp, vertical = 7.dp),
@@ -4636,8 +6787,8 @@ private fun ModelSwitcherDropdown(
                     },
                     onOpenModels = onOpenModels,
                     modifier = Modifier
-                        .padding(start = 4.dp, end = 12.dp, top = 48.dp)
-                        .width(176.dp)
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .fillMaxWidth()
                 )
             }
             AnimatedVisibility(
@@ -4652,8 +6803,8 @@ private fun ModelSwitcherDropdown(
                         reasoningExpanded = false
                     },
                     modifier = Modifier
-                        .padding(start = 4.dp, end = 12.dp, top = 48.dp)
-                        .width(132.dp)
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .fillMaxWidth()
                 )
             }
         }
@@ -4749,14 +6900,16 @@ private fun ModelSourceInlineCapsule(
                     onClick = onOpenModels
                 )
             } else {
-                models.take(3).forEach { model ->
-                    ModelChoicePill(
-                        model = model,
-                        enabled = !isGenerating || model.loaded,
-                        onClick = {
-                            if (!model.loaded) onLoadModel(model.id)
-                        }
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    models.forEach { model ->
+                        ModelChoicePill(
+                            model = model,
+                            enabled = !isGenerating || model.loaded,
+                            onClick = {
+                                if (!model.loaded) onLoadModel(model.id)
+                            }
+                        )
+                    }
                 }
             }
         }

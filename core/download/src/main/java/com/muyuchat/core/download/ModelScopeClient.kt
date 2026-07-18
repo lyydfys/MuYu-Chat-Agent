@@ -726,13 +726,19 @@ class ModelScopeClient(
 
         catalogTargetChipset
             ?.trim()
-            ?.removeSuffix("-for-galaxy")
             ?.takeIf(String::isNotBlank)
             ?.let { target ->
                 // A catalog entry names one executable context target. Device
                 // discovery may rank that entry, but downloading it must not
                 // silently substitute a context archive for another chipset.
-                return listOf(target, "$target-for-galaxy")
+                val exactTargetFirst = if (target.endsWith("-for-galaxy")) {
+                    listOf(target)
+                } else {
+                    // Legacy callers that name a generic target may still use
+                    // the publisher's vendor variant when no generic asset exists.
+                    listOf(target, "$target-for-galaxy")
+                }
+                return exactTargetFirst
                     .firstNotNullOfOrNull(::assetFor)
                     ?: error("release_assets.json 缺少目录声明的 QNN context 目标：$target。")
             }
@@ -808,13 +814,19 @@ class ModelScopeClient(
         }.thenBy { it }
 
     companion object {
+        private const val QNN_SD15_EXECUTION_PROFILE_REVISION = 2
+        private val QNN_SD15_CONDITIONING_RUNTIME_ASSETS = listOf(
+            "tokenizer.json",
+            "token_emb.bin",
+            "pos_emb.bin"
+        )
         private val QAIRT_IMAGE_RELEASE_ASSET_MODEL_IDS = setOf(
             "qualcomm_sd15_gen5_qnn",
             "qualcomm_sd21_gen5_qnn",
             "qualcomm_controlnet_canny_gen5_qnn"
         )
         private const val QAIRT_GEN5_IMAGE_RELEASE_ASSET_CHIPSET =
-            "qualcomm-snapdragon-8-elite-gen5"
+            "qualcomm-snapdragon-8-elite-gen5-for-galaxy"
         private val QAIRT_IMAGE_RELEASE_ASSET_SIZE_BYTES = mapOf(
             "qualcomm_sd15_gen5_qnn" to 711_934_104L,
             "qualcomm_sd21_gen5_qnn" to 874_955_354L,
@@ -1038,7 +1050,7 @@ class ModelScopeClient(
             maxLength: Int = 77,
             dualClip: Boolean = false,
             padZero: Boolean = false,
-            supportsPromptWeighting: Boolean = backend == ImageEngineTokenizerBackend.TOKENIZERS_CPP,
+            supportsPromptWeighting: Boolean = backend != ImageEngineTokenizerBackend.MNN_MTOK,
             separateNegativePrompt: Boolean = true
         ): ImageEngineTokenizerContractSpec = ImageEngineTokenizerContractSpec(
             backend = backend,
@@ -1120,6 +1132,7 @@ class ModelScopeClient(
 
         private fun stableDiffusionCppCapabilities(
             schedulers: Set<ImageEngineSchedulerAlgorithm>,
+            family: ImageEngineModelFamily,
             supportsNegativePrompt: Boolean = true
         ): ImageEngineGenerationCapabilitiesSpec = ImageEngineGenerationCapabilitiesSpec(
             supportedSchedulers = schedulers,
@@ -1130,7 +1143,17 @@ class ModelScopeClient(
             widthMultiple = 64,
             heightMultiple = 64,
             supportsNegativePrompt = supportsNegativePrompt,
-            supportsPromptWeighting = false
+            supportsPromptWeighting = true,
+            supportsClipSkip = family in setOf(
+                ImageEngineModelFamily.SD15,
+                ImageEngineModelFamily.SD21,
+                ImageEngineModelFamily.SDXL,
+                ImageEngineModelFamily.SD_TURBO
+            ),
+            supportsVaeTiling = true,
+            supportsLivePreview = true,
+            supportsLora = true,
+            maxBatchCount = 8
         )
 
         private fun stableDiffusionCppSchedulers(
@@ -1156,15 +1179,19 @@ class ModelScopeClient(
             htpArch: Int?,
             vaeEncoder: String? = null,
             workerStrategy: ImageEngineWorkerStrategy = ImageEngineWorkerStrategy.SHARED_TEXT_UNET_VAE,
-            controlNet: String? = null
+            controlNet: String? = null,
+            schedulerSidecar: String? = "scheduler/scheduler_config.json",
+            tokenizerSidecar: String? = "tokenizer/tokenizer_config.json",
+            runtimeAssets: List<String> = emptyList()
         ): ImageEngineGraphContractSpec = ImageEngineGraphContractSpec(
             textEncoder = textEncoder,
             unet = unet,
             vae = vae,
             vaeEncoder = vaeEncoder,
             controlNet = controlNet,
-            schedulerSidecar = "scheduler/scheduler_config.json",
-            tokenizerSidecar = "tokenizer/tokenizer_config.json",
+            schedulerSidecar = schedulerSidecar,
+            tokenizerSidecar = tokenizerSidecar,
+            configSidecars = runtimeAssets,
             qnnSdk = qnnSdk,
             htpArch = htpArch,
             workerStrategy = workerStrategy
@@ -1180,6 +1207,7 @@ class ModelScopeClient(
             defaultNegativePrompt: String = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
         ): ImageEngineExecutionProfileSpec = ImageEngineExecutionProfileSpec(
             profileId = profileId,
+            profileRevision = QNN_SD15_EXECUTION_PROFILE_REVISION,
             family = ImageEngineModelFamily.SD15,
             variant = variant,
             tokenizer = clipTokenizer(ImageEngineTokenizerBackend.TOKENIZERS_CPP),
@@ -1195,12 +1223,16 @@ class ModelScopeClient(
             ),
             vae = imageVae(ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
             graph = qnnGraph(
-                textEncoder = "clip_text_encoder_qnn_context.bin",
+                textEncoder = "clip_v2.mnn",
                 unet = "unet.bin",
                 vae = "vae_decoder.bin",
                 qnnSdk = "2.28",
                 htpArch = 68,
-                vaeEncoder = "vae_encoder.bin"
+                vaeEncoder = "vae_encoder.bin",
+                workerStrategy = ImageEngineWorkerStrategy.SHARED_UNET_VAE,
+                schedulerSidecar = null,
+                tokenizerSidecar = null,
+                runtimeAssets = QNN_SD15_CONDITIONING_RUNTIME_ASSETS
             ),
             defaults = ImageEngineGenerationDefaultsSpec(
                 width = 512,
@@ -1373,7 +1405,10 @@ class ModelScopeClient(
                 profileId = "mnn.sd15.official.512",
                 family = ImageEngineModelFamily.SD15,
                 variant = ImageEngineModelVariant.STANDARD,
-                tokenizer = clipTokenizer(ImageEngineTokenizerBackend.TOKENIZERS_CPP),
+                tokenizer = clipTokenizer(
+                    ImageEngineTokenizerBackend.TOKENIZERS_CPP,
+                    supportsPromptWeighting = false
+                ),
                 conditioning = imageConditioning(
                     ImageEngineEmbeddingDataType.GRAPH_INTERNAL,
                     ImageEngineEmbeddingConversionStrategy.GRAPH_EXECUTION,
@@ -1409,7 +1444,8 @@ class ModelScopeClient(
                         ImageEngineSchedulerAlgorithm.DPMPP_2M,
                         ImageEngineSchedulerAlgorithm.EULER,
                         ImageEngineSchedulerAlgorithm.PNDM_PLMS
-                    )
+                    ),
+                    supportsPromptWeighting = false
                 )
             )
 
@@ -1506,6 +1542,7 @@ class ModelScopeClient(
             ),
             capabilities = stableDiffusionCppCapabilities(
                 stableDiffusionCppSchedulers(algorithm),
+                family = family,
                 supportsNegativePrompt = supportsNegativePrompt
             )
         )
@@ -1519,6 +1556,8 @@ class ModelScopeClient(
             )
             "dreamshaper_sd15_qnn228" -> qnnSd15ExecutionProfile(
                 profileId = "community.sd15.qnn228",
+                conditioningDataType = ImageEngineEmbeddingDataType.FP32,
+                conversionStrategy = ImageEngineEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
                 defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
             )
             "realisticvisionhyper_sd15_qnn228" -> qnnSd15ExecutionProfile(
@@ -1526,6 +1565,8 @@ class ModelScopeClient(
                 variant = ImageEngineModelVariant.HYPER,
                 steps = 8,
                 cfgScale = 2.0,
+                conditioningDataType = ImageEngineEmbeddingDataType.FP32,
+                conversionStrategy = ImageEngineEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
                 defaultNegativePrompt = RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
             )
             "meinamix_sd15_qnn228" -> qnnSd15ExecutionProfile(
@@ -2301,12 +2342,12 @@ class ModelScopeClient(
                 title = "CyberRealistic SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/CyberRealistic_Final-SD1.5-qnn2.28",
                 revision = "162fe0a46cb3f9017b9e2bc003eb168e8bbf4b04",
-                description = "已在 MCA 真机链路跑通的骁龙 NPU 生图基准包。下载后会解包为 QNN context、VAE decoder、CLIP 文本编码器资源，并先执行 smoke test，成功后才可在图片页选择。",
+                description = "写实方向的 SD1.5 QNN 2.28 包，使用 QNN UNet/VAE 与 MNN clip_v2 conditioning。下载后校验完整展开的运行资源；首次真实 native load 与 graph execution 决定兼容性。",
                 recommendedFileName = "cyberrealistic_final_qnn2.28_min.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
                 minRamGb = 8,
-                tags = listOf("本地生图", "骁龙 NPU", "QNN", "SD1.5", "已验证"),
+                tags = listOf("本地生图", "骁龙 NPU", "QNN UNet/VAE", "MNN clip_v2", "SD1.5"),
                 priority = 0,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 supportedChipsetCodes = SD15_QNN_CHIPSETS,
@@ -2333,12 +2374,12 @@ class ModelScopeClient(
                 title = "RealisticVision Hyper SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/RealisticVisionHyper-SD1.5-qnn2.28",
                 revision = "92a2e40d65a47a6b8aa3ee86ffffdc0ed2b0b66b",
-                description = "写实人像和生活摄影方向的 SD1.5 Hyper QNN 包。默认 8-step、CFG 2.0；已完成三次冷启动和三次复用真机回归，仍作为可手动选择的实验模型。",
+                description = "写实人像和生活摄影方向的 SD1.5 Hyper QNN 2.28 包，默认 8-step、CFG 2.0，使用 QNN UNet/VAE 与 MNN clip_v2 conditioning。下载后校验完整展开的运行资源；首次真实 native load 与 graph execution 决定兼容性。",
                 recommendedFileName = "RealisticVisionHyper-qnn2.28-min.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
                 minRamGb = 8,
-                tags = listOf("本地生图", "骁龙 NPU", "QNN", "写实", "产品回归已通过"),
+                tags = listOf("本地生图", "骁龙 NPU", "QNN UNet/VAE", "MNN clip_v2", "写实"),
                 priority = 1,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.RECOMMENDED,
@@ -2361,12 +2402,12 @@ class ModelScopeClient(
                 title = "DreamShaper SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/DreamShaper-SD1.5-qnn2.28",
                 revision = "2338d013c60981b3bd565ce39d4a731bcf9ebfef",
-                description = "通用创意风格 SD1.5 QNN 包，覆盖插画、概念图和轻写实场景。已完成产品 worker 20-step、三次冷启动和三次复用真机回归。",
+                description = "通用创意风格的 SD1.5 QNN 2.28 包，覆盖插画、概念图和轻写实场景，使用 QNN UNet/VAE 与 MNN clip_v2 conditioning。下载后校验完整展开的运行资源；首次真实 native load 与 graph execution 决定兼容性。",
                 recommendedFileName = "DreamShaperV8-qnn2.28-min.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
                 minRamGb = 8,
-                tags = listOf("本地生图", "骁龙 NPU", "QNN", "通用创意", "产品回归已通过"),
+                tags = listOf("本地生图", "骁龙 NPU", "QNN UNet/VAE", "MNN clip_v2", "通用创意"),
                 priority = 2,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.RECOMMENDED,

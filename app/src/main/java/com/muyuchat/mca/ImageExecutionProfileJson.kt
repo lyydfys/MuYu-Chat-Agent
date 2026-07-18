@@ -190,6 +190,11 @@ internal object ImageExecutionProfileJson {
                 .put("requiresControlImage", profile.capabilities.requiresControlImage)
                 .put("requiresInputImage", profile.capabilities.requiresInputImage)
                 .put("supportsMask", profile.capabilities.supportsMask)
+                .put("supportsClipSkip", profile.capabilities.supportsClipSkip)
+                .put("supportsVaeTiling", profile.capabilities.supportsVaeTiling)
+                .put("supportsLivePreview", profile.capabilities.supportsLivePreview)
+                .put("supportsLora", profile.capabilities.supportsLora)
+                .put("maxBatchCount", profile.capabilities.maxBatchCount)
         )
 
     /** Parses partial generation behavior without requiring a full execution profile. */
@@ -283,17 +288,31 @@ internal object ImageExecutionProfileJson {
                 solverOrder = json.optionalStrictInt("solver_order")
             )
         }
+        val flowScheduler = algorithm == ImageSchedulerAlgorithm.FLOW_MATCH
         val predictionType = json.optionalStrictString("prediction_type")?.let { value ->
             predictionType(value, "scheduler.prediction_type")
-        } ?: if (pndmPublisherConfigUsesEulerTarget) {
-            ImagePredictionType.EPSILON
-        } else {
-            throw formatError("prediction_type", "prediction_type is required for this scheduler.")
+        } ?: when {
+            pndmPublisherConfigUsesEulerTarget -> ImagePredictionType.EPSILON
+            flowScheduler -> ImagePredictionType.FLOW
+            else -> throw formatError("prediction_type", "prediction_type is required for this scheduler.")
         }
-        val noiseSchedule = noiseSchedule(json.requiredStrictString("beta_schedule"))
+        val declaredNoiseSchedule = json.optionalStrictString("beta_schedule")?.let(::noiseSchedule)
+        val noiseSchedule = when {
+            flowScheduler && declaredNoiseSchedule == null -> ImageNoiseSchedule.SIGMA
+            flowScheduler && declaredNoiseSchedule != ImageNoiseSchedule.SIGMA ->
+                throw formatError("scheduler.beta_schedule", "Flow schedulers require a sigma noise schedule.")
+            declaredNoiseSchedule != null -> declaredNoiseSchedule
+            else -> throw formatError("scheduler.beta_schedule", "beta_schedule is required for this scheduler.")
+        }
+        val betaStart = json.optionalStrictDouble("beta_start")
+        val betaEnd = json.optionalStrictDouble("beta_end")
+        if (flowScheduler && (betaStart != null || betaEnd != null)) {
+            throw formatError("scheduler.beta_schedule", "Flow schedulers must not declare diffusion beta endpoints.")
+        }
         val timestepSpacing = json.optionalStrictString("timestep_spacing")?.let(::timestepSpacing)
             ?: when {
                 pndmPublisherConfigUsesEulerTarget -> ImageTimestepSpacing.LINSPACE
+                flowScheduler -> ImageTimestepSpacing.LEADING
                 algorithm == ImageSchedulerAlgorithm.DDIM -> ImageTimestepSpacing.LEADING
                 else -> throw formatError("timestep_spacing", "timestep_spacing is required for this scheduler.")
             }
@@ -305,12 +324,15 @@ internal object ImageExecutionProfileJson {
             predictionType = predictionType,
             numTrainTimesteps = json.optionalStrictInt("num_train_timesteps") ?: 1_000,
             noiseSchedule = noiseSchedule,
-            betaStart = json.optionalStrictDouble("beta_start"),
-            betaEnd = json.optionalStrictDouble("beta_end"),
+            betaStart = betaStart,
+            betaEnd = betaEnd,
             timestepSpacing = timestepSpacing,
-            stepsOffset = json.requiredStrictInt("steps_offset"),
-            setAlphaToOne = json.requiredStrictBoolean("set_alpha_to_one"),
-            skipPrkSteps = json.requiredStrictBoolean("skip_prk_steps"),
+            stepsOffset = json.optionalStrictInt("steps_offset")
+                ?: if (flowScheduler) 0 else json.requiredStrictInt("steps_offset"),
+            setAlphaToOne = json.optionalStrictBoolean("set_alpha_to_one")
+                ?: if (flowScheduler) false else json.requiredStrictBoolean("set_alpha_to_one"),
+            skipPrkSteps = json.optionalStrictBoolean("skip_prk_steps")
+                ?: if (flowScheduler) false else json.requiredStrictBoolean("skip_prk_steps"),
             finalSigmaType = json.optionalStrictString("final_sigma_type")?.let { value ->
                 enumValue<ImageFinalSigmaType>(value, "scheduler.final_sigma_type")
             } ?: ImageFinalSigmaType.ZERO,
@@ -629,7 +651,15 @@ internal object ImageExecutionProfileJson {
         supportsTextualInversion = json.requiredStrictBoolean("supportsTextualInversion"),
         requiresControlImage = json.requiredStrictBoolean("requiresControlImage"),
         requiresInputImage = json.requiredStrictBoolean("requiresInputImage"),
-        supportsMask = json.requiredStrictBoolean("supportsMask")
+        supportsMask = json.requiredStrictBoolean("supportsMask"),
+        // Added after the original profile schema shipped. Old installed manifests remain
+        // readable and conservatively expose no advanced control until a built-in or downloaded
+        // profile layer supplies an explicit capability.
+        supportsClipSkip = json.optionalStrictBoolean("supportsClipSkip") ?: false,
+        supportsVaeTiling = json.optionalStrictBoolean("supportsVaeTiling") ?: false,
+        supportsLivePreview = json.optionalStrictBoolean("supportsLivePreview") ?: false,
+        supportsLora = json.optionalStrictBoolean("supportsLora") ?: false,
+        maxBatchCount = json.optionalStrictInt("maxBatchCount") ?: 1
     )
 
     private fun parseBehaviorFields(
@@ -786,7 +816,9 @@ internal object ImageExecutionProfileJson {
             "ddim", "ddimscheduler" -> ImageSchedulerAlgorithm.DDIM
             "pndm", "plms", "pndm_plms", "pndmscheduler" -> ImageSchedulerAlgorithm.PNDM_PLMS
             "lcm", "lcmscheduler" -> ImageSchedulerAlgorithm.LCM
-            "flow", "flow_match", "flowmatch", "flowmatchscheduler" -> ImageSchedulerAlgorithm.FLOW_MATCH
+            "flow", "flow_match", "flowmatch", "flowmatchscheduler",
+            "flow_match_euler_discrete", "flow_match_euler_discrete_scheduler",
+            "flowmatcheulerdiscretescheduler" -> ImageSchedulerAlgorithm.FLOW_MATCH
             else -> throw formatError(field, "Unsupported package default scheduler: $value")
         }
     }
@@ -800,6 +832,10 @@ internal object ImageExecutionProfileJson {
             "sd2_1", "stable_diffusion_2_1", "stable_diffusion_v2_1" -> LocalImageModelFamily.SD21
             "stable_diffusion_xl" -> LocalImageModelFamily.SDXL
             "sd_turbo", "stable_diffusion_turbo" -> LocalImageModelFamily.SD_TURBO
+            "flux2", "flux_2", "flux2_klein" -> LocalImageModelFamily.FLUX
+            "qwen_image_2512" -> LocalImageModelFamily.QWEN_IMAGE
+            "longcat", "longcat_image" -> LocalImageModelFamily.LONGCAT_IMAGE
+            "sana_edit", "sana_edit_v2" -> LocalImageModelFamily.SANA
             else -> LocalImageModelFamily.CUSTOM
         }
     }
@@ -812,6 +848,10 @@ internal object ImageExecutionProfileJson {
             "dmd2", "dmd2_alt", "sdxl_dmd2" -> ImageModelVariant.DMD2_ALT
             "turbo", "sd_turbo" -> ImageModelVariant.SD_TURBO
             "z_image_turbo", "zimage_turbo" -> ImageModelVariant.Z_IMAGE_TURBO
+            "flux2", "flux_2", "flux2_klein" -> ImageModelVariant.FLUX2_KLEIN
+            "qwen_image_2512" -> ImageModelVariant.QWEN_IMAGE
+            "longcat" -> ImageModelVariant.LONGCAT_IMAGE
+            "sana_edit_v2" -> ImageModelVariant.SANA_EDIT
             else -> null
         }
     }
@@ -844,6 +884,7 @@ internal object ImageExecutionProfileJson {
         val normalized = declared.trim().lowercase().replace(Regex("[^a-z0-9+]+"), "")
         val normalizedType = algorithmType.orEmpty().trim().lowercase().replace(Regex("[^a-z0-9+]+"), "")
         return when {
+            "flowmatch" in normalized -> ImageSchedulerAlgorithm.FLOW_MATCH
             "eulerancestral" in normalized || normalized == "eulera" -> ImageSchedulerAlgorithm.EULER_A
             "euler" in normalized -> ImageSchedulerAlgorithm.EULER
             "ddim" in normalized -> ImageSchedulerAlgorithm.DDIM

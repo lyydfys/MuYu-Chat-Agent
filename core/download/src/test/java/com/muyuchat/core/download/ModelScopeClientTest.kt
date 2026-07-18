@@ -273,6 +273,41 @@ class ModelScopeClientTest {
         assertEquals("骁龙 NPU", ImageEngineAccelerator.QNN_HTP.label)
         assertEquals(ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN1, cyberRealisticQnn.imageEngineBundle!!.minDeviceTier)
         assertTrue(cyberRealisticQnn.imageEngineBundle!!.requiresQnnRuntime)
+        val qnn228Sd15Profiles = listOf(
+            "cyberrealistic_sd15_qnn228",
+            "realisticvisionhyper_sd15_qnn228",
+            "dreamshaper_sd15_qnn228",
+            "meinamix_sd15_qnn228"
+        ).associateWith { id ->
+            requireNotNull(recommendations.first { it.id == id }.imageEngineBundle?.executionProfile)
+        }
+        qnn228Sd15Profiles.values.forEach { profile ->
+            assertEquals(2, profile.profileRevision)
+            assertEquals("clip_v2.mnn", profile.graph.textEncoder)
+            assertEquals(ImageEngineWorkerStrategy.SHARED_UNET_VAE, profile.graph.workerStrategy)
+            assertNull(profile.graph.schedulerSidecar)
+            assertNull(profile.graph.tokenizerSidecar)
+            assertEquals(
+                listOf("tokenizer.json", "token_emb.bin", "pos_emb.bin"),
+                profile.graph.configSidecars
+            )
+        }
+        assertEquals(
+            ImageEngineEmbeddingDataType.FP16,
+            qnn228Sd15Profiles.getValue("cyberrealistic_sd15_qnn228").conditioning.diskDataType
+        )
+        listOf(
+            "realisticvisionhyper_sd15_qnn228",
+            "dreamshaper_sd15_qnn228",
+            "meinamix_sd15_qnn228"
+        ).forEach { id ->
+            val conditioning = qnn228Sd15Profiles.getValue(id).conditioning
+            assertEquals(ImageEngineEmbeddingDataType.FP32, conditioning.diskDataType)
+            assertEquals(
+                ImageEngineEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
+                conditioning.conversionStrategy
+            )
+        }
         listOf(
             "realisticvisionhyper_sd15_qnn228",
             "dreamshaper_sd15_qnn228"
@@ -646,6 +681,8 @@ class ModelScopeClientTest {
         models.filter { it.imageEngineBundle?.runtime == ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP }
             .forEach { model ->
                 val profile = requireNotNull(model.imageEngineBundle?.executionProfile)
+                assertTrue("${model.id} native conditioner applies token weights", profile.tokenizer.supportsPromptWeighting)
+                assertTrue("${model.id} must expose its native prompt weighting", profile.capabilities.supportsPromptWeighting)
                 assertEquals(ImageEngineTask.TEXT_TO_IMAGE, profile.task)
                 assertFalse(profile.capabilities.requiresControlImage)
                 assertFalse(profile.capabilities.requiresInputImage)
@@ -719,6 +756,58 @@ class ModelScopeClientTest {
                     )
                 }
             }
+    }
+
+    @Test
+    fun imageCatalogContractsRejectMissingExecutableComponentsAndPrimaryIdentityDrift() {
+        val models = client.recommendedModels().filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+
+        val split = models.single { it.id == "flux2_klein_4b_q4" }.imageEngineBundle!!
+        val splitFailure = runCatching {
+            split.copy(
+                components = split.components.filterNot {
+                    it.role == ImageEngineBundleComponentRole.VAE
+                }
+            )
+        }.exceptionOrNull()
+        assertTrue(splitFailure is IllegalArgumentException)
+
+        val sana = models.single { it.id == "mnn_sana_edit_v2" }.imageEngineBundle!!
+        val sanaFailure = runCatching {
+            sana.copy(
+                components = sana.components.filterNot {
+                    it.role == ImageEngineBundleComponentRole.VAE_ENCODER
+                }
+            )
+        }.exceptionOrNull()
+        assertTrue(sanaFailure is IllegalArgumentException)
+
+        val mnn = models.single { it.id == "sd15_mnn_512_quality" }.imageEngineBundle!!
+        val mnnFailure = runCatching {
+            mnn.copy(
+                components = mnn.components.filterNot {
+                    it.relativePath == "unet.mnn"
+                }
+            )
+        }.exceptionOrNull()
+        assertTrue(mnnFailure is IllegalArgumentException)
+
+        val control = models.single { it.id == "qualcomm_controlnet_canny_gen5_qnn" }
+        val controlBundle = control.imageEngineBundle!!
+        val controlProfile = controlBundle.executionProfile!!
+        val controlFailure = runCatching {
+            controlBundle.copy(
+                executionProfile = controlProfile.copy(
+                    graph = controlProfile.graph.copy(textEncoder = null)
+                )
+            )
+        }.exceptionOrNull()
+        assertTrue(controlFailure is IllegalArgumentException)
+
+        val primaryIdentityFailure = runCatching {
+            control.copy(recommendedFileName = "different-context.zip")
+        }.exceptionOrNull()
+        assertTrue(primaryIdentityFailure is IllegalArgumentException)
     }
 
     @Test
@@ -1356,6 +1445,9 @@ class ModelScopeClientTest {
                     "qualcomm-snapdragon-8-elite": {
                       "qnn_context_binary": {"download_url": "https://example.com/elite.zip"}
                     },
+                    "qualcomm-snapdragon-8-elite-gen5": {
+                      "qnn_context_binary": {"download_url": "https://example.com/gen5-generic.zip"}
+                    },
                     "qualcomm-snapdragon-8-elite-gen5-for-galaxy": {
                       "qnn_context_binary": {"download_url": "https://example.com/gen5.zip"}
                     }
@@ -1366,11 +1458,19 @@ class ModelScopeClientTest {
         """.trimIndent()
 
         assertEquals(
-            "qualcomm-snapdragon-8-elite-gen5-for-galaxy",
+            "qualcomm-snapdragon-8-elite-gen5",
             client.selectedQnnImageChipsetForTest(
                 releaseAssetsJson = releaseAssets,
                 preferredChipsets = listOf("qualcomm-snapdragon-8-elite"),
                 catalogTargetChipset = "qualcomm-snapdragon-8-elite-gen5"
+            )
+        )
+        assertEquals(
+            "qualcomm-snapdragon-8-elite-gen5-for-galaxy",
+            client.selectedQnnImageChipsetForTest(
+                releaseAssetsJson = releaseAssets,
+                preferredChipsets = listOf("qualcomm-snapdragon-8-elite"),
+                catalogTargetChipset = "qualcomm-snapdragon-8-elite-gen5-for-galaxy"
             )
         )
 
@@ -1381,7 +1481,7 @@ class ModelScopeClientTest {
                     "qualcomm-snapdragon-8gen3"
                 ),
                 preferredChipsets = listOf("qualcomm-snapdragon-8-elite"),
-                catalogTargetChipset = "qualcomm-snapdragon-8-elite-gen5"
+                catalogTargetChipset = "qualcomm-snapdragon-8-elite-gen5-for-galaxy"
             )
         }.exceptionOrNull()
         assertTrue(missingTarget is IllegalStateException)

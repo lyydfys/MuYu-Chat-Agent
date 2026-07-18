@@ -1,11 +1,83 @@
 package com.muyuchat.mca
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.json.JSONObject
 
 class LocalImageWorkerProtocolTest {
+    @Test
+    fun `upscale request round trips fixed model identity and every product scale`() {
+        val input = LocalImagePreparedInput(
+            path = "/data/user/0/com.muyuchat.mca/cache/local_image_dispatch_inputs/upscale/input.png",
+            mimeType = "image/png",
+            sha256 = "a".repeat(64),
+            sizeBytes = 4_096L,
+            width = 320,
+            height = 192
+        )
+        val upscaler = LocalImagePreparedUpscaler(
+            id = "11111111-1111-4111-8111-111111111111",
+            name = "Anime 4x",
+            path = "/data/user/0/com.muyuchat.mca/files/image_upscalers/upscaler.pth",
+            sha256 = "b".repeat(64),
+            sizeBytes = 17_000_000L
+        )
+
+        listOf(2, 3, 4).forEach { scale ->
+            val payload = LocalImageWorkerProtocol.upscaleRequest(
+                requestId = "upscale-$scale",
+                input = input,
+                upscaler = upscaler,
+                targetScale = scale,
+                tileSize = 128,
+                threads = 4
+            )
+            val parsed = LocalImageWorkerProtocol.parseUpscaleRequest(payload)
+
+            assertEquals("upscale-$scale", parsed.requestId)
+            assertEquals(input, parsed.input)
+            assertEquals(upscaler, parsed.upscaler)
+            assertEquals(scale, parsed.targetScale)
+            assertEquals(128, parsed.tileSize)
+            assertEquals(4, parsed.threads)
+            assertTrue(!payload.contains("base64", ignoreCase = true))
+        }
+    }
+
+    @Test
+    fun `upscale request rejects unsupported scale tile and thread controls`() {
+        val input = LocalImagePreparedInput(
+            path = "/data/user/0/com.muyuchat.mca/cache/local_image_dispatch_inputs/upscale/input.png",
+            mimeType = "image/png",
+            sha256 = "a".repeat(64),
+            sizeBytes = 4_096L,
+            width = 64,
+            height = 64
+        )
+        val upscaler = LocalImagePreparedUpscaler(
+            id = "22222222-2222-4222-8222-222222222222",
+            name = "4x",
+            path = "/data/user/0/com.muyuchat.mca/files/image_upscalers/upscaler.pth",
+            sha256 = "b".repeat(64),
+            sizeBytes = 1_024L
+        )
+        fun request(scale: Int = 4, tile: Int = 128, threads: Int = 4) =
+            LocalImageWorkerProtocol.upscaleRequest(
+                "invalid-upscale",
+                input,
+                upscaler,
+                scale,
+                tile,
+                threads
+            )
+
+        assertThrows(IllegalArgumentException::class.java) { request(scale = 5) }
+        assertThrows(IllegalArgumentException::class.java) { request(tile = 30) }
+        assertThrows(IllegalArgumentException::class.java) { request(threads = 0) }
+    }
+
     @Test
     fun `generation request round trips model prompt and explicit options`() {
         val model = LocalImageModelRecord(
@@ -212,6 +284,16 @@ class LocalImageWorkerProtocolTest {
             strength = 0.7,
             clipSkip = 2,
             batchCount = 1,
+            loras = listOf(
+                LocalImagePreparedLora(
+                    id = "11111111-1111-4111-8111-111111111111",
+                    name = "Portrait",
+                    path = "/data/user/0/com.muyuchat.mca/files/image_loras/lora.safetensors",
+                    sha256 = "c".repeat(64),
+                    sizeBytes = 2_048L,
+                    multiplier = 0.75
+                )
+            ),
             vaeTiling = LocalImageVaeTilingOptions(tileSize = 512, overlap = 0.5)
         )
 
@@ -224,6 +306,7 @@ class LocalImageWorkerProtocolTest {
         assertEquals(mask.sha256, parsed.options.maskImage?.sha256)
         assertEquals(0.7, parsed.options.strength ?: 0.0, 0.0)
         assertEquals(2, parsed.options.clipSkip)
+        assertEquals(0.75, parsed.options.loras.single().multiplier, 0.0)
         assertEquals(512, parsed.options.vaeTiling?.tileSize)
     }
 

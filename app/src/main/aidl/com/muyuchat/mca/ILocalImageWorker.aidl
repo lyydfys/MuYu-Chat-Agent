@@ -6,4 +6,5 @@ interface ILocalImageWorker {
     void begin(String requestJson);
     boolean cancel(String requestJson);
     boolean generate(String requestJson, ILocalImageWorkerCallback callback);
+    boolean upscale(String requestJson, ILocalImageWorkerCallback callback);
 }

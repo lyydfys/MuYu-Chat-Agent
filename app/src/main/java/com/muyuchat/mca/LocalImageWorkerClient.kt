@@ -208,6 +208,103 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         }
     }
 
+    suspend fun upscale(
+        inputImageReference: String,
+        upscaler: LocalImagePreparedUpscaler,
+        targetScale: Int,
+        tileSize: Int = 128,
+        threads: Int = Runtime.getRuntime().availableProcessors().coerceIn(1, 5),
+        requestId: String = UUID.randomUUID().toString(),
+        onProgress: (LocalImageProgress) -> Unit = {}
+    ): LocalImageResult {
+        require(inputImageReference.isNotBlank()) { "Upscale input image reference must not be blank." }
+        val request = ActiveRequest(
+            requestId = requestId,
+            runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+            requestedSteps = 1,
+            requestedUseCfg = false,
+            onProgress = onProgress
+        )
+        synchronized(stateLock) {
+            check(!closed) { "Local image worker client is closed." }
+            check(activeRequest == null) { "Another local image operation is already running." }
+            activeRequest = request
+        }
+
+        var inputDispatch: LocalImageInputDispatch? = null
+        try {
+            inputDispatch = inputDispatcher.prepare(
+                requestId = requestId,
+                draft = LocalImageInputDraft(
+                    taskMode = LocalImageTaskMode.IMG2IMG,
+                    inputImageReference = inputImageReference,
+                    strength = 1.0
+                ),
+                baseOptions = LocalImageGenerationOptions()
+            )
+            val preparedInput = requireNotNull(inputDispatch.options.inputImage) {
+                "Upscale input dispatcher did not publish a prepared image."
+            }
+            val runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP
+            val prepared = currentPreparation(runtime) ?: run {
+                begin(runtime)
+                requireNotNull(currentPreparation(runtime))
+            }
+            prepared.ready.await()
+            request.bindingSession = prepared.bindingSession
+            if (prepared.cancelRequested) throw LocalImageWorkerCancelledException()
+            if (request.completion.isCompleted) return request.completion.await().consumeResult()
+
+            val endpoint = awaitService { session -> request.bindingSession = session }
+            val service = endpoint.service
+            if (request.completion.isCompleted) return request.completion.await().consumeResult()
+            if (!request.handshake.tryBeginRemoteStart()) throw LocalImageWorkerCancelledException()
+            val accepted = try {
+                service.upscale(
+                    LocalImageWorkerProtocol.upscaleRequest(
+                        requestId = request.requestId,
+                        input = preparedInput,
+                        upscaler = upscaler,
+                        targetScale = targetScale,
+                        tileSize = tileSize,
+                        threads = threads
+                    ),
+                    callbackFor(request)
+                )
+            } catch (error: RemoteException) {
+                request.handshake.markFinished()
+                handleConnectionLoss(
+                    endpoint.session.connection,
+                    "Local image worker upscale call failed: ${error.message.orEmpty()}"
+                )
+                throw LocalImageWorkerDisconnectedException("Local image worker upscale call failed.", error)
+            }
+            val cancelAfterRegistration = request.handshake.completeRemoteStart(accepted)
+            if (!accepted) {
+                request.completion.completeExceptionally(
+                    LocalImageWorkerException("Local image worker rejected the upscale request.")
+                )
+            } else if (cancelAfterRegistration) {
+                cancelRemote(request)
+            } else {
+                startUpscaleWatchdog(request)
+            }
+            return request.completion.await().consumeResult()
+        } catch (cancelled: CancellationException) {
+            request.completion.cancel(cancelled)
+            if (request.handshake.requestCancel() == LocalImageStartHandshake.CancelAction.CANCEL_REMOTE) {
+                cancelRemote(request)
+            }
+            throw cancelled
+        } finally {
+            request.handshake.markFinished()
+            if (!request.watchdogTimedOut) request.watchdogJob?.cancel()
+            request.deliveredOutputPaths.forEach(::deleteResultIfSafe)
+            releaseBindingAfterRequest(request, LocalImageRuntime.STABLE_DIFFUSION_CPP)
+            inputDispatch?.directory?.deleteRecursively()
+        }
+    }
+
     override fun close() {
         val service: ILocalImageWorker?
         val request: ActiveRequest?
@@ -256,6 +353,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                         if (envelope.workerPid > 0) lastWorkerPid = envelope.workerPid
                         if (envelope.requestId == request.requestId && !request.completion.isCompleted) {
                             if (envelope.workerPid > 0) request.workerPid = envelope.workerPid
+                            request.lastWorkerCallbackAtMs = SystemClock.elapsedRealtime()
                             request.lastProgressPhase = envelope.progress.phase
                             request.lastStageTrace = accumulateNativeStageTrace(
                                 request.lastStageTrace,
@@ -636,6 +734,55 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         }
     }
 
+    private fun startUpscaleWatchdog(request: ActiveRequest) {
+        val acceptedAt = SystemClock.elapsedRealtime()
+        request.watchdogStartedAtMs = acceptedAt
+        request.lastWorkerCallbackAtMs = acceptedAt
+        request.watchdogJob = scope.launch {
+            var timeoutReason = "maximum runtime"
+            while (!request.completion.isCompleted) {
+                val now = SystemClock.elapsedRealtime()
+                val runtimeElapsed = now - request.watchdogStartedAtMs
+                val heartbeatElapsed = now - request.lastWorkerCallbackAtMs
+                val heartbeatTimeout = localImageUpscaleHeartbeatTimeoutMs(
+                    request.lastProgressPhase
+                )
+                if (runtimeElapsed >= LOCAL_IMAGE_UPSCALE_MAX_RUNTIME_MS) {
+                    timeoutReason = "maximum runtime"
+                    break
+                }
+                if (heartbeatElapsed >= heartbeatTimeout) {
+                    timeoutReason = "worker heartbeat"
+                    break
+                }
+                val remainingRuntime = LOCAL_IMAGE_UPSCALE_MAX_RUNTIME_MS - runtimeElapsed
+                val remainingHeartbeat = heartbeatTimeout - heartbeatElapsed
+                delay(
+                    minOf(
+                        WATCHDOG_POLL_INTERVAL_MS,
+                        remainingRuntime,
+                        remainingHeartbeat
+                    ).coerceAtLeast(1L)
+                )
+            }
+            if (request.completion.isCompleted) return@launch
+
+            request.watchdogTimedOut = true
+            val timeout = LocalImageWorkerRemoteException(
+                code = LOCAL_IMAGE_UPSCALE_WATCHDOG_TIMEOUT_CODE,
+                message = "Local ESRGAN worker exceeded its bounded $timeoutReason deadline " +
+                    "at phase=${request.lastProgressPhase.ifBlank { "unknown" }}."
+            )
+            if (!request.completion.completeExceptionally(timeout)) return@launch
+
+            cancelRemote(request)
+            val workerPid = request.workerPid
+            if (workerPid > 0 && workerPid != Process.myPid()) {
+                runCatching { Process.killProcess(workerPid) }
+            }
+        }
+    }
+
     private fun currentEndpoint(): BoundWorker? = synchronized(stateLock) {
         val session = bindingSession ?: return@synchronized null
         val service = remote?.takeIf { remoteBinder?.isBinderAlive == true }
@@ -785,6 +932,9 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         var watchdogStartedAtMs: Long = 0L
 
         @Volatile
+        var lastWorkerCallbackAtMs: Long = 0L
+
+        @Volatile
         var watchdogJob: Job? = null
 
         @Volatile
@@ -794,6 +944,19 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
     companion object {
         private const val WATCHDOG_POLL_INTERVAL_MS = 1_000L
     }
+}
+
+internal const val LOCAL_IMAGE_UPSCALE_WATCHDOG_TIMEOUT_CODE = "esrgan_worker_timeout"
+internal const val LOCAL_IMAGE_UPSCALE_MAX_RUNTIME_MS = 2L * 60L * 60L * 1_000L
+private const val LOCAL_IMAGE_UPSCALE_EXECUTION_HEARTBEAT_MS = 2L * 60L * 1_000L
+private const val LOCAL_IMAGE_UPSCALE_PREPARATION_HEARTBEAT_MS = 15L * 60L * 1_000L
+private const val LOCAL_IMAGE_UPSCALE_LEASE_WAIT_HEARTBEAT_MS = 45L * 60L * 1_000L
+
+internal fun localImageUpscaleHeartbeatTimeoutMs(phase: String): Long = when (phase) {
+    "worker_starting", "worker_preparing", "worker_started" ->
+        LOCAL_IMAGE_UPSCALE_PREPARATION_HEARTBEAT_MS
+    "waiting_for_native_lease" -> LOCAL_IMAGE_UPSCALE_LEASE_WAIT_HEARTBEAT_MS
+    else -> LOCAL_IMAGE_UPSCALE_EXECUTION_HEARTBEAT_MS
 }
 
 /**

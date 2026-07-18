@@ -1,13 +1,13 @@
 diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
-index e15f1aa7d1eba4db9ab7b35b7b9323c822e5e638..b2059cb7667b308da7acc103f14a0c3ea4fa01b6 100644
+index e15f1aa..a98bc6d 100644
 --- a/include/stable-diffusion.h
 +++ b/include/stable-diffusion.h
-@@ -399,17 +399,57 @@ typedef struct {
- 
+@@ -399,17 +399,106 @@ typedef struct {
+
  typedef struct sd_ctx_t sd_ctx_t;
- 
+
 +enum {
-+    SD_IMAGE_EXECUTION_EVIDENCE_VERSION = 2,
++    SD_IMAGE_EXECUTION_EVIDENCE_VERSION = 4,
 +};
 +
 +typedef struct {
@@ -34,13 +34,62 @@ index e15f1aa7d1eba4db9ab7b35b7b9323c822e5e638..b2059cb7667b308da7acc103f14a0c3e
 +    uint64_t negative_diffusion_model_compute_count;
 +    uint64_t auxiliary_diffusion_model_compute_count;
 +    uint64_t conditioning_artifact_byte_count;
++    uint32_t lora_requested_count;
++    uint32_t lora_loaded_count;
++    uint32_t lora_applied_count;
++    uint64_t lora_applied_tensor_count;
++    uint64_t control_net_compute_attempt_count;
++    uint64_t control_net_compute_success_count;
++    uint64_t positive_control_net_compute_attempt_count;
++    uint64_t positive_control_net_compute_success_count;
++    uint64_t negative_control_net_compute_attempt_count;
++    uint64_t negative_control_net_compute_success_count;
++    uint64_t control_net_residual_consumption_count;
++    uint64_t positive_control_net_residual_consumption_count;
++    uint64_t negative_control_net_residual_consumption_count;
++    uint64_t auxiliary_control_net_residual_consumption_count;
++    uint64_t vae_encode_tiling_invocation_count;
++    uint64_t vae_encode_tiling_success_count;
++    uint64_t vae_decode_tiling_invocation_count;
++    uint64_t vae_decode_tiling_success_count;
++    uint64_t vae_encode_planned_tile_count;
++    uint64_t vae_decode_planned_tile_count;
++    uint64_t vae_encode_tile_compute_attempt_count;
++    uint64_t vae_encode_tile_compute_success_count;
++    uint64_t vae_decode_tile_compute_attempt_count;
++    uint64_t vae_decode_tile_compute_success_count;
++    uint32_t vae_encode_tile_size_x;
++    uint32_t vae_encode_tile_size_y;
++    uint32_t vae_decode_tile_size_x;
++    uint32_t vae_decode_tile_size_y;
++    float vae_encode_tile_overlap_x;
++    float vae_encode_tile_overlap_y;
++    float vae_decode_tile_overlap_x;
++    float vae_decode_tile_overlap_y;
 +} sd_image_execution_evidence_t;
++
++#ifdef __cplusplus
++static_assert(SD_IMAGE_EXECUTION_EVIDENCE_VERSION == 4u,
++              "image execution evidence ABI version changed");
++static_assert(sizeof(sd_image_execution_evidence_t) == 352u,
++              "image execution evidence ABI size changed");
++static_assert(offsetof(sd_image_execution_evidence_t, version) == 0u,
++              "image execution evidence version offset changed");
++static_assert(offsetof(sd_image_execution_evidence_t, control_net_compute_attempt_count) == 160u,
++              "image execution evidence ControlNet offset changed");
++static_assert(offsetof(sd_image_execution_evidence_t, auxiliary_control_net_residual_consumption_count) == 232u,
++              "image execution evidence ControlNet tail offset changed");
++static_assert(offsetof(sd_image_execution_evidence_t, vae_encode_tiling_invocation_count) == 240u,
++              "image execution evidence VAE offset changed");
++static_assert(offsetof(sd_image_execution_evidence_t, vae_decode_tile_overlap_y) == 348u,
++              "image execution evidence VAE tail offset changed");
++#endif
 +
  typedef void (*sd_log_cb_t)(enum sd_log_level_t level, const char* text, void* data);
  typedef void (*sd_progress_cb_t)(int step, int steps, float time, void* data);
 +typedef bool (*sd_cancel_cb_t)(void* data);
  typedef void (*sd_preview_cb_t)(int step, int frame_count, sd_image_t* frames, bool is_noisy, void* data);
- 
+
  SD_API void sd_set_log_callback(sd_log_cb_t sd_log_cb, void* data);
  SD_API void sd_set_progress_callback(sd_progress_cb_t cb, void* data);
 +SD_API void sd_set_cancel_callback(sd_cancel_cb_t cb, void* data);
@@ -57,27 +106,74 @@ index e15f1aa7d1eba4db9ab7b35b7b9323c822e5e638..b2059cb7667b308da7acc103f14a0c3e
 +SD_API bool sd_copy_last_image_conditioning_artifact(const sd_ctx_t* sd_ctx,
 +                                                      uint8_t* destination,
 +                                                      size_t destination_size);
- 
+
  SD_API const char* sd_type_name(enum sd_type_t type);
  SD_API enum sd_type_t str_to_sd_type(const char* str);
+@@ -457,6 +546,36 @@ SD_API bool generate_video(sd_ctx_t* sd_ctx,
+
+ typedef struct upscaler_ctx_t upscaler_ctx_t;
+
++#define SD_UPSCALER_EXECUTION_EVIDENCE_VERSION 1u
++
++typedef struct sd_upscaler_execution_evidence_t {
++    uint32_t version;
++    uint32_t requested_scale;
++    uint32_t native_scale;
++    uint32_t source_width;
++    uint32_t source_height;
++    uint32_t output_width;
++    uint32_t output_height;
++    uint32_t tiled;
++    uint32_t completed;
++    uint32_t cancelled;
++    uint64_t compute_invocation_count;
++    uint64_t compute_success_count;
++    uint64_t tile_compute_invocation_count;
++    uint64_t tile_compute_success_count;
++} sd_upscaler_execution_evidence_t;
++
++#ifdef __cplusplus
++static_assert(sizeof(sd_upscaler_execution_evidence_t) == 72u,
++              "upscaler execution evidence ABI size changed");
++static_assert(offsetof(sd_upscaler_execution_evidence_t, version) == 0u,
++              "upscaler execution evidence version offset changed");
++static_assert(offsetof(sd_upscaler_execution_evidence_t, compute_invocation_count) == 40u,
++              "upscaler execution evidence compute offset changed");
++static_assert(offsetof(sd_upscaler_execution_evidence_t, tile_compute_success_count) == 64u,
++              "upscaler execution evidence tile offset changed");
++#endif
++
+ SD_API upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path,
+                                         bool offload_params_to_cpu,
+                                         bool direct,
+@@ -471,6 +590,9 @@ SD_API sd_image_t upscale(upscaler_ctx_t* upscaler_ctx,
+                           uint32_t upscale_factor);
+
+ SD_API int get_upscale_factor(upscaler_ctx_t* upscaler_ctx);
++SD_API bool sd_get_upscaler_execution_evidence(
++    const upscaler_ctx_t* upscaler_ctx,
++    sd_upscaler_execution_evidence_t* evidence);
+
+ SD_API bool convert(const char* input_path,
+                     const char* vae_path,
 diff --git a/src/conditioner.hpp b/src/conditioner.hpp
-index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155f212dc9c 100644
+index bb4e1c2..37e33d7 100644
 --- a/src/conditioner.hpp
 +++ b/src/conditioner.hpp
 @@ -1,7 +1,9 @@
  #ifndef __CONDITIONER_HPP__
  #define __CONDITIONER_HPP__
- 
+
 +#include <algorithm>
  #include <cmath>
 +#include <cstdint>
  #include <limits>
  #include <optional>
- 
+
 @@ -62,6 +64,81 @@ struct SDCondition {
      }
  };
- 
+
 +struct ConditioningExecutionSequenceEvidence {
 +    std::vector<int32_t> token_ids;
 +    std::vector<float> token_weights;
@@ -162,7 +258,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
      const std::vector<sd::Tensor<float>>* ref_images = nullptr;  // for qwen image edit
 +    ConditioningExecutionEvidence* execution_evidence = nullptr;
  };
- 
+
  struct Conditioner {
 @@ -506,7 +584,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
                                               int clip_skip,
@@ -198,7 +294,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +        }
          return result;
      }
- 
+
 @@ -651,7 +748,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
                                                   conditioner_params.clip_skip,
                                                   conditioner_params.width,
@@ -208,7 +304,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +                                                 conditioner_params.execution_evidence);
          return std::make_tuple(cond, clsm);
      }
- 
+
 @@ -677,7 +775,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
                                              conditioner_params.clip_skip,
                                              conditioner_params.width,
@@ -218,7 +314,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +                                            conditioner_params.execution_evidence);
      }
  };
- 
+
 @@ -944,7 +1043,8 @@ struct SD3CLIPEmbedder : public Conditioner {
      SDCondition get_learned_condition_common(int n_threads,
                                               std::vector<std::pair<std::vector<int>, std::vector<float>>> token_and_weights,
@@ -236,7 +332,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +        record_conditioning_execution_sequences(execution_evidence, token_and_weights, true);
          return result;
      }
- 
+
 @@ -1107,7 +1208,8 @@ struct SD3CLIPEmbedder : public Conditioner {
          return get_learned_condition_common(n_threads,
                                              tokens_and_weights,
@@ -246,7 +342,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +                                            conditioner_params.execution_evidence);
      }
  };
- 
+
 @@ -1279,7 +1381,8 @@ struct FluxCLIPEmbedder : public Conditioner {
      SDCondition get_learned_condition_common(int n_threads,
                                               std::vector<std::pair<std::vector<int>, std::vector<float>>> token_and_weights,
@@ -264,7 +360,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +        record_conditioning_execution_sequences(execution_evidence, token_and_weights, true);
          return result;
      }
- 
+
 @@ -1365,7 +1469,8 @@ struct FluxCLIPEmbedder : public Conditioner {
          return get_learned_condition_common(n_threads,
                                              tokens_and_weights,
@@ -274,7 +370,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +                                            conditioner_params.execution_evidence);
      }
  };
- 
+
 @@ -1505,7 +1610,8 @@ struct T5CLIPEmbedder : public Conditioner {
      SDCondition get_learned_condition_common(int n_threads,
                                               std::tuple<std::vector<int>, std::vector<float>, std::vector<float>> token_and_weights,
@@ -295,7 +391,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +                                               true);
          return result;
      }
- 
+
 @@ -1573,7 +1683,8 @@ struct T5CLIPEmbedder : public Conditioner {
          return get_learned_condition_common(n_threads,
                                              tokens_and_weights,
@@ -305,7 +401,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +                                            conditioner_params.execution_evidence);
      }
  };
- 
+
 @@ -1695,6 +1806,10 @@ struct AnimaConditioner : public Conditioner {
          result.c_crossattn  = std::move(hidden_states);
          result.c_t5_ids     = std::move(t5_ids_tensor);
@@ -333,7 +429,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
          hidden_states = apply_token_weights(std::move(hidden_states), weights);
 +        record_conditioning_execution_sequence(execution_evidence, tokens, weights, true);
          GGML_ASSERT(hidden_states.shape()[1] > prompt_template_encode_start_idx);
- 
+
          int64_t zero_pad_len = 0;
 @@ -2162,7 +2279,8 @@ struct LLMEmbedder : public Conditioner {
                                                 out_layers,
@@ -343,7 +439,7 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +                                               max_length,
 +                                               conditioner_params.execution_evidence);
              GGML_ASSERT(!hidden_states.empty());
- 
+
              if (hidden_states.shape()[1] > pixeldit_max_length) {
 @@ -2193,7 +2311,8 @@ struct LLMEmbedder : public Conditioner {
                                             out_layers,
@@ -364,23 +460,25 @@ index bb4e1c26770bd45d52928b39cba8441a2b7077f6..37e33d7d2edf3ae682e85e27296a7155
 +                                                     conditioner_params.execution_evidence);
              extra_hidden_states_vec.push_back(std::move(extra_hidden_states));
          }
- 
+
 diff --git a/src/stable-diffusion.cpp b/src/stable-diffusion.cpp
-index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28ebf885a024 100644
+index 28598eb..5edca08 100644
 --- a/src/stable-diffusion.cpp
 +++ b/src/stable-diffusion.cpp
-@@ -1,5 +1,7 @@
+@@ -1,6 +1,9 @@
  #include <algorithm>
  #include <cmath>
 +#include <cstdint>
 +#include <cstring>
  #include <cstdlib>
- 
++#include <unordered_set>
+
  #include "ggml_extend.hpp"
-@@ -136,10 +138,174 @@ static float get_cache_reuse_threshold(const sd_cache_params_t& params) {
+ #include "ggml_graph_cut.h"
+@@ -136,10 +139,274 @@ static float get_cache_reuse_threshold(const sd_cache_params_t& params) {
      return std::max(0.0f, reuse_threshold);
  }
- 
+
 +enum class DiffusionExecutionBranch : uint32_t {
 +    POSITIVE = 1,
 +    NEGATIVE = 2,
@@ -513,6 +611,80 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
 +        }
 +    }
 +
++    void record_control_net_compute_attempt(DiffusionExecutionBranch branch) {
++        if (!collecting) {
++            return;
++        }
++        ++summary.control_net_compute_attempt_count;
++        switch (branch) {
++            case DiffusionExecutionBranch::POSITIVE:
++                ++summary.positive_control_net_compute_attempt_count;
++                break;
++            case DiffusionExecutionBranch::NEGATIVE:
++                ++summary.negative_control_net_compute_attempt_count;
++                break;
++            case DiffusionExecutionBranch::AUXILIARY:
++                break;
++        }
++    }
++
++    void record_control_net_compute_success(DiffusionExecutionBranch branch) {
++        if (!collecting) {
++            return;
++        }
++        ++summary.control_net_compute_success_count;
++        switch (branch) {
++            case DiffusionExecutionBranch::POSITIVE:
++                ++summary.positive_control_net_compute_success_count;
++                break;
++            case DiffusionExecutionBranch::NEGATIVE:
++                ++summary.negative_control_net_compute_success_count;
++                break;
++            case DiffusionExecutionBranch::AUXILIARY:
++                break;
++        }
++    }
++
++    void record_control_net_residual_consumption(DiffusionExecutionBranch branch) {
++        if (!collecting) {
++            return;
++        }
++        ++summary.control_net_residual_consumption_count;
++        switch (branch) {
++            case DiffusionExecutionBranch::POSITIVE:
++                ++summary.positive_control_net_residual_consumption_count;
++                break;
++            case DiffusionExecutionBranch::NEGATIVE:
++                ++summary.negative_control_net_residual_consumption_count;
++                break;
++            case DiffusionExecutionBranch::AUXILIARY:
++                ++summary.auxiliary_control_net_residual_consumption_count;
++                break;
++        }
++    }
++
++    void record_lora_requested(uint32_t count) {
++        if (collecting) {
++            summary.lora_requested_count = count;
++            summary.lora_loaded_count = 0u;
++            summary.lora_applied_count = 0u;
++            summary.lora_applied_tensor_count = 0u;
++        }
++    }
++
++    void record_lora_loaded(uint32_t count) {
++        if (collecting) {
++            summary.lora_loaded_count = count;
++        }
++    }
++
++    void record_lora_applied(uint32_t count, uint64_t tensor_count) {
++        if (collecting) {
++            summary.lora_applied_count = count;
++            summary.lora_applied_tensor_count = tensor_count;
++        }
++    }
++
 +    void mark_generation_completed(bool flow_shift_applied,
 +                                   bool dynamic_flow_shift,
 +                                   float effective_flow_shift,
@@ -544,26 +716,60 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
 +    ImageExecutionEvidenceState& evidence;
 +};
 +
++struct VaeImageExecutionEvidenceScope {
++    VaeImageExecutionEvidenceScope(const std::shared_ptr<VAE>& first_stage_model,
++                                   const std::shared_ptr<VAE>& preview_vae,
++                                   sd_image_execution_evidence_t* evidence)
++        : first_stage_model(first_stage_model), preview_vae(preview_vae) {
++        if (this->first_stage_model != nullptr) {
++            this->first_stage_model->set_image_execution_evidence(evidence);
++        }
++        if (this->preview_vae != nullptr) {
++            this->preview_vae->set_image_execution_evidence(evidence);
++        }
++    }
++
++    ~VaeImageExecutionEvidenceScope() {
++        if (first_stage_model != nullptr) {
++            first_stage_model->set_image_execution_evidence(nullptr);
++        }
++        if (preview_vae != nullptr) {
++            preview_vae->set_image_execution_evidence(nullptr);
++        }
++    }
++
++    std::shared_ptr<VAE> first_stage_model;
++    std::shared_ptr<VAE> preview_vae;
++};
++
  /*=============================================== StableDiffusionGGML ================================================*/
- 
+
  class StableDiffusionGGML {
  public:
 +    ImageExecutionEvidenceState image_execution_evidence;
      std::vector<MmapTensorStore> mmap_tensor_store;
      SDBackendManager backend_manager;
- 
-@@ -155,6 +321,7 @@ public:
+
+@@ -155,6 +422,7 @@ public:
      std::shared_ptr<RNG> sampler_rng = nullptr;
      int n_threads                    = -1;
      float default_flow_shift         = INFINITY;
 +    bool distilled_guidance_input_enabled = false;
- 
+
      std::shared_ptr<Conditioner> cond_stage_model;
      std::shared_ptr<FrozenCLIPVisionEmbedder> clip_vision;  // for svd or wan2.1 i2v
-@@ -1141,6 +1308,19 @@ public:
+@@ -170,6 +438,7 @@ public:
+     std::vector<std::shared_ptr<LoraModel>> cond_stage_lora_models;
+     std::vector<std::shared_ptr<LoraModel>> diffusion_lora_models;
+     std::vector<std::shared_ptr<LoraModel>> first_stage_lora_models;
++    std::unordered_set<std::string> requested_lora_ids;
+     bool apply_lora_immediately = false;
+
+     std::string taesd_path;
+@@ -1141,6 +1410,19 @@ public:
                  params_memory_location(pmid_params_mem_size, SDBackendModule::PHOTOMAKER));
          }
- 
+
 +        distilled_guidance_input_enabled = false;
 +        if (sd_version_is_flux(version) ||
 +            sd_version_is_flux2(version) ||
@@ -580,25 +786,171 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
          // init denoiser
          {
              prediction_t pred_type = sd_ctx_params->prediction;
-@@ -1878,6 +2058,7 @@ public:
+@@ -1493,13 +1775,33 @@ public:
+                 first_stage_model->set_weight_adapter(multi_lora_adapter);
+             }
+         }
++        std::unordered_set<std::string> loaded_ids;
++        const auto collect_loaded = [&](const std::vector<std::shared_ptr<LoraModel>>& models) {
++            for (const auto& model : models) {
++                if (model && !model->lora_tensors.empty()) loaded_ids.insert(model->lora_id);
++            }
++        };
++        collect_loaded(cond_stage_lora_models);
++        collect_loaded(diffusion_lora_models);
++        collect_loaded(first_stage_lora_models);
++        image_execution_evidence.record_lora_loaded(static_cast<uint32_t>(loaded_ids.size()));
      }
- 
+
+     void lora_stat() {
++        std::unordered_set<std::string> applied_ids;
++        uint64_t applied_tensor_count = 0u;
++        const auto collect_applied = [&](const std::shared_ptr<LoraModel>& lora_model) {
++            if (lora_model && !lora_model->applied_lora_tensors.empty()) {
++                applied_ids.insert(lora_model->lora_id);
++                applied_tensor_count +=
++                    static_cast<uint64_t>(lora_model->applied_lora_tensors.size());
++            }
++        };
+         if (!cond_stage_lora_models.empty()) {
+             LOG_INFO("cond_stage_lora_models:");
+             for (auto& lora_model : cond_stage_lora_models) {
+                 lora_model->stat();
++                collect_applied(lora_model);
+             }
+         }
+
+@@ -1507,6 +1809,7 @@ public:
+             LOG_INFO("diffusion_lora_models:");
+             for (auto& lora_model : diffusion_lora_models) {
+                 lora_model->stat();
++                collect_applied(lora_model);
+             }
+         }
+
+@@ -1514,20 +1817,28 @@ public:
+             LOG_INFO("first_stage_lora_models:");
+             for (auto& lora_model : first_stage_lora_models) {
+                 lora_model->stat();
++                collect_applied(lora_model);
+             }
+         }
++        image_execution_evidence.record_lora_applied(
++            static_cast<uint32_t>(applied_ids.size()),
++            applied_tensor_count);
+     }
+
+     void apply_loras(const sd_lora_t* loras, uint32_t lora_count) {
+         std::unordered_map<std::string, float> lora_f2m;
++        requested_lora_ids.clear();
+         for (uint32_t i = 0; i < lora_count; i++) {
+             std::string lora_id = SAFE_STR(loras[i].path);
+             if (loras[i].is_high_noise) {
+                 lora_id = "|high_noise|" + lora_id;
+             }
+             lora_f2m[lora_id] = loras[i].multiplier;
++            requested_lora_ids.insert(lora_id);
+             LOG_DEBUG("lora %s:%.2f", lora_id.c_str(), loras[i].multiplier);
+         }
++        image_execution_evidence.record_lora_requested(
++            static_cast<uint32_t>(requested_lora_ids.size()));
+         int64_t t0 = ggml_time_ms();
+         if (apply_lora_immediately) {
+             apply_loras_immediately(lora_f2m);
+@@ -1786,14 +2097,29 @@ public:
+         if (preview_mode == PREVIEW_VAE || preview_mode == PREVIEW_TAE) {
+             sd::Tensor<float> vae_latents;
+             sd::Tensor<float> decoded;
++            const bool record_preview_vae_execution = false;
+             if (preview_vae) {
+                 preview_vae->set_temporal_tiling_enabled(vae_tiling_params.temporal_tiling);
+                 vae_latents = preview_vae->diffusion_to_vae_latents(_latents);
+-                decoded     = preview_vae->decode(n_threads, vae_latents, vae_tiling_params, is_video, circular_x, circular_y, true);
++                decoded     = preview_vae->decode(n_threads,
++                                                  vae_latents,
++                                                  vae_tiling_params,
++                                                  is_video,
++                                                  circular_x,
++                                                  circular_y,
++                                                  true,
++                                                  record_preview_vae_execution);
+             } else {
+                 first_stage_model->set_temporal_tiling_enabled(vae_tiling_params.temporal_tiling);
+                 vae_latents = first_stage_model->diffusion_to_vae_latents(_latents);
+-                decoded     = first_stage_model->decode(n_threads, vae_latents, vae_tiling_params, is_video, circular_x, circular_y, true);
++                decoded     = first_stage_model->decode(n_threads,
++                                                        vae_latents,
++                                                        vae_tiling_params,
++                                                        is_video,
++                                                        circular_x,
++                                                        circular_y,
++                                                        true,
++                                                        record_preview_vae_execution);
+             }
+             if (decoded.empty()) {
+                 LOG_ERROR("preview decode failed at step %d", step);
+@@ -1878,6 +2204,7 @@ public:
+     }
+
      void report_sample_progress(int step, size_t total_steps, int64_t t0) {
 +        image_execution_evidence.record_completed_sampling_step();
          int64_t t1 = ggml_time_us();
          if (step > 0 || step == -(int)total_steps) {
              int showstep = std::abs(step);
-@@ -1958,6 +2139,7 @@ public:
+@@ -1885,15 +2212,22 @@ public:
          }
- 
+     }
+
+-    void compute_sample_controls(const sd::Tensor<float>& control_image,
++    bool compute_sample_controls(const sd::Tensor<float>& control_image,
+                                  const sd::Tensor<float>& noised_input,
+                                  const sd::Tensor<float>& timesteps_tensor,
+                                  const SDCondition& condition,
++                                 DiffusionExecutionBranch execution_branch,
+                                  std::vector<sd::Tensor<float>>* controls) {
+         GGML_ASSERT(controls != nullptr);
+         controls->clear();
+-        if (control_image.empty() || control_net == nullptr) {
+-            return;
++        if (control_image.empty()) {
++            return true;
++        }
++
++        image_execution_evidence.record_control_net_compute_attempt(execution_branch);
++        if (control_net == nullptr) {
++            LOG_ERROR("control image was provided without a loaded ControlNet");
++            return false;
+         }
+
+         auto control_result = control_net->compute(n_threads,
+@@ -1902,12 +2236,14 @@ public:
+                                                    timesteps_tensor,
+                                                    condition.c_crossattn,
+                                                    condition.c_vector);
+-        if (!control_result.has_value()) {
++        if (!control_result.has_value() || control_result->empty()) {
+             LOG_ERROR("controlnet compute failed");
+-            return;
++            return false;
+         }
+
+         *controls = std::move(*control_result);
++        image_execution_evidence.record_control_net_compute_success(execution_branch);
++        return true;
+     }
+
+     sd::Tensor<float> sample(const std::shared_ptr<DiffusionModelRunner>& work_diffusion_model,
+@@ -1958,6 +2294,7 @@ public:
+         }
+
          size_t steps       = sigmas.size() - 1;
 +        image_execution_evidence.record_sampling_pass();
          bool has_skiplayer = (slg_scale != 0.0f || slg_uncond) && !skip_layers.empty();
          if (has_skiplayer && !sd_version_is_dit(version)) {
              has_skiplayer = false;
-@@ -1990,6 +2172,10 @@ public:
+@@ -1990,6 +2327,10 @@ public:
          SamplePreviewContext preview = prepare_sample_preview_context();
- 
+
          auto denoise = [&](const sd::Tensor<float>& x, float sigma, int step) -> sd::guidance::GuiderOutput {
 +            if (sd_should_cancel()) {
 +                LOG_WARN("sampling cancelled before step %d", step);
@@ -607,25 +959,46 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
              if (step == 1 || step == -1) {
                  pretty_progress(0, (int)steps, 0);
              }
-@@ -2060,6 +2246,7 @@ public:
-                                     &controls);
- 
+@@ -2053,13 +2394,17 @@ public:
+             step_guidance_input.schedule_size = sigmas.size();
+             bool is_skiplayer_step            = skip_layer_guidance.is_enabled_for_step(step_guidance_input);
+
+-            compute_sample_controls(control_image,
+-                                    noised_input,
+-                                    timesteps_tensor,
+-                                    cond,
+-                                    &controls);
++            if (!compute_sample_controls(control_image,
++                                         noised_input,
++                                         timesteps_tensor,
++                                         cond,
++                                         DiffusionExecutionBranch::POSITIVE,
++                                         &controls)) {
++                return {};
++            }
+
              auto run_condition = [&](const SDCondition& condition,
 +                                     DiffusionExecutionBranch execution_branch,
                                       const sd::Tensor<float>* c_concat_override = nullptr,
                                       const std::vector<int>* local_skip_layers  = nullptr) -> sd::Tensor<float> {
                  diffusion_params.context     = condition.c_crossattn.empty() ? nullptr : &condition.c_crossattn;
-@@ -2103,7 +2290,18 @@ public:
+@@ -2103,7 +2448,24 @@ public:
                      return std::move(cached_output);
                  }
- 
+
 +                if (sd_should_cancel()) {
 +                    LOG_WARN("sampling cancelled before diffusion compute at step %d", step);
 +                    return sd::Tensor<float>();
 +                }
++                const bool control_residuals_wired =
++                    sd_version_is_unet(version) && !controls.empty();
                  auto output_opt = work_diffusion_model->compute(n_threads, diffusion_params);
 +                if (!output_opt.empty()) {
 +                    image_execution_evidence.record_diffusion_compute(execution_branch);
++                    if (control_residuals_wired) {
++                        image_execution_evidence.record_control_net_residual_consumption(
++                            execution_branch);
++                    }
 +                }
 +                if (sd_should_cancel()) {
 +                    LOG_WARN("sampling cancelled after diffusion compute at step %d", step);
@@ -634,9 +1007,9 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
                  if (output_opt.empty()) {
                      LOG_ERROR("diffusion model compute failed");
                      return sd::Tensor<float>();
-@@ -2114,13 +2312,14 @@ public:
+@@ -2114,13 +2476,14 @@ public:
              };
- 
+
              if (start_merge_step == -1 || step <= start_merge_step) {
 -                cond_out = run_condition(cond);
 +                cond_out = run_condition(cond, DiffusionExecutionBranch::POSITIVE);
@@ -650,7 +1023,26 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
                                           cond.c_concat.empty() ? nullptr : &cond.c_concat);
                  if (cond_out.empty()) {
                      return {};
-@@ -2140,13 +2339,17 @@ public:
+@@ -2129,24 +2492,31 @@ public:
+
+             if (!uncond.empty()) {
+                 if (!step_cache.is_step_skipped()) {
+-                    compute_sample_controls(control_image,
+-                                            noised_input,
+-                                            timesteps_tensor,
+-                                            uncond,
+-                                            &controls);
++                    if (!compute_sample_controls(control_image,
++                                                 noised_input,
++                                                 timesteps_tensor,
++                                                 uncond,
++                                                 DiffusionExecutionBranch::NEGATIVE,
++                                                 &controls)) {
++                        return {};
++                    }
+                 }
+                 const std::vector<int>* uncond_skip_layers = nullptr;
+                 if (is_skiplayer_step && slg_uncond) {
                      LOG_DEBUG("Skipping layers at uncond step %d\n", step);
                      uncond_skip_layers = &skip_layer_guidance.layers();
                  }
@@ -669,7 +1061,7 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
                                               cond.c_concat.empty() ? nullptr : &cond.c_concat);
                  if (img_cond_out.empty()) {
                      return {};
-@@ -2169,6 +2372,7 @@ public:
+@@ -2169,6 +2539,7 @@ public:
                  if (!step_cache.is_step_skipped()) {
                      guidance_input.predict_skip_layer = [&]() -> sd::Tensor<float> {
                          return run_condition(cond,
@@ -677,7 +1069,7 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
                                               cond.c_concat.empty() ? nullptr : &cond.c_concat,
                                               &skip_layer_guidance.layers());
                      };
-@@ -2197,13 +2401,21 @@ public:
+@@ -2197,13 +2568,21 @@ public:
                  preview_image(step, denoised, version, preview.mode, preview.callback, preview.data, false);
              }
              report_sample_progress(step, steps, t0);
@@ -688,7 +1080,7 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
              output.pred = denoised;
              return output;
          };
- 
+
          auto x0_opt = sample_k_diffusion(method, denoise, x_t, sigmas, sampler_rng, eta, is_flow_denoiser, extra_sample_args);
          if (x0_opt.empty()) {
 -            LOG_ERROR("Diffusion model sampling failed");
@@ -700,10 +1092,10 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
              if (control_net) {
                  control_net->free_control_ctx();
                  control_net->free_compute_buffer();
-@@ -2386,6 +2598,26 @@ public:
+@@ -2386,6 +2765,26 @@ public:
          }
      }
- 
+
 +    bool get_effective_flow_shift(float* flow_shift) const {
 +        if (flow_shift == nullptr) {
 +            return false;
@@ -727,10 +1119,10 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
      bool is_flow_denoiser() {
          auto flow_denoiser = std::dynamic_pointer_cast<DiscreteFlowDenoiser>(denoiser);
          return !!flow_denoiser;
-@@ -3058,6 +3290,54 @@ SD_API bool sd_ctx_supports_video_generation(const sd_ctx_t* sd_ctx) {
+@@ -3058,6 +3457,54 @@ SD_API bool sd_ctx_supports_video_generation(const sd_ctx_t* sd_ctx) {
      return sd_version_supports_video_generation(sd_ctx->sd->version);
  }
- 
+
 +SD_API bool sd_ctx_uses_flow_shift(const sd_ctx_t* sd_ctx) {
 +    if (sd_ctx == nullptr || sd_ctx->sd == nullptr) {
 +        return false;
@@ -782,7 +1174,7 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
  enum sample_method_t sd_get_default_sample_method(const sd_ctx_t* sd_ctx) {
      if (sd_ctx != nullptr && sd_ctx->sd != nullptr) {
          if (sd_version_is_pid(sd_ctx->sd->version)) {
-@@ -4098,13 +4378,19 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
+@@ -4098,13 +4545,19 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
      auto id_cond                     = sd_ctx->sd->get_pmid_conditon(request->pm_params, condition_params);
      int64_t prepare_start_ms         = ggml_time_ms();
      condition_params.zero_out_masked = false;
@@ -796,13 +1188,13 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
      if (cond.c_concat.empty()) {
          cond.c_concat = latents->concat_latent;  // TODO: optimize
      }
- 
+
      SDCondition uncond;
 +    ConditioningExecutionEvidence negative_execution_evidence;
      if (request->use_uncond || request->use_high_noise_uncond) {
          bool zero_out_masked = false;
          if (sd_version_is_sdxl(sd_ctx->sd->version) &&
-@@ -4114,12 +4400,17 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
+@@ -4114,12 +4567,17 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
          }
          condition_params.text            = request->negative_prompt;
          condition_params.zero_out_masked = zero_out_masked;
@@ -817,18 +1209,22 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
 +        DiffusionExecutionBranch::NEGATIVE,
 +        negative_execution_evidence);
 +    condition_params.execution_evidence = nullptr;
- 
+
      int64_t t1 = ggml_time_ms();
      LOG_INFO("get_learned_condition completed, taking %.2fs", (t1 - prepare_start_ms) * 1.0f / 1000);
-@@ -4364,6 +4655,7 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+@@ -4364,6 +4822,11 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
      if (sd_ctx == nullptr || sd_img_gen_params == nullptr) {
          return nullptr;
      }
 +    ImageExecutionEvidenceScope image_execution_scope(sd_ctx->sd->image_execution_evidence);
- 
++    VaeImageExecutionEvidenceScope vae_execution_scope(
++        sd_ctx->sd->first_stage_model,
++        sd_ctx->sd->preview_vae,
++        &sd_ctx->sd->image_execution_evidence.summary);
+
      int64_t t0                    = ggml_time_ms();
      sd_ctx->sd->vae_tiling_params = sd_img_gen_params->vae_tiling_params;
-@@ -4382,6 +4674,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+@@ -4382,6 +4845,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
                                                          sd_img_gen_params,
                                                          &request,
                                                          &plan);
@@ -839,7 +1235,7 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
      if (!latents_opt.has_value()) {
          return nullptr;
      }
-@@ -4392,6 +4688,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+@@ -4392,6 +4859,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
                                                        &request,
                                                        &plan,
                                                        &latents);
@@ -850,7 +1246,7 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
      if (!embeds_opt.has_value()) {
          return nullptr;
      }
-@@ -4403,6 +4703,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+@@ -4403,6 +4874,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
          int64_t sampling_start = ggml_time_ms();
          int64_t cur_seed       = request.seed + b;
          LOG_INFO("generating image: %i/%i - seed %" PRId64, b + 1, request.batch_count, cur_seed);
@@ -858,12 +1254,12 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
 +            LOG_WARN("image generation cancelled before sampling batch %d", b + 1);
 +            return nullptr;
 +        }
- 
+
          sd_ctx->sd->rng->manual_seed(cur_seed);
          sd_ctx->sd->sampler_rng->manual_seed(cur_seed);
-@@ -4583,6 +4887,16 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+@@ -4583,6 +5058,16 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
      }
- 
+
      auto result = decode_image_outputs(sd_ctx, request, final_latents);
 +    if (sd_should_cancel()) {
 +        LOG_WARN("image generation cancelled after decode");
@@ -878,8 +1274,8 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
      if (result == nullptr) {
          return nullptr;
      }
-@@ -4591,6 +4905,15 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
- 
+@@ -4591,6 +5076,15 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+
      int64_t t1 = ggml_time_ms();
      LOG_INFO("generate_image completed in %.2fs", (t1 - t0) * 1.0f / 1000);
 +    float effective_flow_shift = 0.0f;
@@ -893,9 +1289,9 @@ index 28598eb674fa21caf8d4a9fc1e120cca2d662b7a..bec99593f449752cb04d89e361ee28eb
 +        request.guidance.distilled_guidance);
      return result;
  }
- 
+
 diff --git a/src/tokenizers/vocab/vocab.cpp b/src/tokenizers/vocab/vocab.cpp
-index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a6623a61c80 100644
+index 4d2a9b8..7763fb6 100644
 --- a/src/tokenizers/vocab/vocab.cpp
 +++ b/src/tokenizers/vocab/vocab.cpp
 @@ -1,5 +1,9 @@
@@ -916,12 +1312,12 @@ index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a66
 -#include "t5.hpp"
  #include "umt5.hpp"
 +#endif
- 
+
  std::string load_clip_merges() {
      std::string merges_utf8_str(reinterpret_cast<const char*>(clip_merges_utf8_c_str), sizeof(clip_merges_utf8_c_str));
 @@ -23,13 +26,21 @@ std::string load_qwen2_merges() {
  }
- 
+
  std::string load_mistral_merges() {
 +#if defined(__ANDROID__)
 +    return {};
@@ -930,7 +1326,7 @@ index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a66
      return merges_utf8_str;
 +#endif
  }
- 
+
  std::string load_mistral_vocab_json() {
 +#if defined(__ANDROID__)
 +    return {};
@@ -939,11 +1335,11 @@ index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a66
      return json_str;
 +#endif
  }
- 
+
  std::string load_t5_tokenizer_json() {
 @@ -38,36 +49,64 @@ std::string load_t5_tokenizer_json() {
  }
- 
+
  std::string load_umt5_tokenizer_json() {
 +#if defined(__ANDROID__)
 +    return {};
@@ -952,7 +1348,7 @@ index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a66
      return json_str;
 +#endif
  }
- 
+
  std::string load_gemma_merges() {
 +#if defined(__ANDROID__)
 +    return {};
@@ -961,7 +1357,7 @@ index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a66
      return merges_utf8_str;
 +#endif
  }
- 
+
  std::string load_gemma_vocab_json() {
 +#if defined(__ANDROID__)
 +    return {};
@@ -970,7 +1366,7 @@ index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a66
      return json_str;
 +#endif
  }
- 
+
  std::string load_gemma2_merges() {
 +#if defined(__ANDROID__)
 +    return {};
@@ -979,7 +1375,7 @@ index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a66
      return merges_utf8_str;
 +#endif
  }
- 
+
  std::string load_gemma2_vocab_json() {
 +#if defined(__ANDROID__)
 +    return {};
@@ -988,7 +1384,7 @@ index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a66
      return json_str;
 +#endif
  }
- 
+
  std::string load_gpt_oss_merges() {
 +#if defined(__ANDROID__)
 +    return {};
@@ -997,7 +1393,7 @@ index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a66
      return merges_utf8_str;
 +#endif
  }
- 
+
  std::string load_gpt_oss_vocab_json() {
 +#if defined(__ANDROID__)
 +    return {};
@@ -1008,17 +1404,233 @@ index 4d2a9b84a8de1ba394272afb9fa656c92142d481..7763fb60ab0532a1d652da9328907a66
 \ No newline at end of file
 +#endif
 +}
+diff --git a/src/upscaler.cpp b/src/upscaler.cpp
+index 1197ce3..730a56e 100644
+--- a/src/upscaler.cpp
++++ b/src/upscaler.cpp
+@@ -4,8 +4,52 @@
+ #include "stable-diffusion.h"
+ #include "util.h"
+
++#include <cstdint>
++#include <memory>
++#include <new>
+ #include <utility>
+
++namespace {
++
++thread_local sd_upscaler_execution_evidence_t* active_upscaler_evidence = nullptr;
++
++class UpscalerEvidenceScope {
++public:
++    explicit UpscalerEvidenceScope(sd_upscaler_execution_evidence_t* evidence)
++        : previous(active_upscaler_evidence) {
++        active_upscaler_evidence = evidence;
++    }
++
++    ~UpscalerEvidenceScope() {
++        active_upscaler_evidence = previous;
++    }
++
++private:
++    sd_upscaler_execution_evidence_t* previous;
++};
++
++void record_compute_start(bool tile) {
++    if (active_upscaler_evidence == nullptr) {
++        return;
++    }
++    ++active_upscaler_evidence->compute_invocation_count;
++    if (tile) {
++        ++active_upscaler_evidence->tile_compute_invocation_count;
++    }
++}
++
++void record_compute_result(bool tile, bool succeeded) {
++    if (active_upscaler_evidence == nullptr || !succeeded) {
++        return;
++    }
++    ++active_upscaler_evidence->compute_success_count;
++    if (tile) {
++        ++active_upscaler_evidence->tile_compute_success_count;
++    }
++}
++
++}  // namespace
++
+ UpscalerGGML::UpscalerGGML(int n_threads,
+                            bool direct,
+                            int tile_size,
+@@ -68,6 +112,7 @@ bool UpscalerGGML::load_from_file(const std::string& esrgan_path,
+     ModelLoader model_loader;
+     if (!model_loader.init_from_file_and_convert_name(esrgan_path)) {
+         LOG_ERROR("init model loader from file failed: '%s'", esrgan_path.c_str());
++        return false;
+     }
+     model_loader.set_wtype_override(model_data_type);
+     LOG_INFO("Upscaler weight type: %s", ggml_type_name(model_data_type));
+@@ -87,12 +132,23 @@ bool UpscalerGGML::load_from_file(const std::string& esrgan_path,
+
+ sd::Tensor<float> UpscalerGGML::upscale_tensor(const sd::Tensor<float>& input_tensor) {
+     sd::Tensor<float> upscaled;
++    if (sd_should_cancel()) {
++        LOG_WARN("esrgan upscale cancelled before execution");
++        return {};
++    }
+     if (tile_size <= 0 || (input_tensor.shape()[0] <= tile_size && input_tensor.shape()[1] <= tile_size)) {
++        record_compute_start(false);
+         upscaled = esrgan_upscaler->compute(n_threads, input_tensor);
++        record_compute_result(false, !upscaled.empty());
+     } else {
+         auto on_processing = [&](const sd::Tensor<float>& input_tile) -> sd::Tensor<float> {
++            if (sd_should_cancel()) {
++                return {};
++            }
++            record_compute_start(true);
+             auto output_tile = esrgan_upscaler->compute(n_threads, input_tile);
+-            if (output_tile.empty()) {
++            record_compute_result(true, !output_tile.empty());
++            if (output_tile.empty() || sd_should_cancel()) {
+                 LOG_ERROR("esrgan compute failed while processing a tile");
+                 return {};
+             }
+@@ -111,7 +167,10 @@ sd::Tensor<float> UpscalerGGML::upscale_tensor(const sd::Tensor<float>& input_te
+                                     on_processing);
+     }
+     esrgan_upscaler->free_compute_buffer();
+-    if (upscaled.empty()) {
++    if (upscaled.empty() || sd_should_cancel()) {
++        if (sd_should_cancel()) {
++            LOG_WARN("esrgan upscale cancelled");
++        }
+         LOG_ERROR("esrgan compute failed");
+         return {};
+     }
+@@ -119,7 +178,7 @@ sd::Tensor<float> UpscalerGGML::upscale_tensor(const sd::Tensor<float>& input_te
+ }
+
+ sd_image_t UpscalerGGML::upscale(sd_image_t input_image, uint32_t upscale_factor) {
+-    // upscale_factor, unused for RealESRGAN_x4plus_anime_6B.pth
++    // The public wrapper validates upscale_factor against the loaded model scale.
+     sd_image_t upscaled_image = {0, 0, 0, nullptr};
+     int output_width          = (int)input_image.width * esrgan_upscaler->scale;
+     int output_height         = (int)input_image.height * esrgan_upscaler->scale;
+@@ -142,6 +201,7 @@ sd_image_t UpscalerGGML::upscale(sd_image_t input_image, uint32_t upscale_factor
+
+ struct upscaler_ctx_t {
+     UpscalerGGML* upscaler = nullptr;
++    sd_upscaler_execution_evidence_t execution_evidence{};
+ };
+
+ upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path_c_str,
+@@ -151,28 +211,72 @@ upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path_c_str,
+                                  int tile_size,
+                                  const char* backend,
+                                  const char* params_backend) {
+-    upscaler_ctx_t* upscaler_ctx = (upscaler_ctx_t*)malloc(sizeof(upscaler_ctx_t));
+-    if (upscaler_ctx == nullptr) {
++    std::unique_ptr<upscaler_ctx_t> upscaler_ctx(new (std::nothrow) upscaler_ctx_t());
++    if (!upscaler_ctx) {
+         return nullptr;
+     }
+     std::string esrgan_path(esrgan_path_c_str);
+
+-    upscaler_ctx->upscaler = new UpscalerGGML(n_threads, direct, tile_size, SAFE_STR(backend), SAFE_STR(params_backend));
+-    if (upscaler_ctx->upscaler == nullptr) {
++    std::unique_ptr<UpscalerGGML> upscaler(new (std::nothrow) UpscalerGGML(
++        n_threads, direct, tile_size, SAFE_STR(backend), SAFE_STR(params_backend)));
++    if (!upscaler) {
+         return nullptr;
+     }
+
+-    if (!upscaler_ctx->upscaler->load_from_file(esrgan_path, offload_params_to_cpu, n_threads)) {
+-        delete upscaler_ctx->upscaler;
+-        upscaler_ctx->upscaler = nullptr;
+-        free(upscaler_ctx);
++    if (!upscaler->load_from_file(esrgan_path, offload_params_to_cpu, n_threads)) {
+         return nullptr;
+     }
+-    return upscaler_ctx;
++    upscaler_ctx->upscaler = upscaler.release();
++    return upscaler_ctx.release();
+ }
+
+ sd_image_t upscale(upscaler_ctx_t* upscaler_ctx, sd_image_t input_image, uint32_t upscale_factor) {
+-    return upscaler_ctx->upscaler->upscale(input_image, upscale_factor);
++    sd_image_t empty = {0, 0, 0, nullptr};
++    if (upscaler_ctx == nullptr || upscaler_ctx->upscaler == nullptr ||
++        upscaler_ctx->upscaler->esrgan_upscaler == nullptr) {
++        return empty;
++    }
++
++    const int native_scale = get_upscale_factor(upscaler_ctx);
++    auto& evidence = upscaler_ctx->execution_evidence;
++    evidence = {};
++    evidence.version = SD_UPSCALER_EXECUTION_EVIDENCE_VERSION;
++    evidence.requested_scale = upscale_factor;
++    evidence.native_scale = native_scale > 0 ? static_cast<uint32_t>(native_scale) : 0;
++    evidence.source_width = input_image.width;
++    evidence.source_height = input_image.height;
++    evidence.tiled = upscaler_ctx->upscaler->tile_size > 0 &&
++                             (input_image.width > static_cast<uint32_t>(upscaler_ctx->upscaler->tile_size) ||
++                              input_image.height > static_cast<uint32_t>(upscaler_ctx->upscaler->tile_size))
++                         ? 1u
++                         : 0u;
++    if (native_scale <= 0 || upscale_factor != static_cast<uint32_t>(native_scale)) {
++        LOG_ERROR("requested upscale factor %u does not match model scale %d", upscale_factor, native_scale);
++        return empty;
++    }
++
++    UpscalerEvidenceScope evidence_scope(&evidence);
++    sd_image_t result = upscaler_ctx->upscaler->upscale(input_image, upscale_factor);
++    evidence.output_width = result.width;
++    evidence.output_height = result.height;
++    evidence.cancelled = sd_should_cancel() ? 1u : 0u;
++    evidence.completed = result.data != nullptr && evidence.cancelled == 0u &&
++                                 evidence.compute_invocation_count > 0u &&
++                                 evidence.compute_success_count == evidence.compute_invocation_count
++                             ? 1u
++                             : 0u;
++    return result;
++}
++
++extern "C" SD_API bool sd_get_upscaler_execution_evidence(
++    const upscaler_ctx_t* upscaler_ctx,
++    sd_upscaler_execution_evidence_t* evidence) {
++    if (upscaler_ctx == nullptr || evidence == nullptr ||
++        upscaler_ctx->execution_evidence.version != SD_UPSCALER_EXECUTION_EVIDENCE_VERSION) {
++        return false;
++    }
++    *evidence = upscaler_ctx->execution_evidence;
++    return true;
+ }
+
+ int get_upscale_factor(upscaler_ctx_t* upscaler_ctx) {
+@@ -183,9 +287,12 @@ int get_upscale_factor(upscaler_ctx_t* upscaler_ctx) {
+ }
+
+ void free_upscaler_ctx(upscaler_ctx_t* upscaler_ctx) {
++    if (upscaler_ctx == nullptr) {
++        return;
++    }
+     if (upscaler_ctx->upscaler != nullptr) {
+         delete upscaler_ctx->upscaler;
+         upscaler_ctx->upscaler = nullptr;
+     }
+-    free(upscaler_ctx);
++    delete upscaler_ctx;
+ }
 diff --git a/src/util.cpp b/src/util.cpp
-index 77fc5429cf832c120fc2f874b901e6db2a4ea6af..05399d33dfa32128456dd64a9d3252a81d67396e 100644
+index 77fc542..05399d3 100644
 --- a/src/util.cpp
 +++ b/src/util.cpp
 @@ -340,6 +340,8 @@ int32_t sd_get_num_physical_cores() {
- 
+
  static sd_progress_cb_t sd_progress_cb = nullptr;
  void* sd_progress_cb_data              = nullptr;
 +static sd_cancel_cb_t sd_cancel_cb = nullptr;
 +static void* sd_cancel_cb_data     = nullptr;
- 
+
  static sd_preview_cb_t sd_preview_cb = nullptr;
  static void* sd_preview_cb_data      = nullptr;
 @@ -613,6 +615,10 @@ void sd_set_progress_callback(sd_progress_cb_t cb, void* data) {
@@ -1039,18 +1651,218 @@ index 77fc5429cf832c120fc2f874b901e6db2a4ea6af..05399d33dfa32128456dd64a9d3252a8
 +bool sd_should_cancel() {
 +    return sd_cancel_cb != nullptr && sd_cancel_cb(sd_cancel_cb_data);
 +}
- 
+
  sd_image_t tensor_to_sd_image(const sd::Tensor<float>& tensor, int frame_index) {
      const auto& shape = tensor.shape();
 diff --git a/src/util.h b/src/util.h
-index c3b06b1d6b342dd4fe627529c1e30a39df42d019..e89d511dc1ba4033e008ff42dcf705d4794a990d 100644
+index c3b06b1..e89d511 100644
 --- a/src/util.h
 +++ b/src/util.h
 @@ -88,6 +88,7 @@ std::vector<std::pair<std::string, float>> split_quotation_attention(
- 
+
  sd_progress_cb_t sd_get_progress_callback();
  void* sd_get_progress_callback_data();
 +bool sd_should_cancel();
- 
+
  sd_preview_cb_t sd_get_preview_callback();
  void* sd_get_preview_callback_data();
+diff --git a/src/vae.hpp b/src/vae.hpp
+index cc4cd96..9360146 100644
+--- a/src/vae.hpp
++++ b/src/vae.hpp
+@@ -8,6 +8,7 @@ struct VAE : public GGMLRunner {
+ protected:
+     SDVersion version;
+     bool scale_input                                      = true;
++    sd_image_execution_evidence_t* image_execution_evidence = nullptr;
+     virtual sd::Tensor<float> _compute(const int n_threads,
+                                        const sd::Tensor<float>& z,
+                                        bool decode_graph) = 0;
+@@ -27,6 +28,89 @@ protected:
+         }
+     }
+
++    void record_tiling_invocation(bool decode_graph,
++                                  int small_width,
++                                  int small_height,
++                                  int tile_size_x,
++                                  int tile_size_y,
++                                  float tile_overlap,
++                                  bool circular_x,
++                                  bool circular_y) {
++        if (image_execution_evidence == nullptr) {
++            return;
++        }
++        int num_tiles_x = 0;
++        int num_tiles_y = 0;
++        float actual_overlap_x = 0.0f;
++        float actual_overlap_y = 0.0f;
++        sd_tiling_calc_tiles(num_tiles_x,
++                             actual_overlap_x,
++                             small_width,
++                             tile_size_x,
++                             tile_overlap,
++                             circular_x);
++        sd_tiling_calc_tiles(num_tiles_y,
++                             actual_overlap_y,
++                             small_height,
++                             tile_size_y,
++                             tile_overlap,
++                             circular_y);
++        const uint64_t planned_tile_count =
++            static_cast<uint64_t>(num_tiles_x) * static_cast<uint64_t>(num_tiles_y);
++        if (decode_graph) {
++            ++image_execution_evidence->vae_decode_tiling_invocation_count;
++            image_execution_evidence->vae_decode_planned_tile_count += planned_tile_count;
++            image_execution_evidence->vae_decode_tile_size_x =
++                static_cast<uint32_t>(tile_size_x);
++            image_execution_evidence->vae_decode_tile_size_y =
++                static_cast<uint32_t>(tile_size_y);
++            image_execution_evidence->vae_decode_tile_overlap_x = actual_overlap_x;
++            image_execution_evidence->vae_decode_tile_overlap_y = actual_overlap_y;
++        } else {
++            ++image_execution_evidence->vae_encode_tiling_invocation_count;
++            image_execution_evidence->vae_encode_planned_tile_count += planned_tile_count;
++            image_execution_evidence->vae_encode_tile_size_x =
++                static_cast<uint32_t>(tile_size_x);
++            image_execution_evidence->vae_encode_tile_size_y =
++                static_cast<uint32_t>(tile_size_y);
++            image_execution_evidence->vae_encode_tile_overlap_x = actual_overlap_x;
++            image_execution_evidence->vae_encode_tile_overlap_y = actual_overlap_y;
++        }
++    }
++
++    void record_tiling_success(bool decode_graph) {
++        if (image_execution_evidence == nullptr) {
++            return;
++        }
++        if (decode_graph) {
++            ++image_execution_evidence->vae_decode_tiling_success_count;
++        } else {
++            ++image_execution_evidence->vae_encode_tiling_success_count;
++        }
++    }
++
++    void record_tile_compute_attempt(bool decode_graph) {
++        if (image_execution_evidence == nullptr) {
++            return;
++        }
++        if (decode_graph) {
++            ++image_execution_evidence->vae_decode_tile_compute_attempt_count;
++        } else {
++            ++image_execution_evidence->vae_encode_tile_compute_attempt_count;
++        }
++    }
++
++    void record_tile_compute_success(bool decode_graph) {
++        if (image_execution_evidence == nullptr) {
++            return;
++        }
++        if (decode_graph) {
++            ++image_execution_evidence->vae_decode_tile_compute_success_count;
++        } else {
++            ++image_execution_evidence->vae_encode_tile_compute_success_count;
++        }
++    }
++
+     sd::Tensor<float> tiled_compute(const sd::Tensor<float>& input,
+                                     int n_threads,
+                                     int output_width,
+@@ -39,13 +123,20 @@ protected:
+                                     bool circular_y,
+                                     bool decode_graph,
+                                     const char* error_message,
+-                                    bool silent = false) {
++                                    bool silent                    = false,
++                                    bool record_execution_evidence = true) {
+         auto on_processing = [&](const sd::Tensor<float>& input_tile) {
++            if (record_execution_evidence) {
++                record_tile_compute_attempt(decode_graph);
++            }
+             auto output_tile = _compute(n_threads, input_tile, decode_graph);
+             if (output_tile.empty()) {
+                 LOG_ERROR("%s", error_message);
+                 return sd::Tensor<float>();
+             }
++            if (record_execution_evidence) {
++                record_tile_compute_success(decode_graph);
++            }
+             return output_tile;
+         };
+         return ::process_tiles_2d(input,
+@@ -65,6 +156,10 @@ public:
+     VAE(SDVersion version, ggml_backend_t backend, ggml_backend_t params_backend)
+         : version(version), GGMLRunner(backend, params_backend) {}
+
++    void set_image_execution_evidence(sd_image_execution_evidence_t* evidence) {
++        image_execution_evidence = evidence;
++    }
++
+     int get_scale_factor() {
+         int scale_factor = 8;
+         if (version == VERSION_LTXAV) {
+@@ -129,6 +224,14 @@ public:
+             float tile_overlap;
+             int tile_size_x, tile_size_y;
+             get_tile_sizes(tile_size_x, tile_size_y, tile_overlap, tiling_params, W, H, 1.30539f);
++            record_tiling_invocation(false,
++                                     static_cast<int>(W),
++                                     static_cast<int>(H),
++                                     tile_size_x,
++                                     tile_size_y,
++                                     tile_overlap,
++                                     circular_x,
++                                     circular_y);
+             LOG_DEBUG("VAE Tile size: %dx%d", tile_size_x, tile_size_y);
+             output = tiled_compute(input,
+                                    n_threads,
+@@ -142,6 +245,9 @@ public:
+                                    circular_y,
+                                    false,
+                                    "vae encode compute failed while processing a tile");
++            if (!output.empty()) {
++                record_tiling_success(false);
++            }
+         } else {
+             output = _compute(n_threads, input, false);
+         }
+@@ -163,7 +269,8 @@ public:
+                              bool decode_video = false,
+                              bool circular_x   = false,
+                              bool circular_y   = false,
+-                             bool silent       = false) {
++                             bool silent       = false,
++                             bool record_execution_evidence = true) {
+         int64_t t0              = ggml_time_ms();
+         sd::Tensor<float> input = x;
+         sd::Tensor<float> output;
+@@ -176,6 +283,16 @@ public:
+             float tile_overlap;
+             int tile_size_x, tile_size_y;
+             get_tile_sizes(tile_size_x, tile_size_y, tile_overlap, tiling_params, input.shape()[0], input.shape()[1]);
++            if (record_execution_evidence) {
++                record_tiling_invocation(true,
++                                         static_cast<int>(input.shape()[0]),
++                                         static_cast<int>(input.shape()[1]),
++                                         tile_size_x,
++                                         tile_size_y,
++                                         tile_overlap,
++                                         circular_x,
++                                         circular_y);
++            }
+             if (!silent) {
+                 LOG_DEBUG("VAE Tile size: %dx%d", tile_size_x, tile_size_y);
+             }
+@@ -192,7 +309,11 @@ public:
+                 circular_y,
+                 true,
+                 "vae decode compute failed while processing a tile",
+-                silent);
++                silent,
++                record_execution_evidence);
++            if (!output.empty() && record_execution_evidence) {
++                record_tiling_success(true);
++            }
+         } else {
+             output = _compute(n_threads, input, true);
+         }

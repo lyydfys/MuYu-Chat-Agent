@@ -68,28 +68,57 @@ internal class QnnHtpImageRunner(
     override val backendLabel: String = "骁龙 NPU"
 
     override fun health(device: DeviceProfile, bundleRoot: File?): LocalImageQnnReport {
-        val manifest = bundleRoot?.let(::localImageBundleManifestFromRoot)
+        val manifest = inspectManifest(bundleRoot)?.let { inspection ->
+            when (inspection) {
+                LocalImageBundleManifestInspection.Undeclared -> null
+                is LocalImageBundleManifestInspection.Ready -> inspection.manifest
+                is LocalImageBundleManifestInspection.Invalid ->
+                    return invalidManifestReport(inspection.message)
+            }
+        }
         return readiness(device, bundleRoot, manifest, smokeRequested = false)
     }
 
     override fun runSmoke(device: DeviceProfile, bundleRoot: File?): LocalImageQnnReport {
-        val manifest = bundleRoot?.let(::localImageBundleManifestFromRoot)
+        val manifest = inspectManifest(bundleRoot)?.let { inspection ->
+            when (inspection) {
+                LocalImageBundleManifestInspection.Undeclared -> null
+                is LocalImageBundleManifestInspection.Ready -> inspection.manifest
+                is LocalImageBundleManifestInspection.Invalid ->
+                    return invalidManifestReport(inspection.message)
+            }
+        }
         return readiness(device, bundleRoot, manifest, smokeRequested = true)
     }
+
+    private fun inspectManifest(bundleRoot: File?): LocalImageBundleManifestInspection? =
+        bundleRoot?.let { root -> inspectLocalImageBundleManifestFromRoot(root) }
+
+    private fun invalidManifestReport(message: String): LocalImageQnnReport =
+        LocalImageQnnReport(
+            state = LocalImageQnnState.SMOKE_METADATA_INVALID,
+            backend = backendLabel,
+            message = "QNN image bundle manifest is invalid: $message"
+        )
 
     private fun readiness(
         device: DeviceProfile,
         bundleRoot: File?,
-        manifest: LocalImageBundleManifest?,
+        declaredManifest: LocalImageBundleManifest?,
         smokeRequested: Boolean
     ): LocalImageQnnReport {
-        if (bundleRoot == null || manifest == null) {
+        if (bundleRoot == null) {
             return LocalImageQnnReport(
                 state = LocalImageQnnState.BUNDLE_MISSING,
                 backend = backendLabel,
-                message = "QNN image generation requires a complete MCA image engine bundle manifest."
+                message = "QNN image generation requires a concrete bundle directory."
             )
         }
+        val manifest = declaredManifest ?: LocalImageBundleManifest(
+            runtime = LocalImageRuntime.QNN_HTP,
+            requiresQnnRuntime = true,
+            requiresSmokeTest = true
+        )
         if (manifest.runtime != LocalImageRuntime.QNN_HTP) {
             return LocalImageQnnReport(
                 state = LocalImageQnnState.NOT_QNN_BUNDLE,
@@ -145,13 +174,35 @@ internal class QnnHtpImageRunner(
             listOfNotNull(manifest.qnnSmokeSpec.takeIf(QnnSmokeSpec::hasStaticGraphMetadata))
         }
         val usesSemanticGraphDiscovery = declaredSmokeSpecs.none(QnnSmokeSpec::hasStaticGraphMetadata)
-        val missing = if (usesSemanticGraphDiscovery) {
-            qnnSemanticGraphBundleMissingComponents(
-                root = bundleRoot,
-                requiresControlNet = manifest.task == "CONTROL_IMAGE"
+        val exactContract = manifest.resolveRuntimeComponentContract(bundleRoot)
+        if (exactContract is LocalImageRuntimeComponentContract.Invalid) {
+            return manifest.report(
+                state = LocalImageQnnState.SMOKE_METADATA_INVALID,
+                backend = backendLabel,
+                message = "QNN image runtime component contract is invalid: ${exactContract.message}"
             )
-        } else {
-            qnnMissingComponents(bundleRoot, manifest)
+        }
+        val missing = when (exactContract) {
+            is LocalImageRuntimeComponentContract.Ready -> {
+                if (exactContract.missingPaths.isNotEmpty()) {
+                    exactContract.missingPaths
+                } else if (manifest.task == "CONTROL_IMAGE" &&
+                    bundleRoot.nonEmptyQnnContextPath("controlnet.bin") == null
+                ) {
+                    listOf("controlnet.bin")
+                } else {
+                    emptyList()
+                }
+            }
+            LocalImageRuntimeComponentContract.UndeclaredLegacy -> if (usesSemanticGraphDiscovery) {
+                qnnSemanticGraphBundleMissingComponents(
+                    root = bundleRoot,
+                    requiresControlNet = manifest.task == "CONTROL_IMAGE"
+                )
+            } else {
+                qnnMissingComponents(bundleRoot, manifest)
+            }
+            is LocalImageRuntimeComponentContract.Invalid -> emptyList()
         }
         if (missing.isNotEmpty()) {
             return manifest.report(
@@ -325,7 +376,14 @@ internal fun qnnSemanticGraphBundleMissingComponents(
     requiresControlNet: Boolean = false
 ): List<String> =
     buildList {
-        if (root.nonEmptyQnnContextPath("text_encoder.bin") == null) add("text_encoder.bin")
+        if (root.nonEmptyQnnContextPath(
+                "text_encoder.bin",
+                "clip_v2.mnn",
+                "text_encoder.mnn"
+            ) == null
+        ) {
+            add("text_encoder.bin (or clip_v2.mnn/text_encoder.mnn)")
+        }
         if (root.nonEmptyQnnContextPath("unet.bin") == null) add("unet.bin")
         if (root.nonEmptyQnnContextPath("vae.bin", "vae_decoder.bin") == null) {
             add("vae.bin (or vae_decoder.bin)")

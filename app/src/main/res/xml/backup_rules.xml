@@ -5,4 +5,28 @@
     <exclude domain="database" path="mca-runtime.db-wal" />
     <exclude domain="database" path="mca-runtime.db-shm" />
     <exclude domain="database" path="mca-runtime.db-journal" />
+    <!-- Image history can contain installation-local content grants and native metadata. -->
+    <exclude domain="database" path="mca.db" />
+    <exclude domain="database" path="mca.db-wal" />
+    <exclude domain="database" path="mca.db-shm" />
+    <exclude domain="database" path="mca.db-journal" />
+    <!-- Product images use the explicit, sanitized image-library export format. -->
+    <exclude domain="file" path="image_assets" />
+    <exclude domain="file" path="image_execution_journal" />
+    <exclude domain="file" path="image_loras" />
+    <exclude domain="file" path="image_upscalers" />
+    <exclude domain="file" path="image_models" />
+    <exclude domain="external" path="image_models" />
+    <exclude domain="file" path="chat_sessions.json" />
+    <!-- Credentials and installation-local paths must never cross backup/restore boundaries. -->
+    <exclude domain="sharedpref" path="mca_api.xml" />
+    <exclude domain="sharedpref" path="mca_cloud_api.xml" />
+    <exclude domain="sharedpref" path="mca_web_search.xml" />
+    <exclude domain="sharedpref" path="mca_web_search_diagnostics.xml" />
+    <exclude domain="sharedpref" path="mca_local_api_idempotency_journal.xml" />
+    <exclude domain="sharedpref" path="mca_local_image_models.xml" />
+    <exclude domain="sharedpref" path="image_loras_v1.xml" />
+    <exclude domain="sharedpref" path="image_upscalers_v1.xml" />
+    <exclude domain="sharedpref" path="image_upscaler_product_selection_v1.xml" />
+    <exclude domain="sharedpref" path="mca_image_generation_ui_parameters.xml" />
 </full-backup-content>

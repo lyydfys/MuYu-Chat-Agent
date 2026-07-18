@@ -1,5 +1,6 @@
 package com.muyuchat.api.local
 
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -35,6 +36,17 @@ class ImageGenerationApiContractTest {
                     .put(
                         "vae_tiling",
                         JSONObject().put("tile_size", 512).put("overlap", 0.5).put("tiles", 4)
+                    )
+                    .toString()
+            )
+        }
+        assertRejected("invalid_vae_tiling") {
+            ImageGenerationApiContract.parseRequest(
+                JSONObject()
+                    .put("prompt", "test")
+                    .put(
+                        "vae_tiling",
+                        JSONObject().put("tile_size", 512).put("overlap", 0.5001)
                     )
                     .toString()
             )
@@ -133,6 +145,54 @@ class ImageGenerationApiContractTest {
     }
 
     @Test
+    fun `request parser accepts only pathless LoRA ids and multipliers`() {
+        val id = "11111111-1111-4111-8111-111111111111"
+        val request = ImageGenerationApiContract.parseRequest(
+            JSONObject()
+                .put("prompt", "portrait")
+                .put(
+                    "loras",
+                    JSONArray().put(JSONObject().put("id", id).put("multiplier", 0.75))
+                )
+                .toString()
+        )
+
+        assertEquals(id, request.loras.single().id)
+        assertEquals(0.75, request.loras.single().multiplier, 0.0)
+        assertFalse(request.requestedControlsJson().getJSONArray("loras").getJSONObject(0).has("path"))
+
+        assertRejected("unknown_image_request_field") {
+            ImageGenerationApiContract.parseRequest(
+                JSONObject()
+                    .put("prompt", "portrait")
+                    .put(
+                        "loras",
+                        JSONArray().put(
+                            JSONObject()
+                                .put("id", id)
+                                .put("multiplier", 1.0)
+                                .put("path", "/private/adapter.safetensors")
+                        )
+                    )
+                    .toString()
+            )
+        }
+        assertRejected("invalid_lora") {
+            ImageGenerationApiContract.parseRequest(
+                JSONObject()
+                    .put("prompt", "portrait")
+                    .put(
+                        "loras",
+                        JSONArray()
+                            .put(JSONObject().put("id", id).put("multiplier", 1.0))
+                            .put(JSONObject().put("id", id).put("multiplier", 0.5))
+                    )
+                    .toString()
+            )
+        }
+    }
+
+    @Test
     fun `invalid optional controls fail with stable codes`() {
         assertRejected("unsupported_image_count") {
             ImageGenerationApiContract.parseRequest("""{"prompt":"x","n":0}""")
@@ -152,6 +212,73 @@ class ImageGenerationApiContractTest {
         assertRejected("unsupported_response_format") {
             ImageGenerationApiContract.parseRequest(
                 """{"prompt":"x","response_format":"url"}"""
+            )
+        }
+    }
+
+    @Test
+    fun `stable runtime batch range is preserved for provider capability validation`() {
+        val request = ImageGenerationApiContract.parseRequest(
+            """{"prompt":"batch","n":8}"""
+        )
+
+        assertEquals(8, request.imageCount)
+        assertEquals(8, request.requestedControlsJson().getInt("n"))
+        assertRejected("unsupported_image_count") {
+            ImageGenerationApiContract.parseRequest("""{"prompt":"batch","n":9}""")
+        }
+    }
+
+    @Test
+    fun `batch response requires matching native count and contiguous outputs`() {
+        val request = ImageGenerationApiContract.parseRequest(
+            """{"prompt":"batch","n":2}"""
+        )
+        val execution = strictExecution("STABLE_DIFFUSION_CPP")
+            .put("batchCount", 2)
+            .put("outputCount", 2)
+            .put("n", 2)
+            .put("samplingPassCount", 2)
+            .put("actualSamplingPassCount", 2)
+            .put("actualSamplingStepCount", 40)
+            .put("totalUnetExecutionCount", 80)
+            .put("actualDiffusionModelComputeCount", 80)
+        execution.getJSONObject("nativeEffective")
+            .put("batchCount", 2)
+            .put("outputCount", 2)
+            .put("n", 2)
+            .put("samplingPassCount", 2)
+            .put("totalUnetExecutionCount", 80)
+        val data = JSONArray()
+        repeat(2) { index ->
+            data.put(
+                JSONObject()
+                    .put("index", index)
+                    .put("b64_json", "iVBORw0KGgo=")
+                    .put("mime_type", "image/png")
+                    .put("width", 512)
+                    .put("height", 512)
+            )
+        }
+        val body = JSONObject()
+            .put("request_id", "img-batch")
+            .put("execution", execution)
+            .put("data", data)
+
+        val parsed = ImageGenerationApiContract.parseResponse(
+            expectedRequestId = "img-batch",
+            expectedRequest = request,
+            rawBody = body.toString()
+        )
+
+        assertEquals(2, parsed.data.length())
+
+        val spoofed = JSONObject(execution.toString()).put("actualSamplingPassCount", 1)
+        assertRejected("invalid_image_input_execution_evidence") {
+            ImageGenerationApiContract.parseResponse(
+                expectedRequestId = "img-batch",
+                expectedRequest = request,
+                rawBody = JSONObject(body.toString()).put("execution", spoofed).toString()
             )
         }
     }
@@ -346,6 +473,20 @@ class ImageGenerationApiContractTest {
             ).httpStatus
         )
         assertEquals(
+            422,
+            ImageGenerationProviderException.fromWorkerFailure(
+                "lora_native_apply_incomplete",
+                "adapter did not reach the graph"
+            ).httpStatus
+        )
+        assertEquals(
+            422,
+            ImageGenerationProviderException.fromWorkerFailure(
+                "prompt_weighting_execution_unsupported",
+                "the selected text encoder cannot apply prompt weights"
+            ).httpStatus
+        )
+        assertEquals(
             502,
             ImageGenerationProviderException.fromWorkerFailure(
                 "EXECUTION_CONTRACT_MISMATCH",
@@ -366,6 +507,83 @@ class ImageGenerationApiContractTest {
                 "invalid"
             ).code
         )
+    }
+
+    @Test
+    fun `response proves requested LoRA identities multipliers and applied tensors`() {
+        val id = "11111111-1111-4111-8111-111111111111"
+        val request = ImageGenerationApiContract.parseRequest(
+            JSONObject()
+                .put("prompt", "portrait")
+                .put(
+                    "loras",
+                    JSONArray().put(JSONObject().put("id", id).put("multiplier", 0.75))
+                )
+                .toString()
+        )
+        fun loraExecution(): JSONObject {
+            val execution = strictExecution("STABLE_DIFFUSION_CPP")
+            val loras = JSONArray().put(
+                JSONObject()
+                    .put("id", id)
+                    .put("sha256", "d".repeat(64))
+                    .put("multiplier", 0.75)
+            )
+            val counts = JSONObject()
+                .put("requestedCount", 1)
+                .put("loadedCount", 1)
+                .put("appliedCount", 1)
+                .put("appliedTensorCount", 12)
+            execution.put("loras", JSONArray(loras.toString()))
+                .put("loraEvidence", JSONObject(counts.toString()))
+            execution.getJSONObject("nativeEffective")
+                .put("loras", JSONArray(loras.toString()))
+                .put("loraEvidence", JSONObject(counts.toString()))
+            return execution
+        }
+
+        ImageGenerationApiContract.parseResponse(
+            "img-lora",
+            request,
+            responseBody("img-lora", loraExecution()).toString()
+        )
+
+        val missingTensorProof = loraExecution()
+        missingTensorProof.getJSONObject("nativeEffective")
+            .getJSONObject("loraEvidence")
+            .put("appliedTensorCount", 0)
+        assertRejected("invalid_lora_execution_evidence") {
+            ImageGenerationApiContract.parseResponse(
+                "img-lora-bad",
+                request,
+                responseBody("img-lora-bad", missingTensorProof).toString()
+            )
+        }
+    }
+
+    @Test
+    fun `response rejects LoRA tensor evidence when no adapter was requested`() {
+        val request = ImageGenerationApiContract.parseRequest("""{"prompt":"plain portrait"}""")
+        val execution = strictExecution("STABLE_DIFFUSION_CPP")
+        val counts = JSONObject()
+            .put("requestedCount", 0)
+            .put("loadedCount", 0)
+            .put("appliedCount", 0)
+            .put("appliedTensorCount", 1)
+        execution
+            .put("loras", JSONArray())
+            .put("loraEvidence", JSONObject(counts.toString()))
+        execution.getJSONObject("nativeEffective")
+            .put("loras", JSONArray())
+            .put("loraEvidence", JSONObject(counts.toString()))
+
+        assertRejected("invalid_lora_execution_evidence") {
+            ImageGenerationApiContract.parseResponse(
+                "img-no-lora",
+                request,
+                responseBody("img-no-lora", execution).toString()
+            )
+        }
     }
 
     @Test
@@ -468,6 +686,22 @@ class ImageGenerationApiContractTest {
             )
         }
 
+        val privateOutputPath = strictExecution("QNN_HTP")
+            .put(
+                "outputs",
+                JSONArray().put(
+                    JSONObject()
+                        .put("index", 0)
+                        .put("path", "/data/user/0/private/output.png")
+                )
+            )
+        assertRejected("private_image_input_path_exposed") {
+            ImageGenerationApiContract.parseResponse(
+                "img-output-path",
+                responseBody("img-output-path", privateOutputPath).toString()
+            )
+        }
+
         val countMismatch = controlExecution()
         countMismatch.getJSONObject("imageInput").put("controlImageExecutionCount", 0)
         assertRejected("invalid_image_input_execution_evidence") {
@@ -529,15 +763,31 @@ class ImageGenerationApiContractTest {
             .put("width", 512)
             .put("height", 512)
             .put("seed", 7)
+            .put("batchCount", 1)
             .put("graphName", "model")
             .put("fallback", false)
+        if (runtime == "STABLE_DIFFUSION_CPP") {
+            native
+                .put("outputCount", 1)
+                .put("n", 1)
+                .put("samplingPassCount", 1)
+                .put("totalUnetExecutionCount", 40)
+        }
         return JSONObject(native.toString())
             .put("nativeEffective", native)
             .put("nativeExecution", true)
             .put("nativeGenerationSequence", 9L)
+            .put("batchCount", 1)
             .put("fallback", false)
             .put("npuActive", runtime == "QNN_HTP")
             .put("qnnGraphExecution", runtime == "QNN_HTP")
+            .apply {
+                if (runtime == "STABLE_DIFFUSION_CPP") {
+                    put("actualSamplingPassCount", 1)
+                    put("actualSamplingStepCount", 20)
+                    put("actualDiffusionModelComputeCount", 40)
+                }
+            }
     }
 
     private fun responseBody(requestId: String, execution: JSONObject): JSONObject =

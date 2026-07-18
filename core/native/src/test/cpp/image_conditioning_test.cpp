@@ -113,6 +113,11 @@ void test_segment_tokenization_padding_stats_and_fingerprint() {
     const std::string pair_fingerprint = pair.weighting_fingerprint();
     assert(pair_fingerprint == "1a2c3a52fbd890c78d42a51abb111fc94f1892afee5c4fdfa8d273c340d63ca7");
     assert(pair_fingerprint == pair.weighting_fingerprint());
+    const std::string conditional_only_fingerprint = pair.positive.weighting_fingerprint;
+    ClipTokenPair changed_negative = pair;
+    changed_negative.negative = changed;
+    assert(changed_negative.positive.weighting_fingerprint == conditional_only_fingerprint);
+    assert(changed_negative.weighting_fingerprint() != pair_fingerprint);
     std::swap(pair.negative, pair.positive);
     assert(pair_fingerprint != pair.weighting_fingerprint());
 }

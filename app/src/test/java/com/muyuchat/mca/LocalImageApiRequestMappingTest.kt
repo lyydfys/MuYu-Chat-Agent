@@ -3,10 +3,37 @@ package com.muyuchat.mca
 import com.muyuchat.api.local.ImageGenerationApiContract
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalImageApiRequestMappingTest {
+    @Test
+    fun `API execution sanitizer removes nested locators and preserves physical batch evidence`() {
+        val sanitized = sanitizedLocalImageApiExecution(
+            JSONObject()
+                .put("batchCount", 2)
+                .put("actualSamplingPassCount", 2)
+                .put("path", "/data/user/0/private/output.png")
+                .put(
+                    "outputs",
+                    org.json.JSONArray().put(
+                        JSONObject()
+                            .put("index", 0)
+                            .put("path", "/data/user/0/private/output-0.png")
+                    )
+                )
+                .toString()
+        )
+
+        assertEquals(2, sanitized.getInt("batchCount"))
+        assertEquals(2, sanitized.getInt("actualSamplingPassCount"))
+        assertFalse(sanitized.has("path"))
+        assertFalse(sanitized.getJSONArray("outputs").getJSONObject(0).has("path"))
+        assertTrue(sanitized.getJSONArray("outputs").getJSONObject(0).has("index"))
+    }
+
     @Test
     fun `all API controls map exactly into worker options and input draft`() {
         val input = "data:image/png;base64,AAAA"
@@ -17,7 +44,7 @@ class LocalImageApiRequestMappingTest {
                 .put("prompt", "replace the object")
                 .put("negative_prompt", "")
                 .put("size", "768x512")
-                .put("n", 1)
+                .put("n", 8)
                 .put("response_format", "b64_json")
                 .put("seed", 20260717)
                 .put("steps", 24)
@@ -48,7 +75,7 @@ class LocalImageApiRequestMappingTest {
         assertEquals(6.5, dispatch.options.cfgScale ?: -1.0, 0.0)
         assertEquals("dpmpp_2m", dispatch.options.sampleMethod)
         assertEquals(2, dispatch.options.clipSkip)
-        assertEquals(1, dispatch.options.batchCount)
+        assertEquals(8, dispatch.options.batchCount)
         assertEquals(512, dispatch.options.vaeTiling?.tileSize)
         assertEquals(0.5, dispatch.options.vaeTiling?.overlap ?: -1.0, 0.0)
         assertEquals(3, dispatch.options.preview?.interval)

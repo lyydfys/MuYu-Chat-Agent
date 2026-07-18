@@ -202,6 +202,133 @@ class ImageExecutionProfileNativeContractTest {
     }
 
     @Test
+    fun `QNN conditioning mode distinguishes external MNN from native text encoder`() {
+        val external = ImageExecutionProfileResolver.resolve(
+            ImageExecutionProfileResolverInput(
+                modelFingerprint = "a".repeat(64),
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15,
+                recommendationId = "cyberrealistic_sd15_qnn228"
+            )
+        )
+        val externalNative = nativeEcho(external).apply {
+            getJSONObject("nativeEffective")
+                .put("promptWeightFingerprint", "d".repeat(64))
+                .put("conditioningArtifactSha256", "d".repeat(64))
+                .put("conditioningExecutionMode", "external_mnn_embeddings")
+                .put("conditioningBackend", "MNN")
+                .put("conditioningGraph", "clip_v2.mnn")
+                .put("conditioningGraphSha256", "f".repeat(64))
+                .put("conditioningOrder", "negative_then_positive")
+                .put("conditioningEncoderExecutionCount", 2)
+                .put("textEncoderExecutionCount", 0)
+                .put("conditioningArtifactConsumed", true)
+                .put("runtimeSessionMode", "shared_unet_vae")
+        }
+        ImageExecutionProfileNativeContract.parseAndValidate(external, externalNative)
+        val nestedExternal = external.copy(
+            profile = external.profile.copy(
+                graph = external.profile.graph.copy(
+                    textEncoder = external.profile.graph.textEncoder?.copy(
+                        relativePath = "publisher/runtime/clip_v2.mnn"
+                    )
+                )
+            )
+        )
+        ImageExecutionProfileNativeContract.parseAndValidate(
+            nestedExternal,
+            JSONObject(externalNative.toString())
+        )
+        externalNative.getJSONObject("nativeEffective")
+            .put("textEncoderExecutionCount", 2)
+        assertTrue(expectFailure {
+            ImageExecutionProfileNativeContract.parseAndValidate(external, externalNative)
+        }.field.contains("conditioningExecutionMode"))
+
+        val nativeText = ImageExecutionProfileResolver.resolve(
+            ImageExecutionProfileResolverInput(
+                modelFingerprint = "b".repeat(64),
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15,
+                recommendationId = "qualcomm_sd15_gen5_qnn"
+            )
+        )
+        val nativeTextEcho = nativeEcho(nativeText).apply {
+            getJSONObject("nativeEffective")
+                .put("conditioningArtifactSha256", "e".repeat(64))
+                .put("conditioningExecutionMode", "qnn_text_encoder")
+                .put("conditioningBackend", "QNN")
+                .put("conditioningGraph", nativeText.profile.graph.textEncoder?.graphName)
+                .put("conditioningGraphSha256", "f".repeat(64))
+                .put("conditioningOrder", "negative_then_positive")
+                .put("conditioningEncoderExecutionCount", 2)
+                .put("textEncoderExecutionCount", 2)
+                .put("conditioningArtifactConsumed", true)
+                .put("runtimeSessionMode", "shared_text_unet_vae")
+        }
+        ImageExecutionProfileNativeContract.parseAndValidate(nativeText, nativeTextEcho)
+
+        externalNative.getJSONObject("nativeEffective")
+            .put("textEncoderExecutionCount", 0)
+            .put("conditioningArtifactConsumed", false)
+        assertTrue(expectFailure {
+            ImageExecutionProfileNativeContract.parseAndValidate(external, externalNative)
+        }.field.contains("conditioningArtifactConsumed"))
+    }
+
+    @Test
+    fun `external MNN conditional only execution requires one consumed active branch`() {
+        val resolution = ImageExecutionProfileResolver.resolve(
+            ImageExecutionProfileResolverInput(
+                modelFingerprint = "a".repeat(64),
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15,
+                recommendationId = "cyberrealistic_sd15_qnn228",
+                userOverrides = ImageGenerationOverrides(useCfg = false)
+            )
+        )
+        assertEquals(ImageWorkerStrategy.SHARED_UNET_VAE, resolution.profile.graph.workerStrategy)
+        assertEquals(false, resolution.layers.resolved.useCfg)
+        val native = nativeEcho(resolution).apply {
+            getJSONObject("nativeEffective")
+                .put("promptWeightFingerprint", "d".repeat(64))
+                .put("conditioningArtifactSha256", "d".repeat(64))
+                .put("conditioningExecutionMode", "external_mnn_embeddings")
+                .put("conditioningBackend", "MNN")
+                .put("conditioningGraph", "clip_v2.mnn")
+                .put("conditioningGraphSha256", "f".repeat(64))
+                .put("conditioningOrder", "positive_only")
+                .put("conditioningEncoderExecutionCount", 1)
+                .put("textEncoderExecutionCount", 0)
+                .put("conditioningArtifactConsumed", true)
+                .put("runtimeSessionMode", "shared_unet_vae")
+        }
+
+        ImageExecutionProfileNativeContract.parseAndValidate(resolution, native)
+
+        val detachedFingerprint = JSONObject(native.toString()).apply {
+            getJSONObject("nativeEffective").put("promptWeightFingerprint", "e".repeat(64))
+        }
+        assertTrue(expectFailure {
+            ImageExecutionProfileNativeContract.parseAndValidate(resolution, detachedFingerprint)
+        }.field.contains("promptWeightFingerprint"))
+
+        val missingGraphSha = JSONObject(native.toString()).apply {
+            getJSONObject("nativeEffective").remove("conditioningGraphSha256")
+        }
+        assertEquals("conditioningGraphSha256", expectFailure {
+            ImageExecutionProfileNativeContract.parseAndValidate(resolution, missingGraphSha)
+        }.field)
+
+        val missingConsumed = JSONObject(native.toString()).apply {
+            getJSONObject("nativeEffective").remove("conditioningArtifactConsumed")
+        }
+        assertEquals("conditioningArtifactConsumed", expectFailure {
+            ImageExecutionProfileNativeContract.parseAndValidate(resolution, missingConsumed)
+        }.field)
+    }
+
+    @Test
     fun `every required native field fails when missing`() {
         val resolution = resolution()
         ImageExecutionProfileNativeContract.requiredFields.forEach { field ->
