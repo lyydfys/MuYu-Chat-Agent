@@ -4,13 +4,14 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 internal object LocalImageWorkerProtocol {
-    private const val VERSION = 3
+    private const val VERSION = 5
 
     data class GenerateRequest(
         val requestId: String,
         val model: LocalImageModelRecord,
         val prompt: String,
-        val options: LocalImageGenerationOptions = LocalImageGenerationOptions()
+        val options: LocalImageGenerationOptions = LocalImageGenerationOptions(),
+        val batchLineage: ImageGenerationBatchLineage? = null
     )
 
     data class UpscaleRequest(
@@ -77,7 +78,8 @@ internal object LocalImageWorkerProtocol {
         requestId: String,
         model: LocalImageModelRecord,
         prompt: String,
-        options: LocalImageGenerationOptions = LocalImageGenerationOptions()
+        options: LocalImageGenerationOptions = LocalImageGenerationOptions(),
+        batchLineage: ImageGenerationBatchLineage? = null
     ): String {
         val optionJson = options.toJson().apply {
             // sampler is the product/API term. sampleMethod remains in the payload for backward
@@ -90,6 +92,7 @@ internal object LocalImageWorkerProtocol {
             .put("model", model.toJson())
             .put("prompt", prompt)
             .put("options", optionJson)
+            .apply { batchLineage?.let { put("batchLineage", it.toJson()) } }
             .toString()
     }
 
@@ -114,7 +117,9 @@ internal object LocalImageWorkerProtocol {
                 parsedOptions.copy(sampleMethod = sampler)
             } else {
                 parsedOptions
-            }
+            },
+            batchLineage = json.optJSONObject("batchLineage")
+                ?.let(ImageGenerationBatchLineage::fromJson)
         )
     }
 
@@ -194,6 +199,13 @@ internal object LocalImageWorkerProtocol {
                 .put("previewHeight", progress.previewHeight)
                 .put("previewFrameCount", progress.previewFrameCount)
                 .put("previewNoisy", progress.previewNoisy)
+                .put("previewVaeExecutionAttemptCount", progress.previewVaeExecutionAttemptCount)
+                .put("previewVaeExecutionCount", progress.previewVaeExecutionCount)
+                .put("previewVaeExecutionMsTotal", progress.previewVaeExecutionMsTotal)
+                .put("previewPublicationCount", progress.previewPublicationCount)
+                .put("previewLastStep", progress.previewLastStep)
+                .put("previewLastRevision", progress.previewLastRevision)
+                .put("previewFailureCode", progress.previewFailureCode)
                 .put("stageTrace", JSONArray(progress.stageTrace))
         )
         .toString()
@@ -227,6 +239,14 @@ internal object LocalImageWorkerProtocol {
                 previewHeight = progress.optInt("previewHeight"),
                 previewFrameCount = progress.optInt("previewFrameCount"),
                 previewNoisy = progress.optBoolean("previewNoisy"),
+                previewVaeExecutionAttemptCount =
+                    progress.optInt("previewVaeExecutionAttemptCount"),
+                previewVaeExecutionCount = progress.optInt("previewVaeExecutionCount"),
+                previewVaeExecutionMsTotal = progress.optLong("previewVaeExecutionMsTotal"),
+                previewPublicationCount = progress.optInt("previewPublicationCount"),
+                previewLastStep = progress.optInt("previewLastStep"),
+                previewLastRevision = progress.optLong("previewLastRevision"),
+                previewFailureCode = progress.optString("previewFailureCode"),
                 stageTrace = progress.optJSONArray("stageTrace")?.let { trace ->
                     buildList {
                         for (index in 0 until trace.length()) {
@@ -360,7 +380,7 @@ internal object LocalImageWorkerProtocol {
         optString(name).takeIf { it.isNotBlank() } ?: kotlin.error("Missing $name.")
 
     private fun JSONObject.requireCurrentVersion() {
-        require(optInt("version", -1) == VERSION) { "Unsupported local image worker protocol version." }
+        require(optInt("version", -1) in 4..VERSION) { "Unsupported local image worker protocol version." }
     }
 
     private fun JSONObject.requireReadableVersion() {

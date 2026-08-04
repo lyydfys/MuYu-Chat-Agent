@@ -21,7 +21,16 @@ class LocalApiForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val openPort = intent?.getBooleanExtra(EXTRA_OPEN_PORT, false) == true
+        // The API server and its providers belong to MainViewModel. If Android recreates this
+        // notification-only service after the app process was killed, there is no server here to
+        // advertise or safely reconstruct. Stop the orphaned restart instead of showing a false
+        // "running" notification.
+        if (intent == null) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+
+        val openPort = intent.getBooleanExtra(EXTRA_OPEN_PORT, false)
         val notification = buildNotification(openPort)
         ServiceCompat.startForeground(
             this,
@@ -29,7 +38,7 @@ class LocalApiForegroundService : Service() {
             notification,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         )
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -61,7 +70,7 @@ class LocalApiForegroundService : Service() {
             "本地 API",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "MCA 本地 API 保活通知"
+            description = "MCA 本地 API 运行状态通知"
             setShowBadge(false)
         }
         manager.createNotificationChannel(channel)

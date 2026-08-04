@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.deviceprofile.QnnRuntimeProfileSelector
 import com.muyuchat.core.deviceprofile.QnnRuntimeStatus
 import java.io.File
 import java.security.MessageDigest
@@ -24,6 +25,44 @@ internal data class QnnImageSmokeRuntimeSelection(
     val directories: List<String>,
     val bundleProfile: QnnImageBundleRuntimeProfile?
 )
+
+internal data class QnnImagePackagedRuntimeCandidate(
+    val runtimeProfile: SdxlQnnRuntimeProfile
+) {
+    val htpArchVersion: Int get() = runtimeProfile.htpArchVersion
+    val directories: List<String>
+        get() = if (runtimeProfile.hostDirectory == runtimeProfile.dspDirectory) {
+            listOf(runtimeProfile.hostDirectory)
+        } else {
+            listOf(runtimeProfile.hostDirectory, runtimeProfile.dspDirectory)
+        }
+}
+
+/**
+ * Enumerates every executable packaged runtime tuple. Device-derived HTP
+ * architecture is only an ordering hint; it never removes another coherent
+ * host/DSP profile. SDXL requires an exact Skel + Stub pair even though the
+ * general device-profile inspector intentionally keeps Stub optional.
+ */
+internal fun qnnImagePackagedRuntimeCandidates(
+    searchDirectories: List<File>,
+    preferredHtpArchVersion: Int? = null
+): List<QnnImagePackagedRuntimeCandidate> =
+    QnnRuntimeProfileSelector.candidates(searchDirectories, preferredHtpArchVersion)
+        .asSequence()
+        .filter { profile -> profile.htpStubLibrary?.isFile == true }
+        .map { profile ->
+            val host = profile.hostDirectory.canonicalPath
+            val dsp = profile.dspDirectory.canonicalPath
+            QnnImagePackagedRuntimeCandidate(
+                runtimeProfile = SdxlQnnRuntimeProfile(
+                    hostDirectory = host,
+                    dspDirectory = dsp,
+                    htpArchVersion = profile.htpArchVersion
+                )
+            )
+        }
+        .toList()
 
 internal fun qnnImageSmokeRuntimeSelection(
     bundleRoot: File?,
@@ -71,6 +110,24 @@ internal fun qnnImageBundleRuntimeProfileForArchOrNull(
     qnnImageBundleRuntimeCandidateDirectories(bundleRoot).asSequence()
         .mapNotNull { directory -> completeProfileInDirectoryOrNull(directory, htpArchVersion) }
         .firstOrNull()
+
+/** Enumerates every complete packaged HTP transport without ranking by device identity. */
+internal fun qnnImageBundleRuntimeProfiles(bundleRoot: File): List<QnnImageBundleRuntimeProfile> =
+    qnnImageBundleRuntimeCandidateDirectories(bundleRoot).asSequence()
+        .flatMap { directory ->
+            directory.listFiles().orEmpty().asSequence()
+                .mapNotNull { file ->
+                    HTP_SKEL_NAME.matchEntire(file.name)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                }
+                .distinct()
+                .mapNotNull { arch -> completeProfileInDirectoryOrNull(directory, arch) }
+        }
+        .distinctBy { profile -> profile.directory.canonicalPath to profile.htpArchVersion }
+        .sortedByDescending(QnnImageBundleRuntimeProfile::htpArchVersion)
+        .toList()
 
 internal fun qnnRequiredBundleRuntimeReadinessMessage(
     bundleRoot: File,

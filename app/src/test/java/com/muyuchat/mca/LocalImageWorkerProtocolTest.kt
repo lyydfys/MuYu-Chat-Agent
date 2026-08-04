@@ -139,6 +139,39 @@ class LocalImageWorkerProtocolTest {
     }
 
     @Test
+    fun `generation request round trips path free batch lineage`() {
+        val model = LocalImageModelRecord(
+            id = "model-lineage",
+            displayName = "Image model",
+            path = "/data/user/0/com.muyuchat.mca/files/model.bin",
+            fileName = "model.bin",
+            sizeBytes = 123L,
+            sha256 = "abc",
+            runtime = LocalImageRuntime.QNN_HTP,
+            family = LocalImageModelFamily.SD15,
+            bundleRoot = "/data/user/0/com.muyuchat.mca/files/bundle"
+        )
+        val lineage = ImageGenerationBatchLineage(
+            parentRequestId = "parent-request",
+            index = 2,
+            count = 4,
+            seed = 44
+        )
+
+        val payload = LocalImageWorkerProtocol.generateRequest(
+            requestId = "parent-request-batch-002",
+            model = model,
+            prompt = "prompt",
+            options = LocalImageGenerationOptions(batchCount = 1, seed = 44),
+            batchLineage = lineage
+        )
+        val parsed = LocalImageWorkerProtocol.parseGenerateRequest(payload)
+
+        assertEquals(lineage, parsed.batchLineage)
+        assertTrue(!JSONObject(payload).getJSONObject("batchLineage").toString().contains("/data/"))
+    }
+
+    @Test
     fun `omitted and explicit empty negative prompts remain distinct across worker ipc`() {
         val model = LocalImageModelRecord(
             id = "model-negative",
@@ -334,6 +367,13 @@ class LocalImageWorkerProtocolTest {
             previewHeight = 64,
             previewFrameCount = 1,
             previewNoisy = false,
+            previewVaeExecutionAttemptCount = 2,
+            previewVaeExecutionCount = 1,
+            previewVaeExecutionMsTotal = 37L,
+            previewPublicationCount = 1,
+            previewLastStep = 2,
+            previewLastRevision = 7L,
+            previewFailureCode = "PREVIEW_PNG_INVALID",
             stageTrace = listOf(
                 "context_lock",
                 "context_binary_mmap",
@@ -370,6 +410,16 @@ class LocalImageWorkerProtocolTest {
         assertEquals(progress.previewHeight, parsedProgress.progress.previewHeight)
         assertEquals(progress.previewFrameCount, parsedProgress.progress.previewFrameCount)
         assertEquals(progress.previewNoisy, parsedProgress.progress.previewNoisy)
+        assertEquals(
+            progress.previewVaeExecutionAttemptCount,
+            parsedProgress.progress.previewVaeExecutionAttemptCount
+        )
+        assertEquals(progress.previewVaeExecutionCount, parsedProgress.progress.previewVaeExecutionCount)
+        assertEquals(progress.previewVaeExecutionMsTotal, parsedProgress.progress.previewVaeExecutionMsTotal)
+        assertEquals(progress.previewPublicationCount, parsedProgress.progress.previewPublicationCount)
+        assertEquals(progress.previewLastStep, parsedProgress.progress.previewLastStep)
+        assertEquals(progress.previewLastRevision, parsedProgress.progress.previewLastRevision)
+        assertEquals(progress.previewFailureCode, parsedProgress.progress.previewFailureCode)
         assertEquals(progress.stageTrace, parsedProgress.progress.stageTrace)
         assertEquals(4321, parsedResult.workerPid)
         assertTrue(parsedResult.outputPath.endsWith("out.png"))

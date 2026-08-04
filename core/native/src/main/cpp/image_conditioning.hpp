@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,14 @@ namespace mca::image {
 
 /** SHA-256 over the exact byte payload, returned as lower-case hexadecimal. */
 std::string sha256_hex_bytes(const std::vector<uint8_t>& payload);
+
+/**
+ * SHA-256 over the two effective prompt strings using the product wire framing:
+ * one non-null marker, a four-byte big-endian UTF-8 length, then the UTF-8 bytes
+ * for each of positive and negative prompt, in that order.
+ */
+std::string image_prompt_execution_sha256(const std::string& prompt,
+                                          const std::string& negative_prompt);
 
 enum class TokenizerBackend {
     TokenizersCpp,
@@ -57,6 +66,49 @@ struct ClipTokenPair {
     std::vector<float> negative_then_positive_weights() const;
     // Domain-separated SHA-256 over both complete fixed-length sequences.
     std::string weighting_fingerprint() const;
+};
+
+/** Exact, untruncated count for one prompt as seen by a CLIP tokenizer. */
+struct ClipPromptTokenMeasurement {
+    size_t token_count = 0;
+    size_t max_length = 0;
+    // Byte offset in the original UTF-8 prompt at which the first overflowing
+    // prefix was observed. It is absent when the prompt fits or the backend
+    // cannot provide a stable source offset.
+    std::optional<size_t> overflow_byte_offset;
+};
+
+/** One already-loaded textual-inversion tensor in a CLIP input-embedding space. */
+struct ClipTextualInversionEmbedding {
+    size_t artifact_index = 0;
+    std::string trigger;
+    size_t embedding_width = 0;
+    std::vector<float> values;
+};
+
+/**
+ * Fixed-length token sequence plus rows that replace the ordinary token-table lookup.
+ * override_mask is one byte per token. embedding_overrides is a dense
+ * [maxLength, embeddingWidth] array so the graph input can be assembled without
+ * retaining pointers into an imported artifact.
+ */
+struct ClipConditionedSequence {
+    ClipTokenSequence tokens;
+    size_t embedding_width = 0;
+    std::vector<uint8_t> override_mask;
+    std::vector<float> embedding_overrides;
+    uint64_t tokenizer_match_mask = 0;
+    uint64_t applied_mask = 0;
+    size_t applied_vector_count = 0;
+};
+
+struct ClipConditionedPair {
+    ClipConditionedSequence negative;
+    ClipConditionedSequence positive;
+
+    uint64_t tokenizer_match_mask() const;
+    uint64_t applied_mask() const;
+    size_t applied_vector_count() const;
 };
 
 struct ClipEmbeddingWeightStats {
@@ -127,6 +179,35 @@ bool tokenize_clip_pair_from_json(const std::string& tokenizer_json_path,
                                   const std::string& positive_prompt,
                                   const std::string& negative_prompt,
                                   const ClipTokenizerConfig& config, ClipTokenPair* output,
-                                  std::string* error);
+                                  std::string* error,
+                                  bool include_negative = true);
+
+/**
+ * Measures one prompt with the same tokenizer and prompt-weighting parser used
+ * by the generation path. The count includes explicitly configured BOS/EOS
+ * rows and is never the padded graph length.
+ */
+bool measure_clip_prompt_from_json(const std::string& tokenizer_json_path,
+                                   const std::string& prompt,
+                                   const ClipTokenizerConfig& config,
+                                   ClipPromptTokenMeasurement* output,
+                                   std::string* error);
+
+/**
+ * Executes the same tokenizer and prompt-weight parser as tokenize_clip_pair_from_json,
+ * but replaces complete trigger occurrences before tokenization with imported embedding
+ * rows. This mirrors the Local Dream custom-word contract: the trigger is indivisible,
+ * multi-vector embeddings consume multiple CLIP positions, and truncation fails closed
+ * when a selected embedding would not reach the graph input.
+ */
+bool tokenize_clip_pair_with_textual_inversion_from_json(
+        const std::string& tokenizer_json_path,
+        const std::string& positive_prompt,
+        const std::string& negative_prompt,
+        const ClipTokenizerConfig& config,
+        const std::vector<ClipTextualInversionEmbedding>& embeddings,
+        ClipConditionedPair* output,
+        std::string* error,
+        bool include_negative = true);
 
 }  // namespace mca::image

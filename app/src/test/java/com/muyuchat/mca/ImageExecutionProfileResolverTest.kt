@@ -16,11 +16,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ImageExecutionProfileResolverTest {
-    private val pinnedQnnSd15Ids = linkedSetOf(
+    private val pinnedMigratableQnnIds = linkedSetOf(
         "cyberrealistic_sd15_qnn228",
         "realisticvisionhyper_sd15_qnn228",
         "dreamshaper_sd15_qnn228",
-        "meinamix_sd15_qnn228"
+        "meinamix_sd15_qnn228",
+        "qualcomm_sd15_gen5_qnn",
+        "qualcomm_sd21_gen5_qnn",
+        "qualcomm_controlnet_canny_gen5_qnn",
+        "sdxl_base_qnn228",
+        "realismsdxl_dmd2_alt_qnn228",
+        "animagine_xl_v4_qnn228",
+        "cyberrealisticxl_qnn228",
+        "sd_turbo_512_experimental"
     )
 
     @Test
@@ -58,7 +66,7 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
-    fun `all catalog profiles match both runtime resolution and legacy compatibility templates`() {
+    fun `all catalog profiles match runtime and legacy execution contracts`() {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
 
@@ -83,9 +91,16 @@ class ImageExecutionProfileResolverTest {
                 catalogProfile.copy(provenance = fallbackProfile.provenance),
                 fallbackProfile
             )
+            // Legacy templates predate install-time component pins. They must retain the same
+            // executable semantics without claiming hashes that were not observed in the old
+            // package, while the catalog materialization above remains fully pin-bound.
+            assertTrue(legacyProfile.tokenizer.assets.isEmpty())
             assertEquals(
                 "${model.id} legacy compatibility template drifted from its catalog profile",
-                catalogProfile.copy(provenance = legacyProfile.provenance),
+                catalogProfile.copy(
+                    provenance = legacyProfile.provenance,
+                    tokenizer = catalogProfile.tokenizer.copy(assets = emptyList())
+                ),
                 legacyProfile
             )
         }
@@ -290,16 +305,24 @@ class ImageExecutionProfileResolverTest {
 
         listOf(
             "realisticvisionhyper_sd15_qnn228",
-            "dreamshaper_sd15_qnn228",
-            "meinamix_sd15_qnn228"
+            "dreamshaper_sd15_qnn228"
         ).forEach { id ->
             val profile = resolve(id).profile
-            assertEquals(ImageEmbeddingDiskDataType.FP32, profile.conditioning.diskDataType)
-            assertEquals(
-                ImageEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
-                profile.conditioning.conversionStrategy
-            )
+            assertEquals(ImageEmbeddingDiskDataType.FP16, profile.conditioning.diskDataType)
+            assertEquals(ImageEmbeddingConversionStrategy.NONE, profile.conditioning.conversionStrategy)
         }
+        val meina = resolve("meinamix_sd15_qnn228").profile
+        assertEquals(ImageEmbeddingDiskDataType.FP32, meina.conditioning.diskDataType)
+        assertEquals(
+            ImageEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
+            meina.conditioning.conversionStrategy
+        )
+        val expectedQnnSd15ProfileRevisions = mapOf(
+            "cyberrealistic_sd15_qnn228" to 5,
+            "realisticvisionhyper_sd15_qnn228" to 6,
+            "dreamshaper_sd15_qnn228" to 6,
+            "meinamix_sd15_qnn228" to 5
+        )
         listOf(
             "cyberrealistic_sd15_qnn228",
             "realisticvisionhyper_sd15_qnn228",
@@ -307,9 +330,20 @@ class ImageExecutionProfileResolverTest {
             "meinamix_sd15_qnn228"
         ).forEach { id ->
             val profile = resolve(id).profile
-            assertEquals(2, profile.profileRevision)
+            assertEquals(
+                "$id execution-profile revision drifted",
+                expectedQnnSd15ProfileRevisions.getValue(id),
+                profile.profileRevision
+            )
             assertEquals("clip_v2.mnn", profile.graph.textEncoder?.relativePath)
             assertEquals(ImageWorkerStrategy.SHARED_UNET_VAE, profile.graph.workerStrategy)
+            assertTrue(profile.hasExecutableSharedQnnUltraFixTopology())
+            assertFalse(profile.capabilities.supportsVaeTiling)
+            assertTrue(profile.capabilities.supportsUltraFix)
+            assertEquals(512, profile.capabilities.ultraFixMinWidth)
+            assertEquals(2_048, profile.capabilities.ultraFixMaxWidth)
+            assertEquals(64, profile.capabilities.ultraFixWidthMultiple)
+            assertEquals(512, profile.capabilities.ultraFixRequiredTileSize)
             assertNull(profile.graph.schedulerSidecar)
             assertNull(profile.graph.tokenizerSidecar)
             assertEquals(
@@ -373,6 +407,22 @@ class ImageExecutionProfileResolverTest {
         assertEquals(ImageTimestepSpacing.LINSPACE, dmd2.timestepSpacing)
         assertEquals(2, dmd2.order)
 
+        listOf(
+            "sdxl_base_qnn228",
+            "realismsdxl_dmd2_alt_qnn228",
+            "animagine_xl_v4_qnn228",
+            "cyberrealisticxl_qnn228"
+        ).forEach { id ->
+            assertEquals(
+                setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER),
+                resolve(id).profile.capabilities.supportedSchedulers
+            )
+            assertFalse(
+                ImageSchedulerAlgorithm.LCM in
+                    resolve(id).profile.capabilities.supportedSchedulers
+            )
+        }
+
         val gen5 = resolve("qualcomm_sd15_gen5_qnn").profile.scheduler
         assertEquals(ImageSchedulerAlgorithm.EULER, gen5.algorithm)
         assertEquals(ImageTimestepSpacing.LINSPACE, gen5.timestepSpacing)
@@ -399,7 +449,7 @@ class ImageExecutionProfileResolverTest {
         assertEquals(ImageModelVariant.DMD2_ALT, dmd2.profile.variant)
         assertFalse(dmd2.profile.defaults.useCfg)
         assertEquals(4, dmd2.layers.resolved.unetExecutionCount)
-        assertEquals(154, dmd2.layers.resolved.tokenCount)
+        assertEquals(77, dmd2.layers.resolved.tokenCount)
         assertEquals(listOf(ImageProfileSource.BUILT_IN), dmd2.sourceChain)
 
         val turbo = resolve("sd_turbo_512_experimental")
@@ -628,6 +678,9 @@ class ImageExecutionProfileResolverTest {
         assertEquals(ImageModelVariant.DMD2_ALT, resolution.profile.variant)
         assertEquals(ImageSchedulerAlgorithm.DPMPP_2M, resolution.profile.scheduler.algorithm)
         assertEquals(6, resolution.profile.scheduler.defaultSteps)
+        assertFalse(resolution.profile.scheduler.scaleModelInput)
+        assertEquals(2, resolution.profile.scheduler.order)
+        assertFalse(resolution.profile.scheduler.skipPrkSteps)
         assertEquals(6, resolution.profile.defaults.steps)
         assertEquals(2.5, resolution.profile.defaults.cfgScale, 0.0)
         assertTrue(resolution.profile.defaults.useCfg)
@@ -931,17 +984,56 @@ class ImageExecutionProfileResolverTest {
         assertTrue(stable.capabilities.supportsVaeTiling)
         assertTrue(stable.capabilities.supportsLivePreview)
         assertTrue(stable.capabilities.supportsLora)
+        assertTrue(stable.tokenizer.supportsTextualInversion)
+        assertTrue(stable.capabilities.supportsTextualInversion)
         assertEquals(8, stable.capabilities.maxBatchCount)
+        assertTrue(stable.capabilities.supportsUltraFix)
+        assertEquals(128, stable.capabilities.ultraFixMinWidth)
+        assertEquals(8_192, stable.capabilities.ultraFixMaxWidth)
+        assertEquals(64, stable.capabilities.ultraFixWidthMultiple)
 
         val communityQnn = resolve("cyberrealistic_sd15_qnn228").profile
         assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, communityQnn.tokenizer.backend)
         assertTrue(communityQnn.tokenizer.supportsPromptWeighting)
         assertTrue(communityQnn.capabilities.supportsPromptWeighting)
+        assertTrue(communityQnn.tokenizer.supportsTextualInversion)
+        assertTrue(communityQnn.capabilities.supportsTextualInversion)
         assertFalse(communityQnn.capabilities.supportsClipSkip)
         assertFalse(communityQnn.capabilities.supportsVaeTiling)
-        assertFalse(communityQnn.capabilities.supportsLivePreview)
+        assertTrue(communityQnn.capabilities.supportsUltraFix)
+        assertTrue(communityQnn.hasExecutableSharedQnnUltraFixTopology())
+        assertTrue(communityQnn.capabilities.supportsLivePreview)
         assertFalse(communityQnn.capabilities.supportsLora)
         assertEquals(1, communityQnn.capabilities.maxBatchCount)
+
+        val splitQnnTextualInversion = resolve("sdxl_base_qnn228").profile
+        assertTrue(splitQnnTextualInversion.hasHostWritableClipTextualInversionTopology())
+        assertTrue(splitQnnTextualInversion.hasExecutableSplitSdxlQnnUltraFixTopology())
+        assertTrue(splitQnnTextualInversion.capabilities.supportsUltraFix)
+        assertEquals(1_024, splitQnnTextualInversion.capabilities.ultraFixRequiredTileSize)
+        assertEquals(1_024, splitQnnTextualInversion.capabilities.ultraFixMinWidth)
+        assertEquals(2_048, splitQnnTextualInversion.capabilities.ultraFixMaxWidth)
+
+        val controlProfile = communityQnn.copy(
+            task = ImageTask.CONTROL_IMAGE,
+            capabilities = communityQnn.capabilities.copy(requiresControlImage = true)
+        ).withTopologyDerivedQnnUltraFixCapability()
+        assertFalse(controlProfile.capabilities.supportsUltraFix)
+        assertFalse(controlProfile.hasExecutableQnnUltraFixTopology())
+        val communityMnn = communityQnn.copy(
+            runtime = LocalImageRuntime.MNN_DIFFUSION,
+            graph = communityQnn.graph.copy(
+                textEncoder = ImageGraphArtifactContract("clip_v2.mnn"),
+                unet = ImageGraphArtifactContract("unet.mnn"),
+                vae = ImageGraphArtifactContract("vae_decoder.mnn"),
+                workerStrategy = ImageWorkerStrategy.IN_PROCESS
+            ),
+            tokenizer = communityQnn.tokenizer.copy(supportsTextualInversion = false),
+            capabilities = communityQnn.capabilities.copy(supportsTextualInversion = false)
+        ).withTopologyDerivedTextualInversionCapability()
+        assertTrue(communityMnn.tokenizer.supportsTextualInversion)
+        assertTrue(communityMnn.capabilities.supportsTextualInversion)
+        assertTrue(communityMnn.hasHostWritableClipTextualInversionTopology())
 
         val officialMnn = resolve("sd15_mnn_512_quality").profile
         assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, officialMnn.tokenizer.backend)
@@ -952,6 +1044,7 @@ class ImageExecutionProfileResolverTest {
         assertFalse(officialMnn.capabilities.supportsLivePreview)
         assertFalse(officialMnn.capabilities.supportsLora)
         assertEquals(1, officialMnn.capabilities.maxBatchCount)
+        assertFalse(officialMnn.hasHostWritableClipTextualInversionTopology())
         listOf(
             resolve("qualcomm_sd15_gen5_qnn"),
             resolve("qualcomm_sd21_gen5_qnn"),
@@ -960,22 +1053,54 @@ class ImageExecutionProfileResolverTest {
             assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, resolution.profile.tokenizer.backend)
             assertFalse(resolution.profile.tokenizer.supportsPromptWeighting)
             assertFalse(resolution.profile.capabilities.supportsPromptWeighting)
+            assertFalse(resolution.profile.tokenizer.supportsTextualInversion)
+            assertFalse(resolution.profile.capabilities.supportsTextualInversion)
             assertFalse(resolution.profile.capabilities.supportsClipSkip)
             assertFalse(resolution.profile.capabilities.supportsVaeTiling)
-            assertFalse(resolution.profile.capabilities.supportsLivePreview)
+            assertFalse(resolution.profile.capabilities.supportsUltraFix)
+            assertFalse(resolution.profile.hasExecutableSharedQnnUltraFixTopology())
+            assertTrue(resolution.profile.capabilities.supportsLivePreview)
+            assertEquals(2, resolution.profile.profileRevision)
             assertFalse(resolution.profile.capabilities.supportsLora)
             assertEquals(1, resolution.profile.capabilities.maxBatchCount)
             assertFalse(resolution.layers.resolved.promptWeightingSupported)
             assertEquals(154, resolution.layers.resolved.tokenCount)
+            assertEquals(
+                ImageWorkerStrategy.SHARED_TEXT_UNET_VAE,
+                resolution.profile.graph.workerStrategy
+            )
         }
         val sana = resolve("mnn_sana_edit_v2").profile
         assertFalse(sana.tokenizer.supportsPromptWeighting)
         assertFalse(sana.capabilities.supportsPromptWeighting)
+        assertFalse(sana.tokenizer.supportsTextualInversion)
+        assertFalse(sana.capabilities.supportsTextualInversion)
         assertFalse(sana.capabilities.supportsClipSkip)
         assertFalse(sana.capabilities.supportsVaeTiling)
         assertFalse(sana.capabilities.supportsLivePreview)
         assertFalse(sana.capabilities.supportsLora)
         assertEquals(1, sana.capabilities.maxBatchCount)
+
+        listOf(
+            "sdxl_base_qnn228",
+            "realismsdxl_dmd2_alt_qnn228",
+            "animagine_xl_v4_qnn228",
+            "cyberrealisticxl_qnn228"
+        ).forEach { id ->
+            val splitQnn = resolve(id).profile
+            assertEquals(6, splitQnn.profileRevision)
+            assertEquals(ImageWorkerStrategy.SPLIT_UNET_VAE, splitQnn.graph.workerStrategy)
+            assertTrue(splitQnn.tokenizer.supportsTextualInversion)
+            assertTrue(splitQnn.capabilities.supportsTextualInversion)
+            assertFalse(splitQnn.capabilities.supportsLivePreview)
+            assertFalse(splitQnn.hasSharedQnnVaePreviewTopology())
+            assertFalse(splitQnn.hasSplitQnnSdxlProjectionPreviewTopology())
+            assertTrue(splitQnn.hasExecutableSplitSdxlQnnUltraFixTopology())
+            assertTrue(splitQnn.capabilities.supportsUltraFix)
+            assertEquals(1_024, splitQnn.capabilities.ultraFixMinWidth)
+            assertEquals(2_048, splitQnn.capabilities.ultraFixMaxWidth)
+            assertEquals(1_024, splitQnn.capabilities.ultraFixRequiredTileSize)
+        }
 
         val flowStable = resolve("z_image_turbo_q4").profile
         assertTrue(flowStable.tokenizer.supportsPromptWeighting)
@@ -1019,6 +1144,116 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
+    fun `ultrafix alone can select the extended topology aligned size contract`() {
+        val turbo4k = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "sd_turbo_512_experimental",
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.SD_TURBO,
+                userOverrides = ImageGenerationOverrides(
+                    width = 4_096,
+                    height = 4_096,
+                    useUltraFixDimensionContract = true
+                )
+            )
+        )
+        assertEquals(4_096, turbo4k.profile.defaults.width)
+        assertEquals(4_096, turbo4k.profile.defaults.height)
+        assertEquals(64, turbo4k.profile.capabilities.widthMultiple)
+        assertEquals(ImageProfileSource.USER_OVERRIDE, turbo4k.profile.provenance.primarySource)
+
+        val regularFailure = expectResolutionFailure {
+            ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = "sd_turbo_512_experimental",
+                    runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                    family = LocalImageModelFamily.SD_TURBO,
+                    userOverrides = ImageGenerationOverrides(width = 4_096, height = 4_096)
+                )
+            )
+        }
+        assertTrue(regularFailure.validation.issues.any { it.field == "defaults" })
+
+        val sdxlAligned = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.SDXL,
+                userOverrides = ImageGenerationOverrides(
+                    width = 4_096,
+                    height = 4_064,
+                    useUltraFixDimensionContract = true
+                )
+            )
+        )
+        assertEquals(32, sdxlAligned.profile.capabilities.widthMultiple)
+        assertEquals(4_064, sdxlAligned.profile.defaults.height)
+
+        val sdxlMisaligned = expectResolutionFailure {
+            ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = null,
+                    runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                    family = LocalImageModelFamily.SDXL,
+                    userOverrides = ImageGenerationOverrides(
+                        width = 4_096,
+                        height = 4_080,
+                        useUltraFixDimensionContract = true
+                    )
+                )
+            )
+        }
+        assertTrue(sdxlMisaligned.validation.issues.any { it.field == "defaults" })
+    }
+
+    @Test
+    fun `qnn ultrafix changes target canvas without rewriting fixed graph tensors`() {
+        val profile = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "cyberrealistic_sd15_qnn228",
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15,
+                userOverrides = ImageGenerationOverrides(
+                    width = 1_024,
+                    height = 1_536,
+                    useUltraFixDimensionContract = true
+                )
+            )
+        ).profile
+
+        assertEquals(1_024, profile.defaults.width)
+        assertEquals(1_536, profile.defaults.height)
+        assertEquals(listOf(1, 4, 64, 64), profile.latent.initialShape)
+        assertEquals(listOf(1, 4, 64, 64), profile.vae.inputShape)
+        assertEquals(listOf(1, 3, 512, 512), profile.vae.outputShape)
+        assertEquals(512, profile.capabilities.ultraFixRequiredTileSize)
+    }
+
+    @Test
+    fun `generic stable CLIP topology admits textual inversion without device gating`() {
+        val stable = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.SD15
+            )
+        )
+        assertFalse(stable.deviceAdmissionRestricted)
+        assertTrue(stable.profile.tokenizer.supportsTextualInversion)
+        assertTrue(stable.profile.capabilities.supportsTextualInversion)
+
+        val mnn = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = null,
+                runtime = LocalImageRuntime.MNN_DIFFUSION,
+                family = LocalImageModelFamily.SD15
+            )
+        )
+        assertFalse(mnn.profile.tokenizer.supportsTextualInversion)
+        assertFalse(mnn.profile.capabilities.supportsTextualInversion)
+    }
+
+    @Test
     fun `modern stable diffusion builtins retain model-specific flow defaults`() {
         val flux = resolve("flux2_klein_4b_q4").profile
         assertEquals(4, flux.defaults.steps)
@@ -1052,7 +1287,7 @@ class ImageExecutionProfileResolverTest {
                 recommendationId = "cyberrealistic_sd15_qnn228",
                 userOverrides = ImageGenerationOverrides(
                     expectedProfileId = "community.sd15.qnn228",
-                    expectedProfileRevision = 2,
+                    expectedProfileRevision = 5,
                     scheduler = ImageSchedulerAlgorithm.EULER,
                     predictionType = ImagePredictionType.EPSILON,
                     steps = 22,
@@ -1068,6 +1303,11 @@ class ImageExecutionProfileResolverTest {
         )
 
         assertEquals(ImageSchedulerAlgorithm.EULER, resolution.profile.scheduler.algorithm)
+        assertTrue(resolution.profile.scheduler.scaleModelInput)
+        assertEquals(1, resolution.profile.scheduler.order)
+        assertFalse(resolution.profile.scheduler.skipPrkSteps)
+        assertFalse(resolution.profile.scheduler.lowerOrderFinal)
+        assertEquals(22, resolution.profile.scheduler.defaultSteps)
         assertEquals(22, resolution.profile.defaults.steps)
         assertEquals(6.25, resolution.profile.defaults.cfgScale, 0.0)
         assertEquals(2_026_071_700L, resolution.profile.defaults.seed)
@@ -1078,6 +1318,12 @@ class ImageExecutionProfileResolverTest {
             resolution.sourceChain
         )
         assertEquals(22, resolution.layers.resolved.steps)
+        val nativeParams = ImageExecutionProfileNativeContract.toNativeParamsJson(resolution)
+        assertEquals("EULER", nativeParams.getString("scheduler"))
+        assertEquals("euler", nativeParams.getString("sampleMethod"))
+        assertTrue(nativeParams.getBoolean("scaleModelInput"))
+        assertEquals(22, nativeParams.getInt("expectedTimetableCount"))
+        assertEquals(44, nativeParams.getInt("expectedUnetExecutionCount"))
     }
 
     @Test
@@ -1104,10 +1350,10 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
-    fun `older pinned qnn sd15 manifests migrate only to their exact catalog contract`() {
+    fun `older pinned manifests migrate only to their exact catalog contract`() {
         val models = ModelScopeClient().recommendedModels()
-            .filter { model -> model.id in pinnedQnnSd15Ids }
-        assertEquals(pinnedQnnSd15Ids, models.mapTo(linkedSetOf()) { it.id })
+            .filter { model -> model.id in pinnedMigratableQnnIds }
+        assertEquals(pinnedMigratableQnnIds, models.mapTo(linkedSetOf()) { it.id })
 
         models.forEach { model ->
             val bundle = requireNotNull(model.imageEngineBundle)
@@ -1116,7 +1362,15 @@ class ImageExecutionProfileResolverTest {
                 materializeDownloadedImageExecutionProfile(bundle, fingerprint)
             )
             val persisted = current.copy(
-                profileRevision = 1,
+                profileRevision = current.profileRevision - 1,
+                capabilities = if (current.graph.workerStrategy == ImageWorkerStrategy.SPLIT_UNET_VAE) {
+                    current.capabilities.copy(
+                        supportedSchedulers = current.capabilities.supportedSchedulers +
+                            ImageSchedulerAlgorithm.LCM
+                    )
+                } else {
+                    current.capabilities.copy(supportsLivePreview = false)
+                },
                 graph = current.graph.copy(
                     schedulerSidecar = "scheduler/scheduler_config.json",
                     tokenizerSidecar = "tokenizer/tokenizer_config.json",
@@ -1133,7 +1387,12 @@ class ImageExecutionProfileResolverTest {
                 )
             ).profile
 
-            assertEquals(2, resolved.profileRevision)
+            assertEquals(
+                "${model.id} did not migrate to the current catalog revision",
+                current.profileRevision,
+                resolved.profileRevision
+            )
+            assertEquals(current.capabilities, resolved.capabilities)
             assertEquals(
                 "${model.id} did not migrate to the complete catalog contract",
                 current.copy(provenance = resolved.provenance),
@@ -1201,6 +1460,63 @@ class ImageExecutionProfileResolverTest {
         assertEquals(1, aliasOnlySourceProof.profileRevision)
         assertEquals("scheduler/scheduler_config.json", aliasOnlySourceProof.graph.schedulerSidecar)
 
+        val persistedAliasIdentity = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = model.id,
+                fingerprint = installedFingerprint,
+                manifestProfile = current.copy(
+                    profileRevision = 1,
+                    provenance = current.provenance.copy(
+                        recommendationId = "cyberrealistic-sd15-qnn228-8gen2"
+                    ),
+                    graph = oldGraph
+                ),
+                recommendationEvidence = pinnedRecommendationEvidence(model.id)
+            )
+        ).profile
+        assertEquals(1, persistedAliasIdentity.profileRevision)
+        assertEquals("scheduler/scheduler_config.json", persistedAliasIdentity.graph.schedulerSidecar)
+
+        val requestedBundleAlias = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "${model.id}_bundle",
+                fingerprint = installedFingerprint,
+                manifestProfile = current.copy(profileRevision = 1, graph = oldGraph),
+                recommendationEvidence = pinnedRecommendationEvidence(model.id)
+            )
+        ).profile
+        assertEquals(1, requestedBundleAlias.profileRevision)
+        assertEquals("scheduler/scheduler_config.json", requestedBundleAlias.graph.schedulerSidecar)
+
+        val pinnedEvidence = pinnedRecommendationEvidence(model.id)
+        val archiveBasenameOnly = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = model.id,
+                fingerprint = installedFingerprint,
+                manifestProfile = current.copy(profileRevision = 1, graph = oldGraph),
+                recommendationEvidence = pinnedEvidence.copy(
+                    artifactPaths = pinnedEvidence.artifactPaths.map { path ->
+                        if ("!/" in path) "mirror/$path" else path
+                    }
+                )
+            )
+        ).profile
+        assertEquals(1, archiveBasenameOnly.profileRevision)
+        assertEquals("scheduler/scheduler_config.json", archiveBasenameOnly.graph.schedulerSidecar)
+
+        val mixedRepositoryEvidence = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = model.id,
+                fingerprint = installedFingerprint,
+                manifestProfile = current.copy(profileRevision = 1, graph = oldGraph),
+                recommendationEvidence = pinnedEvidence.copy(
+                    sourceRepositories = pinnedEvidence.sourceRepositories + "attacker/unrelated-package"
+                )
+            )
+        ).profile
+        assertEquals(1, mixedRepositoryEvidence.profileRevision)
+        assertEquals("scheduler/scheduler_config.json", mixedRepositoryEvidence.graph.schedulerSidecar)
+
         val conflictingIdentity = ImageExecutionProfileResolver.resolve(
             input(
                 recommendationId = model.id,
@@ -1260,6 +1576,19 @@ class ImageExecutionProfileResolverTest {
         assertTrue(weightingReport.issues.any {
             it.code == "CAPABILITY_CONTRACT_INVALID" && it.field == "supportsPromptWeighting"
         })
+
+        val splitQnn = resolve("sdxl_base_qnn228").profile
+        val unsupportedSplitPreview = splitQnn.copy(
+            capabilities = splitQnn.capabilities.copy(supportsLivePreview = true)
+        )
+        val splitPreviewReport = ImageExecutionProfileValidator.validate(
+            unsupportedSplitPreview,
+            FINGERPRINT
+        )
+        assertTrue(splitPreviewReport.issues.any {
+            it.code == "CAPABILITY_CONTRACT_INVALID" &&
+                it.field == "capabilities.supportsLivePreview"
+        })
     }
 
     @Test
@@ -1316,9 +1645,36 @@ class ImageExecutionProfileResolverTest {
             )
         )
 
+        assertFalse(resolution.profile.capabilities.supportsUltraFix)
         assertFalse(resolution.profile.scheduler.skipPrkSteps)
         assertEquals(29, resolution.layers.resolved.timetableCount)
         assertEquals(58, resolution.layers.resolved.unetExecutionCount)
+    }
+
+    @Test
+    fun `ultrafix sampler override returns a structured unsupported execution issue`() {
+        val failure = expectResolutionFailure {
+            ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = "cyberrealistic_sd15_qnn228",
+                    userOverrides = ImageGenerationOverrides(
+                        scheduler = ImageSchedulerAlgorithm.PNDM_PLMS,
+                        width = 1_024,
+                        height = 1_024,
+                        useUltraFixDimensionContract = true
+                    )
+                )
+            )
+        }
+
+        assertEquals(
+            "ULTRAFIX_EXECUTION_UNSUPPORTED",
+            failure.validation.issues.single().code
+        )
+        assertEquals(
+            "capabilities.supportsUltraFix",
+            failure.validation.issues.single().field
+        )
     }
 
     @Test

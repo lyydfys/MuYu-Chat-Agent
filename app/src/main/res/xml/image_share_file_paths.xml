@@ -3,4 +3,7 @@
     <cache-path
         name="shared_images"
         path="shared_images/" />
+    <files-path
+        name="generation_inputs"
+        path="image_generation_inputs/" />
 </paths>

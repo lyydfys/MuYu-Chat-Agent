@@ -56,6 +56,11 @@ internal object ImageExecutionProfileJson {
                     put("notes", JSONArray(profile.provenance.notes))
                 }
         )
+        .apply {
+            profile.textEncoderLanguage?.let { contract ->
+                put("textEncoderLanguage", textEncoderLanguageToJson(contract))
+            }
+        }
         .put(
             "tokenizer",
             JSONObject()
@@ -66,6 +71,7 @@ internal object ImageExecutionProfileJson {
                         JSONObject()
                             .put("relativePath", asset.relativePath)
                             .put("fingerprint", asset.fingerprint.lowercase())
+                            .apply { asset.sizeBytes?.let { put("sizeBytes", it) } }
                     })
                 )
                 .apply {
@@ -192,6 +198,14 @@ internal object ImageExecutionProfileJson {
                 .put("supportsMask", profile.capabilities.supportsMask)
                 .put("supportsClipSkip", profile.capabilities.supportsClipSkip)
                 .put("supportsVaeTiling", profile.capabilities.supportsVaeTiling)
+                .put("supportsUltraFix", profile.capabilities.supportsUltraFix)
+                .put("ultraFixMinWidth", profile.capabilities.ultraFixMinWidth)
+                .put("ultraFixMaxWidth", profile.capabilities.ultraFixMaxWidth)
+                .put("ultraFixMinHeight", profile.capabilities.ultraFixMinHeight)
+                .put("ultraFixMaxHeight", profile.capabilities.ultraFixMaxHeight)
+                .put("ultraFixWidthMultiple", profile.capabilities.ultraFixWidthMultiple)
+                .put("ultraFixHeightMultiple", profile.capabilities.ultraFixHeightMultiple)
+                .put("ultraFixRequiredTileSize", profile.capabilities.ultraFixRequiredTileSize)
                 .put("supportsLivePreview", profile.capabilities.supportsLivePreview)
                 .put("supportsLora", profile.capabilities.supportsLora)
                 .put("maxBatchCount", profile.capabilities.maxBatchCount)
@@ -403,6 +417,8 @@ internal object ImageExecutionProfileJson {
                 variant = enumValue(json.requiredStrictString("variant"), "variant"),
                 task = enumValue(json.requiredStrictString("task"), "task"),
                 provenance = parseProvenance(json.strictObject("provenance")),
+                textEncoderLanguage = json.optionalObject("textEncoderLanguage")
+                    ?.let(::parseTextEncoderLanguage),
                 tokenizer = parseTokenizer(json.strictObject("tokenizer")),
                 conditioning = parseConditioning(json.strictObject("conditioning")),
                 scheduler = parseScheduler(json.strictObject("scheduler")),
@@ -422,6 +438,11 @@ internal object ImageExecutionProfileJson {
                 cause = error
             )
         }
+        val legacyIncompleteNativeMultilingualDeclaration = profile.textEncoderLanguage
+            ?.takeIf { contract ->
+                contract.capability == ImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL &&
+                    (contract.evidence == null || contract.evidence.promptToEncoderAssets.isEmpty())
+            }
         val sequenceAxisIssues = buildList {
             if (profile.conditioning.textEncoderInputShape.getOrNull(1) != profile.tokenizer.maxLength) {
                 add(
@@ -444,8 +465,20 @@ internal object ImageExecutionProfileJson {
                 }
             }
         }
+        val profileIssues = ImageExecutionProfileValidator.validate(profile).issues
+            .filterNot { issue ->
+                // The role-aware closure did not exist in older installed profiles. It was never
+                // enough to admit Chinese directly, but it must not make an otherwise valid
+                // package unusable for English prompts. Keep malformed fields and asset pins
+                // fatal; only remove the expected missing-closure declaration errors.
+                legacyIncompleteNativeMultilingualDeclaration != null &&
+                    (issue.code == "TEXT_ENCODER_LANGUAGE_EVIDENCE_MISSING" ||
+                        (issue.code == "TEXT_ENCODER_LANGUAGE_TOPOLOGY_UNSUPPORTED" &&
+                            issue.field ==
+                                "textEncoderLanguage.evidence.promptToEncoderAssets"))
+            }
         val validation = ImageProfileValidationReport(
-            ImageExecutionProfileValidator.validate(profile).issues + sequenceAxisIssues
+            profileIssues + sequenceAxisIssues
         )
         if (!validation.valid) {
             val first = validation.issues.first()
@@ -455,7 +488,11 @@ internal object ImageExecutionProfileJson {
                 message = validation.issues.joinToString(" ") { issue -> "${issue.code}:${issue.message}" }
             )
         }
-        return profile
+        return if (legacyIncompleteNativeMultilingualDeclaration != null) {
+            profile.copy(textEncoderLanguage = null)
+        } else {
+            profile
+        }
     }
 
     private fun parseProvenance(json: JSONObject): ImageProfileProvenance = ImageProfileProvenance(
@@ -466,12 +503,191 @@ internal object ImageExecutionProfileJson {
         notes = json.optionalArray("notes")?.strictStringList("provenance.notes").orEmpty()
     )
 
+    /**
+     * This field was added after installed execution-profile JSON existed. Its absence is not an
+     * error: callers conservatively treat it as English-dominant instead of inferring semantics
+     * from a family, package sidecar, tokenizer transport, or device.
+     */
+    private fun parseTextEncoderLanguage(json: JSONObject): ImageTextEncoderLanguageContract {
+        val supportedLanguages = json.requiredArray("supportedLanguages")
+            .strictEnumList<ImageTextEncoderLanguage>("textEncoderLanguage.supportedLanguages")
+        if (supportedLanguages.toSet().size != supportedLanguages.size) {
+            throw formatError(
+                "textEncoderLanguage.supportedLanguages",
+                "Text encoder language support must not contain duplicates."
+            )
+        }
+        val evidence = json.optionalObject("evidence")?.let { evidenceJson ->
+            ImageTextEncoderLanguageEvidence(
+                evidenceId = evidenceJson.requiredStrictString("evidenceId"),
+                evidenceSha256 = evidenceJson.requiredStrictString("evidenceSha256"),
+                textEncoderAsset = evidenceJson.strictObject("textEncoderAsset").let { assetJson ->
+                    ImageProfileAsset(
+                        relativePath = assetJson.requiredStrictString("relativePath"),
+                        fingerprint = assetJson.requiredStrictString("fingerprint"),
+                        sizeBytes = assetJson.requiredStrictLong("sizeBytes")
+                    ).also { asset ->
+                        requireSafePath(
+                            asset.relativePath,
+                            "textEncoderLanguage.evidence.textEncoderAsset.relativePath"
+                        )
+                    }
+                },
+                auxiliaryAssets = evidenceJson.optionalArray("auxiliaryAssets")
+                    ?.strictObjectList("textEncoderLanguage.evidence.auxiliaryAssets")
+                    ?.mapIndexed { index, assetJson ->
+                        ImageProfileAsset(
+                            relativePath = assetJson.requiredStrictString("relativePath"),
+                            fingerprint = assetJson.requiredStrictString("fingerprint"),
+                            sizeBytes = assetJson.requiredStrictLong("sizeBytes")
+                        ).also { asset ->
+                            requireSafePath(
+                                asset.relativePath,
+                                "textEncoderLanguage.evidence.auxiliaryAssets[$index].relativePath"
+                            )
+                        }
+                    }
+                    .orEmpty(),
+                promptToEncoderAssets = evidenceJson.optionalArray("promptToEncoderAssets")
+                    ?.strictObjectList("textEncoderLanguage.evidence.promptToEncoderAssets")
+                    ?.mapIndexed { index, entryJson ->
+                        val asset = entryJson.strictObject("asset").let { assetJson ->
+                            ImageProfileAsset(
+                                relativePath = assetJson.requiredStrictString("relativePath"),
+                                fingerprint = assetJson.requiredStrictString("fingerprint"),
+                                sizeBytes = assetJson.requiredStrictLong("sizeBytes")
+                            )
+                        }
+                        requireSafePath(
+                            asset.relativePath,
+                            "textEncoderLanguage.evidence.promptToEncoderAssets[$index].asset.relativePath"
+                        )
+                        ImagePromptToEncoderAsset(
+                            role = enumValue(
+                                entryJson.requiredStrictString("role"),
+                                "textEncoderLanguage.evidence.promptToEncoderAssets[$index].role"
+                            ),
+                            asset = asset
+                        )
+                    }
+                    .orEmpty(),
+                semanticProof = evidenceJson.optionalObject("semanticProof")
+                    ?.let(::parseTextEncoderLanguageSemanticProof)
+            )
+        }
+        return ImageTextEncoderLanguageContract(
+            capability = enumValue(
+                json.requiredStrictString("capability"),
+                "textEncoderLanguage.capability"
+            ),
+            supportedLanguages = supportedLanguages.toCollection(linkedSetOf()),
+            evidence = evidence
+        )
+    }
+
+    private fun textEncoderLanguageToJson(
+        contract: ImageTextEncoderLanguageContract
+    ): JSONObject = JSONObject()
+        .put("capability", contract.capability.name)
+        .put(
+            "supportedLanguages",
+            JSONArray(contract.supportedLanguages.sortedBy { it.ordinal }.map { language -> language.name })
+        )
+        .apply {
+            contract.evidence?.let { evidence ->
+                put(
+                    "evidence",
+                    JSONObject()
+                        .put("evidenceId", evidence.evidenceId)
+                        .put("evidenceSha256", evidence.evidenceSha256.lowercase())
+                        .put(
+                            "textEncoderAsset",
+                            JSONObject()
+                                .put("relativePath", evidence.textEncoderAsset.relativePath)
+                                .put("fingerprint", evidence.textEncoderAsset.fingerprint.lowercase())
+                                .put("sizeBytes", evidence.textEncoderAsset.sizeBytes)
+                        )
+                        .apply {
+                            if (evidence.auxiliaryAssets.isNotEmpty()) {
+                                put(
+                                    "auxiliaryAssets",
+                                    JSONArray(evidence.auxiliaryAssets.map { asset ->
+                                        JSONObject()
+                                            .put("relativePath", asset.relativePath)
+                                            .put("fingerprint", asset.fingerprint.lowercase())
+                                            .put("sizeBytes", asset.sizeBytes)
+                                    })
+                                )
+                            }
+                            if (evidence.promptToEncoderAssets.isNotEmpty()) {
+                                put(
+                                    "promptToEncoderAssets",
+                                    JSONArray(
+                                        evidence.promptToEncoderAssets
+                                            .sortedBy { entry -> entry.role.ordinal }
+                                            .map { entry ->
+                                                JSONObject()
+                                                    .put("role", entry.role.name)
+                                                    .put(
+                                                        "asset",
+                                                        JSONObject()
+                                                            .put(
+                                                                "relativePath",
+                                                                entry.asset.relativePath
+                                                            )
+                                                            .put(
+                                                                "fingerprint",
+                                                                entry.asset.fingerprint.lowercase()
+                                                            )
+                                                            .put("sizeBytes", entry.asset.sizeBytes)
+                                                    )
+                                            }
+                                    )
+                                )
+                            }
+                            evidence.semanticProof?.let { proof ->
+                                put(
+                                    "semanticProof",
+                                    JSONObject()
+                                        .put("proofVersion", proof.proofVersion)
+                                        .put("signerKeyId", proof.signerKeyId)
+                                        .put(
+                                            "signerCertificateSha256",
+                                            proof.signerCertificateSha256.lowercase()
+                                        )
+                                        .put("signatureAlgorithm", proof.signatureAlgorithm)
+                                        .put("payloadSha256", proof.payloadSha256.lowercase())
+                                        .put("signatureBase64", proof.signatureBase64)
+                                )
+                            }
+                        }
+                )
+            }
+        }
+
+    /**
+     * A malformed proof is not a malformed base profile. Its verifier will reject it and the
+     * resolver will conservatively remove only the direct-Chinese declaration, preserving normal
+     * English import/load/generation behavior.
+     */
+    private fun parseTextEncoderLanguageSemanticProof(
+        json: JSONObject
+    ): ImageTextEncoderLanguageSemanticProof = ImageTextEncoderLanguageSemanticProof(
+        proofVersion = json.optStrictIntOrZero("proofVersion"),
+        signerKeyId = json.opt("signerKeyId") as? String ?: "",
+        signerCertificateSha256 = json.opt("signerCertificateSha256") as? String ?: "",
+        signatureAlgorithm = json.opt("signatureAlgorithm") as? String ?: "",
+        payloadSha256 = json.opt("payloadSha256") as? String ?: "",
+        signatureBase64 = json.opt("signatureBase64") as? String ?: ""
+    )
+
     private fun parseTokenizer(json: JSONObject): ImageTokenizerContract = ImageTokenizerContract(
         backend = enumValue(json.requiredStrictString("backend"), "tokenizer.backend"),
         assets = json.optionalArray("assets")?.strictObjectList("tokenizer.assets")?.mapIndexed { index, asset ->
             ImageProfileAsset(
                 relativePath = asset.requiredStrictString("relativePath"),
-                fingerprint = asset.requiredStrictString("fingerprint")
+                fingerprint = asset.requiredStrictString("fingerprint"),
+                sizeBytes = asset.optionalStrictLong("sizeBytes")
             ).also { requireSafePath(it.relativePath, "tokenizer.assets[$index].relativePath") }
         }.orEmpty(),
         bosId = json.optionalStrictInt("bosId"),
@@ -636,31 +852,54 @@ internal object ImageExecutionProfileJson {
         defaultNegativePrompt = json.optionalStrictString("defaultNegativePrompt", preserveBlank = true)
     )
 
-    private fun parseCapabilities(json: JSONObject): ImageGenerationCapabilities = ImageGenerationCapabilities(
-        supportedSchedulers = json.requiredArray("supportedSchedulers")
-            .strictEnumList<ImageSchedulerAlgorithm>("capabilities.supportedSchedulers")
-            .toSet(),
-        minWidth = json.requiredStrictInt("minWidth"),
-        maxWidth = json.requiredStrictInt("maxWidth"),
-        minHeight = json.requiredStrictInt("minHeight"),
-        maxHeight = json.requiredStrictInt("maxHeight"),
-        widthMultiple = json.requiredStrictInt("widthMultiple"),
-        heightMultiple = json.requiredStrictInt("heightMultiple"),
-        supportsNegativePrompt = json.requiredStrictBoolean("supportsNegativePrompt"),
-        supportsPromptWeighting = json.requiredStrictBoolean("supportsPromptWeighting"),
-        supportsTextualInversion = json.requiredStrictBoolean("supportsTextualInversion"),
-        requiresControlImage = json.requiredStrictBoolean("requiresControlImage"),
-        requiresInputImage = json.requiredStrictBoolean("requiresInputImage"),
-        supportsMask = json.requiredStrictBoolean("supportsMask"),
-        // Added after the original profile schema shipped. Old installed manifests remain
-        // readable and conservatively expose no advanced control until a built-in or downloaded
-        // profile layer supplies an explicit capability.
-        supportsClipSkip = json.optionalStrictBoolean("supportsClipSkip") ?: false,
-        supportsVaeTiling = json.optionalStrictBoolean("supportsVaeTiling") ?: false,
-        supportsLivePreview = json.optionalStrictBoolean("supportsLivePreview") ?: false,
-        supportsLora = json.optionalStrictBoolean("supportsLora") ?: false,
-        maxBatchCount = json.optionalStrictInt("maxBatchCount") ?: 1
-    )
+    private fun parseCapabilities(json: JSONObject): ImageGenerationCapabilities {
+        val minWidth = json.requiredStrictInt("minWidth")
+        val maxWidth = json.requiredStrictInt("maxWidth")
+        val minHeight = json.requiredStrictInt("minHeight")
+        val maxHeight = json.requiredStrictInt("maxHeight")
+        val widthMultiple = json.requiredStrictInt("widthMultiple")
+        val heightMultiple = json.requiredStrictInt("heightMultiple")
+        val supportsUltraFix = json.optionalStrictBoolean("supportsUltraFix") ?: false
+        return ImageGenerationCapabilities(
+            supportedSchedulers = json.requiredArray("supportedSchedulers")
+                .strictEnumList<ImageSchedulerAlgorithm>("capabilities.supportedSchedulers")
+                .toSet(),
+            minWidth = minWidth,
+            maxWidth = maxWidth,
+            minHeight = minHeight,
+            maxHeight = maxHeight,
+            widthMultiple = widthMultiple,
+            heightMultiple = heightMultiple,
+            supportsNegativePrompt = json.requiredStrictBoolean("supportsNegativePrompt"),
+            supportsPromptWeighting = json.requiredStrictBoolean("supportsPromptWeighting"),
+            supportsTextualInversion = json.requiredStrictBoolean("supportsTextualInversion"),
+            requiresControlImage = json.requiredStrictBoolean("requiresControlImage"),
+            requiresInputImage = json.requiredStrictBoolean("requiresInputImage"),
+            supportsMask = json.requiredStrictBoolean("supportsMask"),
+            // Added after the original profile schema shipped. Old installed manifests remain
+            // readable and conservatively expose no advanced control until a built-in or
+            // downloaded profile layer supplies an explicit capability.
+            supportsClipSkip = json.optionalStrictBoolean("supportsClipSkip") ?: false,
+            supportsVaeTiling = json.optionalStrictBoolean("supportsVaeTiling") ?: false,
+            supportsUltraFix = supportsUltraFix,
+            ultraFixMinWidth = json.optionalStrictInt("ultraFixMinWidth")
+                ?: if (supportsUltraFix) minWidth else 0,
+            ultraFixMaxWidth = json.optionalStrictInt("ultraFixMaxWidth")
+                ?: if (supportsUltraFix) maxWidth else 0,
+            ultraFixMinHeight = json.optionalStrictInt("ultraFixMinHeight")
+                ?: if (supportsUltraFix) minHeight else 0,
+            ultraFixMaxHeight = json.optionalStrictInt("ultraFixMaxHeight")
+                ?: if (supportsUltraFix) maxHeight else 0,
+            ultraFixWidthMultiple = json.optionalStrictInt("ultraFixWidthMultiple")
+                ?: if (supportsUltraFix) widthMultiple else 0,
+            ultraFixHeightMultiple = json.optionalStrictInt("ultraFixHeightMultiple")
+                ?: if (supportsUltraFix) heightMultiple else 0,
+            ultraFixRequiredTileSize = json.optionalStrictInt("ultraFixRequiredTileSize") ?: 0,
+            supportsLivePreview = json.optionalStrictBoolean("supportsLivePreview") ?: false,
+            supportsLora = json.optionalStrictBoolean("supportsLora") ?: false,
+            maxBatchCount = json.optionalStrictInt("maxBatchCount") ?: 1
+        )
+    }
 
     private fun parseBehaviorFields(
         json: JSONObject,
@@ -1004,6 +1243,21 @@ internal object ImageExecutionProfileJson {
             throw formatError(name, "$name must be a finite 32-bit integer.")
         }
         return number.toInt()
+    }
+
+    /** A proof envelope is advisory until signature verification; malformed values fail closed. */
+    private fun JSONObject.optStrictIntOrZero(name: String): Int {
+        val value = opt(name) as? Number ?: return 0
+        val number = value.toDouble()
+        return if (
+            number.isFinite() &&
+            number % 1.0 == 0.0 &&
+            number in Int.MIN_VALUE.toDouble()..Int.MAX_VALUE.toDouble()
+        ) {
+            number.toInt()
+        } else {
+            0
+        }
     }
 
     private fun JSONObject.optionalStrictIntAlias(fieldPrefix: String, names: List<String>): Int? {

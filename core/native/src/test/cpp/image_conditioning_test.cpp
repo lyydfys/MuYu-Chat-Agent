@@ -284,6 +284,27 @@ void test_sana_cfg_invokes_llm_in_positive_negative_source_order() {
     assert(std::string(conditional_only.executed_conditioning_order) == "positive_only");
 }
 
+void test_image_prompt_execution_sha256_matches_product_wire_framing() {
+    assert(mca::image::image_prompt_execution_sha256("a", "") ==
+           "7b2c4dab5874fc03fd088691ce5bea0ff34ded267b495fc5249853dd2110bed7");
+    assert(mca::image::image_prompt_execution_sha256(
+                   "\xE4\xB8\x80\xE5\x8F\xAA\xE7\xBA\xA2\xE8\x89\xB2\xE6\x9D\xAF\xE5\xAD\x90"
+                   "\xE6\x94\xBE\xE5\x9C\xA8\xE8\x93\x9D\xE8\x89\xB2\xE6\xA1\x8C\xE5\xAD\x90"
+                   "\xE4\xB8\x8A\xEF\xBC\x8C\xE6\x9D\xAF\xE5\xAD\x90\xE5\xB7\xA6\xE4\xBE\xA7"
+                   "\xE6\x9C\x89\xE4\xB8\xA4\xE4\xB8\xAA\xE7\xBB\xBF\xE8\x89\xB2\xE8\x8B\xB9"
+                   "\xE6\x9E\x9C",
+                   "\xE4\xB8\x8D\xE8\xA6\x81\xE4\xBA\xBA\xE7\x89\xA9\xEF\xBC\x8C\xE4\xB8\x8D"
+                   "\xE8\xA6\x81\xE6\x96\x87\xE5\xAD\x97\xEF\xBC\x8C\xE4\xB8\x8D\xE8\xA6\x81"
+                   "\xE5\xA4\x9A\xE4\xBD\x99\xE6\xB0\xB4\xE6\x9E\x9C") ==
+           "77debda388ee058e0ce51f89e799e2ca7828a06142fc77b2b19cff3844b93579");
+    assert(mca::image::image_prompt_execution_sha256("hello", "bad") ==
+           "25430c095be5f4e9949d690acd2a5548093d04f30e6d4db57edbb1f011d81792");
+    assert(mca::image::image_prompt_execution_sha256("hello", "bad") !=
+           mca::image::image_prompt_execution_sha256("bad", "hello"));
+    assert(mca::image::image_prompt_execution_sha256("hello", "") !=
+           mca::image::image_prompt_execution_sha256(std::string("hello\0", 6), ""));
+}
+
 }  // namespace
 
 int main() {
@@ -298,5 +319,6 @@ int main() {
     test_token_id_graph_rejects_non_unity_weights_instead_of_post_weighting();
     test_cfg_token_id_graph_requires_unity_on_each_executed_branch();
     test_sana_cfg_invokes_llm_in_positive_negative_source_order();
+    test_image_prompt_execution_sha256_matches_product_wire_framing();
     return 0;
 }

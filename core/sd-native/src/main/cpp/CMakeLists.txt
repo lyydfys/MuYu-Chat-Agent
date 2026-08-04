@@ -48,6 +48,13 @@ set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(${SDCPP_SRC} build-stable-diffusion)
 
+set(MCA_IMAGE_EXECUTION_MATH_DIR
+        ${CMAKE_CURRENT_LIST_DIR}/../../../../native/src/main/cpp)
+target_sources(stable-diffusion PRIVATE
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/image_execution_math.cpp)
+target_include_directories(stable-diffusion PRIVATE
+        ${MCA_IMAGE_EXECUTION_MATH_DIR})
+
 # vocab.cpp embeds huge tokenizer tables; Android NDK clang can OOM at Release -O3
 # on Windows hosts. Keep this data-heavy file unoptimized while optimizing kernels.
 set_source_files_properties(
@@ -59,7 +66,8 @@ add_library(mca_sd_native SHARED
         stable_diffusion_bridge.cpp)
 target_include_directories(mca_sd_native PRIVATE
         ${SDCPP_SRC}/include
-        ${SDCPP_SRC}/thirdparty)
+        ${SDCPP_SRC}/thirdparty
+        ${MCA_IMAGE_EXECUTION_MATH_DIR})
 if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
     target_compile_definitions(mca_sd_native PRIVATE MCA_SD_ARM64=1 MCA_SD_CPU_KLEIDIAI=1 MCA_SD_OPENMP=1)
 elseif(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "x86_64")

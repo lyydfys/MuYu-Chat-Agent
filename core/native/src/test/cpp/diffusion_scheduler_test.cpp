@@ -5,12 +5,14 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 namespace {
 
 using mca::diffusion::DiffusionScheduler;
 using mca::diffusion::DiffusionSchedulerConfig;
+using mca::diffusion::Img2ImgTailSchedule;
 using mca::diffusion::PredictionType;
 using mca::diffusion::SchedulerStepResult;
 using mca::diffusion::SchedulerTensor;
@@ -238,6 +240,125 @@ void test_dmd2_trailing_four_step_timetable() {
     assert(scheduler.expected_unet_execution_count() == expected.size());
 }
 
+void test_local_dream_trailing_timetable_parity() {
+    std::string error;
+
+    auto dpmpp_config = DiffusionSchedulerConfig::stable_diffusion_dpmpp_2m();
+    dpmpp_config.timestep_spacing = TimestepSpacing::Trailing;
+    DiffusionScheduler dpmpp(dpmpp_config);
+    assert(dpmpp.set_timesteps(16, &error));
+    const std::array<double, 16> expected_dpmpp{
+        999.0, 937.0, 874.0, 812.0, 749.0, 687.0, 624.0, 562.0,
+        499.0, 437.0, 374.0, 312.0, 249.0, 187.0, 124.0, 62.0,
+    };
+    assert_values_near(dpmpp.timesteps(), expected_dpmpp, 0.0);
+
+    auto euler_config = DiffusionSchedulerConfig::stable_diffusion_euler();
+    euler_config.timestep_spacing = TimestepSpacing::Trailing;
+    DiffusionScheduler euler(euler_config);
+    assert(euler.set_timesteps(30, &error));
+    assert(euler.timesteps().size() == 30U);
+    assert(euler.timesteps()[0] == 966.0);
+    assert(euler.timesteps()[1] == 932.0);
+    assert(euler.timesteps()[2] == 899.0);
+    assert(euler.timesteps()[27] == 66.0);
+    assert(euler.timesteps()[28] == 32.0);
+    assert(euler.timesteps()[29] == -1.0);
+    assert(euler.sigmas().size() == 31U);
+    const double expected_sigma_min = std::sqrt(
+        (1.0 - euler.alphas_cumprod().front()) /
+        euler.alphas_cumprod().front());
+    assert(std::abs(euler.sigmas()[29] - expected_sigma_min) <= kScheduleTolerance);
+    assert(euler.sigmas().back() == 0.0);
+}
+
+void test_img2img_begin_index_and_noise_contract() {
+    std::string error;
+    const SchedulerTensor original{0.25f, -0.5f, 0.75f};
+    const SchedulerTensor noise{1.0f, -0.25f, 0.5f};
+
+    DiffusionScheduler euler(DiffusionSchedulerConfig::stable_diffusion_euler());
+    assert(euler.set_timesteps(4, &error));
+    SchedulerTensor euler_noisy;
+    assert(euler.add_noise(original, noise, 2, &euler_noisy, &error));
+    const float euler_sigma = static_cast<float>(euler.sigmas()[2]);
+    for (size_t index = 0; index < original.size(); ++index) {
+        assert(std::abs(euler_noisy[index] -
+            (original[index] + noise[index] * euler_sigma)) <= kTensorTolerance);
+    }
+    assert(euler.set_begin_index(2, &error));
+    assert(euler.expected_unet_execution_count() == 2);
+    assert(euler.completed_step_count() == 0);
+    SchedulerTensor scaled;
+    assert(euler.scale_model_input(euler_noisy, 2, &scaled, &error));
+    SchedulerStepResult euler_result;
+    assert(euler.step(fixture_tensor(kModelOutput), 2, euler_noisy, &euler_result, &error));
+    assert(euler.completed_step_count() == 1);
+    assert(!euler.set_begin_index(1, &error));
+
+    DiffusionScheduler dpmpp(DiffusionSchedulerConfig::stable_diffusion_dpmpp_2m());
+    assert(dpmpp.set_timesteps(4, &error));
+    SchedulerTensor dpmpp_noisy;
+    assert(dpmpp.add_noise(original, noise, 2, &dpmpp_noisy, &error));
+    const size_t timestep = static_cast<size_t>(std::llround(dpmpp.timesteps()[2]));
+    const float alpha = static_cast<float>(std::sqrt(dpmpp.alphas_cumprod()[timestep]));
+    const float sigma = static_cast<float>(
+        std::sqrt(1.0 - dpmpp.alphas_cumprod()[timestep]));
+    for (size_t index = 0; index < original.size(); ++index) {
+        assert(std::abs(dpmpp_noisy[index] -
+            (original[index] * alpha + noise[index] * sigma)) <= kTensorTolerance);
+    }
+    assert(dpmpp.set_begin_index(2, &error));
+    assert(dpmpp.expected_unet_execution_count() == 2);
+    assert(dpmpp.completed_step_count() == 0);
+    SchedulerStepResult dpmpp_result;
+    assert(dpmpp.step(
+        fixture_tensor(kModelOutput), 2, dpmpp_noisy, &dpmpp_result, &error));
+    assert(dpmpp.completed_step_count() == 1);
+
+    DiffusionScheduler pndm(DiffusionSchedulerConfig::stable_diffusion_pndm());
+    assert(pndm.set_timesteps(4, &error));
+    assert(!pndm.set_begin_index(1, &error));
+    assert(error.find("PNDM") != std::string::npos);
+}
+
+void test_img2img_tail_schedule_uses_local_dream_float_semantics() {
+    struct Case {
+        int steps;
+        double strength;
+        size_t begin_index;
+        size_t effective_steps;
+    };
+    const std::array<Case, 9> cases{{
+        {4, 0.0, 3, 1},
+        {30, 0.05, 28, 2},
+        {30, 1.0, 0, 30},
+        {20, 0.5, 10, 10},
+        {4, 0.75, 1, 3},
+        {30, 0.65, 10, 20},
+        {28, 0.65, 9, 19},
+        {20, 0.6, 7, 13},
+        {30, 0.6, 11, 19},
+    }};
+    std::string error;
+    for (const auto& expected : cases) {
+        Img2ImgTailSchedule schedule;
+        assert(mca::diffusion::resolve_img2img_tail_schedule(
+            expected.steps, expected.strength, &schedule, &error));
+        assert(schedule.begin_index == expected.begin_index);
+        assert(schedule.effective_step_count == expected.effective_steps);
+        assert(schedule.begin_index + schedule.effective_step_count ==
+            static_cast<size_t>(expected.steps));
+    }
+
+    Img2ImgTailSchedule invalid;
+    assert(!mca::diffusion::resolve_img2img_tail_schedule(0, 0.5, &invalid, &error));
+    assert(!mca::diffusion::resolve_img2img_tail_schedule(20, -0.01, &invalid, &error));
+    assert(!mca::diffusion::resolve_img2img_tail_schedule(20, 1.01, &invalid, &error));
+    assert(!mca::diffusion::resolve_img2img_tail_schedule(
+        20, std::numeric_limits<double>::quiet_NaN(), &invalid, &error));
+}
+
 }  // namespace
 
 int main() {
@@ -248,5 +369,8 @@ int main() {
     test_twenty_step_schedule_structure();
     test_dpmpp_2m_epsilon();
     test_dmd2_trailing_four_step_timetable();
+    test_local_dream_trailing_timetable_parity();
+    test_img2img_begin_index_and_noise_contract();
+    test_img2img_tail_schedule_uses_local_dream_float_semantics();
     return 0;
 }

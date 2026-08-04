@@ -28,12 +28,23 @@ class LocalImageWorkerClientLifecycleTest {
         val source = localImageWorkerClientSource()
         val callback = functionBody(source, "private fun callbackFor(")
         val watchdog = functionBody(source, "private fun startUpscaleWatchdog(")
+        val termination = functionBody(
+            source,
+            "private fun completeWatchdogTimeoutAndRequestExit("
+        )
 
         assertTrue(callback.contains("request.lastWorkerCallbackAtMs = SystemClock.elapsedRealtime()"))
         assertTrue(watchdog.contains("localImageUpscaleHeartbeatTimeoutMs("))
         assertTrue(watchdog.contains("LOCAL_IMAGE_UPSCALE_MAX_RUNTIME_MS"))
-        assertTrue(watchdog.contains("cancelRemote(request)"))
-        assertTrue(watchdog.contains("Process.killProcess(workerPid)"))
+        assertTrue(watchdog.contains("val timedOutEndpoint = currentEndpoint()"))
+        assertTrue(
+            watchdog.contains(
+                "completeWatchdogTimeoutAndRequestExit(request, timeout, timedOutEndpoint)"
+            )
+        )
+        assertTrue(termination.contains("requestRemoteSelfTermination(request, it)"))
+        assertFalse(watchdog.contains("Process.killProcess(workerPid)"))
+        assertFalse(termination.contains("Process.killProcess(workerPid)"))
         assertFalse(watchdog.contains("deviceProfile"))
         assertFalse(watchdog.contains("chipset"))
         assertTrue(
@@ -170,6 +181,29 @@ class LocalImageWorkerClientLifecycleTest {
         assertTrue(gate.tryBeginResultPublication())
         assertFalse(gate.tryRequestCancellation())
         assertFalse(gate.cancelRequested)
+    }
+
+    @Test
+    fun resultPublicationRetirementWaitsForTerminalAttemptSignal() {
+        val gate = LocalImageWorkerPublicationGate()
+
+        assertTrue(gate.tryBeginResultPublication())
+        assertTrue(gate.resultPublicationStarted)
+        assertFalse(gate.awaitResultPublicationTerminalAttempt(0L))
+
+        gate.markResultPublicationTerminalAttemptFinished()
+
+        assertTrue(gate.awaitResultPublicationTerminalAttempt(0L))
+    }
+
+    @Test
+    fun processRetirementIsMonotonicAndRejectsLaterAdmission() {
+        val retirement = LocalImageWorkerProcessRetirementGate()
+
+        assertFalse(retirement.isRetiring)
+        assertTrue(retirement.beginRetirement())
+        assertTrue(retirement.isRetiring)
+        assertFalse(retirement.beginRetirement())
     }
 
     @Test
@@ -325,6 +359,8 @@ class LocalImageWorkerClientLifecycleTest {
         )
         val deliveryFailed = job.indexOf("errorCode = \"RESULT_DELIVERY_FAILED\"")
         val cleanupBeforeFailure = job.indexOf("transferredOutputs.deleteWorkerOutputs()")
+        val terminalAttemptFinished =
+            job.indexOf("active.markResultPublicationTerminalAttemptFinished()")
         val onDestroy = functionBody(source, "override fun onDestroy()")
         val writeResult = functionBody(source, "private fun writeResultFile(")
 
@@ -347,9 +383,52 @@ class LocalImageWorkerClientLifecycleTest {
             "undelivered outputs must be removed before the FAILED journal terminal",
             cleanupBeforeFailure in (completed + 1) until deliveryFailed
         )
+        assertTrue(
+            "process retirement may proceed only after the callback returned and terminal write was attempted",
+            terminalAttemptFinished > deliveryFailed
+        )
+        assertFalse(
+            "scope cancellation during onDestroy must not interrupt the synchronous terminal commit window",
+            job.substring(deliver, terminalAttemptFinished).contains("ensureActive()")
+        )
+        assertTrue(onDestroy.contains("active?.resultPublicationStarted == true"))
+        assertTrue(onDestroy.contains("scheduleResultPublicationSelfExit(requireNotNull(active))"))
+        assertTrue(onDestroy.contains("if (awaitResultPublication) return"))
         assertTrue(writeResult.contains("output.fd.sync()"))
         assertTrue(writeResult.contains("durableMoveWithinParent("))
         assertTrue(writeResult.contains("target.partial.delete()"))
+    }
+
+    @Test
+    fun retiringWorkerRejectsSameProcessRebindBeforeRecoveryOrCleanup() {
+        val source = localImageWorkerServiceSource()
+        val onCreate = functionBody(source, "override fun onCreate()")
+        val onDestroy = functionBody(source, "override fun onDestroy()")
+        val publicationExit = functionBody(
+            source,
+            "private fun scheduleResultPublicationSelfExit("
+        )
+        val retirementCheck = onCreate.indexOf("PROCESS_RETIREMENT.isRetiring")
+        val providerInitialization = onCreate.indexOf("provider = LocalImageProvider(")
+        val recovery = onCreate.indexOf("recoverAbandonedRequests(")
+
+        assertTrue(retirementCheck >= 0)
+        assertTrue(retirementCheck < providerInitialization)
+        assertTrue(retirementCheck < recovery)
+        assertTrue(
+            source.contains(
+                "binder.takeUnless { rejectedRetiringProcess || PROCESS_RETIREMENT.isRetiring }"
+            )
+        )
+        assertTrue(
+            onDestroy.indexOf("PROCESS_RETIREMENT.beginRetirement()") <
+                onDestroy.indexOf("activeGeneration.also { activeGeneration = null }")
+        )
+        assertTrue(
+            publicationExit.indexOf("active.awaitResultPublicationTerminalAttempt(") <
+                publicationExit.indexOf("Process.killProcess(Process.myPid())")
+        )
+        assertTrue(publicationExit.contains("RESULT_PUBLICATION_EXIT_TIMEOUT_MS"))
     }
 
     @Test
@@ -371,6 +450,10 @@ class LocalImageWorkerClientLifecycleTest {
         assertTrue(generate.contains("cancelForDeadClient(active)"))
         assertTrue(deadClient.contains("if (!isCurrent) return"))
         assertTrue(deadClient.contains("if (!active.tryRequestCancellation()) return"))
+        assertTrue(
+            deadClient.indexOf("scheduleSelfExit(active)") <
+                deadClient.indexOf("provider.cancel()")
+        )
         assertTrue(deadClient.contains("requestJournalCancellation(active.requestId)"))
         assertTrue(deadClient.contains("provider.cancel()"))
         assertTrue(deadClient.contains("active.job?.cancel("))
@@ -392,6 +475,54 @@ class LocalImageWorkerClientLifecycleTest {
     }
 
     @Test
+    fun watchdogTerminationIsRequestBoundAndNeverKillsACallbackPid() {
+        val clientSource = localImageWorkerClientSource()
+        val generationWatchdog = functionBody(clientSource, "private fun startWatchdog(")
+        val upscaleWatchdog = functionBody(clientSource, "private fun startUpscaleWatchdog(")
+        val termination = functionBody(clientSource, "private fun requestRemoteSelfTermination(")
+        val timeoutDispatch = functionBody(
+            clientSource,
+            "private fun completeWatchdogTimeoutAndRequestExit("
+        )
+        val awaitDispatch = functionBody(
+            clientSource,
+            "private suspend fun awaitWatchdogTerminationDispatch("
+        )
+        val serviceTermination = functionBody(
+            localImageWorkerServiceSource(),
+            "override fun cancelAndExit("
+        )
+
+        assertTrue(generationWatchdog.contains("completeWatchdogTimeoutAndRequestExit("))
+        assertTrue(upscaleWatchdog.contains("completeWatchdogTimeoutAndRequestExit("))
+        assertTrue(timeoutDispatch.contains("request.completion.completeExceptionally(timeout)"))
+        assertTrue(timeoutDispatch.contains("requestRemoteSelfTermination(request, it)"))
+        assertTrue(timeoutDispatch.contains("request.watchdogTerminationDispatched.complete(Unit)"))
+        assertTrue(awaitDispatch.contains("withContext(NonCancellable)"))
+        assertTrue(awaitDispatch.contains("request.watchdogTerminationDispatched.await()"))
+        assertTrue(
+            clientSource.indexOf("awaitWatchdogTerminationDispatch(request)") <
+                clientSource.indexOf("releaseBindingAfterRequest(request, model.runtime)")
+        )
+        assertFalse(clientSource.contains("Process.killProcess(workerPid)"))
+        assertTrue(termination.contains("LocalImageWorkerProtocol.cancelRequest(request.requestId)"))
+        assertTrue(serviceTermination.contains("activeGeneration?.takeIf { it.requestId == requestedId }"))
+        assertTrue(serviceTermination.contains("scheduleSelfExit(active)"))
+    }
+
+    @Test
+    fun restartedWorkerRecoversOldJournalWithoutTrustingReusedPid() {
+        val recovery = functionBody(
+            localImageWorkerServiceSource(),
+            "private fun recoverInterruptedExecutions("
+        )
+
+        assertTrue(recovery.contains("recoverInterrupted(cleanupRoots = listOf(cacheDir)) { false }"))
+        assertFalse(recovery.contains("/proc/"))
+        assertFalse(recovery.contains("isDirectory"))
+    }
+
+    @Test
     fun closingOneClientDoesNotDeleteAnotherRequestsPublishedResults() {
         val source = localImageWorkerClientSource()
         val close = functionBody(source, "override fun close()")
@@ -406,6 +537,86 @@ class LocalImageWorkerClientLifecycleTest {
 
         assertTrue(generate.contains("request.options.seed == null || request.options.seed == -1"))
         assertTrue(generate.contains("val workerOptions = workerInputs.options"))
+    }
+
+    @Test
+    fun splitSdxlRuntimeFallbackRequiresExactBinderDeathProof() {
+        val source = localImageWorkerSource("SdxlTwoPhaseCoordinator.kt")
+        val execute = functionBody(source, "suspend fun execute(request: SdxlImagePhaseRequest")
+        val executeCandidates = functionBody(
+            source,
+            "internal suspend fun <T> executeSdxlRuntimeCandidates("
+        )
+        val cancelAndAwaitExit = functionBody(source, "private suspend fun cancelAndAwaitExit(")
+        val throwFailureAfterExit = functionBody(
+            source,
+            "private suspend fun throwFailureAfterExit("
+        )
+        val awaitExactBinderDeath = functionBody(source, "private suspend fun awaitExactBinderDeath(")
+        val failConnection = functionBody(source, "private fun failConnection(")
+
+        assertTrue(source.contains("private val binderDeath = CompletableDeferred<Unit>()"))
+        assertTrue(source.contains("private val deathRecipient = IBinder.DeathRecipient"))
+        assertTrue(source.contains("binderDeath.complete(Unit)"))
+        assertTrue(execute.contains("dispatchAttempted = true"))
+        assertTrue(execute.contains("catch (timeout: TimeoutCancellationException)"))
+        assertTrue(executeCandidates.contains("catch (error: LocalImageWorkerRemoteException)"))
+        assertTrue(executeCandidates.contains("shouldRetrySdxlRuntimeCandidate("))
+        assertTrue(execute.contains("catch (cancelled: CancellationException)"))
+        assertTrue(execute.contains("catch (error: Throwable)"))
+        assertTrue(execute.contains("throwFailureAfterExit(terminal.error)"))
+        assertTrue(source.contains("worker_exit_unconfirmed"))
+        assertTrue(cancelAndAwaitExit.contains("cancelAndTerminate()"))
+        assertTrue(cancelAndAwaitExit.contains("releaseBindingForExit()"))
+        assertTrue(cancelAndAwaitExit.contains("requiresExactExitProof()"))
+        assertTrue(throwFailureAfterExit.contains("cancelAndAwaitExit()"))
+        assertTrue(awaitExactBinderDeath.contains("binderDeath.await()"))
+        assertFalse(failConnection.contains("binderDeath.complete"))
+        assertFalse(source.contains("awaitRemoteFailureExit"))
+    }
+
+    @Test
+    fun splitSdxlProviderCleanupRetainsGlobalGateUntilPersistentRequestBarrier() {
+        val coordinator = localImageWorkerSource("SdxlTwoPhaseCoordinator.kt")
+        val provider = localImageWorkerSource("LocalImageProvider.kt")
+        val phaseService = localImageWorkerSource("SdxlImagePhaseWorkerService.kt")
+        val workerService = localImageWorkerServiceSource()
+        val awaitFinish = functionBody(
+            coordinator,
+            "suspend fun awaitFinishAfterProviderCleanup("
+        )
+        val finishUnderBarrier = functionBody(
+            coordinator,
+            "private fun finishUnderExclusiveBarrier("
+        )
+        val phaseExecute = functionBody(phaseService, "override fun execute(")
+
+        assertTrue(provider.contains("splitRequestLease?.awaitFinishAfterProviderCleanup("))
+        assertFalse(provider.contains("splitRequestLease?.finishAfterProviderCleanup("))
+        assertTrue(awaitFinish.contains("withContext(NonCancellable)"))
+        assertTrue(awaitFinish.contains("while (admission == null)"))
+        assertTrue(awaitFinish.contains("while (exclusive == null)"))
+        assertTrue(awaitFinish.indexOf("close()") < awaitFinish.indexOf("while (exclusive == null)"))
+        assertTrue(awaitFinish.contains("while (!finished)"))
+        assertTrue(awaitFinish.contains("pauseBeforeSdxlCleanupBarrierRetry(\"admission\""))
+        assertTrue(awaitFinish.contains("pauseBeforeSdxlCleanupBarrierRetry(\"request\""))
+        assertTrue(awaitFinish.contains("pauseBeforeSdxlCleanupBarrierRetry("))
+        assertFalse(awaitFinish.contains("withTimeout("))
+        assertTrue(finishUnderBarrier.contains("store.markTerminal("))
+        assertTrue(
+            finishUnderBarrier.substringAfter("store.markTerminal(")
+                .contains("trackedPaths.forEach")
+        )
+        assertTrue(
+            phaseExecute.indexOf("acquirePhaseOwnership(") <
+                phaseExecute.indexOf("activeJob = scope.launch")
+        )
+        assertTrue(coordinator.contains("appContext.noBackupFilesDir"))
+        assertTrue(phaseService.contains("noBackupFilesDir"))
+        assertTrue(workerService.contains("coordinationRoot = File("))
+        assertTrue(workerService.contains("noBackupFilesDir"))
+        assertTrue(provider.contains("appContext.cacheDir"))
+        assertTrue(provider.contains("SDXL_TWO_PHASE_DIRECTORY"))
     }
 
     private fun localImageWorkerClientSource(): String {

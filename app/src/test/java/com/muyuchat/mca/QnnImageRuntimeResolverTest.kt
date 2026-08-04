@@ -12,6 +12,79 @@ import org.junit.Test
 
 class QnnImageRuntimeResolverTest {
     @Test
+    fun packagedRuntimeCandidatesRankPreferredKeepSameArchProfilesAndRequireStub() {
+        val futureA = Files.createTempDirectory("qnn-packaged-v83-a").toFile()
+        val futureB = Files.createTempDirectory("qnn-packaged-v83-b").toFile()
+        val preferred = Files.createTempDirectory("qnn-packaged-v79").toFile()
+        val missingStub = Files.createTempDirectory("qnn-packaged-v83-no-stub").toFile()
+        try {
+            completeProfile(futureA, 83)
+            completeProfile(futureB, 83)
+            completeProfile(preferred, 79)
+            File(missingStub, "libQnnSystem.so").writeText("x")
+            File(missingStub, "libQnnHtp.so").writeText("x")
+            File(missingStub, "libQnnHtpV83Skel.so").writeText("x")
+
+            val candidates = qnnImagePackagedRuntimeCandidates(
+                searchDirectories = listOf(futureA, missingStub, preferred, futureB),
+                preferredHtpArchVersion = 79
+            )
+
+            assertEquals(listOf(79, 83, 83), candidates.map(QnnImagePackagedRuntimeCandidate::htpArchVersion))
+            assertEquals(
+                listOf(preferred, futureA, futureB).map { directory -> listOf(directory.canonicalPath) },
+                candidates.map(QnnImagePackagedRuntimeCandidate::directories)
+            )
+        } finally {
+            futureA.deleteRecursively()
+            futureB.deleteRecursively()
+            preferred.deleteRecursively()
+            missingStub.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun unusablePreferredSplitCannotBlockLaterCoherentPackagedRuntime() {
+        val coherent = Files.createTempDirectory("qnn-packaged-coherent-v79").toFile()
+        val sideLoadedDsp = Files.createTempDirectory("qnn-packaged-split-v83").toFile()
+        try {
+            completeProfile(coherent, 79)
+            File(sideLoadedDsp, "libQnnHtpV83Skel.so").writeText("x")
+            File(sideLoadedDsp, "libQnnHtpV83Stub.so").writeText("x")
+
+            val candidates = qnnImagePackagedRuntimeCandidates(
+                searchDirectories = listOf(coherent, sideLoadedDsp),
+                preferredHtpArchVersion = 83
+            )
+
+            assertEquals(listOf(79), candidates.map(QnnImagePackagedRuntimeCandidate::htpArchVersion))
+            assertEquals(listOf(coherent.canonicalPath), candidates.single().directories)
+        } finally {
+            coherent.deleteRecursively()
+            sideLoadedDsp.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun kotlinAndNativePlatformRuntimePrefixesStayInLockstep() {
+        val kotlinSource = projectFile(
+            "core/deviceprofile/src/main/java/com/muyuchat/core/deviceprofile/" +
+                "DeviceAccelerationProfile.kt"
+        ).readText()
+        val nativeSource = projectFile("core/native/src/main/cpp/qnn_native_bridge.cpp").readText()
+        val kotlinBlock = kotlinSource
+            .substringAfter("QNN_PLATFORM_RUNTIME_DIRECTORY_PREFIXES = listOf(")
+            .substringBefore("\n)")
+        val nativeBlock = nativeSource
+            .substringAfter("kQnnPlatformRuntimeDirectoryPrefixes{{")
+            .substringBefore("}};")
+        val expected = listOf("/vendor/", "/odm/", "/system/", "/system_ext/", "/product/")
+
+        assertEquals(expected, PLATFORM_PREFIX.findAll(kotlinBlock).map { it.groupValues[1] }.toList())
+        assertEquals(expected, PLATFORM_PREFIX.findAll(nativeBlock).map { it.groupValues[1] }.toList())
+    }
+
+    @Test
     fun pinnedGenericArchiveCreatesVerifiableRuntimeMetadataForAllDeviceProfiles() {
         val root = Files.createTempDirectory("qnn-pinned-generic-runtime").toFile()
         try {
@@ -250,6 +323,12 @@ class QnnImageRuntimeResolverTest {
         File(directory, "libQnnHtpV${arch}Stub.so").writeText("x")
     }
 
+    private fun projectFile(relativePath: String): File = sequenceOf(
+        File(relativePath),
+        File("..", relativePath)
+    ).map { it.canonicalFile }.firstOrNull(File::isFile)
+        ?: error("Unable to locate project source file: $relativePath")
+
     private fun writeRuntimeMetadata(directory: File, qnnSdk: String, arch: Int) {
         val files = org.json.JSONObject()
         qnnImageRuntimeFileNames(arch).forEach { name ->
@@ -286,3 +365,4 @@ class QnnImageRuntimeResolverTest {
 }
 
 private val INTERNAL_RUNTIME_CODE = Regex("""(?i)SM\d{4}|HTP\s*V\d+|soc_model|libQnnHtpV\d+""")
+private val PLATFORM_PREFIX = Regex(""""(/[a-z_]+/)"""")

@@ -26,11 +26,33 @@ struct SchedulerStepResult {
     bool used_saved_sample = false;
 };
 
+struct Img2ImgTailSchedule {
+    size_t begin_index = 0;
+    size_t effective_step_count = 0;
+    float strength = 1.0f;
+};
+
+/**
+ * Resolves the Local Dream-compatible img2img tail using explicit float32
+ * arithmetic and truncation of the retained-image fraction.
+ */
+bool resolve_img2img_tail_schedule(
+        int inference_steps,
+        double requested_strength,
+        Img2ImgTailSchedule* schedule,
+        std::string* error);
+
 class DiffusionScheduler final {
 public:
     explicit DiffusionScheduler(DiffusionSchedulerConfig config);
 
     bool set_timesteps(int num_inference_steps, std::string* error);
+    /**
+     * Starts an img2img denoise pass at an already-built timetable index.
+     * PNDM is intentionally excluded because its repeated PRK/PLMS warm-up
+     * state cannot be reconstructed by skipping entries.
+     */
+    bool set_begin_index(size_t begin_index, std::string* error);
     void reset_state();
 
     const DiffusionSchedulerConfig& config() const { return config_; }
@@ -39,14 +61,22 @@ public:
     const std::vector<double>& alphas_cumprod() const { return alphas_cumprod_; }
     int num_inference_steps() const { return num_inference_steps_; }
     double init_noise_sigma() const { return init_noise_sigma_; }
-    size_t expected_unet_execution_count() const { return timesteps_.size(); }
-    size_t completed_step_count() const { return counter_; }
+    size_t expected_unet_execution_count() const { return timesteps_.size() - begin_index_; }
+    size_t completed_step_count() const { return counter_ - begin_index_; }
 
     bool scale_model_input(
             const SchedulerTensor& sample,
             size_t schedule_index,
             SchedulerTensor* scaled_sample,
             std::string* error);
+
+    /** Adds deterministic caller-supplied noise at one exact timetable entry. */
+    bool add_noise(
+            const SchedulerTensor& original_sample,
+            const SchedulerTensor& noise,
+            size_t schedule_index,
+            SchedulerTensor* noisy_sample,
+            std::string* error) const;
 
     bool step(
             const SchedulerTensor& model_output,
@@ -120,6 +150,7 @@ private:
     int num_inference_steps_ = 0;
     double final_alpha_cumprod_ = 1.0;
     double init_noise_sigma_ = 1.0;
+    size_t begin_index_ = 0;
     size_t counter_ = 0;
     size_t last_scaled_step_ = static_cast<size_t>(-1);
 

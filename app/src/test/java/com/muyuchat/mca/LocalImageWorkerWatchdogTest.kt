@@ -7,6 +7,16 @@ import org.junit.Test
 
 class LocalImageWorkerWatchdogTest {
     @Test
+    fun `split ultrafix encoder timeout scales with physical tile count and stays bounded`() {
+        val singleTile = sdxlEncoderPhaseTimeoutMs(1)
+        val nineTiles = sdxlEncoderPhaseTimeoutMs(9)
+
+        assertEquals(sdxlEncoderPhaseTimeoutMs(), singleTile)
+        assertTrue(nineTiles > singleTile)
+        assertEquals(sdxlEncoderPhaseTimeoutMs(64), sdxlEncoderPhaseTimeoutMs(Int.MAX_VALUE))
+    }
+
+    @Test
     fun `hard watchdog applies only to qnn sdxl`() {
         val policy = localImageWorkerWatchdogPolicy(
             runtime = LocalImageRuntime.QNN_HTP,
@@ -48,6 +58,7 @@ class LocalImageWorkerWatchdogTest {
         assertTrue(message.contains("${timeoutMs / 1_000L}s"))
         assertTrue(message.contains("phase=graph_execute"))
         assertTrue(message.contains("context_binary_mmap -> context_create -> graph_execute"))
+        assertTrue(message.contains("termination was requested"))
     }
 
     @Test

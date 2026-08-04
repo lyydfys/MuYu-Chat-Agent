@@ -250,6 +250,93 @@ class DeviceAccelerationAnalyzerTest {
     }
 
     @Test
+    fun qnnRuntimeCandidatesRejectSideLoadedSplitButPermitPlatformSplit() {
+        val hostDir = Files.createTempDirectory("qnn-runtime-platform-host").toFile()
+        val dspDir = Files.createTempDirectory("qnn-runtime-platform-dsp").toFile()
+        hostDir.resolve("libQnnSystem.so").writeText("system")
+        hostDir.resolve("libQnnHtp.so").writeText("htp")
+        dspDir.resolve("libQnnHtpV83Skel.so").writeText("skel")
+        dspDir.resolve("libQnnHtpV83Stub.so").writeText("stub")
+
+        assertTrue(QnnRuntimeProfileSelector.candidates(listOf(hostDir, dspDir)).isEmpty())
+
+        val platformPaths = setOf(hostDir.canonicalPath, dspDir.canonicalPath)
+        val candidates = QnnRuntimeProfileSelector.candidates(
+            searchDirectories = listOf(hostDir, dspDir),
+            preferredHtpArchVersion = null,
+            isPlatformDirectory = { directory -> directory.canonicalPath in platformPaths }
+        )
+
+        assertEquals(1, candidates.size)
+        assertEquals(83, candidates.single().htpArchVersion)
+        assertEquals(hostDir.canonicalPath, candidates.single().hostDirectory.canonicalPath)
+        assertEquals(dspDir.canonicalPath, candidates.single().dspDirectory.canonicalPath)
+    }
+
+    @Test
+    fun qnnRuntimeCandidatesKeepEverySameArchProfileAndOnlyRankPreferredArch() {
+        fun runtime(name: String, arch: Int, withStub: Boolean = true): File =
+            Files.createTempDirectory(name).toFile().also { directory ->
+                directory.resolve("libQnnSystem.so").writeText("system-$name")
+                directory.resolve("libQnnHtp.so").writeText("htp-$name")
+                directory.resolve("libQnnHtpV${arch}Skel.so").writeText("skel-$name")
+                if (withStub) {
+                    directory.resolve("libQnnHtpV${arch}Stub.so").writeText("stub-$name")
+                }
+            }
+
+        val futureA = runtime("qnn-runtime-v83-a", 83)
+        val futureB = runtime("qnn-runtime-v83-b", 83)
+        val preferred = runtime("qnn-runtime-v79", 79, withStub = false)
+
+        val candidates = QnnRuntimeProfileSelector.candidates(
+            searchDirectories = listOf(futureA, preferred, futureB),
+            preferredHtpArchVersion = 79
+        )
+
+        assertEquals(listOf(79, 83, 83), candidates.map(QnnRuntimeProfile::htpArchVersion))
+        assertEquals(
+            listOf(preferred, futureA, futureB).map(File::getCanonicalPath),
+            candidates.map { profile -> profile.hostDirectory.canonicalPath }
+        )
+        assertEquals(null, candidates.first().htpStubLibrary)
+        assertEquals(preferred.canonicalPath, QnnRuntimeProfileSelector.select(
+            listOf(futureA, preferred, futureB),
+            preferredHtpArchVersion = 79
+        )?.hostDirectory?.canonicalPath)
+    }
+
+    @Test
+    fun qnnRuntimeSelectShortCircuitsBeforeMaterializingPlatformCrossProduct() {
+        fun host(name: String): File = Files.createTempDirectory(name).toFile().also { directory ->
+            directory.resolve("libQnnSystem.so").writeText("system-$name")
+            directory.resolve("libQnnHtp.so").writeText("htp-$name")
+        }
+        fun dsp(name: String): File = Files.createTempDirectory(name).toFile().also { directory ->
+            directory.resolve("libQnnHtpV83Skel.so").writeText("skel-$name")
+            directory.resolve("libQnnHtpV83Stub.so").writeText("stub-$name")
+        }
+        val hostA = host("qnn-lazy-host-a")
+        val dspA = dsp("qnn-lazy-dsp-a")
+        val hostB = host("qnn-lazy-host-b")
+        val dspB = dsp("qnn-lazy-dsp-b")
+        var classifierCalls = 0
+
+        val selected = QnnRuntimeProfileSelector.select(
+            searchDirectories = listOf(hostA, dspA, hostB, dspB),
+            preferredHtpArchVersion = 83,
+            isPlatformDirectory = {
+                classifierCalls += 1
+                true
+            }
+        )
+
+        assertEquals(hostA.canonicalPath, selected?.hostDirectory?.canonicalPath)
+        assertEquals(dspA.canonicalPath, selected?.dspDirectory?.canonicalPath)
+        assertEquals(2, classifierCalls)
+    }
+
+    @Test
     fun qnnRuntimeInspectorSelectsExactGen2ProfileInsteadOfHighestProfile() {
         val genericDir = Files.createTempDirectory("qnn-runtime-v81").toFile()
         val gen2Dir = Files.createTempDirectory("qnn-runtime-v73").toFile()

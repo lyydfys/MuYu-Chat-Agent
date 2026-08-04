@@ -10,6 +10,41 @@ import org.junit.Test
 
 class LocalImageApiRequestMappingTest {
     @Test
+    fun `API execution sanitizer removes only empty digests for unused image roles`() {
+        val nativeEffective = JSONObject()
+            .put("inputImageExecutionCount", 1)
+            .put("inputImageSha256", "a".repeat(64))
+            .put("maskImageExecutionCount", 0)
+            .put("maskImageSha256", "")
+            .put("controlImageExecutionCount", 0)
+            .put("controlImageSha256", "")
+        val execution = JSONObject(nativeEffective.toString())
+            .put("nativeEffective", nativeEffective)
+
+        val sanitized = sanitizedLocalImageApiExecution(execution.toString())
+
+        val sanitizedNative = sanitized.getJSONObject("nativeEffective")
+        assertEquals("a".repeat(64), sanitizedNative.getString("inputImageSha256"))
+        assertFalse(sanitizedNative.has("maskImageSha256"))
+        assertFalse(sanitizedNative.has("controlImageSha256"))
+    }
+
+    @Test
+    fun `API response output evidence binds every output byte sequence`() {
+        val outputs = listOf(
+            LocalImageOutput(byteArrayOf(1, 2, 3), index = 0),
+            LocalImageOutput(byteArrayOf(4, 5, 6, 7), index = 1)
+        )
+
+        val evidence = localImageApiResponseOutputEvidence(outputs)
+
+        assertEquals(2, evidence.length())
+        assertEquals(3, evidence.getJSONObject(0).getInt("sizeBytes"))
+        assertEquals(4, evidence.getJSONObject(1).getInt("sizeBytes"))
+        assertTrue(evidence.getJSONObject(0).getString("sha256").matches(Regex("[a-f0-9]{64}")))
+    }
+
+    @Test
     fun `API execution sanitizer removes nested locators and preserves physical batch evidence`() {
         val sanitized = sanitizedLocalImageApiExecution(
             JSONObject()
@@ -59,10 +94,6 @@ class LocalImageApiRequestMappingTest {
                     "vae_tiling",
                     JSONObject().put("tile_size", 512).put("overlap", 0.5)
                 )
-                .put(
-                    "preview",
-                    JSONObject().put("interval", 3).put("mode", "vae")
-                )
                 .toString()
         )
 
@@ -78,14 +109,47 @@ class LocalImageApiRequestMappingTest {
         assertEquals(8, dispatch.options.batchCount)
         assertEquals(512, dispatch.options.vaeTiling?.tileSize)
         assertEquals(0.5, dispatch.options.vaeTiling?.overlap ?: -1.0, 0.0)
-        assertEquals(3, dispatch.options.preview?.interval)
-        assertEquals(LocalImagePreviewMode.VAE, dispatch.options.preview?.mode)
+        assertNull(dispatch.options.preview)
         assertEquals(LocalImageTaskMode.INPAINT, dispatch.inputDraft.taskMode)
         assertEquals(input, dispatch.inputDraft.inputImageReference)
         assertEquals(mask, dispatch.inputDraft.maskImageReference)
         assertNull(dispatch.inputDraft.controlImageReference)
         assertEquals(0.72, dispatch.inputDraft.strength ?: -1.0, 0.0)
         assertNull(dispatch.inputDraft.controlStrength)
+    }
+
+    @Test
+    fun `structured UltraFix controls reach the worker in canonical outer fields`() {
+        val request = ImageGenerationApiContract.parseRequest(
+            JSONObject()
+                .put("prompt", "refine the source")
+                .put("task_mode", "img2img")
+                .put("input_image", "data:image/png;base64,AAAA")
+                .put(
+                    "ultrafix",
+                    JSONObject()
+                        .put("target_width", 1024)
+                        .put("target_height", 768)
+                        .put("strength", 0.5)
+                        .put("inversion_steps", 5)
+                        .put("refinement_steps", 10)
+                        .put("tile_size", 512)
+                        .put("overlap", 0.25)
+                )
+                .toString()
+        )
+
+        val dispatch = request.toLocalImageApiDispatch()
+        assertEquals(1024, dispatch.options.width)
+        assertEquals(768, dispatch.options.height)
+        assertEquals(10, dispatch.options.steps)
+        assertEquals(0.5, dispatch.options.strength ?: -1.0, 0.0)
+        assertEquals(512, dispatch.options.vaeTiling?.tileSize)
+        assertEquals(0.25, dispatch.options.vaeTiling?.overlap ?: -1.0, 0.0)
+        assertEquals(1024, dispatch.options.ultraFix?.targetWidth)
+        assertEquals(768, dispatch.options.ultraFix?.targetHeight)
+        assertEquals(LocalImageTaskMode.IMG2IMG, dispatch.inputDraft.taskMode)
+        assertEquals(0.5, dispatch.inputDraft.strength ?: -1.0, 0.0)
     }
 
     @Test

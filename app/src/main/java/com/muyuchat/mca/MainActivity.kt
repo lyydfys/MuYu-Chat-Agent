@@ -54,14 +54,18 @@ import com.muyuchat.feature.chat.FileAssetUiItem
 import com.muyuchat.feature.chat.ImageAssetUiItem
 import com.muyuchat.feature.chat.ImageGenerationUiJob
 import com.muyuchat.feature.chat.ImageGenerationUiLoraSelection
+import com.muyuchat.feature.chat.ImageGenerationUiOptions
 import com.muyuchat.feature.chat.ImageGenerationUiPreset
 import com.muyuchat.feature.chat.ImageGenerationUiTaskMode
 import com.muyuchat.feature.chat.ImageLibraryBackupUiState
 import com.muyuchat.feature.chat.ImageLoraUiItem
+import com.muyuchat.feature.chat.ImageTextualInversionUiItem
 import com.muyuchat.feature.chat.ImageUpscalerUiItem
 import com.muyuchat.feature.chat.ImageUpscaleUiJob
 import com.muyuchat.feature.chat.ChatModelChoice
 import com.muyuchat.feature.chat.ChatUiState
+import com.muyuchat.feature.chat.KnowledgeBaseUiItem
+import com.muyuchat.feature.chat.WorldBookUiItem
 import com.muyuchat.feature.modelhub.ModelHubScreen
 import com.muyuchat.feature.modelhub.CloudApiUiState
 import com.muyuchat.feature.modelhub.CloudModelUiItem
@@ -103,6 +107,7 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     private var pendingChatExportSessionId: String? = null
     private var pendingVisionProjectorModelId: String? = null
+    private var pendingKnowledgeBaseId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -118,6 +123,19 @@ class MainActivity : ComponentActivity() {
         }
         val localImageModelImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) viewModel.importLocalImageModel(uri)
+        }
+        val assistantCardImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) viewModel.importAssistantCardFile(uri.toString())
+        }
+        val worldBookImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) viewModel.importWorldBookFile(uri.toString())
+        }
+        val knowledgeDocumentImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            val knowledgeBaseId = pendingKnowledgeBaseId
+            pendingKnowledgeBaseId = null
+            if (uri != null && knowledgeBaseId != null) {
+                viewModel.importKnowledgeDocument(knowledgeBaseId, uri.toString())
+            }
         }
         val visionProjectorImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             val modelId = pendingVisionProjectorModelId
@@ -158,6 +176,22 @@ class MainActivity : ComponentActivity() {
                             )
                         )
                     },
+                    onImportAssistantCardFile = {
+                        assistantCardImportLauncher.launch(
+                            arrayOf("image/png", "application/json", "text/json", "text/plain", "*/*")
+                        )
+                    },
+                    onImportWorldBookFile = {
+                        worldBookImportLauncher.launch(
+                            arrayOf("application/json", "text/json", "text/plain", "*/*")
+                        )
+                    },
+                    onImportKnowledgeDocument = { knowledgeBaseId ->
+                        pendingKnowledgeBaseId = knowledgeBaseId
+                        knowledgeDocumentImportLauncher.launch(
+                            arrayOf("text/*", "application/json", "application/xml", "*/*")
+                        )
+                    },
                     onAttachVisionProjector = { modelId ->
                         pendingVisionProjectorModelId = modelId
                         visionProjectorImportLauncher.launch(
@@ -186,6 +220,9 @@ private fun McaApp(
     onTab: (AppTab) -> Unit,
     onImport: () -> Unit,
     onImportLocalImageModel: () -> Unit,
+    onImportAssistantCardFile: () -> Unit,
+    onImportWorldBookFile: () -> Unit,
+    onImportKnowledgeDocument: (String) -> Unit,
     onAttachVisionProjector: (String) -> Unit,
     onExportDiagnostics: () -> Unit,
     onExportChatSession: (String) -> Unit,
@@ -205,9 +242,12 @@ private fun McaApp(
     val imageGenerationHistoryById = state.images.associate { image ->
         image.id to ImageGenerationHistoryMetadata.fromJsonOrNull(image.generationMetadataJson)
     }
-    val generationHistoryInputUris = imageGenerationHistoryById.values
+    val generationHistoryInputUris = retainedGenerationImageContentReferences(
+        historyReferences = imageGenerationHistoryById.values
         .filterNotNull()
-        .flatMapTo(mutableSetOf()) { history -> history.requiredContentInputReferences() }
+            .flatMapTo(mutableSetOf()) { history -> history.requiredContentInputReferences() },
+        jobInputDrafts = state.imageJobs.mapNotNull { job -> job.spec?.inputDraft }
+    )
 
     Scaffold { padding ->
         val modifier = Modifier
@@ -298,11 +338,20 @@ private fun McaApp(
                                         supportsImageNegativePrompt = imageCapabilities.supportsNegativePrompt,
                                         supportsImageClipSkip = imageCapabilities.supportsClipSkip,
                                         supportsImageVaeTiling = imageCapabilities.supportsVaeTiling,
+                                        supportsImageTextualInversion = imageCapabilities.supportsTextualInversion,
+                                        supportedImageTextualInversionFormats =
+                                            imageCapabilities.supportedTextualInversionFormats,
+                                        supportsImageUltraFix = imageCapabilities.supportsUltraFix,
                                         supportsImageLora = imageCapabilities.supportsLora,
+                                        supportsImageLivePreview = imageCapabilities.supportsLivePreview,
+                                        imagePreviewMode = imageCapabilities.previewMode,
+                                        imageDefaultPreviewInterval = imageCapabilities.defaultPreviewInterval,
                                         maxImageBatchCount = imageCapabilities.maxBatchCount,
                                         imageDefaultWidth = imageDefaults.width,
                                         imageDefaultHeight = imageDefaults.height,
                                         imageDefaultSteps = imageDefaults.steps,
+                                        imageMinSteps = imageDefaults.minSteps,
+                                        imageMaxSteps = imageDefaults.maxSteps,
                                         imageDefaultCfgScale = imageDefaults.cfgScale,
                                         imageDefaultSeed = imageDefaults.seed,
                                         imageDefaultSampler = imageDefaults.sampler,
@@ -312,7 +361,17 @@ private fun McaApp(
                                         imageMaxHeight = imageDefaults.maxHeight,
                                         imageWidthMultiple = imageDefaults.widthMultiple,
                                         imageHeightMultiple = imageDefaults.heightMultiple,
-                                        imageSupportedSamplers = imageDefaults.supportedSamplers
+                                        imageUltraFixMinWidth = imageDefaults.ultraFixMinWidth,
+                                        imageUltraFixMaxWidth = imageDefaults.ultraFixMaxWidth,
+                                        imageUltraFixMinHeight = imageDefaults.ultraFixMinHeight,
+                                        imageUltraFixMaxHeight = imageDefaults.ultraFixMaxHeight,
+                                        imageUltraFixWidthMultiple = imageDefaults.ultraFixWidthMultiple,
+                                        imageUltraFixHeightMultiple = imageDefaults.ultraFixHeightMultiple,
+                                        imageUltraFixRequiredTileSize =
+                                            imageDefaults.ultraFixRequiredTileSize,
+                                        imageSupportedSamplers = imageDefaults.supportedSamplers,
+                                        imageImg2ImgSupportedSamplers =
+                                            imageDefaults.img2ImgSupportedSamplers
                                     )
                                 }
                         )
@@ -365,7 +424,42 @@ private fun McaApp(
                             webSearchEnabled = assistant.webSearchEnabled,
                             fileContextEnabled = assistant.fileContextEnabled,
                             selected = assistant.id == state.selectedAssistantId,
-                            exportJson = assistant.toJson().toString(2)
+                            exportJson = assistant.characterCardJson ?: assistant.toJson().toString(2)
+                        )
+                    },
+                    worldBooks = state.worldBooks
+                        .filter { book ->
+                            when (book.scope) {
+                                WorldBookScope.GLOBAL -> true
+                                WorldBookScope.ASSISTANT -> book.assistantId == state.selectedAssistantId
+                                WorldBookScope.CHAT -> book.chatSessionId == state.activeChatSessionId
+                            }
+                        }
+                        .map { book ->
+                            WorldBookUiItem(
+                                id = book.id,
+                                name = book.name,
+                                entryCount = book.entries.size,
+                                scopeLabel = when (book.scope) {
+                                    WorldBookScope.GLOBAL -> "全局"
+                                    WorldBookScope.ASSISTANT -> "当前角色"
+                                    WorldBookScope.CHAT -> "当前对话"
+                                }
+                            )
+                        },
+                    knowledgeBases = state.knowledgeBases.map { knowledgeBase ->
+                        KnowledgeBaseUiItem(
+                            id = knowledgeBase.id,
+                            name = knowledgeBase.name,
+                            description = knowledgeBase.description,
+                            selected = knowledgeBase.id in state.selectedKnowledgeBaseIds,
+                            indexStateLabel = when (knowledgeBase.indexState) {
+                                KnowledgeIndexState.LEXICAL_READY -> "本地检索已就绪"
+                                KnowledgeIndexState.EMBEDDING_PENDING -> "等待向量索引"
+                                KnowledgeIndexState.EMBEDDING_READY -> "向量索引已就绪"
+                                KnowledgeIndexState.REINDEX_REQUIRED -> "需要重建索引"
+                                KnowledgeIndexState.FAILED -> "索引失败"
+                            }
                         )
                     },
                     selectedAssistantId = state.selectedAssistantId,
@@ -373,6 +467,7 @@ private fun McaApp(
                     images = state.images.map { image ->
                         val generation = imageGenerationHistoryById[image.id]
                         val sourceGeneration = generation?.takeIf { it.sourceGenerationAvailable }
+                        val executionFacets = sourceGeneration?.executionFacets()
                         ImageAssetUiItem(
                             id = image.id,
                             name = image.name,
@@ -381,6 +476,7 @@ private fun McaApp(
                             prompt = image.prompt,
                             createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
                                 .format(java.util.Date(image.createdAt)),
+                            createdAtMillis = image.createdAt,
                             sizeText = formatAssetBytes(image.sizeBytes),
                             width = image.width,
                             height = image.height,
@@ -391,11 +487,17 @@ private fun McaApp(
                             generationModelId = sourceGeneration?.modelId.orEmpty(),
                             generationModelName = sourceGeneration?.modelName.orEmpty(),
                             generationTaskMode = sourceGeneration?.inputDraft?.taskMode?.wireName.orEmpty(),
+                            generationOperation = sourceGeneration?.operationFacet()?.wireName.orEmpty(),
                             generationSampler = sourceGeneration?.options?.sampleMethod.orEmpty(),
+                            generationRuntime = executionFacets?.runtimeLabel.orEmpty(),
+                            generationDevice = executionFacets?.deviceLabel.orEmpty(),
                             parameterShareJson = sourceGeneration?.toShareJson().orEmpty(),
                             generationPreset = sourceGeneration?.let { metadata ->
                                 ImageGenerationUiPreset(
                                     prompt = metadata.requestPrompt,
+                                    taskMode = ImageGenerationUiTaskMode.entries.firstOrNull { mode ->
+                                        mode.wireName == metadata.inputDraft.taskMode.wireName
+                                    },
                                     negativePrompt = metadata.options.negativePrompt,
                                     width = metadata.options.width,
                                     height = metadata.options.height,
@@ -411,6 +513,20 @@ private fun McaApp(
                                         ImageGenerationUiLoraSelection(
                                             id = selection.id,
                                             multiplier = selection.multiplier
+                                        )
+                                    },
+                                    textualInversionIds = metadata.options.textualInversionIds,
+                                    strength = metadata.inputDraft.strength,
+                                    controlStrength = metadata.inputDraft.controlStrength,
+                                    ultraFix = metadata.options.ultraFix?.let { ultraFix ->
+                                        com.muyuchat.feature.chat.ImageGenerationUiUltraFixOptions(
+                                            targetWidth = ultraFix.targetWidth,
+                                            targetHeight = ultraFix.targetHeight,
+                                            strength = ultraFix.strength,
+                                            inversionSteps = ultraFix.inversionSteps,
+                                            refinementSteps = ultraFix.refinementSteps,
+                                            tileSize = ultraFix.tileSize,
+                                            overlap = ultraFix.overlap
                                         )
                                     }
                                 )
@@ -438,6 +554,21 @@ private fun McaApp(
                     },
                     imageLoraImporting = state.localImageLoraImporting,
                     imageLoraMessage = state.localImageLoraMessage,
+                    imageTextualInversions = state.localImageTextualInversions.map { artifact ->
+                        ImageTextualInversionUiItem(
+                            id = artifact.id,
+                            name = artifact.name,
+                            trigger = artifact.trigger,
+                            format = artifact.format.wireName,
+                            sizeText = formatAssetBytes(artifact.sizeBytes),
+                            sha256 = artifact.sha256,
+                            inUse = artifact.id in state.activeLocalImageTextualInversionIds ||
+                                artifact.id in state.deletingLocalImageTextualInversionIds
+                        )
+                    },
+                    imageTextualInversionImporting = state.localImageTextualInversionLoading ||
+                        state.localImageTextualInversionImporting,
+                    imageTextualInversionMessage = state.localImageTextualInversionMessage,
                     imageUpscalers = state.localImageUpscalers.map { upscaler ->
                         ImageUpscalerUiItem(
                             id = upscaler.id,
@@ -585,6 +716,8 @@ private fun McaApp(
                 onCancelImageLibraryBackup = viewModel::cancelImageLibraryBackup,
                 onImportImageLora = viewModel::importLocalImageLora,
                 onDeleteImageLora = viewModel::deleteLocalImageLora,
+                onImportImageTextualInversion = viewModel::importLocalImageTextualInversion,
+                onDeleteImageTextualInversion = viewModel::deleteLocalImageTextualInversion,
                 onImportImageUpscaler = viewModel::importLocalImageUpscaler,
                 onDeleteImageUpscaler = viewModel::deleteLocalImageUpscaler,
                 onSelectImageUpscaler = viewModel::selectLocalImageUpscaler,
@@ -600,7 +733,7 @@ private fun McaApp(
                     }
                     if (loras.size != uiOptions.loras.size) {
                         viewModel.reportMissingLocalImageLoraSelection()
-                        return@generateImage
+                        return@generateImage false
                     }
                     viewModel.generateImageAsset(
                         prompt = prompt,
@@ -628,10 +761,24 @@ private fun McaApp(
                                     tileSize = tileSize,
                                     overlap = uiOptions.vaeTileOverlap ?: 0.5
                                 )
-                            }
+                            },
+                            textualInversionIds = uiOptions.textualInversionIds,
+                            ultraFix = uiOptions.ultraFix?.let { request ->
+                                LocalImageUltraFixOptions(
+                                    targetWidth = request.targetWidth,
+                                    targetHeight = request.targetHeight,
+                                    strength = request.strength,
+                                    inversionSteps = request.inversionSteps,
+                                    refinementSteps = request.refinementSteps,
+                                    tileSize = request.tileSize,
+                                    overlap = request.overlap,
+                                )
+                            },
+                            preview = uiOptions.toLocalImagePreviewOptions()
                         )
                     )
                 },
+                onMeasureImagePromptTokens = viewModel::measureImagePromptTokens,
                 onRetryImageGeneration = viewModel::retryImageGeneration,
                 onRecreateImageAsset = viewModel::recreateImageAsset,
                 onCancelImageGeneration = viewModel::cancelImageGeneration,
@@ -675,6 +822,13 @@ private fun McaApp(
                 onSelectAssistant = viewModel::selectAssistant,
                 onDeleteAssistant = viewModel::deleteAssistant,
                 onImportAssistantCard = viewModel::importAssistantCard,
+                onImportAssistantCardFile = onImportAssistantCardFile,
+                onImportWorldBookFile = onImportWorldBookFile,
+                onDeleteWorldBook = viewModel::deleteWorldBook,
+                onCreateKnowledgeBase = { name -> viewModel.createKnowledgeBase(name) },
+                onImportKnowledgeDocument = onImportKnowledgeDocument,
+                onSetKnowledgeBaseSelected = viewModel::setKnowledgeBaseSelected,
+                onDeleteKnowledgeBase = viewModel::deleteKnowledgeBase,
                 appMenuOpen = appMenuOpen,
                 onAppMenuOpenChange = { appMenuOpen = it },
                 modifier = Modifier.fillMaxSize()
@@ -1271,6 +1425,17 @@ private fun MainUiState.toWebSearchTurnModeLabel(): String {
             else -> "手动"
         }
     }
+}
+
+internal fun ImageGenerationUiOptions.toLocalImagePreviewOptions(): LocalImagePreviewOptions? {
+    val interval = previewInterval ?: return null
+    val uiMode = requireNotNull(previewMode) {
+        "Image live preview requires an explicit mode when an interval is requested."
+    }
+    return LocalImagePreviewOptions(
+        interval = interval,
+        mode = LocalImagePreviewMode.fromWireName(uiMode.wireName)
+    )
 }
 
 private fun DeviceProfile.deviceAccelerationSummary(): String {

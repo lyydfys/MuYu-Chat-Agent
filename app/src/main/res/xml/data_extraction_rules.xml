@@ -11,6 +11,7 @@
         <exclude domain="database" path="mca.db-journal" />
         <exclude domain="file" path="image_assets" />
         <exclude domain="file" path="image_execution_journal" />
+        <exclude domain="file" path="image_generation_inputs" />
         <exclude domain="file" path="image_loras" />
         <exclude domain="file" path="image_upscalers" />
         <exclude domain="file" path="image_models" />
@@ -38,6 +39,7 @@
         <exclude domain="database" path="mca.db-journal" />
         <exclude domain="file" path="image_assets" />
         <exclude domain="file" path="image_execution_journal" />
+        <exclude domain="file" path="image_generation_inputs" />
         <exclude domain="file" path="image_loras" />
         <exclude domain="file" path="image_upscalers" />
         <exclude domain="file" path="image_models" />

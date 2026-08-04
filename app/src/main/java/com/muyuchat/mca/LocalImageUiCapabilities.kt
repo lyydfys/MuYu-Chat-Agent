@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import com.muyuchat.feature.chat.ImageGenerationUiPreviewMode
 import com.muyuchat.feature.chat.ImageGenerationUiTaskMode
 import java.io.File
 import org.json.JSONArray
@@ -9,6 +10,8 @@ internal data class LocalImageUiExecutionDefaults(
     val width: Int,
     val height: Int,
     val steps: Int,
+    val minSteps: Int,
+    val maxSteps: Int,
     val cfgScale: Double,
     val seed: Int,
     val sampler: String,
@@ -18,7 +21,15 @@ internal data class LocalImageUiExecutionDefaults(
     val maxHeight: Int,
     val widthMultiple: Int,
     val heightMultiple: Int,
-    val supportedSamplers: List<String>
+    val ultraFixMinWidth: Int,
+    val ultraFixMaxWidth: Int,
+    val ultraFixMinHeight: Int,
+    val ultraFixMaxHeight: Int,
+    val ultraFixWidthMultiple: Int,
+    val ultraFixHeightMultiple: Int,
+    val ultraFixRequiredTileSize: Int,
+    val supportedSamplers: List<String>,
+    val img2ImgSupportedSamplers: List<String>
 ) {
     val supportsCustomSize: Boolean
         get() = minWidth != maxWidth || minHeight != maxHeight
@@ -35,8 +46,14 @@ internal data class LocalImageUiCapabilitiesSnapshot(
     val supportsNegativePrompt: Boolean,
     val supportsClipSkip: Boolean,
     val supportsVaeTiling: Boolean,
+    val supportsTextualInversion: Boolean,
+    val supportedTextualInversionFormats: Set<String>,
+    val supportsUltraFix: Boolean,
     val supportsLivePreview: Boolean,
+    val previewMode: ImageGenerationUiPreviewMode?,
+    val defaultPreviewInterval: Int,
     val supportsLora: Boolean,
+    val nativeMaxBatchCount: Int,
     val maxBatchCount: Int,
     val executionDefaults: LocalImageUiExecutionDefaults,
     val readinessError: String?
@@ -46,6 +63,54 @@ private data class LocalImageUiProfileOutcome(
     val resolution: ImageExecutionProfileResolution?,
     val readinessError: String?
 )
+
+internal fun productImageBatchCountForUi(
+    runtime: LocalImageRuntime,
+    nativeMaxBatchCount: Int
+): Int {
+    val normalizedNativeMaximum = nativeMaxBatchCount.coerceIn(
+        1,
+        ImageGenerationBatchLineage.MAX_BATCH_COUNT
+    )
+    return when (runtime) {
+        LocalImageRuntime.QNN_HTP,
+        LocalImageRuntime.MNN_DIFFUSION -> ImageGenerationBatchLineage.MAX_BATCH_COUNT
+        else -> normalizedNativeMaximum
+    }
+}
+
+internal data class LocalImageUiPreviewTopology(
+    val previewMode: ImageGenerationUiPreviewMode?,
+    val defaultPreviewInterval: Int
+) {
+    val supportsLivePreview: Boolean
+        get() = previewMode != null
+}
+
+/**
+ * Preview availability follows executable graph topology only. Device identity and package IDs
+ * must never participate in this decision: an unknown compatible device reaches the same native
+ * load and graph execution path as every other device.
+ */
+internal fun localImagePreviewTopologyForUi(
+    runtime: LocalImageRuntime,
+    task: ImageTask?,
+    hasSharedQnnVaePreviewTopology: Boolean
+): LocalImageUiPreviewTopology = when {
+    runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP -> LocalImageUiPreviewTopology(
+        previewMode = ImageGenerationUiPreviewMode.PROJECTION,
+        defaultPreviewInterval = 1
+    )
+    runtime == LocalImageRuntime.QNN_HTP && hasSharedQnnVaePreviewTopology ->
+        LocalImageUiPreviewTopology(
+            previewMode = ImageGenerationUiPreviewMode.VAE,
+            defaultPreviewInterval = if (task == ImageTask.CONTROL_IMAGE) 5 else 4
+        )
+    else -> LocalImageUiPreviewTopology(
+        previewMode = null,
+        defaultPreviewInterval = 0
+    )
+}
 
 internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabilitiesSnapshot {
     val outcome = resolveExecutionProfileOutcomeForUi()
@@ -81,12 +146,40 @@ internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabil
         ))
     val supportsVaeTiling = resolvedCapabilities?.supportsVaeTiling
         ?: legacyStableDiffusionCpp
-    val supportsLivePreview = resolvedCapabilities?.supportsLivePreview
-        ?: legacyStableDiffusionCpp
+    val supportsTextualInversion = resolvedCapabilities?.supportsTextualInversion
+        ?: (legacyStableDiffusionCpp && family in setOf(
+            LocalImageModelFamily.SD15,
+            LocalImageModelFamily.SD21,
+            LocalImageModelFamily.SDXL
+        ))
+    val effectiveRuntime = resolution?.profile?.runtime ?: runtime
+    val supportedTextualInversionFormats = when {
+        !supportsTextualInversion -> emptySet()
+        effectiveRuntime == LocalImageRuntime.QNN_HTP ||
+            effectiveRuntime == LocalImageRuntime.MNN_DIFFUSION -> setOf("safetensors")
+        else -> setOf("safetensors", "pytorch", "checkpoint", "binary")
+    }
+    val supportsUltraFix = resolvedCapabilities?.supportsUltraFix
+        ?: (legacyStableDiffusionCpp && supportsVaeTiling && family in setOf(
+            LocalImageModelFamily.SD15,
+            LocalImageModelFamily.SD21,
+            LocalImageModelFamily.SDXL
+        ))
+    val previewTopology = localImagePreviewTopologyForUi(
+        runtime = resolution?.layers?.resolved?.runtime ?: runtime,
+        task = resolution?.profile?.task,
+        hasSharedQnnVaePreviewTopology = resolution
+            ?.profile
+            ?.hasSharedQnnVaePreviewTopology() == true,
+    )
     val supportsLora = resolvedCapabilities?.supportsLora
         ?: legacyStableDiffusionCpp
-    val maxBatchCount = resolvedCapabilities?.maxBatchCount
+    val nativeMaxBatchCount = resolvedCapabilities?.maxBatchCount
         ?: if (legacyStableDiffusionCpp) 8 else 1
+    val normalizedNativeMaxBatchCount = nativeMaxBatchCount.coerceIn(
+        1,
+        ImageGenerationBatchLineage.MAX_BATCH_COUNT
+    )
     val executionDefaults = resolution
         ?.let(::executionDefaultsFromResolutionForUi)
         ?: legacyExecutionDefaultsForUi()
@@ -95,9 +188,18 @@ internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabil
         supportsNegativePrompt = supportsNegativePrompt,
         supportsClipSkip = supportsClipSkip,
         supportsVaeTiling = supportsVaeTiling,
-        supportsLivePreview = supportsLivePreview,
+        supportsTextualInversion = supportsTextualInversion,
+        supportedTextualInversionFormats = supportedTextualInversionFormats,
+        supportsUltraFix = supportsUltraFix,
+        supportsLivePreview = previewTopology.supportsLivePreview,
+        previewMode = previewTopology.previewMode,
+        defaultPreviewInterval = previewTopology.defaultPreviewInterval,
         supportsLora = supportsLora,
-        maxBatchCount = maxBatchCount.coerceIn(1, 8),
+        nativeMaxBatchCount = normalizedNativeMaxBatchCount,
+        // QNN and MNN remain physically single-output. The app coordinator exposes a truthful
+        // product batch by issuing those native requests sequentially. Native-batch runtimes keep
+        // their declared physical limit so the UI cannot offer a request the real profile rejects.
+        maxBatchCount = productImageBatchCountForUi(runtime, normalizedNativeMaxBatchCount),
         executionDefaults = executionDefaults,
         readinessError = outcome.readinessError
     )
@@ -110,6 +212,14 @@ internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabil
 internal fun LocalImageModelRecord.supportedImageTaskModesForUi(): Set<ImageGenerationUiTaskMode> {
     return imageCapabilitiesForUi().supportedTaskModes
 }
+
+internal fun ImageExecutionProfile.exposesQnnImg2ImgForUi(): Boolean =
+    hasExecutableQnnImg2ImgTopology() &&
+        supportedSchedulersForProductTask(LocalImageTaskMode.IMG2IMG).isNotEmpty()
+
+internal fun ImageExecutionProfile.exposesQnnInpaintForUi(): Boolean =
+    hasExecutableQnnInpaintTopology() &&
+        supportedQnnInpaintSchedulers().isNotEmpty()
 
 private fun LocalImageModelRecord.taskModesFromResolvedProfileForUi(
     profile: ImageExecutionProfile
@@ -125,6 +235,16 @@ private fun LocalImageModelRecord.taskModesFromResolvedProfileForUi(
             // their declared VAE component at native load time. Keep these runtime capabilities open
             // and let a concrete missing/unsupported native component fail with its real error.
             add(ImageGenerationUiTaskMode.IMG2IMG)
+            add(ImageGenerationUiTaskMode.INPAINT)
+        }
+        if (profile.exposesQnnImg2ImgForUi()) {
+            // Availability follows the executable graph topology only. Device/profile discovery
+            // remains advisory; the real encoder graph load and execute decide compatibility.
+            add(ImageGenerationUiTaskMode.IMG2IMG)
+        }
+        if (profile.exposesQnnInpaintForUi()) {
+            // A regular four-channel shared QNN UNet follows the same per-step latent-blend
+            // contract as Local Dream. Native still inspects the loaded graph before execution.
             add(ImageGenerationUiTaskMode.INPAINT)
         }
         if (hasConcreteControlComponentForUi(profile)) {
@@ -218,10 +338,16 @@ private fun executionDefaultsFromResolutionForUi(
         .map(::imageSchedulerProductName)
         .distinct()
         .ifEmpty { listOf(sampler) }
+    val img2ImgSupported = resolution.profile
+        .orderedSchedulersForProductTask(LocalImageTaskMode.IMG2IMG)
+        .map(::imageSchedulerProductName)
+        .distinct()
     return LocalImageUiExecutionDefaults(
         width = resolved.width,
         height = resolved.height,
         steps = resolved.steps,
+        minSteps = resolution.profile.scheduler.minSteps,
+        maxSteps = resolution.profile.scheduler.maxSteps,
         cfgScale = resolved.cfgScale,
         seed = resolved.seed.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt(),
         sampler = sampler,
@@ -231,7 +357,15 @@ private fun executionDefaultsFromResolutionForUi(
         maxHeight = capabilities.maxHeight,
         widthMultiple = capabilities.widthMultiple,
         heightMultiple = capabilities.heightMultiple,
-        supportedSamplers = supported
+        ultraFixMinWidth = capabilities.ultraFixMinWidth,
+        ultraFixMaxWidth = capabilities.ultraFixMaxWidth,
+        ultraFixMinHeight = capabilities.ultraFixMinHeight,
+        ultraFixMaxHeight = capabilities.ultraFixMaxHeight,
+        ultraFixWidthMultiple = capabilities.ultraFixWidthMultiple,
+        ultraFixHeightMultiple = capabilities.ultraFixHeightMultiple,
+        ultraFixRequiredTileSize = capabilities.ultraFixRequiredTileSize,
+        supportedSamplers = supported,
+        img2ImgSupportedSamplers = img2ImgSupported
     )
 }
 
@@ -258,6 +392,8 @@ private fun LocalImageModelRecord.legacyExecutionDefaultsForUi(): LocalImageUiEx
         LocalImageModelFamily.SANA -> 10
         else -> 20
     }
+    val minSteps = scheduler?.optPositiveInt("minSteps") ?: 1
+    val maxSteps = (scheduler?.optPositiveInt("maxSteps") ?: 1_000).coerceAtLeast(minSteps)
     val cfgScale = defaults?.optFiniteDouble("cfgScale") ?: when (family) {
         LocalImageModelFamily.SD_TURBO,
         LocalImageModelFamily.Z_IMAGE,
@@ -291,10 +427,27 @@ private fun LocalImageModelRecord.legacyExecutionDefaultsForUi(): LocalImageUiEx
     val maxHeight = capabilities?.optPositiveInt("maxHeight") ?: if (stableCpp) 1_536 else height
     val widthMultiple = capabilities?.optPositiveInt("widthMultiple") ?: if (stableCpp) 64 else 8
     val heightMultiple = capabilities?.optPositiveInt("heightMultiple") ?: if (stableCpp) 64 else 8
+    val supportsUltraFix = capabilities?.optBoolean("supportsUltraFix", false) == true
+    val ultraFixMultiple = if (family == LocalImageModelFamily.SDXL) 32 else 64
+    val ultraFixMinWidth = capabilities?.optPositiveInt("ultraFixMinWidth")
+        ?: if (stableCpp && supportsUltraFix) 128 else 0
+    val ultraFixMaxWidth = capabilities?.optPositiveInt("ultraFixMaxWidth")
+        ?: if (stableCpp && supportsUltraFix) 8_192 else 0
+    val ultraFixMinHeight = capabilities?.optPositiveInt("ultraFixMinHeight")
+        ?: if (stableCpp && supportsUltraFix) 128 else 0
+    val ultraFixMaxHeight = capabilities?.optPositiveInt("ultraFixMaxHeight")
+        ?: if (stableCpp && supportsUltraFix) 8_192 else 0
+    val ultraFixWidthMultiple = capabilities?.optPositiveInt("ultraFixWidthMultiple")
+        ?: if (stableCpp && supportsUltraFix) ultraFixMultiple else 0
+    val ultraFixHeightMultiple = capabilities?.optPositiveInt("ultraFixHeightMultiple")
+        ?: if (stableCpp && supportsUltraFix) ultraFixMultiple else 0
+    val ultraFixRequiredTileSize = capabilities?.optPositiveInt("ultraFixRequiredTileSize") ?: 0
     return LocalImageUiExecutionDefaults(
         width = width,
         height = height,
-        steps = steps,
+        steps = steps.coerceIn(minSteps, maxSteps),
+        minSteps = minSteps,
+        maxSteps = maxSteps,
         cfgScale = cfgScale,
         seed = seed,
         sampler = sampler,
@@ -304,7 +457,15 @@ private fun LocalImageModelRecord.legacyExecutionDefaultsForUi(): LocalImageUiEx
         maxHeight = maxHeight,
         widthMultiple = widthMultiple,
         heightMultiple = heightMultiple,
-        supportedSamplers = supported
+        ultraFixMinWidth = ultraFixMinWidth,
+        ultraFixMaxWidth = ultraFixMaxWidth,
+        ultraFixMinHeight = ultraFixMinHeight,
+        ultraFixMaxHeight = ultraFixMaxHeight,
+        ultraFixWidthMultiple = ultraFixWidthMultiple,
+        ultraFixHeightMultiple = ultraFixHeightMultiple,
+        ultraFixRequiredTileSize = ultraFixRequiredTileSize,
+        supportedSamplers = supported,
+        img2ImgSupportedSamplers = supported
     )
 }
 
@@ -319,7 +480,7 @@ private fun LocalImageModelRecord.resolveExecutionProfileOutcomeForUi(): LocalIm
             ),
             readinessError = null
         )
-    } catch (error: Throwable) {
+    } catch (error: Exception) {
         if (!root.hasDeclaredImageExecutionContractForUi()) {
             LocalImageUiProfileOutcome(resolution = null, readinessError = null)
         } else {
@@ -335,8 +496,11 @@ private fun File?.hasDeclaredImageExecutionContractForUi(): Boolean {
     val root = this?.takeIf(File::isDirectory) ?: return false
     val manifest = findInstalledImageManifestForUi(root)
     if (manifest != null) {
-        val json = runCatching { JSONObject(manifest.readText(Charsets.UTF_8)) }
-            .getOrElse { return true }
+        val json = try {
+            JSONObject(manifest.readText(Charsets.UTF_8))
+        } catch (_: Exception) {
+            return true
+        }
         if (json.has("executionProfile")) return true
         if (IMAGE_EXECUTION_BEHAVIOR_CONTAINER_FIELDS.any { field -> json.has(field) }) return true
         if (IMAGE_EXECUTION_BEHAVIOR_FIELDS.any { field -> json.has(field) }) return true

@@ -19,7 +19,8 @@ class LocalImageProductClosureTest {
 
         assertTrue(ui.contains("val jobId = \"ui-img-\${UUID.randomUUID()}\""))
         assertTrue(ui.contains("tryAcquireObservedImageGenerationLease(jobId)"))
-        assertTrue(ui.contains("requestId = jobId"))
+        assertTrue(ui.contains("parentRequestId = jobId"))
+        assertTrue(ui.contains("requestId = child.requestId"))
         assertTrue(localAsset.contains("requestId = requestId"))
         assertFalse(localAsset.contains("requestId = \"ui-img-"))
         assertTrue(api.contains("tryAcquireObservedImageGenerationLease(requestId)"))
@@ -40,7 +41,8 @@ class LocalImageProductClosureTest {
         assertTrue(ui.contains("model = model"))
         assertTrue(ui.contains("val model = requireNotNull(requestedLocalModel)"))
         assertTrue(source.contains("rejectImageModelSwitchWhileGenerationIsActive()"))
-        assertTrue(explicitModelBranch.contains("it.id == requestedModel"))
+        assertTrue(explicitModelBranch.contains("resolveLocalImageApiModel("))
+        assertTrue(explicitModelBranch.contains("requestedModelId = requestedModel"))
         assertTrue(explicitModelBranch.contains("code = \"image_model_not_found\""))
         assertFalse(explicitModelBranch.contains("selectedLocalImageModel()"))
         assertTrue(api.contains("supportsAuthenticatedLocalImageCount(model.runtime, request.imageCount)"))
@@ -121,9 +123,11 @@ class LocalImageProductClosureTest {
         val mnn = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
         val provider = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
         val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt")
+        val phaseProtocol = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlImagePhaseProtocol.kt")
         val normalizedSource = source.replace("\r\n", "\n")
         val normalizedIsolatedSdxl = isolatedSdxl.replace("\r\n", "\n")
         val resolver = functionBody(source, "bool resolve_qnn_conditioning_evidence(")
+        val runtimeSelector = functionBody(source, "bool select_qnn_runtime_profile_for_context(")
 
         assertTrue(source.contains("qnn_consumed_payload_sha256("))
         assertTrue(source.contains("consumed_conditioning_artifact_sha256"))
@@ -144,6 +148,10 @@ class LocalImageProductClosureTest {
         assertTrue(mnn.contains("external_mnn_sdxl_embeddings"))
         assertTrue(mnn.contains("clip.mnn+clip_2.mnn"))
         assertTrue(provider.contains("sdxlQnnConditioningGraphSha256(conditioningRoot)"))
+        assertTrue(provider.contains("put(\"vaeEncoderContextSha256\", encoderContext.sha256Contents())"))
+        assertTrue(source.contains("context_binary_sha256 = mca::qnn::controlnet::sha256_hex_bytes("))
+        assertTrue(isolatedSdxl.contains("expected_encoder_context_sha256"))
+        assertTrue(isolatedSdxl.contains("encoderContextSha256"))
         assertTrue(resolver.contains("format == \"sdxl_qnn_conditioning\""))
         assertTrue(source.contains("qnn_sdxl_conditioning_graph_sha256("))
         assertTrue(source.contains("clip_2.mnn.weight"))
@@ -160,11 +168,22 @@ class LocalImageProductClosureTest {
                 "\\\"runtimeSessionMode\\\":\\\"isolated_unet_phase\\\""
             )
         )
+        assertTrue(phaseProtocol.contains("SDXL_ISOLATED_UNET_VAE_MODE = \"isolated_unet_then_vae\""))
         assertTrue(
-            coordinator.contains(
-                ".put(\"runtimeSessionMode\", \"isolated_unet_then_vae_same_transport\")"
+            phaseProtocol.contains(
+                "SDXL_ISOLATED_ENCODER_UNET_VAE_MODE = \"isolated_encoder_then_unet_then_vae\""
             )
         )
+        assertTrue(coordinator.contains("SDXL_ISOLATED_UNET_VAE_MODE"))
+        assertTrue(coordinator.contains("SDXL_ISOLATED_ENCODER_UNET_VAE_MODE"))
+        assertFalse(coordinator.contains("same_transport"))
+        assertTrue(runtimeSelector.contains("int preferred_htp_arch"))
+        assertTrue(
+            runtimeSelector.indexOf("append_arch(preferred_htp_arch)") <
+                runtimeSelector.indexOf("append_arch(device_htp_arch)")
+        )
+        assertTrue(isolatedSdxl.contains("expected_profile"))
+        assertEquals(3, Regex("expected_profile\\)\\)").findAll(isolatedSdxl).count())
     }
 
     @Test
@@ -263,9 +282,46 @@ class LocalImageProductClosureTest {
         )
         assertTrue(activity.contains("generationDetails = generation?.displayDetails().orEmpty()"))
         assertTrue(activity.contains("generationHistoryInputUris = generationHistoryInputUris"))
+        assertTrue(activity.contains("retainedGenerationImageContentReferences("))
+        assertTrue(activity.contains("state.imageJobs.mapNotNull { job -> job.spec?.inputDraft }"))
         assertTrue(chat.contains("libraryHistoryReferencedUris"))
         assertTrue(chat.contains("onRetryImageGeneration(job.id)"))
         assertTrue(chat.contains("按原参数再生成"))
+    }
+
+    @Test
+    fun `image editor snapshots one external stream per operation and bounds every private PNG`() {
+        val adapter = sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationBitmapEditing.kt"
+        )
+        val editor = sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationEditor.kt"
+        )
+        val dimensionProbe = functionBody(adapter, "fun probeDimensionsBounded(")
+        val decoder = functionBody(adapter, "fun decodeBounded(")
+        val cropEditor = functionBody(editor, "private fun CropEditor(")
+        val maskOverlay = functionBody(editor, "private fun MaskStrokeOverlay(")
+
+        assertEquals(1, Regex("contentResolver\\.openInputStream\\(uri\\)").findAll(dimensionProbe).count())
+        assertEquals(1, Regex("contentResolver\\.openInputStream\\(uri\\)").findAll(decoder).count())
+        assertFalse(adapter.contains("openAssetFileDescriptor("))
+        assertFalse(adapter.contains("openFileDescriptor("))
+        assertTrue(adapter.contains("copyGenerationImageSnapshot("))
+        assertTrue(adapter.contains("BitmapFactory.decodeFile(snapshot.absolutePath"))
+        assertTrue(adapter.contains("ExifInterface(snapshot.absolutePath)"))
+        assertTrue(adapter.contains("temporaryFile.length()"))
+        assertTrue(adapter.contains("catch (_: AtomicMoveNotSupportedException)"))
+        assertTrue(adapter.contains("StandardCopyOption.REPLACE_EXISTING"))
+        assertTrue(editor.contains("checkCancelled = { decodingContext.ensureActive() }"))
+        assertTrue(cropEditor.contains("clampToImage = false"))
+        assertTrue(maskOverlay.contains("state.baseGrayscaleValue == ImageMaskStrokeMode.BRUSH.grayscaleValue"))
+        assertTrue(maskOverlay.contains("clipRect("))
+        assertTrue(maskOverlay.contains("topLeft = Offset(imageBounds.left.toFloat(), imageBounds.top.toFloat())"))
+        assertTrue(editor.contains("private fun PositionedMaskDrawingDialog("))
+        assertTrue(editor.contains("Text(\"在当前位置应用\")"))
+        assertTrue(editor.contains("maskState.applyPointAtCursor("))
+        assertFalse(adapter.contains("catch (error: Throwable)"))
+        assertFalse(editor.contains("catch (saveError: Throwable)"))
     }
 
     @Test
@@ -292,11 +348,13 @@ class LocalImageProductClosureTest {
     @Test
     fun `native preview progress reaches the existing generation canvas while synchronous API rejects it`() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val mainActivity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
         val protocol = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageWorkerProtocol.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
         val api = functionBody(viewModel, "private suspend fun generateLocalApiImage(")
 
-        assertTrue(viewModel.contains("mode = LocalImagePreviewMode.PROJECTION"))
+        assertTrue(mainActivity.contains("preview = uiOptions.toLocalImagePreviewOptions()"))
+        assertTrue(mainActivity.contains("LocalImagePreviewMode.fromWireName(uiMode.wireName)"))
         assertTrue(viewModel.contains("publishLocalImagePreview(jobId, progress)"))
         assertTrue(protocol.contains(".put(\"previewPath\", progress.previewPath)"))
         assertTrue(protocol.contains("previewRevision = progress.optLong(\"previewRevision\")"))
@@ -340,7 +398,12 @@ class LocalImageProductClosureTest {
         assertTrue(client.contains("closedDuringBind"))
         assertTrue(client.contains("context.unbindService(connection)"))
         assertTrue(client.contains("serviceReady.completeExceptionally(failure)"))
-        assertTrue(client.contains("result.completeExceptionally(failure)"))
+        assertTrue(client.contains("TerminalOutcome.Failure -> result.completeExceptionally(outcome.error)"))
+        assertTrue(client.contains("private suspend fun cancelAndAwaitExit(): Boolean"))
+        assertTrue(client.contains("isolated worker exit was confirmed"))
+        assertTrue(client.contains("worker_exit_unconfirmed"))
+        assertTrue(client.contains("The exact Binder death was not confirmed"))
+        assertFalse(client.contains("isolated worker was terminated"))
     }
 
     private fun sourceFile(relativePath: String): String {

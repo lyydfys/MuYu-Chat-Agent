@@ -5,8 +5,10 @@ import com.muyuchat.core.engine.GenerateEvent
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LocalChatExecutionContext
 import com.muyuchat.core.engine.RuntimeStats
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,6 +16,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.MessageDigest
+import java.util.Base64
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
@@ -68,6 +74,53 @@ class McaLoopbackServerTest {
         }
     }
 
+    @Test
+    fun textualInversionInventoryRequiresAuthenticationAndPublishesOnlySelectionFields() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageTextualInversionsJsonProvider = {
+                org.json.JSONArray()
+                    .put(
+                        JSONObject()
+                            .put("id", "11111111-1111-4111-8111-111111111111")
+                            .put("name", "Ceramic style")
+                            .put("trigger", "<ceramic_style>")
+                            .put("format", "safetensors")
+                            .put("sha256", "a".repeat(64))
+                            .put("sizeBytes", 4_096L)
+                            .put("importedAt", 12_345L)
+                            .put("path", "D:\\private\\embedding.safetensors")
+                            .put("modelFingerprint", "b".repeat(64))
+                            .put("tokenizerFingerprint", "c".repeat(64))
+                    )
+                    .put(JSONObject().put("id", "not-a-uuid").put("path", "D:\\private\\bad.bin"))
+                    .toString()
+            }
+
+            val unauthorized = rawHttp(
+                port,
+                "GET /v1/images/textual-inversions HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            )
+            assertTrue(unauthorized.startsWith("HTTP/1.1 401 Unauthorized"))
+
+            val response = rawHttp(port, authenticatedGet("/v1/images/textual-inversions"))
+            val data = responseJson(response).getJSONArray("data")
+            val item = data.getJSONObject(0)
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(1, data.length())
+            assertEquals("textual_inversion", item.getString("object"))
+            assertEquals("11111111-1111-4111-8111-111111111111", item.getString("id"))
+            assertEquals("<ceramic_style>", item.getString("trigger"))
+            assertEquals(4_096L, item.getLong("size_bytes"))
+            assertEquals(12L, item.getLong("created"))
+            assertFalse(response.contains("D:\\private"))
+            assertFalse(response.contains("modelFingerprint"))
+            assertFalse(response.contains("tokenizerFingerprint"))
+            assertFalse(response.contains("b".repeat(64)))
+            assertFalse(response.contains("c".repeat(64)))
+        }
+    }
+
 
     @Test
     fun authenticatedImagesApiUsesProductionProviderAndKeepsRequestIdentity() {
@@ -80,7 +133,12 @@ class McaLoopbackServerTest {
                 capturedBody.set(requestBody)
                 JSONObject()
                     .put("request_id", requestId)
-                    .put("execution", strictImageExecution(runtime = "STABLE_DIFFUSION_CPP"))
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put(
+                        "execution",
+                        strictImageExecution(runtime = "STABLE_DIFFUSION_CPP")
+                            .bindPromptExecution(requestBody)
+                    )
                     .put("data", imageData())
                     .toString()
             }
@@ -95,6 +153,236 @@ class McaLoopbackServerTest {
             assertTrue(capturedRequestId.get().startsWith("img-"))
             assertEquals(capturedRequestId.get(), responseBody.getString("request_id"))
             assertEquals(body, capturedBody.get())
+        }
+    }
+
+    @Test
+    fun authenticatedStopCancelsTheActiveImagesRequestCoroutine() {
+        val started = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        val stopCalls = AtomicInteger(0)
+        val imageCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                if (imageCalls.incrementAndGet() == 1) {
+                    started.countDown()
+                    try {
+                        awaitCancellation()
+                    } finally {
+                        cancelled.countDown()
+                    }
+                }
+                JSONObject()
+                    .put("request_id", requestId)
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put(
+                        "execution",
+                        strictImageExecution(runtime = "STABLE_DIFFUSION_CPP")
+                            .bindPromptExecution(requestBody)
+                    )
+                    .put("data", imageData())
+                    .toString()
+            }
+            LocalApiRuntime.stopGenerationProvider = { stopCalls.incrementAndGet() }
+            val requestThread = Thread {
+                runCatching {
+                    rawHttp(
+                        port,
+                        authenticatedPost(
+                            "/v1/images/generations",
+                            body = """{"prompt":"cancel this image"}"""
+                        )
+                    )
+                }
+            }
+            requestThread.start()
+
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            val stopResponse = rawHttp(port, authenticatedPost("/v1/generate/stop"))
+
+            assertTrue(stopResponse.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(stopResponse.contains("\"stopped\":true"))
+            assertEquals(1, stopCalls.get())
+            assertTrue(cancelled.await(5, TimeUnit.SECONDS))
+            requestThread.join(5_000L)
+            assertFalse(requestThread.isAlive)
+            val nextResponse = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"next image"}"""
+                )
+            )
+            assertTrue(nextResponse.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(2, imageCalls.get())
+        }
+    }
+
+    @Test
+    fun serverStopCancelsTheActiveImagesRequestCoroutine() {
+        val started = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        withServerInstance(apiKey = "secret") { server, port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                started.countDown()
+                try {
+                    awaitCancellation()
+                } finally {
+                    cancelled.countDown()
+                }
+            }
+            val requestThread = Thread {
+                runCatching {
+                    rawHttp(
+                        port,
+                        authenticatedPost(
+                            "/v1/images/generations",
+                            body = """{"prompt":"stop the server"}"""
+                        )
+                    )
+                }
+            }
+            requestThread.start()
+
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            server.stop()
+
+            assertTrue(cancelled.await(5, TimeUnit.SECONDS))
+            requestThread.join(5_000L)
+            assertFalse(requestThread.isAlive)
+        }
+    }
+
+    @Test
+    fun resetImagesClientDisconnectCancelsTheProviderCoroutine() {
+        val started = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                started.countDown()
+                try {
+                    awaitCancellation()
+                } finally {
+                    cancelled.countDown()
+                }
+            }
+            val socket = Socket("127.0.0.1", port)
+            try {
+                socket.setSoLinger(true, 0)
+                socket.getOutputStream().run {
+                    write(
+                        authenticatedPost(
+                            "/v1/images/generations",
+                            body = """{"prompt":"disconnect"}"""
+                        ).toByteArray(Charsets.UTF_8)
+                    )
+                    flush()
+                }
+
+                assertTrue(started.await(5, TimeUnit.SECONDS))
+                socket.close()
+
+                assertTrue(cancelled.await(5, TimeUnit.SECONDS))
+            } finally {
+                runCatching { socket.close() }
+            }
+        }
+    }
+
+    @Test
+    fun authenticatedImagesApiPreservesAppVerifiedPromptProcessingEvidence() {
+        val sourcePrompt = "一只红色杯子放在蓝色桌子上，杯子左侧有两个绿色苹果"
+        val effectivePrompt =
+            "one red cup on a blue table, two green apples to the left of the cup"
+        val translationPlanSha256 = "d".repeat(64)
+        val verificationReceiptSha256 = "e".repeat(64)
+        val translationPhaseSystemPromptSha256 = "f".repeat(64)
+        val verificationPhaseSystemPromptSha256 = "1".repeat(64)
+        val translatorRuntime = "LLAMA_CPP"
+        val translatorModelSha256 = "b".repeat(64)
+        val promptLanguageBindingFingerprint = "c".repeat(64)
+        val translationProofFingerprint = imagePromptTranslationProofFingerprint(
+            contractVersion = 4,
+            originalPrompt = sourcePrompt,
+            effectivePrompt = effectivePrompt,
+            originalNegativePrompt = null,
+            effectiveNegativePrompt = "",
+            negativePromptSource = "EMPTY",
+            translationPlanSha256 = translationPlanSha256,
+            verificationReceiptSha256 = verificationReceiptSha256,
+            translationPhaseSystemPromptSha256 = translationPhaseSystemPromptSha256,
+            verificationPhaseSystemPromptSha256 = verificationPhaseSystemPromptSha256,
+            translatorRuntime = translatorRuntime,
+            translatorModelSha256 = translatorModelSha256,
+            promptLanguageBindingFingerprint = promptLanguageBindingFingerprint
+        )
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                JSONObject()
+                    .put("request_id", requestId)
+                    .put(
+                        "prompt_processing",
+                        JSONObject()
+                            .put("version", 4)
+                            .put("originalPrompt", sourcePrompt)
+                            .put("effectivePrompt", effectivePrompt)
+                            .put("originalNegativePrompt", JSONObject.NULL)
+                            .put("effectiveNegativePrompt", "")
+                            .put("negativePromptSource", "EMPTY")
+                            .put("method", "LOCAL_LLM_ZH_TO_EN")
+                            .put("translationContractVersion", 4)
+                            .put("imageProfileBindingFingerprint", "a".repeat(64))
+                            .put(
+                                "promptLanguageBindingFingerprint",
+                                promptLanguageBindingFingerprint
+                            )
+                            .put("translatorModelId", "translator-model")
+                            .put("translatorModelName", "Translator Model")
+                            .put("translatorRuntime", translatorRuntime)
+                            .put("translatorModelSha256", translatorModelSha256)
+                            .put("translationPlanSha256", translationPlanSha256)
+                            .put("verificationReceiptSha256", verificationReceiptSha256)
+                            .put(
+                                "translationPhaseSystemPromptSha256",
+                                translationPhaseSystemPromptSha256
+                            )
+                            .put(
+                                "verificationPhaseSystemPromptSha256",
+                                verificationPhaseSystemPromptSha256
+                            )
+                            .put("translationProofFingerprint", translationProofFingerprint)
+                    )
+                    .put(
+                        "execution",
+                        strictImageExecution(runtime = "STABLE_DIFFUSION_CPP")
+                            .bindPromptExecution(
+                                requestBody = requestBody,
+                                effectivePrompt = effectivePrompt,
+                                effectiveNegativePrompt = null
+                            )
+                    )
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = JSONObject().put("prompt", sourcePrompt).toString()
+                )
+            )
+            val processing = responseJson(response).getJSONObject("prompt_processing")
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(sourcePrompt, processing.getString("originalPrompt"))
+            assertEquals(effectivePrompt, processing.getString("effectivePrompt"))
+            assertEquals("LOCAL_LLM_ZH_TO_EN", processing.getString("method"))
+            assertEquals(4, processing.getInt("translationContractVersion"))
+            assertEquals(
+                translationProofFingerprint,
+                processing.getString("translationProofFingerprint")
+            )
         }
     }
 
@@ -120,9 +408,11 @@ class McaLoopbackServerTest {
                 JSONObject()
                     .put("request_id", requestId)
                     .put("model", "image-model")
+                    .put("prompt_processing", directPromptProcessing(requestBody))
                     .put(
                         "execution",
                         strictImageExecution(runtime = "QNN_HTP")
+                            .bindPromptExecution(requestBody)
                     )
                     .put("data", imageData())
                     .toString()
@@ -164,7 +454,12 @@ class McaLoopbackServerTest {
                 captured.set(JSONObject(requestBody))
                 JSONObject()
                     .put("request_id", requestId)
-                    .put("execution", strictImageExecution(runtime = "STABLE_DIFFUSION_CPP"))
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put(
+                        "execution",
+                        strictImageExecution(runtime = "STABLE_DIFFUSION_CPP")
+                            .bindPromptExecution(requestBody)
+                    )
                     .put("data", imageData())
                     .toString()
             }
@@ -197,11 +492,11 @@ class McaLoopbackServerTest {
                 port,
                 authenticatedPost(
                     "/images/generations",
-                    body = """{"prompt":"preview","preview":{"interval":2,"mode":"vae"}}"""
+                    body = """{"prompt":"preview"}"""
                 )
             )
 
-            assertTrue(response.startsWith("HTTP/1.1 422 Unprocessable Entity"))
+            assertTrue(response, response.startsWith("HTTP/1.1 422 Unprocessable Entity"))
             assertTrue(response.contains("unsupported_preview"))
             assertFalse(response.contains("image_generation_failed"))
         }
@@ -210,10 +505,11 @@ class McaLoopbackServerTest {
     @Test
     fun authenticatedImagesApiAcceptsStrictQnnControlEvidenceWithoutPrivatePaths() {
         withServer(apiKey = "secret") { port ->
-            LocalApiRuntime.imageGenerationProvider = { requestId, _ ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
                 JSONObject()
                     .put("request_id", requestId)
-                    .put("execution", strictControlImageExecution())
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put("execution", strictControlImageExecution().bindPromptExecution(requestBody))
                     .put("data", imageData())
                     .toString()
             }
@@ -321,11 +617,16 @@ class McaLoopbackServerTest {
     @Test
     fun imagesApiRejectsProviderThatSilentlySwitchesTheRequestedModel() {
         withServer(apiKey = "secret") { port ->
-            LocalApiRuntime.imageGenerationProvider = { requestId, _ ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
                 JSONObject()
                     .put("request_id", requestId)
                     .put("model", "different-model")
-                    .put("execution", strictImageExecution("STABLE_DIFFUSION_CPP"))
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put(
+                        "execution",
+                        strictImageExecution("STABLE_DIFFUSION_CPP")
+                            .bindPromptExecution(requestBody)
+                    )
                     .put("data", imageData())
                     .toString()
             }
@@ -339,7 +640,7 @@ class McaLoopbackServerTest {
             )
 
             assertTrue(response.startsWith("HTTP/1.1 502 Bad Gateway"))
-            assertTrue(response.contains("image_model_identity_mismatch"))
+            assertTrue(response, response.contains("image_model_identity_mismatch"))
         }
     }
 
@@ -651,6 +952,44 @@ class McaLoopbackServerTest {
             assertTrue(response.contains("\"object\":\"list\""))
             assertTrue(response.contains("\"vision_ready\":true"))
             assertTrue(response.contains("\"vision_projector\":\"mmproj-local-vl.gguf\""))
+        }
+    }
+
+    @Test
+    fun authenticatedModelsRouteKeepsChatCompatibilityAndPublishesSafeImageDiscovery() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.modelsJsonProvider = {
+                """{"object":"list","data":[
+                    {"id":"chat-a","object":"model","owned_by":"local","runtime":"LLAMA_CPP"},
+                    {"id":"image:image-a","object":"model","owned_by":"local","type":"image_generation","configured":true,"runtime":"QNN_HTP","family":"SD15","task":"text_to_image","task_modes":["text_to_image","control"],"max_batch_count":1,"capabilities":{"image_generation":true,"task_modes":["text_to_image","control"],"max_batch_count":1,"path":"/data/user/0/private/control.bin","api_key":"never-public"},"defaults":{"size":"512x512","width":512,"height":512,"steps":20,"cfg_scale":7.5},"path":"D:\\private\\model.bin"}
+                ]}"""
+            }
+
+            val response = rawHttp(port, authenticatedGet("/v1/models"))
+            val data = responseJson(response).getJSONArray("data")
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(2, data.length())
+            val chat = data.getJSONObject(0)
+            val image = data.getJSONObject(1)
+            assertEquals("chat-a", chat.getString("id"))
+            assertEquals("model", chat.getString("object"))
+            assertEquals("image:image-a", image.getString("id"))
+            assertEquals("image_generation", image.getString("type"))
+            assertEquals("QNN_HTP", image.getString("runtime"))
+            assertEquals("SD15", image.getString("family"))
+            assertEquals("text_to_image", image.getString("task"))
+            assertEquals(1, image.getInt("max_batch_count"))
+            assertEquals(512, image.getJSONObject("defaults").getInt("width"))
+            assertTrue(image.getJSONObject("capabilities").getBoolean("image_generation"))
+            assertFalse(image.has("path"))
+            assertFalse(image.getJSONObject("capabilities").has("path"))
+            assertFalse(image.getJSONObject("capabilities").has("api_key"))
+            assertFalse(image.has("engineLifecycle"))
+            assertFalse(image.has("loaded"))
+            assertFalse(response.contains("D:\\private"))
+            assertFalse(response.contains("/data/user/0/private"))
+            assertFalse(response.contains("never-public"))
         }
     }
 
@@ -1825,40 +2164,40 @@ class McaLoopbackServerTest {
         }
     }
 
-    private fun withServer(apiKey: String, block: (Int) -> Unit) {
+    private fun withServer(apiKey: String, block: (Int) -> Unit) =
+        withServerInstance(apiKey) { _, port -> block(port) }
+
+    private fun withServerInstance(
+        apiKey: String,
+        block: (McaLoopbackServer, Int) -> Unit
+    ) {
         val port = freePort()
         val server = McaLoopbackServer(port = port, bindHost = "127.0.0.1", apiKey = apiKey)
         try {
             server.clearProcessIdempotencyCacheForTests()
-            LocalApiRuntime.engine = null
-            LocalApiRuntime.nativeStatsJsonProvider = null
-            LocalApiRuntime.streamChatProvider = null
-            LocalApiRuntime.streamChatWithContextProvider = null
-            LocalApiRuntime.stopGenerationProvider = null
-            LocalApiRuntime.imageGenerationProvider = null
-            LocalApiRuntime.controlPlane = null
-            LocalApiRuntime.clearRequestTrace()
-            LocalApiRuntime.loadedModelJsonProvider = { "{}" }
-            LocalApiRuntime.generationParamsProvider = { GenerationParams() }
-            LocalApiRuntime.modelsJsonProvider = { """{"object":"list","data":[]}""" }
-            LocalApiRuntime.modelRuntimeStatesJsonProvider = { "{}" }
+            resetLocalApiRuntimeForTests()
             server.start()
-            block(port)
+            block(server, port)
         } finally {
-            LocalApiRuntime.engine = null
-            LocalApiRuntime.nativeStatsJsonProvider = null
-            LocalApiRuntime.streamChatProvider = null
-            LocalApiRuntime.streamChatWithContextProvider = null
-            LocalApiRuntime.stopGenerationProvider = null
-            LocalApiRuntime.imageGenerationProvider = null
-            LocalApiRuntime.controlPlane = null
-            LocalApiRuntime.clearRequestTrace()
-            LocalApiRuntime.loadedModelJsonProvider = { "{}" }
-            LocalApiRuntime.generationParamsProvider = { GenerationParams() }
-            LocalApiRuntime.modelsJsonProvider = { """{"object":"list","data":[]}""" }
-            LocalApiRuntime.modelRuntimeStatesJsonProvider = { "{}" }
             server.shutdown()
+            resetLocalApiRuntimeForTests()
         }
+    }
+
+    private fun resetLocalApiRuntimeForTests() {
+        LocalApiRuntime.engine = null
+        LocalApiRuntime.nativeStatsJsonProvider = null
+        LocalApiRuntime.streamChatProvider = null
+        LocalApiRuntime.streamChatWithContextProvider = null
+        LocalApiRuntime.stopGenerationProvider = null
+        LocalApiRuntime.imageGenerationProvider = null
+        LocalApiRuntime.controlPlane = null
+        LocalApiRuntime.clearRequestTrace()
+        LocalApiRuntime.loadedModelJsonProvider = { "{}" }
+        LocalApiRuntime.generationParamsProvider = { GenerationParams() }
+        LocalApiRuntime.modelsJsonProvider = { """{"object":"list","data":[]}""" }
+        LocalApiRuntime.imageTextualInversionsJsonProvider = { "[]" }
+        LocalApiRuntime.modelRuntimeStatesJsonProvider = { "{}" }
     }
 
     private fun chatRequest(body: String): String =
@@ -1892,7 +2231,44 @@ class McaLoopbackServerTest {
     private fun imageChatBody(stream: Boolean): String =
         """{"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}],"stream":$stream}"""
 
+    private fun directPromptProcessing(requestBody: String): JSONObject {
+        val request = ImageGenerationApiContract.parseRequest(requestBody)
+        return JSONObject()
+            .put("version", 4)
+            .put("originalPrompt", request.prompt)
+            .put("effectivePrompt", request.prompt)
+            .put("originalNegativePrompt", request.negativePrompt ?: JSONObject.NULL)
+            .put("effectiveNegativePrompt", request.negativePrompt.orEmpty())
+            .put("negativePromptSource", if (request.negativePrompt == null) "EMPTY" else "USER")
+            .put("method", "DIRECT")
+            .put("imageProfileBindingFingerprint", "a".repeat(64))
+            .put("promptLanguageBindingFingerprint", "c".repeat(64))
+    }
+
+    private fun JSONObject.bindPromptExecution(
+        requestBody: String,
+        effectivePrompt: String? = null,
+        effectiveNegativePrompt: String? = null,
+        languageCapability: String = "ENGLISH_DOMINANT"
+    ): JSONObject {
+        val request = ImageGenerationApiContract.parseRequest(requestBody)
+        val promptSha256 = imagePromptExecutionSha256(
+            effectivePrompt ?: request.prompt,
+            (effectiveNegativePrompt ?: request.negativePrompt).orEmpty()
+        )
+        getJSONObject("nativeEffective")
+            .put("nativePromptExecutionSha256", promptSha256)
+            .put("nativePromptBindingStage", "conditioning_consumed")
+        return put("imageProfileBindingFingerprint", "a".repeat(64))
+            .put("promptLanguageBindingFingerprint", "c".repeat(64))
+            .put("textEncoderLanguageCapability", languageCapability)
+            .put("promptExecutionSha256", promptSha256)
+            .put("nativePromptExecutionSha256", promptSha256)
+            .put("nativePromptBindingStage", "conditioning_consumed")
+    }
+
     private fun strictImageExecution(runtime: String): JSONObject {
+        val nativePromptSha256 = imagePromptExecutionSha256("fixture prompt", "")
         val nativeEffective = JSONObject()
             .put("profileId", "profile.image.v1")
             .put("profileRevision", 3)
@@ -1913,6 +2289,8 @@ class McaLoopbackServerTest {
             .put("positiveWeightedTokenCount", 0)
             .put("negativeWeightedTokenCount", 0)
             .put("promptWeightFingerprint", "9b353b1ac542678089ce3d12ee96ddd6ba3b0252ec0675cdf0540e6aa6b1860e")
+            .put("nativePromptExecutionSha256", nativePromptSha256)
+            .put("nativePromptBindingStage", "conditioning_consumed")
             .put("embeddingDiskDataType", "GRAPH_INTERNAL")
             .put("vaeScalingLocation", "GRAPH_INTERNAL")
             .put("vaeScalingFactor", 0.18215)
@@ -1940,6 +2318,7 @@ class McaLoopbackServerTest {
             .put("npuActive", runtime == "QNN_HTP")
             .put("qnnGraphExecution", runtime == "QNN_HTP")
             .put("outputBytes", 1024L)
+            .put("responseOutputEvidence", responseOutputEvidence(imageData()))
             .apply {
                 if (runtime == "STABLE_DIFFUSION_CPP") {
                     put("actualSamplingPassCount", 1)
@@ -1982,6 +2361,23 @@ class McaLoopbackServerTest {
                 .put("width", 512)
                 .put("height", 512)
         )
+
+    private fun responseOutputEvidence(data: JSONArray): JSONArray = JSONArray().apply {
+        for (index in 0 until data.length()) {
+            val item = data.getJSONObject(index)
+            val bytes = Base64.getDecoder().decode(item.getString("b64_json"))
+            val sha256 = MessageDigest.getInstance("SHA-256")
+                .digest(bytes)
+                .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
+            put(
+                JSONObject()
+                    .put("index", index)
+                    .put("mimeType", item.getString("mime_type"))
+                    .put("sizeBytes", bytes.size)
+                    .put("sha256", sha256)
+            )
+        }
+    }
 
     private fun rawHttp(port: Int, request: String): String {
         Socket("127.0.0.1", port).use { socket ->

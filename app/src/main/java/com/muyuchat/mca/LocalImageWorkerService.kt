@@ -8,7 +8,11 @@ import android.os.RemoteException
 import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +21,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlin.system.exitProcess
 import org.json.JSONObject
 
 internal const val LOCAL_IMAGE_GENERATION_CANCELLED_CODE = "image_generation_cancelled"
@@ -42,6 +47,15 @@ private val LOCAL_IMAGE_SAFE_LOG_BOOLEAN_FIELDS = listOf(
     "tiledExecution",
     "executionCompleted"
 )
+
+private val LOCAL_IMAGE_SAFE_LOG_UINT64_HEX_FIELDS = listOf(
+    QNN_NATIVE_DETAIL_STAGE_MASK_HEX_FIELD,
+    "encoderNativeDetailStageMaskHex",
+    "unetNativeDetailStageMaskHex",
+    "vaeNativeDetailStageMaskHex"
+)
+
+private val LOCAL_IMAGE_UINT64_HEX_PATTERN = Regex("^[0-9a-f]{16}$")
 
 private val LOCAL_IMAGE_SAFE_LOG_OPERATIONS = setOf(
     "IMAGE_GENERATION",
@@ -85,6 +99,12 @@ internal fun localImageWorkerCompletionLogSummary(
         val safeValue = sources.firstNotNullOfOrNull { source -> source.opt(field) as? Boolean }
         safeValue?.let { summary.put(field, it) }
     }
+    LOCAL_IMAGE_SAFE_LOG_UINT64_HEX_FIELDS.forEach { field ->
+        val safeValue = sources.firstNotNullOfOrNull { source ->
+            (source.opt(field) as? String)?.takeIf(LOCAL_IMAGE_UINT64_HEX_PATTERN::matches)
+        }
+        safeValue?.let { summary.put(field, it) }
+    }
     return summary.toString()
 }
 
@@ -109,6 +129,7 @@ class LocalImageWorkerService : Service() {
     private lateinit var provider: LocalImageProvider
     private lateinit var executionJournal: ImageExecutionJournalStore
     private lateinit var workerInputStore: LocalImageWorkerInputStore
+    private var rejectedRetiringProcess = false
 
     @Volatile
     private var activeGeneration: ActiveGeneration? = null
@@ -130,10 +151,28 @@ class LocalImageWorkerService : Service() {
                 activeGeneration?.takeIf { requestedId == null || it.requestId == requestedId }
             } ?: return false
             if (!active.tryRequestCancellation()) return false
+            scheduleSelfExit(active)
             requestJournalCancellation(active.requestId)
             runCatching { provider.cancel() }
             active.job?.cancel(CancellationException("Local image generation was cancelled."))
             publishCancellationTerminal(active, "Local image generation was cancelled.")
+            return true
+        }
+
+        override fun cancelAndExit(requestJson: String): Boolean {
+            val requestedId = runCatching {
+                LocalImageWorkerProtocol.parseCancelRequestId(requestJson)
+            }.getOrNull() ?: return false
+            val active = synchronized(stateLock) {
+                activeGeneration?.takeIf { it.requestId == requestedId }
+            } ?: return false
+            scheduleSelfExit(active)
+            if (active.tryRequestCancellation()) {
+                requestJournalCancellation(active.requestId)
+                runCatching { provider.cancel() }
+                active.job?.cancel(CancellationException("Local image generation timed out."))
+                publishCancellationTerminal(active, "Local image generation timed out.")
+            }
             return true
         }
 
@@ -271,6 +310,13 @@ class LocalImageWorkerService : Service() {
                         val output = writeResultFile(target, generated.bytes)
                         transferredOutputs += output
                         updateJournalOutputPath(request.requestId, output)
+                        updateJournalOutputArtifact(
+                            requestId = request.requestId,
+                            output = output,
+                            index = generated.index,
+                            mimeType = generated.mimeType,
+                            seed = generated.seed
+                        )
                         generated to output
                     }
                     val outputBytes = transferredOutputs.sumOf(File::length)
@@ -290,29 +336,33 @@ class LocalImageWorkerService : Service() {
                         },
                         executionMetadataJson = result.executionMetadataJson
                     )
-                    if (delivered) {
-                        markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)
-                        Log.i(
-                            "MCA-LocalImage",
-                            localImageWorkerCompletionLogSummary(
-                                requestId = request.requestId,
-                                workerPid = Process.myPid(),
-                                operation = "IMAGE_GENERATION",
-                                runtime = request.model.runtime,
-                                outputCount = transferredOutputs.size,
-                                outputBytes = outputBytes,
-                                executionMetadataJson = result.executionMetadataJson
+                    try {
+                        if (delivered) {
+                            markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)
+                            Log.i(
+                                "MCA-LocalImage",
+                                localImageWorkerCompletionLogSummary(
+                                    requestId = request.requestId,
+                                    workerPid = Process.myPid(),
+                                    operation = "IMAGE_GENERATION",
+                                    runtime = request.model.runtime,
+                                    outputCount = transferredOutputs.size,
+                                    outputBytes = outputBytes,
+                                    executionMetadataJson = result.executionMetadataJson
+                                )
                             )
-                        )
-                        transferredOutputs.clear()
-                    } else {
-                        transferredOutputs.deleteWorkerOutputs()
-                        markJournalTerminal(
-                            request.requestId,
-                            ImageExecutionPhase.FAILED,
-                            errorCode = "RESULT_DELIVERY_FAILED",
-                            errorMessage = "The generated image could not be delivered to the client."
-                        )
+                            transferredOutputs.clear()
+                        } else {
+                            transferredOutputs.deleteWorkerOutputs()
+                            markJournalTerminal(
+                                request.requestId,
+                                ImageExecutionPhase.FAILED,
+                                errorCode = "RESULT_DELIVERY_FAILED",
+                                errorMessage = "The generated image could not be delivered to the client."
+                            )
+                        }
+                    } finally {
+                        active.markResultPublicationTerminalAttemptFinished()
                     }
                 } catch (error: CancellationException) {
                     val message = error.message ?: "The image client or worker was cancelled."
@@ -522,6 +572,13 @@ class LocalImageWorkerService : Service() {
                 updateJournalOutputPath(request.requestId, target.partial)
                 transferredOutput = writeResultFile(target, output.bytes)
                 updateJournalOutputPath(request.requestId, requireNotNull(transferredOutput))
+                updateJournalOutputArtifact(
+                    requestId = request.requestId,
+                    output = requireNotNull(transferredOutput),
+                    index = 0,
+                    mimeType = output.mimeType,
+                    seed = output.seed
+                )
                 if (!active.tryBeginResultPublication()) {
                     throw CancellationException("Image upscale was cancelled before result publication.")
                 }
@@ -538,30 +595,34 @@ class LocalImageWorkerService : Service() {
                     ),
                     executionMetadataJson = result.executionMetadataJson
                 )
-                if (delivered) {
-                    markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)
-                    Log.i(
-                        "MCA-LocalImage",
-                        localImageWorkerCompletionLogSummary(
-                            requestId = request.requestId,
-                            workerPid = Process.myPid(),
-                            operation = "ESRGAN_UPSCALE",
-                            runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
-                            outputCount = 1,
-                            outputBytes = transferredOutput?.length() ?: 0L,
-                            executionMetadataJson = result.executionMetadataJson
+                try {
+                    if (delivered) {
+                        markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)
+                        Log.i(
+                            "MCA-LocalImage",
+                            localImageWorkerCompletionLogSummary(
+                                requestId = request.requestId,
+                                workerPid = Process.myPid(),
+                                operation = "ESRGAN_UPSCALE",
+                                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                                outputCount = 1,
+                                outputBytes = transferredOutput.length(),
+                                executionMetadataJson = result.executionMetadataJson
+                            )
                         )
-                    )
-                    transferredOutput = null
-                } else {
-                    transferredOutput?.delete()
-                    transferredOutput = null
-                    markJournalTerminal(
-                        request.requestId,
-                        ImageExecutionPhase.FAILED,
-                        errorCode = "RESULT_DELIVERY_FAILED",
-                        errorMessage = "The upscaled image could not be delivered to the client."
-                    )
+                        transferredOutput = null
+                    } else {
+                        transferredOutput.delete()
+                        transferredOutput = null
+                        markJournalTerminal(
+                            request.requestId,
+                            ImageExecutionPhase.FAILED,
+                            errorCode = "RESULT_DELIVERY_FAILED",
+                            errorMessage = "The upscaled image could not be delivered to the client."
+                        )
+                    }
+                } finally {
+                    active.markResultPublicationTerminalAttemptFinished()
                 }
             } catch (error: CancellationException) {
                 val message = error.message ?: "The image upscale was cancelled."
@@ -606,8 +667,27 @@ class LocalImageWorkerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        if (PROCESS_RETIREMENT.isRetiring) {
+            rejectedRetiringProcess = true
+            return
+        }
         provider = LocalImageProvider(applicationContext)
         workerInputStore = LocalImageWorkerInputStore(applicationContext)
+        // Encoder phases can still consume the worker-owned source image after the parent process
+        // dies. Acquire every abandoned split request lock exclusively before deleting either the
+        // handoff artifacts or worker_inputs; numeric PIDs are not process identity.
+        SdxlTwoPhaseRequestLease.recoverAbandonedRequests(
+            artifactRoot = File(cacheDir, SDXL_TWO_PHASE_DIRECTORY),
+            coordinationRoot = File(
+                noBackupFilesDir,
+                SDXL_TWO_PHASE_COORDINATION_DIRECTORY
+            )
+        )
+        runCatching {
+            QnnInputImageArtifact.cleanupStaleSharedArtifacts(cacheDir)
+        }.onFailure { error ->
+            logLocalImageWorkerInternalFailure("cleanup_stale_shared_qnn_artifacts", error)
+        }
         workerInputStore.clearOrphanedWorkerInputs()
         executionJournal = ImageExecutionJournalStore(
             File(filesDir, IMAGE_EXECUTION_JOURNAL_DIRECTORY)
@@ -616,11 +696,24 @@ class LocalImageWorkerService : Service() {
         cleanupStaleResults()
     }
 
-    override fun onBind(intent: Intent?): IBinder = binder
+    override fun onBind(intent: Intent?): IBinder? =
+        binder.takeUnless { rejectedRetiringProcess || PROCESS_RETIREMENT.isRetiring }
 
     override fun onDestroy() {
+        if (rejectedRetiringProcess) {
+            scope.cancel()
+            super.onDestroy()
+            return
+        }
+        PROCESS_RETIREMENT.beginRetirement()
         val active = synchronized(stateLock) {
             activeGeneration.also { activeGeneration = null }
+        }
+        val awaitResultPublication = active?.resultPublicationStarted == true
+        if (awaitResultPublication) {
+            scheduleResultPublicationSelfExit(requireNotNull(active))
+        } else {
+            scheduleUnconditionalSelfExit()
         }
         if (active != null) {
             if (active.tryRequestCancellation()) {
@@ -633,15 +726,75 @@ class LocalImageWorkerService : Service() {
         scope.cancel()
         cleanupPartialResults()
         super.onDestroy()
+        if (awaitResultPublication) return
+        // This is the exact disposable :local_image Linux process, not a historical callback PID.
+        // Retire it synchronously so Android cannot construct a new service instance beside a
+        // still-blocked native call from the destroyed instance.
+        Process.killProcess(Process.myPid())
+        exitProcess(0)
     }
 
     private fun cancelForDeadClient(active: ActiveGeneration) {
         val isCurrent = synchronized(stateLock) { activeGeneration === active }
         if (!isCurrent) return
         if (!active.tryRequestCancellation()) return
+        scheduleSelfExit(active)
         requestJournalCancellation(active.requestId)
         runCatching { provider.cancel() }
         active.job?.cancel(CancellationException("Local image client disconnected."))
+    }
+
+    private fun scheduleSelfExit(active: ActiveGeneration) {
+        Thread(
+            {
+                runCatching { Thread.sleep(SELF_EXIT_GRACE_MS) }
+                val stillOwnsTimedOutRequest = synchronized(stateLock) {
+                    activeGeneration === active
+                }
+                if (stillOwnsTimedOutRequest) {
+                    // This code executes inside the exact disposable worker instance. Killing self
+                    // cannot target a PID that Android has already reassigned to another process.
+                    Process.killProcess(Process.myPid())
+                    exitProcess(0)
+                }
+            },
+            "mca-local-image-self-exit"
+        ).apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun scheduleUnconditionalSelfExit() {
+        Thread(
+            {
+                runCatching { Thread.sleep(SELF_EXIT_GRACE_MS) }
+                Process.killProcess(Process.myPid())
+                exitProcess(0)
+            },
+            "mca-local-image-retire"
+        ).apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun scheduleResultPublicationSelfExit(active: ActiveGeneration) {
+        Thread(
+            {
+                runCatching {
+                    active.awaitResultPublicationTerminalAttempt(
+                        RESULT_PUBLICATION_EXIT_TIMEOUT_MS
+                    )
+                }
+                Process.killProcess(Process.myPid())
+                exitProcess(0)
+            },
+            "mca-local-image-publication-exit"
+        ).apply {
+            isDaemon = true
+            start()
+        }
     }
 
     private fun finish(active: ActiveGeneration) {
@@ -781,6 +934,10 @@ class LocalImageWorkerService : Service() {
         executionJournal.create(
             ImageExecutionJournalEntry(
                 requestId = request.requestId,
+                modelId = request.model.id,
+                modelName = request.model.displayName,
+                recommendationId = resolution.profile.provenance.recommendationId.orEmpty(),
+                recommendationRevision = resolution.profile.provenance.recommendationRevision.orEmpty(),
                 modelFingerprint = resolution.profile.modelFingerprint,
                 profileFingerprint = resolution.profile.bindingFingerprint,
                 requestedSummaryJson = effectiveOptions.toJson()
@@ -789,6 +946,7 @@ class LocalImageWorkerService : Service() {
                         remove("maskImage")
                         remove("controlImage")
                         put("productInput", effectiveOptions.inputAuditJson())
+                        request.batchLineage?.let { put("batchLineage", it.toJson()) }
                     }
                     .put("runtime", request.model.runtime.name)
                     .put("family", request.model.family.name)
@@ -835,6 +993,8 @@ class LocalImageWorkerService : Service() {
         executionJournal.create(
             ImageExecutionJournalEntry(
                 requestId = request.requestId,
+                modelId = inputs.upscaler.id,
+                modelName = inputs.upscaler.name,
                 modelFingerprint = inputs.upscaler.sha256,
                 profileFingerprint = "stable-diffusion-cpp-esrgan-upscale-v1",
                 requestedSummaryJson = requested.toString(),
@@ -947,6 +1107,51 @@ class LocalImageWorkerService : Service() {
         )
     }
 
+    private fun updateJournalOutputArtifact(
+        requestId: String,
+        output: File,
+        index: Int,
+        mimeType: String,
+        seed: Long?
+    ) {
+        val canonical = output.canonicalFile
+        require(canonical.isFile && canonical.length() > 0L) {
+            "Published image output is missing before provenance hashing."
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        canonical.inputStream().buffered().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (count > 0) digest.update(buffer, 0, count)
+            }
+        }
+        val artifact = ImageExecutionOutputArtifact(
+            index = index,
+            mimeType = mimeType,
+            bytes = canonical.length(),
+            sha256 = digest.digest().joinToString(separator = "") { byte ->
+                "%02x".format(byte.toInt() and 0xff)
+            },
+            seed = seed
+        )
+        val current = executionJournal.read(requestId)
+            ?: error("Image execution journal disappeared before output provenance publication.")
+        check(!current.phase.terminal) {
+            "Image execution journal became terminal before output provenance publication."
+        }
+        require(index == current.outputArtifacts.size) {
+            "Published image output provenance arrived out of order."
+        }
+        executionJournal.update(
+            current.copy(
+                outputArtifacts = current.outputArtifacts + artifact,
+                updatedAtMs = System.currentTimeMillis().coerceAtLeast(current.updatedAtMs + 1L)
+            )
+        )
+    }
+
     private fun requestJournalCancellation(requestId: String) {
         runCatching {
             val current = executionJournal.read(requestId) ?: return@runCatching
@@ -997,9 +1202,10 @@ class LocalImageWorkerService : Service() {
 
     private fun recoverInterruptedExecutions() {
         runCatching {
-            executionJournal.recoverInterrupted(cleanupRoots = listOf(cacheDir)) { pid ->
-                pid > 0 && File("/proc/$pid").isDirectory
-            }
+            // onCreate belongs to a new LocalImageWorkerService instance. A journal persisted by
+            // the previous instance cannot represent work owned by this instance even if Android
+            // has already reused its numeric PID for another process.
+            executionJournal.recoverInterrupted(cleanupRoots = listOf(cacheDir)) { false }
         }.onSuccess { report ->
             if (report.interrupted.isNotEmpty() || report.invalidJournalFiles.isNotEmpty()) {
                 Log.w(
@@ -1082,6 +1288,9 @@ class LocalImageWorkerService : Service() {
         val cancelRequested: Boolean
             get() = publicationGate.cancelRequested
 
+        val resultPublicationStarted: Boolean
+            get() = publicationGate.resultPublicationStarted
+
         /**
          * Result publication is the commit point for native generation. Once the final output has
          * been written and callback delivery starts, a normal client unbind may destroy this bound
@@ -1089,6 +1298,12 @@ class LocalImageWorkerService : Service() {
          * must not turn the already-produced request into a cancellation.
          */
         fun tryBeginResultPublication(): Boolean = publicationGate.tryBeginResultPublication()
+
+        fun markResultPublicationTerminalAttemptFinished() =
+            publicationGate.markResultPublicationTerminalAttemptFinished()
+
+        fun awaitResultPublicationTerminalAttempt(timeoutMs: Long): Boolean =
+            publicationGate.awaitResultPublicationTerminalAttempt(timeoutMs)
 
         fun tryRequestCancellation(): Boolean = publicationGate.tryRequestCancellation()
 
@@ -1111,10 +1326,22 @@ class LocalImageWorkerService : Service() {
     )
 
     companion object {
+        private val PROCESS_RETIREMENT = LocalImageWorkerProcessRetirementGate()
         internal const val RESULT_DIRECTORY = "local_image_worker_results"
         internal const val IMAGE_EXECUTION_JOURNAL_DIRECTORY = "image_execution_journal"
+        private const val SELF_EXIT_GRACE_MS = 250L
+        private const val RESULT_PUBLICATION_EXIT_TIMEOUT_MS = 5_000L
         private const val RESULT_MAX_AGE_MS = 24 * 60 * 60 * 1000L
     }
+}
+
+internal class LocalImageWorkerProcessRetirementGate {
+    private val retiring = AtomicBoolean(false)
+
+    val isRetiring: Boolean
+        get() = retiring.get()
+
+    fun beginRetirement(): Boolean = retiring.compareAndSet(false, true)
 }
 
 internal fun localImageWorkerErrorCode(error: Throwable): String {
@@ -1122,7 +1349,7 @@ internal fun localImageWorkerErrorCode(error: Throwable): String {
         is LocalImageProductContractException -> error.code
         is LocalImageWorkerRemoteException -> error.code
         is ImageNativeExecutionContractException -> error.code
-        is ImageProfileResolutionException -> "invalid_image_execution_profile"
+        is ImageProfileResolutionException -> error.localImagePublicErrorCode()
         else -> "generation_failed"
     }
     return raw.trim()
@@ -1150,14 +1377,27 @@ internal class LocalImageWorkerPublicationGate {
     private var state: State = State.RUNNING
 
     private var cancellationTerminalPublicationStarted: Boolean = false
+    private val resultPublicationTerminalAttemptFinished = CountDownLatch(1)
 
     val cancelRequested: Boolean
         get() = state == State.CANCELLATION_REQUESTED
+
+    val resultPublicationStarted: Boolean
+        get() = state == State.RESULT_PUBLICATION_STARTED
 
     fun tryBeginResultPublication(): Boolean = synchronized(this) {
         if (state != State.RUNNING) return@synchronized false
         state = State.RESULT_PUBLICATION_STARTED
         true
+    }
+
+    fun markResultPublicationTerminalAttemptFinished() {
+        resultPublicationTerminalAttemptFinished.countDown()
+    }
+
+    fun awaitResultPublicationTerminalAttempt(timeoutMs: Long): Boolean {
+        require(timeoutMs >= 0L) { "Result publication exit timeout must be non-negative." }
+        return resultPublicationTerminalAttemptFinished.await(timeoutMs, TimeUnit.MILLISECONDS)
     }
 
     fun tryRequestCancellation(): Boolean = synchronized(this) {

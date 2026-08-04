@@ -13,14 +13,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <fcntl.h>
 #include <fstream>
 #include <functional>
+#include <limits.h>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <ostream>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -35,9 +38,13 @@
 #include "image_conditioning.hpp"
 #include "jni_utf8_codec.hpp"
 #include "mnn_legacy_chat_template_policy.hpp"
+#include "mnn_qnn_prompt_handoff.hpp"
+#include "native_prompt_language_contract.hpp"
 #include "mnn_runtime_capability_policy.hpp"
 #include "mnn_stream_protocol_filter.hpp"
+#include "textual_inversion_conditioning.hpp"
 #include "mnn_vision_path_policy.hpp"
+#include "execution_asset_binding.hpp"
 
 #if MCA_WITH_MNN_LLM
 #include "llm/llm.hpp"
@@ -66,7 +73,7 @@
 #include <MNN/Interpreter.hpp>
 #include <MNN/Tensor.hpp>
 #include <MNN/expr/Module.hpp>
-#include "tokenizer.hpp"
+#include "mnn_diffusion_tokenizer.hpp"
 #include "scheduler.hpp"
 #include "diffusion/stable_diffusion.hpp"
 #include "diffusion/sana_diffusion.hpp"
@@ -508,6 +515,61 @@ json read_json_file_or_empty(const std::string& path) {
     json parsed = json::parse(input, nullptr, false);
     if (!parsed.is_object()) return json::object();
     return parsed;
+}
+
+struct MnnPublishedImageEvidence {
+    long long bytes = 0;
+    std::string sha256;
+};
+
+bool collect_mnn_published_image_evidence(
+        const std::string& path,
+        MnnPublishedImageEvidence& evidence,
+        std::string& error) {
+    constexpr long long kMinPngBytes = 57LL;
+    constexpr long long kMaxPngBytes = 64LL * 1024LL * 1024LL;
+    struct stat info {};
+    if (path.empty() || ::lstat(path.c_str(), &info) != 0 ||
+        !S_ISREG(info.st_mode) || info.st_size < kMinPngBytes ||
+        info.st_size > kMaxPngBytes) {
+        error = "MNN-Diffusion output is not a bounded regular PNG file.";
+        return false;
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        error = "MNN-Diffusion output could not be opened for publication proof.";
+        return false;
+    }
+    std::vector<uint8_t> bytes(static_cast<size_t>(info.st_size));
+    input.read(reinterpret_cast<char*>(bytes.data()), info.st_size);
+    if (input.gcount() != info.st_size || input.peek() != std::char_traits<char>::eof()) {
+        error = "MNN-Diffusion output changed while publication proof was collected.";
+        return false;
+    }
+    struct stat after {};
+    if (::lstat(path.c_str(), &after) != 0 || !S_ISREG(after.st_mode) ||
+        after.st_dev != info.st_dev || after.st_ino != info.st_ino ||
+        after.st_size != info.st_size) {
+        error = "MNN-Diffusion output identity changed before publication.";
+        return false;
+    }
+    static constexpr std::array<uint8_t, 8> kPngSignature = {
+        UINT8_C(0x89), UINT8_C(0x50), UINT8_C(0x4e), UINT8_C(0x47),
+        UINT8_C(0x0d), UINT8_C(0x0a), UINT8_C(0x1a), UINT8_C(0x0a),
+    };
+    if (bytes.size() < kPngSignature.size() ||
+        !std::equal(kPngSignature.begin(), kPngSignature.end(), bytes.begin())) {
+        error = "MNN-Diffusion output does not have a PNG signature.";
+        return false;
+    }
+    evidence.bytes = static_cast<long long>(bytes.size());
+    evidence.sha256 = mca::image::sha256_hex_bytes(bytes);
+    if (evidence.sha256.size() != 64U) {
+        error = "MNN-Diffusion output SHA-256 proof could not be produced.";
+        return false;
+    }
+    error.clear();
+    return true;
 }
 
 void collect_mnn_visual_path_declarations(
@@ -1272,6 +1334,17 @@ struct MnnSchedulerExecutionContract {
     float eta = 0.0f;
 };
 
+struct MnnTextEncoderAssetRequest {
+    bool declared = false;
+    std::string path;
+    std::string sha256;
+    uint64_t size_bytes = 0U;
+    bool has_weight = false;
+    std::string weight_path;
+    std::string weight_sha256;
+    uint64_t weight_size_bytes = 0U;
+};
+
 struct MnnSemanticExecutionContract {
     std::string profile_id;
     int profile_revision = 0;
@@ -1300,6 +1373,29 @@ struct MnnSemanticExecutionContract {
     std::string runner;
     int threads = 0;
     int memory_mode = 0;
+    std::string textual_inversion_json;
+    std::string language_proof_sha256;
+    MnnTextEncoderAssetRequest text_encoder_asset;
+};
+
+bool mnn_contract_uses_community_clip(const MnnSemanticExecutionContract& contract) {
+    return contract.embedding_disk_data_type == "FP16" ||
+           contract.embedding_disk_data_type == "FP32";
+}
+
+struct MnnTextEncoderAssetEvidence {
+    bool consumed = false;
+    std::string path;
+    std::string sha256;
+    uint64_t size_bytes = 0U;
+    std::string expected_sha256;
+    uint64_t expected_size_bytes = 0U;
+    bool has_weight = false;
+    std::string weight_path;
+    std::string weight_sha256;
+    uint64_t weight_size_bytes = 0U;
+    std::string expected_weight_sha256;
+    uint64_t expected_weight_size_bytes = 0U;
 };
 
 struct MnnNativeExecutionEvidence {
@@ -1312,11 +1408,384 @@ struct MnnNativeExecutionEvidence {
     size_t positive_weighted_token_count = 0;
     size_t negative_weighted_token_count = 0;
     std::string prompt_weight_fingerprint;
+    std::string native_prompt_execution_sha256;
     std::string embedding_disk_data_type;
     std::vector<double> timesteps;
     std::vector<double> sigmas;
     double init_noise_sigma = 1.0;
+    json textual_inversions = json::array();
+    json textual_inversion_evidence = nullptr;
+    mca::image::execution_assets::Binding execution_assets;
+    bool has_execution_assets = false;
+    MnnTextEncoderAssetEvidence text_encoder_asset;
 };
+
+std::function<bool()> mnn_asset_cancel_callback() {
+    return [] {
+        std::lock_guard<std::mutex> lock(g_mnn_diffusion_mutex);
+        return g_mnn_diffusion_cancel_requested;
+    };
+}
+
+bool prepare_mnn_execution_assets(
+        const std::string& textualInversionJson,
+        const std::string& runtime,
+        mca::image::execution_assets::Binding& binding,
+        std::string& error) {
+    const auto parsed = json::parse(textualInversionJson, nullptr, false);
+    if (!parsed.is_object() ||
+        !mca::image::execution_assets::parse(parsed, runtime, binding, error) ||
+        !mca::image::execution_assets::verify_initial(
+                binding, mnn_asset_cancel_callback(), error)) {
+        return false;
+    }
+    return true;
+}
+
+bool finalize_mnn_execution_assets(
+        mca::image::execution_assets::Binding& binding,
+        std::string& error) {
+    return mca::image::execution_assets::verify_final(
+            binding, mnn_asset_cancel_callback(), error);
+}
+
+bool mnn_selection_matches_execution_assets(
+        const mca::image::textual_inversion::Selection& selection,
+        const mca::image::execution_assets::Binding& binding,
+        std::string& error) {
+    const bool matches = std::all_of(
+        selection.artifacts.begin(),
+        selection.artifacts.end(),
+        [&binding](const auto& artifact) {
+            return artifact.tokenizer_fingerprint == binding.composite_sha256;
+        });
+    if (!matches) {
+        error = "textual inversion artifact binding does not match the verified consumer assets";
+    }
+    return matches;
+}
+
+bool mnn_execution_assets_match(
+        const mca::image::execution_assets::Binding& binding,
+        const std::vector<std::string>& requiredPaths,
+        std::string& error) {
+    std::set<std::string> canonicalRequiredPaths;
+    for (const auto& path : requiredPaths) {
+        char canonical[PATH_MAX] = {};
+        struct stat pathStat {};
+        if (realpath(path.c_str(), canonical) == nullptr ||
+            stat(canonical, &pathStat) != 0 || !S_ISREG(pathStat.st_mode)) {
+            error = "native prompt-conditioning execution asset is missing or non-canonical";
+            return false;
+        }
+        canonicalRequiredPaths.emplace(canonical);
+    }
+    std::set<std::string> describedPaths;
+    for (const auto& asset : binding.assets) {
+        describedPaths.emplace(asset.path);
+    }
+    if (describedPaths != canonicalRequiredPaths) {
+        error = "execution asset descriptors do not exactly match native prompt consumers";
+        return false;
+    }
+    return true;
+}
+
+json mnn_execution_asset_failure(const std::string& error, const char* format = nullptr) {
+    if (error == "cancelled") {
+        json cancelled = {{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+        if (format != nullptr) cancelled["format"] = format;
+        return cancelled;
+    }
+    json failure = {
+        {"ok", false},
+        {"errorCode", "TEXTUAL_INVERSION_EXECUTION_ASSET_MISMATCH"},
+        {"error", error}
+    };
+    if (format != nullptr) failure["format"] = format;
+    return failure;
+}
+
+struct MnnOpenedTextEncoderAsset {
+    int fd = -1;
+    std::string canonical_path;
+    std::string sha256;
+    uint64_t size_bytes = 0U;
+    mca::image::execution_assets::Identity identity;
+
+    ~MnnOpenedTextEncoderAsset() {
+        reset();
+    }
+
+    MnnOpenedTextEncoderAsset() = default;
+    MnnOpenedTextEncoderAsset(const MnnOpenedTextEncoderAsset&) = delete;
+    MnnOpenedTextEncoderAsset& operator=(const MnnOpenedTextEncoderAsset&) = delete;
+
+    void reset() {
+        if (fd >= 0) {
+            ::close(fd);
+            fd = -1;
+        }
+        canonical_path.clear();
+        sha256.clear();
+        size_bytes = 0U;
+        identity = {};
+    }
+
+    std::string opened_path() const {
+        return fd >= 0 ? "/proc/self/fd/" + std::to_string(fd) : std::string();
+    }
+};
+
+struct MnnOpenedTextEncoderBinding {
+    bool active = false;
+    MnnOpenedTextEncoderAsset graph;
+    MnnOpenedTextEncoderAsset weight;
+};
+
+bool mnn_text_encoder_path_is_inside_bundle(
+        const std::string& bundleRoot,
+        const std::string& path) {
+    if (bundleRoot == "/") return path.size() > 1U && path.front() == '/';
+    return path.size() > bundleRoot.size() &&
+            path.compare(0, bundleRoot.size(), bundleRoot) == 0 &&
+            path[bundleRoot.size()] == '/';
+}
+
+bool hash_opened_mnn_text_encoder_asset(
+        MnnOpenedTextEncoderAsset& asset,
+        const std::string& expectedSha256,
+        uint64_t expectedSizeBytes,
+        const char* label,
+        std::string& error) {
+    struct stat descriptorBefore {};
+    struct stat pathBefore {};
+    if (asset.fd < 0 || asset.canonical_path.empty() ||
+        ::fstat(asset.fd, &descriptorBefore) != 0 ||
+        ::lstat(asset.canonical_path.c_str(), &pathBefore) != 0 ||
+        !S_ISREG(descriptorBefore.st_mode) || !S_ISREG(pathBefore.st_mode) ||
+        !mca::image::execution_assets::same_identity(
+            asset.identity,
+            mca::image::execution_assets::identity_of(descriptorBefore)) ||
+        !mca::image::execution_assets::same_identity(
+            asset.identity,
+            mca::image::execution_assets::identity_of(pathBefore))) {
+        error = std::string(label) + " identity changed before native MNN consumption.";
+        return false;
+    }
+    if (asset.identity.size != expectedSizeBytes ||
+        ::lseek(asset.fd, 0, SEEK_SET) == static_cast<off_t>(-1)) {
+        error = std::string(label) + " size or seek position is invalid.";
+        return false;
+    }
+    mca::image::execution_assets::Sha256 digest;
+    std::array<uint8_t, 64U * 1024U> bytes{};
+    uint64_t readBytes = 0U;
+    const auto cancelled = mnn_asset_cancel_callback();
+    while (true) {
+        if (cancelled()) {
+            error = "cancelled";
+            return false;
+        }
+        const ssize_t count = ::read(asset.fd, bytes.data(), bytes.size());
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            error = std::string(label) + " could not be streamed for SHA-256 verification.";
+            return false;
+        }
+        readBytes += static_cast<uint64_t>(count);
+        if (readBytes > expectedSizeBytes) {
+            error = std::string(label) + " grew while native MNN verification was in progress.";
+            return false;
+        }
+        digest.update(bytes.data(), static_cast<size_t>(count));
+    }
+    struct stat descriptorAfter {};
+    struct stat pathAfter {};
+    if (::fstat(asset.fd, &descriptorAfter) != 0 ||
+        ::lstat(asset.canonical_path.c_str(), &pathAfter) != 0 ||
+        !mca::image::execution_assets::same_identity(
+            asset.identity,
+            mca::image::execution_assets::identity_of(descriptorAfter)) ||
+        !mca::image::execution_assets::same_identity(
+            asset.identity,
+            mca::image::execution_assets::identity_of(pathAfter)) ||
+        readBytes != expectedSizeBytes) {
+        error = std::string(label) + " changed while native MNN verification was in progress.";
+        return false;
+    }
+    const std::string actualSha256 = digest.finish_hex();
+    if (actualSha256 != expectedSha256 ||
+        ::lseek(asset.fd, 0, SEEK_SET) == static_cast<off_t>(-1)) {
+        error = std::string(label) + " bytes do not match the profile-declared SHA-256.";
+        return false;
+    }
+    asset.sha256 = actualSha256;
+    asset.size_bytes = readBytes;
+    return true;
+}
+
+bool open_mnn_text_encoder_asset(
+        const std::string& canonicalBundleRoot,
+        const std::string& requestedPath,
+        const std::string& expectedSha256,
+        uint64_t expectedSizeBytes,
+        const char* label,
+        MnnOpenedTextEncoderAsset& asset,
+        std::string& error) {
+    asset.reset();
+    char canonical[PATH_MAX] = {};
+    if (requestedPath.empty() || realpath(requestedPath.c_str(), canonical) == nullptr ||
+        requestedPath != canonical ||
+        !mnn_text_encoder_path_is_inside_bundle(canonicalBundleRoot, canonical)) {
+        error = std::string(label) + " path must be canonical and stay inside the selected bundle.";
+        return false;
+    }
+    struct stat pathBefore {};
+    if (::lstat(canonical, &pathBefore) != 0 || !S_ISREG(pathBefore.st_mode)) {
+        error = std::string(label) + " is not a regular non-symlink file.";
+        return false;
+    }
+    asset.fd = ::open(canonical, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat descriptorBefore {};
+    if (asset.fd < 0 || ::fstat(asset.fd, &descriptorBefore) != 0 ||
+        !S_ISREG(descriptorBefore.st_mode)) {
+        asset.reset();
+        error = std::string(label) + " could not be opened through a regular-file descriptor.";
+        return false;
+    }
+    asset.canonical_path = canonical;
+    asset.identity = mca::image::execution_assets::identity_of(descriptorBefore);
+    if (!mca::image::execution_assets::same_identity(
+            asset.identity,
+            mca::image::execution_assets::identity_of(pathBefore)) ||
+        asset.identity.size != expectedSizeBytes ||
+        !hash_opened_mnn_text_encoder_asset(
+            asset, expectedSha256, expectedSizeBytes, label, error)) {
+        asset.reset();
+        return false;
+    }
+    return true;
+}
+
+std::string mnn_consumed_text_encoder_closure_sha256(
+        const MnnTextEncoderAssetEvidence& evidence) {
+    if (!evidence.consumed) return {};
+    std::ostringstream payload;
+    payload << "mca.mnn.consumed-text-encoder-assets.v1"
+            << '\x1f' << evidence.path
+            << '\x1f' << evidence.size_bytes
+            << '\x1f' << evidence.sha256;
+    if (evidence.has_weight) {
+        payload << '\x1f' << evidence.weight_path
+                << '\x1f' << evidence.weight_size_bytes
+                << '\x1f' << evidence.weight_sha256;
+    }
+    return mca::image::execution_assets::sha256_utf8(payload.str());
+}
+
+bool open_mnn_text_encoder_binding(
+        const std::string& root,
+        const MnnTextEncoderAssetRequest& request,
+        MnnOpenedTextEncoderBinding& binding,
+        MnnTextEncoderAssetEvidence& evidence,
+        std::string& error) {
+    if (!request.declared) return true;
+    char canonicalRoot[PATH_MAX] = {};
+    struct stat rootStat {};
+    if (root.empty() || realpath(root.c_str(), canonicalRoot) == nullptr ||
+        ::stat(canonicalRoot, &rootStat) != 0 || !S_ISDIR(rootStat.st_mode)) {
+        error = "MNN text encoder evidence has no canonical bundle root.";
+        return false;
+    }
+    if (!open_mnn_text_encoder_asset(
+            canonicalRoot,
+            request.path,
+            request.sha256,
+            request.size_bytes,
+            "MNN text encoder graph",
+            binding.graph,
+            error)) {
+        return false;
+    }
+    if (request.has_weight) {
+        if (request.weight_path != request.path + ".weight" ||
+            !open_mnn_text_encoder_asset(
+                canonicalRoot,
+                request.weight_path,
+                request.weight_sha256,
+                request.weight_size_bytes,
+                "MNN text encoder weight",
+                binding.weight,
+                error)) {
+            if (error.empty()) {
+                error = "The declared MNN text encoder weight must match the graph's .weight path.";
+            }
+            return false;
+        }
+    } else {
+        struct stat unexpectedWeight {};
+        const std::string defaultWeightPath = binding.graph.canonical_path + ".weight";
+        if (::lstat(defaultWeightPath.c_str(), &unexpectedWeight) == 0) {
+            error = "The declared MNN text encoder has a .weight sidecar that is not pinned by nativeTextEncoderEvidence.";
+            return false;
+        }
+        if (errno != ENOENT) {
+            error = "The declared MNN text encoder .weight sidecar could not be inspected."
+                " It must be explicitly pinned before native execution.";
+            return false;
+        }
+    }
+    binding.active = true;
+    evidence.consumed = true;
+    evidence.path = binding.graph.canonical_path;
+    evidence.sha256 = binding.graph.sha256;
+    evidence.size_bytes = binding.graph.size_bytes;
+    evidence.expected_sha256 = request.sha256;
+    evidence.expected_size_bytes = request.size_bytes;
+    if (request.has_weight) {
+        evidence.has_weight = true;
+        evidence.weight_path = binding.weight.canonical_path;
+        evidence.weight_sha256 = binding.weight.sha256;
+        evidence.weight_size_bytes = binding.weight.size_bytes;
+        evidence.expected_weight_sha256 = request.weight_sha256;
+        evidence.expected_weight_size_bytes = request.weight_size_bytes;
+    }
+    return true;
+}
+
+bool verify_mnn_text_encoder_binding(
+        const MnnTextEncoderAssetRequest& request,
+        MnnOpenedTextEncoderBinding& binding,
+        std::string& error) {
+    if (!binding.active) return true;
+    if (!hash_opened_mnn_text_encoder_asset(
+            binding.graph,
+            request.sha256,
+            request.size_bytes,
+            "MNN text encoder graph",
+            error)) {
+        return false;
+    }
+    return !request.has_weight || hash_opened_mnn_text_encoder_asset(
+            binding.weight,
+            request.weight_sha256,
+            request.weight_size_bytes,
+            "MNN text encoder weight",
+            error);
+}
+
+json mnn_text_encoder_asset_failure(const std::string& error) {
+    if (error == "cancelled") {
+        return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}});
+    }
+    return json({
+        {"ok", false},
+        {"errorCode", "TEXT_ENCODER_ASSET_MISMATCH"},
+        {"error", error}
+    });
+}
 
 void append_mnn_u32_little_endian(uint32_t value, std::vector<uint8_t>& payload) {
     for (unsigned shift = 0U; shift < 32U; shift += 8U) {
@@ -1419,6 +1888,121 @@ bool mnn_contract_integer(
     }
     error = std::string("MNN image execution field '") + key + "' must be an integer.";
     return false;
+}
+
+bool parse_mnn_text_encoder_asset_descriptor(
+        const json& source,
+        const char* label,
+        std::string& path,
+        std::string& sha256,
+        uint64_t& sizeBytes,
+        std::string& error) {
+    const auto pathIt = source.find("path");
+    const auto shaIt = source.find("sha256");
+    const auto sizeIt = source.find("sizeBytes");
+    if (pathIt == source.end() || !pathIt->is_string() ||
+        shaIt == source.end() || !shaIt->is_string() ||
+        sizeIt == source.end() ||
+            (!sizeIt->is_number_integer() && !sizeIt->is_number_unsigned())) {
+        error = std::string(label) + " must contain path, sha256, and sizeBytes.";
+        return false;
+    }
+    path = pathIt->get<std::string>();
+    sha256 = shaIt->get<std::string>();
+    if (path.empty() || !mca::image::execution_assets::lowercase_sha256(sha256)) {
+        error = std::string(label) + " path or SHA-256 is invalid.";
+        return false;
+    }
+    try {
+        if (sizeIt->is_number_unsigned()) {
+            sizeBytes = sizeIt->get<uint64_t>();
+        } else {
+            const int64_t signedSize = sizeIt->get<int64_t>();
+            if (signedSize <= 0) {
+                error = std::string(label) + " sizeBytes must be positive.";
+                return false;
+            }
+            sizeBytes = static_cast<uint64_t>(signedSize);
+        }
+    } catch (const std::exception&) {
+        error = std::string(label) + " sizeBytes exceeds uint64 range.";
+        return false;
+    }
+    if (sizeBytes == 0U) {
+        error = std::string(label) + " sizeBytes must be positive.";
+        return false;
+    }
+    return true;
+}
+
+bool parse_mnn_text_encoder_asset_request(
+        const json& params,
+        MnnTextEncoderAssetRequest& request,
+        std::string& error) {
+    const auto evidenceIt = params.find("nativeTextEncoderEvidence");
+    if (evidenceIt == params.end() || evidenceIt->is_null()) return true;
+    if (!evidenceIt->is_object()) {
+        error = "nativeTextEncoderEvidence must be an object when supplied.";
+        return false;
+    }
+    if (!parse_mnn_text_encoder_asset_descriptor(
+            *evidenceIt,
+            "nativeTextEncoderEvidence",
+            request.path,
+            request.sha256,
+            request.size_bytes,
+            error)) {
+        return false;
+    }
+    const auto auxiliaryIt = evidenceIt->find("auxiliaryAssets");
+    if (auxiliaryIt != evidenceIt->end()) {
+        if (!auxiliaryIt->is_array() || auxiliaryIt->size() > 1U) {
+            error = "nativeTextEncoderEvidence.auxiliaryAssets must contain at most one MNN .weight asset.";
+            return false;
+        }
+        if (!auxiliaryIt->empty()) {
+            if (!auxiliaryIt->front().is_object() ||
+                !parse_mnn_text_encoder_asset_descriptor(
+                    auxiliaryIt->front(),
+                    "nativeTextEncoderEvidence.auxiliaryAssets[0]",
+                    request.weight_path,
+                    request.weight_sha256,
+                    request.weight_size_bytes,
+                    error)) {
+                return false;
+            }
+            request.has_weight = true;
+        }
+    }
+    request.declared = true;
+    return true;
+}
+
+bool parse_mnn_language_proof_sha256(
+        const json& params,
+        std::string& proofSha256,
+        std::string& error) {
+    const auto proofIt = params.find("languageProofSha256");
+    if (proofIt == params.end() || proofIt->is_null()) return true;
+    if (!proofIt->is_string()) {
+        error = "languageProofSha256 must be a SHA-256 string when supplied.";
+        return false;
+    }
+    proofSha256 = proofIt->get<std::string>();
+    if (!mca::image::execution_assets::lowercase_sha256(proofSha256)) {
+        error = "languageProofSha256 must be a 64-character SHA-256 value.";
+        return false;
+    }
+    return true;
+}
+
+// English-dominant product paths pass safe ASCII tags only.  Native MNN execution admits other
+// UTF-8 prompt bytes solely when the caller supplied the descriptor-backed text-encoder evidence
+// that is rehashed before and after actual graph consumption.
+bool mnn_prompt_contains_non_ascii(const std::string& value) {
+    return std::any_of(value.begin(), value.end(), [](unsigned char byte) {
+        return byte >= 0x80U;
+    });
 }
 
 bool mnn_contract_number(
@@ -1870,6 +2454,19 @@ bool parse_mnn_semantic_execution_contract(
         error = "tokenEmbeddingMode is obsolete; token_emb.bin dtype is determined only by its exact byte size.";
         return false;
     }
+    if (!parse_mnn_text_encoder_asset_request(
+            params, contract.text_encoder_asset, error)) {
+        return false;
+    }
+    if (!parse_mnn_language_proof_sha256(
+            params, contract.language_proof_sha256, error)) {
+        return false;
+    }
+    if (!contract.language_proof_sha256.empty() &&
+        !contract.text_encoder_asset.declared) {
+        error = "languageProofSha256 requires complete nativeTextEncoderEvidence.";
+        return false;
+    }
     if (!contract.use_cfg && !contract.negative_prompt.empty()) {
         error = "A negativePrompt cannot affect pixels when useCfg=false.";
         return false;
@@ -1877,6 +2474,22 @@ bool parse_mnn_semantic_execution_contract(
     if (contract.tokenizer_backend == "MNN_MTOK" && !contract.negative_prompt.empty()) {
         error = "MNN_MTOK fallback is allowed only when negativePrompt is empty.";
         return false;
+    }
+    const auto textualInversionCount = params.find("textualInversionCount");
+    if (textualInversionCount != params.end()) {
+        if (!textualInversionCount->is_number_integer() ||
+            textualInversionCount->get<int64_t>() <= 0 ||
+            textualInversionCount->get<int64_t>() > 8) {
+            error = "textualInversionCount must be in [1, 8] when supplied.";
+            return false;
+        }
+        if (contract.runner != "direct" ||
+            contract.tokenizer_backend != "TOKENIZERS_CPP" ||
+            !mnn_contract_uses_community_clip(contract)) {
+            error = "Textual inversion requires a direct host-writable CLIP input_embedding topology.";
+            return false;
+        }
+        contract.textual_inversion_json = params.dump();
     }
     if (!mnn_contract_integer(params, "timetableCount", integerValue, error) ||
         integerValue <= 0 ||
@@ -1942,7 +2555,7 @@ const char* mnn_vae_scaling_wire_name(MnnVaeScalingLocation location) {
 json mnn_native_effective_json(
         const MnnSemanticExecutionContract& contract,
         const MnnNativeExecutionEvidence& evidence) {
-    return json({
+    json result = json({
         {"profileId", contract.profile_id},
         {"profileRevision", contract.profile_revision},
         {"modelFingerprint", contract.model_fingerprint},
@@ -1964,6 +2577,8 @@ json mnn_native_effective_json(
         {"positiveWeightedTokenCount", evidence.positive_weighted_token_count},
         {"negativeWeightedTokenCount", evidence.negative_weighted_token_count},
         {"promptWeightFingerprint", evidence.prompt_weight_fingerprint},
+        {"nativePromptExecutionSha256", evidence.native_prompt_execution_sha256},
+        {"nativePromptBindingStage", "conditioning_consumed"},
         {"embeddingDiskDataType", evidence.embedding_disk_data_type},
         {"vaeScalingLocation", mnn_vae_scaling_wire_name(contract.vae_scaling_location)},
         {"vaeScalingFactor", contract.vae_scaling_factor},
@@ -1980,6 +2595,35 @@ json mnn_native_effective_json(
         {"maskImageExecutionCount", 0},
         {"controlImageExecutionCount", 0}
     });
+    if (!evidence.textual_inversion_evidence.is_null()) {
+        result["textualInversions"] = evidence.textual_inversions;
+        result["textualInversionEvidence"] = evidence.textual_inversion_evidence;
+    }
+    if (evidence.has_execution_assets) {
+        mca::image::execution_assets::append_evidence(result, evidence.execution_assets);
+    }
+    if (evidence.text_encoder_asset.consumed) {
+        json consumed = json::array({json({
+            {"path", evidence.text_encoder_asset.path},
+            {"sha256", evidence.text_encoder_asset.sha256},
+            {"sizeBytes", evidence.text_encoder_asset.size_bytes}
+        })});
+        if (evidence.text_encoder_asset.has_weight) {
+            consumed.push_back({
+                {"path", evidence.text_encoder_asset.weight_path},
+                {"sha256", evidence.text_encoder_asset.weight_sha256},
+                {"sizeBytes", evidence.text_encoder_asset.weight_size_bytes}
+            });
+        }
+        result["consumedTextEncoderAssets"] = consumed;
+        result["consumedTextEncoderClosureSha256"] =
+                mnn_consumed_text_encoder_closure_sha256(evidence.text_encoder_asset);
+        result["consumedTextEncoderBindingStage"] = "opened_descriptor";
+        if (!contract.language_proof_sha256.empty()) {
+            result["languageProofSha256"] = contract.language_proof_sha256;
+        }
+    }
+    return result;
 }
 
 bool mnn_sana_native_effective_json(
@@ -2171,7 +2815,10 @@ bool mnn_sana_native_effective_json(
     return true;
 }
 
-std::string mnn_diffusion_missing_component(const std::string& root, const std::string& family) {
+std::string mnn_diffusion_missing_component(
+        const std::string& root,
+        const std::string& family,
+        const MnnTextEncoderAssetRequest* declaredTextEncoder = nullptr) {
     if (root.empty() || !directory_exists(root)) {
         return is_sana_family(family)
                 ? "MNN Sana requires a complete resource directory."
@@ -2195,14 +2842,25 @@ std::string mnn_diffusion_missing_component(const std::string& root, const std::
         return out.str();
     }
     std::vector<std::string> missing;
-    const bool hasCommunityClip =
-            file_exists(root + "/clip_v2.mnn") &&
-            file_exists(root + "/tokenizer.json") &&
-            file_exists(root + "/token_emb.bin") &&
-            file_exists(root + "/pos_emb.bin");
-    if (!hasCommunityClip) {
-        if (!file_exists(root + "/text_encoder.mnn")) missing.emplace_back("text_encoder.mnn");
-        if (!file_exists(root + "/text_encoder.mnn.weight")) missing.emplace_back("text_encoder.mnn.weight");
+    if (declaredTextEncoder != nullptr && declaredTextEncoder->declared) {
+        if (!file_exists(declaredTextEncoder->path)) {
+            missing.emplace_back("nativeTextEncoderEvidence.path");
+        }
+        if (declaredTextEncoder->has_weight && !file_exists(declaredTextEncoder->weight_path)) {
+            missing.emplace_back("nativeTextEncoderEvidence.auxiliaryAssets[0]");
+        }
+    } else {
+        const bool hasCommunityClip =
+                file_exists(root + "/clip_v2.mnn") &&
+                file_exists(root + "/tokenizer.json") &&
+                file_exists(root + "/token_emb.bin") &&
+                file_exists(root + "/pos_emb.bin");
+        if (!hasCommunityClip) {
+            if (!file_exists(root + "/text_encoder.mnn")) missing.emplace_back("text_encoder.mnn");
+            if (!file_exists(root + "/text_encoder.mnn.weight")) {
+                missing.emplace_back("text_encoder.mnn.weight");
+            }
+        }
     }
     if (!file_exists(root + "/unet.mnn")) missing.emplace_back("unet.mnn");
     if (!file_exists(root + "/unet.mnn.weight")) missing.emplace_back("unet.mnn.weight");
@@ -3327,7 +3985,8 @@ bool build_community_clip_input(
         std::vector<float>& input,
         std::string& error,
         size_t* token_embedding_bytes = nullptr,
-        std::string* token_embedding_data_type = nullptr) {
+        std::string* token_embedding_data_type = nullptr,
+        const mca::image::ClipConditionedSequence* conditioned = nullptr) {
     constexpr int kMaxTextLen = 77;
     constexpr int kEmbeddingSize = 768;
     constexpr int kVocabSize = 49408;
@@ -3337,6 +3996,18 @@ bool build_community_clip_input(
     }
     if (token_weights.size() != kMaxTextLen) {
         error = "CLIP token weight count must be 77.";
+        return false;
+    }
+    if (conditioned != nullptr &&
+        (conditioned->embedding_width != static_cast<size_t>(kEmbeddingSize) ||
+         conditioned->tokens.ids.size() != token_ids.size() ||
+         conditioned->tokens.weights.size() != token_weights.size() ||
+         conditioned->override_mask.size() != token_ids.size() ||
+         conditioned->embedding_overrides.size() !=
+            token_ids.size() * static_cast<size_t>(kEmbeddingSize) ||
+         !std::equal(conditioned->tokens.ids.begin(), conditioned->tokens.ids.end(), token_ids.begin()) ||
+         !std::equal(conditioned->tokens.weights.begin(), conditioned->tokens.weights.end(), token_weights.begin()))) {
+        error = "Textual inversion CLIP-L override contract does not match the executed token sequence.";
         return false;
     }
     const auto tokenPath = root + "/token_emb.bin";
@@ -3377,6 +4048,8 @@ bool build_community_clip_input(
     for (int pos = 0; pos < kMaxTextLen; ++pos) {
         const int id = token_ids[static_cast<size_t>(pos)];
         const float tokenWeight = token_weights[static_cast<size_t>(pos)];
+        const bool overridden = conditioned != nullptr &&
+                conditioned->override_mask[static_cast<size_t>(pos)] != 0U;
         if (id < 0 || id >= kVocabSize) {
             error = "CLIP token id at position " + std::to_string(pos) + " is outside the vocabulary range.";
             return false;
@@ -3385,32 +4058,36 @@ bool build_community_clip_input(
             error = "CLIP token weight at position " + std::to_string(pos) + " is not finite.";
             return false;
         }
-        const size_t elementBytes = tokenFp16 ? sizeof(uint16_t) : sizeof(float);
-        const size_t byteOffset = static_cast<size_t>(id) * kEmbeddingSize * elementBytes;
-        tokenInput.clear();
-        tokenInput.seekg(static_cast<std::streamoff>(byteOffset), std::ios::beg);
-        if (!tokenInput.good()) {
-            error = "Failed to seek token_emb.bin to vocabulary row " + std::to_string(id) + ".";
-            return false;
-        }
-        if (tokenFp16) {
-            tokenInput.read(
-                    reinterpret_cast<char*>(fp16Window.data()),
-                    static_cast<std::streamsize>(fp16Window.size() * sizeof(uint16_t)));
-        } else {
-            tokenInput.read(
-                    reinterpret_cast<char*>(fp32Window.data()),
-                    static_cast<std::streamsize>(fp32Window.size() * sizeof(float)));
-        }
-        if (!tokenInput.good()) {
-            error = "Failed to read a complete token_emb.bin vocabulary row.";
-            return false;
+        if (!overridden) {
+            const size_t elementBytes = tokenFp16 ? sizeof(uint16_t) : sizeof(float);
+            const size_t byteOffset = static_cast<size_t>(id) * kEmbeddingSize * elementBytes;
+            tokenInput.clear();
+            tokenInput.seekg(static_cast<std::streamoff>(byteOffset), std::ios::beg);
+            if (!tokenInput.good()) {
+                error = "Failed to seek token_emb.bin to vocabulary row " + std::to_string(id) + ".";
+                return false;
+            }
+            if (tokenFp16) {
+                tokenInput.read(
+                        reinterpret_cast<char*>(fp16Window.data()),
+                        static_cast<std::streamsize>(fp16Window.size() * sizeof(uint16_t)));
+            } else {
+                tokenInput.read(
+                        reinterpret_cast<char*>(fp32Window.data()),
+                        static_cast<std::streamsize>(fp32Window.size() * sizeof(float)));
+            }
+            if (!tokenInput.good()) {
+                error = "Failed to read a complete token_emb.bin vocabulary row.";
+                return false;
+            }
         }
         for (int dim = 0; dim < kEmbeddingSize; ++dim) {
             const size_t out_index = static_cast<size_t>(pos) * kEmbeddingSize + dim;
-            const float tokenValue = tokenFp16
-                    ? fp16_to_float(fp16Window[static_cast<size_t>(dim)])
-                    : fp32Window[static_cast<size_t>(dim)];
+            const float tokenValue = overridden
+                    ? conditioned->embedding_overrides[out_index]
+                    : (tokenFp16
+                        ? fp16_to_float(fp16Window[static_cast<size_t>(dim)])
+                        : fp32Window[static_cast<size_t>(dim)]);
             const float value = tokenValue * tokenWeight + pos_emb[out_index];
             if (!std::isfinite(value)) {
                 error = "token_emb.bin or pos_emb.bin produced a non-finite CLIP input value.";
@@ -3424,6 +4101,7 @@ bool build_community_clip_input(
 
 bool run_community_clip_encoder_direct(
         const std::string& root,
+        const std::string& pinnedExternalWeightPath,
         const std::vector<int>& token_ids,
         const std::vector<float>& token_weights,
         const std::string& backendMode,
@@ -3431,13 +4109,15 @@ bool run_community_clip_encoder_direct(
         FloatTensorData& embeddings,
         std::string& error,
         json* debug,
-        std::string* embedding_disk_data_type = nullptr) {
+        std::string* embedding_disk_data_type = nullptr,
+        const mca::image::ClipConditionedSequence* conditioned = nullptr,
+        const MnnOpenedTextEncoderBinding* textEncoderBinding = nullptr) {
     std::vector<float> input_values;
     size_t token_embedding_bytes = 0;
     std::string token_embedding_type;
     if (!build_community_clip_input(
             root, token_ids, token_weights, input_values, error,
-            &token_embedding_bytes, &token_embedding_type)) {
+            &token_embedding_bytes, &token_embedding_type, conditioned)) {
         return false;
     }
     if (embedding_disk_data_type != nullptr) {
@@ -3455,18 +4135,37 @@ bool run_community_clip_encoder_direct(
         }
         (*debug)["tokenIdSamples"] = tokenSamples;
     }
-    const auto path = root + "/clip_v2.mnn";
+    const bool hasDeclaredBinding =
+            textEncoderBinding != nullptr && textEncoderBinding->active;
+    const std::string path = hasDeclaredBinding
+            ? textEncoderBinding->graph.opened_path()
+            : root + "/clip_v2.mnn";
+    const char* graphLabel = hasDeclaredBinding ? "declared MNN text encoder" : "clip_v2.mnn";
+    if (path.empty()) {
+        error = "The declared MNN text encoder descriptor is no longer open.";
+        return false;
+    }
     std::unique_ptr<MNN::Interpreter> interpreter(MNN::Interpreter::createFromFile(path.c_str()));
     if (!interpreter) {
-        error = "Failed to create clip_v2.mnn interpreter.";
+        error = std::string("Failed to create ") + graphLabel + " interpreter.";
         return false;
+    }
+    if (hasDeclaredBinding && textEncoderBinding->weight.fd >= 0) {
+        const auto weightPath = textEncoderBinding->weight.opened_path();
+        if (weightPath.empty()) {
+            error = "The declared MNN text encoder weight descriptor is no longer open.";
+            return false;
+        }
+        interpreter->setExternalFile(weightPath.c_str());
+    } else if (!hasDeclaredBinding && !pinnedExternalWeightPath.empty()) {
+        interpreter->setExternalFile(pinnedExternalWeightPath.c_str());
     }
     configure_direct_interpreter(interpreter.get());
     MNN::ScheduleConfig config;
     MNN::BackendConfig backendConfig;
     std::string config_error;
     if (!configure_mnn_session(config, backendConfig, backendMode, threads, config_error)) {
-        error = "clip_v2.mnn session configuration failed: " + config_error;
+        error = std::string(graphLabel) + " session configuration failed: " + config_error;
         return false;
     }
     // The community CLIP transformer is numerically fragile with low precision CPU
@@ -3475,13 +4174,13 @@ bool run_community_clip_encoder_direct(
     backendConfig.memory = MNN::BackendConfig::Memory_Normal;
     auto* session = interpreter->createSession(config);
     if (session == nullptr) {
-        error = "Failed to create clip_v2.mnn session.";
+        error = std::string("Failed to create ") + graphLabel + " session.";
         return false;
     }
     auto* input = interpreter->getSessionInput(session, "input_embedding");
     if (input == nullptr) {
         interpreter->releaseSession(session);
-        error = "clip_v2.mnn input_embedding tensor is missing.";
+        error = std::string(graphLabel) + " input_embedding tensor is missing.";
         return false;
     }
     interpreter->resizeTensor(input, {1, 77, 768});
@@ -3491,7 +4190,7 @@ bool run_community_clip_encoder_direct(
     std::string copyError;
     if (!copy_vector_to_tensor<float>(input, input_values, copyError)) {
         interpreter->releaseSession(session);
-        error = "clip_v2.mnn input copy failed: " + copyError;
+        error = std::string(graphLabel) + " input copy failed: " + copyError;
         return false;
     }
     interpreter->resizeSession(session, 1);
@@ -3501,7 +4200,7 @@ bool run_community_clip_encoder_direct(
     }
     if (!copy_vector_to_tensor<float>(input, input_values, copyError)) {
         interpreter->releaseSession(session);
-        error = "clip_v2.mnn input recopy failed after resize: " + copyError;
+        error = std::string(graphLabel) + " input recopy failed after resize: " + copyError;
         return false;
     }
     if (debug != nullptr) {
@@ -3510,7 +4209,7 @@ bool run_community_clip_encoder_direct(
     const auto code = interpreter->runSession(session);
     if (code != MNN::NO_ERROR) {
         interpreter->releaseSession(session);
-        error = "clip_v2.mnn runSession failed: " + std::to_string(static_cast<int>(code)) +
+        error = std::string(graphLabel) + " runSession failed: " + std::to_string(static_cast<int>(code)) +
                 " (" + mnn_error_code_name(code) + ")";
         return false;
     }
@@ -3537,11 +4236,11 @@ bool run_community_clip_encoder_direct(
     const bool ok = copy_tensor_to_float_vector(tensor, embeddings, error);
     interpreter->releaseSession(session);
     if (!ok) {
-        error = "clip_v2.mnn output copy failed: " + error;
+        error = std::string(graphLabel) + " output copy failed: " + error;
         return false;
     }
     if (!validate_float_tensor_contract(
-            embeddings, {1, 77, 768}, "clip_v2.mnn output", error)) {
+            embeddings, {1, 77, 768}, std::string(graphLabel) + " output", error)) {
         return false;
     }
     if (debug != nullptr) {
@@ -3551,8 +4250,10 @@ bool run_community_clip_encoder_direct(
     return true;
 }
 
-bool has_community_clip_bundle(const std::string& root) {
-    return file_exists(root + "/clip_v2.mnn") &&
+bool has_community_clip_bundle(
+        const std::string& root,
+        const std::string& graphPath = "") {
+    return file_exists(graphPath.empty() ? root + "/clip_v2.mnn" : graphPath) &&
             file_exists(root + "/tokenizer.json") &&
             file_exists(root + "/token_emb.bin") &&
             file_exists(root + "/pos_emb.bin");
@@ -3566,7 +4267,8 @@ bool build_clip_embedding_input(
         const std::string& positionFile,
         int embeddingSize,
         std::vector<float>& input,
-        std::string& error) {
+        std::string& error,
+        const mca::image::ClipConditionedSequence* conditioned = nullptr) {
     constexpr int kMaxTextLen = 77;
     constexpr int kVocabSize = 49408;
     if (token_ids.size() != kMaxTextLen) {
@@ -3579,6 +4281,18 @@ bool build_clip_embedding_input(
     }
     if (embeddingSize <= 0) {
         error = "CLIP embedding size must be positive.";
+        return false;
+    }
+    if (conditioned != nullptr &&
+        (conditioned->embedding_width != static_cast<size_t>(embeddingSize) ||
+         conditioned->tokens.ids.size() != token_ids.size() ||
+         conditioned->tokens.weights.size() != token_weights.size() ||
+         conditioned->override_mask.size() != token_ids.size() ||
+         conditioned->embedding_overrides.size() !=
+            token_ids.size() * static_cast<size_t>(embeddingSize) ||
+         !std::equal(conditioned->tokens.ids.begin(), conditioned->tokens.ids.end(), token_ids.begin()) ||
+         !std::equal(conditioned->tokens.weights.begin(), conditioned->tokens.weights.end(), token_weights.begin()))) {
+        error = "Textual inversion CLIP override contract does not match the executed token sequence.";
         return false;
     }
     const auto token_bytes = read_binary_bytes(root + "/" + tokenFile);
@@ -3620,8 +4334,12 @@ bool build_clip_embedding_input(
                     static_cast<size_t>(dim);
             const size_t token_index = static_cast<size_t>(id) * static_cast<size_t>(embeddingSize) +
                     static_cast<size_t>(dim);
-            const float value =
-                    fp16_to_float(token_emb[token_index]) * tokenWeight + pos_emb[out_index];
+            const bool overridden = conditioned != nullptr &&
+                    conditioned->override_mask[static_cast<size_t>(pos)] != 0U;
+            const float tokenValue = overridden
+                    ? conditioned->embedding_overrides[out_index]
+                    : fp16_to_float(token_emb[token_index]);
+            const float value = tokenValue * tokenWeight + pos_emb[out_index];
             if (!std::isfinite(value)) {
                 error = tokenFile + " or " + positionFile +
                         " produced a non-finite CLIP input value.";
@@ -3686,6 +4404,7 @@ MNN::Tensor* find_named_output_by_shape(
 bool run_sdxl_clip_encoder_direct(
         const std::string& root,
         const std::string& modelFile,
+        const std::string& pinnedExternalWeightPath,
         const std::string& tokenFile,
         const std::string& positionFile,
         int embeddingSize,
@@ -3696,7 +4415,8 @@ bool run_sdxl_clip_encoder_direct(
         FloatTensorData& hidden,
         FloatTensorData* pooled,
         std::string& error,
-        json* debug) {
+        json* debug,
+        const mca::image::ClipConditionedSequence* conditioned = nullptr) {
     std::vector<float> input_values;
     if (!build_clip_embedding_input(
             root,
@@ -3706,7 +4426,8 @@ bool run_sdxl_clip_encoder_direct(
             positionFile,
             embeddingSize,
             input_values,
-            error)) {
+            error,
+            conditioned)) {
         return false;
     }
     const auto path = root + "/" + modelFile;
@@ -3715,10 +4436,7 @@ bool run_sdxl_clip_encoder_direct(
         error = "Failed to create " + modelFile + " interpreter.";
         return false;
     }
-    const auto weightPath = path + ".weight";
-    if (file_exists(weightPath)) {
-        interpreter->setExternalFile(weightPath.c_str());
-    }
+    interpreter->setExternalFile(pinnedExternalWeightPath.c_str());
     configure_direct_interpreter(interpreter.get());
     MNN::ScheduleConfig config;
     MNN::BackendConfig backendConfig;
@@ -3945,9 +4663,28 @@ json encode_sdxl_prompt_conditioning_to_file(
         int height,
         const std::string& backendMode,
         int threads,
-        bool promptWeightingEnabled) {
+        bool useCfg,
+        bool promptWeightingEnabled,
+        const std::string& textualInversionJson) {
     if (is_blank_text(prompt)) {
         return json({{"ok", false}, {"error", "Prompt is empty."}, {"format", "sdxl_qnn_conditioning"}});
+    }
+    if (!useCfg && !is_blank_text(negativePrompt)) {
+        return json({
+            {"ok", false},
+            {"error", "SDXL no-CFG conditioning must not receive a negative prompt."},
+            {"format", "sdxl_qnn_conditioning"}
+        });
+    }
+    if (!mca::image::prompt_language::is_supported_chinese_han_diffusion_prompt_pair(
+            prompt,
+            negativePrompt)) {
+        return json({
+            {"ok", false},
+            {"errorCode", "UNSUPPORTED_NATIVE_PROMPT_LANGUAGE"},
+            {"error", "Image prompt syntax must use Chinese Han text, supported CJK punctuation, and safe ASCII diffusion prompt syntax."},
+            {"format", "sdxl_qnn_conditioning"}
+        });
     }
     if (width < 256 || width > 2048 || height < 256 || height > 2048 ||
         width % 8 != 0 || height % 8 != 0) {
@@ -3967,6 +4704,34 @@ json encode_sdxl_prompt_conditioning_to_file(
         });
     }
     std::string error;
+    const bool textualInversionRequested = !textualInversionJson.empty();
+    const auto clip1WeightPath = join_path(root, "clip.mnn.weight");
+    const bool useClip1Weight = nonempty_regular_file_exists(clip1WeightPath);
+    const std::string pinnedClip1WeightPath = useClip1Weight ? clip1WeightPath : "";
+    const std::string pinnedClip2WeightPath = join_path(root, "clip_2.mnn.weight");
+    mca::image::execution_assets::Binding executionAssets;
+    if (textualInversionRequested && !prepare_mnn_execution_assets(
+            textualInversionJson, "QNN_HTP", executionAssets, error)) {
+        return mnn_execution_asset_failure(error, "sdxl_qnn_conditioning");
+    }
+    if (textualInversionRequested) {
+        std::vector<std::string> requiredAssetPaths = {
+            join_path(root, "clip.mnn"),
+            join_path(root, "clip_2.mnn"),
+            join_path(root, "clip_2.mnn.weight"),
+            join_path(root, "tokenizer.json"),
+            join_path(root, "token_emb.bin"),
+            join_path(root, "token_emb_2.bin"),
+            join_path(root, "pos_emb.bin"),
+            join_path(root, "pos_emb_2.bin"),
+        };
+        if (useClip1Weight) {
+            requiredAssetPaths.push_back(clip1WeightPath);
+        }
+        if (!mnn_execution_assets_match(executionAssets, requiredAssetPaths, error)) {
+            return mnn_execution_asset_failure(error, "sdxl_qnn_conditioning");
+        }
+    }
     mca::image::ClipTokenizerConfig clip1TokenizerConfig;
     clip1TokenizerConfig.bos_id = 49406;
     clip1TokenizerConfig.eos_id = 49407;
@@ -3983,27 +4748,91 @@ json encode_sdxl_prompt_conditioning_to_file(
             negativePrompt,
             clip1TokenizerConfig,
             &clip1TokenPair,
-            &error) ||
+            &error,
+            useCfg) ||
         !mca::image::tokenize_clip_pair_from_json(
             root + "/tokenizer.json",
             prompt,
             negativePrompt,
             clip2TokenizerConfig,
             &clip2TokenPair,
-            &error)) {
+            &error,
+            useCfg)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
-    const auto clip1StandardIds = clip1TokenPair.negative_then_positive();
-    const auto clip2StandardIds = clip2TokenPair.negative_then_positive();
+    mca::image::textual_inversion::Selection textualInversionSelection;
+    mca::image::textual_inversion::Audit textualInversionAudit;
+    mca::image::ClipConditionedPair clip1ConditionedPair;
+    mca::image::ClipConditionedPair clip2ConditionedPair;
+    if (textualInversionRequested) {
+        if (!mca::image::textual_inversion::load_selection(
+                textualInversionJson,
+                "QNN_HTP",
+                true,
+                &textualInversionSelection,
+                &textualInversionAudit,
+                &error) ||
+            !mnn_selection_matches_execution_assets(
+                textualInversionSelection, executionAssets, error) ||
+            !mca::image::tokenize_clip_pair_with_textual_inversion_from_json(
+                root + "/tokenizer.json",
+                prompt,
+                negativePrompt,
+                clip1TokenizerConfig,
+                mca::image::textual_inversion::clip_embeddings(textualInversionSelection, false),
+                &clip1ConditionedPair,
+                &error,
+                useCfg) ||
+            !mca::image::tokenize_clip_pair_with_textual_inversion_from_json(
+                root + "/tokenizer.json",
+                prompt,
+                negativePrompt,
+                clip2TokenizerConfig,
+                mca::image::textual_inversion::clip_embeddings(textualInversionSelection, true),
+                &clip2ConditionedPair,
+                &error,
+                useCfg)) {
+            return json({
+                {"ok", false},
+                {"errorCode", "TEXTUAL_INVERSION_CONDITIONING_FAILED"},
+                {"error", error},
+                {"format", "sdxl_qnn_conditioning"}
+            });
+        }
+        mca::image::textual_inversion::record_conditioned_pair(
+            clip1ConditionedPair, false, &textualInversionAudit);
+        mca::image::textual_inversion::record_conditioned_pair(
+            clip2ConditionedPair, true, &textualInversionAudit);
+        clip1TokenPair.negative = clip1ConditionedPair.negative.tokens;
+        clip1TokenPair.positive = clip1ConditionedPair.positive.tokens;
+        clip2TokenPair.negative = clip2ConditionedPair.negative.tokens;
+        clip2TokenPair.positive = clip2ConditionedPair.positive.tokens;
+    }
+    const auto clip1StandardIds = useCfg
+        ? clip1TokenPair.negative_then_positive()
+        : clip1TokenPair.positive.ids;
+    const auto clip2StandardIds = useCfg
+        ? clip2TokenPair.negative_then_positive()
+        : clip2TokenPair.positive.ids;
     const std::vector<int> clip1Ids(clip1StandardIds.begin(), clip1StandardIds.end());
     const std::vector<int> clip2Ids(clip2StandardIds.begin(), clip2StandardIds.end());
-    if (clip1Ids.size() != 154 || clip2Ids.size() != 154) {
+    const size_t expectedTokenIds = useCfg ? 154U : 77U;
+    if (clip1Ids.size() != expectedTokenIds || clip2Ids.size() != expectedTokenIds) {
         return json({{"ok", false}, {"error", "CLIP tokenizer returned invalid id count."}});
     }
-    std::vector<int> clip1NegIds(clip1Ids.begin(), clip1Ids.begin() + 77);
-    std::vector<int> clip1PosIds(clip1Ids.begin() + 77, clip1Ids.end());
-    std::vector<int> clip2NegIds(clip2Ids.begin(), clip2Ids.begin() + 77);
-    std::vector<int> clip2PosIds(clip2Ids.begin() + 77, clip2Ids.end());
+    std::vector<int> clip1NegIds;
+    std::vector<int> clip1PosIds;
+    std::vector<int> clip2NegIds;
+    std::vector<int> clip2PosIds;
+    if (useCfg) {
+        clip1NegIds.assign(clip1Ids.begin(), clip1Ids.begin() + 77);
+        clip1PosIds.assign(clip1Ids.begin() + 77, clip1Ids.end());
+        clip2NegIds.assign(clip2Ids.begin(), clip2Ids.begin() + 77);
+        clip2PosIds.assign(clip2Ids.begin() + 77, clip2Ids.end());
+    } else {
+        clip1PosIds = clip1Ids;
+        clip2PosIds = clip2Ids;
+    }
 
     FloatTensorData negClip1;
     FloatTensorData posClip1;
@@ -4015,48 +4844,58 @@ json encode_sdxl_prompt_conditioning_to_file(
     const bool includeDebug =
             outputPath.find("/image_bench/runs/") != std::string::npos ||
             outputPath.find("\\image_bench\\runs\\") != std::string::npos;
-    if (!run_sdxl_clip_encoder_direct(
-            root, "clip.mnn", "token_emb.bin", "pos_emb.bin", 768, clip1NegIds,
+    if (useCfg && !run_sdxl_clip_encoder_direct(
+            root, "clip.mnn", pinnedClip1WeightPath,
+            "token_emb.bin", "pos_emb.bin", 768, clip1NegIds,
             clip1TokenPair.negative.weights,
             canonicalBackend, threads, negClip1, nullptr, error,
-            includeDebug ? &debug["clip1_negative"] : nullptr)) {
+            includeDebug ? &debug["clip1_negative"] : nullptr,
+            textualInversionRequested ? &clip1ConditionedPair.negative : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
     if (!run_sdxl_clip_encoder_direct(
-            root, "clip.mnn", "token_emb.bin", "pos_emb.bin", 768, clip1PosIds,
+            root, "clip.mnn", pinnedClip1WeightPath,
+            "token_emb.bin", "pos_emb.bin", 768, clip1PosIds,
             clip1TokenPair.positive.weights,
             canonicalBackend, threads, posClip1, nullptr, error,
-            includeDebug ? &debug["clip1_positive"] : nullptr)) {
+            includeDebug ? &debug["clip1_positive"] : nullptr,
+            textualInversionRequested ? &clip1ConditionedPair.positive : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
-    if (!run_sdxl_clip_encoder_direct(
-            root, "clip_2.mnn", "token_emb_2.bin", "pos_emb_2.bin", 1280, clip2NegIds,
+    if (useCfg && !run_sdxl_clip_encoder_direct(
+            root, "clip_2.mnn", pinnedClip2WeightPath,
+            "token_emb_2.bin", "pos_emb_2.bin", 1280, clip2NegIds,
             clip2TokenPair.negative.weights,
             canonicalBackend, threads, negClip2, &negPooled, error,
-            includeDebug ? &debug["clip2_negative"] : nullptr)) {
+            includeDebug ? &debug["clip2_negative"] : nullptr,
+            textualInversionRequested ? &clip2ConditionedPair.negative : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
     if (!run_sdxl_clip_encoder_direct(
-            root, "clip_2.mnn", "token_emb_2.bin", "pos_emb_2.bin", 1280, clip2PosIds,
+            root, "clip_2.mnn", pinnedClip2WeightPath,
+            "token_emb_2.bin", "pos_emb_2.bin", 1280, clip2PosIds,
             clip2TokenPair.positive.weights,
             canonicalBackend, threads, posClip2, &posPooled, error,
-            includeDebug ? &debug["clip2_positive"] : nullptr)) {
+            includeDebug ? &debug["clip2_positive"] : nullptr,
+            textualInversionRequested ? &clip2ConditionedPair.positive : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
     constexpr int kTextLen = 77;
     constexpr int kClip1 = 768;
     constexpr int kClip2 = 1280;
     constexpr int kHidden = kClip1 + kClip2;
-    if (!validate_float_tensor_contract(negClip1, {1, kTextLen, kClip1}, "SDXL negative clip1", error) ||
-        !validate_float_tensor_contract(posClip1, {1, kTextLen, kClip1}, "SDXL positive clip1", error) ||
+    if ((useCfg && (!validate_float_tensor_contract(negClip1, {1, kTextLen, kClip1}, "SDXL negative clip1", error) ||
         !validate_float_tensor_contract(negClip2, {1, kTextLen, kClip2}, "SDXL negative clip2", error) ||
+        !validate_float_tensor_contract(negPooled, {1, kClip2}, "SDXL negative pooled output", error))) ||
+        !validate_float_tensor_contract(posClip1, {1, kTextLen, kClip1}, "SDXL positive clip1", error) ||
         !validate_float_tensor_contract(posClip2, {1, kTextLen, kClip2}, "SDXL positive clip2", error) ||
-        !validate_float_tensor_contract(negPooled, {1, kClip2}, "SDXL negative pooled output", error) ||
         !validate_float_tensor_contract(posPooled, {1, kClip2}, "SDXL positive pooled output", error)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
     std::vector<float> combined;
-    combined.reserve(static_cast<size_t>(2 * kTextLen * kHidden + 2 * kClip2 + 6));
+    const size_t branchCount = useCfg ? 2U : 1U;
+    combined.reserve(static_cast<size_t>(branchCount * kTextLen * kHidden +
+        branchCount * kClip2 + 6));
     auto appendHidden = [&](const FloatTensorData& clip1, const FloatTensorData& clip2) {
         for (int token = 0; token < kTextLen; ++token) {
             const size_t clip1Base = static_cast<size_t>(token) * kClip1;
@@ -4065,9 +4904,11 @@ json encode_sdxl_prompt_conditioning_to_file(
             combined.insert(combined.end(), clip2.values.begin() + clip2Base, clip2.values.begin() + clip2Base + kClip2);
         }
     };
-    appendHidden(negClip1, negClip2);
+    if (useCfg) appendHidden(negClip1, negClip2);
     appendHidden(posClip1, posClip2);
-    combined.insert(combined.end(), negPooled.values.begin(), negPooled.values.end());
+    if (useCfg) {
+        combined.insert(combined.end(), negPooled.values.begin(), negPooled.values.end());
+    }
     combined.insert(combined.end(), posPooled.values.begin(), posPooled.values.end());
     combined.insert(combined.end(), {
             static_cast<float>(height),
@@ -4084,12 +4925,19 @@ json encode_sdxl_prompt_conditioning_to_file(
     std::memcpy(artifactBytes.data(), combined.data(), artifactBytes.size());
     const std::string conditioningArtifactSha256 =
             mca::image::sha256_hex_bytes(artifactBytes);
-    if (conditioningArtifactSha256.size() != 64U) {
+    const std::string nativePromptExecutionSha256 =
+            mca::image::image_prompt_execution_sha256(prompt, negativePrompt);
+    if (conditioningArtifactSha256.size() != 64U ||
+        nativePromptExecutionSha256.size() != 64U) {
         return json({
                 {"ok", false},
-                {"error", "SDXL conditioning artifact SHA-256 could not be derived."},
+                {"error", "SDXL conditioning artifact or native prompt SHA-256 could not be derived."},
                 {"format", "sdxl_qnn_conditioning"}
         });
+    }
+    if (textualInversionRequested &&
+        !finalize_mnn_execution_assets(executionAssets, error)) {
+        return mnn_execution_asset_failure(error, "sdxl_qnn_conditioning");
     }
     json result = json({
             {"ok", true},
@@ -4097,37 +4945,59 @@ json encode_sdxl_prompt_conditioning_to_file(
             {"bytes", static_cast<long long>(combined.size() * sizeof(float))},
             {"elements", static_cast<long long>(combined.size())},
             {"format", "sdxl_qnn_conditioning"},
-            {"hiddenShape", {2, 77, 2048}},
-            {"pooledShape", {2, 1280}},
+            {"hiddenShape", {branchCount, 77, 2048}},
+            {"pooledShape", {branchCount, 1280}},
             {"timeIdsShape", {1, 6}},
             {"conditioningExecutionMode", "external_mnn_sdxl_embeddings"},
             {"conditioningBackend", "MNN"},
             {"conditioningGraph", "clip.mnn+clip_2.mnn"},
-            {"conditioningEncoderExecutionCount", 4},
-            {"conditioningOrder", "negative_then_positive"},
+            {"conditioningEncoderExecutionCount", useCfg ? 4 : 2},
+            {"conditioningOrder", useCfg ? "negative_then_positive" : "positive_only"},
             {"conditioningArtifactSha256", conditioningArtifactSha256},
+            {"nativePromptExecutionSha256", nativePromptExecutionSha256},
+            {"nativePromptBindingStage", "conditioning_encoded"},
             {"clip1PadId", clip1TokenizerConfig.pad_id},
             {"clip2PadId", clip2TokenizerConfig.pad_id},
             {"clipPadRules", {
                 {"clip1", "EOS"},
                 {"clip2", "ZERO"}
             }},
-            {"negativeHiddenStats", float_vector_stats_json(std::vector<float>(combined.begin(), combined.begin() + kTextLen * kHidden))},
-            {"positiveHiddenStats", float_vector_stats_json(std::vector<float>(combined.begin() + kTextLen * kHidden, combined.begin() + 2 * kTextLen * kHidden))},
-            {"positiveNegativeAbsDiffStats", float_vector_abs_diff_stats_json(
-                    std::vector<float>(combined.begin() + kTextLen * kHidden, combined.begin() + 2 * kTextLen * kHidden),
-                    std::vector<float>(combined.begin(), combined.begin() + kTextLen * kHidden))},
             {"backendMode", canonicalBackend}
     });
+    const size_t hiddenElementCount = static_cast<size_t>(kTextLen * kHidden);
+    const size_t positiveHiddenOffset = useCfg ? hiddenElementCount : 0U;
+    result["positiveHiddenStats"] = float_vector_stats_json(
+        std::vector<float>(
+            combined.begin() + positiveHiddenOffset,
+            combined.begin() + positiveHiddenOffset + hiddenElementCount));
+    if (useCfg) {
+        result["negativeHiddenStats"] = float_vector_stats_json(
+            std::vector<float>(combined.begin(), combined.begin() + hiddenElementCount));
+        result["positiveNegativeAbsDiffStats"] = float_vector_abs_diff_stats_json(
+            std::vector<float>(
+                combined.begin() + hiddenElementCount,
+                combined.begin() + 2U * hiddenElementCount),
+            std::vector<float>(combined.begin(), combined.begin() + hiddenElementCount));
+    }
     if (!append_clip_prompt_weighting_evidence(
-            result, clip1TokenPair, promptWeightingEnabled, true, error)) {
+            result, clip1TokenPair, promptWeightingEnabled, useCfg, error)) {
         return json({{"ok", false}, {"error", error}, {"format", "sdxl_qnn_conditioning"}});
     }
-    // The isolated QNN consumer receives the serialized dual-CLIP float
-    // artifact, not either tokenizer sequence independently. Bind the
+    // The isolated QNN consumer receives the serialized CLIP float artifact,
+    // not either tokenizer sequence independently. Bind the
     // cross-process fingerprint to those exact bytes while retaining the
     // weighted-token counts as separate execution evidence.
     result["promptWeightFingerprint"] = conditioningArtifactSha256;
+    if (textualInversionRequested) {
+        result["textualInversions"] =
+            mca::image::textual_inversion::artifacts_json(textualInversionSelection);
+        result["textualInversionEvidence"] =
+            mca::image::textual_inversion::evidence_json(
+                textualInversionSelection,
+                textualInversionAudit,
+                false);
+        mca::image::execution_assets::append_evidence(result, executionAssets);
+    }
     if (includeDebug) {
         result["debug"] = debug;
     }
@@ -4142,8 +5012,32 @@ json encode_community_clip_embeddings_to_file(
         const std::string& backendMode,
         int threads,
         bool useCfg,
-        bool promptWeightingEnabled = true) {
+        bool promptWeightingEnabled = true,
+        const std::string& textualInversionJson = "") {
     std::string error;
+    const bool textualInversionRequested = !textualInversionJson.empty();
+    const auto clipWeightPath = join_path(root, "clip_v2.mnn.weight");
+    const bool useClipWeight = nonempty_regular_file_exists(clipWeightPath);
+    const std::string pinnedClipWeightPath = useClipWeight ? clipWeightPath : "";
+    mca::image::execution_assets::Binding executionAssets;
+    if (textualInversionRequested && !prepare_mnn_execution_assets(
+            textualInversionJson, "QNN_HTP", executionAssets, error)) {
+        return mnn_execution_asset_failure(error, "community_clip");
+    }
+    if (textualInversionRequested) {
+        std::vector<std::string> requiredAssetPaths = {
+            join_path(root, "clip_v2.mnn"),
+            join_path(root, "tokenizer.json"),
+            join_path(root, "token_emb.bin"),
+            join_path(root, "pos_emb.bin"),
+        };
+        if (useClipWeight) {
+            requiredAssetPaths.push_back(clipWeightPath);
+        }
+        if (!mnn_execution_assets_match(executionAssets, requiredAssetPaths, error)) {
+            return mnn_execution_asset_failure(error, "community_clip");
+        }
+    }
     mca::image::ClipTokenizerConfig tokenizerConfig;
     tokenizerConfig.bos_id = 49406;
     tokenizerConfig.eos_id = 49407;
@@ -4159,6 +5053,39 @@ json encode_community_clip_embeddings_to_file(
             &tokenPair,
             &error)) {
         return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
+    }
+    mca::image::textual_inversion::Selection textualInversionSelection;
+    mca::image::textual_inversion::Audit textualInversionAudit;
+    mca::image::ClipConditionedPair conditionedPair;
+    if (textualInversionRequested) {
+        if (!mca::image::textual_inversion::load_selection(
+                textualInversionJson,
+                "QNN_HTP",
+                false,
+                &textualInversionSelection,
+                &textualInversionAudit,
+                &error) ||
+            !mnn_selection_matches_execution_assets(
+                textualInversionSelection, executionAssets, error) ||
+            !mca::image::tokenize_clip_pair_with_textual_inversion_from_json(
+                root + "/tokenizer.json",
+                prompt,
+                negativePrompt,
+                tokenizerConfig,
+                mca::image::textual_inversion::clip_embeddings(textualInversionSelection, false),
+                &conditionedPair,
+                &error)) {
+            return json({
+                {"ok", false},
+                {"errorCode", "TEXTUAL_INVERSION_CONDITIONING_FAILED"},
+                {"error", error},
+                {"format", "community_clip"}
+            });
+        }
+        mca::image::textual_inversion::record_conditioned_pair(
+            conditionedPair, false, &textualInversionAudit);
+        tokenPair.negative = conditionedPair.negative.tokens;
+        tokenPair.positive = conditionedPair.positive.tokens;
     }
     const auto standardIds = tokenPair.negative_then_positive();
     const std::vector<int> ids(standardIds.begin(), standardIds.end());
@@ -4184,6 +5111,7 @@ json encode_community_clip_embeddings_to_file(
     if (useCfg) {
         if (!run_community_clip_encoder_direct(
                 root,
+                pinnedClipWeightPath,
                 neg_ids,
                 tokenPair.negative.weights,
                 backendMode,
@@ -4191,12 +5119,14 @@ json encode_community_clip_embeddings_to_file(
                 negative,
                 error,
                 includeDebug ? &negativeDebug : nullptr,
-                &negativeEmbeddingType)) {
+                &negativeEmbeddingType,
+                textualInversionRequested ? &conditionedPair.negative : nullptr)) {
             return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
         }
     }
     if (!run_community_clip_encoder_direct(
             root,
+            pinnedClipWeightPath,
             pos_ids,
             tokenPair.positive.weights,
             backendMode,
@@ -4204,7 +5134,8 @@ json encode_community_clip_embeddings_to_file(
             positive,
             error,
             includeDebug ? &positiveDebug : nullptr,
-            &positiveEmbeddingType)) {
+            &positiveEmbeddingType,
+            textualInversionRequested ? &conditionedPair.positive : nullptr)) {
         return json({{"ok", false}, {"error", error}, {"format", "community_clip"}});
     }
     if (useCfg && negativeEmbeddingType != positiveEmbeddingType) {
@@ -4233,12 +5164,21 @@ json encode_community_clip_embeddings_to_file(
     std::memcpy(artifactBytes.data(), combined.data(), artifactBytes.size());
     const std::string conditioningArtifactSha256 =
             mca::image::sha256_hex_bytes(artifactBytes);
-    if (conditioningArtifactSha256.size() != 64U) {
+    const std::string nativePromptExecutionSha256 =
+            mca::image::image_prompt_execution_sha256(
+                    prompt,
+                    useCfg ? negativePrompt : std::string());
+    if (conditioningArtifactSha256.size() != 64U ||
+        nativePromptExecutionSha256.size() != 64U) {
         return json({
             {"ok", false},
-            {"error", "Community CLIP conditioning artifact SHA-256 could not be derived."},
+            {"error", "Community CLIP conditioning artifact or native prompt SHA-256 could not be derived."},
             {"format", "community_clip"}
         });
+    }
+    if (textualInversionRequested &&
+        !finalize_mnn_execution_assets(executionAssets, error)) {
+        return mnn_execution_asset_failure(error, "community_clip");
     }
     json result = {
         {"ok", true},
@@ -4256,6 +5196,8 @@ json encode_community_clip_embeddings_to_file(
         {"conditioningEncoderExecutionCount", useCfg ? 2 : 1},
         {"conditioningOrder", useCfg ? "negative_then_positive" : "positive_only"},
         {"conditioningArtifactSha256", conditioningArtifactSha256},
+        {"nativePromptExecutionSha256", nativePromptExecutionSha256},
+        {"nativePromptBindingStage", "conditioning_encoded"},
         {"embeddingDiskDataType", positiveEmbeddingType},
         {"backendMode", backendMode == "opencl" || backendMode == "gpu" ? "opencl" : "cpu"}
     };
@@ -4273,6 +5215,16 @@ json encode_community_clip_embeddings_to_file(
     // weighting counts as separate evidence, but bind the fingerprint field
     // to the exact serialized float payload.
     result["promptWeightFingerprint"] = conditioningArtifactSha256;
+    if (textualInversionRequested) {
+        result["textualInversions"] =
+            mca::image::textual_inversion::artifacts_json(textualInversionSelection);
+        result["textualInversionEvidence"] =
+            mca::image::textual_inversion::evidence_json(
+                textualInversionSelection,
+                textualInversionAudit,
+                false);
+        mca::image::execution_assets::append_evidence(result, executionAssets);
+    }
     if (!useCfg) {
         result["negativeWeightedTokenCount"] = 0;
         result["promptWeightingApplied"] =
@@ -4447,39 +5399,58 @@ bool run_text_encoder_direct(
         const std::string& backendMode,
         int threads,
         FloatTensorData& embeddings,
-        std::string& error) {
+        std::string& error,
+        const MnnOpenedTextEncoderBinding* textEncoderBinding = nullptr) {
     if (ids.size() != 77U && ids.size() != 2U * 77U) {
         error = "text_encoder requires exactly 77 conditional ids or 154 CFG-pair ids.";
         return false;
     }
     const int batch = ids.size() == 77U ? 1 : 2;
-    const auto path = root + "/text_encoder.mnn";
-    std::unique_ptr<MNN::Interpreter> interpreter(MNN::Interpreter::createFromFile(path.c_str()));
-    if (!interpreter) {
-        error = "Failed to create text_encoder interpreter.";
+    const bool hasDeclaredBinding =
+            textEncoderBinding != nullptr && textEncoderBinding->active;
+    const std::string path = hasDeclaredBinding
+            ? textEncoderBinding->graph.opened_path()
+            : root + "/text_encoder.mnn";
+    const char* graphLabel = hasDeclaredBinding ? "declared MNN text encoder" : "text_encoder";
+    if (path.empty()) {
+        error = "The declared MNN text encoder descriptor is no longer open.";
         return false;
     }
-    const auto weightPath = path + ".weight";
-    if (file_exists(weightPath)) {
+    std::unique_ptr<MNN::Interpreter> interpreter(MNN::Interpreter::createFromFile(path.c_str()));
+    if (!interpreter) {
+        error = std::string("Failed to create ") + graphLabel + " interpreter.";
+        return false;
+    }
+    if (hasDeclaredBinding && textEncoderBinding->weight.fd >= 0) {
+        const auto weightPath = textEncoderBinding->weight.opened_path();
+        if (weightPath.empty()) {
+            error = "The declared MNN text encoder weight descriptor is no longer open.";
+            return false;
+        }
         interpreter->setExternalFile(weightPath.c_str());
+    } else if (!hasDeclaredBinding) {
+        const auto weightPath = path + ".weight";
+        if (file_exists(weightPath)) {
+            interpreter->setExternalFile(weightPath.c_str());
+        }
     }
     configure_direct_interpreter(interpreter.get());
     MNN::ScheduleConfig config;
     MNN::BackendConfig backendConfig;
     std::string config_error;
     if (!configure_mnn_session(config, backendConfig, backendMode, threads, config_error, true)) {
-        error = "text_encoder session configuration failed: " + config_error;
+        error = std::string(graphLabel) + " session configuration failed: " + config_error;
         return false;
     }
     auto* session = interpreter->createSession(config);
     if (session == nullptr) {
-        error = "Failed to create text_encoder session.";
+        error = std::string("Failed to create ") + graphLabel + " session.";
         return false;
     }
     auto* input = interpreter->getSessionInput(session, "input_ids");
     if (input == nullptr) {
         interpreter->releaseSession(session);
-        error = "text_encoder input_ids tensor is missing before resize.";
+        error = std::string(graphLabel) + " input_ids tensor is missing before resize.";
         return false;
     }
     interpreter->resizeTensor(input, {batch, 77});
@@ -4487,19 +5458,19 @@ bool run_text_encoder_direct(
     input = interpreter->getSessionInput(session, "input_ids");
     if (input == nullptr) {
         interpreter->releaseSession(session);
-        error = "text_encoder input_ids tensor is missing after resize.";
+        error = std::string(graphLabel) + " input_ids tensor is missing after resize.";
         return false;
     }
     std::string copyError;
     if (!copy_vector_to_tensor<int>(input, ids, copyError)) {
         interpreter->releaseSession(session);
-        error = "text_encoder input copy failed after resize: " + copyError;
+        error = std::string(graphLabel) + " input copy failed after resize: " + copyError;
         return false;
     }
     const auto code = interpreter->runSession(session);
     if (code != MNN::NO_ERROR) {
         interpreter->releaseSession(session);
-        error = "text_encoder runSession failed: " + std::to_string(static_cast<int>(code)) +
+        error = std::string(graphLabel) + " runSession failed: " + std::to_string(static_cast<int>(code)) +
                 " (" + mnn_error_code_name(code) + ")";
         return false;
     }
@@ -4507,11 +5478,11 @@ bool run_text_encoder_direct(
     const bool ok = copy_tensor_to_float_vector(tensor, embeddings, error);
     interpreter->releaseSession(session);
     if (!ok) {
-        error = "text_encoder output copy failed: " + error;
+        error = std::string(graphLabel) + " output copy failed: " + error;
         return false;
     }
     if (!validate_float_tensor_contract(
-            embeddings, {batch, 77, 768}, "text_encoder output", error)) {
+            embeddings, {batch, 77, 768}, std::string(graphLabel) + " output", error)) {
         return false;
     }
     return true;
@@ -5058,9 +6029,19 @@ json encode_sd15_prompt_embeddings_to_file(
         const std::string& backendMode,
         int threads,
         bool useCfg,
-        bool promptWeightingEnabled) {
+        bool promptWeightingEnabled,
+        const std::string& textualInversionJson) {
     if (is_blank_text(prompt)) {
         return json({{"ok", false}, {"error", "Prompt is empty."}});
+    }
+    if (!mca::image::prompt_language::is_supported_chinese_han_diffusion_prompt_pair(
+            prompt,
+            negativePrompt)) {
+        return json({
+            {"ok", false},
+            {"errorCode", "UNSUPPORTED_NATIVE_PROMPT_LANGUAGE"},
+            {"error", "Image prompt syntax must use Chinese Han text, supported CJK punctuation, and safe ASCII diffusion prompt syntax."}
+        });
     }
     if (has_community_clip_bundle(root) && !file_exists(root + "/text_encoder.mnn")) {
         return encode_community_clip_embeddings_to_file(
@@ -5071,7 +6052,15 @@ json encode_sd15_prompt_embeddings_to_file(
                 backendMode,
                 threads,
                 useCfg,
-                promptWeightingEnabled);
+                promptWeightingEnabled,
+                textualInversionJson);
+    }
+    if (!textualInversionJson.empty()) {
+        return json({
+            {"ok", false},
+            {"errorCode", "TEXTUAL_INVERSION_GRAPH_INPUT_UNSUPPORTED"},
+            {"error", "This text encoder owns its token embedding lookup inside the graph and has no host input_embedding path."}
+        });
     }
     std::string error;
     std::vector<int> ids;
@@ -5117,7 +6106,8 @@ json encode_sd15_prompt_embeddings_to_file(
                         backendMode,
                         threads,
                         useCfg,
-                        promptWeightingEnabled);
+                        promptWeightingEnabled,
+                        textualInversionJson);
             }
             return json({{"ok", false}, {"error", "Failed to load MNN-Diffusion tokenizer."}});
         }
@@ -5199,6 +6189,15 @@ json run_mnn_sd15_interpreter_direct(
     if (progressCallback) {
         progressCallback(0);
     }
+    MnnOpenedTextEncoderBinding textEncoderBinding;
+    if (!open_mnn_text_encoder_binding(
+            root,
+            contract.text_encoder_asset,
+            textEncoderBinding,
+            evidence.text_encoder_asset,
+            error)) {
+        return mnn_text_encoder_asset_failure(error);
+    }
     std::vector<int> ids;
     mca::image::ClipTokenPair executedTokenPair;
     bool hasExecutedTokenPair = false;
@@ -5218,6 +6217,86 @@ json run_mnn_sd15_interpreter_direct(
         }
         return failure;
     }
+    mca::image::textual_inversion::Selection textualInversionSelection;
+    mca::image::textual_inversion::Audit textualInversionAudit;
+    mca::image::ClipConditionedPair conditionedPair;
+    const bool textualInversionRequested = !contract.textual_inversion_json.empty();
+    const bool useCommunityClip = mnn_contract_uses_community_clip(contract);
+    const std::string selectedTextEncoderPath = textEncoderBinding.active
+            ? textEncoderBinding.graph.canonical_path
+            : join_path(root, "clip_v2.mnn");
+    const std::string clipWeightPath = textEncoderBinding.active
+            ? textEncoderBinding.weight.canonical_path
+            : join_path(root, "clip_v2.mnn.weight");
+    const bool useClipWeight = textEncoderBinding.active
+            ? textEncoderBinding.weight.fd >= 0
+            : nonempty_regular_file_exists(clipWeightPath);
+    const std::string pinnedClipWeightPath =
+            !textEncoderBinding.active && useClipWeight ? clipWeightPath : "";
+    mca::image::execution_assets::Binding executionAssets;
+    if (textualInversionRequested && !prepare_mnn_execution_assets(
+            contract.textual_inversion_json, "MNN_DIFFUSION", executionAssets, error)) {
+        return mnn_execution_asset_failure(error);
+    }
+    if (textualInversionRequested) {
+        std::vector<std::string> requiredAssetPaths = {
+            selectedTextEncoderPath,
+            join_path(root, "tokenizer.json"),
+            join_path(root, "token_emb.bin"),
+            join_path(root, "pos_emb.bin"),
+        };
+        if (useClipWeight) {
+            requiredAssetPaths.push_back(clipWeightPath);
+        }
+        if (!mnn_execution_assets_match(executionAssets, requiredAssetPaths, error)) {
+            return mnn_execution_asset_failure(error);
+        }
+    }
+    if (textualInversionRequested) {
+        if (!useCommunityClip || !has_community_clip_bundle(root, selectedTextEncoderPath)) {
+            return json({
+                {"ok", false},
+                {"errorCode", "TEXTUAL_INVERSION_GRAPH_INPUT_UNSUPPORTED"},
+                {"error", "MNN textual inversion requires the declared host-writable input_embedding text encoder."}
+            });
+        }
+        mca::image::ClipTokenizerConfig tokenizerConfig;
+        tokenizerConfig.bos_id = contract.tokenizer_bos_id;
+        tokenizerConfig.eos_id = contract.tokenizer_eos_id;
+        tokenizerConfig.pad_id = contract.tokenizer_pad_id;
+        tokenizerConfig.max_length = contract.tokenizer_max_length;
+        tokenizerConfig.enable_prompt_weighting = contract.prompt_weighting_supported;
+        if (!mca::image::textual_inversion::load_selection(
+                contract.textual_inversion_json,
+                "MNN_DIFFUSION",
+                false,
+                &textualInversionSelection,
+                &textualInversionAudit,
+                &error) ||
+            !mnn_selection_matches_execution_assets(
+                textualInversionSelection, executionAssets, error) ||
+            !mca::image::tokenize_clip_pair_with_textual_inversion_from_json(
+                root + "/tokenizer.json",
+                prompt,
+                contract.negative_prompt,
+                tokenizerConfig,
+                mca::image::textual_inversion::clip_embeddings(textualInversionSelection, false),
+                &conditionedPair,
+                &error)) {
+            return json({
+                {"ok", false},
+                {"errorCode", "TEXTUAL_INVERSION_CONDITIONING_FAILED"},
+                {"error", error}
+            });
+        }
+        mca::image::textual_inversion::record_conditioned_pair(
+            conditionedPair, false, &textualInversionAudit);
+        executedTokenPair.negative = conditionedPair.negative.tokens;
+        executedTokenPair.positive = conditionedPair.positive.tokens;
+        hasExecutedTokenPair = true;
+        const auto conditionedIds = executedTokenPair.negative_then_positive();
+        ids.assign(conditionedIds.begin(), conditionedIds.end());
+    }
     const bool includeDebug =
             outputPath.find("/image_bench/runs/") != std::string::npos ||
             outputPath.find("\\image_bench\\runs\\") != std::string::npos;
@@ -5235,7 +6314,7 @@ json run_mnn_sd15_interpreter_direct(
     if (progressCallback) {
         progressCallback(1);
     }
-    if (has_community_clip_bundle(root) && !file_exists(root + "/text_encoder.mnn")) {
+    if (useCommunityClip) {
         size_t tokenEmbeddingBytes = 0;
         std::string detectedEmbeddingType;
         if (!inspect_community_token_embedding_file(
@@ -5266,6 +6345,7 @@ json run_mnn_sd15_interpreter_direct(
         json positiveDebug;
         if (!run_community_clip_encoder_direct(
                 root,
+                pinnedClipWeightPath,
                 positiveIds,
                 positiveTokenWeights,
                 contract.backend_mode,
@@ -5273,7 +6353,9 @@ json run_mnn_sd15_interpreter_direct(
                 positiveEmbeddings,
                 error,
                 includeDebug ? &positiveDebug : nullptr,
-                &positiveType)) {
+                &positiveType,
+                textualInversionRequested ? &conditionedPair.positive : nullptr,
+                &textEncoderBinding)) {
             return json({{"ok", false}, {"error", error}});
         }
         if (positiveType != detectedEmbeddingType) {
@@ -5291,6 +6373,7 @@ json run_mnn_sd15_interpreter_direct(
             json negativeDebug;
             if (!run_community_clip_encoder_direct(
                     root,
+                    pinnedClipWeightPath,
                     negativeIds,
                     negativeTokenWeights,
                     contract.backend_mode,
@@ -5298,7 +6381,9 @@ json run_mnn_sd15_interpreter_direct(
                     negativeEmbeddings,
                     error,
                     includeDebug ? &negativeDebug : nullptr,
-                    &negativeType)) {
+                    &negativeType,
+                    textualInversionRequested ? &conditionedPair.negative : nullptr,
+                    &textEncoderBinding)) {
                 return json({{"ok", false}, {"error", error}});
             }
             if (negativeType != positiveType) {
@@ -5346,7 +6431,8 @@ json run_mnn_sd15_interpreter_direct(
                 contract.backend_mode,
                 contract.threads,
                 embeddings,
-                error)) {
+                error,
+                &textEncoderBinding)) {
             return json({{"ok", false}, {"error", error}});
         }
         evidence.embedding_disk_data_type = "GRAPH_INTERNAL";
@@ -5358,6 +6444,10 @@ json run_mnn_sd15_interpreter_direct(
             error)) {
         return json({{"ok", false}, {"error", error}});
     }
+    if (textEncoderBinding.active && !verify_mnn_text_encoder_binding(
+            contract.text_encoder_asset, textEncoderBinding, error)) {
+        return mnn_text_encoder_asset_failure(error);
+    }
     if (evidence.embedding_disk_data_type != contract.embedding_disk_data_type) {
         return json({
             {"ok", false},
@@ -5366,6 +6456,16 @@ json run_mnn_sd15_interpreter_direct(
             {"error", "embeddingDiskDataType mismatch: resolved=" +
                     contract.embedding_disk_data_type + ", native=" +
                     evidence.embedding_disk_data_type + "."}
+        });
+    }
+    evidence.native_prompt_execution_sha256 =
+            mca::image::image_prompt_execution_sha256(prompt, contract.negative_prompt);
+    if (evidence.native_prompt_execution_sha256.size() != 64U) {
+        return json({
+            {"ok", false},
+            {"errorCode", "EXECUTION_CONTRACT_MISMATCH"},
+            {"field", "nativePromptExecutionSha256"},
+            {"error", "The prompts consumed by native MNN conditioning could not be framed and hashed."}
         });
     }
     if (includeDebug) {
@@ -5516,6 +6616,21 @@ json run_mnn_sd15_interpreter_direct(
     if (progressCallback) progressCallback(95);
     if (!write_vae_image_to_file(image, outputPath, error)) {
         return json({{"ok", false}, {"error", error}});
+    }
+    if (textualInversionRequested &&
+        !finalize_mnn_execution_assets(executionAssets, error)) {
+        return mnn_execution_asset_failure(error);
+    }
+    if (textualInversionRequested) {
+        evidence.textual_inversions =
+            mca::image::textual_inversion::artifacts_json(textualInversionSelection);
+        evidence.textual_inversion_evidence =
+            mca::image::textual_inversion::evidence_json(
+                textualInversionSelection,
+                textualInversionAudit,
+                true);
+        evidence.execution_assets = executionAssets;
+        evidence.has_execution_assets = true;
     }
     if (progressCallback) progressCallback(100);
     json result = {
@@ -6579,6 +7694,13 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_runUnetSmoke(
     return utf8_to_jstring(env, out);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_resetImageCancellation(
+        JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lock(g_mnn_diffusion_mutex);
+    g_mnn_diffusion_cancel_requested = false;
+}
+
 #if MCA_WITH_MNN_DIFFUSION
 // Tokenizer-only bridge used by QNN Stable Diffusion bundles. QNN's
 // text_encoder.bin consumes CLIP ids, while the MNN text encoder path can
@@ -6593,6 +7715,9 @@ jintArray tokenize_prompt_token_ids(
         jint maxTokens) {
     if (env == nullptr || maxTokens <= 0 || maxTokens > 4096) {
         return env == nullptr ? nullptr : env->NewIntArray(0);
+    }
+    if (!mca::image::prompt_language::is_supported_chinese_han_diffusion_prompt(prompt)) {
+        return env->NewIntArray(0);
     }
     auto root = tokenizerRoot.empty() ? bundleRoot : tokenizerRoot;
     if (!file_exists(root + "/tokenizer.mtok") && file_exists(bundleRoot + "/tokenizer.mtok")) {
@@ -6642,6 +7767,226 @@ void write_u32_little_endian(std::ostream& output, uint32_t value) {
             static_cast<std::streamsize>(bytes.size()));
 }
 
+// Keep tokenizer.json on the same descriptor-pinned lifecycle as verified MNN graphs.
+using MnnOpenedTokenizerJsonAsset = MnnOpenedTextEncoderAsset;
+
+bool hash_opened_qnn_tokenizer_json_asset(
+        MnnOpenedTokenizerJsonAsset& asset,
+        const std::string& expectedSha256,
+        uint64_t expectedSizeBytes,
+        const char* phase,
+        std::string& error) {
+    struct stat descriptorBefore {};
+    struct stat pathBefore {};
+    if (asset.fd < 0 || asset.canonical_path.empty() ||
+        ::fstat(asset.fd, &descriptorBefore) != 0 ||
+        ::lstat(asset.canonical_path.c_str(), &pathBefore) != 0 ||
+        !S_ISREG(descriptorBefore.st_mode) || !S_ISREG(pathBefore.st_mode) ||
+        !mca::image::execution_assets::same_identity(
+                asset.identity,
+                mca::image::execution_assets::identity_of(descriptorBefore)) ||
+        !mca::image::execution_assets::same_identity(
+                asset.identity,
+                mca::image::execution_assets::identity_of(pathBefore))) {
+        error = std::string("QNN tokenizer JSON identity changed ") + phase + ".";
+        return false;
+    }
+    if (expectedSizeBytes == 0U || asset.identity.size != expectedSizeBytes ||
+        ::lseek(asset.fd, 0, SEEK_SET) == static_cast<off_t>(-1)) {
+        error = std::string("QNN tokenizer JSON size or seek position is invalid ") + phase + ".";
+        return false;
+    }
+
+    mca::image::execution_assets::Sha256 digest;
+    std::array<uint8_t, 64U * 1024U> bytes{};
+    uint64_t readBytes = 0U;
+    const auto cancelled = mnn_asset_cancel_callback();
+    while (true) {
+        if (cancelled()) {
+            error = "cancelled";
+            return false;
+        }
+        const ssize_t count = ::read(asset.fd, bytes.data(), bytes.size());
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            error = std::string("QNN tokenizer JSON could not be streamed ") + phase + ".";
+            return false;
+        }
+        readBytes += static_cast<uint64_t>(count);
+        if (readBytes > expectedSizeBytes) {
+            error = std::string("QNN tokenizer JSON grew ") + phase + ".";
+            return false;
+        }
+        digest.update(bytes.data(), static_cast<size_t>(count));
+    }
+
+    struct stat descriptorAfter {};
+    struct stat pathAfter {};
+    if (::fstat(asset.fd, &descriptorAfter) != 0 ||
+        ::lstat(asset.canonical_path.c_str(), &pathAfter) != 0 ||
+        !mca::image::execution_assets::same_identity(
+                asset.identity,
+                mca::image::execution_assets::identity_of(descriptorAfter)) ||
+        !mca::image::execution_assets::same_identity(
+                asset.identity,
+                mca::image::execution_assets::identity_of(pathAfter)) ||
+        readBytes != expectedSizeBytes) {
+        error = std::string("QNN tokenizer JSON changed ") + phase + ".";
+        return false;
+    }
+
+    const std::string actualSha256 = digest.finish_hex();
+    if ((!expectedSha256.empty() && actualSha256 != expectedSha256) ||
+        !mca::image::execution_assets::lowercase_sha256(actualSha256) ||
+        ::lseek(asset.fd, 0, SEEK_SET) == static_cast<off_t>(-1)) {
+        error = std::string("QNN tokenizer JSON bytes do not match the consumed snapshot ") +
+                phase + ".";
+        return false;
+    }
+    asset.sha256 = actualSha256;
+    asset.size_bytes = readBytes;
+    return true;
+}
+
+bool open_qnn_tokenizer_json_asset(
+        const std::string& requestedPath,
+        MnnOpenedTokenizerJsonAsset& asset,
+        std::string& error) {
+    asset.reset();
+    char canonical[PATH_MAX] = {};
+    if (requestedPath.empty() || realpath(requestedPath.c_str(), canonical) == nullptr ||
+        requestedPath != canonical) {
+        error = "QNN tokenizer JSON path must be a canonical absolute path.";
+        return false;
+    }
+
+    struct stat pathBefore {};
+    if (::lstat(canonical, &pathBefore) != 0 || !S_ISREG(pathBefore.st_mode)) {
+        error = "QNN tokenizer JSON must be a regular non-symlink file.";
+        return false;
+    }
+
+    asset.fd = ::open(canonical, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat descriptorBefore {};
+    if (asset.fd < 0 || ::fstat(asset.fd, &descriptorBefore) != 0 ||
+        !S_ISREG(descriptorBefore.st_mode)) {
+        asset.reset();
+        error = "QNN tokenizer JSON could not be opened through a regular-file descriptor.";
+        return false;
+    }
+
+    asset.canonical_path = canonical;
+    asset.identity = mca::image::execution_assets::identity_of(descriptorBefore);
+    if (!mca::image::execution_assets::same_identity(
+                asset.identity,
+                mca::image::execution_assets::identity_of(pathBefore)) ||
+        asset.identity.size == 0U ||
+        !hash_opened_qnn_tokenizer_json_asset(
+                asset,
+                "",
+                asset.identity.size,
+                "before native tokenizer consumption",
+                error)) {
+        asset.reset();
+        return false;
+    }
+    return true;
+}
+
+json qnn_tokenizer_asset_failure(const std::string& error) {
+    if (error == "cancelled") {
+        return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}});
+    }
+    return json({
+        {"ok", false},
+        {"errorCode", "TOKENIZER_ASSET_MISMATCH"},
+        {"error", error}
+    });
+}
+
+bool hash_published_qnn_prompt_payload(
+        const std::string& requestedPath,
+        std::string& sha256,
+        std::string& error) {
+    char canonical[PATH_MAX] = {};
+    struct stat pathBefore {};
+    if (requestedPath.empty() ||
+        ::realpath(requestedPath.c_str(), canonical) == nullptr ||
+        requestedPath != canonical ||
+        ::lstat(canonical, &pathBefore) != 0 ||
+        !S_ISREG(pathBefore.st_mode) || pathBefore.st_size <= 0) {
+        error = "Published QNN prompt payload is not a canonical nonempty regular file.";
+        return false;
+    }
+    const int fd = ::open(canonical, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        error = "Published QNN prompt payload cannot be opened through a pinned descriptor.";
+        return false;
+    }
+    const auto closeDescriptor = [&]() { ::close(fd); };
+    struct stat descriptorBefore {};
+    if (::fstat(fd, &descriptorBefore) != 0 ||
+        !S_ISREG(descriptorBefore.st_mode) ||
+        !mca::image::execution_assets::same_identity(
+            mca::image::execution_assets::identity_of(pathBefore),
+            mca::image::execution_assets::identity_of(descriptorBefore))) {
+        closeDescriptor();
+        error = "Published QNN prompt payload identity changed before hashing.";
+        return false;
+    }
+
+    mca::image::execution_assets::Sha256 digest;
+    std::array<uint8_t, 64U * 1024U> bytes{};
+    uint64_t readBytes = 0U;
+    const auto cancelled = mnn_asset_cancel_callback();
+    while (true) {
+        if (cancelled()) {
+            closeDescriptor();
+            error = "cancelled";
+            return false;
+        }
+        const ssize_t count = ::read(fd, bytes.data(), bytes.size());
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            closeDescriptor();
+            error = "Published QNN prompt payload could not be streamed for hashing.";
+            return false;
+        }
+        readBytes += static_cast<uint64_t>(count);
+        if (readBytes > static_cast<uint64_t>(descriptorBefore.st_size)) {
+            closeDescriptor();
+            error = "Published QNN prompt payload grew while being hashed.";
+            return false;
+        }
+        digest.update(bytes.data(), static_cast<size_t>(count));
+    }
+
+    struct stat descriptorAfter {};
+    struct stat pathAfter {};
+    const bool stable = ::fstat(fd, &descriptorAfter) == 0 &&
+        ::lstat(canonical, &pathAfter) == 0 &&
+        mca::image::execution_assets::same_identity(
+            mca::image::execution_assets::identity_of(descriptorBefore),
+            mca::image::execution_assets::identity_of(descriptorAfter)) &&
+        mca::image::execution_assets::same_identity(
+            mca::image::execution_assets::identity_of(descriptorBefore),
+            mca::image::execution_assets::identity_of(pathAfter)) &&
+        readBytes == static_cast<uint64_t>(descriptorBefore.st_size);
+    closeDescriptor();
+    if (!stable) {
+        error = "Published QNN prompt payload changed while being hashed.";
+        return false;
+    }
+    sha256 = digest.finish_hex();
+    if (!mca::image::execution_assets::lowercase_sha256(sha256)) {
+        error = "Published QNN prompt payload SHA-256 is invalid.";
+        return false;
+    }
+    return true;
+}
+
 json encode_prompt_token_ids_with_weights_from_json(
         const std::string& tokenizerJsonPath,
         const std::string& prompt,
@@ -6650,10 +7995,64 @@ json encode_prompt_token_ids_with_weights_from_json(
         int32_t eosId,
         int32_t padId,
         int maxTokens,
+        const std::string& promptToEncoderClosureSha256,
         const std::string& outputPath) {
-    if (maxTokens <= 0 || maxTokens > 4096 || outputPath.empty()) {
+    if (outputPath.empty()) {
         return json({{"ok", false}, {"error", "Weighted CLIP token payload arguments are invalid."}});
     }
+    if (!promptToEncoderClosureSha256.empty() &&
+        !mca::image::execution_assets::lowercase_sha256(
+            promptToEncoderClosureSha256)) {
+        return json({
+            {"ok", false},
+            {"error", "Prompt-to-encoder closure SHA-256 is invalid."}
+        });
+    }
+    const std::string temporaryPath = outputPath + ".part";
+    if (tokenizerJsonPath == outputPath || tokenizerJsonPath == temporaryPath) {
+        return json({
+            {"ok", false},
+            {"error", "Weighted CLIP token payload output must not alias tokenizer.json."}
+        });
+    }
+    const auto discardOutput = [&]() {
+        ::unlink(temporaryPath.c_str());
+        ::unlink(outputPath.c_str());
+    };
+    if (maxTokens <= 0 || maxTokens > 4096) {
+        discardOutput();
+        return json({{"ok", false}, {"error", "Weighted CLIP token payload arguments are invalid."}});
+    }
+    if (!mca::image::prompt_language::is_supported_chinese_han_diffusion_prompt_pair(
+            prompt,
+            negativePrompt)) {
+        discardOutput();
+        return json({
+            {"ok", false},
+            {"errorCode", "UNSUPPORTED_NATIVE_PROMPT_LANGUAGE"},
+            {"error", "Image prompt syntax must use Chinese Han text, supported CJK punctuation, and safe ASCII diffusion prompt syntax."}
+        });
+    }
+
+    MnnOpenedTokenizerJsonAsset tokenizerAsset;
+    std::string error;
+    if (!open_qnn_tokenizer_json_asset(tokenizerJsonPath, tokenizerAsset, error)) {
+        discardOutput();
+        return qnn_tokenizer_asset_failure(error);
+    }
+    char outputCanonical[PATH_MAX] = {};
+    char temporaryCanonical[PATH_MAX] = {};
+    if ((realpath(outputPath.c_str(), outputCanonical) != nullptr &&
+            tokenizerAsset.canonical_path == outputCanonical) ||
+        (realpath(temporaryPath.c_str(), temporaryCanonical) != nullptr &&
+            tokenizerAsset.canonical_path == temporaryCanonical)) {
+        return json({
+            {"ok", false},
+            {"error", "Weighted CLIP token payload output must not alias tokenizer.json."}
+        });
+    }
+    discardOutput();
+
     mca::image::ClipTokenizerConfig config;
     config.bos_id = bosId;
     config.eos_id = eosId;
@@ -6661,15 +8060,33 @@ json encode_prompt_token_ids_with_weights_from_json(
     config.max_length = maxTokens;
     config.enable_prompt_weighting = true;
     mca::image::ClipTokenPair pair;
-    std::string error;
-    if (!mca::image::tokenize_clip_pair_from_json(
-            tokenizerJsonPath,
+    const bool tokenized = mca::image::tokenize_clip_pair_from_json(
+            tokenizerAsset.opened_path(),
             prompt,
             negativePrompt,
             config,
             &pair,
-            &error)) {
-        return json({{"ok", false}, {"error", error}});
+            &error);
+    const std::string tokenizationError = error;
+    const std::string tokenizerSha256 = tokenizerAsset.sha256;
+    const uint64_t tokenizerSizeBytes = tokenizerAsset.size_bytes;
+    if (!hash_opened_qnn_tokenizer_json_asset(
+            tokenizerAsset,
+            tokenizerSha256,
+            tokenizerSizeBytes,
+            "after native tokenizer consumption",
+            error)) {
+        discardOutput();
+        return qnn_tokenizer_asset_failure(error);
+    }
+    if (!tokenized) {
+        discardOutput();
+        return json({{"ok", false}, {"error", tokenizationError}});
+    }
+    const auto cancelled = mnn_asset_cancel_callback();
+    if (cancelled()) {
+        discardOutput();
+        return qnn_tokenizer_asset_failure("cancelled");
     }
     const auto ids = pair.negative_then_positive();
     const auto weights = pair.negative_then_positive_weights();
@@ -6678,16 +8095,48 @@ json encode_prompt_token_ids_with_weights_from_json(
     if (ids.size() != expectedCount || weights.size() != expectedCount ||
             fingerprint.size() != 64U ||
             expectedCount > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        discardOutput();
         return json({
             {"ok", false},
             {"error", "Weighted CLIP token payload is internally inconsistent."}
         });
     }
-    const std::string temporaryPath = outputPath + ".part";
-    ::unlink(temporaryPath.c_str());
-    ::unlink(outputPath.c_str());
+    const std::string nativePromptExecutionSha256 =
+            mca::image::image_prompt_execution_sha256(prompt, negativePrompt);
+    if (nativePromptExecutionSha256.size() != 64U) {
+        discardOutput();
+        return json({
+            {"ok", false},
+            {"error", "Weighted CLIP token payload prompt SHA-256 could not be derived."}
+        });
+    }
+
+    json result = {
+        {"ok", true},
+        {"conditioningFormat", "qnn_clip_token_ids_weights_v1"},
+        {"tokenizerBackend", "tokenizers_cpp"},
+        {"tokenCount", ids.size()},
+        {"nativePromptExecutionSha256", nativePromptExecutionSha256},
+        {"nativePromptBindingStage", "conditioning_encoded"},
+        {"outputPath", outputPath},
+        {"tokenizerAssetPath", tokenizerAsset.canonical_path},
+        {"tokenizerAssetSha256", tokenizerAsset.sha256},
+        {"tokenizerAssetSizeBytes", tokenizerAsset.size_bytes},
+        {"tokenizerAssetBindingStage", "tokenizer_consumed"}
+    };
+    if (!append_clip_prompt_weighting_evidence(result, pair, true, true, error)) {
+        discardOutput();
+        return json({{"ok", false}, {"error", error}});
+    }
+    if (cancelled()) {
+        discardOutput();
+        return qnn_tokenizer_asset_failure("cancelled");
+    }
+
     std::ofstream output(temporaryPath.c_str(), std::ios::binary | std::ios::trunc);
     if (!output.good()) {
+        output.close();
+        discardOutput();
         return json({{"ok", false}, {"error", "Failed to open weighted CLIP token payload."}});
     }
     static constexpr std::array<char, 8> kMagic = {
@@ -6708,22 +8157,49 @@ json encode_prompt_token_ids_with_weights_from_json(
     output.flush();
     const bool writeOk = output.good();
     output.close();
-    if (!writeOk || !output.good() || ::rename(temporaryPath.c_str(), outputPath.c_str()) != 0 ||
+    if (!writeOk || !output.good() || cancelled() ||
+            ::rename(temporaryPath.c_str(), outputPath.c_str()) != 0 ||
             !nonempty_regular_file_exists(outputPath)) {
-        ::unlink(temporaryPath.c_str());
-        ::unlink(outputPath.c_str());
+        discardOutput();
+        if (cancelled()) return qnn_tokenizer_asset_failure("cancelled");
         return json({{"ok", false}, {"error", "Failed to publish weighted CLIP token payload."}});
     }
-    json result = {
-        {"ok", true},
-        {"conditioningFormat", "qnn_clip_token_ids_weights_v1"},
-        {"tokenizerBackend", "tokenizers_cpp"},
-        {"tokenCount", ids.size()},
-        {"outputPath", outputPath}
-    };
-    if (!append_clip_prompt_weighting_evidence(result, pair, true, true, error)) {
-        ::unlink(outputPath.c_str());
-        return json({{"ok", false}, {"error", error}});
+    if (cancelled()) {
+        discardOutput();
+        return qnn_tokenizer_asset_failure("cancelled");
+    }
+    if (!promptToEncoderClosureSha256.empty()) {
+        std::string payloadSha256;
+        if (!hash_published_qnn_prompt_payload(outputPath, payloadSha256, error)) {
+            discardOutput();
+            return qnn_tokenizer_asset_failure(error);
+        }
+        mca::image::prompt_handoff::Record handoffRecord;
+        handoffRecord.tokenizer_canonical_path = tokenizerAsset.canonical_path;
+        handoffRecord.tokenizer_device = tokenizerAsset.identity.device;
+        handoffRecord.tokenizer_inode = tokenizerAsset.identity.inode;
+        handoffRecord.tokenizer_size_bytes = tokenizerAsset.size_bytes;
+        handoffRecord.tokenizer_sha256 = tokenizerAsset.sha256;
+        handoffRecord.prompt_pair_sha256 = nativePromptExecutionSha256;
+        handoffRecord.payload_sha256 = payloadSha256;
+        handoffRecord.prompt_to_encoder_closure_sha256 =
+            promptToEncoderClosureSha256;
+        if (cancelled()) {
+            discardOutput();
+            return qnn_tokenizer_asset_failure("cancelled");
+        }
+        std::string handoff;
+        if (!mca::image::prompt_handoff::issue(handoffRecord, handoff, error)) {
+            discardOutput();
+            return json({
+                {"ok", false},
+                {"errorCode", "PROMPT_HANDOFF_ISSUE_FAILED"},
+                {"error", error.empty()
+                    ? "Failed to issue the native MNN-to-QNN prompt handoff."
+                    : error}
+            });
+        }
+        result["mnnPromptHandoff"] = handoff;
     }
     return result;
 }
@@ -6787,6 +8263,13 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptToken
     if (env == nullptr || maxTokens <= 0 || maxTokens > 4096) {
         return env == nullptr ? nullptr : env->NewIntArray(0);
     }
+    const std::string promptText = jstring_to_std(env, prompt);
+    const std::string negativePromptText = jstring_to_std(env, negativePrompt);
+    if (!mca::image::prompt_language::is_supported_chinese_han_diffusion_prompt_pair(
+            promptText,
+            negativePromptText)) {
+        return env->NewIntArray(0);
+    }
     mca::image::ClipTokenizerConfig config;
     config.bos_id = static_cast<int32_t>(bosId);
     config.eos_id = static_cast<int32_t>(eosId);
@@ -6796,8 +8279,8 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptToken
     std::string error;
     if (!mca::image::tokenize_clip_pair_from_json(
             normalize_mnn_model_path(jstring_to_std(env, tokenizerJsonPath)),
-            jstring_to_std(env, prompt),
-            jstring_to_std(env, negativePrompt),
+            promptText,
+            negativePromptText,
             config,
             &pair,
             &error)) {
@@ -6825,6 +8308,116 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptToken
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_measurePromptTokens(
+        JNIEnv* env,
+        jobject,
+        jstring bundleRoot,
+        jstring tokenizerBackend,
+        jstring tokenizerJsonPath,
+        jstring prompt,
+        jint bosId,
+        jint eosId,
+        jint padId,
+        jint maxTokens,
+        jboolean promptWeightingEnabled) {
+    if (env == nullptr || maxTokens < 2 || maxTokens > 4096) {
+        return env == nullptr ? nullptr : utf8_to_jstring(
+                env,
+                json({{"ok", false}, {"error", "Prompt tokenizer arguments are invalid."}}).dump());
+    }
+    const std::string backend = jstring_to_std(env, tokenizerBackend);
+    const std::string promptText = jstring_to_std(env, prompt);
+    json result = {
+        {"ok", false},
+        {"backend", backend},
+    };
+    if (!mca::image::prompt_language::is_supported_chinese_han_diffusion_prompt(
+            promptText)) {
+        result["errorCode"] = "UNSUPPORTED_NATIVE_PROMPT_LANGUAGE";
+        result["error"] =
+            "Image prompt syntax must use Chinese Han text, supported CJK punctuation, and safe ASCII diffusion prompt syntax.";
+        return utf8_to_jstring(env, result.dump());
+    }
+    if (backend == "TOKENIZERS_CPP") {
+        mca::image::ClipTokenizerConfig config;
+        config.bos_id = static_cast<int32_t>(bosId);
+        config.eos_id = static_cast<int32_t>(eosId);
+        config.pad_id = static_cast<int32_t>(padId);
+        config.max_length = static_cast<int>(maxTokens);
+        config.enable_prompt_weighting = promptWeightingEnabled == JNI_TRUE;
+        mca::image::ClipPromptTokenMeasurement measurement;
+        std::string error;
+        if (!mca::image::measure_clip_prompt_from_json(
+                normalize_mnn_model_path(jstring_to_std(env, tokenizerJsonPath)),
+                promptText,
+                config,
+                &measurement,
+                &error)) {
+            result["error"] = error;
+        } else {
+            result = {
+                {"ok", true},
+                {"backend", backend},
+                {"count", measurement.token_count},
+                {"maxTokens", measurement.max_length},
+            };
+            if (measurement.overflow_byte_offset.has_value()) {
+                result["overflowByteOffset"] = *measurement.overflow_byte_offset;
+            }
+        }
+    } else if (backend == "MNN_MTOK") {
+#if MCA_WITH_MNN_DIFFUSION
+        if (promptWeightingEnabled == JNI_TRUE) {
+            // The production MNN_MTOK contract rejects weighted prompts because
+            // this graph consumes token ids only. Do not present a literal
+            // punctuation count as an exact executable count.
+            result["error"] = "MNN_MTOK does not support exact prompt-weight measurement.";
+            return utf8_to_jstring(env, result.dump());
+        }
+        try {
+            const std::string root = normalize_mnn_model_path(jstring_to_std(env, bundleRoot));
+            // Production MNN_MTOK execution requires this artifact before it loads
+            // the same pair tokenizer used below. Do not measure a root that the
+            // generation contract would reject before tokenizer initialization.
+            if (root.empty() || !file_exists(root + "/tokenizer.mtok")) {
+                result["error"] = "MNN prompt tokenizer is unavailable.";
+            } else {
+                MNN::DIFFUSION::McaMtokPromptMeasurementTokenizer tokenizer(
+                        static_cast<int>(bosId),
+                        static_cast<int>(eosId));
+                if (!tokenizer.load(root)) {
+                    result["error"] = "MNN prompt tokenizer is unavailable.";
+                } else {
+                    std::vector<int> ids;
+                    if (!tokenizer.encodeConditionalPromptForMeasurement(promptText, &ids)) {
+                        result["error"] =
+                                "MNN prompt tokenizer has no exact single-prompt measurement adapter.";
+                    } else {
+                        result = {
+                            {"ok", true},
+                            {"backend", backend},
+                            {"count", ids.size()},
+                            {"maxTokens", maxTokens},
+                        };
+                    }
+                }
+            }
+        } catch (const std::exception&) {
+            result["error"] = "MNN prompt tokenizer is unavailable.";
+        } catch (...) {
+            // Never permit a malformed local tokenizer asset to escape through JNI.
+            result["error"] = "MNN prompt tokenizer is unavailable.";
+        }
+#else
+        result["error"] = "MNN prompt tokenizer is not packaged in this build.";
+#endif
+    } else {
+        result["error"] = "The selected image tokenizer has no exact measurement adapter.";
+    }
+    return utf8_to_jstring(env, result.dump());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodePromptTokenIdsWithWeightsFromJson(
         JNIEnv* env,
         jobject,
@@ -6835,6 +8428,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodePromptTokenId
         jint eosId,
         jint padId,
         jint maxTokens,
+        jstring promptToEncoderClosureSha256,
         jstring outputPath) {
 #if MCA_WITH_MNN_DIFFUSION
     const auto result = encode_prompt_token_ids_with_weights_from_json(
@@ -6845,6 +8439,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodePromptTokenId
             static_cast<int32_t>(eosId),
             static_cast<int32_t>(padId),
             static_cast<int>(maxTokens),
+            jstring_to_std(env, promptToEncoderClosureSha256),
             normalize_mnn_model_path(jstring_to_std(env, outputPath)));
 #else
     (void)tokenizerJsonPath;
@@ -6854,6 +8449,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodePromptTokenId
     (void)eosId;
     (void)padId;
     (void)maxTokens;
+    (void)promptToEncoderClosureSha256;
     (void)outputPath;
     const auto result = json({
         {"ok", false},
@@ -6874,7 +8470,8 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmb
         jstring backendMode,
         jint threads,
         jstring conditioningOrder,
-        jboolean promptWeightingEnabled) {
+        jboolean promptWeightingEnabled,
+        jstring textualInversionJson) {
 #if MCA_WITH_MNN_DIFFUSION
     const auto root = normalize_mnn_model_path(jstring_to_std(env, bundleRoot));
     // The JNI slot is unchanged; its local name now reflects the active branch
@@ -6889,7 +8486,8 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmb
             jstring_to_std(env, backendMode),
             std::max(1, static_cast<int>(threads)),
             useCfg,
-            promptWeightingEnabled == JNI_TRUE).dump();
+            promptWeightingEnabled == JNI_TRUE,
+            jstring_to_std(env, textualInversionJson)).dump();
 #else
     (void)bundleRoot;
     (void)prompt;
@@ -6899,6 +8497,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmb
     (void)threads;
     (void)conditioningOrder;
     (void)promptWeightingEnabled;
+    (void)textualInversionJson;
     const auto out = json({
         {"ok", false},
         {"error", "MNN-Diffusion native runner is not linked in this APK."}
@@ -6919,7 +8518,9 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptCon
         jint height,
         jstring backendMode,
         jint threads,
-        jboolean promptWeightingEnabled) {
+        jboolean useCfg,
+        jboolean promptWeightingEnabled,
+        jstring textualInversionJson) {
 #if MCA_WITH_MNN_DIFFUSION
     const auto root = normalize_mnn_model_path(jstring_to_std(env, bundleRoot));
     const auto out = encode_sdxl_prompt_conditioning_to_file(
@@ -6931,7 +8532,9 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptCon
             std::max(256, static_cast<int>(height)),
             jstring_to_std(env, backendMode),
             std::max(1, static_cast<int>(threads)),
-            promptWeightingEnabled == JNI_TRUE).dump();
+            useCfg == JNI_TRUE,
+            promptWeightingEnabled == JNI_TRUE,
+            jstring_to_std(env, textualInversionJson)).dump();
 #else
     (void)bundleRoot;
     (void)prompt;
@@ -6941,7 +8544,9 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptCon
     (void)height;
     (void)backendMode;
     (void)threads;
+    (void)useCfg;
     (void)promptWeightingEnabled;
+    (void)textualInversionJson;
     const auto out = json({
         {"ok", false},
         {"error", "MNN-Diffusion native runner is not linked in this APK."},
@@ -7190,6 +8795,34 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         }).dump();
         return utf8_to_jstring(env, out);
     }
+    if (!mca::image::prompt_language::is_supported_chinese_han_diffusion_prompt_pair(
+            prompt,
+            negative_prompt)) {
+        const auto out = json({
+            {"ok", false},
+            {"backend", "mnn_diffusion"},
+            {"errorCode", "UNSUPPORTED_NATIVE_PROMPT_LANGUAGE"},
+            {"field", "prompt,negativePrompt"},
+            {"error", "Native multilingual image prompts must use Chinese Han text, supported CJK punctuation, and safe ASCII diffusion prompt syntax."}
+        }).dump();
+        return utf8_to_jstring(env, out);
+    }
+    if (mnn_prompt_contains_non_ascii(prompt) ||
+        mnn_prompt_contains_non_ascii(negative_prompt)) {
+        const bool has_verified_text_encoder =
+            !sana_family && executionContract.text_encoder_asset.declared &&
+                !executionContract.language_proof_sha256.empty();
+        if (!has_verified_text_encoder) {
+            const auto out = json({
+                {"ok", false},
+                {"backend", "mnn_diffusion"},
+                {"errorCode", "TEXT_ENCODER_LANGUAGE_PROOF_REQUIRED"},
+                {"field", "nativeTextEncoderEvidence,languageProofSha256"},
+                {"error", "Non-ASCII image prompts require complete text-encoder asset evidence and a signed semantic proof."}
+            }).dump();
+            return utf8_to_jstring(env, out);
+        }
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_mnn_diffusion_mutex);
@@ -7202,7 +8835,6 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
             return utf8_to_jstring(env, out);
         }
         g_mnn_diffusion_generating = true;
-        g_mnn_diffusion_cancel_requested = false;
         g_mnn_diffusion_loaded = false;
         g_mnn_diffusion_started_at_ms = now_ms();
         const int64_t process_unique_sequence =
@@ -7251,7 +8883,10 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         const auto out = fail("Output path is empty.");
         return utf8_to_jstring(env, out);
     }
-    const auto missing = mnn_diffusion_missing_component(root, family);
+    const auto missing = mnn_diffusion_missing_component(
+            root,
+            family,
+            sana_family ? nullptr : &executionContract.text_encoder_asset);
     if (!missing.empty()) {
         const auto out = fail(missing);
         return utf8_to_jstring(env, out);
@@ -7382,6 +9017,14 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         }
         const bool ok = result.value("ok", false);
         if (!ok) {
+            if (result.value("cancelled", false) ||
+                result.value("error", std::string()) == "cancelled") {
+                result["ok"] = false;
+                result["cancelled"] = true;
+                result["error"] = "cancelled";
+                result["backend"] = "mnn_diffusion";
+                return utf8_to_jstring(env, result.dump());
+            }
             auto failed = json::parse(
                     fail(result.value("error", "MNN-Diffusion direct interpreter failed.")),
                     nullptr,
@@ -7395,6 +9038,16 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         }
         if (!ok || !file_exists(output_path)) {
             const auto out = fail("MNN-Diffusion did not produce a valid output image.");
+            return utf8_to_jstring(env, out);
+        }
+        MnnPublishedImageEvidence output_evidence;
+        std::string output_evidence_error;
+        if (!collect_mnn_published_image_evidence(
+                output_path,
+                output_evidence,
+                output_evidence_error)) {
+            ::unlink(output_path.c_str());
+            const auto out = fail(output_evidence_error);
             return utf8_to_jstring(env, out);
         }
         {
@@ -7425,6 +9078,17 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
                 const auto out = fail(evidenceError);
                 return utf8_to_jstring(env, out);
             }
+            const std::string nativePromptExecutionSha256 =
+                    mca::image::image_prompt_execution_sha256(prompt, negative_prompt);
+            if (nativePromptExecutionSha256.size() != 64U) {
+                const auto out = fail(
+                        "The prompts consumed by native MNN Sana conditioning could not be framed and hashed.");
+                return utf8_to_jstring(env, out);
+            }
+            nativeEffective["nativePromptExecutionSha256"] =
+                    nativePromptExecutionSha256;
+            nativeEffective["nativePromptBindingStage"] =
+                    "conditioning_consumed";
             nativeEffective["taskMode"] = task_mode;
             nativeEffective["inputImagePath"] = input_image_path;
             nativeEffective["maskImagePath"] = "";
@@ -7434,6 +9098,9 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
             nativeEffective["inputImageSha256"] = sanaExecutedInputImageSha256;
             nativeEffective["maskImageExecutionCount"] = 0;
             nativeEffective["controlImageExecutionCount"] = 0;
+            nativeEffective["outputPath"] = output_path;
+            nativeEffective["outputBytes"] = output_evidence.bytes;
+            nativeEffective["outputSha256"] = output_evidence.sha256;
             json out = json({
                 {"ok", true},
                 {"nativeExecution", true},
@@ -7443,6 +9110,9 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
                 {"backendMode", backend_mode},
                 {"runner", "sana_varp"},
                 {"path", output_path},
+                {"outputPath", output_path},
+                {"outputBytes", output_evidence.bytes},
+                {"outputSha256", output_evidence.sha256},
                 {"mimeType", "image/png"},
                 {"steps", steps},
                 {"width", width},
@@ -7471,10 +9141,14 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
                 {"tokenizerNonPaddingTokenCount", sanaTokenizerNonPaddingTokenCount},
                 {"tokenizerInputOrder", sanaTokenizerInputOrder},
                 {"conditioningArtifactSha256", sanaConditioningArtifactSha256},
+                {"nativePromptExecutionSha256", nativePromptExecutionSha256},
+                {"nativePromptBindingStage", "conditioning_consumed"},
                 {"nativeEffective", nativeEffective},
                 {"outputs", json::array({json({
                     {"index", 0},
                     {"path", output_path},
+                    {"outputBytes", output_evidence.bytes},
+                    {"outputSha256", output_evidence.sha256},
                     {"mimeType", "image/png"},
                     {"seed", seed}
                 })})},
@@ -7483,9 +9157,12 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
             });
             return utf8_to_jstring(env, out.dump());
         }
-        const auto nativeEffective = mnn_native_effective_json(
+        auto nativeEffective = mnn_native_effective_json(
                 executionContract,
                 executionEvidence);
+        nativeEffective["outputPath"] = output_path;
+        nativeEffective["outputBytes"] = output_evidence.bytes;
+        nativeEffective["outputSha256"] = output_evidence.sha256;
         json out = nativeEffective;
         out["ok"] = true;
         out["nativeExecution"] = true;
@@ -7495,6 +9172,9 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         out["backendMode"] = executionContract.backend_mode;
         out["runner"] = "direct";
         out["path"] = output_path;
+        out["outputPath"] = output_path;
+        out["outputBytes"] = output_evidence.bytes;
+        out["outputSha256"] = output_evidence.sha256;
         out["mimeType"] = "image/png";
         out["taskMode"] = "text_to_image";
         out["inputImagePath"] = "";
@@ -7506,6 +9186,8 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         out["outputs"] = json::array({json({
             {"index", 0},
             {"path", output_path},
+            {"outputBytes", output_evidence.bytes},
+            {"outputSha256", output_evidence.sha256},
             {"mimeType", "image/png"},
             {"seed", executionContract.seed}
         })});

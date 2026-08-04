@@ -23,6 +23,9 @@ internal data class ImageProfileSidecar(
     val behavior: ImagePackageBehaviorConfig? = null
 )
 
+// Text-encoder language evidence is intentionally absent from sidecar overlays. Package sidecars
+// are advisory behavior/configuration data and cannot grant direct Chinese prompt admission.
+
 /**
  * Partial user-facing behavior declared by a model package. Unlike a complete
  * execution profile, every field is optional and only overrides the matching
@@ -70,6 +73,9 @@ internal data class ImageCapabilityDiscovery(
     val capabilities: ImageGenerationCapabilities? = null
 )
 
+// Runtime discovery describes graph mechanics only. It must never infer text-language semantics
+// from a tokenizer path, model family, chipset, or device observation.
+
 internal data class ImageGenerationOverrides(
     val expectedProfileId: String? = null,
     val expectedProfileRevision: Int? = null,
@@ -80,6 +86,7 @@ internal data class ImageGenerationOverrides(
     val useCfg: Boolean? = null,
     val width: Int? = null,
     val height: Int? = null,
+    val useUltraFixDimensionContract: Boolean = false,
     val seed: Long? = null,
     val negativePrompt: String? = null,
     val negativePromptSpecified: Boolean = false
@@ -158,17 +165,31 @@ private data class CatalogImageProfileContract(
 )
 
 internal object ImageExecutionProfileResolver {
-    private const val QNN_SD15_EXECUTION_PROFILE_REVISION = 2
+    private const val DEFAULT_SCHEDULER_BETA_START = 0.00085
+    private const val DEFAULT_SCHEDULER_BETA_END = 0.012
+    private const val QNN_SD15_EXECUTION_PROFILE_REVISION = 5
+    private const val QNN_DREAMSHAPER_SD15_EXECUTION_PROFILE_REVISION = 6
+    private const val QNN_REALISTICVISIONHYPER_SD15_EXECUTION_PROFILE_REVISION = 6
+    private const val QNN_SDXL_EXECUTION_PROFILE_REVISION = 6
+    private const val QNN_GEN5_EXECUTION_PROFILE_REVISION = 2
     private val QNN_SD15_CONDITIONING_RUNTIME_ASSETS = listOf(
         "tokenizer.json",
         "token_emb.bin",
         "pos_emb.bin"
     )
-    private val MIGRATABLE_PINNED_QNN_SD15_RECOMMENDATIONS = setOf(
+    private val MIGRATABLE_PINNED_RECOMMENDATIONS = setOf(
         "cyberrealistic_sd15_qnn228",
         "realisticvisionhyper_sd15_qnn228",
         "dreamshaper_sd15_qnn228",
-        "meinamix_sd15_qnn228"
+        "meinamix_sd15_qnn228",
+        "qualcomm_sd15_gen5_qnn",
+        "qualcomm_sd21_gen5_qnn",
+        "qualcomm_controlnet_canny_gen5_qnn",
+        "sdxl_base_qnn228",
+        "realismsdxl_dmd2_alt_qnn228",
+        "animagine_xl_v4_qnn228",
+        "cyberrealisticxl_qnn228",
+        "sd_turbo_512_experimental"
     )
     val builtInTargets: List<BuiltInImageProfileTarget> = listOf(
         BuiltInImageProfileTarget("cyberrealistic_sd15_qnn228", "community.sd15.qnn228"),
@@ -230,7 +251,9 @@ internal object ImageExecutionProfileResolver {
                         primary.fileName,
                         primary.relativePath,
                         bundle.id
-                    ).mapTo(linkedSetOf(), ::normalizeIdentityToken),
+                    ).asSequence()
+                        .filter(::isStrongCatalogImageArtifactIdentity)
+                        .mapTo(linkedSetOf(), ::normalizeIdentityToken),
                     modelFingerprint = fingerprint
                 )
             }
@@ -353,6 +376,12 @@ internal object ImageExecutionProfileResolver {
         ImageSchedulerAlgorithm.LCM,
         ImageSchedulerAlgorithm.FLOW_MATCH
     )
+    private val GENERIC_DIFFUSION_ARTIFACT_STEMS = setOf(
+        "unet",
+        "transformer",
+        "model",
+        "diffusion_model"
+    )
 
     fun resolve(input: ImageExecutionProfileResolverInput): ImageExecutionProfileResolution {
         val fieldSources = linkedMapOf<String, ImageProfileSource>()
@@ -436,8 +465,14 @@ internal object ImageExecutionProfileResolver {
                 )
             )
         }
+        // Reconcile any signed/sidecar capability claim with the graph topology before user
+        // dimensions are applied. User overrides select a canvas; they cannot manufacture a VAE
+        // encoder or change the fixed native tile contract.
+        resolvedProfile = resolvedProfile.withTopologyDerivedQnnUltraFixCapability()
         resolvedProfile = applyUserOverrides(resolvedProfile, input.userOverrides, fieldSources)
         if (hasUserOverrides(input.userOverrides)) sourceChain.add(0, ImageProfileSource.USER_OVERRIDE)
+        resolvedProfile = resolvedProfile.withTopologyDerivedTextualInversionCapability()
+        resolvedProfile = resolvedProfile.withEvidenceBoundNativeChineseTextEncoder()
         resolvedProfile = resolvedProfile.copy(
             provenance = ImageProfileProvenance(
                 primarySource = sourceChain.first(),
@@ -630,6 +665,12 @@ internal object ImageExecutionProfileResolver {
         .replace(Regex("[^a-z0-9]+"), "_")
         .trim('_')
 
+    private fun isStrongCatalogImageArtifactIdentity(value: String): Boolean {
+        val leaf = value.trim().replace('\\', '/').substringAfterLast('/')
+        val stem = leaf.substringBeforeLast('.', leaf)
+        return normalizeIdentityToken(stem) !in GENERIC_DIFFUSION_ARTIFACT_STEMS
+    }
+
     private fun applySidecar(
         base: ImageExecutionProfile,
         sidecar: ImageProfileSidecar,
@@ -705,7 +746,7 @@ internal object ImageExecutionProfileResolver {
         val useCfg = behavior.useCfg
             ?: behavior.cfgScale?.let { kotlin.math.abs(it - 1.0) > 1.0e-12 }
             ?: base.defaults.useCfg
-        val scheduler = base.scheduler.copy(
+        val scheduler = base.scheduler.withResolvedAlgorithm(
             algorithm = behavior.scheduler ?: base.scheduler.algorithm,
             defaultSteps = behavior.steps ?: base.scheduler.defaultSteps
         )
@@ -811,6 +852,17 @@ internal object ImageExecutionProfileResolver {
         sources: MutableMap<String, ImageProfileSource>
     ): ImageExecutionProfile {
         val schedulerChanged = overrides.scheduler != null || overrides.predictionType != null
+        // Capability derivation depends on the scheduler that will actually run. In
+        // particular, QNN UltraFix has a narrower sampler set than the regular graph. Resolve
+        // the scheduler first so a user-selected PNDM request does not retain a stale UltraFix
+        // claim from the profile's original sampler.
+        val resolvedScheduler = base.scheduler.withResolvedAlgorithm(
+            algorithm = overrides.scheduler ?: base.scheduler.algorithm,
+            predictionType = overrides.predictionType ?: base.scheduler.predictionType,
+            defaultSteps = overrides.steps ?: base.scheduler.defaultSteps
+        )
+        val schedulerAdjustedBase = base.copy(scheduler = resolvedScheduler)
+            .withTopologyDerivedQnnUltraFixCapability()
         val width = overrides.width ?: base.defaults.width
         val height = overrides.height ?: base.defaults.height
         val dimensionsChanged = width != base.defaults.width || height != base.defaults.height
@@ -822,19 +874,47 @@ internal object ImageExecutionProfileResolver {
         if (overrides.height != null) sources["defaults.height"] = ImageProfileSource.USER_OVERRIDE
         if (overrides.seed != null) sources["defaults.seed"] = ImageProfileSource.USER_OVERRIDE
         if (overrides.negativePromptSpecified) sources["defaults.defaultNegativePrompt"] = ImageProfileSource.USER_OVERRIDE
-        if (dimensionsChanged) {
+        val resizeNativeTensorContracts = dimensionsChanged &&
+            !(overrides.useUltraFixDimensionContract && base.runtime == LocalImageRuntime.QNN_HTP)
+        if (resizeNativeTensorContracts) {
             sources["latent.initialShape"] = ImageProfileSource.USER_OVERRIDE
             sources["vae.inputShape"] = ImageProfileSource.USER_OVERRIDE
             sources["vae.outputShape"] = ImageProfileSource.USER_OVERRIDE
         }
-        val resizedContracts = resizedImageContracts(base, width, height)
-        return base.copy(
-            scheduler = base.scheduler.copy(
-                algorithm = overrides.scheduler ?: base.scheduler.algorithm,
-                predictionType = overrides.predictionType ?: base.scheduler.predictionType
-            ),
-            latent = if (dimensionsChanged) resizedContracts.first else base.latent,
-            vae = if (dimensionsChanged) resizedContracts.second else base.vae,
+        val effectiveCapabilities = if (overrides.useUltraFixDimensionContract) {
+            if (!schedulerAdjustedBase.capabilities.supportsUltraFix) {
+                throw ImageProfileResolutionException(
+                    ImageProfileValidationReport(
+                        listOf(
+                            ImageProfileValidationIssue(
+                                code = "ULTRAFIX_EXECUTION_UNSUPPORTED",
+                                field = "capabilities.supportsUltraFix",
+                                message = "The resolved graph and sampler cannot execute UltraFix dimensions."
+                            )
+                        )
+                    )
+                )
+            }
+            schedulerAdjustedBase.capabilities.copy(
+                minWidth = schedulerAdjustedBase.capabilities.ultraFixMinWidth,
+                maxWidth = schedulerAdjustedBase.capabilities.ultraFixMaxWidth,
+                minHeight = schedulerAdjustedBase.capabilities.ultraFixMinHeight,
+                maxHeight = schedulerAdjustedBase.capabilities.ultraFixMaxHeight,
+                widthMultiple = schedulerAdjustedBase.capabilities.ultraFixWidthMultiple,
+                heightMultiple = schedulerAdjustedBase.capabilities.ultraFixHeightMultiple
+            )
+        } else {
+            schedulerAdjustedBase.capabilities
+        }
+        val resizedContracts = if (resizeNativeTensorContracts) {
+            resizedImageContracts(schedulerAdjustedBase, width, height)
+        } else {
+            schedulerAdjustedBase.latent to schedulerAdjustedBase.vae
+        }
+        return schedulerAdjustedBase.copy(
+            latent = resizedContracts.first,
+            vae = resizedContracts.second,
+            capabilities = effectiveCapabilities,
             defaults = base.defaults.copy(
                 width = width,
                 height = height,
@@ -848,6 +928,70 @@ internal object ImageExecutionProfileResolver {
                     base.defaults.defaultNegativePrompt
                 }
             )
+        )
+    }
+
+    /**
+     * Selects an algorithm without carrying algorithm-specific state from the previous one.
+     *
+     * Profiles and package behavior can intentionally retain model-specific schedule values
+     * such as timestep spacing, beta values, offsets, and alpha handling. The native scheduler
+     * still requires the fields that define the selected algorithm to agree as one contract:
+     * Euler scales model input, DPM++ is second order, and only PNDM consumes PRK warm-up state.
+     */
+    private fun ImageSchedulerContract.withResolvedAlgorithm(
+        algorithm: ImageSchedulerAlgorithm,
+        predictionType: ImagePredictionType = this.predictionType,
+        defaultSteps: Int = this.defaultSteps
+    ): ImageSchedulerContract {
+        // applyUserOverrides is also the normal no-op merge path. Retain a complete scheduler
+        // sidecar unchanged unless the algorithm itself changes; some native profiles declare
+        // otherwise-unused compatibility values such as skipPrkSteps deliberately.
+        if (algorithm == this.algorithm) {
+            return copy(
+                predictionType = predictionType,
+                defaultSteps = defaultSteps
+            )
+        }
+        val isFlowMatch = algorithm == ImageSchedulerAlgorithm.FLOW_MATCH
+        val wasFlowMatch = this.algorithm == ImageSchedulerAlgorithm.FLOW_MATCH
+        val nonFlowPrediction = predictionType.takeUnless { it == ImagePredictionType.FLOW }
+            ?: ImagePredictionType.EPSILON
+        val noiseSchedule = when {
+            isFlowMatch -> ImageNoiseSchedule.SIGMA
+            this.noiseSchedule == ImageNoiseSchedule.SIGMA -> ImageNoiseSchedule.SCALED_LINEAR
+            else -> this.noiseSchedule
+        }
+        val betaStart = when {
+            isFlowMatch -> null
+            wasFlowMatch && this.betaStart == null -> DEFAULT_SCHEDULER_BETA_START
+            else -> this.betaStart
+        }
+        val betaEnd = when {
+            isFlowMatch -> null
+            wasFlowMatch && this.betaEnd == null -> DEFAULT_SCHEDULER_BETA_END
+            else -> this.betaEnd
+        }
+        return copy(
+            algorithm = algorithm,
+            predictionType = if (isFlowMatch) ImagePredictionType.FLOW else nonFlowPrediction,
+            noiseSchedule = noiseSchedule,
+            betaStart = betaStart,
+            betaEnd = betaEnd,
+            skipPrkSteps = if (algorithm == ImageSchedulerAlgorithm.PNDM_PLMS) {
+                skipPrkSteps
+            } else {
+                false
+            },
+            lowerOrderFinal = if (algorithm == ImageSchedulerAlgorithm.DPMPP_2M) {
+                lowerOrderFinal
+            } else {
+                false
+            },
+            scaleModelInput = algorithm == ImageSchedulerAlgorithm.EULER ||
+                algorithm == ImageSchedulerAlgorithm.EULER_A,
+            order = if (algorithm == ImageSchedulerAlgorithm.DPMPP_2M) 2 else 1,
+            defaultSteps = defaultSteps
         )
     }
 
@@ -870,6 +1014,13 @@ internal object ImageExecutionProfileResolver {
                 // when CFG actually executes. This is the resolved minimum
                 // branch capacity; native reports the prompt-dependent token
                 // count separately after real conditioning runs.
+                profile.tokenizer.maxLength * branches
+            }
+            profile.runtime == LocalImageRuntime.QNN_HTP &&
+                profile.graph.workerStrategy == ImageWorkerStrategy.SPLIT_UNET_VAE -> {
+                // Isolated SDXL QNN phases consume exactly the branches that
+                // the split UNet will execute. Shared QNN topologies retain
+                // their existing fixed dual-branch payload below.
                 profile.tokenizer.maxLength * branches
             }
             profile.runtime == LocalImageRuntime.QNN_HTP -> {
@@ -942,6 +1093,27 @@ internal object ImageExecutionProfileResolver {
     }
 
     /**
+     * Direct Chinese is a generic evidence-bound runtime capability, never a catalog, model ID,
+     * chipset, or device admission rule. Keep a declaration only when its consumed graph,
+     * tokenizer assets, hashes, sizes, and native topology form one self-consistent contract.
+     *
+     * Actual bytes are re-hashed at the request boundary and native must then load and execute
+     * that exact encoder before an image can succeed. An incomplete declaration merely remains
+     * English-dominant; it must not prevent the package from running its normal English path.
+     */
+    private fun ImageExecutionProfile.withEvidenceBoundNativeChineseTextEncoder(): ImageExecutionProfile {
+        val declared = textEncoderLanguage ?: return this
+        if (declared.capability != ImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL) {
+            return this
+        }
+        return if (hasVerifiedNativeSimplifiedChineseTextEncoder()) {
+            this
+        } else {
+            copy(textEncoderLanguage = null)
+        }
+    }
+
+    /**
      * Revision migration is deliberately narrower than normal recommendation
      * resolution. It only repairs an older persisted contract for the exact
      * pinned archive that authored it; aliases, device hints and profile names
@@ -954,7 +1126,7 @@ internal object ImageExecutionProfileResolver {
         val persisted = input.manifestProfile ?: return null
         if (persisted.modelFingerprint.trim().lowercase() != fingerprint) return persisted
         val target = resolveBuiltInTarget(input)
-            ?.takeIf { it.recommendationId in MIGRATABLE_PINNED_QNN_SD15_RECOMMENDATIONS }
+            ?.takeIf { it.recommendationId in MIGRATABLE_PINNED_RECOMMENDATIONS }
             ?: return persisted
         val recommendationId = target.recommendationId
         val contract = catalogProfileContractsByRecommendationId[recommendationId]
@@ -967,7 +1139,6 @@ internal object ImageExecutionProfileResolver {
             modelFingerprint = fingerprint
         ) ?: return persisted
         if (
-            catalogProfile.profileRevision != QNN_SD15_EXECUTION_PROFILE_REVISION ||
             persisted.profileId != catalogProfile.profileId ||
             persisted.profileRevision <= 0 ||
             persisted.profileRevision >= catalogProfile.profileRevision ||
@@ -995,17 +1166,14 @@ internal object ImageExecutionProfileResolver {
         recommendationId: String
     ): Boolean {
         val targetRule = identityRules.single { rule -> rule.recommendationId == recommendationId }
-        val targetAliases = targetRule.effectiveAliases()
         val persistedIdentity = persisted.provenance.recommendationId
             ?.takeIf(String::isNotBlank)
-            ?.let(::normalizeIdentityToken)
             ?: return false
-        if (persistedIdentity !in targetAliases) return false
+        if (persistedIdentity.trim() != recommendationId) return false
         input.recommendationId
             ?.takeIf(String::isNotBlank)
-            ?.let(::normalizeIdentityToken)
             ?.let { requestedIdentity ->
-                if (requestedIdentity !in targetAliases) return false
+                if (requestedIdentity.trim() != recommendationId) return false
             }
 
         val conflictingAlias = input.recommendationEvidence.aliases
@@ -1023,10 +1191,11 @@ internal object ImageExecutionProfileResolver {
             .filter(String::isNotBlank)
             .map(::normalizeRepositoryIdentity)
             .any { repository ->
-                identityRules.any { rule ->
-                    rule.recommendationId != recommendationId &&
-                        repository in rule.effectivePrimaryRepositories()
-                }
+                repository !in targetRule.effectivePrimaryRepositories() &&
+                    identityRules.any { rule ->
+                        rule.recommendationId != recommendationId &&
+                            repository in rule.effectivePrimaryRepositories()
+                    }
             }
         if (conflictingRepository) return false
         val conflictingArtifact = input.recommendationEvidence.artifactPaths
@@ -1051,46 +1220,60 @@ internal object ImageExecutionProfileResolver {
         input: ImageExecutionProfileResolverInput,
         recommendationId: String
     ): Boolean {
-        val targetRule = identityRules.single { rule -> rule.recommendationId == recommendationId }
-        val pinnedArchiveNames = catalogProfileContractsByRecommendationId[recommendationId]
-            ?.bundle
-            ?.requiredComponents
-            .orEmpty()
-            .asSequence()
+        val contract = catalogProfileContractsByRecommendationId[recommendationId]
+            ?: return false
+        val primaryComponents = contract.bundle.requiredComponents
             .filter { component -> component.role == ImageEngineBundleComponentRole.DIFFUSION }
-            .flatMap { component -> sequenceOf(component.fileName, component.relativePath) }
-            .map { path -> normalizeIdentityToken(path.replace('\\', '/').substringAfterLast('/')) }
+        val pinnedRepositories = primaryComponents
+            .asSequence()
+            .map { component -> normalizeRepositoryIdentity(component.repoId) }
             .filter(String::isNotBlank)
             .toSet()
-        if (pinnedArchiveNames.isEmpty()) return false
-        val repositoryMatched = input.recommendationEvidence.sourceRepositories
+        val pinnedArchiveSourcePaths = primaryComponents
+            .asSequence()
+            .map { component -> normalizePinnedArchiveSourcePath(component.fileName) }
+            .filter(String::isNotBlank)
+            .toSet()
+        if (pinnedRepositories.isEmpty() || pinnedArchiveSourcePaths.isEmpty()) return false
+        val repositoryEvidence = input.recommendationEvidence.sourceRepositories
             .asSequence()
             .filter(String::isNotBlank)
             .map(::normalizeRepositoryIdentity)
-            .any { repository -> repository in targetRule.effectivePrimaryRepositories() }
-        val artifactMatched = input.recommendationEvidence.artifactPaths
+            // Local records also carry provider labels such as "local". Only owner/repository
+            // identities are publisher evidence for this migration boundary.
+            .filter { repository -> '/' in repository }
+            .toSet()
+        val archiveSourceEvidence = input.recommendationEvidence.artifactPaths
             .asSequence()
             .filter(String::isNotBlank)
-            .any { path -> pinnedArchiveSourcePathMatches(path, pinnedArchiveNames) }
-        return repositoryMatched && artifactMatched
+            .mapNotNull(::archiveSourcePathOrNull)
+            .toSet()
+        return repositoryEvidence.isNotEmpty() &&
+            repositoryEvidence.all(pinnedRepositories::contains) &&
+            archiveSourceEvidence.isNotEmpty() &&
+            archiveSourceEvidence.all(pinnedArchiveSourcePaths::contains)
     }
 
-    private fun pinnedArchiveSourcePathMatches(
-        value: String,
-        pinnedArchiveNames: Set<String>
-    ): Boolean {
+    private fun archiveSourcePathOrNull(value: String): String? {
         val normalized = value.trim().replace('\\', '/')
         val archiveDelimiter = normalized.indexOf("!/")
-        if (archiveDelimiter <= 0) return false
-        val archiveName = normalized
+        if (archiveDelimiter <= 0) return null
+        return normalizePinnedArchiveSourcePath(
+            normalized
             .substring(0, archiveDelimiter)
-            .trimEnd('/')
-            .substringAfterLast('/')
-            .let(::normalizeIdentityToken)
-        return archiveName in pinnedArchiveNames
+        )
     }
 
-    /** Retained only for packages installed before catalog profiles were persisted. */
+    private fun normalizePinnedArchiveSourcePath(value: String): String = value
+        .trim()
+        .replace('\\', '/')
+        .trim('/')
+        .lowercase()
+
+    /**
+     * Retained only for packages installed before catalog profiles were persisted. Such profiles
+     * have no immutable multilingual semantic evidence and therefore remain English-dominant.
+     */
     internal fun legacyBuiltInProfileForCompatibility(
         recommendationId: String,
         modelFingerprint: String
@@ -1104,15 +1287,10 @@ internal object ImageExecutionProfileResolver {
         "community.sd15.qnn228" -> qnnSd15Profile(
             profileId,
             fingerprint,
-            conditioningType = if (target.recommendationId == "dreamshaper_sd15_qnn228") {
-                ImageEmbeddingDiskDataType.FP32
+            profileRevision = if (target.recommendationId == "dreamshaper_sd15_qnn228") {
+                QNN_DREAMSHAPER_SD15_EXECUTION_PROFILE_REVISION
             } else {
-                ImageEmbeddingDiskDataType.FP16
-            },
-            conversion = if (target.recommendationId == "dreamshaper_sd15_qnn228") {
-                ImageEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING
-            } else {
-                ImageEmbeddingConversionStrategy.NONE
+                QNN_SD15_EXECUTION_PROFILE_REVISION
             },
             defaultNegativePrompt = if (target.recommendationId == "cyberrealistic_sd15_qnn228") {
                 RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
@@ -1126,9 +1304,8 @@ internal object ImageExecutionProfileResolver {
             ImageModelVariant.HYPER,
             8,
             2.0,
-            conditioningType = ImageEmbeddingDiskDataType.FP32,
-            conversion = ImageEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
-            defaultNegativePrompt = RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
+            defaultNegativePrompt = RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT,
+            profileRevision = QNN_REALISTICVISIONHYPER_SD15_EXECUTION_PROFILE_REVISION
         )
         "community.sd15.legacy-fp32.qnn228" -> qnnSd15Profile(
             profileId,
@@ -1189,7 +1366,8 @@ internal object ImageExecutionProfileResolver {
         cfg: Double = 7.0,
         conditioningType: ImageEmbeddingDiskDataType = ImageEmbeddingDiskDataType.FP16,
         conversion: ImageEmbeddingConversionStrategy = ImageEmbeddingConversionStrategy.NONE,
-        defaultNegativePrompt: String = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+        defaultNegativePrompt: String = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
+        profileRevision: Int = QNN_SD15_EXECUTION_PROFILE_REVISION
     ): ImageExecutionProfile = profile(
         profileId = profileId,
         fingerprint = fingerprint,
@@ -1205,7 +1383,10 @@ internal object ImageExecutionProfileResolver {
             timestepSpacing = ImageTimestepSpacing.LEADING,
             order = 2
         ),
-        tokenizer = clipTokenizer(ImageTokenizerBackend.TOKENIZERS_CPP),
+        tokenizer = clipTokenizer(
+            ImageTokenizerBackend.TOKENIZERS_CPP,
+            supportsTextualInversion = true
+        ),
         conditioning = conditioning(conditioningType, conversion, 768),
         vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
         graph = qnnGraph(
@@ -1227,8 +1408,26 @@ internal object ImageExecutionProfileResolver {
             useCfg = true,
             defaultNegativePrompt = defaultNegativePrompt
         ),
-        capabilities = capabilities(512, setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER, ImageSchedulerAlgorithm.PNDM_PLMS)),
-        profileRevision = QNN_SD15_EXECUTION_PROFILE_REVISION
+        capabilities = capabilities(
+            512,
+            setOf(
+                ImageSchedulerAlgorithm.DPMPP_2M,
+                ImageSchedulerAlgorithm.EULER,
+                ImageSchedulerAlgorithm.PNDM_PLMS
+            ),
+            supportsTextualInversion = true,
+            supportsLivePreview = true
+        ).copy(
+            supportsUltraFix = true,
+            ultraFixMinWidth = QNN_SHARED_ULTRAFIX_MIN_SIDE,
+            ultraFixMaxWidth = QNN_SHARED_ULTRAFIX_MAX_SIDE,
+            ultraFixMinHeight = QNN_SHARED_ULTRAFIX_MIN_SIDE,
+            ultraFixMaxHeight = QNN_SHARED_ULTRAFIX_MAX_SIDE,
+            ultraFixWidthMultiple = QNN_SHARED_ULTRAFIX_DIMENSION_MULTIPLE,
+            ultraFixHeightMultiple = QNN_SHARED_ULTRAFIX_DIMENSION_MULTIPLE,
+            ultraFixRequiredTileSize = QNN_SHARED_ULTRAFIX_TILE_SIZE
+        ),
+        profileRevision = profileRevision
     )
 
     private fun qnnSdxlProfile(
@@ -1259,6 +1458,7 @@ internal object ImageExecutionProfileResolver {
         tokenizer = clipTokenizer(
             ImageTokenizerBackend.TOKENIZERS_CPP,
             dualClip = true,
+            supportsTextualInversion = true,
             separateNegativePrompt = supportsNegativePrompt
         ),
         conditioning = conditioning(ImageEmbeddingDiskDataType.FP16, ImageEmbeddingConversionStrategy.NONE, 2_048, dualEncoder = true, pooled = true),
@@ -1275,9 +1475,23 @@ internal object ImageExecutionProfileResolver {
         defaults = defaults(1024, steps, cfg, useCfg, defaultNegativePrompt),
         capabilities = capabilities(
             1024,
-            setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER, ImageSchedulerAlgorithm.LCM),
-            supportsNegativePrompt = supportsNegativePrompt
-        )
+            setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER),
+            supportsTextualInversion = true,
+            supportsNegativePrompt = supportsNegativePrompt,
+            // Split UNet/VAE workers have no resumable scheduler checkpoint. A projection frame
+            // would be an approximation and is intentionally not part of the product contract.
+            supportsLivePreview = false
+        ).copy(
+            supportsUltraFix = true,
+            ultraFixMinWidth = QNN_SPLIT_SDXL_ULTRAFIX_MIN_SIDE,
+            ultraFixMaxWidth = QNN_SPLIT_SDXL_ULTRAFIX_MAX_SIDE,
+            ultraFixMinHeight = QNN_SPLIT_SDXL_ULTRAFIX_MIN_SIDE,
+            ultraFixMaxHeight = QNN_SPLIT_SDXL_ULTRAFIX_MAX_SIDE,
+            ultraFixWidthMultiple = QNN_SPLIT_SDXL_ULTRAFIX_DIMENSION_MULTIPLE,
+            ultraFixHeightMultiple = QNN_SPLIT_SDXL_ULTRAFIX_DIMENSION_MULTIPLE,
+            ultraFixRequiredTileSize = QNN_SPLIT_SDXL_ULTRAFIX_TILE_SIZE
+        ),
+        profileRevision = QNN_SDXL_EXECUTION_PROFILE_REVISION
     )
 
     private fun qnnGen5Profile(
@@ -1335,8 +1549,10 @@ internal object ImageExecutionProfileResolver {
         capabilities = capabilities(
             512,
             setOf(if (sd21) ImageSchedulerAlgorithm.DDIM else ImageSchedulerAlgorithm.EULER),
-            supportsPromptWeighting = false
-        )
+            supportsPromptWeighting = false,
+            supportsLivePreview = true
+        ),
+        profileRevision = QNN_GEN5_EXECUTION_PROFILE_REVISION
     )
 
     private fun qnnControlNetProfile(profileId: String, fingerprint: String): ImageExecutionProfile {
@@ -1471,7 +1687,9 @@ internal object ImageExecutionProfileResolver {
         ),
         tokenizer = clipTokenizer(
             ImageTokenizerBackend.SDCPP_NATIVE,
-            separateNegativePrompt = supportsNegativePrompt
+            separateNegativePrompt = supportsNegativePrompt,
+            supportsTextualInversion = runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP &&
+                family.supportsStableDiffusionCppTextualInversion()
         ),
         conditioning = conditioning(
             ImageEmbeddingDiskDataType.RUNTIME_NATIVE,
@@ -1500,7 +1718,8 @@ internal object ImageExecutionProfileResolver {
             },
             family = family,
             supportsNegativePrompt = supportsNegativePrompt
-        )
+        ),
+        profileRevision = if (family.supportsStableDiffusionCppTextualInversion()) 2 else 1
     )
 
     private fun genericProfile(
@@ -1584,7 +1803,9 @@ internal object ImageExecutionProfileResolver {
                 } else {
                     ImageTokenizerBackend.MNN_MTOK
                 },
-                separateNegativePrompt = !conditionalOnly
+                separateNegativePrompt = !conditionalOnly,
+                supportsTextualInversion = runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP &&
+                    family.supportsStableDiffusionCppTextualInversion()
             ),
             conditioning = conditioning(
                 ImageEmbeddingDiskDataType.RUNTIME_NATIVE,
@@ -1700,6 +1921,7 @@ internal object ImageExecutionProfileResolver {
         dualClip: Boolean = false,
         padZero: Boolean = false,
         supportsPromptWeighting: Boolean = backend != ImageTokenizerBackend.MNN_MTOK,
+        supportsTextualInversion: Boolean = false,
         separateNegativePrompt: Boolean = true
     ) = ImageTokenizerContract(
         backend = backend,
@@ -1710,6 +1932,7 @@ internal object ImageExecutionProfileResolver {
         clip1PadRule = if (padZero) ImageClipPadRule.ZERO else ImageClipPadRule.EOS,
         clip2PadRule = if (dualClip) ImageClipPadRule.ZERO else null,
         supportsPromptWeighting = supportsPromptWeighting,
+        supportsTextualInversion = supportsTextualInversion,
         separateNegativePrompt = separateNegativePrompt
     )
 
@@ -1794,7 +2017,9 @@ internal object ImageExecutionProfileResolver {
         size: Int,
         schedulers: Set<ImageSchedulerAlgorithm>,
         supportsPromptWeighting: Boolean = true,
-        supportsNegativePrompt: Boolean = true
+        supportsTextualInversion: Boolean = false,
+        supportsNegativePrompt: Boolean = true,
+        supportsLivePreview: Boolean = false
     ) = ImageGenerationCapabilities(
         supportedSchedulers = schedulers,
         minWidth = size,
@@ -1802,34 +2027,60 @@ internal object ImageExecutionProfileResolver {
         minHeight = size,
         maxHeight = size,
         supportsNegativePrompt = supportsNegativePrompt,
-        supportsPromptWeighting = supportsPromptWeighting
+        supportsPromptWeighting = supportsPromptWeighting,
+        supportsTextualInversion = supportsTextualInversion,
+        supportsLivePreview = supportsLivePreview
     )
+
+    private fun LocalImageModelFamily.supportsStableDiffusionCppTextualInversion(): Boolean =
+        this == LocalImageModelFamily.SD15 ||
+            this == LocalImageModelFamily.SD21 ||
+            this == LocalImageModelFamily.SDXL ||
+            this == LocalImageModelFamily.SD_TURBO
+
+    private fun LocalImageModelFamily.supportsStableDiffusionCppUltraFix(): Boolean =
+        this == LocalImageModelFamily.SD15 ||
+            this == LocalImageModelFamily.SD21 ||
+            this == LocalImageModelFamily.SDXL ||
+            this == LocalImageModelFamily.SD_TURBO
 
     private fun stableDiffusionCapabilities(
         schedulers: Set<ImageSchedulerAlgorithm>,
         family: LocalImageModelFamily,
         supportsNegativePrompt: Boolean = true
-    ) = ImageGenerationCapabilities(
-        supportedSchedulers = schedulers,
-        minWidth = 256,
-        maxWidth = 1_536,
-        minHeight = 256,
-        maxHeight = 1_536,
-        widthMultiple = 64,
-        heightMultiple = 64,
-        supportsNegativePrompt = supportsNegativePrompt,
-        supportsPromptWeighting = true,
-        supportsClipSkip = family in setOf(
-            LocalImageModelFamily.SD15,
-            LocalImageModelFamily.SD21,
-            LocalImageModelFamily.SDXL,
-            LocalImageModelFamily.SD_TURBO
-        ),
-        supportsVaeTiling = true,
-        supportsLivePreview = true,
-        supportsLora = true,
-        maxBatchCount = 8
-    )
+    ): ImageGenerationCapabilities {
+        val supportsUltraFix = family.supportsStableDiffusionCppUltraFix()
+        val ultraFixMultiple = if (family == LocalImageModelFamily.SDXL) 32 else 64
+        return ImageGenerationCapabilities(
+            supportedSchedulers = schedulers,
+            minWidth = 256,
+            maxWidth = 1_536,
+            minHeight = 256,
+            maxHeight = 1_536,
+            widthMultiple = 64,
+            heightMultiple = 64,
+            supportsNegativePrompt = supportsNegativePrompt,
+            supportsPromptWeighting = true,
+            supportsTextualInversion = family.supportsStableDiffusionCppTextualInversion(),
+            supportsClipSkip = family in setOf(
+                LocalImageModelFamily.SD15,
+                LocalImageModelFamily.SD21,
+                LocalImageModelFamily.SDXL,
+                LocalImageModelFamily.SD_TURBO
+            ),
+            supportsVaeTiling = true,
+            supportsUltraFix = supportsUltraFix,
+            ultraFixMinWidth = if (supportsUltraFix) 128 else 0,
+            ultraFixMaxWidth = if (supportsUltraFix) 8_192 else 0,
+            ultraFixMinHeight = if (supportsUltraFix) 128 else 0,
+            ultraFixMaxHeight = if (supportsUltraFix) 8_192 else 0,
+            ultraFixWidthMultiple = if (supportsUltraFix) ultraFixMultiple else 0,
+            ultraFixHeightMultiple = if (supportsUltraFix) ultraFixMultiple else 0,
+            supportsLivePreview = true,
+            supportsLora = true,
+            maxBatchCount = 8
+        )
+    }
 
     private fun markAllProfileFields(
         target: MutableMap<String, ImageProfileSource>,
@@ -1863,6 +2114,7 @@ internal object ImageExecutionProfileResolver {
             value.useCfg != null ||
             value.width != null ||
             value.height != null ||
+            value.useUltraFixDimensionContract ||
             value.seed != null ||
             value.negativePromptSpecified
 }

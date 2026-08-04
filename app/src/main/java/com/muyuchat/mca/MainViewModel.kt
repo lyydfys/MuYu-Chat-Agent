@@ -23,6 +23,7 @@ import com.muyuchat.api.local.LocalApiPreflightResult
 import com.muyuchat.api.local.ImageGenerationApiContract
 import com.muyuchat.api.local.ImageGenerationProviderException
 import com.muyuchat.api.local.McaLoopbackServer
+import com.muyuchat.api.local.imagePromptTranslationProofFingerprint
 import com.muyuchat.core.advisor.AgentAdvisor
 import com.muyuchat.core.advisor.AgentDecisionLog
 import com.muyuchat.core.advisor.AgentDecisionLogger
@@ -86,6 +87,8 @@ import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.engine.QairtExecutionVerificationStore
+import com.muyuchat.core.engine.localContextWindowAdmission
+import com.muyuchat.core.engine.localPromptTextFootprint
 import com.muyuchat.core.engine.qairtRuntimeIdentityFor
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
@@ -124,6 +127,9 @@ import com.muyuchat.feature.agent.AgentProfileVerification
 import com.muyuchat.feature.agent.AgentRollbackProfile
 import com.muyuchat.feature.agent.AgentTuningMode
 import com.muyuchat.feature.agent.AgentTuningJobState
+import com.muyuchat.feature.chat.ImageGenerationUiTaskMode
+import com.muyuchat.feature.chat.ImagePromptTokenMeasurement
+import com.muyuchat.core.nativebridge.NativeMnnDiffusionBridge
 import com.muyuchat.core.telemetry.SocFamily
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -148,6 +154,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -230,6 +237,23 @@ private data class ManagedChatCatalogSnapshot(
     val models: List<ModelManifest>,
     val qairtVerifiedLocalModelIds: Set<String>
 )
+
+private data class LocalApiImageGenerationOwnership(
+    val requestId: String,
+    val requestJob: Job
+)
+
+internal fun requiredLocalImagePromptTransformationMethod(
+    containsChinese: Boolean,
+    languageCapability: LocalImageTextEncoderLanguageCapability
+): LocalImagePromptTransformationMethod = when {
+    !containsChinese -> LocalImagePromptTransformationMethod.DIRECT
+    languageCapability == LocalImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL ->
+        LocalImagePromptTransformationMethod.NATIVE_MULTILINGUAL
+    else -> error(
+        "English-dominant image profiles must reject residual Chinese before selecting an execution method."
+    )
+}
 
 data class ChatSessionRecord(
     val id: String,
@@ -341,6 +365,7 @@ data class ImageGenerationJobSpec(
     val modelName: String,
     val inputDraft: LocalImageInputDraft,
     val options: LocalImageGenerationOptions,
+    val promptExecution: LocalImagePromptExecution? = null,
     val chatSessionId: String? = null
 ) {
     init {
@@ -351,7 +376,23 @@ data class ImageGenerationJobSpec(
             (backend == ImageBackend.LOCAL && localModelSnapshot != null && cloudConfigSnapshot == null) ||
                 (backend == ImageBackend.CLOUD && cloudConfigSnapshot != null && localModelSnapshot == null)
         ) { "Image generation job backend must have exactly one matching model snapshot." }
+        require(promptExecution == null || backend == ImageBackend.LOCAL) {
+            "Only a local image job may carry local prompt execution evidence."
+        }
+        promptExecution?.let { execution ->
+            require(execution.originalPrompt == prompt &&
+                execution.originalNegativePrompt == options.negativePrompt
+            ) { "Image generation prompt execution must match the captured request." }
+        }
     }
+
+    fun effectivePrompt(): String = promptExecution?.effectivePrompt ?: prompt
+
+    fun effectiveOptions(
+        base: LocalImageGenerationOptions = options
+    ): LocalImageGenerationOptions = promptExecution?.let { execution ->
+        base.copy(negativePrompt = execution.effectiveNegativePrompt)
+    } ?: base
 
     fun toHistoryMetadata(nativeExecutionJson: String = ""): ImageGenerationHistoryMetadata =
         ImageGenerationHistoryMetadata(
@@ -369,9 +410,51 @@ data class ImageGenerationJobSpec(
                 LocalImageGenerationOptions()
             },
             inputDraft = if (backend == ImageBackend.LOCAL) inputDraft else LocalImageInputDraft(),
+            promptExecution = promptExecution,
             nativeExecutionJson = nativeExecutionJson
         )
 }
+
+/**
+ * Resolves the exact negative text that any local backend will encode. A model default is not an
+ * executed input when CFG is disabled; an explicit non-empty user value remains an invalid request
+ * because silently ignoring it would misrepresent the generated pixels.
+ */
+internal fun resolveLocalImageFinalNegativePromptForExecution(
+    finalNegativePrompt: LocalImageFinalNegativePrompt,
+    useCfg: Boolean
+): LocalImageFinalNegativePrompt {
+    if (useCfg) return finalNegativePrompt
+    if (finalNegativePrompt.source == LocalImageNegativePromptSource.USER &&
+        finalNegativePrompt.value.isNotEmpty()
+    ) {
+        throw LocalImageProductContractException(
+            code = "execution_contract_unsupported",
+            message = "A negativePrompt cannot affect pixels when useCfg=false."
+        )
+    }
+    return if (finalNegativePrompt.source == LocalImageNegativePromptSource.MODEL_DEFAULT) {
+        LocalImageFinalNegativePrompt(
+            value = "",
+            source = LocalImageNegativePromptSource.EMPTY
+        )
+    } else {
+        finalNegativePrompt
+    }
+}
+
+/** Kept for source compatibility while every runtime now uses the shared resolver above. */
+@Deprecated(
+    message = "Use resolveLocalImageFinalNegativePromptForExecution.",
+    replaceWith = ReplaceWith("resolveLocalImageFinalNegativePromptForExecution(finalNegativePrompt, useCfg)")
+)
+internal fun resolveQnnFinalNegativePromptForExecution(
+    finalNegativePrompt: LocalImageFinalNegativePrompt,
+    useCfg: Boolean
+): LocalImageFinalNegativePrompt = resolveLocalImageFinalNegativePromptForExecution(
+    finalNegativePrompt = finalNegativePrompt,
+    useCfg = useCfg
+)
 
 data class ImageGenerationJobRecord(
     val id: String,
@@ -434,7 +517,210 @@ internal fun supportsAuthenticatedLocalImageCount(
 ): Boolean = imageCount in 1..8 &&
     (imageCount == 1 || runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP)
 
-private data class PublishedLocalImagePreview(
+private const val LOCAL_IMAGE_API_MODEL_ID_PREFIX = "image:"
+private val LOCAL_IMAGE_API_MODEL_ID_TOKEN = Regex("[A-Za-z0-9._-]{1,200}")
+
+internal data class LocalImageApiCatalogEntry(
+    val model: LocalImageModelRecord,
+    val apiId: String,
+    val payload: JSONObject
+)
+
+/**
+ * Builds the public image-model extension for `/v1/models` without serializing the backing
+ * [LocalImageModelRecord]. In particular, model paths, bundle roots, hashes, verification text,
+ * and source metadata never enter this payload.
+ *
+ * Chat ids remain untouched. Image ids use a separate namespace and reserve every raw image id,
+ * so an image alias cannot collide with either a chat id or the legacy raw id accepted by the
+ * Images API.
+ */
+internal fun localImageApiCatalogEntries(
+    chatModelIds: Collection<String>,
+    imageModels: List<LocalImageModelRecord>
+): List<LocalImageApiCatalogEntry> {
+    val configuredModels = imageModels.filter(LocalImageModelRecord::configured)
+    val usedIds = buildSet {
+        addAll(chatModelIds)
+        addAll(imageModels.map(LocalImageModelRecord::id))
+    }.toMutableSet()
+
+    return configuredModels.map { model ->
+        val baseId = localImageApiModelBaseId(model.id)
+        var apiId = baseId
+        var suffix = 2
+        while (!usedIds.add(apiId)) {
+            apiId = "$baseId:$suffix"
+            suffix += 1
+        }
+
+        val resolvedCapabilities = runCatching { model.imageCapabilitiesForUi() }
+            .getOrNull()
+            ?.takeIf { it.readinessError == null }
+        val taskModes = resolvedCapabilities
+            ?.supportedTaskModes
+            ?.sortedBy { it.ordinal }
+            .orEmpty()
+        val taskModesJson = JSONArray().apply {
+            taskModes.forEach { mode -> put(mode.wireName) }
+        }
+        // The synchronous Local API still exposes only the physical native request shape. UI
+        // product batches are coordinated in MainViewModel and must not be advertised as one
+        // forged native API batch.
+        val maxBatchCount = resolvedCapabilities?.nativeMaxBatchCount
+        val resolvedExecutionDefaults = resolvedCapabilities
+            ?.executionDefaults
+            ?.takeIf { executionDefaults ->
+                executionDefaults.width > 0 &&
+                    executionDefaults.height > 0 &&
+                    executionDefaults.steps > 0 &&
+                    executionDefaults.cfgScale.isFinite()
+            }
+        val defaults = resolvedExecutionDefaults
+            ?.let { executionDefaults ->
+                JSONObject()
+                    .put("size", "${executionDefaults.width}x${executionDefaults.height}")
+                    .put("width", executionDefaults.width)
+                    .put("height", executionDefaults.height)
+                    .put("steps", executionDefaults.steps)
+                    .put("cfg_scale", executionDefaults.cfgScale)
+                    .put("seed", executionDefaults.seed)
+                    .put("sampler", executionDefaults.sampler)
+            }
+        val capabilityJson = JSONObject()
+            .put("image_generation", true)
+            .put(
+                "task_modes",
+                JSONArray().apply { taskModes.forEach { mode -> put(mode.wireName) } }
+            )
+            .put("max_batch_count", maxBatchCount ?: JSONObject.NULL)
+            .put(
+                "textual_inversion",
+                resolvedCapabilities?.supportsTextualInversion ?: false
+            )
+            .put(
+                "textual_inversion_formats",
+                JSONArray().apply {
+                    resolvedCapabilities
+                        ?.supportedTextualInversionFormats
+                        .orEmpty()
+                        .sorted()
+                        .forEach { format -> put(format) }
+                }
+            )
+            .put("live_preview", resolvedCapabilities?.supportsLivePreview ?: false)
+            .put("runtime_live_preview", resolvedCapabilities?.supportsLivePreview ?: false)
+            .put("synchronous_live_preview", false)
+            .put("preview_transport", "none")
+            .put(
+                "preview_mode",
+                resolvedCapabilities?.previewMode?.wireName ?: JSONObject.NULL
+            )
+            .put(
+                "default_preview_interval",
+                resolvedCapabilities
+                    ?.takeIf { it.supportsLivePreview }
+                    ?.defaultPreviewInterval
+                    ?: JSONObject.NULL
+            )
+            .put("ultrafix", resolvedCapabilities?.supportsUltraFix ?: false)
+            .put(
+                "ultrafix_dimensions",
+                resolvedExecutionDefaults
+                    ?.takeIf {
+                        resolvedCapabilities?.supportsUltraFix == true &&
+                            it.ultraFixMinWidth > 0 && it.ultraFixMinHeight > 0
+                    }
+                    ?.let { executionDefaults ->
+                        JSONObject()
+                            .put("min_width", executionDefaults.ultraFixMinWidth)
+                            .put("max_width", executionDefaults.ultraFixMaxWidth)
+                            .put("min_height", executionDefaults.ultraFixMinHeight)
+                            .put("max_height", executionDefaults.ultraFixMaxHeight)
+                            .put("width_multiple", executionDefaults.ultraFixWidthMultiple)
+                            .put("height_multiple", executionDefaults.ultraFixHeightMultiple)
+                            .put(
+                                "required_tile_size",
+                                executionDefaults.ultraFixRequiredTileSize
+                                    .takeIf { it > 0 }
+                                    ?: JSONObject.NULL
+                            )
+                    }
+                    ?: JSONObject.NULL
+            )
+            .put(
+                "supported_samplers",
+                JSONArray().apply {
+                    resolvedExecutionDefaults?.supportedSamplers.orEmpty().forEach(::put)
+                }
+            )
+            .put(
+                "samplers_by_task",
+                JSONObject().apply {
+                    taskModes.forEach { mode ->
+                        val samplers = (if (mode in setOf(
+                                ImageGenerationUiTaskMode.IMG2IMG,
+                                ImageGenerationUiTaskMode.INPAINT
+                            )) {
+                            resolvedExecutionDefaults?.img2ImgSupportedSamplers
+                        } else {
+                            resolvedExecutionDefaults?.supportedSamplers
+                        }).orEmpty()
+                        put(
+                            mode.wireName,
+                            JSONArray().apply { samplers.forEach(::put) }
+                        )
+                    }
+                }
+            )
+
+        LocalImageApiCatalogEntry(
+            model = model,
+            apiId = apiId,
+            payload = JSONObject()
+                .put("id", apiId)
+                .put("object", "model")
+                .put("owned_by", "local")
+                .put("display_name", model.displayName)
+                .put("type", "image_generation")
+                .put("configured", true)
+                .put("runtime", model.runtime.name)
+                .put("family", model.family.name)
+                .put("task", taskModes.firstOrNull()?.wireName ?: JSONObject.NULL)
+                .put("task_modes", taskModesJson)
+                .put("max_batch_count", maxBatchCount ?: JSONObject.NULL)
+                .put("capabilities", capabilityJson)
+                .apply { defaults?.let { put("defaults", it) } }
+        )
+    }
+}
+
+internal fun resolveLocalImageApiModel(
+    requestedModelId: String,
+    chatModelIds: Collection<String>,
+    imageModels: List<LocalImageModelRecord>
+): LocalImageModelRecord? {
+    val requested = requestedModelId.trim()
+    if (requested.isEmpty()) return null
+    localImageApiCatalogEntries(chatModelIds, imageModels)
+        .firstOrNull { entry -> entry.apiId == requested }
+        ?.let { return it.model }
+    // Preserve the pre-discovery Images API contract for callers that already persisted a raw id.
+    return imageModels.firstOrNull { model -> model.id == requested }
+}
+
+private fun localImageApiModelBaseId(rawModelId: String): String {
+    val normalized = rawModelId.trim()
+    val segment = normalized.takeIf(LOCAL_IMAGE_API_MODEL_ID_TOKEN::matches)
+        ?: MessageDigest.getInstance("SHA-256")
+            .digest(normalized.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte ->
+                "%02x".format(Locale.ROOT, byte.toInt() and 0xff)
+            }
+    return LOCAL_IMAGE_API_MODEL_ID_PREFIX + segment
+}
+
+internal data class PublishedLocalImagePreview(
     val uriString: String,
     val mode: String,
     val step: Int,
@@ -443,8 +729,203 @@ private data class PublishedLocalImagePreview(
     val height: Int
 )
 
-private fun LocalImageModelRecord.supportsLiveProjectionPreview(): Boolean =
-    imageCapabilitiesForUi().supportsLivePreview
+private const val LOCAL_IMAGE_PREVIEW_OUTPUT_DIRECTORY = "local_image_outputs"
+private const val LOCAL_IMAGE_PREVIEW_CHILD_REVISION_MASK = 0xffff_ffffL
+private val STABLE_LOCAL_IMAGE_PREVIEW_FILE_REGEX = Regex(
+    "^[A-Za-z0-9][A-Za-z0-9._-]*\\.preview-([01])\\.png$"
+)
+private val QNN_SHARED_IMAGE_PREVIEW_DIRECTORY_REGEX = Regex(
+    "qnn-htp-[0-9]+-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" +
+        "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.qnn-stage\\.json\\.previews"
+)
+private val QNN_LOCAL_IMAGE_PREVIEW_FILE_REGEX = Regex(
+    "preview-([1-9][0-9]*)\\.png"
+)
+
+/**
+ * Validates the native preview namespace before any bytes are copied into the UI-owned cache.
+ *
+ * Stable-diffusion.cpp keeps its two-slot `*.preview-0|1.png` files directly under the native
+ * output directory. Shared-QNN writes immutable `preview-N.png` children under the request's
+ * `<journal>.previews` directory. Product-level batches encode the output index in the high
+ * 32 bits of [coordinatedRevision], while native files only carry the child revision.
+ */
+internal fun validatedLocalImagePreviewSource(
+    cacheRoot: File,
+    previewPath: String,
+    coordinatedRevision: Long
+): File {
+    require(previewPath.isNotBlank()) { "Native image preview path must not be blank." }
+    require(coordinatedRevision > 0L) { "Native image preview revision must be positive." }
+    val outputIndex = coordinatedRevision ushr 32
+    val childRevision = coordinatedRevision and LOCAL_IMAGE_PREVIEW_CHILD_REVISION_MASK
+    require(outputIndex < ImageGenerationBatchLineage.MAX_BATCH_COUNT.toLong() && childRevision > 0L) {
+        "Native image preview revision is outside the product batch range."
+    }
+
+    val canonicalCacheRoot = cacheRoot.canonicalFile
+    val outputRoot = File(
+        canonicalCacheRoot,
+        LOCAL_IMAGE_PREVIEW_OUTPUT_DIRECTORY
+    ).canonicalFile
+    require(
+        outputRoot.parentFile == canonicalCacheRoot &&
+            outputRoot.name == LOCAL_IMAGE_PREVIEW_OUTPUT_DIRECTORY
+    ) { "Native image output directory is not a direct app-cache child." }
+    val source = File(previewPath).canonicalFile
+    val sourceParent = source.parentFile
+    val stableMatch = STABLE_LOCAL_IMAGE_PREVIEW_FILE_REGEX.matchEntire(source.name)
+    val stableSlot = stableMatch?.groupValues?.getOrNull(1)?.toLongOrNull()
+    val stablePath = sourceParent == outputRoot && stableSlot == childRevision % 2L
+
+    val qnnDirectory = sourceParent
+    val qnnMatch = QNN_LOCAL_IMAGE_PREVIEW_FILE_REGEX.matchEntire(source.name)
+    val qnnChildRevision = qnnMatch?.groupValues?.getOrNull(1)?.toLongOrNull()
+    val qnnSharedPath = qnnDirectory != null &&
+        qnnDirectory.parentFile == outputRoot &&
+        QNN_SHARED_IMAGE_PREVIEW_DIRECTORY_REGEX.matches(qnnDirectory.name) &&
+        qnnChildRevision == childRevision
+    require(stablePath || qnnSharedPath) {
+        "Native image preview path is outside the request-scoped preview namespace."
+    }
+    return source
+}
+
+/**
+ * Commits a validated preview together with the surrounding job update.
+ *
+ * Preview publication does file I/O before reaching this pure boundary, so callbacks may arrive
+ * after a newer revision or a terminal transition has already won. Keep the compare-and-commit in
+ * the same image-jobs map operation: stale/duplicate revisions preserve every committed preview
+ * field, while every terminal state clears the transient preview and cannot be revived by a late
+ * non-terminal callback.
+ */
+internal fun ImageGenerationJobRecord.withCommittedImageJobUpdate(
+    status: ImageGenerationStatusRecord,
+    message: String,
+    imageAssetId: String? = null,
+    preview: PublishedLocalImagePreview? = null
+): ImageGenerationJobRecord {
+    val lateNonTerminalAfterTerminal = this.status.terminal && !status.terminal
+    // A cancellation request is deliberately non-terminal while the worker unwinds, but it must
+    // be a one-way UI transition. A delayed progress callback must not revive its preview or
+    // change it back to GENERATING.
+    val lateProgressAfterCancellation =
+        this.status == ImageGenerationStatusRecord.CANCEL_REQUESTED &&
+            status == ImageGenerationStatusRecord.GENERATING
+    val ignoredLateUpdate = lateNonTerminalAfterTerminal || lateProgressAfterCancellation
+    val committedStatus = if (ignoredLateUpdate) {
+        this.status
+    } else {
+        status
+    }
+    val committedMessage = if (ignoredLateUpdate) this.message else message
+    val committedImageAssetId = if (ignoredLateUpdate) {
+        this.imageAssetId
+    } else {
+        imageAssetId ?: this.imageAssetId
+    }
+    val previewVisible = committedStatus == ImageGenerationStatusRecord.GENERATING
+    val committedPreview = preview?.takeIf { candidate ->
+        previewVisible && candidate.revision > previewRevision
+    }
+    return copy(
+        status = committedStatus,
+        message = committedMessage,
+        imageAssetId = committedImageAssetId,
+        previewUriString = if (!previewVisible) null else {
+            committedPreview?.uriString ?: previewUriString
+        },
+        previewMode = if (!previewVisible) "" else {
+            committedPreview?.mode ?: previewMode
+        },
+        previewStep = if (!previewVisible) 0 else {
+            committedPreview?.step ?: previewStep
+        },
+        previewRevision = if (!previewVisible) 0L else {
+            committedPreview?.revision ?: previewRevision
+        },
+        previewWidth = if (!previewVisible) 0 else {
+            committedPreview?.width ?: previewWidth
+        },
+        previewHeight = if (!previewVisible) 0 else {
+            committedPreview?.height ?: previewHeight
+        }
+    )
+}
+
+internal const val LOCAL_IMAGE_PREVIEW_DEGRADED_MESSAGE =
+    "实时预览已降级，最终图片继续生成"
+
+internal fun appendLocalImagePreviewDegradationMessage(
+    message: String,
+    previewFailureCode: String
+): String = if (previewFailureCode.isBlank()) {
+    message
+} else {
+    "$message · $LOCAL_IMAGE_PREVIEW_DEGRADED_MESSAGE"
+}
+
+internal const val LOCAL_IMAGE_PROMPT_PREPARATION_FALLBACK_MESSAGE =
+    "图片提示词准备失败，尚未启动图片生成，请重试。"
+
+internal fun localImagePromptPreparationFailureMessage(error: Exception): String =
+    when ((error as? LocalImageProductContractException)?.code) {
+        "image_textual_inversion_trigger_missing" ->
+            error.message.orEmpty().ifBlank {
+                "所选 Textual Inversion 的触发词缺失，尚未启动图片生成。"
+            }
+        "invalid_image_prompt" ->
+            "图片提示词长度或内容无效，尚未启动图片生成。"
+        "invalid_image_profile_prompt_language" ->
+            "模型默认负向提示词语言不兼容，尚未启动图片生成。"
+        "invalid_image_prompt_language_evidence" ->
+            "原生中文文本编码器证据文件校验失败，尚未启动图片生成。"
+        "image_prompt_unsupported_native_language" ->
+            "当前原生多语文本编码器只支持中文汉字、已支持的中文标点和安全 ASCII 提示词语法，尚未启动图片生成。"
+        "image_prompt_requires_canonical_english_tags" ->
+            error.message.orEmpty().ifBlank {
+                "当前模型需要英文规范标签；请导入主标签词典和中文翻译词典后，用中文检索并点选英文候选。"
+            }
+        "execution_contract_unsupported" ->
+            "当前生成设置与模型执行合同不兼容，尚未启动图片生成。"
+        "image_prompt_translation_input_too_large" ->
+            "离线中译英输入过长，尚未启动图片生成。"
+        "image_prompt_translation_input_too_complex" ->
+            "离线中译英输入结构过于复杂，尚未启动图片生成。"
+        "image_prompt_translation_busy" ->
+            "本地离线翻译运行时正忙，尚未启动图片生成，请稍后重试。"
+        "image_prompt_translation_unavailable" ->
+            "没有可核验的本地翻译模型，尚未启动图片生成。"
+        "image_prompt_translation_timeout" ->
+            "中文提示词转换超时，尚未启动图片生成。"
+        "image_prompt_translation_invalid" ->
+            "翻译结果未通过格式或语义一致性校验，尚未启动图片生成。"
+        "image_prompt_translation_failed" ->
+            "中文提示词转换失败，尚未启动图片生成。"
+        else -> LOCAL_IMAGE_PROMPT_PREPARATION_FALLBACK_MESSAGE
+    }
+
+internal fun List<ImageGenerationJobRecord>.withLocalImagePromptPreparationFailureIfActive(
+    activeJobId: String?,
+    jobId: String,
+    message: String
+): List<ImageGenerationJobRecord> {
+    val currentJob = firstOrNull { job -> job.id == jobId }
+    if (activeJobId != jobId || currentJob?.status != ImageGenerationStatusRecord.GENERATING) {
+        return this
+    }
+    return map { job ->
+        if (job.id == jobId) {
+            job.withCommittedImageJobUpdate(
+                status = ImageGenerationStatusRecord.FAILED,
+                message = message
+            )
+        } else {
+            job
+        }
+    }
+}
 
 private data class AttachmentImportResult(
     val name: String,
@@ -667,6 +1148,79 @@ data class ImageLibraryBackupState(
     val failed: Boolean = false
 )
 
+private data class LocalImagePromptTokenizerDescriptor(
+    val modelKey: String,
+    val bundleRoot: File,
+    val backend: ImageTokenizerBackend,
+    val tokenizerJsonPath: File?,
+    val bosId: Int,
+    val eosId: Int,
+    val padId: Int,
+    val maxTokens: Int,
+    val promptWeightingEnabled: Boolean,
+)
+
+/** Keeps UI-only exact tokenizer results bounded without ever caching an unavailable backend. */
+private class ImagePromptTokenMeasurementCache(
+    private val maximumEntries: Int = 96
+) {
+    private val entries = object : LinkedHashMap<String, ImagePromptTokenMeasurement>(
+        maximumEntries,
+        0.75f,
+        true
+    ) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, ImagePromptTokenMeasurement>?
+        ): Boolean = size > maximumEntries
+    }
+
+    init {
+        require(maximumEntries > 0)
+    }
+
+    fun get(key: String): ImagePromptTokenMeasurement? = synchronized(entries) { entries[key] }
+
+    fun put(key: String, value: ImagePromptTokenMeasurement) {
+        synchronized(entries) { entries[key] = value }
+    }
+}
+
+private fun utf8ByteOffsetToUtf16(prompt: String, byteOffset: Int): Int? {
+    if (byteOffset !in 0..prompt.toByteArray(Charsets.UTF_8).size) return null
+    val bytes = prompt.toByteArray(Charsets.UTF_8)
+    val prefixBytes = bytes.copyOf(byteOffset)
+    val prefix = runCatching { String(prefixBytes, Charsets.UTF_8) }.getOrNull() ?: return null
+    return prefix.toByteArray(Charsets.UTF_8)
+        .takeIf { it.contentEquals(prefixBytes) }
+        ?.let { prefix.length }
+}
+
+private data class Utf8BoundedText(val text: String, val truncated: Boolean)
+
+private fun String.takeUtf8Prefix(maxBytes: Int): Utf8BoundedText {
+    require(maxBytes > 0)
+    if (localPromptTextFootprint(this).utf8Bytes <= maxBytes) {
+        return Utf8BoundedText(this, truncated = false)
+    }
+    val output = StringBuilder(minOf(length, maxBytes))
+    var used = 0
+    var index = 0
+    while (index < length) {
+        val codePoint = Character.codePointAt(this, index)
+        val size = when {
+            codePoint <= 0x7f -> 1
+            codePoint <= 0x7ff -> 2
+            codePoint <= 0xffff -> 3
+            else -> 4
+        }
+        if (used > maxBytes - size) break
+        output.appendCodePoint(codePoint)
+        used += size
+        index += Character.charCount(codePoint)
+    }
+    return Utf8BoundedText(output.toString(), truncated = true)
+}
+
 data class MainUiState(
     val tab: AppTab = AppTab.CHAT,
     val messages: List<ChatMessage> = emptyList(),
@@ -681,6 +1235,12 @@ data class MainUiState(
     val activeLocalImageLoraIds: Set<String> = emptySet(),
     val localImageLoraImporting: Boolean = false,
     val localImageLoraMessage: String = "",
+    val localImageTextualInversions: List<TextualInversionArtifact> = emptyList(),
+    val activeLocalImageTextualInversionIds: Set<String> = emptySet(),
+    val deletingLocalImageTextualInversionIds: Set<String> = emptySet(),
+    val localImageTextualInversionLoading: Boolean = false,
+    val localImageTextualInversionImporting: Boolean = false,
+    val localImageTextualInversionMessage: String = "",
     val localImageUpscalers: List<LocalImageUpscalerRecord> = emptyList(),
     val selectedLocalImageUpscalerId: String? = null,
     val activeLocalImageUpscalerId: String? = null,
@@ -707,6 +1267,9 @@ data class MainUiState(
     val selectedChatBackend: ChatBackend = ChatBackend.LOCAL,
     val assistants: List<AssistantRecord> = emptyList(),
     val selectedAssistantId: String = AssistantRecord.DEFAULT_ID,
+    val worldBooks: List<WorldBookRecord> = emptyList(),
+    val knowledgeBases: List<KnowledgeBaseRecord> = emptyList(),
+    val selectedKnowledgeBaseIds: Set<String> = emptySet(),
     val input: String = "",
     val isGenerating: Boolean = false,
     val models: List<ModelManifest> = emptyList(),
@@ -1043,6 +1606,70 @@ private val IMAGE_ASSET_DELETION_STAGE_REGEX = Regex(
     "\\.delete-[0-9a-fA-F-]{36}--(.+)"
 )
 
+internal data class InitialTextualInversionLibraryState(
+    val records: List<TextualInversionArtifact>,
+    val message: String
+)
+
+internal suspend fun loadInitialTextualInversionLibraryState(
+    store: TextualInversionStore
+): InitialTextualInversionLibraryState = try {
+    InitialTextualInversionLibraryState(store.load(), "")
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (error: Exception) {
+    val detail = error.message?.trim()?.take(240).orEmpty()
+        .ifBlank { "清单损坏或文件不可读" }
+    InitialTextualInversionLibraryState(
+        records = emptyList(),
+        message = "Textual Inversion 库读取失败：$detail。原文件已保留，请修复后重试。"
+    )
+}
+
+internal fun requireTextualInversionPromptTriggers(
+    prompt: String,
+    negativePrompt: String?,
+    ids: List<String>,
+    records: List<TextualInversionArtifact>
+) {
+    if (ids.isEmpty()) return
+    val recordsById = records.associateBy(TextualInversionArtifact::id)
+    val selected = ids.map { id ->
+        recordsById[id] ?: throw LocalImageProductContractException(
+            "image_textual_inversion_not_found",
+            "所选 Textual Inversion 已删除或不可用：$id"
+        )
+    }
+    val missing = TextualInversionContract.missingPromptTriggers(
+        prompts = listOf(prompt, negativePrompt.orEmpty()),
+        artifacts = selected
+    )
+    if (missing.isNotEmpty()) {
+        throw LocalImageProductContractException(
+            "image_textual_inversion_trigger_missing",
+            "所选 Textual Inversion 的触发词未出现在提示词中：${missing.take(3).joinToString()}"
+        )
+    }
+}
+
+internal fun localImageExtensionResolutionFailure(
+    error: Exception,
+    fallbackCode: String,
+    fallbackMessage: String
+): ImageGenerationProviderException {
+    val code = (error as? LocalImageProductContractException)?.code ?: fallbackCode
+    val httpStatus = when {
+        code == "image_textual_inversion_trigger_missing" -> 422
+        code.endsWith("_not_found") -> 404
+        else -> 422
+    }
+    return ImageGenerationProviderException(
+        code = code,
+        httpStatus = httpStatus,
+        message = error.message ?: fallbackMessage
+    )
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val REST_PORT = 11435
@@ -1053,6 +1680,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val IMAGE_UPSCALER_PREFERENCES = "image_upscaler_product_selection_v1"
         private const val IMAGE_UPSCALER_SELECTED_ID = "selected_id"
         private const val IMAGE_UPSCALE_TILE_SIZE = 128
+        private const val MAX_DIRECT_COMPOSER_UTF8_BYTES = 256 * 1024
         private const val ASSISTANT_MODEL_MODE_FOLLOW_CURRENT = "follow_current"
         private const val ASSISTANT_MODEL_MODE_LOCAL = "local"
         private const val ASSISTANT_MODEL_MODE_CLOUD = "cloud"
@@ -1077,6 +1705,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var apiServer: McaLoopbackServer? = null
     private var activeApiBindHost: String? = null
     private val chatSessionStore = ChatSessionStore(application)
+    private val worldBookStore = WorldBookStore(application)
+    private val knowledgeBaseStore = KnowledgeBaseStore(application)
+    private val chatContextComposer = ChatContextComposer(worldBookStore, knowledgeBaseStore)
     private val imageLibraryBackup = ImageLibraryBackup(application, chatSessionStore)
     private val imageAssetDirectory = canonicalImageAssetDirectory(application.filesDir)
     private val assistantStore = AssistantStore(application)
@@ -1088,7 +1719,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val webSearchProvider = WebSearchProvider()
     private val localImageModelStore = LocalImageModelStore(application)
     private val localImageLoraStore = LocalImageLoraStore(application)
+    private val localImageTextualInversionStore = TextualInversionStore(application)
     private val localImageUpscalerStore = LocalImageUpscalerStore(application)
+    private val imagePromptTokenizerDescriptors =
+        java.util.concurrent.ConcurrentHashMap<String, LocalImagePromptTokenizerDescriptor>()
+    private val imagePromptTokenMeasurementCache = ImagePromptTokenMeasurementCache()
     private val imageUpscalerPreferences = application.getSharedPreferences(
         IMAGE_UPSCALER_PREFERENCES,
         Context.MODE_PRIVATE
@@ -1101,6 +1736,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val benchmarkHistoryLogger = BenchmarkHistoryLogger(application)
     private val initialDeviceProfile = deviceProfileReader.read()
     private val initialChatSessions = chatSessionStore.load()
+    private val initialWorldBooks = worldBookStore.load()
+    private val initialKnowledgeBases = knowledgeBaseStore.loadBases()
+    private val initialKnowledgeBaseIds = initialChatSessions.firstOrNull()
+        ?.id
+        ?.let(knowledgeBaseStore::selectedKnowledgeBaseIds)
+        .orEmpty()
     private val initialImages = chatSessionStore.loadImages()
     private val initialFiles = chatSessionStore.loadFiles()
     private val initialParams = loadGenerationParams(application)
@@ -1202,7 +1843,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile private var activeImageUpscaleSourceImageId: String? = null
     private val localImageGenerationCoordinator = LocalImageGenerationCoordinator()
     private val localImageGenerationCoordinatorObservationLock = Any()
+    private val localApiImageGenerationLifecycleLock = Any()
+    private var activeLocalApiImageGenerationOwnership: LocalApiImageGenerationOwnership? = null
     private val localImageLoraLifecycleLock = Any()
+    private val localImageTextualInversionLifecycleLock = Any()
     private val localImageUpscaleLifecycleLock = Any()
 
     private suspend fun awaitImageLibraryStartupReconciliation() {
@@ -1252,6 +1896,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             files = initialFiles,
             localImageModels = initialLocalImageModels,
             localImageLoras = initialLocalImageLoras,
+            localImageTextualInversionLoading = true,
+            localImageTextualInversionMessage = "正在加载 Textual Inversion 库…",
             localImageUpscalers = initialLocalImageUpscalers,
             selectedLocalImageUpscalerId = initialSelectedLocalImageUpscalerId,
             selectedLocalImageModelId = initialSelectedLocalImageModelId,
@@ -1265,6 +1911,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selectedCloudImageModelId = initialSelectedCloudImageModelId,
             assistants = initialAssistants,
             selectedAssistantId = initialSelectedAssistantId,
+            worldBooks = initialWorldBooks,
+            knowledgeBases = initialKnowledgeBases,
+            selectedKnowledgeBaseIds = initialKnowledgeBaseIds,
             selectedChatBackend = if (initialSelectedBackend == ChatBackend.CLOUD && initialCloudConfig.configured) {
                 ChatBackend.CLOUD
             } else {
@@ -1335,6 +1984,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+    private fun registerLocalApiImageGenerationOwnership(
+        ownership: LocalApiImageGenerationOwnership
+    ) {
+        synchronized(localApiImageGenerationLifecycleLock) {
+            check(activeLocalApiImageGenerationOwnership == null) {
+                "Another Local API image request already owns cancellation."
+            }
+            activeLocalApiImageGenerationOwnership = ownership
+        }
+    }
+
+    private fun unregisterLocalApiImageGenerationOwnership(
+        ownership: LocalApiImageGenerationOwnership
+    ): Boolean = synchronized(localApiImageGenerationLifecycleLock) {
+        if (activeLocalApiImageGenerationOwnership !== ownership) {
+            false
+        } else {
+            activeLocalApiImageGenerationOwnership = null
+            true
+        }
+    }
+
+    /** The lifecycle lock prevents a stale stop snapshot from cancelling a newer UI request. */
+    private fun cancelActiveLocalApiImageGeneration(reason: String): Boolean =
+        synchronized(localApiImageGenerationLifecycleLock) {
+            val ownership = activeLocalApiImageGenerationOwnership
+                ?: return@synchronized false
+            localImageWorkerClient.cancel()
+            ownership.requestJob.cancel(CancellationException(reason))
+            true
+        }
+
+    private fun cancelOwnedLocalApiImageWorker(
+        ownership: LocalApiImageGenerationOwnership
+    ): Boolean = synchronized(localApiImageGenerationLifecycleLock) {
+        if (activeLocalApiImageGenerationOwnership !== ownership) {
+            false
+        } else {
+            localImageWorkerClient.cancel()
+            true
+        }
+    }
+
     private fun updateGenerationImageGrantReleaseDefer(defer: Boolean) {
         _uiState.update { state ->
             if (state.deferGenerationImageGrantRelease == defer) {
@@ -1349,6 +2041,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         runCatching {
             File(getApplication<Application>().cacheDir, LOCAL_IMAGE_UI_PREVIEW_DIRECTORY)
                 .deleteRecursively()
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val loaded = loadInitialTextualInversionLibraryState(localImageTextualInversionStore)
+            _uiState.update { state ->
+                if (!state.localImageTextualInversionLoading) {
+                    state
+                } else {
+                    state.copy(
+                        localImageTextualInversions = loaded.records,
+                        localImageTextualInversionLoading = false,
+                        localImageTextualInversionMessage = loaded.message
+                    )
+                }
+            }
         }
         LocalApiRuntime.engine = engine
         LocalApiRuntime.streamChatWithContextProvider = { request, executionContext ->
@@ -1372,11 +2078,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
         }
-        LocalApiRuntime.stopGenerationProvider = { engine.stopGeneration() }
+        LocalApiRuntime.stopGenerationProvider = {
+            cancelActiveLocalApiImageGeneration("Local API generation was stopped by the client.")
+            engine.stopGeneration()
+        }
         LocalApiRuntime.loadedModelJsonProvider = { loadedModelJson() }
         LocalApiRuntime.paramsJsonProvider = { apiGenerationParams().toJson() }
         LocalApiRuntime.generationParamsProvider = { apiGenerationParams() }
         LocalApiRuntime.modelsJsonProvider = { modelsJson() }
+        LocalApiRuntime.imageTextualInversionsJsonProvider = {
+            JSONArray().apply {
+                _uiState.value.localImageTextualInversions.forEach { artifact ->
+                    put(artifact.toJson(includePath = false))
+                }
+            }.toString()
+        }
         LocalApiRuntime.modelRuntimeStatesJsonProvider = { modelRuntimeStatesJson() }
         LocalApiRuntime.deviceProfileJsonProvider = { currentDeviceProfile().toJson().toString() }
         LocalApiRuntime.agentRecommendationJsonProvider = { requestJson ->
@@ -2132,7 +2848,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onInputChange(value: String) {
-        _uiState.update { it.copy(input = value) }
+        val bounded = value.takeUtf8Prefix(MAX_DIRECT_COMPOSER_UTF8_BYTES)
+        _uiState.update {
+            it.copy(
+                input = bounded.text,
+                statusMessage = if (bounded.truncated) {
+                    "输入超过 256 KiB，已保留前半部分；较长资料请导入知识库或作为文件使用。"
+                } else {
+                    it.statusMessage
+                }
+            )
+        }
     }
 
     fun attachFile(uriString: String) {
@@ -2246,6 +2972,153 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Measures a prompt with the tokenizer declared by the selected local image
+     * model. This is intentionally tokenizer-only: it never loads a diffusion
+     * graph, and an unsupported/unknown backend simply returns null so the UI
+     * cannot present a guessed token count.
+     */
+    suspend fun measureImagePromptTokens(
+        modelChoiceId: String,
+        prompt: String,
+    ): ImagePromptTokenMeasurement? = withContext(Dispatchers.IO) {
+        val modelId = modelChoiceId
+            .removePrefix(LOCAL_IMAGE_MODEL_CHOICE_PREFIX)
+            .takeIf { it != modelChoiceId && it.isNotBlank() }
+            ?: return@withContext null
+        val model = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
+            ?: return@withContext null
+        if (!model.configured || !NativeMnnDiffusionBridge.isAvailable) return@withContext null
+
+        val key = "$modelId|${model.sha256.lowercase()}|${model.updatedAt}"
+        val measurementCacheKey = "$key\u001f$prompt"
+        imagePromptTokenMeasurementCache.get(measurementCacheKey)?.let { cached ->
+            return@withContext cached
+        }
+        val descriptor = imagePromptTokenizerDescriptors[key] ?: runCatching {
+            val root = (
+                model.bundleRoot
+                    ?.takeIf(String::isNotBlank)
+                    ?.let(::File)
+                    ?.takeIf(File::isDirectory)
+                    ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+                )?.canonicalFile ?: return@runCatching null
+            val profile = resolveLocalImageExecutionProfile(
+                model = model,
+                options = LocalImageGenerationOptions(),
+                bundleRoot = root
+            ).profile
+            val backend = profile.tokenizer.backend
+            if (backend == ImageTokenizerBackend.SDCPP_NATIVE) return@runCatching null
+            // The adapter mirrors MtokTokenizer::encodeSingle, but this profile family has no
+            // descriptor-backed tokenizer.mtok binding that proves the UI would open the exact
+            // file consumed by the generation engine. Do not turn a directory scan into an
+            // apparently exact count. This affects only the UI meter, never model admission or
+            // execution.
+            if (backend == ImageTokenizerBackend.MNN_MTOK) {
+                return@runCatching null
+            }
+            val verifiedNativeMultilingualTokenizer = profile
+                .textEncoderLanguage
+                ?.evidence
+                ?.takeIf { profile.hasVerifiedNativeSimplifiedChineseTextEncoder() }
+                ?.let { evidence ->
+                    runCatching {
+                        qnnPinnedNativeMultilingualTokenizerJsonFile(root, evidence)
+                    }.getOrNull()
+                        ?: return@runCatching null
+                }
+            val tokenizerJson = if (backend == ImageTokenizerBackend.TOKENIZERS_CPP) {
+                verifiedNativeMultilingualTokenizer ?: run {
+                    val rootPrefix = root.path + File.separator
+                    profile.tokenizer.assets.asSequence()
+                        .filter { asset ->
+                            asset.relativePath
+                                .replace('\\', '/')
+                                .substringAfterLast('/')
+                                .equals("tokenizer.json", ignoreCase = true)
+                        }
+                        .map { asset -> File(root, asset.relativePath).canonicalFile }
+                        .plus(
+                            sequenceOf(
+                                File(root, "tokenizer.json").canonicalFile,
+                                File(root, "tokenizer/tokenizer.json").canonicalFile
+                            )
+                        )
+                        .firstOrNull { file -> file.isFile && file.path.startsWith(rootPrefix) }
+                        ?: return@runCatching null
+                }
+            } else {
+                null
+            }
+            val tokenizerRoot = root
+            val bosId = profile.tokenizer.bosId
+                ?: return@runCatching null
+            val eosId = profile.tokenizer.eosId
+                ?: return@runCatching null
+            val padId = profile.tokenizer.padId
+                ?: return@runCatching null
+            LocalImagePromptTokenizerDescriptor(
+                modelKey = key,
+                bundleRoot = tokenizerRoot,
+                backend = backend,
+                tokenizerJsonPath = tokenizerJson,
+                bosId = bosId,
+                eosId = eosId,
+                padId = padId,
+                maxTokens = profile.tokenizer.maxLength,
+                promptWeightingEnabled = profile.tokenizer.supportsPromptWeighting,
+            )
+        }.getOrNull() ?: return@withContext null
+
+        imagePromptTokenizerDescriptors.putIfAbsent(key, descriptor)
+        currentCoroutineContext().ensureActive()
+        val raw = runCatching {
+            NativeMnnDiffusionBridge().measurePromptTokens(
+                bundleRoot = descriptor.bundleRoot.path,
+                tokenizerBackend = descriptor.backend.name,
+                tokenizerJsonPath = descriptor.tokenizerJsonPath?.path.orEmpty(),
+                prompt = prompt,
+                bosId = descriptor.bosId,
+                eosId = descriptor.eosId,
+                padId = descriptor.padId,
+                maxTokens = descriptor.maxTokens,
+                promptWeightingEnabled = descriptor.promptWeightingEnabled,
+            )
+        }.getOrNull() ?: return@withContext null
+        currentCoroutineContext().ensureActive()
+        val json = runCatching { JSONObject(raw) }.getOrNull() ?: return@withContext null
+        if (!json.optBoolean("ok", false) ||
+            json.optString("backend") != descriptor.backend.name
+        ) return@withContext null
+        val count = json.opt("count")
+            .takeIf { value -> value is Byte || value is Short || value is Int || value is Long }
+            ?.let { (it as Number).toLong() }
+            ?.takeIf { value -> value in 0L..Int.MAX_VALUE.toLong() }
+            ?.toInt()
+            ?: return@withContext null
+        val maxTokens = json.opt("maxTokens")
+            .takeIf { value -> value is Byte || value is Short || value is Int || value is Long }
+            ?.let { (it as Number).toLong() }
+            ?.takeIf { value -> value in 1L..Int.MAX_VALUE.toLong() }
+            ?.toInt()
+            ?: return@withContext null
+        val overflowOffset = json.opt("overflowByteOffset")
+            .takeIf { value -> value is Byte || value is Short || value is Int || value is Long }
+            ?.let { (it as Number).toLong() }
+            ?.takeIf { value -> value in 0L..Int.MAX_VALUE.toLong() }
+            ?.toInt()
+            ?.let { offset -> utf8ByteOffsetToUtf16(prompt, offset) }
+        val measurement = ImagePromptTokenMeasurement(
+            count = count,
+            maxTokens = maxTokens,
+            overflowOffset = overflowOffset,
+        )
+        currentCoroutineContext().ensureActive()
+        imagePromptTokenMeasurementCache.put(measurementCacheKey, measurement)
+        measurement
+    }
+
     fun useFileAsset(fileId: String) {
         val file = _uiState.value.files.firstOrNull { it.id == fileId } ?: return
         _uiState.update { state ->
@@ -2357,6 +3230,146 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 localImageLoraMessage = "所选 LoRA 已删除，请重新选择。",
                 statusMessage = "所选 LoRA 已删除，请重新选择。"
+            )
+        }
+    }
+
+    fun importLocalImageTextualInversion(uriString: String, trigger: String) {
+        if (_uiState.value.localImageTextualInversionLoading) {
+            _uiState.update {
+                it.copy(localImageTextualInversionMessage = "Textual Inversion 库仍在加载，请稍后重试。")
+            }
+            return
+        }
+        val uri = runCatching { Uri.parse(uriString.trim()) }.getOrNull()
+        val normalizedTrigger = trigger.trim()
+        if (uri == null || !uri.scheme.equals("content", ignoreCase = true)) {
+            _uiState.update {
+                it.copy(localImageTextualInversionMessage = "请选择可读取的 Textual Inversion 文档。")
+            }
+            return
+        }
+        if (!TextualInversionContract.TRIGGER_PATTERN.matches(normalizedTrigger)) {
+            _uiState.update {
+                it.copy(localImageTextualInversionMessage = "Textual Inversion 触发词格式无效。")
+            }
+            return
+        }
+        if (_uiState.value.localImageTextualInversionImporting) return
+        _uiState.update {
+            it.copy(
+                localImageTextualInversionImporting = true,
+                localImageTextualInversionMessage = "正在导入 Textual Inversion…"
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val imported = localImageTextualInversionStore.importFromContentUri(
+                    uri = uri,
+                    trigger = normalizedTrigger
+                )
+                val records = localImageTextualInversionStore.load()
+                _uiState.update {
+                    it.copy(
+                        localImageTextualInversions = records,
+                        localImageTextualInversionImporting = false,
+                        localImageTextualInversionMessage = if (imported.duplicate) {
+                            "相同 Textual Inversion 已存在：${imported.artifact.name}"
+                        } else {
+                            "已导入 Textual Inversion：${imported.artifact.name}"
+                        }
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(
+                        localImageTextualInversionImporting = false,
+                        localImageTextualInversionMessage =
+                            "Textual Inversion 导入失败：${error.message ?: "文件无效"}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun deleteLocalImageTextualInversion(id: String) {
+        if (_uiState.value.localImageTextualInversionLoading) {
+            _uiState.update {
+                it.copy(localImageTextualInversionMessage = "Textual Inversion 库仍在加载，请稍后重试。")
+            }
+            return
+        }
+        val artifactId = runCatching { UUID.fromString(id.trim()).toString() }.getOrNull() ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val reserved = synchronized(localImageTextualInversionLifecycleLock) {
+                val state = _uiState.value
+                when {
+                    artifactId in state.activeLocalImageTextualInversionIds -> false
+                    artifactId in state.deletingLocalImageTextualInversionIds -> false
+                    else -> {
+                        _uiState.update {
+                            it.copy(
+                                deletingLocalImageTextualInversionIds =
+                                    it.deletingLocalImageTextualInversionIds + artifactId
+                            )
+                        }
+                        true
+                    }
+                }
+            }
+            if (!reserved) {
+                _uiState.update {
+                    it.copy(
+                        localImageTextualInversionMessage =
+                            "该 Textual Inversion 正被任务使用或删除中。"
+                    )
+                }
+                return@launch
+            }
+            try {
+                val record = _uiState.value.localImageTextualInversions
+                    .firstOrNull { it.id == artifactId }
+                val deleted = localImageTextualInversionStore.clear(artifactId)
+                val records = localImageTextualInversionStore.load()
+                _uiState.update {
+                    it.copy(
+                        localImageTextualInversions = records,
+                        localImageTextualInversionMessage = when {
+                            record == null || !deleted -> "Textual Inversion 已不存在。"
+                            else -> "已删除 Textual Inversion：${record.name}"
+                        }
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(
+                        localImageTextualInversionMessage =
+                            "Textual Inversion 删除失败：${error.message ?: "文件已保留"}"
+                    )
+                }
+            } finally {
+                synchronized(localImageTextualInversionLifecycleLock) {
+                    _uiState.update {
+                        it.copy(
+                            deletingLocalImageTextualInversionIds =
+                                it.deletingLocalImageTextualInversionIds - artifactId
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun reportMissingLocalImageTextualInversionSelection() {
+        _uiState.update {
+            it.copy(
+                localImageTextualInversionMessage =
+                    "所选 Textual Inversion 已删除，请重新选择。",
+                statusMessage = "所选 Textual Inversion 已删除，请重新选择。"
             )
         }
     }
@@ -2786,8 +3799,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prompt: String,
         inputDraft: LocalImageInputDraft = LocalImageInputDraft(),
         options: LocalImageGenerationOptions = LocalImageGenerationOptions()
-    ) {
-        enqueueImageGeneration(
+    ): Boolean {
+        return enqueueImageGeneration(
             prompt = prompt,
             inputDraft = inputDraft,
             options = options,
@@ -2835,6 +3848,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun resolveCurrentLocalImageTextualInversionIds(
+        ids: List<String>,
+        records: List<TextualInversionArtifact> = _uiState.value.localImageTextualInversions
+    ): List<String> {
+        require(ids.size <= TextualInversionContract.MAX_COUNT) {
+            "单次最多使用 ${TextualInversionContract.MAX_COUNT} 个 Textual Inversion。"
+        }
+        val normalizedIds = ids.map { id -> UUID.fromString(id.trim()).toString() }
+        require(normalizedIds.distinct().size == normalizedIds.size) {
+            "同一个 Textual Inversion 不能重复选择。"
+        }
+        val availableIds = records.mapTo(mutableSetOf(), TextualInversionArtifact::id)
+        normalizedIds.firstOrNull { it !in availableIds }?.let { missingId ->
+            throw LocalImageProductContractException(
+                "image_textual_inversion_not_found",
+                "所选 Textual Inversion 已删除或不可用：$missingId"
+            )
+        }
+        return normalizedIds
+    }
+
     fun recreateImageAsset(imageId: String) {
         val state = _uiState.value
         val asset = state.images.firstOrNull { it.id == imageId }
@@ -2878,6 +3912,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     modelName = history.modelName,
                     inputDraft = history.inputDraft,
                     options = history.options.copy(loras = resolvedLoras),
+                    promptExecution = history.promptExecution?.takeIf { execution ->
+                        execution.method.isReusableFromImageHistory()
+                    },
                     chatSessionId = asset.chatSessionId
                 )
             }
@@ -2932,20 +3969,154 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }.getOrDefault(false)
     }
 
+    private suspend fun prepareLocalImagePromptExecution(
+        model: LocalImageModelRecord,
+        prompt: String,
+        options: LocalImageGenerationOptions,
+        captured: LocalImagePromptExecution?
+    ): LocalImagePromptExecution {
+        if (prompt.length > LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS ||
+            (options.negativePrompt?.length ?: 0) >
+            LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS
+        ) {
+            throw LocalImageProductContractException(
+                code = "invalid_image_prompt",
+                message = "图片提示词超过 ${LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS} 字符上限。"
+            )
+        }
+        val profileOptions = options.normalizedForPromptExecutionProfile(model.runtime)
+        val bundleRoot = model.bundleRoot
+            ?.takeIf(String::isNotBlank)
+            ?.let(::File)
+            ?.takeIf(File::isDirectory)
+            ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+        val profile = resolveLocalImageExecutionProfile(
+            model = model,
+            options = profileOptions,
+            bundleRoot = bundleRoot
+        ).profile
+        val languageCapability = profile.textEncoderLanguageCapability()
+        val resolvedFinalNegativePrompt = resolveLocalImageFinalNegativePrompt(
+            userNegativePrompt = options.negativePrompt,
+            modelDefaultNegativePrompt = profile.defaults.defaultNegativePrompt
+        )
+        val finalNegativePrompt = resolveLocalImageFinalNegativePromptForExecution(
+            finalNegativePrompt = resolvedFinalNegativePrompt,
+            useCfg = profile.defaults.useCfg
+        )
+        // Validate the exact pair the selected CFG topology will encode. In particular, a model
+        // default negative prompt discarded by useCfg=false must not reject an otherwise valid
+        // positive prompt before native execution begins.
+        requireLocalImagePromptLanguageAdmission(
+            profile = profile,
+            prompt = prompt.trim(),
+            executedNegativePrompt = finalNegativePrompt.value
+        )
+        // The default negative prompt is also native conditioning input. Classify the exact
+        // final pair so any admitted non-ASCII native input cannot be recorded as DIRECT.
+        val requiresNativeMultilingualPromptExecution =
+            prompt.requiresNativeMultilingualPromptExecution() ||
+                finalNegativePrompt.value.requiresNativeMultilingualPromptExecution()
+        if (requiresNativeMultilingualPromptExecution &&
+            languageCapability == LocalImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL
+        ) {
+            val evidenceRoot = bundleRoot ?: throw LocalImageProductContractException(
+                code = "invalid_image_prompt_language_evidence",
+                message = "原生中文文本编码器证据目录不可用，尚未启动图片生成。"
+            )
+            requireNativeMultilingualTextEncoderEvidenceAsset(
+                bundleRoot = evidenceRoot,
+                profile = profile
+            )
+        }
+        fun effectiveExecutionProfile(effectiveNegativePrompt: String): ImageExecutionProfile {
+            val effectiveProfile = resolveLocalImageExecutionProfile(
+                model = model,
+                options = profileOptions.copy(negativePrompt = effectiveNegativePrompt),
+                bundleRoot = bundleRoot
+            ).profile
+            check(
+                effectiveProfile.promptLanguageBindingFingerprint ==
+                    profile.promptLanguageBindingFingerprint
+            ) { "Effective prompt options changed the text-encoder language topology." }
+            return effectiveProfile
+        }
+        if (finalNegativePrompt.value.length > LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS) {
+            throw LocalImageProductContractException(
+                code = "invalid_image_prompt",
+                message = "图片模型的最终负向提示词超过 " +
+                    "${LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS} 字符上限。"
+            )
+        }
+        val requiredMethod = requiredLocalImagePromptTransformationMethod(
+            containsChinese = requiresNativeMultilingualPromptExecution,
+            languageCapability = languageCapability
+        )
+        captured?.let { execution ->
+            require(execution.originalPrompt == prompt &&
+                execution.originalNegativePrompt == options.negativePrompt
+            ) { "Captured image prompt execution does not match the request." }
+            if (execution.promptLanguageBindingFingerprint ==
+                profile.promptLanguageBindingFingerprint && execution.method == requiredMethod
+            ) {
+                val rebound = execution.rebindToCurrentImageProfile(
+                    finalNegativePrompt = finalNegativePrompt,
+                    imageProfileBindingFingerprint = profile.bindingFingerprint,
+                    promptLanguageBindingFingerprint = profile.promptLanguageBindingFingerprint
+                )
+                val effectiveProfile = effectiveExecutionProfile(rebound.effectiveNegativePrompt)
+                return rebound.copy(
+                    imageProfileBindingFingerprint = effectiveProfile.bindingFingerprint,
+                    promptLanguageBindingFingerprint =
+                        effectiveProfile.promptLanguageBindingFingerprint
+                )
+            }
+        }
+
+        if (requiredMethod in setOf(
+                LocalImagePromptTransformationMethod.DIRECT,
+                LocalImagePromptTransformationMethod.NATIVE_MULTILINGUAL
+            )
+        ) {
+            val effectiveProfile = effectiveExecutionProfile(finalNegativePrompt.value)
+            return LocalImagePromptExecution(
+                originalPrompt = prompt,
+                effectivePrompt = prompt,
+                originalNegativePrompt = options.negativePrompt,
+                effectiveNegativePrompt = finalNegativePrompt.value,
+                negativePromptSource = finalNegativePrompt.source,
+                method = requiredMethod,
+                imageProfileBindingFingerprint = effectiveProfile.bindingFingerprint,
+                promptLanguageBindingFingerprint = effectiveProfile.promptLanguageBindingFingerprint
+            )
+        }
+
+        error("New local image requests cannot enter the legacy V4 LLM prompt translation path.")
+    }
+
     private fun enqueueImageGeneration(
         prompt: String,
         inputDraft: LocalImageInputDraft,
         options: LocalImageGenerationOptions,
         jobSnapshot: ImageGenerationJobSpec?
-    ) {
-        val cleanPrompt = (jobSnapshot?.prompt ?: prompt).trim().take(600)
+    ): Boolean {
+        val cleanPrompt = (jobSnapshot?.prompt ?: prompt).trim()
         if (cleanPrompt.isBlank()) {
             _uiState.update { it.copy(statusMessage = "请输入图片描述") }
-            return
+            return false
+        }
+        if (cleanPrompt.length > LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS) {
+            _uiState.update {
+                it.copy(
+                    statusMessage = "图片提示词超过 " +
+                        "${LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS} 字符上限。"
+                )
+            }
+            return false
         }
         if (imageGenerationJob?.isActive == true) {
             _uiState.update { it.copy(statusMessage = "已有图片生成任务正在运行，请先停止当前任务") }
-            return
+            return false
         }
         val jobId = "ui-img-${UUID.randomUUID()}"
         val enqueueState = _uiState.value
@@ -2962,11 +4133,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (requestedBackend == ImageBackend.LOCAL && requestedLocalModel == null) {
             _uiState.update { it.copy(statusMessage = "请先在模型管理的本地页导入并选择图像生成引擎。") }
-            return
+            return false
         }
         if (requestedBackend == ImageBackend.CLOUD && requestedCloudConfig == null) {
             _uiState.update { it.copy(statusMessage = "请先在模型管理的云端页接入并选择图像生成模型。") }
-            return
+            return false
         }
         val requestedModelId = jobSnapshot?.modelId
             ?: requestedLocalModel?.id
@@ -2977,41 +4148,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ?: requestedCloudConfig?.imageModel.orEmpty()
         val requestedChatSessionId = jobSnapshot?.chatSessionId ?: enqueueState.activeChatSessionId
         val baseOptions = jobSnapshot?.options ?: options
+        if (requestedBackend == ImageBackend.LOCAL &&
+            baseOptions.textualInversionIds.isNotEmpty() &&
+            enqueueState.localImageTextualInversionLoading
+        ) {
+            _uiState.update {
+                it.copy(statusMessage = "Textual Inversion 库仍在加载，请稍后重试。")
+            }
+            return false
+        }
         val currentOptions = if (requestedBackend == ImageBackend.LOCAL) {
-            runCatching {
+            try {
                 baseOptions.copy(
                     loras = resolveCurrentLocalImageLoras(
                         baseOptions.loras.map { adapter -> adapter.id to adapter.multiplier }
+                    ),
+                    textualInversionIds = resolveCurrentLocalImageTextualInversionIds(
+                        baseOptions.textualInversionIds
                     )
-                )
-            }.getOrElse { error ->
-                _uiState.update {
-                    it.copy(statusMessage = "图片任务的 LoRA 不可用：${error.message ?: "请重新选择"}")
+                ).also { resolvedOptions ->
+                    requireTextualInversionPromptTriggers(
+                        prompt = cleanPrompt,
+                        negativePrompt = resolvedOptions.negativePrompt,
+                        ids = resolvedOptions.textualInversionIds,
+                        records = enqueueState.localImageTextualInversions
+                    )
                 }
-                return
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(statusMessage = "图片任务的本地扩展不可用：${error.message ?: "请重新选择"}")
+                }
+                return false
             }
         } else {
-            if (baseOptions.loras.isNotEmpty()) {
-                _uiState.update { it.copy(statusMessage = "云端图片连接器不接受本地 LoRA。") }
-                return
+            if (baseOptions.loras.isNotEmpty() || baseOptions.textualInversionIds.isNotEmpty() ||
+                baseOptions.ultraFix != null
+            ) {
+                _uiState.update { it.copy(statusMessage = "云端图片连接器不接受本地模型扩展。") }
+                return false
             }
             baseOptions
         }
-        var queuedOptions = if (
-            requestedBackend == ImageBackend.LOCAL &&
-            requestedLocalModel?.supportsLiveProjectionPreview() == true &&
-            currentOptions.preview == null
-        ) {
-            currentOptions.copy(
-                preview = LocalImagePreviewOptions(
-                    interval = 1,
-                    mode = LocalImagePreviewMode.PROJECTION
-                )
-            )
-        } else {
-            currentOptions
-        }
+        // Preview is an explicit per-job UI/API option. Do not silently turn it back on here:
+        // retries and history recreation must preserve the captured job snapshot exactly.
+        var queuedOptions = currentOptions
         val queuedInputDraft = jobSnapshot?.inputDraft ?: inputDraft
+        if (requestedBackend == ImageBackend.LOCAL) {
+            try {
+                val resolvedSampler = requireNotNull(requestedLocalModel).validateProductTaskSampler(
+                    taskMode = queuedInputDraft.taskMode,
+                    sampleMethod = queuedOptions.sampleMethod
+                )
+                // Capture the effective task-aware sampler in the retryable job spec. In
+                // particular, an omitted sampler on a generic shared-QNN img2img request must
+                // not fall through to that profile's legacy PNDM default.
+                queuedOptions = queuedOptions.copy(
+                    sampleMethod = imageSchedulerProductName(resolvedSampler)
+                )
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(
+                        statusMessage = "图片采样器不可用：${error.message ?: "请重新选择采样器"}"
+                    )
+                }
+                return false
+            }
+        }
         var queuedJobSpec = (jobSnapshot ?: ImageGenerationJobSpec(
             prompt = cleanPrompt,
             backend = requestedBackend,
@@ -3032,7 +4234,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update {
                 it.copy(statusMessage = "已有 UI 或 Local API 图片任务正在运行，请等待完成或先停止当前任务")
             }
-            return
+            return false
+        }
+        val textualInversionReservationError =
+            synchronized(localImageTextualInversionLifecycleLock) {
+                val state = _uiState.value
+                val ids = queuedOptions.textualInversionIds.toSet()
+                when {
+                    ids.any(state.deletingLocalImageTextualInversionIds::contains) ->
+                        "所选 Textual Inversion 正在删除，请重新选择。"
+                    ids.any { requestedId ->
+                        state.localImageTextualInversions.none { it.id == requestedId }
+                    } -> "所选 Textual Inversion 已删除，请重新选择。"
+                    else -> {
+                        _uiState.update {
+                            it.copy(activeLocalImageTextualInversionIds = ids)
+                        }
+                        null
+                    }
+                }
+            }
+        if (textualInversionReservationError != null) {
+            check(releaseObservedImageGenerationLease(generationLease)) {
+                "UI image generation lease was replaced during Textual Inversion reservation."
+            }
+            _uiState.update {
+                it.copy(
+                    activeLocalImageTextualInversionIds = emptySet(),
+                    localImageTextualInversionMessage = textualInversionReservationError,
+                    statusMessage = textualInversionReservationError
+                )
+            }
+            return false
         }
         val leasedLoraRefreshError = synchronized(localImageLoraLifecycleLock) {
             runCatching {
@@ -3061,35 +4294,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update {
                     it.copy(
                         activeLocalImageLoraIds = emptySet(),
+                        activeLocalImageTextualInversionIds = emptySet(),
                         statusMessage = "图片任务的 LoRA 不可用：${leasedLoraRefreshError.message ?: "请重新选择"}"
                     )
                 }
             }
-            return
+            return false
+        }
+        val localBatchPlan = requestedLocalModel?.let { model ->
+            runCatching {
+                planLocalImageBatch(
+                    parentRequestId = jobId,
+                    runtime = model.runtime,
+                    requestedOptions = queuedOptions
+                )
+            }.getOrElse { error ->
+                check(releaseObservedImageGenerationLease(generationLease)) {
+                    "UI image generation lease was replaced during batch planning."
+                }
+                synchronized(localImageLoraLifecycleLock) {
+                    _uiState.update {
+                        it.copy(
+                            activeLocalImageLoraIds = emptySet(),
+                            activeLocalImageTextualInversionIds = emptySet(),
+                            statusMessage = "图片批次参数无效：${error.message ?: "请检查数量和 seed"}"
+                        )
+                    }
+                }
+                return false
+            }
         }
         // Nothing after the lease-protected refresh may observe another value. Keeping these
         // snapshots immutable also makes the coroutine capture explicit for retry/history parity.
-        val executionOptions = queuedOptions
-        val executionJobSpec = queuedJobSpec
+        val executionOptions = localBatchPlan?.parentOptions ?: queuedOptions
+        val executionJobSpec = queuedJobSpec.copy(options = executionOptions)
         activeImageGenerationJobId = jobId
         activeImageGenerationBackend = requestedBackend
         activeImageGenerationModelId = requestedModelId
-        val prepareError = runCatching {
-            requestedLocalModel?.let { model -> localImageWorkerClient.begin(model.runtime) }
-        }.exceptionOrNull()
-        if (prepareError != null) {
-            releaseObservedImageGenerationLease(generationLease)
-            activeImageGenerationJobId = null
-            activeImageGenerationBackend = null
-            activeImageGenerationModelId = null
-            synchronized(localImageLoraLifecycleLock) {
-                _uiState.update { it.copy(activeLocalImageLoraIds = emptySet()) }
-            }
-            _uiState.update {
-                it.copy(statusMessage = "本地生图 worker 准备失败：${prepareError.message ?: "未知错误"}")
-            }
-            return
-        }
         _uiState.update { state ->
             state.copy(
                 imageJobs = (
@@ -3110,6 +4351,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         val executionJob = viewModelScope.launch(Dispatchers.IO) {
+            var preparedJobSpec = executionJobSpec
             try {
                 awaitImageLibraryStartupReconciliation()
                 _uiState.update { state ->
@@ -3122,6 +4364,74 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 if (requestedBackend == ImageBackend.LOCAL) {
+                    val model = requireNotNull(requestedLocalModel) {
+                        "The queued local image model snapshot is missing."
+                    }
+                    val promptExecution = try {
+                        prepareLocalImagePromptExecution(
+                            model = model,
+                            prompt = executionJobSpec.prompt,
+                            options = executionJobSpec.options,
+                            captured = executionJobSpec.promptExecution
+                        ).also { execution ->
+                            requireTextualInversionPromptTriggers(
+                                prompt = execution.effectivePrompt,
+                                negativePrompt = execution.effectiveNegativePrompt,
+                                ids = executionJobSpec.options.textualInversionIds,
+                                records = _uiState.value.localImageTextualInversions
+                            )
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        val message = localImagePromptPreparationFailureMessage(error)
+                        _uiState.update { state ->
+                            val updatedJobs =
+                                state.imageJobs.withLocalImagePromptPreparationFailureIfActive(
+                                    activeJobId = activeImageGenerationJobId,
+                                    jobId = jobId,
+                                    message = message
+                                )
+                            if (updatedJobs === state.imageJobs) {
+                                state
+                            } else {
+                                state.copy(
+                                    imageJobs = updatedJobs,
+                                    statusMessage = "图片生成失败：$message"
+                                )
+                            }
+                        }
+                        return@launch
+                    }
+                    preparedJobSpec = executionJobSpec.copy(promptExecution = promptExecution)
+                    currentCoroutineContext().ensureActive()
+                    localImageWorkerClient.begin(model.runtime)
+                    currentCoroutineContext().ensureActive()
+                    _uiState.update { state ->
+                        val currentJob = state.imageJobs.firstOrNull { it.id == jobId }
+                        if (currentJob?.status != ImageGenerationStatusRecord.GENERATING) {
+                            state
+                        } else {
+                            state.copy(
+                                imageJobs = state.imageJobs.map { job ->
+                                    if (job.id == jobId) {
+                                        job.copy(
+                                            spec = preparedJobSpec,
+                                            message = if (promptExecution.method ==
+                                                LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN
+                                            ) {
+                                                "中文提示词已转换，正在调用本地图像生成引擎"
+                                            } else {
+                                                job.message
+                                            }
+                                        )
+                                    } else {
+                                        job
+                                    }
+                                }
+                            )
+                        }
+                    }
                     startLocalImageGenerationWatchdog(jobId)
                 }
                 val generatedImages = runCatching {
@@ -3130,31 +4440,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             val model = requireNotNull(requestedLocalModel) {
                                 "The queued local image model snapshot is missing."
                             }
-                            createLocalGeneratedImageAsset(
-                                requestId = jobId,
-                                prompt = cleanPrompt,
-                                model = model,
-                                options = executionOptions,
-                                inputDraft = queuedInputDraft,
-                                chatSessionId = requestedChatSessionId,
-                                generationMetadata = executionJobSpec.toHistoryMetadata(),
-                                onProgress = { progress ->
-                                    val message = progress.toImageGenerationMessage()
-                                    val publishedPreview = publishLocalImagePreview(jobId, progress)
-                                    _uiState.update { state ->
-                                        val job = state.imageJobs.firstOrNull { it.id == jobId }
-                                        if (job?.status == ImageGenerationStatusRecord.GENERATING) {
-                                            state.copy(
-                                                imageJobs = state.imageJobs.updateImageJob(
-                                                    jobId,
-                                                    ImageGenerationStatusRecord.GENERATING,
-                                                    message,
-                                                    preview = publishedPreview
-                                                )
-                                            )
-                                        } else {
-                                            state
+                            val batchPlan = requireNotNull(localBatchPlan) {
+                                "The queued local image batch plan is missing."
+                            }
+                            executeLocalImageBatchPlan(
+                                plan = batchPlan,
+                                cancellationRequested = {
+                                    activeImageGenerationJobId != jobId ||
+                                        _uiState.value.imageJobs.firstOrNull { it.id == jobId }
+                                            ?.status != ImageGenerationStatusRecord.GENERATING
+                                },
+                                execute = { child ->
+                                    createLocalGeneratedImageAsset(
+                                        requestId = child.requestId,
+                                        prompt = preparedJobSpec.effectivePrompt(),
+                                        model = model,
+                                        options = preparedJobSpec.effectiveOptions(child.options),
+                                        inputDraft = queuedInputDraft,
+                                        chatSessionId = requestedChatSessionId,
+                                        generationMetadata = preparedJobSpec.toHistoryMetadata(),
+                                        batchLineage = child.batchLineage,
+                                        outputLineages = child.outputLineages,
+                                        onProgress = { childProgress ->
+                                            val progress = child.parentProgress(childProgress)
+                                            val message = progress.toImageGenerationMessage()
+                                            val publishedPreview = publishLocalImagePreview(jobId, progress)
+                                            _uiState.update { state ->
+                                                val job = state.imageJobs.firstOrNull { it.id == jobId }
+                                                if (job?.status == ImageGenerationStatusRecord.GENERATING) {
+                                                    state.copy(
+                                                        imageJobs = state.imageJobs.updateImageJob(
+                                                            jobId,
+                                                            ImageGenerationStatusRecord.GENERATING,
+                                                            message,
+                                                            preview = publishedPreview
+                                                        )
+                                                    )
+                                                } else {
+                                                    state
+                                                }
+                                            }
                                         }
+                                    )
+                                },
+                                cleanup = { candidates ->
+                                    candidates.forEach { image ->
+                                        image.deleteLocalCopy(imageAssetDirectory)
                                     }
                                 }
                             )
@@ -3357,6 +4688,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val job = state.imageJobs.firstOrNull { it.id == jobId }
                         state.copy(
                             activeLocalImageLoraIds = emptySet(),
+                            activeLocalImageTextualInversionIds = emptySet(),
                             imageJobs = if (completion is CancellationException &&
                                 job != null && !job.status.terminal
                             ) {
@@ -3377,6 +4709,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (imageGenerationJob === executionJob) imageGenerationJob = null
         }
+        return true
     }
 
     private fun startLocalImageGenerationWatchdog(jobId: String) {
@@ -3478,7 +4811,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val progress = if (steps > 0) "第 ${step.coerceIn(0, steps)}/$steps 步" else "准备中"
         val size = if (width > 0 && height > 0) " · ${width}x$height" else ""
         val threadText = if (threads > 0) " · ${threads} 线程" else ""
-        return when {
+        val batchPrefix = message.substringBefore(" · ")
+            .takeIf { prefix -> Regex("^第 [1-8]/[1-8] 张$").matches(prefix) }
+        val detailMessage = batchPrefix
+            ?.let { prefix -> message.removePrefix("$prefix · ") }
+            ?: message
+        val status = when {
             cancelRequested || phase == "cancelling" -> "正在停止本地生图 · ${elapsedSeconds}s"
             phase == "loading" -> "正在加载本地图像引擎 · ${elapsedSeconds}s$threadText"
             phase == "conditioning" -> "正在编码提示词 · ${elapsedSeconds}s$threadText"
@@ -3495,9 +4833,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             phase == "sampling" -> "本地生图 $progress · ${elapsedSeconds}s$size$threadText"
             phase == "writing" -> "正在写入图片 · ${elapsedSeconds}s"
             phase == "completed" -> "本地生图完成 · ${elapsedSeconds}s"
-            phase == "failed" -> message.ifBlank { "本地生图失败" }
+            phase == "failed" -> detailMessage.ifBlank { "本地生图失败" }
             else -> "正在准备本地生图 · ${elapsedSeconds}s$threadText"
         }
+        return appendLocalImagePreviewDegradationMessage(
+            message = batchPrefix?.let { "$it · $status" } ?: status,
+            previewFailureCode = previewFailureCode
+        )
     }
 
     private fun LocalImageProgress.toImageUpscaleMessage(): String {
@@ -3520,12 +4862,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         jobId: String,
         progress: LocalImageProgress
     ): PublishedLocalImagePreview? = runCatching {
+        if (!canPublishLocalImagePreview(jobId)) return@runCatching null
         if (progress.previewRevision <= 0L || progress.previewPath.isBlank()) return@runCatching null
-        val currentRevision = _uiState.value.imageJobs
-            .firstOrNull { it.id == jobId }
-            ?.previewRevision
-            ?: 0L
-        if (progress.previewRevision <= currentRevision) return@runCatching null
         require(progress.previewMimeType == "image/png") {
             "Native image preview must be a PNG."
         }
@@ -3540,10 +4878,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val app = getApplication<Application>()
         val cacheRoot = app.cacheDir.canonicalFile
-        val source = File(progress.previewPath).canonicalFile
+        val source = validatedLocalImagePreviewSource(
+            cacheRoot = cacheRoot,
+            previewPath = progress.previewPath,
+            coordinatedRevision = progress.previewRevision
+        )
         require(
-            source.isFile && source.path.startsWith(cacheRoot.path + File.separator) &&
-                ".preview-" in source.name && source.length() in 1..MAX_LOCAL_IMAGE_PREVIEW_BYTES
+            source.isFile && source.length() in 1..MAX_LOCAL_IMAGE_PREVIEW_BYTES
         ) { "Native image preview path is not a bounded app-cache file." }
         val bytes = source.readBytes()
         require(bytes.size.toLong() == source.length()) {
@@ -3555,6 +4896,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             bounds.outWidth == progress.previewWidth && bounds.outHeight == progress.previewHeight
         ) { "Native image preview dimensions do not match the decoded PNG." }
 
+        // Copying and decoding can take long enough for a cancellation to win. Do not create a
+        // new UI-cache artifact once the job has left the only state that may show previews.
+        if (!canPublishLocalImagePreview(jobId)) return@runCatching null
+
         val root = File(cacheRoot, LOCAL_IMAGE_UI_PREVIEW_DIRECTORY).canonicalFile
         require(root.isDirectory || root.mkdirs()) { "Unable to create the image preview directory." }
         val requestToken = jobId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(64)
@@ -3563,15 +4908,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "Unable to create the request preview directory."
         }
         val fileName = "preview-${progress.previewRevision}.png"
+        var createdForThisPublication = false
         val published = File(requestDir, fileName).takeIf(File::isFile)
             ?: run {
                 if (!imageAssetWriteMutex.tryLock()) return@runCatching null
                 try {
-                    writeImageAssetBytesAtomically(requestDir, fileName, bytes)
+                    if (!canPublishLocalImagePreview(jobId)) return@runCatching null
+                    val created = writeImageAssetBytesAtomically(requestDir, fileName, bytes)
+                    createdForThisPublication = true
+                    created
                 } finally {
                     imageAssetWriteMutex.unlock()
                 }
             }
+        if (!canPublishLocalImagePreview(jobId)) {
+            if (createdForThisPublication) {
+                published.delete()
+            }
+            return@runCatching null
+        }
         PublishedLocalImagePreview(
             uriString = Uri.fromFile(published).toString(),
             mode = progress.previewMode,
@@ -3581,6 +4936,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             height = progress.previewHeight
         )
     }.getOrNull()
+
+    private fun canPublishLocalImagePreview(jobId: String): Boolean =
+        activeImageGenerationJobId == jobId &&
+            _uiState.value.imageJobs.firstOrNull { job -> job.id == jobId }?.status ==
+            ImageGenerationStatusRecord.GENERATING
 
     private fun cleanupLocalImagePreviews(jobId: String) {
         runCatching {
@@ -4695,6 +6055,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             systemPrompt = cleanPrompt,
             defaultModelMode = cleanDefaultModelMode,
             defaultModelId = cleanDefaultModelId,
+            characterCardJson = null,
             paramsJson = state.params.copy(
                 systemPrompt = cleanPrompt,
                 temperature = temperature.coerceIn(0f, 2f),
@@ -5342,13 +6703,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importAssistantCard(rawJson: String) {
-        val imported = runCatching {
-            AssistantRecord.fromJson(JSONObject(rawJson), AssistantRecord.default(_uiState.value.params.systemPrompt, _uiState.value.params))
-        }.getOrElse { error ->
-            _uiState.update { it.copy(statusMessage = "角色卡导入失败：${error.message ?: "JSON 格式不正确"}") }
+        if (_uiState.value.isGenerating) {
+            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再导入角色卡") }
+            return
+        }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.Default) {
+                CharacterCardCodec.parseJson(rawJson)
+            }
+            finishCharacterCardImport(result)
+        }
+    }
+
+    fun importAssistantCardFile(uriString: String) {
+        if (_uiState.value.isGenerating) {
+            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再导入角色卡") }
+            return
+        }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val uri = Uri.parse(uriString)
+                    val stream = getApplication<Application>().contentResolver.openInputStream(uri)
+                        ?: error("无法打开所选文件")
+                    stream.use(CharacterCardCodec::parse)
+                }.getOrElse { error ->
+                    CharacterCardParseResult.Failure(
+                        CharacterCardParseError(
+                            code = CharacterCardParseErrorCode.IO_ERROR,
+                            message = error.message ?: "无法读取所选文件",
+                            cause = error
+                        )
+                    )
+                }
+            }
+            finishCharacterCardImport(result)
+        }
+    }
+
+    private fun finishCharacterCardImport(result: CharacterCardParseResult) {
+        val success = result as? CharacterCardParseResult.Success ?: run {
+            val failure = result as CharacterCardParseResult.Failure
+            _uiState.update {
+                it.copy(statusMessage = "角色卡导入失败：${failure.error.message}")
+            }
             return
         }
         val state = _uiState.value
+        val imported = success.card.toAssistantRecord(
+            AssistantRecord.default(state.params.systemPrompt, state.params)
+        )
         val now = System.currentTimeMillis()
         val assistant = imported.copy(
             id = UUID.randomUUID().toString(),
@@ -5357,6 +6761,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             createdAt = now,
             updatedAt = now
         )
+        val embeddedWorldBook = success.card.toEmbeddedWorldBookOrNull(assistant.id)
+        val updatedWorldBooks = embeddedWorldBook?.let(worldBookStore::upsert) ?: state.worldBooks
         val updatedAssistants = state.assistants + assistant
         assistantStore.saveAssistants(updatedAssistants)
         assistantStore.saveSelectedAssistantId(assistant.id)
@@ -5374,11 +6780,178 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 selectedAssistantId = assistant.id,
                 params = updatedParams,
                 chatSessions = updatedSessions,
-                statusMessage = "已导入角色卡：${assistant.name}"
+                worldBooks = updatedWorldBooks,
+                statusMessage = buildString {
+                    append("已导入")
+                    append(if (success.source == CharacterCardSource.JSON) " JSON " else " PNG ")
+                    append("角色卡：")
+                    append(assistant.name)
+                    embeddedWorldBook?.let { book ->
+                        append("；内置世界书 ")
+                        append(book.entries.size)
+                        append(" 条")
+                    }
+                }
             )
         }
         persistChatSessions(updatedSessions)
         applyAssistantDefaultModel(assistant)
+    }
+
+    private fun CharacterCard.toEmbeddedWorldBookOrNull(assistantId: String): WorldBookRecord? {
+        val root = toJson()
+        val data = root.optJSONObject("data") ?: root
+        val embedded = data.optJSONObject("character_book") ?: return null
+        return runCatching {
+            WorldBookCodec.parse(
+                root = embedded,
+                scope = WorldBookScope.ASSISTANT,
+                assistantId = assistantId,
+                fallbackName = "${name.ifBlank { "导入角色" }}的世界书"
+            )
+        }.getOrNull()
+    }
+
+    fun importWorldBook(rawJson: String, scope: WorldBookScope = WorldBookScope.ASSISTANT) {
+        val state = _uiState.value
+        val result = WorldBookCodec.parse(
+            rawJson = rawJson,
+            scope = scope,
+            assistantId = state.selectedAssistantId.takeIf { scope == WorldBookScope.ASSISTANT },
+            chatSessionId = state.activeChatSessionId.takeIf { scope == WorldBookScope.CHAT }
+        )
+        val imported = result.book ?: run {
+            _uiState.update { it.copy(statusMessage = "世界书导入失败：${result.error ?: "格式不正确"}") }
+            return
+        }
+        val updated = worldBookStore.upsert(imported)
+        _uiState.update {
+            it.copy(
+                worldBooks = updated,
+                statusMessage = "已导入世界书：${imported.name}（${imported.entries.size} 条）"
+            )
+        }
+    }
+
+    fun importWorldBookFile(uriString: String, scope: WorldBookScope = WorldBookScope.ASSISTANT) {
+        if (_uiState.value.isGenerating) {
+            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再导入世界书") }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val (text, truncated) = readAttachmentText(Uri.parse(uriString), maxBytes = 1_048_576)
+                require(!truncated) { "世界书文件超过 1 MiB。" }
+                text
+            }
+            result.onSuccess { text -> importWorldBook(text, scope) }
+                .onFailure { error ->
+                    _uiState.update { it.copy(statusMessage = "世界书导入失败：${error.message ?: "无法读取文件"}") }
+                }
+        }
+    }
+
+    fun deleteWorldBook(worldBookId: String) {
+        val removed = _uiState.value.worldBooks.firstOrNull { it.id == worldBookId } ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { worldBookStore.remove(worldBookId) }
+                .onSuccess { remaining ->
+                    _uiState.update {
+                        it.copy(
+                            worldBooks = remaining,
+                            statusMessage = "已删除世界书：${removed.name}"
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(statusMessage = "世界书删除失败：${error.message ?: "请重试"}")
+                    }
+                }
+        }
+    }
+
+    fun createKnowledgeBase(name: String, description: String = "") {
+        val created = runCatching { knowledgeBaseStore.create(name, description) }.getOrElse { error ->
+            _uiState.update { it.copy(statusMessage = "知识库创建失败：${error.message ?: "名称无效"}") }
+            return
+        }
+        _uiState.update { state ->
+            state.copy(
+                knowledgeBases = (state.knowledgeBases.filterNot { it.id == created.id } + created)
+                    .sortedBy { it.name.lowercase() },
+                statusMessage = "已创建知识库：${created.name}"
+            )
+        }
+    }
+
+    fun importKnowledgeDocument(knowledgeBaseId: String, uriString: String) {
+        if (_uiState.value.isGenerating) {
+            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再导入知识库文件") }
+            return
+        }
+        val known = _uiState.value.knowledgeBases.any { it.id == knowledgeBaseId }
+        if (!known) {
+            _uiState.update { it.copy(statusMessage = "未找到要导入的知识库") }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val uri = Uri.parse(uriString)
+                val name = displayNameForUri(uri)
+                require(isSupportedTextAttachment(uri, name)) { "知识库目前支持文本、Markdown、JSON、XML、CSV 与代码文件。" }
+                val (text, truncated) = readAttachmentText(uri, maxBytes = 1_048_576)
+                require(!truncated) { "知识库文件超过 1 MiB，请拆分后导入。" }
+                knowledgeBaseStore.importDocument(
+                    knowledgeBaseId = knowledgeBaseId,
+                    title = name,
+                    text = text,
+                    source = uriString
+                )
+            }
+            result.onSuccess { document ->
+                _uiState.update { state ->
+                    state.copy(
+                        statusMessage = "已导入知识库文档：${document.title}（${document.chunkCount} 段）"
+                    )
+                }
+            }.onFailure { error ->
+                _uiState.update {
+                    it.copy(statusMessage = "知识库导入失败：${error.message ?: "无法读取文件"}")
+                }
+            }
+        }
+    }
+
+    fun setKnowledgeBaseSelected(knowledgeBaseId: String, selected: Boolean) {
+        val state = _uiState.value
+        if (knowledgeBaseId !in state.knowledgeBases.mapTo(mutableSetOf()) { it.id }) return
+        val updatedIds = state.selectedKnowledgeBaseIds.toMutableSet().apply {
+            if (selected) add(knowledgeBaseId) else remove(knowledgeBaseId)
+        }.toSet()
+        _uiState.update { it.copy(selectedKnowledgeBaseIds = updatedIds) }
+        state.activeChatSessionId?.let { sessionId ->
+            persistKnowledgeBaseBindings(sessionId, updatedIds)
+        }
+    }
+
+    fun deleteKnowledgeBase(knowledgeBaseId: String) {
+        val removed = _uiState.value.knowledgeBases.firstOrNull { it.id == knowledgeBaseId } ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { knowledgeBaseStore.remove(knowledgeBaseId) }
+                .onSuccess {
+                    _uiState.update { state ->
+                        state.copy(
+                            knowledgeBases = state.knowledgeBases.filterNot { it.id == knowledgeBaseId },
+                            selectedKnowledgeBaseIds = state.selectedKnowledgeBaseIds - knowledgeBaseId,
+                            statusMessage = "已删除知识库：${removed.name}"
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update { it.copy(statusMessage = "知识库删除失败：${error.message ?: "请重试"}") }
+                }
+        }
     }
 
     fun updateReasoningMode(mode: ReasoningMode) {
@@ -6178,7 +7751,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         modelStore.attachVisionProjectorFile(registered.id, projectorFile, projectorRemote.name)
                     )
                 } else {
-                    val report = LiteRtQnnVisionRunner().health(
+                    val report = LiteRtQnnVisionRunner(
+                        context = getApplication<Application>()
+                    ).health(
                         device = currentDeviceProfile(),
                         bundleRoot = bundleDir
                     )
@@ -7328,10 +8903,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             },
             imageAttachments = preparedInput.imageAttachments
         )
+        val preflightContext = chatContextComposer.compose(
+            messages = state.messages + user,
+            params = state.params,
+            assistantId = state.selectedAssistantId,
+            chatSessionId = state.activeChatSessionId,
+            knowledgeBaseIds = state.selectedKnowledgeBaseIds
+        )
+        val admission = localContextWindowAdmission(
+            ChatRequest(
+                messages = state.messages + user,
+                params = state.params,
+                runtimeSystemContext = preflightContext.runtimeSystemContext
+            )
+        )
+        if (!admission.isAccepted) {
+            _uiState.update {
+                it.copy(
+                    statusMessage = admission.userMessage
+                        ?: "当前输入无法放入本机安全上下文，请缩短后重试。"
+                )
+            }
+            return
+        }
         val assistant = ChatMessage(Role.ASSISTANT, "")
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
+        var chatSessionIdForKnowledgeBinding: String? = null
+        var selectedKnowledgeBaseIdsForBinding: Set<String> = emptySet()
         _uiState.update {
             val sessionId = it.activeChatSessionId ?: UUID.randomUUID().toString()
+            chatSessionIdForKnowledgeBinding = sessionId
+            selectedKnowledgeBaseIdsForBinding = it.selectedKnowledgeBaseIds
             val messages = it.messages + user + assistant
             sessionsToPersist = it.chatSessions.upsertSession(
                 sessionId = sessionId,
@@ -7350,6 +8952,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         persistChatSessions(sessionsToPersist)
+        chatSessionIdForKnowledgeBinding?.let { sessionId ->
+            persistKnowledgeBaseBindings(sessionId, selectedKnowledgeBaseIdsForBinding)
+        }
 
         startGeneration(_uiState.value.messages.dropLast(1))
     }
@@ -7436,6 +9041,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(params = baseParams) }
             }
             var requestParams = baseParams
+            val runtimeContextPlan = chatContextComposer.compose(
+                messages = requestMessages,
+                params = requestParams,
+                assistantId = initialState.selectedAssistantId,
+                chatSessionId = initialState.activeChatSessionId,
+                knowledgeBaseIds = initialState.selectedKnowledgeBaseIds
+            )
             val webSearchTurnMode = if (initialState.webSearchOneShotEnabled) {
                 WebSearchTurnMode.ON
             } else {
@@ -7526,7 +9138,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     persistChatSessions()
                     return@launch
                 }
-                cloudChatProvider.streamChat(cloudConfig, ChatRequest(cloudMessages, requestParams))
+                cloudChatProvider.streamChat(
+                    cloudConfig,
+                    ChatRequest(
+                        messages = cloudMessages,
+                        params = requestParams,
+                        runtimeSystemContext = runtimeContextPlan.runtimeSystemContext
+                    )
+                )
             } else {
                 if (hasImageAttachments && !localVisionRunnerAvailable()) {
                     appendAssistant("\n${state.localVisionUnavailableMessage()}")
@@ -7555,9 +9174,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ?.let { profile -> mergeExecutionProfile(requestParams, profile) }
                     ?: requestParams
                 LocalApiRuntime.streamChat(
-                    ChatRequest(localMessages, activeRequestParams),
+                    ChatRequest(
+                        messages = localMessages,
+                        params = activeRequestParams,
+                        runtimeSystemContext = runtimeContextPlan.runtimeSystemContext
+                    ),
                     executionContext
-                ) ?: engine.streamChat(ChatRequest(localMessages, activeRequestParams), executionContext)
+                ) ?: engine.streamChat(
+                    ChatRequest(
+                        messages = localMessages,
+                        params = activeRequestParams,
+                        runtimeSystemContext = runtimeContextPlan.runtimeSystemContext
+                    ),
+                    executionContext
+                )
             }
             stream.collect { event ->
                 when (event) {
@@ -7644,6 +9274,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 messages = emptyList(),
                 input = "",
                 activeChatSessionId = null,
+                selectedKnowledgeBaseIds = emptySet(),
                 statusMessage = "已新建对话"
             )
         }
@@ -7656,6 +9287,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val session = state.chatSessions.firstOrNull { it.id == sessionId } ?: return
+        val selectedKnowledgeBaseIds = knowledgeBaseStore.selectedKnowledgeBaseIds(session.id)
         val assistant = session.assistantId
             ?.let { id -> state.assistants.firstOrNull { it.id == id } }
             ?: state.assistants.firstOrNull { it.id == state.selectedAssistantId }
@@ -7694,6 +9326,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 messages = session.messages,
                 input = "",
                 activeChatSessionId = session.id,
+                selectedKnowledgeBaseIds = selectedKnowledgeBaseIds,
                 selectedAssistantId = assistant?.id ?: it.selectedAssistantId,
                 params = updatedParams,
                 selectedChatBackend = when {
@@ -7722,9 +9355,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 messages = if (isActive) emptyList() else it.messages,
                 input = if (isActive) "" else it.input,
                 activeChatSessionId = if (isActive) null else it.activeChatSessionId,
+                selectedKnowledgeBaseIds = if (isActive) emptySet() else it.selectedKnowledgeBaseIds,
                 statusMessage = "已删除对话记录"
             )
         }
+        knowledgeBaseStore.setSelectedKnowledgeBaseIds(sessionId, emptySet())
         persistChatSessions(remaining)
     }
 
@@ -7790,6 +9425,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 messages = emptyList(),
                 input = "",
                 activeChatSessionId = null,
+                selectedKnowledgeBaseIds = emptySet(),
                 statusMessage = "已清空聊天记录"
             )
         }
@@ -9293,6 +10929,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         LocalApiRuntime.streamChatWithContextProvider = null
         LocalApiRuntime.stopGenerationProvider = null
         LocalApiRuntime.imageGenerationProvider = null
+        LocalApiRuntime.imageTextualInversionsJsonProvider = { "[]" }
         LocalApiRuntime.controlPlane = null
         localImageWorkerClient.close()
         super.onCleared()
@@ -9306,13 +10943,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 LocalApiForegroundService.stop(getApplication())
             }
         }.onFailure { error ->
-            _uiState.update { it.copy(statusMessage = "本地 API 保活服务启动失败：${error.message}") }
+            _uiState.update { it.copy(statusMessage = "本地 API 前台通知服务启动失败：${error.message}") }
         }
     }
 
     private fun startApiServer(bindHost: String) {
         val current = apiServer
         if (current?.isRunning == true && activeApiBindHost == bindHost) return
+        cancelActiveLocalApiImageGeneration("Local API server is restarting.")
         current?.shutdown()
         val next = McaLoopbackServer(port = REST_PORT, bindHost = bindHost, apiKey = apiKey)
         next.start()
@@ -9321,6 +10959,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun stopApiServer() {
+        cancelActiveLocalApiImageGeneration("Local API server stopped.")
         runCatching { apiServer?.shutdown() }
         apiServer = null
         activeApiBindHost = null
@@ -9503,6 +11142,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { error ->
                     _uiState.update {
                         it.copy(statusMessage = "聊天历史保存失败：${error.message}")
+                    }
+                }
+        }
+    }
+
+    private fun persistKnowledgeBaseBindings(sessionId: String, knowledgeBaseIds: Set<String>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { knowledgeBaseStore.setSelectedKnowledgeBaseIds(sessionId, knowledgeBaseIds) }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(statusMessage = "知识库选择保存失败：${error.message ?: "请重试"}")
                     }
                 }
         }
@@ -9731,20 +11381,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ): List<ImageGenerationJobRecord> =
         map { job ->
             if (job.id == jobId) {
-                job.copy(
+                job.withCommittedImageJobUpdate(
                     status = status,
                     message = message,
                     imageAssetId = imageAssetId ?: job.imageAssetId,
-                    previewUriString = if (status.terminal) null else {
-                        preview?.uriString ?: job.previewUriString
-                    },
-                    previewMode = if (status.terminal) "" else preview?.mode ?: job.previewMode,
-                    previewStep = if (status.terminal) 0 else preview?.step ?: job.previewStep,
-                    previewRevision = if (status.terminal) 0L else {
-                        preview?.revision ?: job.previewRevision
-                    },
-                    previewWidth = if (status.terminal) 0 else preview?.width ?: job.previewWidth,
-                    previewHeight = if (status.terminal) 0 else preview?.height ?: job.previewHeight
+                    preview = preview
                 )
             } else {
                 job
@@ -10075,6 +11716,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         inputDraft: LocalImageInputDraft = LocalImageInputDraft(),
         chatSessionId: String? = null,
         generationMetadata: ImageGenerationHistoryMetadata,
+        batchLineage: ImageGenerationBatchLineage? = null,
+        outputLineages: List<ImageGenerationBatchLineage>,
         onProgress: (LocalImageProgress) -> Unit = {}
     ): List<ImageAssetRecord> {
         val result = try {
@@ -10084,7 +11727,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 options = options,
                 inputDraft = inputDraft,
                 onProgress = onProgress,
-                requestId = requestId
+                requestId = requestId,
+                batchLineage = batchLineage
             )
         } catch (error: Throwable) {
             if (error !is CancellationException && error !is LocalImageWorkerCancelledException) {
@@ -10092,16 +11736,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             throw error
         }
+        val effectiveBundleRoot = model.bundleRoot
+            ?.takeIf(String::isNotBlank)
+            ?.let(::File)
+            ?.takeIf(File::isDirectory)
+            ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+        val effectiveProfile = resolveLocalImageExecutionProfile(
+            model = model,
+            options = options.normalizedForPromptExecutionProfile(model.runtime),
+            bundleRoot = effectiveBundleRoot
+        ).profile
+        val preparedPromptExecution = requireNotNull(generationMetadata.promptExecution) {
+            "Local image generation is missing prepared prompt execution evidence."
+        }
+        require(
+            prompt == preparedPromptExecution.effectivePrompt &&
+                options.negativePrompt == preparedPromptExecution.effectiveNegativePrompt
+        ) { "Local image worker inputs do not match prepared prompt execution evidence." }
+        val effectivePromptExecution = preparedPromptExecution
+            .bindToEffectiveExecutionProfile(effectiveProfile)
+        validateLocalImagePromptExecutionBinding(
+            promptExecution = effectivePromptExecution,
+            expectedProfile = effectiveProfile,
+            executionMetadataJson = result.executionMetadataJson
+        )
         recordLocalImageExecutionOutcome(model, failureMessage = null)
-        val generationMetadataJson = generationMetadata
+        require(outputLineages.size == result.outputs.size) {
+            "Image batch lineage count does not match worker outputs."
+        }
+        val nativeGenerationMetadata = generationMetadata
+            .copy(promptExecution = effectivePromptExecution)
             .withNativeExecution(result.executionMetadataJson)
-            .toJsonString()
         val timestamp = System.currentTimeMillis()
         val requestToken = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(48)
         return imageAssetWriteMutex.withLock {
             val writtenFiles = mutableListOf<File>()
             try {
                 result.outputs.map { output ->
+                    val outputLineage = outputLineages[output.index]
+                    val actualSeed = requireNotNull(output.seed) {
+                        "Generated image ${output.index} is missing its actual seed."
+                    }
+                    require(actualSeed == outputLineage.seed.toLong()) {
+                        "Generated image ${output.index} seed does not match its batch lineage."
+                    }
+                    val generationMetadataJson = nativeGenerationMetadata
+                        .forBatchOutput(outputLineage)
+                        .toJsonString()
                     val extension = imageExtensionForMime(output.mimeType)
                     val suffix = if (result.outputs.size == 1) "" else "-${output.index.toString().padStart(3, '0')}"
                     val outputFile = writeImageAssetBytesAtomically(
@@ -10120,7 +11801,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         name = "Local Image ${java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault()).format(java.util.Date(timestamp))}$suffix.$extension",
                         uriString = Uri.fromFile(outputFile).toString(),
                         source = "generated:${model.runtime.label}",
-                        prompt = prompt,
+                        prompt = generationMetadata.requestPrompt,
                         sizeBytes = outputFile.length(),
                         width = bounds.outWidth,
                         height = bounds.outHeight,
@@ -10147,7 +11828,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val requestedModel = request.model.orEmpty()
         val model = if (requestedModel.isNotBlank()) {
-            val candidate = _uiState.value.localImageModels.firstOrNull { it.id == requestedModel }
+            val currentState = _uiState.value
+            val candidate = resolveLocalImageApiModel(
+                requestedModelId = requestedModel,
+                chatModelIds = currentState.models.map(ModelManifest::id),
+                imageModels = currentState.localImageModels
+            )
                 ?: throw ImageGenerationProviderException(
                     code = "image_model_not_found",
                     httpStatus = 404,
@@ -10177,62 +11863,175 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         val dispatch = request.toLocalImageApiDispatch()
-        var options = runCatching {
-            dispatch.options.copy(
-                loras = resolveCurrentLocalImageLoras(
-                    request.loras.map { selection -> selection.id to selection.multiplier }
-                )
-            )
-        }.getOrElse { error ->
+        if (request.textualInversionIds.isNotEmpty() &&
+            _uiState.value.localImageTextualInversionLoading
+        ) {
             throw ImageGenerationProviderException(
-                code = "image_lora_not_found",
-                httpStatus = 404,
-                message = error.message ?: "A requested LoRA adapter is unavailable."
+                code = "image_textual_inversion_library_loading",
+                httpStatus = 409,
+                message = "The textual inversion library is still loading. Retry this request shortly."
             )
         }
+        val resolvedLoras = try {
+            resolveCurrentLocalImageLoras(
+                request.loras.map { selection -> selection.id to selection.multiplier }
+            )
+        } catch (error: Exception) {
+            throw localImageExtensionResolutionFailure(
+                error = error,
+                fallbackCode = "image_lora_not_found",
+                fallbackMessage = "A requested LoRA adapter is unavailable."
+            )
+        }
+        val resolvedTextualInversionIds = try {
+            resolveCurrentLocalImageTextualInversionIds(request.textualInversionIds).also { ids ->
+                requireTextualInversionPromptTriggers(
+                    prompt = request.prompt,
+                    negativePrompt = dispatch.options.negativePrompt,
+                    ids = ids,
+                    records = _uiState.value.localImageTextualInversions
+                )
+            }
+        } catch (error: Exception) {
+            throw localImageExtensionResolutionFailure(
+                error = error,
+                fallbackCode = "image_textual_inversion_not_found",
+                fallbackMessage = "A requested textual inversion is unavailable."
+            )
+        }
+        var options = dispatch.options.copy(
+            loras = resolvedLoras,
+            textualInversionIds = resolvedTextualInversionIds
+        )
         val inputDraft = dispatch.inputDraft
+        try {
+            val resolvedSampler = model.validateProductTaskSampler(
+                taskMode = inputDraft.taskMode,
+                sampleMethod = options.sampleMethod
+            )
+            // Persist the task-aware effective sampler before planning/dispatch. This keeps an
+            // omitted sampler usable for generic shared-QNN img2img (whose legacy profile default
+            // may be PNDM) while still returning a stable 422 for an explicit PNDM request.
+            options = options.copy(sampleMethod = imageSchedulerProductName(resolvedSampler))
+        } catch (error: Exception) {
+            throw requireNotNull(error.toLocalImageApiProviderExceptionOrNull()) {
+                ImageGenerationProviderException(
+                    code = "unsupported_sampler",
+                    httpStatus = 422,
+                    message = error.message ?: "The selected sampler is not supported for this image task."
+                )
+            }
+        }
+        options = planLocalImageBatch(
+            parentRequestId = requestId,
+            runtime = model.runtime,
+            requestedOptions = options
+        ).parentOptions
+        val requestJob = requireNotNull(currentCoroutineContext()[Job]) {
+            "Local API image generation requires a request coroutine."
+        }
         val generationLease = tryAcquireObservedImageGenerationLease(requestId)
             ?: throw ImageGenerationProviderException(
                 code = "image_generation_busy",
                 httpStatus = 409,
                 message = "Another UI or Local API image request is already running."
             )
-        activeLocalApiImageModelId = model.id
-        val leasedLoraRefreshError = synchronized(localImageLoraLifecycleLock) {
-            runCatching {
-                val currentLoras = localImageLoraStore.load()
-                options = options.copy(
-                    loras = resolveCurrentLocalImageLoras(
-                        request.loras.map { selection -> selection.id to selection.multiplier },
-                        currentLoras
-                    )
-                )
-                _uiState.update {
-                    it.copy(
-                        localImageLoras = currentLoras,
-                        activeLocalImageLoraIds = options.loras
-                            .mapTo(mutableSetOf()) { adapter -> adapter.id }
-                    )
-                }
-            }.exceptionOrNull()
-        }
-        if (leasedLoraRefreshError != null) {
-            activeLocalApiImageModelId = null
-            check(releaseObservedImageGenerationLease(generationLease)) {
-                "Local API image generation lease was replaced during LoRA refresh."
-            }
-            throw ImageGenerationProviderException(
-                code = "image_lora_not_found",
-                httpStatus = 404,
-                message = leasedLoraRefreshError.message ?: "A requested LoRA adapter is unavailable."
-            )
-        }
+        val ownership = LocalApiImageGenerationOwnership(
+            requestId = requestId,
+            requestJob = requestJob
+        )
+        var ownershipRegistered = false
         try {
-            val result = try {
-                localImageWorkerClient.generate(
+            registerLocalApiImageGenerationOwnership(ownership)
+            ownershipRegistered = true
+            currentCoroutineContext().ensureActive()
+            activeLocalApiImageModelId = model.id
+            val textualInversionReservationError =
+                synchronized(localImageTextualInversionLifecycleLock) {
+                    val state = _uiState.value
+                    val ids = options.textualInversionIds.toSet()
+                    when {
+                        ids.any(state.deletingLocalImageTextualInversionIds::contains) ->
+                            "A requested textual inversion is being deleted."
+                        ids.any { requestedId ->
+                            state.localImageTextualInversions.none { it.id == requestedId }
+                        } -> "A requested textual inversion is no longer installed."
+                        else -> {
+                            _uiState.update {
+                                it.copy(activeLocalImageTextualInversionIds = ids)
+                            }
+                            null
+                        }
+                    }
+                }
+            if (textualInversionReservationError != null) {
+                throw ImageGenerationProviderException(
+                    code = "image_textual_inversion_not_found",
+                    httpStatus = 404,
+                    message = textualInversionReservationError
+                )
+            }
+            val leasedLoraRefreshError = synchronized(localImageLoraLifecycleLock) {
+                runCatching {
+                    val currentLoras = localImageLoraStore.load()
+                    options = options.copy(
+                        loras = resolveCurrentLocalImageLoras(
+                            request.loras.map { selection -> selection.id to selection.multiplier },
+                            currentLoras
+                        )
+                    )
+                    _uiState.update {
+                        it.copy(
+                            localImageLoras = currentLoras,
+                            activeLocalImageLoraIds = options.loras
+                                .mapTo(mutableSetOf()) { adapter -> adapter.id }
+                        )
+                    }
+                }.exceptionOrNull()
+            }
+            if (leasedLoraRefreshError != null) {
+                throw ImageGenerationProviderException(
+                    code = "image_lora_not_found",
+                    httpStatus = 404,
+                    message = leasedLoraRefreshError.message
+                        ?: "A requested LoRA adapter is unavailable."
+                )
+            }
+            val promptExecution = try {
+                prepareLocalImagePromptExecution(
                     model = model,
                     prompt = request.prompt,
                     options = options,
+                    captured = null
+                ).also { execution ->
+                    requireTextualInversionPromptTriggers(
+                        prompt = execution.effectivePrompt,
+                        negativePrompt = execution.effectiveNegativePrompt,
+                        ids = options.textualInversionIds,
+                        records = _uiState.value.localImageTextualInversions
+                    )
+                }
+            } catch (error: Throwable) {
+                if (error is LocalImageProductContractException &&
+                    error.code == "image_textual_inversion_trigger_missing"
+                ) {
+                    throw ImageGenerationProviderException(
+                        code = error.code,
+                        httpStatus = 422,
+                        message = error.message
+                    )
+                }
+                error.toLocalImageApiProviderExceptionOrNull()?.let { throw it }
+                throw error
+            }
+            val effectiveOptions = options.copy(
+                negativePrompt = promptExecution.effectiveNegativePrompt
+            )
+            val result = try {
+                localImageWorkerClient.generate(
+                    model = model,
+                    prompt = promptExecution.effectivePrompt,
+                    options = effectiveOptions,
                     inputDraft = inputDraft,
                     requestId = requestId
                 )
@@ -10247,6 +12046,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 throw error
             }
+            currentCoroutineContext().ensureActive()
             return try {
                 require(result.outputs.size == request.imageCount) {
                     "The local image worker returned ${result.outputs.size} images; ${request.imageCount} were requested."
@@ -10254,6 +12054,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val execution = runCatching {
                     sanitizedLocalImageApiExecution(result.executionMetadataJson)
                 }.getOrElse { JSONObject() }
+                execution.put(
+                    "responseOutputEvidence",
+                    localImageApiResponseOutputEvidence(result.outputs)
+                )
                 val nativeEffective = execution.optJSONObject("nativeEffective")
                     ?: error("The local image result is missing nativeEffective execution evidence.")
                 require(
@@ -10279,12 +12083,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 JSONObject()
                     .put("created", System.currentTimeMillis() / 1000L)
                     .put("request_id", requestId)
-                    .put("model", model.id)
+                    // Echo an explicit catalog alias exactly so the API contract can bind the
+                    // provider response to the caller's requested model. Legacy raw ids remain
+                    // accepted and are echoed unchanged.
+                    .put("model", requestedModel.ifBlank { model.id })
+                    .put("prompt_processing", promptExecution.toJson())
                     .put("execution", execution)
                     .put(
                         "data",
                         JSONArray().apply {
                             result.outputs.forEach { output ->
+                                currentCoroutineContext().ensureActive()
                                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                                 BitmapFactory.decodeByteArray(output.bytes, 0, output.bytes.size, bounds)
                                 require(bounds.outWidth > 0 && bounds.outHeight > 0) {
@@ -10303,6 +12112,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     )
                     .toString()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: ImageGenerationProviderException) {
                 throw error
             } catch (error: Throwable) {
@@ -10312,10 +12123,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     message = error.message ?: "The local image worker returned invalid execution evidence."
                 )
             }
+        } catch (cancelled: CancellationException) {
+            if (ownershipRegistered) cancelOwnedLocalApiImageWorker(ownership)
+            throw cancelled
         } finally {
-            if (activeLocalApiImageModelId == model.id) activeLocalApiImageModelId = null
-            synchronized(localImageLoraLifecycleLock) {
-                _uiState.update { it.copy(activeLocalImageLoraIds = emptySet()) }
+            if (ownershipRegistered) {
+                check(unregisterLocalApiImageGenerationOwnership(ownership)) {
+                    "Local API image cancellation ownership changed before request completion."
+                }
+                if (activeLocalApiImageModelId == model.id) activeLocalApiImageModelId = null
+                synchronized(localImageLoraLifecycleLock) {
+                    _uiState.update {
+                        it.copy(
+                            activeLocalImageLoraIds = emptySet(),
+                            activeLocalImageTextualInversionIds = emptySet()
+                        )
+                    }
+                }
             }
             check(releaseObservedImageGenerationLease(generationLease)) {
                 "Local API image generation lease was replaced before request completion."
@@ -12266,6 +14090,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .put("vision_validated", visionValidated)
             )
         }
+        localImageApiCatalogEntries(
+            chatModelIds = state.models.map(ModelManifest::id),
+            imageModels = state.localImageModels
+        ).forEach { entry -> array.put(entry.payload) }
         return JSONObject().put("object", "list").put("data", array).toString()
     }
 
@@ -12480,7 +14308,8 @@ internal fun downloadedImageBundleManifestJson(
     displayName: String,
     bundle: ImageEngineBundleSpec,
     targets: List<Pair<RemoteModelFile, File>>,
-    primarySha256: String? = null
+    primarySha256: String? = null,
+    bundleRoot: File? = null
 ): JSONObject {
     val primary = targets.firstOrNull { it.first.bundleRole == ImageEngineBundleComponentRole.DIFFUSION }
     val familyHint = "${bundle.id}/$displayName/${primary?.second?.name.orEmpty()}"
@@ -12534,9 +14363,15 @@ internal fun downloadedImageBundleManifestJson(
             ?.lowercase()
             ?.takeIf { it.matches(Regex("^[0-9a-f]{64}$")) }
             ?: primaryFile.sha256ForProfile()
-        val profile = requireNotNull(
+        val resolvedProfile = requireNotNull(
             materializeDownloadedImageExecutionProfile(bundle, fingerprint)
         ).resolveDownloadedExecutionGraphPaths(targets)
+        val profile = bundleRoot?.let { root ->
+            resolvedProfile.withDownloadedTextualInversionConsumerPins(
+                bundleRoot = root,
+                primaryModel = primaryFile
+            )
+        } ?: resolvedProfile
         manifest.put("executionProfile", ImageExecutionProfileJson.toJson(profile))
     }
     bundle.requiredRuntimeProfile?.let { profile ->
@@ -12564,6 +14399,14 @@ internal fun downloadedImageBundleManifestJson(
                             "contextBinary",
                             resolvedDownloadedQnnContextPath(smoke.contextBinary, targets)
                         )
+                        .also { json ->
+                            smoke.expectedContextSizeBytes?.let { size ->
+                                json.put("expectedContextSizeBytes", size)
+                            }
+                            smoke.expectedContextSha256?.let { sha256 ->
+                                json.put("expectedContextSha256", sha256)
+                            }
+                        }
                         .put(
                             "inputs",
                             JSONArray(
@@ -12706,7 +14549,8 @@ private fun writeDownloadedImageBundleManifest(
             displayName = displayName,
             bundle = bundle,
             targets = targets,
-            primarySha256 = primarySha256
+            primarySha256 = primarySha256,
+            bundleRoot = bundleDir
         ).toString(2),
         Charsets.UTF_8
     )

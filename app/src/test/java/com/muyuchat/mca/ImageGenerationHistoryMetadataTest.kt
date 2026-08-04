@@ -63,6 +63,61 @@ class ImageGenerationHistoryMetadataTest {
     }
 
     @Test
+    fun `ultrafix history round trip keeps structured controls until source restaging`() {
+        val ultraFix = LocalImageUltraFixOptions(
+            targetWidth = 1_024,
+            targetHeight = 768,
+            strength = 0.4,
+            inversionSteps = 4,
+            refinementSteps = 10,
+            tileSize = 512,
+            overlap = 0.25
+        )
+        val metadata = ImageGenerationHistoryMetadata(
+            backend = ImageBackend.LOCAL,
+            modelId = "ultrafix-model",
+            modelName = "UltraFix Model",
+            requestPrompt = "refine the source",
+            options = LocalImageGenerationOptions(
+                width = ultraFix.targetWidth,
+                height = ultraFix.targetHeight,
+                steps = ultraFix.refinementSteps,
+                taskMode = LocalImageTaskMode.IMG2IMG,
+                strength = ultraFix.strength,
+                batchCount = 1,
+                vaeTiling = LocalImageVaeTilingOptions(ultraFix.tileSize, ultraFix.overlap),
+                ultraFix = ultraFix
+            ),
+            inputDraft = LocalImageInputDraft(
+                taskMode = LocalImageTaskMode.IMG2IMG,
+                inputImageReference = "content://documents/ultrafix-source",
+                strength = ultraFix.strength
+            )
+        )
+
+        val raw = metadata.toJsonString()
+        val restored = requireNotNull(ImageGenerationHistoryMetadata.fromJsonOrNull(raw))
+
+        assertEquals(metadata.options, restored.options)
+        assertEquals(ultraFix, restored.options.ultraFix)
+        assertTrue(restored.canRecreate())
+        assertFalse(JSONObject(raw).getJSONObject("options").has("inputImage"))
+
+        val injected = JSONObject(raw)
+        injected.getJSONObject("options").put(
+            "inputImage",
+            JSONObject()
+                .put("path", "/data/user/0/private/source.png")
+                .put("mimeType", "image/png")
+                .put("sha256", "a".repeat(64))
+                .put("sizeBytes", 1_024L)
+                .put("width", 512)
+                .put("height", 512)
+        )
+        assertNull(ImageGenerationHistoryMetadata.fromJsonOrNull(injected.toString()))
+    }
+
+    @Test
     fun malformedOrUnknownHistoryFailsClosed() {
         assertNull(ImageGenerationHistoryMetadata.fromJsonOrNull(""))
         assertNull(
@@ -102,6 +157,244 @@ class ImageGenerationHistoryMetadataTest {
         assertEquals(77, effective.options.seed)
         assertEquals("flow_match", effective.options.sampleMethod)
         assertTrue(effective.displayDetails().contains("seed 77"))
+    }
+
+    @Test
+    fun batchOutputHistoryStoresActualSeedAndLineageWhileKeepingNativeEvidenceTruthful() {
+        val parent = ImageGenerationHistoryMetadata(
+            backend = ImageBackend.LOCAL,
+            modelId = "model-1",
+            modelName = "Model One",
+            requestPrompt = "same batch",
+            options = LocalImageGenerationOptions(seed = 100, batchCount = 4),
+            inputDraft = LocalImageInputDraft()
+        ).withNativeExecution(
+            """{"nativeEffective":{"seed":100,"batchCount":4}}"""
+        )
+        val lineage = ImageGenerationBatchLineage(
+            parentRequestId = "parent-request",
+            index = 2,
+            count = 4,
+            seed = 102
+        )
+
+        val output = parent.forBatchOutput(lineage)
+        val restored = requireNotNull(
+            ImageGenerationHistoryMetadata.fromJsonOrNull(output.toJsonString())
+        )
+
+        assertEquals(102, restored.options.seed)
+        assertEquals(1, restored.options.batchCount)
+        assertEquals(lineage, restored.batchLineage)
+        assertTrue(restored.nativeExecutionJson.contains("\"batchCount\":4"))
+        assertTrue(restored.displayDetails().contains("3/4"))
+
+        val mismatchedSeed = JSONObject(output.toJsonString()).apply {
+            getJSONObject("options").put("seed", 103)
+        }
+        assertNull(ImageGenerationHistoryMetadata.fromJsonOrNull(mismatchedSeed.toString()))
+    }
+
+    @Test
+    fun versionOneHistoryRemainsReadableWithoutBatchLineage() {
+        val current = ImageGenerationHistoryMetadata(
+            backend = ImageBackend.LOCAL,
+            modelId = "legacy-model",
+            modelName = "Legacy Model",
+            requestPrompt = "legacy prompt",
+            options = LocalImageGenerationOptions(seed = 42),
+            inputDraft = LocalImageInputDraft()
+        )
+        val legacy = JSONObject(current.toJsonString()).put("version", 1).toString()
+
+        val restored = requireNotNull(ImageGenerationHistoryMetadata.fromJsonOrNull(legacy))
+
+        assertEquals(42, restored.options.seed)
+        assertNull(restored.batchLineage)
+    }
+
+    @Test
+    fun legacyLocalHistoryWithoutPromptEvidenceStaysVersionThreeAcrossDerivedWrites() {
+        val legacy = ImageGenerationHistoryMetadata(
+            backend = ImageBackend.LOCAL,
+            modelId = "legacy-local-model",
+            modelName = "Legacy Local Model",
+            requestPrompt = "旧提示词",
+            options = LocalImageGenerationOptions(seed = 7),
+            inputDraft = LocalImageInputDraft()
+        )
+
+        val initialRaw = legacy.toJsonString()
+        assertEquals(3, JSONObject(initialRaw).getInt("version"))
+        val restored = requireNotNull(ImageGenerationHistoryMetadata.fromJsonOrNull(initialRaw))
+
+        val upscaleRaw = restored.withUpscale(
+            ImageUpscaleHistoryMetadata(
+                sourceImageId = "11111111-1111-4111-8111-111111111111",
+                upscalerId = "22222222-2222-4222-8222-222222222222",
+                upscalerName = "Legacy 2x",
+                upscalerSha256 = "a".repeat(64),
+                inputImageSha256 = "b".repeat(64),
+                targetScale = 2,
+                nativeScale = 2,
+                tileSize = 512,
+                threads = 4,
+                sourceWidth = 128,
+                sourceHeight = 128,
+                outputWidth = 256,
+                outputHeight = 256,
+                postResizeApplied = false,
+                physicalComputeCount = 1,
+                physicalComputeSuccessCount = 1,
+                physicalTileComputeCount = 0,
+                physicalTileComputeSuccessCount = 0,
+                tiledExecution = false,
+                executionCompleted = true,
+                nativeGenerationSequence = 1,
+                nativeStageMask = 255,
+                nativeDetailStageMask = 255,
+                contextReleased = true
+            )
+        ).toJsonString()
+        assertEquals(3, JSONObject(upscaleRaw).getInt("version"))
+        assertNotNull(ImageGenerationHistoryMetadata.fromJsonOrNull(upscaleRaw))
+
+        val backupRaw = restored.toPortableBackupJsonString()
+        assertEquals(3, JSONObject(backupRaw).getInt("version"))
+        assertNotNull(ImageGenerationHistoryMetadata.fromJsonOrNull(backupRaw))
+    }
+
+    @Test
+    fun legacyTranslatedPromptEvidenceIsDiscardedWithoutLosingRecreatableHistory() {
+        val legacy = ImageGenerationHistoryMetadata(
+            backend = ImageBackend.LOCAL,
+            modelId = "legacy-translated-model",
+            modelName = "Legacy Translated Model",
+            requestPrompt = "一只红色杯子",
+            options = LocalImageGenerationOptions(negativePrompt = "不要人物", seed = 17),
+            inputDraft = LocalImageInputDraft()
+        )
+        listOf(
+            3 to JSONObject().put("version", 3),
+            4 to JSONObject().put("version", 3),
+            4 to JSONObject()
+                .put("version", 4)
+                .put("translationContractVersion", 3)
+        ).forEach { (outerHistoryVersion, legacyVersionFields) ->
+            val legacyPromptExecution = legacyVersionFields
+                .put("method", LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN.name)
+                .put("originalPrompt", "一只红色杯子")
+                .put("originalNegativePrompt", "不要人物")
+                .put("effectivePrompt", "one red cup")
+            val raw = JSONObject(legacy.toJsonString())
+                .put("version", outerHistoryVersion)
+                .put("promptExecution", legacyPromptExecution)
+
+            val restored = requireNotNull(
+                ImageGenerationHistoryMetadata.fromJsonOrNull(raw.toString())
+            )
+
+            assertEquals("一只红色杯子", restored.requestPrompt)
+            assertEquals("不要人物", restored.options.negativePrompt)
+            assertEquals(17, restored.options.seed)
+            assertNull(restored.promptExecution)
+            assertTrue(restored.canRecreate())
+            assertEquals(3, JSONObject(restored.toJsonString()).getInt("version"))
+        }
+    }
+
+    @Test
+    fun malformedCurrentTranslatedPromptEvidenceStillFailsClosed() {
+        val current = ImageGenerationHistoryMetadata(
+            backend = ImageBackend.LOCAL,
+            modelId = "current-translated-model",
+            modelName = "Current Translated Model",
+            requestPrompt = "一只红色杯子",
+            options = LocalImageGenerationOptions(seed = 19),
+            inputDraft = LocalImageInputDraft()
+        )
+        val raw = JSONObject(current.toJsonString())
+            .put("version", 4)
+            .put(
+                "promptExecution",
+                JSONObject()
+                    .put("version", 4)
+                    .put("method", LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN.name)
+            )
+
+        assertNull(ImageGenerationHistoryMetadata.fromJsonOrNull(raw.toString()))
+
+        raw.put(
+            "promptExecution",
+            JSONObject()
+                .put("version", 3)
+                .put("method", LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN.name)
+                .put("originalPrompt", "被篡改的提示词")
+                .put("originalNegativePrompt", JSONObject.NULL)
+        )
+        assertNull(ImageGenerationHistoryMetadata.fromJsonOrNull(raw.toString()))
+    }
+
+    @Test
+    fun translatedHistoryEvidenceIsAuditOnlyAndMustBeReverifiedOnRecreate() {
+        assertFalse(
+            LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN
+                .isReusableFromImageHistory()
+        )
+        assertTrue(LocalImagePromptTransformationMethod.DIRECT.isReusableFromImageHistory())
+        assertTrue(
+            LocalImagePromptTransformationMethod.NATIVE_MULTILINGUAL
+                .isReusableFromImageHistory()
+        )
+    }
+
+    @Test
+    fun executionFacetsUseOnlyExactSanitizedNativeEvidence() {
+        val local = ImageGenerationHistoryMetadata(
+            backend = ImageBackend.LOCAL,
+            modelId = "model-1",
+            modelName = "Model One",
+            requestPrompt = "same image",
+            options = LocalImageGenerationOptions(),
+            inputDraft = LocalImageInputDraft()
+        )
+
+        assertEquals(ImageHistoryExecutionFacets(), local.executionFacets())
+        assertEquals(
+            ImageHistoryExecutionFacets(runtimeLabel = "QNN HTP", deviceLabel = "HTP V79"),
+            local.withNativeExecution(
+                """{"runtime":"QNN_HTP","transportHtpArch":79,"npuActive":true,"nativeDetailStageMaskHex":"00000000000000ff"}"""
+            ).executionFacets()
+        )
+        assertEquals(
+            ImageHistoryExecutionFacets(runtimeLabel = "MNN Diffusion", deviceLabel = "OpenCL GPU"),
+            local.withNativeExecution(
+                """{"nativeEffective":{"runtime":"MNN_DIFFUSION","backendMode":"opencl"}}"""
+            ).executionFacets()
+        )
+        assertEquals(
+            ImageHistoryExecutionFacets(),
+            local.withNativeExecution(
+                """{"runtime":"UNRECOGNIZED","backendMode":"/data/user/0/private"}"""
+            ).executionFacets()
+        )
+    }
+
+    @Test
+    fun cloudHistoryExposesBackendWithoutInventingAnExecutionDevice() {
+        val cloud = ImageGenerationHistoryMetadata(
+            backend = ImageBackend.CLOUD,
+            modelId = "cloud-image",
+            modelName = "Cloud Image",
+            requestPrompt = "a cloud image",
+            options = LocalImageGenerationOptions(),
+            inputDraft = LocalImageInputDraft()
+        )
+
+        assertEquals(
+            ImageHistoryExecutionFacets(runtimeLabel = "云端 API", deviceLabel = ""),
+            cloud.executionFacets()
+        )
     }
 
     @Test

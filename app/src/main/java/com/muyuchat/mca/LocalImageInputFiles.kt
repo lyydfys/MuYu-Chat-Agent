@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.media.ExifInterface
 import android.net.Uri
 import android.util.Base64
 import java.io.ByteArrayInputStream
@@ -52,7 +53,7 @@ internal class LocalImageInputDispatcher(context: Context) {
                 },
                 strength = draft.strength,
                 controlStrength = draft.controlStrength
-            ).also { it.validateProductInputContract() }
+            ).withCanonicalUltraFixControls().also { it.validateProductInputContract() }
             LocalImageInputDispatch(options = options, directory = directory)
         } catch (error: Throwable) {
             directory.deleteRecursively()
@@ -411,19 +412,37 @@ private fun writeValidatedInput(
         val canonicalRoot = directory.canonicalFile
         val canonical = target.canonicalFile
         require(canonical.parentFile == canonicalRoot) { "$role image escaped its request directory." }
+        val exifOrientation = readPreparedInputExifOrientation(canonical)
+        val orientedDimensions = localImageOrientedDimensions(
+            bounds.outWidth,
+            bounds.outHeight,
+            exifOrientation
+        )
         return LocalImagePreparedInput(
             path = canonical.path,
             mimeType = actualMime,
             sha256 = digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) },
             sizeBytes = size,
             width = bounds.outWidth,
-            height = bounds.outHeight
+            height = bounds.outHeight,
+            orientedWidth = orientedDimensions.first,
+            orientedHeight = orientedDimensions.second,
+            exifOrientation = exifOrientation
         )
     } catch (error: Throwable) {
         target.delete()
         throw error
     }
 }
+
+private fun readPreparedInputExifOrientation(file: File): Int = runCatching {
+    ExifInterface(file.path).getAttributeInt(
+        ExifInterface.TAG_ORIENTATION,
+        ExifInterface.ORIENTATION_NORMAL
+    )
+}.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+    .takeIf { it in ExifInterface.ORIENTATION_NORMAL..ExifInterface.ORIENTATION_ROTATE_270 }
+    ?: ExifInterface.ORIENTATION_NORMAL
 
 private fun requestDirectory(root: File, requestId: String): File {
     root.mkdirs()

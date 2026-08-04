@@ -364,20 +364,34 @@ data class ImageGenerationHistoryMetadata(
     val requestPrompt: String,
     val options: LocalImageGenerationOptions,
     val inputDraft: LocalImageInputDraft,
+    val promptExecution: LocalImagePromptExecution? = null,
     val loras: List<ImageGenerationLoraSelection> = options.loras.map { adapter ->
         ImageGenerationLoraSelection(adapter.id, adapter.name, adapter.multiplier)
     },
     val nativeExecutionJson: String = "",
     val sourceGenerationAvailable: Boolean = true,
-    val upscaleHistory: List<ImageUpscaleHistoryMetadata> = emptyList()
+    val upscaleHistory: List<ImageUpscaleHistoryMetadata> = emptyList(),
+    val batchLineage: ImageGenerationBatchLineage? = null
 ) {
     init {
         require(modelId.isNotBlank()) { "Image history modelId must not be blank." }
         require(modelName.isNotBlank()) { "Image history modelName must not be blank." }
         require(requestPrompt.isNotBlank()) { "Image history requestPrompt must not be blank." }
+        promptExecution?.let { execution ->
+            require(execution.originalPrompt == requestPrompt) {
+                "Image history prompt execution must retain the original request prompt."
+            }
+            require(execution.originalNegativePrompt == options.negativePrompt) {
+                "Image history prompt execution must retain the original negative prompt."
+            }
+        }
         if (backend == ImageBackend.LOCAL) {
-            require(options.taskMode == inputDraft.taskMode) {
-                "Image history options and input draft must use the same task mode."
+            val canonicalOptions = options.withCanonicalPersistedUltraFixControls()
+            require(canonicalOptions.taskMode == inputDraft.taskMode &&
+                canonicalOptions.strength == inputDraft.strength &&
+                canonicalOptions.controlStrength == inputDraft.controlStrength
+            ) {
+                "Image history options and input draft must use the same input controls."
             }
         }
         require(loras.size <= LocalImagePreparedLora.MAX_COUNT &&
@@ -386,10 +400,22 @@ data class ImageGenerationHistoryMetadata(
         require(upscaleHistory.size <= MAX_UPSCALE_HISTORY) {
             "Image history contains too many upscale lineage entries."
         }
+        batchLineage?.let { lineage ->
+            require(options.batchCount == 1 && options.seed == lineage.seed) {
+                "Image history batch lineage must match the image's actual seed and single output."
+            }
+        }
     }
 
     fun toJsonString(): String = JSONObject()
-        .put("version", VERSION)
+        .put(
+            "version",
+            if (backend == ImageBackend.LOCAL && promptExecution == null) {
+                LAST_VERSION_WITHOUT_PROMPT_EXECUTION
+            } else {
+                VERSION
+            }
+        )
         .put("backend", backend.name)
         .put("modelId", modelId)
         .put("modelName", modelName)
@@ -397,7 +423,7 @@ data class ImageGenerationHistoryMetadata(
         .put("sourceGenerationAvailable", sourceGenerationAvailable)
         .put(
             "options",
-            options.copy(
+            options.withCanonicalPersistedUltraFixControls().copy(
                 inputImage = null,
                 maskImage = null,
                 controlImage = null,
@@ -412,6 +438,8 @@ data class ImageGenerationHistoryMetadata(
         .put("loras", JSONArray().apply { loras.forEach { put(it.toJson()) } })
         .put("upscaleHistory", JSONArray().apply { upscaleHistory.forEach { put(it.toJson()) } })
         .apply {
+            promptExecution?.let { put("promptExecution", it.toJson()) }
+            batchLineage?.let { put("batchLineage", it.toJson()) }
             sanitizeNativeExecutionJson(nativeExecutionJson).takeIf(String::isNotEmpty)?.let { raw ->
                 runCatching { JSONObject(raw) }.getOrNull()?.let { put("nativeExecution", it) }
             }
@@ -446,43 +474,56 @@ data class ImageGenerationHistoryMetadata(
         upscaleHistory = (upscaleHistory + lineage).takeLast(MAX_UPSCALE_HISTORY)
     )
 
+    /** Specializes parent/native-batch evidence for one library image without falsifying it. */
+    fun forBatchOutput(lineage: ImageGenerationBatchLineage): ImageGenerationHistoryMetadata = copy(
+        options = options.copy(seed = lineage.seed, batchCount = 1),
+        batchLineage = lineage
+    )
+
     /** Portable, secret-free parameters for clipboard sharing and selective reuse. */
-    fun toShareJson(): String = JSONObject()
-        .put("schema", "mca.image.generation.parameters")
-        .put("version", 1)
-        .put("modelId", modelId)
-        .put("modelName", modelName)
-        .put("prompt", requestPrompt)
-        .put("taskMode", inputDraft.taskMode.wireName)
-        .put("batchCount", options.batchCount)
-        .put("loras", JSONArray().apply { loras.forEach { put(it.toJson()) } })
-        .apply {
-            when (val negative = options.negativePrompt) {
-                null -> put("negativePromptMode", "model_default")
-                else -> {
-                    put("negativePromptMode", "explicit")
-                    put("negativePrompt", negative)
+    fun toShareJson(): String {
+        val portableOptions = options.withCanonicalPersistedUltraFixControls()
+        return JSONObject()
+            .put("schema", "mca.image.generation.parameters")
+            .put("version", 1)
+            .put("modelId", modelId)
+            .put("modelName", modelName)
+            .put("prompt", requestPrompt)
+            .put("taskMode", inputDraft.taskMode.wireName)
+            .put("batchCount", portableOptions.batchCount)
+            .put("loras", JSONArray().apply { loras.forEach { put(it.toJson()) } })
+            .put("textualInversionIds", JSONArray(portableOptions.textualInversionIds))
+            .apply {
+                when (val negative = portableOptions.negativePrompt) {
+                    null -> put("negativePromptMode", "model_default")
+                    else -> {
+                        put("negativePromptMode", "explicit")
+                        put("negativePrompt", negative)
+                    }
                 }
+                portableOptions.width?.let { put("width", it) }
+                portableOptions.height?.let { put("height", it) }
+                portableOptions.steps?.let { put("steps", it) }
+                portableOptions.cfgScale?.let { put("cfgScale", it) }
+                portableOptions.seed?.let { put("seed", it) }
+                portableOptions.sampleMethod?.takeIf(String::isNotBlank)?.let {
+                    put("sampleMethod", it)
+                }
+                portableOptions.clipSkip?.let { put("clipSkip", it) }
+                portableOptions.vaeTiling?.let { tiling ->
+                    put(
+                        "vaeTiling",
+                        JSONObject()
+                            .put("tileSize", tiling.tileSize)
+                            .put("overlap", tiling.overlap)
+                    )
+                }
+                portableOptions.ultraFix?.let { put("ultraFix", it.toJson()) }
+                inputDraft.strength?.let { put("strength", it) }
+                inputDraft.controlStrength?.let { put("controlStrength", it) }
             }
-            options.width?.let { put("width", it) }
-            options.height?.let { put("height", it) }
-            options.steps?.let { put("steps", it) }
-            options.cfgScale?.let { put("cfgScale", it) }
-            options.seed?.let { put("seed", it) }
-            options.sampleMethod?.takeIf(String::isNotBlank)?.let { put("sampleMethod", it) }
-            options.clipSkip?.let { put("clipSkip", it) }
-            options.vaeTiling?.let { tiling ->
-                put(
-                    "vaeTiling",
-                    JSONObject()
-                        .put("tileSize", tiling.tileSize)
-                        .put("overlap", tiling.overlap)
-                )
-            }
-            inputDraft.strength?.let { put("strength", it) }
-            inputDraft.controlStrength?.let { put("controlStrength", it) }
-        }
-        .toString()
+            .toString()
+    }
 
     /** Backup-safe history metadata without device-local paths or transient native evidence. */
     fun toPortableBackupJsonString(): String = copy(
@@ -495,6 +536,17 @@ data class ImageGenerationHistoryMetadata(
     ).toJsonString()
 
     fun canRecreate(): Boolean = sourceGenerationAvailable && inputDraft.hasRequiredInputReferences()
+
+    /**
+     * Product operation used by the image library. This is deliberately derived instead of
+     * persisted: UltraFix is an img2img execution variant, so its wire taskMode must remain
+     * `img2img` for share/recreate/API compatibility while history may expose it separately.
+     */
+    internal fun operationFacet(): ImageGenerationHistoryOperation =
+        ImageGenerationHistoryOperation.from(
+            taskMode = inputDraft.taskMode,
+            ultraFix = options.ultraFix != null
+        )
 
     /** Required, path-free inputs that must retain their generation-owned read grant for recreate. */
     fun requiredContentInputReferences(): Set<String> {
@@ -516,7 +568,7 @@ data class ImageGenerationHistoryMetadata(
 
     fun displayDetails(): String = buildList {
         if (sourceGenerationAvailable) {
-        add("$modelName · ${inputDraft.taskMode.displayName()}")
+        add("$modelName · ${if (options.ultraFix != null) "UltraFix" else inputDraft.taskMode.displayName()}")
         val elapsedMs = runCatching {
             JSONObject(nativeExecutionJson).optLong("elapsedMs", 0L)
         }.getOrDefault(0L)
@@ -527,12 +579,21 @@ data class ImageGenerationHistoryMetadata(
             add(options.seed?.let { "seed $it" } ?: "随机 seed")
             options.sampleMethod?.takeIf(String::isNotBlank)?.let { add(it) }
             if (options.batchCount > 1) add("${options.batchCount} 张")
+            batchLineage?.let { add("批次 ${it.index + 1}/${it.count}") }
             if (elapsedMs > 0L) add("用时 ${"%.1f".format(elapsedMs / 1000.0)} 秒")
         }
         if (parameters.isNotEmpty()) add(parameters.joinToString(" · "))
         val controls = buildList {
             options.clipSkip?.let { add("CLIP skip $it") }
-            options.vaeTiling?.let { add("VAE 分块 ${it.tileSize}/${it.overlap.toCompactText()}") }
+            options.ultraFix?.let { ultraFix ->
+                add(
+                    "UltraFix ${ultraFix.targetWidth}×${ultraFix.targetHeight} · " +
+                        "反演 ${ultraFix.inversionSteps} / 精修 ${ultraFix.refinementSteps} · " +
+                        "分块 ${ultraFix.tileSize}/${ultraFix.overlap.toCompactText()}"
+                )
+            } ?: options.vaeTiling?.let {
+                add("VAE 分块 ${it.tileSize}/${it.overlap.toCompactText()}")
+            }
             if (loras.isNotEmpty()) {
                 add(
                     "LoRA " + loras.joinToString { selection ->
@@ -540,10 +601,15 @@ data class ImageGenerationHistoryMetadata(
                     }
                 )
             }
+            if (options.textualInversionIds.isNotEmpty()) {
+                add("Textual Inversion ${options.textualInversionIds.size} 个")
+            }
             if (!inputDraft.inputImageReference.isNullOrBlank()) add("原图")
             if (!inputDraft.maskImageReference.isNullOrBlank()) add("蒙版")
             if (!inputDraft.controlImageReference.isNullOrBlank()) add("控制图")
-            inputDraft.strength?.let { add("重绘强度 ${it.toCompactText()}") }
+            if (options.ultraFix == null) {
+                inputDraft.strength?.let { add("重绘强度 ${it.toCompactText()}") }
+            }
             inputDraft.controlStrength?.let { add("控制强度 ${it.toCompactText()}") }
             when (val negative = options.negativePrompt) {
                 null -> add("模型默认负向提示词")
@@ -563,12 +629,16 @@ data class ImageGenerationHistoryMetadata(
     }.joinToString("\n")
 
     companion object {
-        private const val VERSION = 1
+        private const val VERSION = 5
+        private const val LEGACY_VERSION = 1
+        private const val LAST_VERSION_WITHOUT_PROMPT_EXECUTION = 3
+        private const val LEGACY_QNN_DETAIL_MASK_LAST_HISTORY_VERSION = 2
         private const val MAX_UPSCALE_HISTORY = 16
 
         fun fromJsonOrNull(raw: String?): ImageGenerationHistoryMetadata? = runCatching {
             val json = JSONObject(raw?.trim().orEmpty())
-            require(json.historyExactIntOrNull("version") == VERSION) {
+            val historyVersion = requireNotNull(json.historyExactIntOrNull("version"))
+            require(historyVersion in LEGACY_VERSION..VERSION) {
                 "Unsupported image history version."
             }
             val input = json.getJSONObject("inputDraft")
@@ -583,18 +653,55 @@ data class ImageGenerationHistoryMetadata(
                 strength = input.optionalHistoryDouble("strength"),
                 controlStrength = input.optionalHistoryDouble("controlStrength")
             ).also(LocalImageInputDraft::validateForHistory)
-            val persistedOptions = LocalImageGenerationOptions.fromJson(json.getJSONObject("options"))
+            val persistedOptions = LocalImageGenerationOptions.fromHistoryJson(
+                json.getJSONObject("options")
+            )
+            val backend = ImageBackend.valueOf(json.getString("backend"))
+            val requestPrompt = json.getString("requestPrompt")
+            var discardedLegacyTranslatedPromptExecution = false
+            val promptExecution = if (json.has("promptExecution")) {
+                val promptExecutionJson = requireNotNull(json.optJSONObject("promptExecution")) {
+                    "Image history promptExecution is invalid."
+                }
+                if (promptExecutionJson.isDiscardableLegacyTranslatedPromptExecution(
+                        requestPrompt = requestPrompt,
+                        originalNegativePrompt = persistedOptions.negativePrompt
+                    )
+                ) {
+                    discardedLegacyTranslatedPromptExecution = true
+                    null
+                } else {
+                    requireNotNull(LocalImagePromptExecution.fromJsonOrNull(promptExecutionJson)) {
+                        "Image history promptExecution is invalid."
+                    }
+                }
+            } else {
+                null
+            }
+            val sourceGenerationAvailable = if (json.has("sourceGenerationAvailable")) {
+                requireNotNull(json.historyBooleanOrNull("sourceGenerationAvailable"))
+            } else {
+                true
+            }
+            require(historyVersion < VERSION || backend != ImageBackend.LOCAL ||
+                !sourceGenerationAvailable || promptExecution != null ||
+                discardedLegacyTranslatedPromptExecution
+            ) {
+                "Current local image history must include prompt execution evidence."
+            }
+            val historyOptions = persistedOptions.copy(
+                taskMode = inputDraft.taskMode,
+                strength = inputDraft.strength,
+                controlStrength = inputDraft.controlStrength
+            ).also(LocalImageGenerationOptions::validateHistoryProductInputContract)
             ImageGenerationHistoryMetadata(
-                backend = ImageBackend.valueOf(json.getString("backend")),
+                backend = backend,
                 modelId = json.getString("modelId"),
                 modelName = json.getString("modelName"),
-                requestPrompt = json.getString("requestPrompt"),
-                options = persistedOptions.copy(
-                    taskMode = inputDraft.taskMode,
-                    strength = inputDraft.strength,
-                    controlStrength = inputDraft.controlStrength
-                ),
+                requestPrompt = requestPrompt,
+                options = historyOptions,
                 inputDraft = inputDraft,
+                promptExecution = promptExecution,
                 loras = json.optJSONArray("loras")?.let { array ->
                     require(array.length() <= LocalImagePreparedLora.MAX_COUNT)
                     buildList {
@@ -604,13 +711,11 @@ data class ImageGenerationHistoryMetadata(
                     }
                 }.orEmpty(),
                 nativeExecutionJson = sanitizeNativeExecutionJson(
-                    json.optJSONObject("nativeExecution")?.toString().orEmpty()
+                    json.optJSONObject("nativeExecution")?.toString().orEmpty(),
+                    allowLegacyQnnDetailStageMaskMigration =
+                        historyVersion <= LEGACY_QNN_DETAIL_MASK_LAST_HISTORY_VERSION
                 ),
-                sourceGenerationAvailable = if (json.has("sourceGenerationAvailable")) {
-                    requireNotNull(json.historyBooleanOrNull("sourceGenerationAvailable"))
-                } else {
-                    true
-                },
+                sourceGenerationAvailable = sourceGenerationAvailable,
                 upscaleHistory = json.optJSONArray("upscaleHistory")?.let { array ->
                     require(array.length() <= MAX_UPSCALE_HISTORY)
                     buildList {
@@ -622,10 +727,152 @@ data class ImageGenerationHistoryMetadata(
                             ))
                         }
                     }
-                }.orEmpty()
+                }.orEmpty(),
+                batchLineage = json.optJSONObject("batchLineage")
+                    ?.let(ImageGenerationBatchLineage::fromJson)
             )
         }.getOrNull()
     }
+}
+
+/** Stable, display-oriented operation facet for generated-image history. */
+internal enum class ImageGenerationHistoryOperation(
+    val wireName: String,
+    val displayName: String
+) {
+    TEXT_TO_IMAGE("text_to_image", "Text to image"),
+    IMG2IMG("img2img", "Image to image"),
+    INPAINT("inpaint", "Inpaint"),
+    CONTROL("control", "Control"),
+    EDIT("edit", "Edit"),
+    ULTRAFIX("ultrafix", "UltraFix");
+
+    companion object {
+        fun from(taskMode: LocalImageTaskMode, ultraFix: Boolean): ImageGenerationHistoryOperation {
+            if (ultraFix) return ULTRAFIX
+            return entries.first { it.wireName == taskMode.wireName }
+        }
+
+        fun fromWireNameOrNull(value: String?): ImageGenerationHistoryOperation? =
+            entries.firstOrNull { it.wireName == value?.trim()?.lowercase() }
+    }
+}
+
+/** Canonicalizes UltraFix's duplicated scalar controls without requiring staged worker paths. */
+private fun LocalImageGenerationOptions.withCanonicalPersistedUltraFixControls():
+    LocalImageGenerationOptions {
+    val request = ultraFix ?: return this
+    require(taskMode == LocalImageTaskMode.IMG2IMG && batchCount == 1 && preview == null) {
+        "Persisted UltraFix controls require one img2img output."
+    }
+    require(width == null || width == request.targetWidth)
+    require(height == null || height == request.targetHeight)
+    require(steps == null || steps == request.refinementSteps)
+    require(strength == null || kotlin.math.abs(strength - request.strength) <= 1.0e-12)
+    require(vaeTiling == null || (
+        vaeTiling.tileSize == request.tileSize &&
+            kotlin.math.abs(vaeTiling.overlap - request.overlap) <= 1.0e-12
+        )) {
+        "Persisted UltraFix scalar controls conflict with the structured request."
+    }
+    return copy(
+        width = request.targetWidth,
+        height = request.targetHeight,
+        steps = request.refinementSteps,
+        strength = request.strength,
+        vaeTiling = LocalImageVaeTilingOptions(request.tileSize, request.overlap)
+    )
+}
+
+/**
+ * Persisted translation receipts are portable audit metadata, not an install-authenticated
+ * attestation that a historical translator ran. Recreate therefore starts again under the current
+ * prompt-language policy. Only the two current execution methods are safe to reuse because their effective
+ * positive prompt is identical to the retained request text. The former UTF-8-pass-through
+ * marker is retained solely so old history remains readable; it cannot authorize a new run.
+ */
+internal fun LocalImagePromptTransformationMethod.isReusableFromImageHistory(): Boolean =
+    this == LocalImagePromptTransformationMethod.DIRECT ||
+        this == LocalImagePromptTransformationMethod.NATIVE_MULTILINGUAL
+
+/**
+ * V1-v3 translated prompt evidence predates the current two-phase semantic contract. Preserve the
+ * surrounding history, but deliberately discard that weak evidence so recreate performs a fresh
+ * v4 translation. Current-schema corruption must still fail closed instead of silently downgrading.
+ */
+private fun JSONObject.isDiscardableLegacyTranslatedPromptExecution(
+    requestPrompt: String,
+    originalNegativePrompt: String?
+): Boolean {
+    if (opt("method") != LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN.name) return false
+    if (opt("originalPrompt") != requestPrompt) return false
+    val persistedOriginalNegativePrompt = when {
+        !has("originalNegativePrompt") || isNull("originalNegativePrompt") -> null
+        opt("originalNegativePrompt") is String -> getString("originalNegativePrompt")
+        else -> return false
+    }
+    if (persistedOriginalNegativePrompt != originalNegativePrompt) return false
+    val schemaVersion = historyExactIntOrNull("version") ?: return false
+    if (schemaVersion in 1..LAST_LEGACY_TRANSLATED_PROMPT_EXECUTION_VERSION) return true
+    val contractVersion = historyExactIntOrNull("translationContractVersion") ?: return false
+    return schemaVersion == CURRENT_TRANSLATED_PROMPT_EXECUTION_SCHEMA_VERSION &&
+        contractVersion in 1 until CURRENT_LOCAL_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION
+}
+
+private const val LAST_LEGACY_TRANSLATED_PROMPT_EXECUTION_VERSION = 3
+private const val CURRENT_TRANSLATED_PROMPT_EXECUTION_SCHEMA_VERSION = 4
+
+internal data class ImageHistoryExecutionFacets(
+    val runtimeLabel: String = "",
+    val deviceLabel: String = ""
+)
+
+/**
+ * Structured, display-safe execution facets for image-library filtering. Values are accepted only
+ * from the persisted, path-sanitized native execution echo. Unknown and legacy evidence stays
+ * empty instead of being inferred from the current model or device.
+ */
+internal fun ImageGenerationHistoryMetadata.executionFacets(): ImageHistoryExecutionFacets {
+    if (backend == ImageBackend.CLOUD) {
+        return ImageHistoryExecutionFacets(runtimeLabel = "云端 API")
+    }
+    val root = runCatching { JSONObject(nativeExecutionJson) }.getOrNull()
+        ?: return ImageHistoryExecutionFacets()
+    val nativeEffective = root.optJSONObject("nativeEffective")
+    fun exactString(key: String): String? = sequenceOf(nativeEffective, root)
+        .filterNotNull()
+        .mapNotNull { json -> json.opt(key) as? String }
+        .map(String::trim)
+        .firstOrNull(String::isNotBlank)
+
+    val runtime = exactString("runtime")?.let { wireName ->
+        LocalImageRuntime.entries.firstOrNull { it.name == wireName }
+    }
+    val runtimeLabel = when (runtime) {
+        LocalImageRuntime.QNN_HTP -> "QNN HTP"
+        LocalImageRuntime.MNN_DIFFUSION -> "MNN Diffusion"
+        LocalImageRuntime.STABLE_DIFFUSION_CPP -> "stable-diffusion.cpp"
+        LocalImageRuntime.ONNX_RUNTIME -> "ONNX Runtime"
+        LocalImageRuntime.CUSTOM -> "自定义本地引擎"
+        null -> ""
+    }
+
+    val transportHtpArch = sequenceOf(root, nativeEffective)
+        .filterNotNull()
+        .mapNotNull { json -> json.historyExactIntOrNull("transportHtpArch") }
+        .firstOrNull { it in 1..999 }
+    val backendMode = exactString("backendMode")?.lowercase()
+    val deviceLabel = when {
+        transportHtpArch != null -> "HTP V$transportHtpArch"
+        backendMode == "opencl" -> "OpenCL GPU"
+        backendMode == "cpu" -> "CPU"
+        runtime == LocalImageRuntime.QNN_HTP && root.optBoolean("npuActive", false) -> "NPU"
+        else -> ""
+    }
+    return ImageHistoryExecutionFacets(
+        runtimeLabel = runtimeLabel,
+        deviceLabel = deviceLabel
+    )
 }
 
 private fun LocalImageInputDraft.toHistoryJson(): JSONObject = JSONObject()
@@ -686,9 +933,87 @@ private fun String?.safeHistoryInputReferenceOrNull(): String? = this
     ?.trim()
     ?.takeIf { it.startsWith("content://", ignoreCase = true) }
 
-internal fun sanitizeNativeExecutionJson(raw: String): String {
+internal fun sanitizeNativeExecutionJson(
+    raw: String,
+    allowLegacyQnnDetailStageMaskMigration: Boolean = false
+): String {
     val source = runCatching { JSONObject(raw.trim()) }.getOrNull() ?: return ""
+    val runtime = sequenceOf(source.optJSONObject("nativeEffective"), source)
+        .filterNotNull()
+        .mapNotNull { json -> json.opt("runtime") as? String }
+        .firstOrNull()
+    if (runtime == LocalImageRuntime.QNN_HTP.name) {
+        val accepted = runCatching {
+            if (allowLegacyQnnDetailStageMaskMigration) {
+                migrateLegacyQnnDetailStageMasks(source)
+            }
+            validatePersistedQnnDetailStageMasks(source)
+        }.isSuccess
+        if (!accepted) return ""
+    }
     return sanitizeNativeObject(source).toString()
+}
+
+private fun migrateLegacyQnnDetailStageMasks(root: JSONObject) {
+    fun migrate(container: JSONObject, hexField: String, legacyField: String) {
+        if (!container.has(legacyField)) return
+        require(!container.has(hexField)) { "QNN detail stage mask has two wire encodings." }
+        val signed = requireNotNull(container.historyExactLongOrNull(legacyField))
+        require(signed >= 0L) { "Legacy QNN detail stage mask is outside its accepted range." }
+        container.put(hexField, signed.toULong().toFixedUInt64Hex())
+        container.remove(legacyField)
+    }
+
+    val containers = buildList {
+        add(root)
+        root.optJSONObject("nativeEffective")?.let(::add)
+        root.optJSONObject("sdxlPhaseProof")?.let(::add)
+        root.optJSONObject("nativeEffective")
+            ?.optJSONObject("sdxlPhaseProof")
+            ?.let(::add)
+    }
+    containers.forEach { container ->
+        migrate(
+            container,
+            QNN_NATIVE_DETAIL_STAGE_MASK_HEX_FIELD,
+            "nativeDetailStageMask"
+        )
+        listOf("encoder", "unet", "vae").forEach { phase ->
+            migrate(
+                container,
+                "${phase}NativeDetailStageMaskHex",
+                "${phase}NativeDetailStageMask"
+            )
+        }
+    }
+}
+
+private fun validatePersistedQnnDetailStageMasks(root: JSONObject) {
+    val aggregate = root.strictUInt64Hex(QNN_NATIVE_DETAIL_STAGE_MASK_HEX_FIELD)
+    root.optJSONObject("nativeEffective")?.let { nativeEffective ->
+        if (nativeEffective.has(QNN_NATIVE_DETAIL_STAGE_MASK_HEX_FIELD) ||
+            nativeEffective.has("nativeDetailStageMask")
+        ) {
+            require(
+                nativeEffective.strictUInt64Hex(QNN_NATIVE_DETAIL_STAGE_MASK_HEX_FIELD) ==
+                    aggregate
+            ) { "Persisted QNN detail stage mask conflicts with nativeEffective." }
+        }
+    }
+    listOf("encoder", "unet", "vae").forEach { phase ->
+        val hexField = "${phase}NativeDetailStageMaskHex"
+        val legacyField = "${phase}NativeDetailStageMask"
+        if (root.has(hexField) || root.has(legacyField)) {
+            val phaseMask = root.strictUInt64Hex(hexField, legacyField)
+            root.optJSONObject("sdxlPhaseProof")?.let { proof ->
+                if (proof.has(hexField) || proof.has(legacyField)) {
+                    require(proof.strictUInt64Hex(hexField, legacyField) == phaseMask) {
+                        "Persisted QNN $phase detail stage mask conflicts with its phase proof."
+                    }
+                }
+            }
+        }
+    }
 }
 
 private fun sanitizeNativeObject(source: JSONObject): JSONObject = JSONObject().apply {

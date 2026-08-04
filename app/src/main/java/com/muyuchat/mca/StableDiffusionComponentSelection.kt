@@ -41,6 +41,17 @@ internal data class StableDiffusionComponentSelection(
         return copy(controlNetPath = resolvedPath)
     }
 
+    /** Requires the native bridge to consume the exact encoder proven by a language contract. */
+    fun requireTextEncoderPath(resolvedPath: String): StableDiffusionComponentSelection {
+        val declared = requireNotNull(textEncoderPath) {
+            "Stable-diffusion component selection is missing the evidence-bound text encoder."
+        }
+        require(File(declared).canonicalPath == File(resolvedPath).canonicalPath) {
+            "Image profile and component manifest resolve different text-encoder files."
+        }
+        return copy(requireTextEncoder = true)
+    }
+
     fun putIntoNativeParams(params: JSONObject): JSONObject = params
         .put("componentSelectionMode", mode)
         .put("componentBundleRoot", bundleRoot)
@@ -155,6 +166,23 @@ internal fun resolveProfileControlNetPath(
     return candidate.path
 }
 
+internal fun resolveProfileTextEncoderPath(
+    bundleRoot: File,
+    profile: ImageExecutionProfile
+): String? {
+    val relativePath = profile.graph.textEncoder?.relativePath?.trim()?.takeIf(String::isNotEmpty)
+        ?: return null
+    require(!File(relativePath).isAbsolute && !Regex("^[A-Za-z]:[\\\\/]").containsMatchIn(relativePath)) {
+        "Image profile graph.textEncoder path must be bundle-relative."
+    }
+    val root = bundleRoot.canonicalFile
+    val candidate = File(root, relativePath).canonicalFile
+    require(candidate.path.startsWith(root.path + File.separator) && candidate.isFile) {
+        "Image profile text-encoder component is missing or escapes the bundle root."
+    }
+    return candidate.path
+}
+
 internal fun resolveStableDiffusionComponentSelection(
     model: LocalImageModelRecord
 ): StableDiffusionComponentSelection {
@@ -188,18 +216,23 @@ internal fun resolveStableDiffusionComponentSelection(
         return compatibilityStableDiffusionSelection(model, primary, manifestFile.parentFile)
     }
 
-    require(components != null && components.length() > 0) {
+    val declaredComponents = requireNotNull(components) {
         "Image bundle manifest components are missing."
     }
-    val root = manifestFile.parentFile.canonicalFile
+    require(declaredComponents.length() > 0) {
+        "Image bundle manifest components are missing."
+    }
+    val root = requireNotNull(manifestFile.parentFile) {
+        "Image bundle manifest has no parent directory."
+    }.canonicalFile
     val effectiveFamily = manifest.optString("family")
         .takeIf { it.isNotBlank() }
         ?.let { LocalImageModelFamily.from(it) }
         ?.takeUnless { it == LocalImageModelFamily.CUSTOM && model.family != LocalImageModelFamily.CUSTOM }
         ?: model.family
     val byRole = linkedMapOf<String, ManifestComponentPath>()
-    for (index in 0 until components.length()) {
-        val component = components.optJSONObject(index)
+    for (index in 0 until declaredComponents.length()) {
+        val component = declaredComponents.optJSONObject(index)
             ?: throw IllegalArgumentException("Image bundle manifest component $index is not an object.")
         val role = component.optString("role").trim().uppercase()
         val required = component.optBoolean("required", role != "OPTIONAL")

@@ -169,9 +169,14 @@ object RecommendedImageDefaults {
         "low quality, blurry, distorted, deformed, artifacts, text, watermark"
     const val LANGUAGE_CONDITIONED_NEGATIVE_PROMPT =
         "blurry, low quality, distorted, deformed, text, watermark"
+    // This is catalog-owned executable text, not a user prompt. Keep it in the canonical ASCII
+    // prompt grammar because the current stable-diffusion.cpp Qwen path has no independently
+    // verified native multilingual text-encoder receipt. Do not substitute an on-device or chat
+    // translation for user-provided Chinese; that remains a separate capability.
     const val QWEN_IMAGE_2512_NEGATIVE_PROMPT =
-        "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，" +
-            "过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。"
+        "low resolution, low quality, malformed limbs, malformed fingers, oversaturated, " +
+            "waxy skin, lacking facial detail, over-smoothed, artificial appearance, " +
+            "chaotic composition, blurry text, distorted text"
     const val LONGCAT_IMAGE_NEGATIVE_PROMPT = ""
 
     const val ANIMAGINE_XL_STEPS = 28
@@ -202,6 +207,192 @@ enum class ImageEngineEmbeddingConversionStrategy {
     FP32_TO_FP16_STREAMING,
     GRAPH_EXECUTION,
     RUNTIME_NATIVE
+}
+
+/**
+ * Prompt-language admission is deliberately evidence-bound bundle data, rather than a
+ * model-family, recommendation identity, or tokenizer-transport heuristic. A missing contract
+ * is conservatively English-dominant.
+ */
+enum class ImageEngineTextEncoderLanguageCapability {
+    ENGLISH_DOMINANT,
+    NATIVE_MULTILINGUAL
+}
+
+enum class ImageEngineTextEncoderLanguage {
+    ENGLISH,
+    CHINESE_SIMPLIFIED
+}
+
+/** Explicit role for an immutable file that turns prompt text into encoder input. */
+enum class ImageEnginePromptToEncoderAssetRole {
+    TEXT_ENCODER_GRAPH,
+    TEXT_ENCODER_WEIGHT,
+    TOKENIZER_JSON,
+    TOKEN_EMBEDDING,
+    POSITION_EMBEDDING
+}
+
+data class ImageEnginePromptToEncoderAssetSpec(
+    val role: ImageEnginePromptToEncoderAssetRole,
+    val relativePath: String,
+    val sha256: String
+) {
+    init {
+        val normalizedPath = relativePath.trim().replace('\\', '/')
+        require(
+            normalizedPath.isNotBlank() &&
+                !normalizedPath.startsWith('/') &&
+                !Regex("^[A-Za-z]:").containsMatchIn(normalizedPath) &&
+                normalizedPath.split('/').all { segment ->
+                    segment.isNotBlank() && segment != "." && segment != ".."
+                }
+        ) { "Prompt-to-encoder asset path must stay inside the bundle." }
+        require(sha256.matches(Regex("^[0-9a-f]{64}$"))) {
+            "Prompt-to-encoder asset must use a lowercase SHA-256 fingerprint."
+        }
+    }
+}
+
+/**
+ * A secondary file whose bytes participate in the text encoder's semantics (for example an MNN
+ * external `.weight` tensor file).  It is deliberately a catalog pin, never a file discovered at
+ * request time.
+ */
+data class ImageEngineTextEncoderLanguageAuxiliaryAssetSpec(
+    val relativePath: String,
+    val sha256: String
+) {
+    init {
+        val normalizedPath = relativePath.trim().replace('\\', '/')
+        require(
+            normalizedPath.isNotBlank() &&
+                !normalizedPath.startsWith('/') &&
+                !Regex("^[A-Za-z]:").containsMatchIn(normalizedPath) &&
+                normalizedPath.split('/').all { segment ->
+                    segment.isNotBlank() && segment != "." && segment != ".."
+                }
+        ) {
+            "Text encoder language auxiliary asset path must stay inside the bundle."
+        }
+        require(sha256.matches(Regex("^[0-9a-f]{64}$"))) {
+            "Text encoder language auxiliary asset must use a lowercase SHA-256 fingerprint."
+        }
+    }
+}
+
+/**
+ * Publisher-signed semantic claim for a native text encoder. The catalog carries this opaque
+ * envelope but never treats it as verified itself: the installed app verifies it against its
+ * signing-certificate trust root after the complete execution profile has been materialized.
+ *
+ * The fields intentionally stay strings rather than optimistic enums. An unsupported future
+ * algorithm or malformed envelope must conservatively downgrade to English-dominant instead of
+ * making the package unavailable for its normal English path.
+ */
+data class ImageEngineTextEncoderLanguageSemanticProofSpec(
+    val proofVersion: Int,
+    val signerKeyId: String,
+    val signerCertificateSha256: String,
+    val signatureAlgorithm: String,
+    val payloadSha256: String,
+    val signatureBase64: String
+)
+
+/**
+ * Immutable evidence for a text encoder's semantic language support. The referenced evidence is
+ * expected to be a native tokenizer/encoder semantic proof, not a device observation or a model
+ * family label. Every consumed encoder byte is pinned independently below.
+ */
+data class ImageEngineTextEncoderLanguageEvidenceSpec(
+    val evidenceId: String,
+    val evidenceSha256: String,
+    val textEncoderAssetPath: String,
+    val textEncoderAssetSha256: String,
+    val auxiliaryAssets: List<ImageEngineTextEncoderLanguageAuxiliaryAssetSpec> = emptyList(),
+    /**
+     * Complete, role-aware prompt-to-encoder closure. Empty legacy closures remain usable for
+     * English but can never authorize direct Chinese input.
+     */
+    val promptToEncoderAssets: List<ImageEnginePromptToEncoderAssetSpec> = emptyList(),
+    /** Missing or untrusted proof means English-dominant at runtime, never package rejection. */
+    val semanticProof: ImageEngineTextEncoderLanguageSemanticProofSpec? = null
+) {
+    init {
+        require(evidenceId.matches(Regex("^[a-z0-9][a-z0-9._-]{2,127}$"))) {
+            "Text encoder language evidence id must be a stable lower-case identifier."
+        }
+        require(evidenceSha256.matches(Regex("^[0-9a-f]{64}$"))) {
+            "Text encoder language evidence must use a lowercase SHA-256 fingerprint."
+        }
+        val normalizedPath = textEncoderAssetPath.trim().replace('\\', '/')
+        require(
+            normalizedPath.isNotBlank() &&
+                !normalizedPath.startsWith('/') &&
+                !Regex("^[A-Za-z]:").containsMatchIn(normalizedPath) &&
+                normalizedPath.split('/').all { segment ->
+                    segment.isNotBlank() && segment != "." && segment != ".."
+                }
+        ) {
+            "Text encoder language evidence asset path must stay inside the bundle."
+        }
+        require(textEncoderAssetSha256.matches(Regex("^[0-9a-f]{64}$"))) {
+            "Text encoder language evidence asset must use a lowercase SHA-256 fingerprint."
+        }
+        val normalizedPrimaryPath = normalizedPath.lowercase()
+        val normalizedAuxiliaryPaths = auxiliaryAssets.map { asset ->
+            asset.relativePath.trim().replace('\\', '/').lowercase()
+        }
+        require(normalizedAuxiliaryPaths.distinct().size == normalizedAuxiliaryPaths.size) {
+            "Text encoder language auxiliary evidence paths must be unique."
+        }
+        require(normalizedPrimaryPath !in normalizedAuxiliaryPaths) {
+            "Text encoder language auxiliary evidence must not repeat the primary encoder asset."
+        }
+        val closureRoles = promptToEncoderAssets.map { asset -> asset.role }
+        val closurePaths = promptToEncoderAssets.map { asset ->
+            asset.relativePath.trim().replace('\\', '/').lowercase()
+        }
+        require(closureRoles.distinct().size == closureRoles.size) {
+            "Prompt-to-encoder evidence roles must be unique."
+        }
+        require(closurePaths.distinct().size == closurePaths.size) {
+            "Prompt-to-encoder evidence paths must be unique."
+        }
+    }
+}
+
+data class ImageEngineTextEncoderLanguageContractSpec(
+    val capability: ImageEngineTextEncoderLanguageCapability,
+    val supportedLanguages: Set<ImageEngineTextEncoderLanguage>,
+    val evidence: ImageEngineTextEncoderLanguageEvidenceSpec? = null
+) {
+    init {
+        require(supportedLanguages.isNotEmpty()) {
+            "Text encoder language support must declare at least one language."
+        }
+        when (capability) {
+            ImageEngineTextEncoderLanguageCapability.ENGLISH_DOMINANT -> {
+                require(supportedLanguages == setOf(ImageEngineTextEncoderLanguage.ENGLISH)) {
+                    "English-dominant text encoders must declare English only."
+                }
+                require(evidence == null) {
+                    "English-dominant text encoders must not publish multilingual semantic evidence."
+                }
+            }
+            ImageEngineTextEncoderLanguageCapability.NATIVE_MULTILINGUAL -> {
+                require(ImageEngineTextEncoderLanguage.ENGLISH in supportedLanguages) {
+                    "Native multilingual text encoders must retain English support."
+                }
+                require(ImageEngineTextEncoderLanguage.CHINESE_SIMPLIFIED in supportedLanguages) {
+                    "Native multilingual admission requires explicit Simplified Chinese support."
+                }
+                require(evidence != null) {
+                    "Native multilingual text encoders require immutable semantic evidence."
+                }
+            }
+        }
+    }
 }
 
 enum class ImageEngineVaeScalingLocation { HOST_BEFORE_GRAPH, GRAPH_INTERNAL, RUNTIME_NATIVE }
@@ -349,6 +540,15 @@ data class ImageEngineGenerationCapabilitiesSpec(
     val supportsMask: Boolean = false,
     val supportsClipSkip: Boolean = false,
     val supportsVaeTiling: Boolean = false,
+    val supportsUltraFix: Boolean = false,
+    val ultraFixMinWidth: Int = if (supportsUltraFix) minWidth else 0,
+    val ultraFixMaxWidth: Int = if (supportsUltraFix) maxWidth else 0,
+    val ultraFixMinHeight: Int = if (supportsUltraFix) minHeight else 0,
+    val ultraFixMaxHeight: Int = if (supportsUltraFix) maxHeight else 0,
+    val ultraFixWidthMultiple: Int = if (supportsUltraFix) widthMultiple else 0,
+    val ultraFixHeightMultiple: Int = if (supportsUltraFix) heightMultiple else 0,
+    /** Zero denotes a runtime-selectable tile; QNN fixed graphs publish their exact pixel tile. */
+    val ultraFixRequiredTileSize: Int = 0,
     val supportsLivePreview: Boolean = false,
     val supportsLora: Boolean = false,
     val maxBatchCount: Int = 1
@@ -357,6 +557,32 @@ data class ImageEngineGenerationCapabilitiesSpec(
         require(supportedSchedulers.isNotEmpty()) { "At least one image scheduler must be supported." }
         require(minWidth in 1..maxWidth && minHeight in 1..maxHeight) { "Image capability bounds are invalid." }
         require(widthMultiple > 0 && heightMultiple > 0) { "Image dimension multiples must be positive." }
+        if (supportsUltraFix) {
+            require(ultraFixMinWidth in 64..ultraFixMaxWidth &&
+                ultraFixMinHeight in 64..ultraFixMaxHeight &&
+                ultraFixMaxWidth <= 8_192 && ultraFixMaxHeight <= 8_192 &&
+                ultraFixWidthMultiple > 0 && ultraFixHeightMultiple > 0 &&
+                ultraFixMinWidth % ultraFixWidthMultiple == 0 &&
+                ultraFixMaxWidth % ultraFixWidthMultiple == 0 &&
+                ultraFixMinHeight % ultraFixHeightMultiple == 0 &&
+                ultraFixMaxHeight % ultraFixHeightMultiple == 0 &&
+                (ultraFixRequiredTileSize == 0 ||
+                    (ultraFixRequiredTileSize in ultraFixMinWidth..ultraFixMaxWidth &&
+                        ultraFixRequiredTileSize in ultraFixMinHeight..ultraFixMaxHeight &&
+                        ultraFixRequiredTileSize % ultraFixWidthMultiple == 0 &&
+                        ultraFixRequiredTileSize % ultraFixHeightMultiple == 0))
+            ) { "UltraFix dimension capabilities are invalid." }
+        } else {
+            require(listOf(
+                ultraFixMinWidth,
+                ultraFixMaxWidth,
+                ultraFixMinHeight,
+                ultraFixMaxHeight,
+                ultraFixWidthMultiple,
+                ultraFixHeightMultiple,
+                ultraFixRequiredTileSize
+            ).all { it == 0 }) { "Unsupported UltraFix capabilities must not publish bounds." }
+        }
         require(maxBatchCount in 1..8) { "Image batch capability must be between 1 and 8." }
     }
 }
@@ -373,7 +599,12 @@ data class ImageEngineExecutionProfileSpec(
     val vae: ImageEngineVaeContractSpec,
     val graph: ImageEngineGraphContractSpec,
     val defaults: ImageEngineGenerationDefaultsSpec,
-    val capabilities: ImageEngineGenerationCapabilitiesSpec
+    val capabilities: ImageEngineGenerationCapabilitiesSpec,
+    /**
+     * Optional positive admission proof for direct non-English text. Absence intentionally means
+     * English-dominant, including old catalog records and third-party package declarations.
+     */
+    val textEncoderLanguage: ImageEngineTextEncoderLanguageContractSpec? = null
 ) {
     init {
         require(profileId.isNotBlank()) { "Image execution profile id must not be blank." }
@@ -386,6 +617,22 @@ data class ImageEngineExecutionProfileSpec(
             shape.getOrNull(1) == tokenizer.maxLength
         }) {
             "Tokenizer length and conditioning output sequence axes must match."
+        }
+        textEncoderLanguage?.takeIf {
+            it.capability == ImageEngineTextEncoderLanguageCapability.NATIVE_MULTILINGUAL
+        }?.let { contract ->
+            val evidence = requireNotNull(contract.evidence)
+            require(!conditioning.dualEncoder) {
+                "Direct Chinese admission requires every text encoder to be evidence-bound; dual-encoder topology is not represented by this contract."
+            }
+            require(
+                graph.textEncoder?.trim()?.replace('\\', '/')?.equals(
+                    evidence.textEncoderAssetPath.trim().replace('\\', '/'),
+                    ignoreCase = true
+                ) == true
+            ) {
+                "Text encoder language evidence must bind the graph text encoder consumed at runtime."
+            }
         }
         require(scheduler.algorithm in capabilities.supportedSchedulers) { "Default scheduler must be supported." }
         require(defaults.width in capabilities.minWidth..capabilities.maxWidth) { "Default width is unsupported." }
@@ -465,6 +712,8 @@ data class ImageEngineQnnSmokeTensorSpec(
 data class ImageEngineQnnSmokeSpec(
     val graphName: String = "model",
     val contextBinary: String,
+    val expectedContextSizeBytes: Long? = null,
+    val expectedContextSha256: String? = null,
     val width: Int = 512,
     val height: Int = 512,
     val steps: Int = 1,
@@ -472,7 +721,21 @@ data class ImageEngineQnnSmokeSpec(
     val prompt: String = "a small ceramic cup on a bright wooden desk",
     val inputs: List<ImageEngineQnnSmokeTensorSpec>,
     val outputs: List<ImageEngineQnnSmokeTensorSpec>
-)
+) {
+    init {
+        require((expectedContextSizeBytes == null) == (expectedContextSha256 == null)) {
+            "QNN smoke context identity must declare both size and SHA-256 or neither."
+        }
+        expectedContextSizeBytes?.let { size ->
+            require(size > 0L) { "QNN smoke context identity size must be positive." }
+        }
+        expectedContextSha256?.let { sha256 ->
+            require(sha256.matches(Regex("^[0-9a-f]{64}$"))) {
+                "QNN smoke context identity SHA-256 must use 64 lowercase hexadecimal digits."
+            }
+        }
+    }
+}
 
 /**
  * Exact QNN runtime contract required by a context-binary bundle.
@@ -561,6 +824,48 @@ data class ImageEngineBundleSpec(
                 required.map { normalizedBundlePath(it.relativePath).lowercase() }.distinct().size == required.size
             ) {
                 "Required image components must use unique installed paths."
+            }
+            profile.textEncoderLanguage?.evidence?.let { evidence ->
+                val anchoredAssets = evidence.promptToEncoderAssets
+                    .map { asset -> asset.relativePath to asset.sha256 }
+                    .ifEmpty {
+                        buildList {
+                            add(evidence.textEncoderAssetPath to evidence.textEncoderAssetSha256)
+                            evidence.auxiliaryAssets.forEach { asset ->
+                                add(asset.relativePath to asset.sha256)
+                            }
+                        }
+                    }
+                anchoredAssets.forEachIndexed { index, (path, sha256) ->
+                    val expectedPath = normalizedBundlePath(path).lowercase()
+                    val anchoredEncoder = required.singleOrNull { component ->
+                        component.role in setOf(
+                            ImageEngineBundleComponentRole.TEXT_ENCODER,
+                            ImageEngineBundleComponentRole.TOKENIZER,
+                            ImageEngineBundleComponentRole.CONDITIONING
+                        ) &&
+                            normalizedBundlePath(component.relativePath).lowercase() == expectedPath &&
+                            component.sha256.equals(sha256, ignoreCase = true)
+                    }
+                    require(anchoredEncoder != null) {
+                        "Text encoder language evidence asset $index must bind an exact required prompt-conditioning component."
+                    }
+                }
+                if (profile.textEncoderLanguage.capability ==
+                    ImageEngineTextEncoderLanguageCapability.NATIVE_MULTILINGUAL
+                ) {
+                    val closureRoles = evidence.promptToEncoderAssets.map { asset -> asset.role }
+                    require(runtime == ImageEngineBundleRuntime.QNN_HTP &&
+                        profile.graph.workerStrategy == ImageEngineWorkerStrategy.SHARED_TEXT_UNET_VAE &&
+                        profile.tokenizer.backend == ImageEngineTokenizerBackend.TOKENIZERS_CPP &&
+                        closureRoles.toSet() == setOf(
+                            ImageEnginePromptToEncoderAssetRole.TEXT_ENCODER_GRAPH,
+                            ImageEnginePromptToEncoderAssetRole.TOKENIZER_JSON
+                        )
+                    ) {
+                        "Direct Chinese admission requires the complete QNN text-encoder and tokenizer JSON closure."
+                    }
+                }
             }
 
             val diffusionComponents = required.filter {

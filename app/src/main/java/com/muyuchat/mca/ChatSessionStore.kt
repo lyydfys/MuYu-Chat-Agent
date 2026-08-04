@@ -104,9 +104,7 @@ class ChatSessionStore(context: Context) {
             List(array.length()) { index ->
                 array.getJSONObject(index).toChatSessionRecord()
             }.sortedForHistory()
-        }.getOrElse {
-            emptyList()
-        }
+        }.getOrElse { return emptyList() }
         if (records.isNotEmpty()) {
             database.chatSessionDao().replaceAll(records)
         }
@@ -162,9 +160,13 @@ class ChatSessionStore(context: Context) {
         ImageAssetEntity::class,
         FileAssetEntity::class,
         MemoryEntity::class,
-        AssistantEntity::class
+        AssistantEntity::class,
+        KnowledgeBaseEntity::class,
+        KnowledgeDocumentEntity::class,
+        KnowledgeChunkEntity::class,
+        ChatKnowledgeBaseBindingEntity::class
     ],
-    version = 16,
+    version = 18,
     exportSchema = false
 )
 abstract class McaRoomDatabase : RoomDatabase() {
@@ -185,7 +187,14 @@ abstract class McaRoomDatabase : RoomDatabase() {
                 )
                     .addMigrations(MIGRATION_1_2, MIGRATION_2_6, MIGRATION_3_6, MIGRATION_4_6, MIGRATION_5_6)
                     .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
-                    .addMigrations(MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
+                    .addMigrations(
+                        MIGRATION_12_13,
+                        MIGRATION_13_14,
+                        MIGRATION_14_15,
+                        MIGRATION_15_16,
+                        MIGRATION_16_17,
+                        MIGRATION_17_18
+                    )
                     .build()
                     .also { instance = it }
             }
@@ -303,6 +312,18 @@ abstract class McaRoomDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                createKnowledgeBaseTablesIfMissing(db)
+            }
+        }
+
+        private val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addAssistantCharacterCardJsonColumnIfMissing(db)
+            }
+        }
+
         private fun addProjectIdColumnIfMissing(db: SupportSQLiteDatabase) {
             runCatching {
                 db.execSQL("ALTER TABLE chat_sessions ADD COLUMN projectId TEXT")
@@ -325,6 +346,65 @@ abstract class McaRoomDatabase : RoomDatabase() {
             runCatching {
                 db.execSQL("ALTER TABLE chat_messages ADD COLUMN webSearchTraceJson TEXT NOT NULL DEFAULT '{}'")
             }
+        }
+
+        private fun createKnowledgeBaseTablesIfMissing(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS knowledge_bases (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    embeddingModelFingerprint TEXT,
+                    indexState TEXT NOT NULL,
+                    createdAt INTEGER NOT NULL,
+                    updatedAt INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS knowledge_documents (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    knowledgeBaseId TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    contentHash TEXT NOT NULL,
+                    contentLength INTEGER NOT NULL,
+                    chunkCount INTEGER NOT NULL,
+                    createdAt INTEGER NOT NULL,
+                    updatedAt INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS knowledge_chunks (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    knowledgeBaseId TEXT NOT NULL,
+                    documentId TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    contentHash TEXT NOT NULL,
+                    estimatedTokens INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS chat_knowledge_base_bindings (
+                    chatSessionId TEXT NOT NULL,
+                    knowledgeBaseId TEXT NOT NULL,
+                    PRIMARY KEY(chatSessionId, knowledgeBaseId)
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_bases_updatedAt ON knowledge_bases(updatedAt)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_documents_knowledgeBaseId ON knowledge_documents(knowledgeBaseId)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_documents_contentHash ON knowledge_documents(contentHash)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_chunks_knowledgeBaseId ON knowledge_chunks(knowledgeBaseId)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_chunks_documentId ON knowledge_chunks(documentId)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_knowledge_base_bindings_knowledgeBaseId ON chat_knowledge_base_bindings(knowledgeBaseId)")
         }
 
         private fun addImageGenerationMetadataColumnIfMissing(db: SupportSQLiteDatabase) {
@@ -403,6 +483,12 @@ abstract class McaRoomDatabase : RoomDatabase() {
         private fun addAssistantTagColumnIfMissing(db: SupportSQLiteDatabase) {
             runCatching {
                 db.execSQL("ALTER TABLE assistants ADD COLUMN tag TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        private fun addAssistantCharacterCardJsonColumnIfMissing(db: SupportSQLiteDatabase) {
+            if ("characterCardJson" !in tableColumns(db, "assistants")) {
+                db.execSQL("ALTER TABLE assistants ADD COLUMN characterCardJson TEXT")
             }
         }
 
@@ -732,6 +818,87 @@ interface ChatSessionDao {
     @Query("DELETE FROM assistants")
     suspend fun clearAssistants()
 
+    @Query("SELECT * FROM knowledge_bases ORDER BY updatedAt DESC, name ASC")
+    suspend fun knowledgeBases(): List<KnowledgeBaseEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertKnowledgeBases(records: List<KnowledgeBaseEntity>)
+
+    @Query("DELETE FROM knowledge_bases WHERE id = :knowledgeBaseId")
+    suspend fun deleteKnowledgeBase(knowledgeBaseId: String)
+
+    @Query("SELECT * FROM knowledge_documents WHERE knowledgeBaseId = :knowledgeBaseId ORDER BY updatedAt DESC, title ASC")
+    suspend fun knowledgeDocuments(knowledgeBaseId: String): List<KnowledgeDocumentEntity>
+
+    @Query("SELECT * FROM knowledge_documents WHERE id = :documentId LIMIT 1")
+    suspend fun knowledgeDocument(documentId: String): KnowledgeDocumentEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertKnowledgeDocuments(records: List<KnowledgeDocumentEntity>)
+
+    @Query("DELETE FROM knowledge_documents WHERE id = :documentId")
+    suspend fun deleteKnowledgeDocument(documentId: String)
+
+    @Query("DELETE FROM knowledge_documents WHERE knowledgeBaseId = :knowledgeBaseId")
+    suspend fun deleteKnowledgeDocumentsForBase(knowledgeBaseId: String)
+
+    @Query(
+        """
+        SELECT knowledge_chunks.* FROM knowledge_chunks
+        INNER JOIN knowledge_bases ON knowledge_bases.id = knowledge_chunks.knowledgeBaseId
+        WHERE knowledge_chunks.knowledgeBaseId IN (:knowledgeBaseIds)
+        ORDER BY knowledge_chunks.documentId ASC, knowledge_chunks.position ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun knowledgeChunksForBases(
+        knowledgeBaseIds: List<String>,
+        limit: Int
+    ): List<KnowledgeChunkEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertKnowledgeChunks(records: List<KnowledgeChunkEntity>)
+
+    @Query("DELETE FROM knowledge_chunks WHERE documentId = :documentId")
+    suspend fun deleteKnowledgeChunksForDocument(documentId: String)
+
+    @Query("DELETE FROM knowledge_chunks WHERE knowledgeBaseId = :knowledgeBaseId")
+    suspend fun deleteKnowledgeChunksForBase(knowledgeBaseId: String)
+
+    @Query("SELECT knowledgeBaseId FROM chat_knowledge_base_bindings WHERE chatSessionId = :chatSessionId ORDER BY knowledgeBaseId ASC")
+    suspend fun knowledgeBaseIdsForChat(chatSessionId: String): List<String>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertKnowledgeBindings(records: List<ChatKnowledgeBaseBindingEntity>)
+
+    @Query("DELETE FROM chat_knowledge_base_bindings WHERE chatSessionId = :chatSessionId")
+    suspend fun deleteKnowledgeBindingsForChat(chatSessionId: String)
+
+    @Query("DELETE FROM chat_knowledge_base_bindings WHERE knowledgeBaseId = :knowledgeBaseId")
+    suspend fun deleteKnowledgeBindingsForBase(knowledgeBaseId: String)
+
+    @Query("DELETE FROM chat_knowledge_base_bindings")
+    suspend fun clearKnowledgeBindings()
+
+    @Query("DELETE FROM chat_knowledge_base_bindings WHERE chatSessionId NOT IN (:chatSessionIds)")
+    suspend fun pruneKnowledgeBindings(chatSessionIds: List<String>)
+
+    @Query("SELECT COUNT(*) > 0 FROM knowledge_bases WHERE id = :knowledgeBaseId")
+    suspend fun knowledgeBaseExists(knowledgeBaseId: String): Boolean
+
+    @Query(
+        """
+        UPDATE knowledge_bases
+        SET indexState = CASE
+                WHEN embeddingModelFingerprint IS NULL THEN 'LEXICAL_READY'
+                ELSE 'REINDEX_REQUIRED'
+            END,
+            updatedAt = :updatedAt
+        WHERE id = :knowledgeBaseId
+        """
+    )
+    suspend fun invalidateKnowledgeBaseIndex(knowledgeBaseId: String, updatedAt: Long)
+
     @Transaction
     suspend fun loadRecords(): List<ChatSessionRecord> =
         sessions().map { session ->
@@ -753,8 +920,12 @@ interface ChatSessionDao {
     suspend fun replaceAll(records: List<ChatSessionRecord>) {
         clearMessages()
         clearSessions()
-        if (records.isEmpty()) return
+        if (records.isEmpty()) {
+            clearKnowledgeBindings()
+            return
+        }
         insertSessions(records.map { it.toEntity() })
+        pruneKnowledgeBindings(records.map { it.id })
         insertMessages(
             records.flatMap { session ->
                 session.messages.mapIndexed { index, message ->
@@ -807,6 +978,79 @@ interface ChatSessionDao {
         if (records.isEmpty()) return
         insertAssistants(records.map { it.toEntity() })
     }
+
+    @Transaction
+    suspend fun knowledgeBaseRecords(): List<KnowledgeBaseRecord> =
+        knowledgeBases().map { it.toRecord() }
+
+    @Transaction
+    suspend fun upsertKnowledgeBases(records: List<KnowledgeBaseEntity>) {
+        if (records.isNotEmpty()) insertKnowledgeBases(records)
+    }
+
+    @Transaction
+    suspend fun knowledgeDocumentRecords(knowledgeBaseId: String): List<KnowledgeDocumentRecord> =
+        knowledgeDocuments(knowledgeBaseId).map { it.toRecord() }
+
+    @Transaction
+    suspend fun replaceKnowledgeDocument(
+        document: KnowledgeDocumentEntity,
+        chunks: List<KnowledgeChunkEntity>
+    ) {
+        check(knowledgeBaseExists(document.knowledgeBaseId)) {
+            "Knowledge base no longer exists."
+        }
+        deleteKnowledgeChunksForDocument(document.id)
+        deleteKnowledgeDocument(document.id)
+        insertKnowledgeDocuments(listOf(document))
+        if (chunks.isNotEmpty()) insertKnowledgeChunks(chunks)
+        invalidateKnowledgeBaseIndex(document.knowledgeBaseId, document.updatedAt)
+    }
+
+    @Transaction
+    suspend fun deleteKnowledgeDocumentCompletely(
+        documentId: String,
+        knowledgeBaseId: String,
+        updatedAt: Long
+    ) {
+        deleteKnowledgeChunksForDocument(documentId)
+        deleteKnowledgeDocument(documentId)
+        invalidateKnowledgeBaseIndex(knowledgeBaseId, updatedAt)
+    }
+
+    @Transaction
+    suspend fun deleteKnowledgeBaseCompletely(knowledgeBaseId: String) {
+        deleteKnowledgeBindingsForBase(knowledgeBaseId)
+        deleteKnowledgeChunksForBase(knowledgeBaseId)
+        deleteKnowledgeDocumentsForBase(knowledgeBaseId)
+        deleteKnowledgeBase(knowledgeBaseId)
+    }
+
+    @Transaction
+    suspend fun replaceKnowledgeBindings(chatSessionId: String, knowledgeBaseIds: List<String>) {
+        deleteKnowledgeBindingsForChat(chatSessionId)
+        if (knowledgeBaseIds.isNotEmpty()) {
+            insertKnowledgeBindings(
+                knowledgeBaseIds.map { knowledgeBaseId ->
+                    ChatKnowledgeBaseBindingEntity(
+                        chatSessionId = chatSessionId,
+                        knowledgeBaseId = knowledgeBaseId
+                    )
+                }
+            )
+        }
+    }
+
+    @Transaction
+    suspend fun knowledgeChunksForBaseRecords(
+        knowledgeBaseIds: List<String>,
+        limit: Int
+    ): List<KnowledgeChunkRecord> =
+        if (knowledgeBaseIds.isEmpty() || limit <= 0) {
+            emptyList()
+        } else {
+            knowledgeChunksForBases(knowledgeBaseIds, limit).map { it.toRecord() }
+        }
 }
 
 @Entity(tableName = "chat_sessions")
@@ -889,11 +1133,66 @@ data class AssistantEntity(
     val defaultModelMode: String,
     val defaultModelId: String?,
     val paramsJson: String,
+    val characterCardJson: String?,
     val memoryEnabled: Boolean,
     val webSearchEnabled: Boolean,
     val fileContextEnabled: Boolean,
     val createdAt: Long,
     val updatedAt: Long
+)
+
+@Entity(
+    tableName = "knowledge_bases",
+    indices = [Index("updatedAt")]
+)
+data class KnowledgeBaseEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val description: String,
+    val embeddingModelFingerprint: String?,
+    val indexState: String,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+@Entity(
+    tableName = "knowledge_documents",
+    indices = [Index("knowledgeBaseId"), Index("contentHash")]
+)
+data class KnowledgeDocumentEntity(
+    @PrimaryKey val id: String,
+    val knowledgeBaseId: String,
+    val title: String,
+    val source: String,
+    val contentHash: String,
+    val contentLength: Int,
+    val chunkCount: Int,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+@Entity(
+    tableName = "knowledge_chunks",
+    indices = [Index("knowledgeBaseId"), Index("documentId")]
+)
+data class KnowledgeChunkEntity(
+    @PrimaryKey val id: String,
+    val knowledgeBaseId: String,
+    val documentId: String,
+    val position: Int,
+    val content: String,
+    val contentHash: String,
+    val estimatedTokens: Int
+)
+
+@Entity(
+    tableName = "chat_knowledge_base_bindings",
+    primaryKeys = ["chatSessionId", "knowledgeBaseId"],
+    indices = [Index("knowledgeBaseId")]
+)
+data class ChatKnowledgeBaseBindingEntity(
+    val chatSessionId: String,
+    val knowledgeBaseId: String
 )
 
 @Entity(
@@ -985,6 +1284,7 @@ private fun AssistantRecord.toEntity(): AssistantEntity =
         defaultModelMode = defaultModelMode,
         defaultModelId = defaultModelId,
         paramsJson = paramsJson,
+        characterCardJson = characterCardJson,
         memoryEnabled = memoryEnabled,
         webSearchEnabled = webSearchEnabled,
         fileContextEnabled = fileContextEnabled,
@@ -1072,6 +1372,7 @@ private fun AssistantEntity.toAssistantRecord(): AssistantRecord =
         defaultModelMode = defaultModelMode,
         defaultModelId = defaultModelId,
         paramsJson = paramsJson,
+        characterCardJson = characterCardJson,
         memoryEnabled = memoryEnabled,
         webSearchEnabled = webSearchEnabled,
         fileContextEnabled = fileContextEnabled,

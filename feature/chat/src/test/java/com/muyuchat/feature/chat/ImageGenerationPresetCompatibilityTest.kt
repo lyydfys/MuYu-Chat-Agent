@@ -13,7 +13,10 @@ class ImageGenerationPresetCompatibilityTest {
         imageMaxHeight = 1024,
         imageWidthMultiple = 64,
         imageHeightMultiple = 64,
-        imageSupportedSamplers = listOf("euler", "dpmpp_2m")
+        imageMinSteps = 10,
+        imageMaxSteps = 50,
+        imageSupportedSamplers = listOf("euler", "dpmpp_2m", "pndm"),
+        imageImg2ImgSupportedSamplers = listOf("euler", "dpmpp_2m")
     )
 
     @Test
@@ -92,7 +95,131 @@ class ImageGenerationPresetCompatibilityTest {
             maxBatchCount = 8
         )
 
-        assertEquals(ImageGenerationPresetField.entries.toSet(), fields)
+        assertEquals(
+            setOf(
+                ImageGenerationPresetField.PROMPT,
+                ImageGenerationPresetField.NEGATIVE_PROMPT,
+                ImageGenerationPresetField.SIZE,
+                ImageGenerationPresetField.STEPS,
+                ImageGenerationPresetField.CFG,
+                ImageGenerationPresetField.SEED,
+                ImageGenerationPresetField.SAMPLER,
+                ImageGenerationPresetField.CLIP_SKIP,
+                ImageGenerationPresetField.LORA,
+                ImageGenerationPresetField.BATCH,
+                ImageGenerationPresetField.VAE_TILING
+            ),
+            fields
+        )
+    }
+
+    @Test
+    fun `steps outside the selected profile range are not offered for reuse`() {
+        val fields = compatibleImageGenerationPresetFields(
+            preset = ImageGenerationUiPreset(prompt = "keep prompt", steps = 9),
+            selectedModel = localModel,
+            selectedModelIsCloud = false,
+            supportsNegativePrompt = false,
+            supportsClipSkip = false,
+            supportsVaeTiling = false,
+            supportsLora = false,
+            availableLoraIds = emptySet(),
+            maxBatchCount = 1
+        )
+
+        assertEquals(setOf(ImageGenerationPresetField.PROMPT), fields)
+    }
+
+    @Test
+    fun `img2img does not reuse pndm while text to image still does`() {
+        val preset = ImageGenerationUiPreset(
+            prompt = "sampler mode",
+            sampleMethod = "pndm"
+        )
+
+        val img2ImgFields = compatibleImageGenerationPresetFields(
+            preset = preset,
+            selectedModel = localModel,
+            selectedModelIsCloud = false,
+            supportsNegativePrompt = false,
+            supportsClipSkip = false,
+            supportsVaeTiling = false,
+            supportsLora = false,
+            availableLoraIds = emptySet(),
+            maxBatchCount = 1,
+            currentTaskMode = ImageGenerationUiTaskMode.IMG2IMG
+        )
+        val textToImageFields = compatibleImageGenerationPresetFields(
+            preset = preset,
+            selectedModel = localModel,
+            selectedModelIsCloud = false,
+            supportsNegativePrompt = false,
+            supportsClipSkip = false,
+            supportsVaeTiling = false,
+            supportsLora = false,
+            availableLoraIds = emptySet(),
+            maxBatchCount = 1,
+            currentTaskMode = ImageGenerationUiTaskMode.TEXT_TO_IMAGE
+        )
+
+        assertEquals(setOf(ImageGenerationPresetField.PROMPT), img2ImgFields)
+        assertEquals(
+            setOf(ImageGenerationPresetField.PROMPT, ImageGenerationPresetField.SAMPLER),
+            textToImageFields
+        )
+    }
+
+    @Test
+    fun `UltraFix preset obeys the selected graph alignment instead of generic eight pixels`() {
+        val ultraFixModel = localModel.copy(
+            supportsImageUltraFix = true,
+            imageUltraFixMinWidth = 512,
+            imageUltraFixMaxWidth = 2048,
+            imageUltraFixMinHeight = 512,
+            imageUltraFixMaxHeight = 2048,
+            imageUltraFixWidthMultiple = 64,
+            imageUltraFixHeightMultiple = 64
+        )
+        fun reusableTile(tileSize: Int): Set<ImageGenerationPresetField> =
+            compatibleImageGenerationPresetFields(
+                preset = ImageGenerationUiPreset(
+                    prompt = "refine",
+                    width = 1024,
+                    height = 768,
+                    ultraFix = ImageGenerationUiUltraFixOptions(
+                        targetWidth = 1024,
+                        targetHeight = 768,
+                        strength = 0.5,
+                        inversionSteps = 5,
+                        refinementSteps = 10,
+                        tileSize = tileSize,
+                        overlap = 0.25
+                    )
+                ),
+                selectedModel = ultraFixModel,
+                selectedModelIsCloud = false,
+                supportsNegativePrompt = false,
+                supportsClipSkip = false,
+                supportsVaeTiling = true,
+                supportsLora = false,
+                availableLoraIds = emptySet(),
+                maxBatchCount = 1,
+                currentTaskMode = ImageGenerationUiTaskMode.IMG2IMG,
+                supportsUltraFix = true
+            )
+
+        assertEquals(
+            setOf(ImageGenerationPresetField.PROMPT, ImageGenerationPresetField.SIZE),
+            reusableTile(160)
+        )
+        assertEquals(
+            setOf(
+                ImageGenerationPresetField.PROMPT,
+                ImageGenerationPresetField.SIZE,
+                ImageGenerationPresetField.ULTRAFIX
+            ),
+            reusableTile(192)
+        )
     }
 
     @Test

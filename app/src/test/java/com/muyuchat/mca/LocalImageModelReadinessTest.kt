@@ -74,6 +74,166 @@ class LocalImageModelReadinessTest {
     }
 
     @Test
+    fun expandedQnnZipPersistsExactSd15PromptConsumerPins() {
+        val root = Files.createTempDirectory("qnn-sd15-expanded-prompt-pins").toFile()
+        try {
+            val model = ModelScopeClient().recommendedModels()
+                .single { it.id == "cyberrealistic_sd15_qnn228" }
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val nested = File(root, "publisher/runtime").apply { mkdirs() }
+            val files = listOf(
+                "unet.bin",
+                "vae_decoder.bin",
+                "vae_encoder.bin",
+                "clip_v2.mnn",
+                "clip_v2.mnn.weight",
+                "tokenizer.json",
+                "token_emb.bin",
+                "pos_emb.bin"
+            ).associateWith { name -> nested.touch(name, "expanded-$name") }
+            val primary = requireNotNull(files["unet.bin"])
+            val targets = files.map { (name, file) ->
+                remote(
+                    name,
+                    if (name == "unet.bin") {
+                        ImageEngineBundleComponentRole.DIFFUSION
+                    } else {
+                        ImageEngineBundleComponentRole.CONFIG
+                    }
+                ).copy(relativePath = file.relativeTo(root).invariantSeparatorsPath) to file
+            }
+
+            val manifest = downloadedImageBundleManifestJson(
+                displayName = model.title,
+                bundle = bundle,
+                targets = targets,
+                primarySha256 = primary.sha256ForProfile(),
+                bundleRoot = root
+            )
+            val profile = ImageExecutionProfileJson.parseProfile(
+                manifest.getJSONObject("executionProfile")
+            )
+            val pins = profile.tokenizer.assets.associateBy(ImageProfileAsset::relativePath)
+            val expectedNames = setOf(
+                "clip_v2.mnn",
+                "clip_v2.mnn.weight",
+                "tokenizer.json",
+                "token_emb.bin",
+                "pos_emb.bin"
+            )
+            val expectedLabels = expectedNames.mapTo(linkedSetOf()) { name ->
+                requireNotNull(files[name]).relativeTo(root).invariantSeparatorsPath
+            }
+
+            assertEquals(expectedLabels, pins.keys)
+            expectedNames.forEach { name ->
+                val file = requireNotNull(files[name])
+                val pin = requireNotNull(pins[file.relativeTo(root).invariantSeparatorsPath])
+                assertEquals(file.length(), pin.sizeBytes)
+                assertEquals(file.sha256ForProfile(), pin.fingerprint)
+            }
+            assertFalse(pins.keys.any { path -> path.endsWith("unet.bin") })
+            assertFalse(pins.keys.any { path -> path.endsWith("vae_decoder.bin") })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun expandedQnnZipPersistsExactSdxlPromptConsumerPinsIncludingOptionalClipWeight() {
+        val root = Files.createTempDirectory("qnn-sdxl-expanded-prompt-pins").toFile()
+        try {
+            val model = ModelScopeClient().recommendedModels()
+                .single { it.id == "sdxl_base_qnn228" }
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val nested = File(root, "output/qnn_models_sdxl_8gen3").apply { mkdirs() }
+            val names = listOf(
+                "unet.bin",
+                "vae_decoder.bin",
+                "vae_encoder.bin",
+                "clip.mnn",
+                "clip.mnn.weight",
+                "clip_2.mnn",
+                "clip_2.mnn.weight",
+                "tokenizer.json",
+                "token_emb.bin",
+                "token_emb_2.bin",
+                "pos_emb.bin",
+                "pos_emb_2.bin"
+            )
+            val files = names.associateWith { name -> nested.touch(name, "expanded-$name") }
+            val primary = requireNotNull(files["unet.bin"])
+            val targets = files.map { (name, file) ->
+                remote(
+                    name,
+                    if (name == "unet.bin") {
+                        ImageEngineBundleComponentRole.DIFFUSION
+                    } else {
+                        ImageEngineBundleComponentRole.CONFIG
+                    }
+                ).copy(relativePath = file.relativeTo(root).invariantSeparatorsPath) to file
+            }
+
+            val manifest = downloadedImageBundleManifestJson(
+                displayName = model.title,
+                bundle = bundle,
+                targets = targets,
+                primarySha256 = primary.sha256ForProfile(),
+                bundleRoot = root
+            )
+            val profile = ImageExecutionProfileJson.parseProfile(
+                manifest.getJSONObject("executionProfile")
+            )
+            val pins = profile.tokenizer.assets.associateBy(ImageProfileAsset::relativePath)
+            val expectedNames = names.drop(3).toSet()
+            val expectedLabels = expectedNames.mapTo(linkedSetOf()) { name ->
+                requireNotNull(files[name]).relativeTo(root).invariantSeparatorsPath
+            }
+
+            assertEquals(expectedLabels, pins.keys)
+            expectedNames.forEach { name ->
+                val file = requireNotNull(files[name])
+                val pin = requireNotNull(pins[file.relativeTo(root).invariantSeparatorsPath])
+                assertEquals(file.length(), pin.sizeBytes)
+                assertEquals(file.sha256ForProfile(), pin.fingerprint)
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun stableDiffusionDownloadedProfilePinsItsActualPrimaryConsumer() {
+        val root = Files.createTempDirectory("sdcpp-primary-prompt-pin").toFile()
+        try {
+            val model = ModelScopeClient().recommendedModels()
+                .single { it.id == "sd_turbo_512_experimental" }
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val primary = root.touch("sd_turbo.safetensors", "actual-primary-bytes")
+            val target = remote(primary.name, ImageEngineBundleComponentRole.DIFFUSION)
+                .copy(relativePath = primary.name) to primary
+
+            val manifest = downloadedImageBundleManifestJson(
+                displayName = model.title,
+                bundle = bundle,
+                targets = listOf(target),
+                primarySha256 = primary.sha256ForProfile(),
+                bundleRoot = root
+            )
+            val profile = ImageExecutionProfileJson.parseProfile(
+                manifest.getJSONObject("executionProfile")
+            )
+
+            assertEquals(
+                listOf(ImageProfileAsset(primary.name, primary.sha256ForProfile(), primary.length())),
+                profile.tokenizer.assets
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun universalQnnArchivePersistsTheExactLocalTransportProfile() {
         val root = Files.createTempDirectory("qnn-universal-installed-profile").toFile()
         try {

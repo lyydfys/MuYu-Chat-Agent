@@ -23,7 +23,7 @@ internal fun Throwable.toLocalImageApiProviderExceptionOrNull(): ImageGeneration
         is ImageNativeExecutionContractException ->
             ImageGenerationProviderException.fromWorkerFailure(code, message.orEmpty())
         is ImageProfileResolutionException -> ImageGenerationProviderException(
-            code = "invalid_image_execution_profile",
+            code = localImagePublicErrorCode(),
             httpStatus = 422,
             message = message.orEmpty().ifBlank { "The selected image model has an invalid execution profile." }
         )
@@ -33,4 +33,12 @@ internal fun Throwable.toLocalImageApiProviderExceptionOrNull(): ImageGeneration
             message = message.orEmpty().ifBlank { "The local image worker returned an invalid response." }
         )
         else -> null
+    }
+
+/** Maps only stable, user-actionable resolution issues to their product error contracts. */
+internal fun ImageProfileResolutionException.localImagePublicErrorCode(): String =
+    when {
+        validation.issues.any { it.code == "ULTRAFIX_EXECUTION_UNSUPPORTED" } ->
+            "ultrafix_execution_unsupported"
+        else -> "invalid_image_execution_profile"
     }

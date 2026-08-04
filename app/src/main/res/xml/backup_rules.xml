@@ -13,6 +13,7 @@
     <!-- Product images use the explicit, sanitized image-library export format. -->
     <exclude domain="file" path="image_assets" />
     <exclude domain="file" path="image_execution_journal" />
+    <exclude domain="file" path="image_generation_inputs" />
     <exclude domain="file" path="image_loras" />
     <exclude domain="file" path="image_upscalers" />
     <exclude domain="file" path="image_models" />

@@ -48,7 +48,28 @@ internal enum class ImageClipPadRule { EOS, ZERO, MODEL_DECLARED }
 
 internal data class ImageProfileAsset(
     val relativePath: String,
-    val fingerprint: String
+    val fingerprint: String,
+    val sizeBytes: Long? = null
+)
+
+/**
+ * Every byte that can change how a user prompt becomes a text-encoder input has a stable role.
+ *
+ * Roles are intentionally narrow. A future runtime must add a new explicit role and native
+ * receipt before it can advertise direct multilingual input; it cannot smuggle a newly
+ * discovered sidecar through an untyped auxiliary-file list.
+ */
+internal enum class ImagePromptToEncoderAssetRole {
+    TEXT_ENCODER_GRAPH,
+    TEXT_ENCODER_WEIGHT,
+    TOKENIZER_JSON,
+    TOKEN_EMBEDDING,
+    POSITION_EMBEDDING
+}
+
+internal data class ImagePromptToEncoderAsset(
+    val role: ImagePromptToEncoderAssetRole,
+    val asset: ImageProfileAsset
 )
 
 internal data class ImageTokenizerContract(
@@ -68,6 +89,132 @@ internal data class ImageTokenizerContract(
     val supportsTextualInversion: Boolean = false,
     val separateNegativePrompt: Boolean = true
 )
+
+/**
+ * Profile-owned language semantics for the exact text encoder. This deliberately does not infer
+ * language support from a model family, tokenizer transport, device, or recommendation id.
+ */
+internal enum class ImageTextEncoderLanguageCapability {
+    ENGLISH_DOMINANT,
+    NATIVE_MULTILINGUAL
+}
+
+internal enum class ImageTextEncoderLanguage {
+    ENGLISH,
+    CHINESE_SIMPLIFIED
+}
+
+internal data class ImageTextEncoderLanguageEvidence(
+    val evidenceId: String,
+    val evidenceSha256: String,
+    val textEncoderAsset: ImageProfileAsset,
+    /** Additional immutable files consumed by the same native text-encoder graph. */
+    val auxiliaryAssets: List<ImageProfileAsset> = emptyList(),
+    /**
+     * Versioned, role-aware closure of every asset consumed from prompt text through encoder
+     * input. Legacy primary/auxiliary fields remain readable for old profiles, but only this
+     * closure can authorize direct Simplified Chinese input.
+     */
+    val promptToEncoderAssets: List<ImagePromptToEncoderAsset> = emptyList(),
+    /**
+     * Publisher signature over the complete semantic claim. It is deliberately optional so an
+     * unsigned or legacy package remains usable for English prompts, but it can never authorize
+     * direct Chinese input.
+     */
+    val semanticProof: ImageTextEncoderLanguageSemanticProof? = null
+) {
+    /**
+     * Primary graph first for legacy readers. Direct multilingual execution always requires the
+     * role-aware closure, so this fallback never grants Chinese admission.
+     */
+    fun consumedAssets(): List<ImageProfileAsset> = promptToEncoderAssets
+        .map(ImagePromptToEncoderAsset::asset)
+        .ifEmpty { listOf(textEncoderAsset) + auxiliaryAssets }
+}
+
+/** Stable cross-process identity for the complete signed prompt-to-encoder closure. */
+internal fun ImageTextEncoderLanguageEvidence.promptToEncoderClosureSha256(): String {
+    require(promptToEncoderAssets.isNotEmpty()) {
+        "Prompt-to-encoder closure is required."
+    }
+    val payload = buildList {
+        add("mca.image.prompt-to-encoder-assets.v1")
+        promptToEncoderAssets.sortedBy { entry -> entry.role.ordinal }.forEach { entry ->
+            add(entry.role.name)
+            add(entry.asset.relativePath.replace('\\', '/').trim())
+            add(entry.asset.sizeBytes?.toString() ?: "-1")
+            add(entry.asset.fingerprint.lowercase())
+        }
+    }.joinToString("\u001f")
+    return MessageDigest.getInstance("SHA-256")
+        .digest(payload.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+}
+
+internal data class ImageTextEncoderLanguageContract(
+    val capability: ImageTextEncoderLanguageCapability,
+    val supportedLanguages: Set<ImageTextEncoderLanguage>,
+    val evidence: ImageTextEncoderLanguageEvidence? = null
+) {
+    /** Stable, order-independent representation used by execution and prompt bindings. */
+    fun bindingToken(): String = listOf(
+        "promptLanguageContractVersion=$LOCAL_IMAGE_PROMPT_LANGUAGE_CONTRACT_VERSION",
+        capability.name,
+        supportedLanguages.sortedBy { it.ordinal }.joinToString(",") { it.name },
+        evidence?.evidenceId?.lowercase().orEmpty(),
+        evidence?.evidenceSha256?.lowercase().orEmpty(),
+        evidence?.textEncoderAsset?.relativePath?.replace('\\', '/')?.lowercase().orEmpty(),
+        evidence?.textEncoderAsset?.fingerprint?.lowercase().orEmpty(),
+        evidence?.textEncoderAsset?.sizeBytes?.toString().orEmpty(),
+            evidence?.auxiliaryAssets
+                ?.sortedWith(compareBy<ImageProfileAsset> { asset ->
+                    asset.relativePath.replace('\\', '/').lowercase()
+            }.thenBy { asset -> asset.fingerprint.lowercase() })
+            ?.joinToString("\u001d") { asset ->
+                listOf(
+                    asset.relativePath.replace('\\', '/').lowercase(),
+                    asset.fingerprint.lowercase(),
+                    asset.sizeBytes?.toString().orEmpty()
+                ).joinToString("\u001c")
+                }
+            .orEmpty(),
+        evidence?.promptToEncoderAssets
+            ?.sortedBy { entry -> entry.role.ordinal }
+            ?.joinToString("\u001d") { entry ->
+                listOf(
+                    entry.role.name,
+                    entry.asset.relativePath.replace('\\', '/').lowercase(),
+                    entry.asset.fingerprint.lowercase(),
+                    entry.asset.sizeBytes?.toString().orEmpty()
+                ).joinToString("\u001c")
+            }
+            .orEmpty(),
+        evidence?.semanticProof?.bindingToken().orEmpty()
+    ).joinToString("\u001e")
+}
+
+/**
+ * Opaque signed envelope for a native text-encoder semantic claim. The proof is verified only by
+ * [ImagePromptLanguageProofTrust] after the full execution profile is available, because its
+ * canonical payload binds profile-owned model and graph fields as well as this evidence closure.
+ */
+internal data class ImageTextEncoderLanguageSemanticProof(
+    val proofVersion: Int,
+    val signerKeyId: String,
+    val signerCertificateSha256: String,
+    val signatureAlgorithm: String,
+    val payloadSha256: String,
+    val signatureBase64: String
+) {
+    fun bindingToken(): String = listOf(
+        proofVersion.toString(),
+        signerKeyId,
+        signerCertificateSha256.lowercase(),
+        signatureAlgorithm,
+        payloadSha256.lowercase(),
+        signatureBase64
+    ).joinToString("\u001c")
+}
 
 internal enum class ImageEmbeddingDiskDataType { FP16, FP32, BF16, GRAPH_INTERNAL, RUNTIME_NATIVE }
 internal enum class ImageEmbeddingConversionStrategy {
@@ -234,6 +381,15 @@ internal data class ImageGenerationCapabilities(
     val supportsMask: Boolean = false,
     val supportsClipSkip: Boolean = false,
     val supportsVaeTiling: Boolean = false,
+    val supportsUltraFix: Boolean = false,
+    val ultraFixMinWidth: Int = if (supportsUltraFix) minWidth else 0,
+    val ultraFixMaxWidth: Int = if (supportsUltraFix) maxWidth else 0,
+    val ultraFixMinHeight: Int = if (supportsUltraFix) minHeight else 0,
+    val ultraFixMaxHeight: Int = if (supportsUltraFix) maxHeight else 0,
+    val ultraFixWidthMultiple: Int = if (supportsUltraFix) widthMultiple else 0,
+    val ultraFixHeightMultiple: Int = if (supportsUltraFix) heightMultiple else 0,
+    /** Zero means the runtime accepts any topology-aligned tile in the advertised range. */
+    val ultraFixRequiredTileSize: Int = 0,
     val supportsLivePreview: Boolean = false,
     val supportsLora: Boolean = false,
     val maxBatchCount: Int = 1
@@ -256,12 +412,20 @@ internal data class ImageExecutionProfile(
     val vae: ImageVaeContract,
     val graph: ImageGraphContract,
     val defaults: ImageGenerationDefaults,
-    val capabilities: ImageGenerationCapabilities
+    val capabilities: ImageGenerationCapabilities,
+    /**
+     * Optional positive admission proof for direct non-English text. Missing fields in legacy
+     * manifests remain readable and conservatively resolve to English-dominant.
+     */
+    val textEncoderLanguage: ImageTextEncoderLanguageContract? = null,
+    /** Request-scoped exact file snapshot. It is intentionally omitted from persisted JSON. */
+    val textualInversionExecutionAssets: TextualInversionExecutionAssetBinding? = null
 ) {
     /** Stable binding over the model fingerprint and every executable contract. */
     val bindingFingerprint: String
         get() = sha256Hex(
-            listOf(
+            buildList {
+                addAll(listOf(
                 schemaVersion,
                 profileId,
                 profileRevision,
@@ -270,6 +434,8 @@ internal data class ImageExecutionProfile(
                 family,
                 variant,
                 task,
+                provenance.primarySource,
+                provenance.sources.joinToString("\u001e") { source -> source.name },
                 tokenizer,
                 conditioning,
                 scheduler,
@@ -278,8 +444,292 @@ internal data class ImageExecutionProfile(
                 graph,
                 defaults,
                 capabilities
-            ).joinToString("\u001f")
+                ))
+                // Keep the historical digest byte-for-byte stable when an old profile lacks the
+                // optional contract. A positive declaration must invalidate stale prompt evidence.
+                textEncoderLanguage?.let { add("textEncoderLanguage:${it.bindingToken()}") }
+            }.joinToString("\u001f")
         )
+
+    /**
+     * Stable binding for prompt preparation and translation reuse. Generation defaults and
+     * sampling/image topology deliberately stay out of this digest: changing a seed, scheduler,
+     * size, or default negative prompt cannot change how captured text is tokenized and encoded.
+     */
+    val promptLanguageBindingFingerprint: String
+        get() {
+            val profileFingerprint = computedPromptLanguageBindingFingerprint()
+            val executionAssets = textualInversionExecutionAssets ?: return profileFingerprint
+            // The execution-asset snapshot is captured from this exact profile before the tokenizer
+            // asset list is narrowed. Requiring equality here prevents that snapshot branch from
+            // bypassing a subsequently declared text-encoder language contract.
+            if (textEncoderLanguage != null) {
+                require(executionAssets.profilePromptFingerprint == profileFingerprint) {
+                    "Textual-inversion execution assets are bound to a different text-encoder language contract."
+                }
+            }
+            return executionAssets.profilePromptFingerprint
+        }
+
+    private fun computedPromptLanguageBindingFingerprint(): String = sha256Hex(
+            buildList {
+                addAll(listOf(
+                "prompt-language-binding-v2",
+                "prompt-language-contract-version=$LOCAL_IMAGE_PROMPT_LANGUAGE_CONTRACT_VERSION",
+                modelFingerprint.lowercase(),
+                runtime,
+                family,
+                variant,
+                task,
+                provenance.primarySource,
+                provenance.sources.joinToString("\u001e") { source -> source.name },
+                tokenizer,
+                conditioning,
+                graph.textEncoder,
+                graph.workerStrategy
+                ))
+                textEncoderLanguage?.let { add("textEncoderLanguage:${it.bindingToken()}") }
+            }.joinToString("\u001f")
+        )
+}
+
+/**
+ * This is the sole profile-level admission predicate for direct Simplified Chinese prompts. It
+ * intentionally excludes model family, tokenizer UTF-8 transport, device properties, and runtime
+ * discovery. The asset check prevents copied metadata from granting a different encoder access.
+ */
+/**
+ * Checks the executable prompt-to-encoder topology before signature verification. This is kept
+ * separate from the proof so validators can explain malformed future profiles without turning a
+ * missing proof into a package-level import failure.
+ */
+internal fun ImageExecutionProfile.hasCompleteNativeMultilingualPromptToEncoderTopology(): Boolean {
+    val contract = textEncoderLanguage ?: return false
+    val evidence = contract.evidence ?: return false
+    val graphTextEncoder = graph.textEncoder ?: return false
+    val closure = evidence.promptToEncoderAssets
+    val roles = closure.map(ImagePromptToEncoderAsset::role)
+    val closureAssets = closure.map(ImagePromptToEncoderAsset::asset)
+    val normalizedClosurePaths = closureAssets.map { asset ->
+        asset.relativePath.replace('\\', '/').trim()
+    }
+    val graphEntry = closure.singleOrNull {
+        it.role == ImagePromptToEncoderAssetRole.TEXT_ENCODER_GRAPH
+    } ?: return false
+    fun sameAsset(left: ImageProfileAsset, right: ImageProfileAsset): Boolean =
+        left.relativePath.replace('\\', '/').trim().equals(
+            right.relativePath.replace('\\', '/').trim(),
+            ignoreCase = true
+        ) && left.fingerprint.equals(right.fingerprint, ignoreCase = true) &&
+            left.sizeBytes == right.sizeBytes
+    val closureMatchesTokenizerAssets = closureAssets.size == tokenizer.assets.size &&
+        closureAssets.all { entry -> tokenizer.assets.any { candidate -> sameAsset(entry, candidate) } }
+    if (
+        contract.capability != ImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL ||
+        ImageTextEncoderLanguage.ENGLISH !in contract.supportedLanguages ||
+        ImageTextEncoderLanguage.CHINESE_SIMPLIFIED !in contract.supportedLanguages ||
+        conditioning.dualEncoder ||
+        !TEXT_ENCODER_LANGUAGE_EVIDENCE_ID.matches(evidence.evidenceId) ||
+        !TEXT_ENCODER_LANGUAGE_SHA256.matches(evidence.evidenceSha256) ||
+        closure.isEmpty() ||
+        roles.distinct().size != roles.size ||
+        normalizedClosurePaths.distinctBy { path -> path.lowercase() }.size !=
+            normalizedClosurePaths.size ||
+        closureAssets.any { asset ->
+            !isSafeTextEncoderLanguageEvidencePath(
+                asset.relativePath.replace('\\', '/').trim()
+            ) ||
+                !TEXT_ENCODER_LANGUAGE_SHA256.matches(asset.fingerprint) ||
+                asset.sizeBytes == null || asset.sizeBytes <= 0L
+        } ||
+        !sameAsset(graphEntry.asset, evidence.textEncoderAsset) ||
+        !graphTextEncoder.relativePath.replace('\\', '/').trim().equals(
+            graphEntry.asset.relativePath.replace('\\', '/').trim(),
+            ignoreCase = true
+        ) ||
+        graphTextEncoder.graphName.isBlank() ||
+        !closureMatchesTokenizerAssets
+    ) return false
+
+    return when (runtime) {
+        LocalImageRuntime.QNN_HTP ->
+            graph.workerStrategy == ImageWorkerStrategy.SHARED_TEXT_UNET_VAE &&
+                tokenizer.backend == ImageTokenizerBackend.TOKENIZERS_CPP &&
+                graphEntry.asset.relativePath.endsWith(".bin", ignoreCase = true) &&
+                roles.toSet() == setOf(
+                    ImagePromptToEncoderAssetRole.TEXT_ENCODER_GRAPH,
+                    ImagePromptToEncoderAssetRole.TOKENIZER_JSON
+                )
+        // MNN direct generation still has legacy discovery-based tokenizer and host-embedding
+        // reads. It remains English-dominant until its descriptor-backed native receipt consumes
+        // the complete role-aware closure rather than only graph/.weight.
+        LocalImageRuntime.MNN_DIFFUSION,
+        LocalImageRuntime.STABLE_DIFFUSION_CPP,
+        LocalImageRuntime.ONNX_RUNTIME,
+        LocalImageRuntime.CUSTOM -> false
+    }
+}
+
+internal fun ImageExecutionProfile.hasVerifiedNativeSimplifiedChineseTextEncoder(): Boolean {
+    val contract = textEncoderLanguage ?: return false
+    val evidence = contract.evidence ?: return false
+    return hasCompleteNativeMultilingualPromptToEncoderTopology() &&
+        ImagePromptLanguageProofTrust.isVerified(
+            profile = this,
+            contract = contract,
+            evidence = evidence
+        )
+}
+
+/**
+ * The digest is supplied to native only after Android has verified the publisher signature. Native
+ * returns the same opaque value after consuming the exact encoder closure; it does not need an
+ * additional copy of the public key or a JNI ABI change.
+ */
+internal fun ImageExecutionProfile.verifiedNativeSimplifiedChineseLanguageProofSha256(): String? {
+    val proof = textEncoderLanguage?.evidence?.semanticProof ?: return null
+    return proof.payloadSha256.lowercase().takeIf {
+        hasVerifiedNativeSimplifiedChineseTextEncoder()
+    }
+}
+
+private val TEXT_ENCODER_LANGUAGE_EVIDENCE_ID =
+    Regex("^[a-z0-9][a-z0-9._-]{2,127}$")
+private val TEXT_ENCODER_LANGUAGE_SHA256 = Regex("^[0-9a-f]{64}$")
+
+private fun isSafeTextEncoderLanguageEvidencePath(value: String): Boolean =
+    value.isNotBlank() &&
+        !value.startsWith('/') &&
+        !Regex("^[A-Za-z]:").containsMatchIn(value) &&
+        value.split('/').all { segment ->
+            segment.isNotBlank() && segment != "." && segment != ".."
+        }
+
+/**
+ * The profile-facing Chinese admission result. Consumers should use this instead of inspecting
+ * the raw declaration so a malformed or unpinned declaration cannot bypass the asset check.
+ */
+internal fun ImageExecutionProfile.chinesePromptLanguageCapability(): ImageTextEncoderLanguageCapability =
+    if (hasVerifiedNativeSimplifiedChineseTextEncoder()) {
+        ImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL
+    } else {
+        ImageTextEncoderLanguageCapability.ENGLISH_DOMINANT
+    }
+
+/**
+ * Native live preview is an execution-topology property, not a recommendation or device allowlist.
+ * Any QNN package that really keeps its UNet and VAE in one worker session can use the same path.
+ */
+internal fun ImageExecutionProfile.hasSharedQnnVaePreviewTopology(): Boolean =
+    runtime == LocalImageRuntime.QNN_HTP &&
+        graph.vae != null &&
+        (graph.workerStrategy == ImageWorkerStrategy.SHARED_UNET_VAE ||
+            graph.workerStrategy == ImageWorkerStrategy.SHARED_TEXT_UNET_VAE)
+
+/**
+ * Split SDXL workers are intentionally excluded from the first live-preview product contract.
+ * Their UNet and VAE phases run in separate processes; a projection frame would be an
+ * approximation until a resumable phase checkpoint exists. Keep the predicate for wire/schema
+ * compatibility, but never advertise or admit it as a user-facing capability.
+ */
+internal fun ImageExecutionProfile.hasSplitQnnSdxlProjectionPreviewTopology(): Boolean =
+    false
+
+/**
+ * Product img2img admission follows executable graph topology only. Recommendation ids, device
+ * discovery, chipset profiles, and validation history deliberately do not participate.
+ */
+internal fun ImageExecutionProfile.hasExecutableQnnImg2ImgTopology(): Boolean {
+    if (runtime != LocalImageRuntime.QNN_HTP ||
+        graph.vaeEncoder == null || graph.unet == null || graph.vae == null
+    ) {
+        return false
+    }
+    return when (graph.workerStrategy) {
+        ImageWorkerStrategy.SPLIT_UNET_VAE ->
+            vae.inputShape == listOf(1, 4, 128, 128) &&
+                vae.outputShape == listOf(1, 3, 1024, 1024)
+        ImageWorkerStrategy.SHARED_UNET_VAE,
+        ImageWorkerStrategy.SHARED_TEXT_UNET_VAE ->
+            vae.inputShape == listOf(1, 4, 64, 64) &&
+                vae.outputShape == listOf(1, 3, 512, 512)
+        ImageWorkerStrategy.IN_PROCESS,
+        ImageWorkerStrategy.DEDICATED_WORKER -> false
+    }
+}
+
+internal fun ImageExecutionProfile.hasSharedQnnImg2ImgTopology(): Boolean =
+    hasExecutableQnnImg2ImgTopology() &&
+        graph.workerStrategy in setOf(
+            ImageWorkerStrategy.SHARED_UNET_VAE,
+            ImageWorkerStrategy.SHARED_TEXT_UNET_VAE
+        )
+
+/**
+ * Textual inversion is executable only when native code owns the CLIP token-table lookup and
+ * can replace exact input_embedding rows before the Transformer. Graph-internal token lookup
+ * (for example Gen5 QNN text_encoder.bin and Sana MNN_MTOK) deliberately remains unsupported.
+ * This predicate is topology-only: recommendation ids, devices and chipsets never participate.
+ */
+internal fun ImageExecutionProfile.hasHostWritableClipTextualInversionTopology(): Boolean {
+    if (tokenizer.backend != ImageTokenizerBackend.TOKENIZERS_CPP ||
+        tokenizer.maxLength != 77 ||
+        tokenizer.bosId == null || tokenizer.eosId == null || tokenizer.padId == null ||
+        conditioning.diskDataType !in setOf(
+            ImageEmbeddingDiskDataType.FP16,
+            ImageEmbeddingDiskDataType.FP32
+        ) ||
+        conditioning.textEncoderInputShape != listOf(1, 77) ||
+        graph.unet == null || graph.vae == null
+    ) {
+        return false
+    }
+    val textEncoderName = graph.textEncoder
+        ?.relativePath
+        ?.substringAfterLast('/')
+        ?.substringAfterLast('\\')
+        ?.lowercase()
+        ?: return false
+    return when (runtime) {
+        LocalImageRuntime.QNN_HTP -> when (graph.workerStrategy) {
+            ImageWorkerStrategy.SHARED_UNET_VAE ->
+                family in setOf(LocalImageModelFamily.SD15, LocalImageModelFamily.SD21) &&
+                    textEncoderName == "clip_v2.mnn" && !conditioning.dualEncoder &&
+                    !conditioning.pooledOutput &&
+                    conditioning.textEncoderOutputShapes == listOf(listOf(1, 77, 768))
+            ImageWorkerStrategy.SPLIT_UNET_VAE ->
+                family == LocalImageModelFamily.SDXL && textEncoderName == "clip.mnn" &&
+                    conditioning.dualEncoder && conditioning.pooledOutput &&
+                    conditioning.textEncoderOutputShapes == listOf(
+                        listOf(1, 77, 768),
+                        listOf(1, 77, 1_280)
+                    )
+            else -> false
+        }
+        LocalImageRuntime.MNN_DIFFUSION ->
+            family == LocalImageModelFamily.SD15 &&
+                graph.workerStrategy == ImageWorkerStrategy.IN_PROCESS &&
+                textEncoderName == "clip_v2.mnn" && !conditioning.dualEncoder &&
+                !conditioning.pooledOutput &&
+                conditioning.textEncoderOutputShapes == listOf(listOf(1, 77, 768))
+        LocalImageRuntime.STABLE_DIFFUSION_CPP,
+        LocalImageRuntime.ONNX_RUNTIME,
+        LocalImageRuntime.CUSTOM -> false
+    }
+}
+
+/**
+ * QNN/MNN textual inversion is derived from the executable graph contract, never from a
+ * recommendation id or hardware profile. This also strips stale manifest capability bits from
+ * graph-internal text encoders while allowing an imported host-writable CLIP topology.
+ */
+internal fun ImageExecutionProfile.withTopologyDerivedTextualInversionCapability(): ImageExecutionProfile {
+    if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) return this
+    val supported = hasHostWritableClipTextualInversionTopology()
+    return copy(
+        tokenizer = tokenizer.copy(supportsTextualInversion = supported),
+        capabilities = capabilities.copy(supportsTextualInversion = supported)
+    )
 }
 
 internal data class ImageProfileValidationIssue(
@@ -329,6 +779,151 @@ internal object ImageExecutionProfileValidator {
                 if (!SHA256.matches(asset.fingerprint)) {
                     issue("ASSET_FINGERPRINT_INVALID", "tokenizer.assets[$index].fingerprint", "Tokenizer asset fingerprint must be SHA-256.")
                 }
+                if (asset.sizeBytes != null && asset.sizeBytes <= 0L) {
+                    issue("ASSET_SIZE_INVALID", "tokenizer.assets[$index].sizeBytes", "Tokenizer asset size must be positive.")
+                }
+            }
+            profile.textEncoderLanguage?.let { contract ->
+                val languages = contract.supportedLanguages
+                if (languages.isEmpty()) {
+                    issue(
+                        "TEXT_ENCODER_LANGUAGE_CONTRACT_INVALID",
+                        "textEncoderLanguage.supportedLanguages",
+                        "Text encoder language support must declare at least one language."
+                    )
+                }
+                when (contract.capability) {
+                    ImageTextEncoderLanguageCapability.ENGLISH_DOMINANT -> {
+                        if (languages != setOf(ImageTextEncoderLanguage.ENGLISH)) {
+                            issue(
+                                "TEXT_ENCODER_LANGUAGE_CONTRACT_INVALID",
+                                "textEncoderLanguage.supportedLanguages",
+                                "English-dominant text encoders must declare English only."
+                            )
+                        }
+                        if (contract.evidence != null) {
+                            issue(
+                                "TEXT_ENCODER_LANGUAGE_CONTRACT_INVALID",
+                                "textEncoderLanguage.evidence",
+                                "English-dominant text encoders must not publish multilingual semantic evidence."
+                            )
+                        }
+                    }
+                    ImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL -> {
+                        if (ImageTextEncoderLanguage.ENGLISH !in languages ||
+                            ImageTextEncoderLanguage.CHINESE_SIMPLIFIED !in languages
+                        ) {
+                            issue(
+                                "TEXT_ENCODER_LANGUAGE_CONTRACT_INVALID",
+                                "textEncoderLanguage.supportedLanguages",
+                                "Native multilingual admission requires explicit English and Simplified Chinese support."
+                            )
+                        }
+                        val evidence = contract.evidence
+                        if (evidence == null) {
+                            issue(
+                                "TEXT_ENCODER_LANGUAGE_EVIDENCE_MISSING",
+                                "textEncoderLanguage.evidence",
+                                "Native multilingual admission requires immutable text-encoder semantic evidence."
+                            )
+                        } else {
+                            if (!PROFILE_ID.matches(evidence.evidenceId)) {
+                                issue(
+                                    "TEXT_ENCODER_LANGUAGE_EVIDENCE_INVALID",
+                                    "textEncoderLanguage.evidence.evidenceId",
+                                    "Text encoder language evidence id must be a stable lower-case identifier."
+                                )
+                            }
+                            if (!SHA256.matches(evidence.evidenceSha256)) {
+                                issue(
+                                    "TEXT_ENCODER_LANGUAGE_EVIDENCE_INVALID",
+                                    "textEncoderLanguage.evidence.evidenceSha256",
+                                    "Text encoder language evidence must use a SHA-256 fingerprint."
+                                )
+                            }
+                            val evidenceAssets = evidence.consumedAssets()
+                            val normalizedEvidencePaths = evidenceAssets.map { asset ->
+                                asset.relativePath.replace('\\', '/').trim().lowercase()
+                            }
+                            if (normalizedEvidencePaths.distinct().size != normalizedEvidencePaths.size) {
+                                issue(
+                                    "TEXT_ENCODER_LANGUAGE_EVIDENCE_INVALID",
+                                    "textEncoderLanguage.evidence.auxiliaryAssets",
+                                    "Text encoder language evidence assets must use unique bundle-relative paths."
+                                )
+                            }
+                            evidenceAssets.forEachIndexed { index, asset ->
+                                val assetField = if (index == 0) {
+                                    "textEncoderLanguage.evidence.textEncoderAsset"
+                                } else {
+                                    "textEncoderLanguage.evidence.auxiliaryAssets[${index - 1}]"
+                                }
+                                if (!safeRelativePath(asset.relativePath)) {
+                                    issue(
+                                        "PROFILE_PATH_INVALID",
+                                        "$assetField.relativePath",
+                                        "Text encoder language evidence asset must stay inside the bundle."
+                                    )
+                                }
+                                if (!SHA256.matches(asset.fingerprint)) {
+                                    issue(
+                                        "ASSET_FINGERPRINT_INVALID",
+                                        "$assetField.fingerprint",
+                                        "Text encoder language evidence asset must use a SHA-256 fingerprint."
+                                    )
+                                }
+                                if (asset.sizeBytes == null || asset.sizeBytes <= 0L) {
+                                    issue(
+                                        "ASSET_SIZE_INVALID",
+                                        "$assetField.sizeBytes",
+                                        "Text encoder language evidence asset must pin a positive source size."
+                                    )
+                                }
+                                val assetPinnedByProfile = profile.tokenizer.assets.any { candidate ->
+                                    candidate.relativePath.replace('\\', '/').trim().equals(
+                                        asset.relativePath.replace('\\', '/').trim(),
+                                        ignoreCase = true
+                                    ) && candidate.fingerprint.equals(asset.fingerprint, ignoreCase = true) &&
+                                        candidate.sizeBytes == asset.sizeBytes
+                                }
+                                if (!assetPinnedByProfile) {
+                                    issue(
+                                        "TEXT_ENCODER_LANGUAGE_EVIDENCE_INVALID",
+                                        assetField,
+                                        "Text encoder language evidence must bind an exact profile text-encoder asset."
+                                    )
+                                }
+                            }
+                            if (profile.conditioning.dualEncoder) {
+                                issue(
+                                    "TEXT_ENCODER_LANGUAGE_TOPOLOGY_UNSUPPORTED",
+                                    "conditioning.dualEncoder",
+                                    "Direct Chinese admission requires every native text encoder to be explicitly evidence-bound; dual-encoder topology is not represented by this contract."
+                                )
+                            }
+                            val graphTextEncoder = profile.graph.textEncoder
+                            if (graphTextEncoder == null ||
+                                !graphTextEncoder.relativePath.replace('\\', '/').equals(
+                                    evidence.textEncoderAsset.relativePath.replace('\\', '/'),
+                                    ignoreCase = true
+                                )
+                            ) {
+                                issue(
+                                    "TEXT_ENCODER_LANGUAGE_EVIDENCE_INVALID",
+                                    "textEncoderLanguage.evidence.textEncoderAsset",
+                                    "Text encoder language evidence must bind the graph text encoder consumed at runtime."
+                                )
+                            }
+                            if (!profile.hasCompleteNativeMultilingualPromptToEncoderTopology()) {
+                                issue(
+                                    "TEXT_ENCODER_LANGUAGE_TOPOLOGY_UNSUPPORTED",
+                                    "textEncoderLanguage.evidence.promptToEncoderAssets",
+                                    "Direct Chinese admission requires the complete role-aware prompt-to-encoder closure for a descriptor-backed QNN text encoder."
+                                )
+                            }
+                        }
+                    }
+                }
             }
             if (profile.tokenizer.maxLength <= 0) {
                 issue("TOKENIZER_CONTRACT_INVALID", "tokenizer.maxLength", "Tokenizer max length must be positive.")
@@ -341,6 +936,25 @@ internal object ImageExecutionProfileValidator {
                     "CAPABILITY_CONTRACT_INVALID",
                     "supportsPromptWeighting",
                     "Image generation cannot advertise prompt weighting without tokenizer support."
+                )
+            }
+            if (profile.capabilities.supportsTextualInversion !=
+                profile.tokenizer.supportsTextualInversion
+            ) {
+                issue(
+                    "CAPABILITY_CONTRACT_INVALID",
+                    "supportsTextualInversion",
+                    "Tokenizer and generation textual-inversion capabilities must agree."
+                )
+            }
+            if (profile.runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP &&
+                profile.capabilities.supportsTextualInversion &&
+                !profile.hasHostWritableClipTextualInversionTopology()
+            ) {
+                issue(
+                    "CAPABILITY_CONTRACT_INVALID",
+                    "supportsTextualInversion",
+                    "QNN/MNN textual inversion requires a host-writable CLIP input_embedding topology."
                 )
             }
             if ((profile.conditioning.exactByteSize ?: 1L) <= 0L) {
@@ -388,6 +1002,93 @@ internal object ImageExecutionProfileValidator {
             }
             if (profile.runtime == LocalImageRuntime.QNN_HTP && profile.graph.unet == null) {
                 issue("GRAPH_CONTRACT_INVALID", "graph.unet", "QNN image profiles require a UNet or diffusion graph.")
+            }
+            if (profile.capabilities.supportsLivePreview &&
+                profile.runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP &&
+                !profile.hasSharedQnnVaePreviewTopology() &&
+                !profile.hasSplitQnnSdxlProjectionPreviewTopology()
+            ) {
+                issue(
+                    "CAPABILITY_CONTRACT_INVALID",
+                    "capabilities.supportsLivePreview",
+                    "Live preview requires stable-diffusion.cpp or a shared QNN VAE topology."
+                )
+            }
+            if (profile.capabilities.supportsUltraFix &&
+                ((profile.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP &&
+                    !profile.capabilities.supportsVaeTiling) ||
+                    (profile.runtime == LocalImageRuntime.QNN_HTP &&
+                        !profile.hasExecutableQnnUltraFixTopology()) ||
+                    (profile.runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP &&
+                        profile.runtime != LocalImageRuntime.QNN_HTP) ||
+                    profile.family !in setOf(
+                        LocalImageModelFamily.SD15,
+                        LocalImageModelFamily.SD21,
+                        LocalImageModelFamily.SDXL,
+                        LocalImageModelFamily.SD_TURBO
+                    ) ||
+                    profile.scheduler.predictionType == ImagePredictionType.FLOW)
+            ) {
+                issue(
+                    "CAPABILITY_CONTRACT_INVALID",
+                    "capabilities.supportsUltraFix",
+                    "UltraFix requires a standard native UNet, VAE encode/decode, and topology-aligned tiling."
+                )
+            }
+            val ultraFixDimensions = listOf(
+                profile.capabilities.ultraFixMinWidth,
+                profile.capabilities.ultraFixMaxWidth,
+                profile.capabilities.ultraFixMinHeight,
+                profile.capabilities.ultraFixMaxHeight,
+                profile.capabilities.ultraFixWidthMultiple,
+                profile.capabilities.ultraFixHeightMultiple
+            )
+            if (profile.capabilities.supportsUltraFix) {
+                if (profile.capabilities.ultraFixMinWidth !in 64..profile.capabilities.ultraFixMaxWidth ||
+                    profile.capabilities.ultraFixMinHeight !in 64..profile.capabilities.ultraFixMaxHeight ||
+                    profile.capabilities.ultraFixMaxWidth > 8_192 ||
+                    profile.capabilities.ultraFixMaxHeight > 8_192 ||
+                    profile.capabilities.ultraFixWidthMultiple <= 0 ||
+                    profile.capabilities.ultraFixHeightMultiple <= 0 ||
+                    profile.capabilities.ultraFixMinWidth %
+                        profile.capabilities.ultraFixWidthMultiple != 0 ||
+                    profile.capabilities.ultraFixMinHeight %
+                        profile.capabilities.ultraFixHeightMultiple != 0 ||
+                    profile.capabilities.ultraFixMaxWidth %
+                        profile.capabilities.ultraFixWidthMultiple != 0 ||
+                    profile.capabilities.ultraFixMaxHeight %
+                        profile.capabilities.ultraFixHeightMultiple != 0
+                ) {
+                    issue(
+                        "CAPABILITY_CONTRACT_INVALID",
+                        "capabilities.ultraFixDimensions",
+                        "UltraFix dimensions must form a bounded, topology-aligned 64..8192 range."
+                    )
+                }
+                if (profile.capabilities.ultraFixRequiredTileSize != 0 &&
+                    (profile.capabilities.ultraFixRequiredTileSize !in
+                        profile.capabilities.ultraFixMinWidth..profile.capabilities.ultraFixMaxWidth ||
+                        profile.capabilities.ultraFixRequiredTileSize !in
+                            profile.capabilities.ultraFixMinHeight..profile.capabilities.ultraFixMaxHeight ||
+                        profile.capabilities.ultraFixRequiredTileSize %
+                            profile.capabilities.ultraFixWidthMultiple != 0 ||
+                        profile.capabilities.ultraFixRequiredTileSize %
+                            profile.capabilities.ultraFixHeightMultiple != 0)
+                ) {
+                    issue(
+                        "CAPABILITY_CONTRACT_INVALID",
+                        "capabilities.ultraFixRequiredTileSize",
+                        "A fixed UltraFix graph tile must be zero or lie inside the topology-aligned bounds."
+                    )
+                }
+            } else if (ultraFixDimensions.any { it != 0 } ||
+                profile.capabilities.ultraFixRequiredTileSize != 0
+            ) {
+                issue(
+                    "CAPABILITY_CONTRACT_INVALID",
+                    "capabilities.ultraFixDimensions",
+                    "A profile without UltraFix support must not publish UltraFix dimension bounds."
+                )
             }
             if (profile.task == ImageTask.CONTROL_IMAGE && profile.graph.controlNet == null) {
                 issue("GRAPH_CONTRACT_INVALID", "graph.controlNet", "Control-image profiles require a control graph.")

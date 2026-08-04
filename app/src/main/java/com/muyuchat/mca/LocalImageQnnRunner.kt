@@ -146,30 +146,8 @@ internal class QnnHtpImageRunner(
                 message = runtimeResolution.stagingError
             )
         }
-        val bundleRuntimeReady = runtimeResolution?.stagedRuntime != null
-        if (
-            manifest.requiresQnnRuntime &&
-            !bundleRuntimeReady &&
-            device.accelerationProfile.qnnRuntime.transportDependencyBlocked
-        ) {
-            return manifest.report(
-                state = LocalImageQnnState.QNN_TRANSPORT_BLOCKED,
-                backend = backendLabel,
-                message = "The Snapdragon NPU runtime loads, but its device transport is blocked: ${device.accelerationProfile.qnnRuntime.cdspRpcMessage}"
-            )
-        }
-        if (
-            manifest.requiresQnnRuntime &&
-            !bundleRuntimeReady &&
-            (!device.accelerationProfile.qnnRuntime.ready ||
-                !device.accelerationProfile.qnnRuntime.htpStubLibraryPresent)
-        ) {
-            return manifest.report(
-                state = LocalImageQnnState.QNN_RUNTIME_MISSING,
-                backend = backendLabel,
-                message = "The complete QNN System, HTP, Skel, and Stub runtime libraries are unavailable."
-            )
-        }
+        // Device/runtime discovery is advisory only. Generic runtime candidates
+        // and real native load/graph execution determine compatibility.
         val declaredSmokeSpecs = manifest.qnnSmokeSpecs.ifEmpty {
             listOfNotNull(manifest.qnnSmokeSpec.takeIf(QnnSmokeSpec::hasStaticGraphMetadata))
         }

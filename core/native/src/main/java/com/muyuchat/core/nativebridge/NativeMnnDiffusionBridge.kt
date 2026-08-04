@@ -14,6 +14,7 @@ class NativeMnnDiffusionBridge {
     }
 
     external fun isRunnerReady(): Boolean
+    external fun resetImageCancellation()
     external fun inspectBundle(bundleRoot: String): String
     external fun runUnetSmoke(bundleRoot: String, backendMode: String): String
     /**
@@ -54,6 +55,22 @@ class NativeMnnDiffusionBridge {
     ): IntArray
 
     /**
+     * Returns exact untruncated prompt-token information from the selected
+     * production tokenizer, or an error JSON when that backend is unavailable.
+     */
+    external fun measurePromptTokens(
+        bundleRoot: String,
+        tokenizerBackend: String,
+        tokenizerJsonPath: String,
+        prompt: String,
+        bosId: Int,
+        eosId: Int,
+        padId: Int,
+        maxTokens: Int,
+        promptWeightingEnabled: Boolean
+    ): String
+
+    /**
      * Writes a versioned little-endian CLIP conditioning payload containing
      * negative+positive token IDs and their native prompt-attention weights.
      * The returned JSON is execution evidence produced by the tokenizer, not
@@ -67,6 +84,7 @@ class NativeMnnDiffusionBridge {
         eosId: Int,
         padId: Int,
         maxTokens: Int,
+        promptToEncoderClosureSha256: String,
         outputPath: String
     ): String
     external fun encodeSd15PromptEmbeddings(
@@ -77,8 +95,15 @@ class NativeMnnDiffusionBridge {
         backendMode: String,
         threads: Int,
         conditioningOrder: String,
-        promptWeightingEnabled: Boolean
+        promptWeightingEnabled: Boolean,
+        textualInversionJson: String
     ): String
+
+    /**
+     * Writes a versioned little-endian SDXL conditioning payload. Split QNN
+     * callers select positive-only or negative-then-positive branches through
+     * [useCfg]; the returned JSON is native execution evidence.
+     */
     external fun encodeSdxlPromptConditioning(
         bundleRoot: String,
         prompt: String,
@@ -88,7 +113,9 @@ class NativeMnnDiffusionBridge {
         height: Int,
         backendMode: String,
         threads: Int,
-        promptWeightingEnabled: Boolean
+        useCfg: Boolean,
+        promptWeightingEnabled: Boolean,
+        textualInversionJson: String
     ): String
     external fun generate(
         bundleRoot: String,

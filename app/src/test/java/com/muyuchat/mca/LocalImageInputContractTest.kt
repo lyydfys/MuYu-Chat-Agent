@@ -11,6 +11,17 @@ import org.junit.Test
 
 class LocalImageInputContractTest {
     @Test
+    fun `runtime validation defers textual inversion admission to the resolved graph topology`() {
+        val options = LocalImageGenerationOptions(
+            textualInversionIds = listOf("123e4567-e89b-12d3-a456-426614174000")
+        )
+
+        LocalImageRuntime.entries.forEach { runtime ->
+            validateLocalImageRuntimeProductOptions(runtime, options)
+        }
+    }
+
+    @Test
     fun `portable history may omit source images without weakening product validation`() {
         val restoredHistoryDraft = LocalImageInputDraft(
             taskMode = LocalImageTaskMode.INPAINT,
@@ -46,6 +57,131 @@ class LocalImageInputContractTest {
         assertEquals(0.65, params.getDouble("strength"), 0.0)
         assertEquals(1, params.getInt("clipSkip"))
         assertFalse(params.has("maskImagePath"))
+    }
+
+    @Test
+    fun `zero denoise strength remains img2img and is not rejected`() {
+        val input = prepared("/cache/worker/zero-strength.img", "0")
+        val options = LocalImageGenerationOptions(
+            taskMode = LocalImageTaskMode.IMG2IMG,
+            inputImage = input,
+            strength = 0.0
+        )
+
+        options.validateProductInputContract()
+        assertEquals(
+            0.0,
+            options.putProductInputNativeParams(JSONObject()).getDouble("strength"),
+            0.0
+        )
+        assertInvalid {
+            options.copy(strength = -0.01).validateProductInputContract()
+        }
+    }
+
+    @Test
+    fun `ultrafix structured request canonically owns every duplicated execution control`() {
+        val request = LocalImageUltraFixOptions(
+            targetWidth = 1_024,
+            targetHeight = 1_024,
+            strength = 0.4,
+            inversionSteps = 4,
+            refinementSteps = 10,
+            tileSize = 512,
+            overlap = 0.25
+        )
+        val base = LocalImageGenerationOptions(
+            taskMode = LocalImageTaskMode.IMG2IMG,
+            inputImage = prepared("/cache/worker/ultrafix.img", "7", width = 512, height = 384),
+            ultraFix = request
+        )
+
+        val canonical = base.withCanonicalUltraFixControls()
+
+        assertEquals(request.targetWidth, canonical.width)
+        assertEquals(request.targetHeight, canonical.height)
+        assertEquals(request.refinementSteps, canonical.steps)
+        assertEquals(request.strength, canonical.strength!!, 0.0)
+        assertEquals(request.tileSize, canonical.vaeTiling?.tileSize)
+        assertEquals(request.overlap, canonical.vaeTiling?.overlap ?: -1.0, 0.0)
+        assertEquals(canonical, LocalImageGenerationOptions.fromJson(base.toJson()))
+
+        listOf(
+            base.copy(width = 512),
+            base.copy(height = 512),
+            base.copy(steps = 9),
+            base.copy(strength = 0.5),
+            base.copy(vaeTiling = LocalImageVaeTilingOptions(256, 0.25)),
+            base.copy(vaeTiling = LocalImageVaeTilingOptions(512, 0.5))
+        ).forEach { conflicting ->
+            assertInvalid { conflicting.withCanonicalUltraFixControls() }
+        }
+    }
+
+    @Test
+    fun `ultrafix denoising tail uses the native Float wire boundary`() {
+        val adjacentStrength = 0.4000000000000001
+
+        assertEquals(4, localImageDenoisingTailStepCount(10, 0.4))
+        assertEquals(4, localImageDenoisingTailStepCount(10, adjacentStrength))
+        LocalImageUltraFixOptions(
+            targetWidth = 1_024,
+            targetHeight = 1_024,
+            strength = adjacentStrength,
+            inversionSteps = 4,
+            refinementSteps = 10,
+            tileSize = 512,
+            overlap = 0.25
+        )
+        assertInvalid {
+            LocalImageUltraFixOptions(
+                targetWidth = 1_024,
+                targetHeight = 1_024,
+                strength = adjacentStrength,
+                inversionSteps = 5,
+                refinementSteps = 10,
+                tileSize = 512,
+                overlap = 0.25
+            )
+        }
+    }
+
+    @Test
+    fun `prepared inputs retain encoded and EXIF oriented dimensions across IPC`() {
+        (1..8).forEach { orientation ->
+            val expected = if (orientation in 5..8) 480 to 640 else 640 to 480
+            assertEquals(expected, localImageOrientedDimensions(640, 480, orientation))
+            val input = LocalImagePreparedInput(
+                path = "/cache/worker/oriented-$orientation.jpg",
+                mimeType = "image/jpeg",
+                sha256 = orientation.toString().repeat(64),
+                sizeBytes = 1_024L,
+                width = 640,
+                height = 480,
+                orientedWidth = expected.first,
+                orientedHeight = expected.second,
+                exifOrientation = orientation
+            )
+            assertEquals(input, LocalImagePreparedInput.fromJson(input.toJson()))
+        }
+
+        val rotatedSource = LocalImagePreparedInput(
+            path = "/cache/worker/source.jpg",
+            mimeType = "image/jpeg",
+            sha256 = "a".repeat(64),
+            sizeBytes = 1_024L,
+            width = 640,
+            height = 480,
+            orientedWidth = 480,
+            orientedHeight = 640,
+            exifOrientation = 6
+        )
+        LocalImageGenerationOptions(
+            taskMode = LocalImageTaskMode.INPAINT,
+            inputImage = rotatedSource,
+            maskImage = prepared("/cache/worker/mask.png", "b", width = 480, height = 640),
+            strength = 0.5
+        ).validateProductInputContract()
     }
 
     @Test
@@ -95,6 +231,14 @@ class LocalImageInputContractTest {
             )
         )
         validateLocalImageRuntimeProductOptions(LocalImageRuntime.STABLE_DIFFUSION_CPP, preview)
+        validateLocalImageRuntimeProductOptions(LocalImageRuntime.QNN_HTP, preview)
+        val qnnPreview = LocalImageGenerationOptions(
+            preview = LocalImagePreviewOptions(
+                interval = 2,
+                mode = LocalImagePreviewMode.VAE
+            )
+        )
+        validateLocalImageRuntimeProductOptions(LocalImageRuntime.QNN_HTP, qnnPreview)
         try {
             validateLocalImageRuntimeProductOptions(LocalImageRuntime.MNN_DIFFUSION, preview)
             fail("Expected unsupported MNN preview")
@@ -166,6 +310,30 @@ class LocalImageInputContractTest {
                 preview = LocalImagePreviewOptions(2, LocalImagePreviewMode.PROJECTION)
             )
         )
+        validateLocalImageProfileProductOptions(
+            stableClassic,
+            LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.IMG2IMG,
+                ultraFix = LocalImageUltraFixOptions(
+                    targetWidth = 4_096,
+                    targetHeight = 2_048,
+                    strength = 0.4,
+                    inversionSteps = 4,
+                    refinementSteps = 10,
+                    tileSize = 512,
+                    overlap = 0.25
+                )
+            )
+        )
+        validateLocalImageProfileProductOptions(
+            stableClassic.copy(
+                profileId = "custom.sdcpp.runtime-preview",
+                capabilities = stableClassic.capabilities.copy(supportsLivePreview = false)
+            ),
+            LocalImageGenerationOptions(
+                preview = LocalImagePreviewOptions(2, LocalImagePreviewMode.PROJECTION)
+            )
+        )
 
         val stableFlow = resolvedProfile(
             recommendationId = "z_image_turbo_q4",
@@ -195,6 +363,30 @@ class LocalImageInputContractTest {
                 )
             )
         }
+        validateLocalImageProfileProductOptions(
+            qnn,
+            LocalImageGenerationOptions(
+                preview = LocalImagePreviewOptions(2, LocalImagePreviewMode.VAE)
+            )
+        )
+        assertProductRejected("invalid_preview_interval") {
+            validateLocalImageProfileProductOptions(
+                qnn,
+                LocalImageGenerationOptions(
+                    preview = LocalImagePreviewOptions(11, LocalImagePreviewMode.VAE)
+                )
+            )
+        }
+        val topologyOnlyQnn = qnn.copy(
+            profileId = "custom.shared.qnn",
+            capabilities = qnn.capabilities.copy(supportsLivePreview = false)
+        )
+        validateLocalImageProfileProductOptions(
+            topologyOnlyQnn,
+            LocalImageGenerationOptions(
+                preview = LocalImagePreviewOptions(2, LocalImagePreviewMode.VAE)
+            )
+        )
         assertProductRejected("unsupported_preview") {
             validateLocalImageProfileProductOptions(
                 qnn,
@@ -202,6 +394,530 @@ class LocalImageInputContractTest {
                     preview = LocalImagePreviewOptions(2, LocalImagePreviewMode.PROJECTION)
                 )
             )
+        }
+
+        val splitQnn = resolvedProfile(
+            recommendationId = "sdxl_base_qnn228",
+            runtime = LocalImageRuntime.QNN_HTP,
+            family = LocalImageModelFamily.SDXL
+        )
+        assertProductRejected("unsupported_preview") {
+            validateLocalImageProfileProductOptions(
+                splitQnn,
+                LocalImageGenerationOptions(
+                    preview = LocalImagePreviewOptions(2, LocalImagePreviewMode.VAE)
+                )
+            )
+        }
+        assertProductRejected("unsupported_preview") {
+            validateLocalImageProfileProductOptions(
+                splitQnn,
+                LocalImageGenerationOptions(
+                    preview = LocalImagePreviewOptions(2, LocalImagePreviewMode.PROJECTION)
+                )
+            )
+        }
+    }
+
+    @Test
+    fun `split qnn accepts img2img and inpaint with encoder and rejects unrelated task modes`() {
+        val splitQnn = resolvedProfile(
+            recommendationId = "sdxl_base_qnn228",
+            runtime = LocalImageRuntime.QNN_HTP,
+            family = LocalImageModelFamily.SDXL
+        )
+        validateLocalImageProfileProductOptions(
+            splitQnn,
+            LocalImageGenerationOptions(taskMode = LocalImageTaskMode.TEXT_TO_IMAGE)
+        )
+
+        val input = prepared("/cache/split-qnn-input.png", "1", width = 1024, height = 1024)
+        val mask = prepared("/cache/split-qnn-mask.png", "2", width = 1024, height = 1024)
+        val control = prepared("/cache/split-qnn-control.png", "3", width = 1024, height = 1024)
+        validateLocalImageProfileProductOptions(
+            splitQnn,
+            LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.IMG2IMG,
+                inputImage = input,
+                strength = 0.0
+            )
+        )
+        validateLocalImageProfileProductOptions(
+            splitQnn,
+            LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.INPAINT,
+                inputImage = input,
+                maskImage = mask,
+                strength = 0.6
+            )
+        )
+        listOf(
+            LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.EDIT,
+                inputImage = input
+            ),
+            LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.CONTROL,
+                controlImage = control,
+                controlStrength = 1.0
+            )
+        ).forEach { options ->
+            assertProductRejected("task_mode_execution_unsupported") {
+                validateLocalImageProfileProductOptions(splitQnn, options)
+            }
+        }
+
+        val sharedControlQnn = resolvedProfile(
+            recommendationId = "qualcomm_controlnet_canny_gen5_qnn",
+            runtime = LocalImageRuntime.QNN_HTP,
+            family = LocalImageModelFamily.SD15
+        )
+        validateLocalImageProfileProductOptions(
+            sharedControlQnn,
+            LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.CONTROL,
+                controlImage = control,
+                controlStrength = 1.0
+            )
+        )
+    }
+
+    @Test
+    fun `shared qnn image input admission follows executable topology without id or device gates`() {
+        val input = prepared("/cache/shared-qnn-input.png", "4")
+        val img2imgOptions = LocalImageGenerationOptions(
+            taskMode = LocalImageTaskMode.IMG2IMG,
+            inputImage = input,
+            strength = 0.6
+        )
+        val inpaintOptions = LocalImageGenerationOptions(
+            taskMode = LocalImageTaskMode.INPAINT,
+            inputImage = input,
+            maskImage = prepared("/cache/shared-qnn-mask.png", "5"),
+            strength = 0.6
+        )
+        val recommendationIds = listOf(
+            "cyberrealistic_sd15_qnn228",
+            "realisticvisionhyper_sd15_qnn228",
+            "dreamshaper_sd15_qnn228",
+            "meinamix_sd15_qnn228"
+        )
+        val representative = recommendationIds.map { recommendationId ->
+            resolvedProfile(
+                recommendationId = recommendationId,
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15
+            ).also { profile ->
+                assertTrue("$recommendationId topology", profile.hasSharedQnnImg2ImgTopology())
+                assertTrue("$recommendationId inpaint topology", profile.hasExecutableQnnInpaintTopology())
+                assertEquals(
+                    QnnInpaintMaskTopology.LATENT_BLEND_4,
+                    profile.inspectQnnInpaintTopology().topology
+                )
+                validateLocalImageProfileProductOptions(profile, img2imgOptions)
+                validateLocalImageProfileProductOptions(profile, inpaintOptions)
+            }
+        }.first()
+
+        val genericSharedTextTopology = representative.copy(
+            profileId = "custom.qnn.shared-text.img2img",
+            modelFingerprint = "b".repeat(64),
+            graph = representative.graph.copy(
+                textEncoder = ImageGraphArtifactContract("text_encoder.bin"),
+                workerStrategy = ImageWorkerStrategy.SHARED_TEXT_UNET_VAE
+            )
+        )
+        assertTrue(genericSharedTextTopology.hasSharedQnnImg2ImgTopology())
+        assertTrue(genericSharedTextTopology.hasExecutableQnnInpaintTopology())
+        validateLocalImageProfileProductOptions(genericSharedTextTopology, img2imgOptions)
+        validateLocalImageProfileProductOptions(genericSharedTextTopology, inpaintOptions)
+
+        listOf(
+            representative.copy(
+                profileId = "custom.qnn.no-encoder",
+                graph = representative.graph.copy(vaeEncoder = null)
+            ),
+            representative.copy(
+                profileId = "custom.qnn.noncoherent",
+                graph = representative.graph.copy(workerStrategy = ImageWorkerStrategy.DEDICATED_WORKER)
+            )
+        ).forEach { unsupported ->
+            assertFalse(unsupported.hasExecutableQnnImg2ImgTopology())
+            assertFalse(unsupported.hasExecutableQnnInpaintTopology())
+            listOf(img2imgOptions, inpaintOptions).forEach { unsupportedOptions ->
+                assertProductRejected("task_mode_execution_unsupported") {
+                    validateLocalImageProfileProductOptions(unsupported, unsupportedOptions)
+                }
+            }
+        }
+
+        listOf(
+            LocalImageGenerationOptions(taskMode = LocalImageTaskMode.EDIT, inputImage = input),
+            LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.CONTROL,
+                controlImage = prepared("/cache/shared-qnn-control.png", "6"),
+                controlStrength = 1.0
+            )
+        ).forEach { unsupportedOptions ->
+            assertProductRejected("task_mode_execution_unsupported") {
+                validateLocalImageProfileProductOptions(representative, unsupportedOptions)
+            }
+        }
+    }
+
+    @Test
+    fun `qnn strength conditioned image modes filter pndm while text to image retains it`() {
+        val recommendationIds = listOf(
+            "cyberrealistic_sd15_qnn228",
+            "realisticvisionhyper_sd15_qnn228",
+            "dreamshaper_sd15_qnn228",
+            "meinamix_sd15_qnn228"
+        )
+        val profiles = recommendationIds.map { recommendationId ->
+            resolvedProfile(
+                recommendationId = recommendationId,
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15
+            )
+        }
+        profiles.forEach { profile ->
+            assertTrue(
+                profile.capabilities.supportedSchedulers.contains(ImageSchedulerAlgorithm.PNDM_PLMS)
+            )
+            assertTrue(
+                ImageSchedulerAlgorithm.PNDM_PLMS in
+                    profile.supportedSchedulersForProductTask(LocalImageTaskMode.TEXT_TO_IMAGE)
+            )
+            assertFalse(
+                ImageSchedulerAlgorithm.PNDM_PLMS in
+                    profile.supportedSchedulersForProductTask(LocalImageTaskMode.IMG2IMG)
+            )
+            assertFalse(
+                ImageSchedulerAlgorithm.PNDM_PLMS in
+                    profile.supportedSchedulersForProductTask(LocalImageTaskMode.INPAINT)
+            )
+            validateLocalImageTaskSamplerCapability(
+                profile = profile,
+                taskMode = LocalImageTaskMode.TEXT_TO_IMAGE,
+                requestedScheduler = ImageSchedulerAlgorithm.PNDM_PLMS
+            )
+            assertProductRejected("unsupported_img2img_sampler") {
+                validateLocalImageTaskSamplerCapability(
+                    profile = profile,
+                    taskMode = LocalImageTaskMode.IMG2IMG,
+                    requestedScheduler = ImageSchedulerAlgorithm.PNDM_PLMS
+                )
+            }
+            assertProductRejected("unsupported_inpaint_sampler") {
+                validateLocalImageTaskSamplerCapability(
+                    profile = profile,
+                    taskMode = LocalImageTaskMode.INPAINT,
+                    requestedScheduler = ImageSchedulerAlgorithm.PNDM_PLMS
+                )
+            }
+        }
+
+        val genericUnknownProfile = profiles.first().copy(
+            profileId = "unknown.generic.shared.qnn",
+            modelFingerprint = "f".repeat(64)
+        )
+        assertTrue(genericUnknownProfile.hasSharedQnnImg2ImgTopology())
+        assertProductRejected("unsupported_img2img_sampler") {
+            validateLocalImageTaskSamplerCapability(
+                profile = genericUnknownProfile,
+                taskMode = LocalImageTaskMode.IMG2IMG,
+                requestedScheduler = ImageSchedulerAlgorithm.PNDM_PLMS
+            )
+        }
+        assertProductRejected("unsupported_inpaint_sampler") {
+            validateLocalImageTaskSamplerCapability(
+                profile = genericUnknownProfile,
+                taskMode = LocalImageTaskMode.INPAINT,
+                requestedScheduler = ImageSchedulerAlgorithm.PNDM_PLMS
+            )
+        }
+    }
+
+    @Test
+    fun `generic shared qnn omitted image input sampler falls back while explicit pndm stays rejected`() {
+        val root = Files.createTempDirectory("generic-shared-qnn-sampler").toFile()
+        try {
+            val primary = root.resolve("unet.bin").apply { writeBytes(byteArrayOf(1)) }
+            listOf("text_encoder.bin", "vae.bin", "vae_encoder.bin").forEach { name ->
+                root.resolve(name).writeBytes(byteArrayOf(1))
+            }
+            val model = LocalImageModelRecord(
+                id = "unknown-shared-qnn",
+                displayName = "Unknown shared QNN",
+                path = primary.absolutePath,
+                fileName = primary.name,
+                sizeBytes = primary.length(),
+                sha256 = "0".repeat(64),
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15,
+                bundleRoot = root.absolutePath
+            )
+
+            val img2imgResolution = resolveLocalImageExecutionProfile(
+                model = model,
+                options = LocalImageGenerationOptions(taskMode = LocalImageTaskMode.IMG2IMG),
+                bundleRoot = root
+            )
+            assertTrue(img2imgResolution.profile.hasSharedQnnImg2ImgTopology())
+            assertEquals(
+                ImageSchedulerAlgorithm.DPMPP_2M,
+                img2imgResolution.layers.resolved.scheduler
+            )
+            assertEquals(null, img2imgResolution.layers.requested.scheduler)
+            assertFalse(img2imgResolution.sourceChain.first() == ImageProfileSource.USER_OVERRIDE)
+            assertEquals(
+                ImageSchedulerAlgorithm.DPMPP_2M,
+                model.validateProductTaskSampler(LocalImageTaskMode.IMG2IMG, null)
+            )
+            try {
+                model.validateProductTaskSampler(LocalImageTaskMode.IMG2IMG, "plms")
+                fail("Expected explicit PNDM/PLMS to be rejected for QNN img2img")
+            } catch (error: LocalImageProductContractException) {
+                assertEquals("unsupported_img2img_sampler", error.code)
+                val apiFailure = requireNotNull(error.toLocalImageApiProviderExceptionOrNull())
+                assertEquals(422, apiFailure.httpStatus)
+                assertEquals("unsupported_img2img_sampler", apiFailure.code)
+            }
+
+            val inpaintResolution = resolveLocalImageExecutionProfile(
+                model = model,
+                options = LocalImageGenerationOptions(taskMode = LocalImageTaskMode.INPAINT),
+                bundleRoot = root
+            )
+            assertTrue(inpaintResolution.profile.hasExecutableQnnInpaintTopology())
+            assertEquals(
+                ImageSchedulerAlgorithm.DPMPP_2M,
+                inpaintResolution.layers.resolved.scheduler
+            )
+            assertEquals(
+                ImageSchedulerAlgorithm.DPMPP_2M,
+                model.validateProductTaskSampler(LocalImageTaskMode.INPAINT, null)
+            )
+            try {
+                model.validateProductTaskSampler(LocalImageTaskMode.INPAINT, "pndm")
+                fail("Expected explicit PNDM/PLMS to be rejected for QNN inpaint")
+            } catch (error: LocalImageProductContractException) {
+                assertEquals("unsupported_inpaint_sampler", error.code)
+                val apiFailure = requireNotNull(error.toLocalImageApiProviderExceptionOrNull())
+                assertEquals(422, apiFailure.httpStatus)
+                assertEquals("unsupported_inpaint_sampler", apiFailure.code)
+            }
+
+            val textResolution = resolveLocalImageExecutionProfile(
+                model = model,
+                options = LocalImageGenerationOptions(taskMode = LocalImageTaskMode.TEXT_TO_IMAGE),
+                bundleRoot = root
+            )
+            assertEquals(
+                ImageSchedulerAlgorithm.PNDM_PLMS,
+                textResolution.layers.resolved.scheduler
+            )
+            assertEquals(
+                ImageSchedulerAlgorithm.PNDM_PLMS,
+                model.validateProductTaskSampler(LocalImageTaskMode.TEXT_TO_IMAGE, null)
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `split qnn explicit pndm keeps the task specific api rejection`() {
+        val root = Files.createTempDirectory("split-qnn-sampler").toFile()
+        try {
+            val primary = root.resolve("unet.bin").apply { writeBytes(byteArrayOf(1)) }
+            root.resolve("manifest.json").writeText(
+                JSONObject()
+                    .put("schema", "mca.image_engine.bundle.v1")
+                    .put("recommendationId", "sdxl_base_qnn228")
+                    .toString(),
+                Charsets.UTF_8
+            )
+            val model = LocalImageModelRecord(
+                id = "unknown-device-split-qnn",
+                displayName = "Split QNN",
+                path = primary.absolutePath,
+                fileName = primary.name,
+                sizeBytes = primary.length(),
+                sha256 = "1".repeat(64),
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SDXL,
+                bundleRoot = root.absolutePath
+            )
+
+            assertEquals(
+                ImageSchedulerAlgorithm.DPMPP_2M,
+                model.validateProductTaskSampler(LocalImageTaskMode.IMG2IMG, null)
+            )
+            try {
+                model.validateProductTaskSampler(LocalImageTaskMode.IMG2IMG, "pndm")
+                fail("Expected split-QNN img2img PNDM to be rejected")
+            } catch (error: LocalImageProductContractException) {
+                assertEquals("unsupported_img2img_sampler", error.code)
+                val apiFailure = requireNotNull(error.toLocalImageApiProviderExceptionOrNull())
+                assertEquals(422, apiFailure.httpStatus)
+                assertEquals("unsupported_img2img_sampler", apiFailure.code)
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `shared qnn img2img verifier binds encoder tail schedule and bit63 proof`() {
+        val root = Files.createTempDirectory("shared-qnn-img2img-proof").toFile()
+        try {
+            val source = root.resolve("source.png").apply { writeBytes(byteArrayOf(1)) }.canonicalFile
+            val tensor = root.resolve("input-rgb-nchw.f32").apply { writeBytes(byteArrayOf(2)) }.canonicalFile
+            val input = prepared(source.path, "a")
+            val prepared = QnnPreparedInputTensor(
+                sourcePath = source.path,
+                sourceSha256 = input.sha256,
+                sourceBytes = input.sizeBytes,
+                sourceWidth = 512,
+                sourceHeight = 512,
+                exifOrientation = 1,
+                orientedWidth = 512,
+                orientedHeight = 512,
+                tensorPath = tensor.path,
+                tensorSha256 = "b".repeat(64),
+                tensorBytes = 1L * 3L * 512L * 512L * Float.SIZE_BYTES,
+                tensorWidth = 512,
+                tensorHeight = 512
+            )
+            val options = LocalImageGenerationOptions(
+                taskMode = LocalImageTaskMode.IMG2IMG,
+                inputImage = input,
+                strength = 0.6
+            )
+            val profile = resolvedProfile(
+                recommendationId = "cyberrealistic_sd15_qnn228",
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15
+            )
+            val encoderContextSha256 = "c".repeat(64)
+            val result = sharedQnnImg2ImgResultEvidence(
+                options = options,
+                prepared = prepared,
+                profile = profile,
+                encoderContextSha256 = encoderContextSha256
+            )
+
+            val audit = verifyAndSanitizeSharedQnnImg2ImgProductInput(
+                result = result,
+                options = options,
+                prepared = prepared,
+                profile = profile,
+                expectedVaeEncoderContextSha256 = encoderContextSha256,
+                expectedVaeEncoderGraphName = "model"
+            )
+
+            assertTrue(audit.getBoolean("nativeExecution"))
+            assertEquals(prepared.tensorSha256, audit.getString("inputImageTensorSha256"))
+            assertEquals("00000000000000ff", audit.getString("img2imgNoiseChecksum"))
+            assertFalse(result.has("inputImagePath"))
+            assertFalse(result.has("inputImageTensorPath"))
+            assertFalse(result.getJSONObject("nativeEffective").has("inputImagePath"))
+
+            val missingEncoderExecute = sharedQnnImg2ImgResultEvidence(
+                options,
+                prepared,
+                profile,
+                encoderContextSha256
+            ).put(QNN_NATIVE_DETAIL_STAGE_MASK_HEX_FIELD, "00000000000003ff")
+            missingEncoderExecute.getJSONObject("nativeEffective")
+                .put(QNN_NATIVE_DETAIL_STAGE_MASK_HEX_FIELD, "00000000000003ff")
+            assertInvalid {
+                verifyAndSanitizeSharedQnnImg2ImgProductInput(
+                    missingEncoderExecute,
+                    options,
+                    prepared,
+                    profile,
+                    encoderContextSha256,
+                    "model"
+                )
+            }
+
+            val badTailTimestep = sharedQnnImg2ImgResultEvidence(
+                options,
+                prepared,
+                profile,
+                encoderContextSha256
+            ).put("img2imgAddNoiseTimestep", -123.0)
+            badTailTimestep.getJSONObject("nativeEffective")
+                .put("img2imgAddNoiseTimestep", -123.0)
+            assertInvalid {
+                verifyAndSanitizeSharedQnnImg2ImgProductInput(
+                    badTailTimestep,
+                    options,
+                    prepared,
+                    profile,
+                    encoderContextSha256,
+                    "model"
+                )
+            }
+
+            val numericNoiseChecksum = sharedQnnImg2ImgResultEvidence(
+                options,
+                prepared,
+                profile,
+                encoderContextSha256
+            ).put("img2imgNoiseChecksum", 255L)
+            numericNoiseChecksum.getJSONObject("nativeEffective")
+                .put("img2imgNoiseChecksum", 255L)
+            assertInvalid {
+                verifyAndSanitizeSharedQnnImg2ImgProductInput(
+                    numericNoiseChecksum,
+                    options,
+                    prepared,
+                    profile,
+                    encoderContextSha256,
+                    "model"
+                )
+            }
+
+            val zeroNoiseChecksum = sharedQnnImg2ImgResultEvidence(
+                options,
+                prepared,
+                profile,
+                encoderContextSha256
+            ).put("img2imgNoiseChecksum", "0000000000000000")
+            zeroNoiseChecksum.getJSONObject("nativeEffective")
+                .put("img2imgNoiseChecksum", "0000000000000000")
+            assertInvalid {
+                verifyAndSanitizeSharedQnnImg2ImgProductInput(
+                    zeroNoiseChecksum,
+                    options,
+                    prepared,
+                    profile,
+                    encoderContextSha256,
+                    "model"
+                )
+            }
+
+            val inconsistentNoiseChecksum = sharedQnnImg2ImgResultEvidence(
+                options,
+                prepared,
+                profile,
+                encoderContextSha256
+            ).put("img2imgNoiseChecksum", "00000000000000aa")
+            assertInvalid {
+                verifyAndSanitizeSharedQnnImg2ImgProductInput(
+                    inconsistentNoiseChecksum,
+                    options,
+                    prepared,
+                    profile,
+                    encoderContextSha256,
+                    "model"
+                )
+            }
+        } finally {
+            root.deleteRecursively()
         }
     }
 
@@ -674,7 +1390,7 @@ class LocalImageInputContractTest {
     @Test
     fun `QNN text result verifies and removes empty worker path slots`() {
         val options = LocalImageGenerationOptions()
-        val nativeEffective = nativeInputEvidence(options)
+        val nativeEffective = nativeInputEvidence(options, qnnDetailMaskHex = true)
         val result = JSONObject(nativeEffective.toString())
             .put("nativeEffective", nativeEffective)
 
@@ -689,13 +1405,21 @@ class LocalImageInputContractTest {
     @Test
     fun `QNN text result rejects a non-empty or missing worker path slot`() {
         val options = LocalImageGenerationOptions()
-        val nonEmptyNative = nativeInputEvidence(options)
+        val legacyNumericNative = nativeInputEvidence(options)
+        val legacyNumeric = JSONObject(legacyNumericNative.toString())
+            .put("nativeEffective", legacyNumericNative)
+        assertInvalid {
+            verifyAndSanitizeQnnTextToImagePrivatePaths(legacyNumeric, options)
+        }
+
+        val nonEmptyNative = nativeInputEvidence(options, qnnDetailMaskHex = true)
             .put("inputImagePath", "/private/input.png")
         val nonEmpty = JSONObject(nonEmptyNative.toString())
             .put("nativeEffective", nonEmptyNative)
         assertInvalid { verifyAndSanitizeQnnTextToImagePrivatePaths(nonEmpty, options) }
 
-        val missingNative = nativeInputEvidence(options).apply { remove("maskImagePath") }
+        val missingNative = nativeInputEvidence(options, qnnDetailMaskHex = true)
+            .apply { remove("maskImagePath") }
         val missing = JSONObject(missingNative.toString()).put("nativeEffective", missingNative)
         assertInvalid { verifyAndSanitizeQnnTextToImagePrivatePaths(missing, options) }
     }
@@ -704,7 +1428,8 @@ class LocalImageInputContractTest {
         options: LocalImageGenerationOptions,
         includeUnusedHashes: Boolean = true,
         timetableCount: Int = 20,
-        useCfg: Boolean = false
+        useCfg: Boolean = false,
+        qnnDetailMaskHex: Boolean = false
     ): JSONObject {
         var stageMask = 127L
         if (options.inputImage != null) stageMask = stageMask or 128L
@@ -803,7 +1528,13 @@ class LocalImageInputContractTest {
         .put("loraEvidence", loraEvidence)
         .put("controlNetEvidence", controlNetEvidence)
         .put("nativeStageMask", stageMask)
-        .put("nativeDetailStageMask", stageMask)
+        .apply {
+            if (qnnDetailMaskHex) {
+                put(QNN_NATIVE_DETAIL_STAGE_MASK_HEX_FIELD, stageMask.toULong().toFixedUInt64Hex())
+            } else {
+                put("nativeDetailStageMask", stageMask)
+            }
+        }
         .put(
             "vaeTiling",
             vaeTilingEvidence
@@ -825,8 +1556,14 @@ class LocalImageInputContractTest {
         options: LocalImageGenerationOptions,
         seed: Long
     ): JSONObject {
+        val outputPath = "/cache/output.png"
+        val outputBytes = 1_024L
+        val outputSha256 = "a".repeat(64)
         val nativeEffective = nativeInputEvidence(options, includeUnusedHashes = false)
             .put("seed", seed)
+            .put("outputPath", outputPath)
+            .put("outputBytes", outputBytes)
+            .put("outputSha256", outputSha256)
             .apply {
                 options.inputImage?.let { put("inputImageSha256", it.sha256) }
                 options.maskImage?.let { put("maskImageSha256", it.sha256) }
@@ -839,7 +1576,9 @@ class LocalImageInputContractTest {
                 JSONArray().put(
                     JSONObject()
                         .put("index", 0)
-                        .put("path", "/cache/output.png")
+                        .put("path", outputPath)
+                        .put("outputBytes", outputBytes)
+                        .put("outputSha256", outputSha256)
                         .put("mimeType", "image/png")
                         .put("seed", seed)
                 )
@@ -851,7 +1590,7 @@ class LocalImageInputContractTest {
         timetableCount: Int
     ): JSONObject {
         val residualTensorCount = 13
-        val nativeEffective = nativeInputEvidence(options)
+        val nativeEffective = nativeInputEvidence(options, qnnDetailMaskHex = true)
             .put("useCfg", true)
             .put("unetExecutionCount", timetableCount * 2)
             .put("controlStrength", options.controlStrength ?: 1.0)
@@ -867,6 +1606,100 @@ class LocalImageInputContractTest {
             .put("timetableCount", timetableCount)
             .put("useCfg", true)
             .put("nativeEffective", nativeEffective)
+    }
+
+    private fun sharedQnnImg2ImgResultEvidence(
+        options: LocalImageGenerationOptions,
+        prepared: QnnPreparedInputTensor,
+        profile: ImageExecutionProfile,
+        encoderContextSha256: String
+    ): JSONObject {
+        val steps = profile.defaults.steps
+        val schedule = resolveQnnImg2ImgSchedule(
+            steps = steps,
+            fullTimetableCount = steps,
+            strength = options.strength ?: 1.0
+        )
+        val tailTimesteps = JSONArray().apply {
+            repeat(schedule.effectiveSteps) { index -> put(900.0 - index) }
+        }
+        val runtimeSessionMode = if (
+            profile.graph.workerStrategy == ImageWorkerStrategy.SHARED_TEXT_UNET_VAE
+        ) {
+            "shared_text_unet_vae"
+        } else {
+            "shared_unet_vae"
+        }
+        val nativeEffective = JSONObject()
+            .put("taskMode", LocalImageTaskMode.IMG2IMG.wireName)
+            .put("batchCount", 1)
+            .put("inputImagePath", requireNotNull(options.inputImage).path)
+            .put("maskImagePath", "")
+            .put("controlImagePath", "")
+            .put("inputImageExecutionCount", 1)
+            .put("maskImageExecutionCount", 0)
+            .put("controlImageExecutionCount", 0)
+            .put("inputImageSha256", options.inputImage.sha256)
+            .put("inputImageSourceReadByNative", false)
+            .put("inputImageSourceValidation", "android_preprocess_provenance")
+            .put("inputImageTensorPath", prepared.tensorPath)
+            .put("inputImageTensorSha256", prepared.tensorSha256)
+            .put("inputImagePreprocess", QNN_INPUT_TENSOR_PREPROCESS)
+            .put("inputImageSourceWidth", prepared.sourceWidth)
+            .put("inputImageSourceHeight", prepared.sourceHeight)
+            .put("inputImageOrientedWidth", prepared.orientedWidth)
+            .put("inputImageOrientedHeight", prepared.orientedHeight)
+            .put("inputImageExifOrientation", prepared.exifOrientation)
+            .put("inputImageTensorWidth", prepared.tensorWidth)
+            .put("inputImageTensorHeight", prepared.tensorHeight)
+            .put("inputImageTensorChannels", 3)
+            .put("inputImageTensorBytes", prepared.tensorBytes)
+            .put("inputImageTensorShape", JSONArray(listOf(1, 3, 512, 512)))
+            .put("inputImageTensorDtype", QNN_INPUT_TENSOR_DTYPE)
+            .put("inputImageTensorLayout", QNN_INPUT_TENSOR_LAYOUT)
+            .put("inputImageTensorRange", QNN_INPUT_TENSOR_RANGE)
+            .put("encoderContextSha256", encoderContextSha256)
+            .put("encoderContextLoadCount", 1)
+            .put("encoderExecutionCount", 1)
+            .put("encoderGraphName", "model")
+            .put("encoderInputName", "input")
+            .put("encoderMeanOutputName", "mean")
+            .put("encoderStdOutputName", "std")
+            .put("encoderInputDtype", "uint16")
+            .put("encoderMeanDtype", "uint16")
+            .put("encoderStdDtype", "uint16")
+            .put("encoderInputShape", JSONArray(listOf(1, 3, 512, 512)))
+            .put("encoderMeanShape", JSONArray(listOf(1, 4, 64, 64)))
+            .put("encoderStdShape", JSONArray(listOf(1, 4, 64, 64)))
+            .put("encoderInputBufferSha256", "d".repeat(64))
+            .put("encoderMeanBufferSha256", "e".repeat(64))
+            .put("encoderStdBufferSha256", "f".repeat(64))
+            .put("encoderLatentSha256", "1".repeat(64))
+            .put("posteriorSampling", "mean_plus_std_times_normal_mt19937_domain_v1")
+            .put("posteriorSampleCount", 1L * 4L * 64L * 64L)
+            .put("encoderLatentScalingFactor", profile.vae.scalingFactor)
+            .put("encoderContextReleasedBeforeSharedSession", true)
+            .put("encoderRuntimeMode", "standalone_encoder_then_shared_unet_vae")
+            .put("runtimeSessionMode", runtimeSessionMode)
+            .put("steps", steps)
+            .put("strength", options.strength ?: 1.0)
+            .put("fullTimetableCount", schedule.fullTimetableCount)
+            .put("timetableCount", schedule.effectiveSteps)
+            .put("effectiveDenoiseSteps", schedule.effectiveSteps)
+            .put("img2imgBeginIndex", schedule.beginIndex)
+            .put("useCfg", profile.defaults.useCfg)
+            .put(
+                "unetExecutionCount",
+                schedule.effectiveSteps * if (profile.defaults.useCfg) 2 else 1
+            )
+            .put("img2imgAddNoiseApplied", true)
+            .put("img2imgAddNoiseBeginIndex", schedule.beginIndex)
+            .put("img2imgAddNoiseTimestep", tailTimesteps.getDouble(0))
+            .put("img2imgNoiseChecksum", "00000000000000ff")
+            .put(QNN_NATIVE_DETAIL_STAGE_MASK_HEX_FIELD, "80000000000003ff")
+        return JSONObject(nativeEffective.toString())
+            .put("timesteps", tailTimesteps)
+            .put("nativeEffective", JSONObject(nativeEffective.toString()))
     }
 
     private fun prepared(

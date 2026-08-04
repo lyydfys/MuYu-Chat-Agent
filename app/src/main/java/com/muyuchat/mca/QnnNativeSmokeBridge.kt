@@ -129,6 +129,12 @@ internal data class QnnExecutionDiagnostics(
     val bundleGraphArtifactFound: Boolean = false,
     val bundleContextBinaryFound: Boolean = false,
     val bundleContextBinaryNonEmpty: Boolean = false,
+    val contextIdentityRequired: Boolean = false,
+    val contextIdentityMatched: Boolean = false,
+    val metadataContractMatched: Boolean = false,
+    val outputValuesFinite: Boolean = false,
+    val outputValidationPassed: Boolean = false,
+    val nonZeroOutputElements: Long = 0L,
     val smokeMetadataComplete: Boolean = false,
     val sdkHeadersCompiled: Boolean = false,
     val backendCreated: Boolean = false,
@@ -169,6 +175,12 @@ internal data class QnnExecutionDiagnostics(
         .put("bundleGraphArtifactFound", bundleGraphArtifactFound)
         .put("bundleContextBinaryFound", bundleContextBinaryFound)
         .put("bundleContextBinaryNonEmpty", bundleContextBinaryNonEmpty)
+        .put("contextIdentityRequired", contextIdentityRequired)
+        .put("contextIdentityMatched", contextIdentityMatched)
+        .put("metadataContractMatched", metadataContractMatched)
+        .put("outputValuesFinite", outputValuesFinite)
+        .put("outputValidationPassed", outputValidationPassed)
+        .put("nonZeroOutputElements", nonZeroOutputElements)
         .put("smokeMetadataComplete", smokeMetadataComplete)
         .put("sdkHeadersCompiled", sdkHeadersCompiled)
         .put("backendCreated", backendCreated)
@@ -208,6 +220,12 @@ internal data class QnnExecutionDiagnostics(
                 bundleGraphArtifactFound = smoke.bundleGraphArtifactFound,
                 bundleContextBinaryFound = smoke.bundleContextBinaryFound,
                 bundleContextBinaryNonEmpty = smoke.bundleContextBinaryNonEmpty,
+                contextIdentityRequired = smoke.contextIdentityRequired,
+                contextIdentityMatched = smoke.contextIdentityMatched,
+                metadataContractMatched = smoke.metadataContractMatched,
+                outputValuesFinite = smoke.outputValuesFinite,
+                outputValidationPassed = smoke.outputValidationPassed,
+                nonZeroOutputElements = smoke.nonZeroOutputElements,
                 smokeMetadataComplete = smoke.smokeMetadataComplete,
                 sdkHeadersCompiled = smoke.sdkHeadersCompiled,
                 backendCreated = smoke.backendCreated,
@@ -254,6 +272,13 @@ internal data class NativeQnnSmokeResult(
     val bundleGraphArtifactFound: Boolean = false,
     val bundleContextBinaryFound: Boolean = false,
     val bundleContextBinaryNonEmpty: Boolean = false,
+    val contextIdentityRequired: Boolean = false,
+    val contextIdentityMatched: Boolean = false,
+    val metadataContractMatched: Boolean = false,
+    val outputValuesFinite: Boolean = false,
+    val outputValidationPassed: Boolean = false,
+    val nonZeroOutputElements: Long = 0L,
+    val strictEvidenceReported: Boolean = false,
     val smokeMetadataComplete: Boolean = false,
     val sdkHeadersCompiled: Boolean = false,
     val backendCreated: Boolean = false,
@@ -265,11 +290,29 @@ internal data class NativeQnnSmokeResult(
     val outputTensors: List<QnnTensorBufferDiagnostics> = emptyList()
 ) {
     val provesNpuExecution: Boolean
-        get() = graphRunnerReady && graphExecute && npuActive && smokePassed
+        get() {
+            return graphRunnerReady && graphExecute && npuActive && smokePassed &&
+                (!strictEvidenceReported || (
+                    (!contextIdentityRequired || contextIdentityMatched) &&
+                        metadataContractMatched &&
+                        outputValuesFinite &&
+                        outputValidationPassed &&
+                        nonZeroOutputElements > 0L
+                    ))
+        }
 
     companion object {
         fun fromJson(raw: String): NativeQnnSmokeResult {
             val json = JSONObject(raw)
+            val smokeSpec = json.optJSONObject("smokeSpec")
+            val strictEvidenceReported = smokeSpec != null && listOf(
+                "contextIdentityRequired",
+                "contextIdentityMatched",
+                "metadataContractMatched",
+                "outputValuesFinite",
+                "outputValidationPassed",
+                "nonZeroOutputElements"
+            ).any(smokeSpec::has)
             return NativeQnnSmokeResult(
                 backend = json.optString("backend").ifBlank { "qnn_htp" },
                 message = json.optString("message").ifBlank { "QNN smoke returned no message." },
@@ -335,6 +378,19 @@ internal data class NativeQnnSmokeResult(
                     ?: false,
                 bundleContextBinaryNonEmpty = json.optJSONObject("stages")?.optBoolean("bundleContextBinaryNonEmpty", false)
                     ?: false,
+                contextIdentityRequired = json.optJSONObject("smokeSpec")
+                    ?.optBoolean("contextIdentityRequired", false) ?: false,
+                contextIdentityMatched = json.optJSONObject("smokeSpec")
+                    ?.optBoolean("contextIdentityMatched", false) ?: false,
+                metadataContractMatched = json.optJSONObject("smokeSpec")
+                    ?.optBoolean("metadataContractMatched", false) ?: false,
+                outputValuesFinite = json.optJSONObject("smokeSpec")
+                    ?.optBoolean("outputValuesFinite", false) ?: false,
+                outputValidationPassed = json.optJSONObject("smokeSpec")
+                    ?.optBoolean("outputValidationPassed", false) ?: false,
+                nonZeroOutputElements = json.optJSONObject("smokeSpec")
+                    ?.optLong("nonZeroOutputElements", 0L) ?: 0L,
+                strictEvidenceReported = strictEvidenceReported,
                 smokeMetadataComplete = json.optJSONObject("stages")?.optBoolean("smokeMetadataComplete", false)
                     ?: false,
                 sdkHeadersCompiled = json.optJSONObject("stages")?.optBoolean("sdkHeadersCompiled", false)

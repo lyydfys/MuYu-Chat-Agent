@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import android.content.Context
 import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.download.VisionModelAccelerator
 import com.muyuchat.core.download.VisionModelBundleRuntime
@@ -52,7 +53,8 @@ internal class LiteRtQnnVisionRunner(
     runnerReady: Boolean? = null,
     private val forcedSmokePassed: Boolean? = null,
     private val forcedSmokeElapsedMs: Long = 0L,
-    private val smokeBridge: LocalVisionNpuSmokeBridge = NativeLocalVisionNpuSmokeBridge
+    private val smokeBridge: LocalVisionNpuSmokeBridge = NativeLocalVisionNpuSmokeBridge,
+    private val context: Context? = null
 ) : LocalVisionNpuRunner {
     override val runnerReady: Boolean = runnerReady ?: smokeBridge.runnerReady
     override val backendLabel: String = "骁龙 NPU"
@@ -89,26 +91,8 @@ internal class LiteRtQnnVisionRunner(
                 message = "This vision bundle is not a LiteRT / QNN NPU bundle."
             )
         }
-        // minDeviceTier remains a recommendation hint only. Do not turn an
-        // unknown or untested device into a product-level denial; native load
-        // and the real graph smoke below are the source of truth.
-        if (manifest.requiresQnnRuntime && device.accelerationProfile.qnnRuntime.transportDependencyBlocked) {
-            return LocalVisionNpuReport(
-                state = LocalVisionNpuState.QNN_TRANSPORT_BLOCKED,
-                backend = backendLabel,
-                message = "The Snapdragon NPU runtime loads, but its device transport is blocked: ${device.accelerationProfile.qnnRuntime.cdspRpcMessage}"
-            )
-        }
-        if (manifest.requiresQnnRuntime &&
-            (!device.accelerationProfile.qnnRuntime.ready ||
-                !device.accelerationProfile.qnnRuntime.htpStubLibraryPresent)
-        ) {
-            return LocalVisionNpuReport(
-                state = LocalVisionNpuState.QNN_RUNTIME_MISSING,
-                backend = backendLabel,
-                message = "The complete QNN System, HTP, Skel, and Stub runtime libraries are unavailable."
-            )
-        }
+        // Device/runtime discovery is advisory only. Generic runtime candidates
+        // and real native load/graph execution determine compatibility.
         val missing = manifest.missingRequiredComponents
         if (missing.isNotEmpty()) {
             return LocalVisionNpuReport(
@@ -163,9 +147,21 @@ internal class LiteRtQnnVisionRunner(
             )
         }
 
+        val runtimeResolution = context?.let { appContext ->
+            qnnRuntimeDirectoryResolutionFor(appContext, bundleRoot)
+        }
+        runtimeResolution?.stagingError?.let { stagingError ->
+            return LocalVisionNpuReport(
+                state = LocalVisionNpuState.QNN_RUNTIME_MISSING,
+                backend = backendLabel,
+                message = stagingError
+            )
+        }
+        val runtimeDirectories = runtimeResolution?.directories
+            ?: qnnRuntimeDirectoriesFor(device.accelerationProfile.qnnRuntime)
         val smoke = smokeBridge.runVisionSmoke(
             bundleRoot = bundleRoot,
-            runtimeDirs = qnnRuntimeDirectoriesFor(device.accelerationProfile.qnnRuntime),
+            runtimeDirs = runtimeDirectories,
             smokeSpec = manifest.qnnSmokeSpec
         )
         val diagnostics = QnnExecutionDiagnostics.from(smoke)

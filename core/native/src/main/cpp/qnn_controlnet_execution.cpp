@@ -656,6 +656,13 @@ std::string sha256_hex_bytes(const std::vector<uint8_t>& payload) {
     return sha256_hex(payload);
 }
 
+std::string sha256_hex_bytes(const uint8_t* payload, size_t size) {
+    if (payload == nullptr && size != 0U) return {};
+    Sha256State state;
+    if (!state.update(payload, size)) return {};
+    return sha256_hex_digest(state.finish());
+}
+
 bool sha256_hex_file(const std::string& path,
                      std::string* digest,
                      std::string* error) {

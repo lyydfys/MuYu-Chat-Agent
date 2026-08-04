@@ -1,6 +1,7 @@
 package com.muyuchat.feature.modelhub
 
 import com.muyuchat.core.download.ModelScopeRecommendedGroup
+import com.muyuchat.core.download.ModelScopeRecommendedKind
 import com.muyuchat.core.download.ModelScopeRecommendedModel
 import com.muyuchat.core.download.RecommendedModelSection
 import com.muyuchat.core.download.RecommendedModelStatus
@@ -133,6 +134,8 @@ internal fun recommendationVerificationLine(
     model: ModelScopeRecommendedModel,
     qairtVerified: Boolean
 ): String = when {
+    model.id in COMMUNITY_LOW_REFUSAL_MODEL_IDS ->
+        "工程状态：社区低拒答实验包，发布者声明已降低拒答；尚无 MCA 生产设备验收，实际兼容性以完整包、native load 与真实执行为准"
     model.id in TEXT_VERIFIED_MNN_MODEL_IDS ->
         "验证状态：MNN 文本与图文链路已通过代表机型回归；兼容 ARM64 设备默认开放"
     model.id == "minicpm_v46_q4" ->
@@ -145,18 +148,18 @@ internal fun recommendationVerificationLine(
         "验证状态：当前设备十轮文本、Local API 与二次加载已通过"
     model.id == "qwen3_4b_2507_qairt_w4a16" ->
         "验证状态：已有骁龙 8 Elite 正式文本回归证据；兼容设备默认开放并以真实运行结果为准"
-    model.id == "cyberrealisticxl_qnn228" ->
-        "工程状态：已切换完整 1024×1024 包；安装后执行 UNet/VAE 双图 native smoke"
-    model.id == "realisticvisionhyper_sd15_qnn228" ->
-        "验证状态：默认 8-step、CFG 2.0；产品 worker 三次冷启动和三次复用已通过"
-    model.id in VERIFIED_QNN_SD15_STANDARD_IDS ->
-        "验证状态：20-step 产品 worker 三次冷启动和三次复用已通过"
+    model.id in SDXL_QNN_MODEL_IDS ->
+        "工程状态：已接真实 VAE encoder + 隔离 encoder→UNet→VAE 的 IMG2IMG、Inpaint、UltraFix 与 Textual Inversion 产品链；尚需代表 ARM64 设备的生产 UI/API 真机验证"
+    model.id in SHARED_QNN_SD15_IMG2IMG_MODEL_IDS ->
+        "工程状态：已接真实 VAE encoder→共享 UNet/VAE 的 IMG2IMG、Inpaint、UltraFix、Textual Inversion 与 VAE 预览产品链；历史文生图证据不代表这些链路已验收，尚需代表性 ARM64 生产 UI/API 真机验证"
     model.id == "sd15_mnn_512_quality" ->
-        "验证状态：direct + OpenCL 产品链路可出图；多提示词质量仍不稳定"
+        "验证状态：历史 debug worker 的 OpenCL/Euler 路径可出图；当前 DPM++ 2M 预设待生产复验"
     model.id == "qualcomm_controlnet_canny_gen5_qnn" ->
-        "工程状态：Canny、ControlNet residual 与强度链路已接线；首次使用以真实 native graph 结果为准"
+        "工程状态：目录已声明 Canny 与 ControlNet graph；产品输入链尚无生产 UI/API 真机证据"
     model.id.startsWith("gemma4_") ->
         "验证状态：文本隔离方案待产品验收；完整图文包兼容性待验证"
+    model.kind == ModelScopeRecommendedKind.IMAGE ->
+        "验证状态：目录与执行 profile 已接线；当前版本尚无生产双入口证据，下载保持开放"
     model.status == RecommendedModelStatus.RECOMMENDED ->
         "验证状态：代表设备已验证；兼容设备默认开放"
     model.status == RecommendedModelStatus.PENDING_INTEGRATION ->
@@ -166,14 +169,30 @@ internal fun recommendationVerificationLine(
 }
 
 private val TEXT_VERIFIED_MNN_MODEL_IDS = setOf(
-    "qwen35_08b_q4",
-    "qwen35_2b_q4",
-    "qwen35_4b_q4",
-    "qwen35_9b_q4"
+    "qwen35_2b_q4"
 )
 
-private val VERIFIED_QNN_SD15_STANDARD_IDS = setOf(
-    "dreamshaper_sd15_qnn228"
+private val COMMUNITY_LOW_REFUSAL_MODEL_IDS = setOf(
+    "qwen35_08b_uncensored_mnn",
+    "qwen35_2b_abliterated_gguf",
+    "gemma4_e2b_uncensored_gguf",
+    "qwen3_vl_4b_abliterated_gguf",
+    "qwen3_4b_2507_abliterated_gguf",
+    "qwen35_4b_uncensored_mnn",
+    "minicpm_v46_abliterated_gguf",
+    "gemma4_e4b_uncensored_gguf",
+    "qwen35_9b_uncensored_mnn",
+    "qwen3_8b_abliterated_gguf",
+    "qwen25_vl_7b_abliterated_gguf",
+    "qwen36_35b_a3b_abliterated_mnn",
+    "gemma4_26b_a4b_abliterated_gguf"
+)
+
+private val SHARED_QNN_SD15_IMG2IMG_MODEL_IDS = setOf(
+    "cyberrealistic_sd15_qnn228",
+    "realisticvisionhyper_sd15_qnn228",
+    "dreamshaper_sd15_qnn228",
+    "meinamix_sd15_qnn228"
 )
 
 internal fun recommendationDownloadCtaLabel(

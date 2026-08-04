@@ -24,7 +24,11 @@ bool finite_tensor(const SchedulerTensor& tensor) {
 }
 
 double rounded(double value) {
-    return std::nearbyint(value);
+    // Local Dream v2.8.0 uses std::round for inference timetable construction.
+    // nearbyint follows the active floating-point rounding mode (normally
+    // ties-to-even), which changes half-step entries and therefore the exact
+    // sigma/timestep selected by img2img add-noise.
+    return std::round(value);
 }
 
 std::vector<int64_t> discrete_timesteps_descending(
@@ -102,6 +106,34 @@ bool validate_tensor_pair(
 }
 
 }  // namespace
+
+bool resolve_img2img_tail_schedule(
+        int inference_steps,
+        double requested_strength,
+        Img2ImgTailSchedule* schedule,
+        std::string* error) {
+    if (schedule == nullptr || error == nullptr) return false;
+    if (inference_steps <= 0) {
+        *error = "Img2img inference steps must be positive.";
+        return false;
+    }
+    if (!std::isfinite(requested_strength) ||
+        requested_strength < 0.0 || requested_strength > 1.0) {
+        *error = "Img2img strength must be finite and in [0, 1].";
+        return false;
+    }
+    const float strength = static_cast<float>(requested_strength);
+    const float retained_steps =
+        static_cast<float>(inference_steps) * (1.0f - strength);
+    const int raw_begin_index = static_cast<int>(retained_steps);
+    const int begin_index = std::clamp(raw_begin_index, 0, inference_steps - 1);
+    schedule->begin_index = static_cast<size_t>(begin_index);
+    schedule->effective_step_count =
+        static_cast<size_t>(inference_steps - begin_index);
+    schedule->strength = strength;
+    error->clear();
+    return true;
+}
 
 DiffusionScheduler::DiffusionScheduler(DiffusionSchedulerConfig config)
     : config_(std::move(config)) {}
@@ -205,12 +237,36 @@ bool DiffusionScheduler::set_timesteps(int num_inference_steps, std::string* err
 }
 
 void DiffusionScheduler::reset_state() {
+    begin_index_ = 0;
     counter_ = 0;
     last_scaled_step_ = kNoStep;
     model_output_history_.clear();
     accumulated_model_output_.clear();
     saved_sample_.clear();
     has_saved_sample_ = false;
+}
+
+bool DiffusionScheduler::set_begin_index(size_t begin_index, std::string* error) {
+    if (timesteps_.empty()) {
+        return fail(error, "Scheduler timesteps must be built before setting a begin index.");
+    }
+    if (begin_index >= timesteps_.size()) {
+        return fail(error, "Scheduler begin index is outside the inference timetable.");
+    }
+    if (counter_ != begin_index_) {
+        return fail(error, "Scheduler begin index must be selected before the first denoise step.");
+    }
+    if (config_.algorithm == SchedulerAlgorithm::Pndm) {
+        return fail(error, "PNDM img2img begin-index execution is unsupported without warm-up state.");
+    }
+    begin_index_ = begin_index;
+    counter_ = begin_index;
+    last_scaled_step_ = kNoStep;
+    model_output_history_.clear();
+    accumulated_model_output_.clear();
+    saved_sample_.clear();
+    has_saved_sample_ = false;
+    return true;
 }
 
 bool DiffusionScheduler::build_euler_schedule(int num_inference_steps, std::string* error) {
@@ -232,7 +288,11 @@ bool DiffusionScheduler::build_euler_schedule(int num_inference_steps, std::stri
     } else {
         const double step_ratio = static_cast<double>(config_.num_train_timesteps) / num_inference_steps;
         for (int index = 0; index < num_inference_steps; ++index) {
-            const float timestep = static_cast<float>(rounded(config_.num_train_timesteps - index * step_ratio) - 1.0);
+            // Euler trailing spacing in Local Dream advances by one ratio
+            // before publishing the first step. DPM++ intentionally retains
+            // its separate index-based trailing formula below.
+            const float timestep = static_cast<float>(rounded(
+                    config_.num_train_timesteps - (index + 1) * step_ratio) - 1.0);
             schedule.push_back(static_cast<double>(timestep));
         }
     }
@@ -246,8 +306,17 @@ bool DiffusionScheduler::build_euler_schedule(int num_inference_steps, std::stri
     timesteps_ = std::move(schedule);
     sigmas_.reserve(timesteps_.size() + 1);
     for (double timestep : timesteps_) {
-        if (!std::isfinite(timestep) || timestep < 0.0 || timestep > config_.num_train_timesteps - 1) {
+        const double minimum_timestep =
+                config_.timestep_spacing == TimestepSpacing::Trailing ? -1.0 : 0.0;
+        if (!std::isfinite(timestep) || timestep < minimum_timestep ||
+            timestep > config_.num_train_timesteps - 1) {
             return fail(error, "Euler timestep is outside the training schedule.");
+        }
+        if (timestep <= 0.0) {
+            // Local Dream keeps -1 as the final trailing Euler timestep and
+            // maps every non-positive value to the minimum training sigma.
+            sigmas_.push_back(static_cast<double>(training_sigmas.front()));
+            continue;
         }
         const size_t low = static_cast<size_t>(std::floor(timestep));
         const size_t high = std::min(low + 1, training_sigmas.size() - 1);
@@ -412,6 +481,42 @@ bool DiffusionScheduler::scale_model_input(
     }
     last_scaled_step_ = schedule_index;
     return true;
+}
+
+bool DiffusionScheduler::add_noise(
+        const SchedulerTensor& original_sample,
+        const SchedulerTensor& noise,
+        size_t schedule_index,
+        SchedulerTensor* noisy_sample,
+        std::string* error) const {
+    if (noisy_sample == nullptr) return fail(error, "Scheduler noisy sample output is null.");
+    if (schedule_index >= timesteps_.size()) {
+        return fail(error, "Scheduler noise index is outside the inference timetable.");
+    }
+    if (!validate_tensor_pair(original_sample, noise, error)) return false;
+    noisy_sample->resize(original_sample.size());
+    if (config_.algorithm == SchedulerAlgorithm::EulerDiscrete) {
+        if (schedule_index >= sigmas_.size() - 1U) {
+            return fail(error, "Euler noise sigma index is outside the inference schedule.");
+        }
+        const float sigma = static_cast<float>(sigmas_[schedule_index]);
+        for (size_t index = 0; index < original_sample.size(); ++index) {
+            (*noisy_sample)[index] = original_sample[index] + noise[index] * sigma;
+        }
+        return finite_tensor(*noisy_sample) || fail(error, "Euler noisy sample is not finite.");
+    }
+
+    const int64_t timestep = static_cast<int64_t>(std::llround(timesteps_[schedule_index]));
+    if (timestep < 0 || timestep >= static_cast<int64_t>(alphas_cumprod_.size())) {
+        return fail(error, "Scheduler noise timestep is outside the training schedule.");
+    }
+    const double alpha_prod = alphas_cumprod_[static_cast<size_t>(timestep)];
+    const float alpha = static_cast<float>(std::sqrt(std::max(0.0, alpha_prod)));
+    const float sigma = static_cast<float>(std::sqrt(std::max(0.0, 1.0 - alpha_prod)));
+    for (size_t index = 0; index < original_sample.size(); ++index) {
+        (*noisy_sample)[index] = original_sample[index] * alpha + noise[index] * sigma;
+    }
+    return finite_tensor(*noisy_sample) || fail(error, "Scheduler noisy sample is not finite.");
 }
 
 bool DiffusionScheduler::step(
@@ -647,7 +752,7 @@ bool DiffusionScheduler::step_dpmpp_2m(
             ((config_.lower_order_final && timesteps_.size() < 15) ||
              config_.final_sigma_type == FinalSigmaType::Zero);
     SchedulerTensor previous(sample.size());
-    if (counter_ == 0 || lower_order_final) {
+    if (model_output_history_.size() == 1U || lower_order_final) {
         const double sample_scale = sigma_current_normalized > 0.0
                 ? sigma_next_normalized / sigma_current_normalized
                 : 0.0;

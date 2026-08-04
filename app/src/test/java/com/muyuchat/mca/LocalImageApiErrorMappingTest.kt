@@ -105,4 +105,41 @@ class LocalImageApiErrorMappingTest {
         assertEquals("prompt_weighting_execution_unsupported", apiFailure.code)
         assertEquals(422, apiFailure.httpStatus)
     }
+
+    @Test
+    fun `qnn img2img pndm rejection is a stable 422 product error`() {
+        val apiFailure = requireNotNull(
+            LocalImageProductContractException(
+                code = "unsupported_img2img_sampler",
+                message = "QNN img2img cannot use PNDM/PLMS at a strength-derived index."
+            ).toLocalImageApiProviderExceptionOrNull()
+        )
+
+        assertEquals("unsupported_img2img_sampler", apiFailure.code)
+        assertEquals(422, apiFailure.httpStatus)
+        assertTrue(apiFailure.message.contains("PNDM"))
+    }
+
+    @Test
+    fun `ultrafix resolution rejection keeps its product error code through worker and API`() {
+        val resolutionFailure = ImageProfileResolutionException(
+            ImageProfileValidationReport(
+                listOf(
+                    ImageProfileValidationIssue(
+                        code = "ULTRAFIX_EXECUTION_UNSUPPORTED",
+                        field = "capabilities.supportsUltraFix",
+                        message = "The resolved graph and sampler cannot execute UltraFix dimensions."
+                    )
+                )
+            )
+        )
+
+        assertEquals(
+            "ultrafix_execution_unsupported",
+            localImageWorkerErrorCode(resolutionFailure)
+        )
+        val apiFailure = requireNotNull(resolutionFailure.toLocalImageApiProviderExceptionOrNull())
+        assertEquals("ultrafix_execution_unsupported", apiFailure.code)
+        assertEquals(422, apiFailure.httpStatus)
+    }
 }

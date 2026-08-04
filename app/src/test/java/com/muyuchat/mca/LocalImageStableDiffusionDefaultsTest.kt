@@ -224,8 +224,10 @@ class LocalImageStableDiffusionDefaultsTest {
     fun `stable diffusion consumes every ordered batch output and deletes every private file`() {
         val root = Files.createTempDirectory("sdcpp-batch-output").toFile()
         try {
-            val first = File(root, "image.png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
-            val second = File(root, "image-002.png").apply { writeBytes(byteArrayOf(4, 5, 6)) }
+            val firstBytes = stableDiffusionOutputBytes(marker = 1)
+            val secondBytes = stableDiffusionOutputBytes(marker = 2)
+            val first = File(root, "image.png").apply { writeBytes(firstBytes) }
+            val second = File(root, "image-002.png").apply { writeBytes(secondBytes) }
 
             val outputs = consumeStableDiffusionOutputs(
                 result = stableDiffusionBatchResult(first, second),
@@ -236,8 +238,8 @@ class LocalImageStableDiffusionDefaultsTest {
 
             assertEquals(listOf(0, 1), outputs.map(LocalImageOutput::index))
             assertEquals(listOf(40L, 41L), outputs.map(LocalImageOutput::seed))
-            assertArrayEquals(byteArrayOf(1, 2, 3), outputs[0].bytes)
-            assertArrayEquals(byteArrayOf(4, 5, 6), outputs[1].bytes)
+            assertArrayEquals(firstBytes, outputs[0].bytes)
+            assertArrayEquals(secondBytes, outputs[1].bytes)
             assertFalse(first.exists())
             assertFalse(second.exists())
         } finally {
@@ -249,7 +251,8 @@ class LocalImageStableDiffusionDefaultsTest {
     fun `legacy single output remains compatible and is deleted after consumption`() {
         val root = Files.createTempDirectory("sdcpp-legacy-output").toFile()
         try {
-            val output = File(root, "legacy.png").apply { writeBytes(byteArrayOf(7, 8, 9)) }
+            val outputBytes = stableDiffusionOutputBytes(marker = 7)
+            val output = File(root, "legacy.png").apply { writeBytes(outputBytes) }
             val result = JSONObject()
                 .put("path", output.canonicalPath)
                 .put("mimeType", "image/png")
@@ -263,7 +266,7 @@ class LocalImageStableDiffusionDefaultsTest {
 
             assertEquals(1, outputs.size)
             assertEquals(77L, outputs.single().seed)
-            assertArrayEquals(byteArrayOf(7, 8, 9), outputs.single().bytes)
+            assertArrayEquals(outputBytes, outputs.single().bytes)
             assertFalse(output.exists())
         } finally {
             root.deleteRecursively()
@@ -295,6 +298,64 @@ class LocalImageStableDiffusionDefaultsTest {
             assertTrue(second.delete())
         }
     }
+
+    @Test
+    fun `stable diffusion request cleanup removes only files derived from its request`() {
+        val root = Files.createTempDirectory("sdcpp-request-cleanup").toFile()
+        try {
+            val output = File(root, "sdcpp-123.png")
+            val candidates = stableDiffusionRequestOutputCandidates(output)
+            candidates.forEach { candidate ->
+                candidate.writeBytes(byteArrayOf(1))
+            }
+            val unrelated = File(root, "sdcpp-1234.png").apply { writeBytes(byteArrayOf(2)) }
+            val unrelatedPreview = File(root, "other.preview-0.png").apply {
+                writeBytes(byteArrayOf(3))
+            }
+
+            cleanupStableDiffusionRequestOutputs(output)
+
+            assertTrue(candidates.none(File::exists))
+            assertTrue(unrelated.isFile)
+            assertTrue(unrelatedPreview.isFile)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `stable diffusion stale sweep is age bounded and filename scoped`() {
+        val root = Files.createTempDirectory("sdcpp-stale-sweep").toFile()
+        try {
+            val now = 10L * STABLE_DIFFUSION_OUTPUT_MAX_AGE_MS
+            val stale = File(root, "sdcpp-123.png").apply { writeBytes(byteArrayOf(1)) }
+            val staleBatchPart = File(root, "sdcpp-123-8.png.part").apply {
+                writeBytes(byteArrayOf(2))
+            }
+            val stalePreviewPart = File(root, "sdcpp-123.png.preview-1.png.part").apply {
+                writeBytes(byteArrayOf(3))
+            }
+            val fresh = File(root, "sdcpp-456.png").apply { writeBytes(byteArrayOf(4)) }
+            val unrelated = File(root, "sdcpp-123-9.png").apply { writeBytes(byteArrayOf(5)) }
+            listOf(stale, staleBatchPart, stalePreviewPart, unrelated).forEach { file ->
+                assertTrue(file.setLastModified(now - STABLE_DIFFUSION_OUTPUT_MAX_AGE_MS - 1L))
+            }
+            assertTrue(fresh.setLastModified(now - STABLE_DIFFUSION_OUTPUT_MAX_AGE_MS + 1L))
+
+            pruneStaleStableDiffusionOutputs(root, nowMillis = now)
+
+            assertFalse(stale.exists())
+            assertFalse(staleBatchPart.exists())
+            assertFalse(stalePreviewPart.exists())
+            assertTrue(fresh.isFile)
+            assertTrue(unrelated.isFile)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    private fun stableDiffusionOutputBytes(marker: Int): ByteArray =
+        ByteArray(57) { index -> (marker + index).toByte() }
 
     private fun stableDiffusionBatchResult(first: File, second: File): JSONObject = JSONObject()
         .put("path", first.canonicalPath)

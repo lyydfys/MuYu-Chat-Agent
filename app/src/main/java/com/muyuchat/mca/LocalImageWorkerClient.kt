@@ -6,7 +6,6 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.DeadObjectException
 import android.os.IBinder
-import android.os.Process
 import android.os.RemoteException
 import android.os.SystemClock
 import java.io.File
@@ -16,10 +15,12 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class LocalImageWorkerClient(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -79,7 +80,13 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                     endpoint.service.begin(LocalImageWorkerProtocol.beginRequest(runtime))
                 }.getOrThrow()
             }.onSuccess {
-                next.ready.complete(Unit)
+                if (next.cancelRequested || !isCurrentPreparation(next)) {
+                    val cancelled = LocalImageWorkerCancelledException()
+                    releaseBindingAfterPreparationFailure(next, cancelled)
+                    next.ready.completeExceptionally(cancelled)
+                } else {
+                    next.ready.complete(Unit)
+                }
             }.onFailure { error ->
                 releaseBindingAfterPreparationFailure(next, error)
                 next.ready.completeExceptionally(remoteFailure(error))
@@ -105,7 +112,9 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                     endpoint.service.cancel(LocalImageWorkerProtocol.cancelRequest(null))
                 }
             }
-            return supportsNativeCancel
+            // A preparation has no registered native request whose terminal can release the UI.
+            // Report false so the owner cancels prompt preprocessing or other caller-side work.
+            return false
         }
         return when (request.handshake.requestCancel()) {
             LocalImageStartHandshake.CancelAction.COMPLETE_LOCALLY -> {
@@ -126,6 +135,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         options: LocalImageGenerationOptions = LocalImageGenerationOptions(),
         inputDraft: LocalImageInputDraft = LocalImageInputDraft(),
         requestId: String = UUID.randomUUID().toString(),
+        batchLineage: ImageGenerationBatchLineage? = null,
         onProgress: (LocalImageProgress) -> Unit = {}
     ): LocalImageResult {
         val request = ActiveRequest(
@@ -168,7 +178,8 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                         request.requestId,
                         model,
                         prompt,
-                        dispatchedOptions
+                        dispatchedOptions,
+                        batchLineage
                     ),
                     callback
                 )
@@ -201,6 +212,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             throw cancelled
         } finally {
             request.handshake.markFinished()
+            awaitWatchdogTerminationDispatch(request)
             if (!request.watchdogTimedOut) request.watchdogJob?.cancel()
             request.deliveredOutputPaths.forEach(::deleteResultIfSafe)
             releaseBindingAfterRequest(request, model.runtime)
@@ -298,6 +310,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             throw cancelled
         } finally {
             request.handshake.markFinished()
+            awaitWatchdogTerminationDispatch(request)
             if (!request.watchdogTimedOut) request.watchdogJob?.cancel()
             request.deliveredOutputPaths.forEach(::deleteResultIfSafe)
             releaseBindingAfterRequest(request, LocalImageRuntime.STABLE_DIFFUSION_CPP)
@@ -688,6 +701,42 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         return cancelled
     }
 
+    private fun requestRemoteSelfTermination(
+        request: ActiveRequest,
+        endpoint: BoundWorker
+    ): Boolean {
+        return runRemoteCall(endpoint) {
+            endpoint.service.cancelAndExit(LocalImageWorkerProtocol.cancelRequest(request.requestId))
+        }.getOrElse { false }
+    }
+
+    private fun completeWatchdogTimeoutAndRequestExit(
+        request: ActiveRequest,
+        timeout: Throwable,
+        endpoint: BoundWorker?
+    ) {
+        request.watchdogTimedOut = true
+        if (!request.completion.completeExceptionally(timeout)) {
+            request.watchdogTerminationDispatched.complete(Unit)
+            return
+        }
+        try {
+            // The completion wakes the awaiting caller, but its finally block waits for this exact
+            // dispatch before releasing the binding. This preserves terminal-result arbitration
+            // while preventing unbind from racing ahead of cancelAndExit.
+            endpoint?.let { requestRemoteSelfTermination(request, it) }
+        } finally {
+            request.watchdogTerminationDispatched.complete(Unit)
+        }
+    }
+
+    private suspend fun awaitWatchdogTerminationDispatch(request: ActiveRequest) {
+        if (!request.watchdogTimedOut) return
+        withContext(NonCancellable) {
+            request.watchdogTerminationDispatched.await()
+        }
+    }
+
     private fun startWatchdog(request: ActiveRequest, model: LocalImageModelRecord) {
         val policy = localImageWorkerWatchdogPolicy(
             runtime = model.runtime,
@@ -711,7 +760,6 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             }
             if (request.completion.isCompleted) return@launch
 
-            request.watchdogTimedOut = true
             val timeout = LocalImageWorkerRemoteException(
                 code = LOCAL_IMAGE_WORKER_WATCHDOG_TIMEOUT_CODE,
                 message = localImageWorkerWatchdogMessage(
@@ -720,17 +768,11 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                     stageTrace = request.lastStageTrace
                 )
             )
-            if (!request.completion.completeExceptionally(timeout)) return@launch
-
-            // Native QNN graphExecute/contextCreate are synchronous vendor calls;
-            // cooperative cancellation cannot unwind a stuck call.  This process
-            // is declared disposable in the manifest, so terminate it after the
-            // stable timeout result has won the completion race.
-            cancelRemote(request)
-            val workerPid = request.workerPid
-            if (workerPid > 0 && workerPid != Process.myPid()) {
-                runCatching { Process.killProcess(workerPid) }
-            }
+            val timedOutEndpoint = currentEndpoint()
+            // Native QNN graphExecute/contextCreate are synchronous vendor calls. Ask the exact
+            // request-bound disposable service instance to terminate itself; a callback PID may
+            // already have been reused and is never safe to kill from this process.
+            completeWatchdogTimeoutAndRequestExit(request, timeout, timedOutEndpoint)
         }
     }
 
@@ -767,19 +809,13 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             }
             if (request.completion.isCompleted) return@launch
 
-            request.watchdogTimedOut = true
             val timeout = LocalImageWorkerRemoteException(
                 code = LOCAL_IMAGE_UPSCALE_WATCHDOG_TIMEOUT_CODE,
                 message = "Local ESRGAN worker exceeded its bounded $timeoutReason deadline " +
                     "at phase=${request.lastProgressPhase.ifBlank { "unknown" }}."
             )
-            if (!request.completion.completeExceptionally(timeout)) return@launch
-
-            cancelRemote(request)
-            val workerPid = request.workerPid
-            if (workerPid > 0 && workerPid != Process.myPid()) {
-                runCatching { Process.killProcess(workerPid) }
-            }
+            val timedOutEndpoint = currentEndpoint()
+            completeWatchdogTimeoutAndRequestExit(request, timeout, timedOutEndpoint)
         }
     }
 
@@ -910,6 +946,8 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         val onProgress: (LocalImageProgress) -> Unit
     ) {
         val completion = CompletableDeferred<LocalImageWorkerProtocol.ResultEnvelope>()
+
+        val watchdogTerminationDispatched = CompletableDeferred<Unit>()
 
         val handshake = LocalImageStartHandshake()
 

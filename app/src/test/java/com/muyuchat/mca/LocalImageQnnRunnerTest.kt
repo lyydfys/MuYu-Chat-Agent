@@ -52,27 +52,29 @@ class LocalImageQnnRunnerTest {
     }
 
     @Test
-    fun qnnImageBundleDoesNotBecomeActiveWhenRuntimeIsMissing() {
+    fun qnnImageBundleWithMissingRuntimeDiscoveryStillReachesRealSmoke() {
         val bundle = qnnImageBundle()
         val report = QnnHtpImageRunner(runnerReady = true).health(
             device = snapdragonElite(qnnReady = false),
             bundleRoot = bundle
         )
 
-        assertEquals(LocalImageQnnState.QNN_RUNTIME_MISSING, report.state)
+        assertEquals(LocalImageQnnState.SMOKE_REQUIRED, report.state)
         assertFalse(report.npuActive)
+        assertTrue(report.message.contains("smoke", ignoreCase = true))
     }
 
     @Test
-    fun qnnImageBundleDoesNotBecomeActiveWhenRuntimeLoadProbeFails() {
+    fun qnnImageBundleWithFailedRuntimeDiscoveryStillReachesRealSmoke() {
         val bundle = qnnImageBundle()
         val report = QnnHtpImageRunner(runnerReady = true).health(
             device = snapdragonDevice("SM8750", failedRuntime("mock load failure")),
             bundleRoot = bundle
         )
 
-        assertEquals(LocalImageQnnState.QNN_RUNTIME_MISSING, report.state)
+        assertEquals(LocalImageQnnState.SMOKE_REQUIRED, report.state)
         assertFalse(report.npuActive)
+        assertTrue(report.message.contains("smoke", ignoreCase = true))
     }
 
     @Test

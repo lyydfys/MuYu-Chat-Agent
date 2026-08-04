@@ -1,7 +1,9 @@
 package com.muyuchat.mca
 
 import com.muyuchat.core.download.ImageEngineBundleRuntime
+import com.muyuchat.core.download.ImageEngineBundleComponentRole
 import com.muyuchat.core.download.ImageEngineBundleSpec
+import java.io.File
 
 /**
  * Converts the catalog-owned contract into the exact app/runtime contract stored beside downloaded
@@ -17,6 +19,86 @@ internal fun materializeDownloadedImageExecutionProfile(
         ?.trim()
         ?.takeIf(String::isNotEmpty)
         ?.let(::ImageGraphArtifactContract)
+    val promptExecutionAssets = bundle.requiredComponents
+        .asSequence()
+        .filter { component ->
+            component.role in setOf(
+                ImageEngineBundleComponentRole.TEXT_ENCODER,
+                ImageEngineBundleComponentRole.TOKENIZER,
+                ImageEngineBundleComponentRole.CONDITIONING
+            )
+        }
+        .mapNotNull { component ->
+            val sha256 = component.sha256?.trim()?.lowercase()
+            val sizeBytes = component.expectedSizeBytes
+            if (sha256 == null || sizeBytes == null) return@mapNotNull null
+            ImageProfileAsset(
+                relativePath = component.relativePath.replace('\\', '/'),
+                fingerprint = sha256,
+                sizeBytes = sizeBytes
+            )
+        }
+        .sortedWith { left, right ->
+            compareUtf8Unsigned(left.relativePath, right.relativePath)
+        }
+        .toList()
+
+    val textEncoderLanguage = source.textEncoderLanguage?.let { declared ->
+        val evidence = declared.evidence?.let { declaredEvidence ->
+            fun resolvePinnedAsset(path: String, sha256: String, label: String): ImageProfileAsset {
+                val expectedPath = path.replace('\\', '/')
+                return promptExecutionAssets.singleOrNull { asset ->
+                    asset.relativePath.replace('\\', '/').equals(expectedPath, ignoreCase = true) &&
+                        asset.fingerprint.equals(sha256, ignoreCase = true)
+                } ?: error(
+                    "Text encoder language evidence $label must bind an exact downloaded text-encoder asset."
+                )
+            }
+            val pinnedAsset = resolvePinnedAsset(
+                declaredEvidence.textEncoderAssetPath,
+                declaredEvidence.textEncoderAssetSha256,
+                "primary graph"
+            )
+            ImageTextEncoderLanguageEvidence(
+                evidenceId = declaredEvidence.evidenceId,
+                evidenceSha256 = declaredEvidence.evidenceSha256,
+                textEncoderAsset = pinnedAsset,
+                auxiliaryAssets = declaredEvidence.auxiliaryAssets.mapIndexed { index, auxiliary ->
+                    resolvePinnedAsset(auxiliary.relativePath, auxiliary.sha256, "auxiliary asset $index")
+                },
+                promptToEncoderAssets = declaredEvidence.promptToEncoderAssets.mapIndexed {
+                        index,
+                        declaredAsset ->
+                    ImagePromptToEncoderAsset(
+                        role = ImagePromptToEncoderAssetRole.valueOf(declaredAsset.role.name),
+                        asset = resolvePinnedAsset(
+                            declaredAsset.relativePath,
+                            declaredAsset.sha256,
+                            "prompt-to-encoder asset $index (${declaredAsset.role.name})"
+                        )
+                    )
+                },
+                semanticProof = declaredEvidence.semanticProof?.let { proof ->
+                    ImageTextEncoderLanguageSemanticProof(
+                        proofVersion = proof.proofVersion,
+                        signerKeyId = proof.signerKeyId,
+                        signerCertificateSha256 = proof.signerCertificateSha256,
+                        signatureAlgorithm = proof.signatureAlgorithm,
+                        payloadSha256 = proof.payloadSha256,
+                        signatureBase64 = proof.signatureBase64
+                    )
+                }
+            )
+        }
+        ImageTextEncoderLanguageContract(
+            capability = ImageTextEncoderLanguageCapability.valueOf(declared.capability.name),
+            supportedLanguages = declared.supportedLanguages
+                .mapTo(linkedSetOf()) { language ->
+                    ImageTextEncoderLanguage.valueOf(language.name)
+                },
+            evidence = evidence
+        )
+    }
 
     val defaults = source.defaults
     val profile = ImageExecutionProfile(
@@ -38,6 +120,7 @@ internal fun materializeDownloadedImageExecutionProfile(
         ),
         tokenizer = ImageTokenizerContract(
             backend = ImageTokenizerBackend.valueOf(source.tokenizer.backend.name),
+            assets = promptExecutionAssets,
             bosId = source.tokenizer.bosId,
             eosId = source.tokenizer.eosId,
             padId = source.tokenizer.padId,
@@ -143,10 +226,19 @@ internal fun materializeDownloadedImageExecutionProfile(
             supportsMask = source.capabilities.supportsMask,
             supportsClipSkip = source.capabilities.supportsClipSkip,
             supportsVaeTiling = source.capabilities.supportsVaeTiling,
+            supportsUltraFix = source.capabilities.supportsUltraFix,
+            ultraFixMinWidth = source.capabilities.ultraFixMinWidth,
+            ultraFixMaxWidth = source.capabilities.ultraFixMaxWidth,
+            ultraFixMinHeight = source.capabilities.ultraFixMinHeight,
+            ultraFixMaxHeight = source.capabilities.ultraFixMaxHeight,
+            ultraFixWidthMultiple = source.capabilities.ultraFixWidthMultiple,
+            ultraFixHeightMultiple = source.capabilities.ultraFixHeightMultiple,
+            ultraFixRequiredTileSize = source.capabilities.ultraFixRequiredTileSize,
             supportsLivePreview = source.capabilities.supportsLivePreview,
             supportsLora = source.capabilities.supportsLora,
             maxBatchCount = source.capabilities.maxBatchCount
-        )
+        ),
+        textEncoderLanguage = textEncoderLanguage
     )
     val validation = ImageExecutionProfileValidator.validate(profile, modelFingerprint)
     require(validation.valid) {
@@ -155,4 +247,93 @@ internal fun materializeDownloadedImageExecutionProfile(
         }
     }
     return profile
+}
+
+/**
+ * Persists the exact files that native prompt conditioning will consume. Publisher pins are
+ * reused without a second host-side hash; files discovered only after archive expansion are
+ * hashed once here. Native execution independently verifies every pin before and after use.
+ */
+internal fun ImageExecutionProfile.withDownloadedTextualInversionConsumerPins(
+    bundleRoot: File,
+    primaryModel: File
+): ImageExecutionProfile {
+    if (!capabilities.supportsTextualInversion || !tokenizer.supportsTextualInversion) return this
+    if (runtime in setOf(LocalImageRuntime.QNN_HTP, LocalImageRuntime.MNN_DIFFUSION)) {
+        require(hasHostWritableClipTextualInversionTopology()) {
+            "Downloaded profile advertises textual inversion without a host-writable CLIP topology."
+        }
+    }
+
+    val root = bundleRoot.canonicalFile
+    val primary = primaryModel.canonicalFile
+    require(root.isDirectory && primary.isFile && primary.path.startsWith(root.path + File.separator)) {
+        "Downloaded textual-inversion consumer root or primary model is invalid."
+    }
+    val declaredByLabel = tokenizer.assets.associateBy { asset ->
+        asset.relativePath.replace('\\', '/').trim()
+    }
+    val pins = resolveTextualInversionConsumerAssetFiles(
+        profile = this,
+        primaryModel = primary,
+        root = root
+    )
+        .map(File::getCanonicalFile)
+        .distinctBy(File::getPath)
+        .map { file ->
+            val label = file.relativeTo(root).invariantSeparatorsPath
+            val installedPin = if (file == primary) {
+                ImageProfileAsset(label, modelFingerprint.lowercase(), file.length())
+            } else {
+                declaredByLabel[label]?.takeIf { asset -> asset.sizeBytes != null }
+            }
+            val descriptor = captureImageExecutionAssetDescriptor(
+                bundleRoot = root,
+                source = file,
+                installedPin = installedPin
+            )
+            ImageProfileAsset(
+                relativePath = descriptor.label,
+                fingerprint = descriptor.sha256,
+                sizeBytes = descriptor.sizeBytes
+            )
+        }
+        .sortedWith { left, right ->
+            compareUtf8Unsigned(left.relativePath, right.relativePath)
+        }
+
+    // The complete language-evidence closure is part of prompt semantics, not textual inversion
+    // itself. Keep every graph/sidecar in the request-scoped asset snapshot even when no inversion
+    // consumer needs it.
+    val pinsWithLanguageEvidence = textEncoderLanguage?.evidence?.consumedAssets()
+        ?.let { languageAssets ->
+            languageAssets.forEach { languageAsset ->
+                val matching = pins.firstOrNull { candidate ->
+                    candidate.relativePath.replace('\\', '/').equals(
+                        languageAsset.relativePath.replace('\\', '/'),
+                        ignoreCase = true
+                    )
+                }
+                require(
+                    matching == null ||
+                        (matching.fingerprint.equals(languageAsset.fingerprint, ignoreCase = true) &&
+                            matching.sizeBytes == languageAsset.sizeBytes)
+                ) {
+                    "Textual-inversion capture changed a text-encoder language evidence asset."
+                }
+            }
+            (pins + languageAssets)
+                .distinctBy { asset -> asset.relativePath.replace('\\', '/').lowercase() }
+                .sortedWith { left, right -> compareUtf8Unsigned(left.relativePath, right.relativePath) }
+        }
+        ?: pins
+
+    val pinnedProfile = copy(tokenizer = tokenizer.copy(assets = pinsWithLanguageEvidence))
+    val validation = ImageExecutionProfileValidator.validate(pinnedProfile, modelFingerprint)
+    require(validation.valid) {
+        validation.issues.joinToString(" ") { issue ->
+            "${issue.code}:${issue.field}:${issue.message}"
+        }
+    }
+    return pinnedProfile
 }

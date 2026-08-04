@@ -814,7 +814,11 @@ class ModelScopeClient(
         }.thenBy { it }
 
     companion object {
-        private const val QNN_SD15_EXECUTION_PROFILE_REVISION = 2
+        private const val QNN_SD15_EXECUTION_PROFILE_REVISION = 5
+        private const val QNN_DREAMSHAPER_SD15_EXECUTION_PROFILE_REVISION = 6
+        private const val QNN_REALISTICVISIONHYPER_SD15_EXECUTION_PROFILE_REVISION = 6
+        private const val QNN_SDXL_EXECUTION_PROFILE_REVISION = 6
+        private const val QNN_GEN5_EXECUTION_PROFILE_REVISION = 2
         private val QNN_SD15_CONDITIONING_RUNTIME_ASSETS = listOf(
             "tokenizer.json",
             "token_emb.bin",
@@ -878,14 +882,24 @@ class ModelScopeClient(
         private const val SANA_EDIT_V2_REVISION = "50adc28b4682161542f893c624048adf6dd027ca"
         private const val SD15_MNN_REVISION = "346de5fcde406781a34368140419ac3f62440916"
 
-        // Keep every recommended MNN package on one immutable ModelScope revision.  The
-        // installer still validates the per-file SHA-256 returned by ModelScope, but a
+        // Keep every recommended MNN package on one immutable repository revision. The
+        // installer still validates the per-file SHA-256 returned by the source, but a
         // pinned tree prevents config/tokenizer/model files from drifting independently
         // between a file-list request and a later repair-install.
-        private const val QWEN35_08B_MNN_REVISION = "594e8d3c5dcdd8ae7ff488a3ba5920c503721fe6"
         private const val QWEN35_2B_MNN_REVISION = "b9ae8c8f3da3fceb4278b558a747286b8a087dbe"
-        private const val QWEN35_4B_MNN_REVISION = "33045fd83cd206d66976af438f7a58255b258a58"
-        private const val QWEN35_9B_MNN_REVISION = "4def89fe8459266be4be64d5ab7ae8bbe9066081"
+        private const val QWEN35_08B_UNCENSORED_MNN_REVISION = "7ad2802ed360a3066112bd973506a6bb3820df2c"
+        private const val QWEN35_4B_UNCENSORED_MNN_REVISION = "cfa553d6b42bd9ed86f17e02da3b78e7093736ed"
+        private const val QWEN35_9B_UNCENSORED_MNN_REVISION = "9eadc756519bf42e6b8aed8a6ade5b124c79e564"
+        private const val QWEN35_2B_ABLITERATED_GGUF_REVISION = "f36848fead3fdda244cf60195c46993d23183d4c"
+        private const val QWEN3_VL_4B_ABLITERATED_GGUF_REVISION = "d6630953b1fe29a678c69f95e02d1f5d17b53b11"
+        private const val MINICPM_V46_ABLITERATED_GGUF_REVISION = "df9281a41ec46766218fc1b54d070b2a52668866"
+        private const val QWEN25_VL_7B_ABLITERATED_GGUF_REVISION = "dbf78ed7f2020ee497ddaec61b88f153790eedb3"
+        private const val GEMMA4_26B_A4B_ABLITERATED_GGUF_REVISION = "5e35628c3cd1f39fdde4d7a16ee6653d42df0e95"
+        private const val QWEN36_35B_A3B_ABLITERATED_MNN_REVISION = "bb83b12d83ad64aaaa98f9fab3e86af3806a6e40"
+        private const val GEMMA4_E2B_UNCENSORED_GGUF_REVISION = "4345c0c77cde7da43084c94b1deac23c09bccfc1"
+        private const val GEMMA4_E4B_UNCENSORED_GGUF_REVISION = "771f130d4c49735ace331f68a80f7ae31387e51c"
+        private const val QWEN3_4B_2507_ABLITERATED_GGUF_REVISION = "c9e90669eeb205d5af35c28a3e9983fc9293c2ec"
+        private const val QWEN3_8B_ABLITERATED_GGUF_REVISION = "64c8e52a68276ef181b7695813c5883070b783a0"
         private const val QWEN35_35B_A3B_MNN_REVISION = "5e21a599fd2e01d2f1f6ccedac48912439ba22f5"
         private const val GEMMA4_E2B_MNN_REVISION = "ad38122704d7a0cfd207abb75a815a2436ab92e6"
         private const val GEMMA4_E4B_MNN_REVISION = "69a938a0f52bedcffc7e42215932f03de15bfe86"
@@ -899,6 +913,74 @@ class ModelScopeClient(
             MnnModelBundleComponentSpec(MnnModelBundleComponentRole.OPTIONAL, "llm.mnn.json"),
             MnnModelBundleComponentSpec(MnnModelBundleComponentRole.TOKENIZER, "tokenizer.mtok"),
             MnnModelBundleComponentSpec(MnnModelBundleComponentRole.WEIGHT, "ple_embeddings_int4.bin")
+        )
+
+        private fun qwen35CommunityMnnComponents(
+            tokenizerFileName: String,
+            requiresEmbeddingFile: Boolean = false,
+            requiresVision: Boolean = false
+        ): List<MnnModelBundleComponentSpec> = buildList {
+            add(MnnModelBundleComponentSpec(MnnModelBundleComponentRole.CONFIG, "config.json"))
+            add(MnnModelBundleComponentSpec(MnnModelBundleComponentRole.LLM_CONFIG, "llm_config.json"))
+            add(MnnModelBundleComponentSpec(MnnModelBundleComponentRole.MODEL, "llm.mnn"))
+            add(MnnModelBundleComponentSpec(MnnModelBundleComponentRole.WEIGHT, "llm.mnn.weight"))
+            add(MnnModelBundleComponentSpec(MnnModelBundleComponentRole.TOKENIZER, tokenizerFileName))
+            add(MnnModelBundleComponentSpec(MnnModelBundleComponentRole.OPTIONAL, "llm.mnn.json"))
+            if (requiresEmbeddingFile) {
+                add(MnnModelBundleComponentSpec(MnnModelBundleComponentRole.WEIGHT, "embeddings_bf16.bin"))
+            }
+            if (requiresVision) {
+                add(MnnModelBundleComponentSpec(MnnModelBundleComponentRole.MODEL, "visual.mnn"))
+                add(MnnModelBundleComponentSpec(MnnModelBundleComponentRole.WEIGHT, "visual.mnn.weight"))
+            }
+        }
+
+        /**
+         * Community GGUF releases keep the multimodal projector separate from
+         * the quantized language model. The installer must therefore always
+         * materialize both files as one managed bundle rather than register a
+         * text-only main model and leave the card's vision claim dangling.
+         */
+        private fun communityLowRefusalGgufVisionBundle(
+            id: String,
+            title: String,
+            repoId: String,
+            revision: String,
+            mainFileName: String,
+            projectorFileName: String,
+            smokeImageSize: Int = 448,
+            smokeTimeoutSeconds: Int = 180
+        ): VisionModelBundleSpec = VisionModelBundleSpec(
+            id = id,
+            title = title,
+            runtime = VisionModelBundleRuntime.GGUF_MMPROJ,
+            accelerator = VisionModelAccelerator.CPU,
+            minDeviceTier = ImageEngineMinDeviceTier.ANY,
+            requiresQnnRuntime = false,
+            requiresSmokeTest = true,
+            downloadProjectorByDefault = true,
+            smokeSpec = VisionModelSmokeSpec(
+                imageWidth = smokeImageSize,
+                imageHeight = smokeImageSize,
+                prompt = "请用中文描述这张图片",
+                timeoutSeconds = smokeTimeoutSeconds
+            ),
+            components = listOf(
+                VisionModelBundleComponentSpec(
+                    role = VisionModelBundleComponentRole.MAIN_MODEL,
+                    repoId = repoId,
+                    revision = revision,
+                    provider = ModelRepositoryProvider.HUGGING_FACE,
+                    fileName = mainFileName
+                ),
+                VisionModelBundleComponentSpec(
+                    role = VisionModelBundleComponentRole.PROJECTOR,
+                    repoId = repoId,
+                    revision = revision,
+                    provider = ModelRepositoryProvider.HUGGING_FACE,
+                    fileName = projectorFileName
+                )
+            )
         )
 
         private fun gemmaMnnComponents(): List<MnnModelBundleComponentSpec> = listOf(
@@ -1051,6 +1133,7 @@ class ModelScopeClient(
             dualClip: Boolean = false,
             padZero: Boolean = false,
             supportsPromptWeighting: Boolean = backend != ImageEngineTokenizerBackend.MNN_MTOK,
+            supportsTextualInversion: Boolean = false,
             separateNegativePrompt: Boolean = true
         ): ImageEngineTokenizerContractSpec = ImageEngineTokenizerContractSpec(
             backend = backend,
@@ -1069,6 +1152,7 @@ class ModelScopeClient(
             },
             clip2PadRule = if (dualClip) ImageEngineClipPadRule.ZERO else null,
             supportsPromptWeighting = supportsPromptWeighting,
+            supportsTextualInversion = supportsTextualInversion,
             separateNegativePrompt = separateNegativePrompt
         )
 
@@ -1113,10 +1197,12 @@ class ModelScopeClient(
             size: Int,
             schedulers: Set<ImageEngineSchedulerAlgorithm>,
             supportsPromptWeighting: Boolean = true,
+            supportsTextualInversion: Boolean = false,
             supportsNegativePrompt: Boolean = true,
             requiresControlImage: Boolean = false,
             requiresInputImage: Boolean = false,
-            supportsMask: Boolean = false
+            supportsMask: Boolean = false,
+            supportsLivePreview: Boolean = false
         ): ImageEngineGenerationCapabilitiesSpec = ImageEngineGenerationCapabilitiesSpec(
             supportedSchedulers = schedulers,
             minWidth = size,
@@ -1125,36 +1211,50 @@ class ModelScopeClient(
             maxHeight = size,
             supportsNegativePrompt = supportsNegativePrompt,
             supportsPromptWeighting = supportsPromptWeighting,
+            supportsTextualInversion = supportsTextualInversion,
             requiresControlImage = requiresControlImage,
             requiresInputImage = requiresInputImage,
-            supportsMask = supportsMask
+            supportsMask = supportsMask,
+            supportsLivePreview = supportsLivePreview
         )
 
         private fun stableDiffusionCppCapabilities(
             schedulers: Set<ImageEngineSchedulerAlgorithm>,
             family: ImageEngineModelFamily,
             supportsNegativePrompt: Boolean = true
-        ): ImageEngineGenerationCapabilitiesSpec = ImageEngineGenerationCapabilitiesSpec(
-            supportedSchedulers = schedulers,
-            minWidth = 256,
-            maxWidth = 1_536,
-            minHeight = 256,
-            maxHeight = 1_536,
-            widthMultiple = 64,
-            heightMultiple = 64,
-            supportsNegativePrompt = supportsNegativePrompt,
-            supportsPromptWeighting = true,
-            supportsClipSkip = family in setOf(
+        ): ImageEngineGenerationCapabilitiesSpec {
+            val supportsStableExtensions = family in setOf(
                 ImageEngineModelFamily.SD15,
                 ImageEngineModelFamily.SD21,
                 ImageEngineModelFamily.SDXL,
                 ImageEngineModelFamily.SD_TURBO
-            ),
-            supportsVaeTiling = true,
-            supportsLivePreview = true,
-            supportsLora = true,
-            maxBatchCount = 8
-        )
+            )
+            val ultraFixMultiple = if (family == ImageEngineModelFamily.SDXL) 32 else 64
+            return ImageEngineGenerationCapabilitiesSpec(
+                supportedSchedulers = schedulers,
+                minWidth = 256,
+                maxWidth = 1_536,
+                minHeight = 256,
+                maxHeight = 1_536,
+                widthMultiple = 64,
+                heightMultiple = 64,
+                supportsNegativePrompt = supportsNegativePrompt,
+                supportsPromptWeighting = true,
+                supportsTextualInversion = supportsStableExtensions,
+                supportsClipSkip = supportsStableExtensions,
+                supportsVaeTiling = true,
+                supportsUltraFix = supportsStableExtensions,
+                ultraFixMinWidth = if (supportsStableExtensions) 128 else 0,
+                ultraFixMaxWidth = if (supportsStableExtensions) 8_192 else 0,
+                ultraFixMinHeight = if (supportsStableExtensions) 128 else 0,
+                ultraFixMaxHeight = if (supportsStableExtensions) 8_192 else 0,
+                ultraFixWidthMultiple = if (supportsStableExtensions) ultraFixMultiple else 0,
+                ultraFixHeightMultiple = if (supportsStableExtensions) ultraFixMultiple else 0,
+                supportsLivePreview = true,
+                supportsLora = true,
+                maxBatchCount = 8
+            )
+        }
 
         private fun stableDiffusionCppSchedulers(
             algorithm: ImageEngineSchedulerAlgorithm
@@ -1204,13 +1304,17 @@ class ModelScopeClient(
             cfgScale: Double = 7.0,
             conditioningDataType: ImageEngineEmbeddingDataType = ImageEngineEmbeddingDataType.FP16,
             conversionStrategy: ImageEngineEmbeddingConversionStrategy = ImageEngineEmbeddingConversionStrategy.NONE,
-            defaultNegativePrompt: String = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+            defaultNegativePrompt: String = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
+            profileRevision: Int = QNN_SD15_EXECUTION_PROFILE_REVISION
         ): ImageEngineExecutionProfileSpec = ImageEngineExecutionProfileSpec(
             profileId = profileId,
-            profileRevision = QNN_SD15_EXECUTION_PROFILE_REVISION,
+            profileRevision = profileRevision,
             family = ImageEngineModelFamily.SD15,
             variant = variant,
-            tokenizer = clipTokenizer(ImageEngineTokenizerBackend.TOKENIZERS_CPP),
+            tokenizer = clipTokenizer(
+                ImageEngineTokenizerBackend.TOKENIZERS_CPP,
+                supportsTextualInversion = true
+            ),
             conditioning = imageConditioning(conditioningDataType, conversionStrategy, 768),
             scheduler = imageScheduler(
                 algorithm = ImageEngineSchedulerAlgorithm.DPMPP_2M,
@@ -1248,7 +1352,18 @@ class ModelScopeClient(
                     ImageEngineSchedulerAlgorithm.DPMPP_2M,
                     ImageEngineSchedulerAlgorithm.EULER,
                     ImageEngineSchedulerAlgorithm.PNDM_PLMS
-                )
+                ),
+                supportsTextualInversion = true,
+                supportsLivePreview = true
+            ).copy(
+                supportsUltraFix = true,
+                ultraFixMinWidth = 512,
+                ultraFixMaxWidth = 2_048,
+                ultraFixMinHeight = 512,
+                ultraFixMaxHeight = 2_048,
+                ultraFixWidthMultiple = 64,
+                ultraFixHeightMultiple = 64,
+                ultraFixRequiredTileSize = 512
             )
         )
 
@@ -1263,11 +1378,13 @@ class ModelScopeClient(
             supportsNegativePrompt: Boolean = true
         ): ImageEngineExecutionProfileSpec = ImageEngineExecutionProfileSpec(
             profileId = profileId,
+            profileRevision = QNN_SDXL_EXECUTION_PROFILE_REVISION,
             family = ImageEngineModelFamily.SDXL,
             variant = variant,
             tokenizer = clipTokenizer(
                 ImageEngineTokenizerBackend.TOKENIZERS_CPP,
                 dualClip = true,
+                supportsTextualInversion = true,
                 separateNegativePrompt = supportsNegativePrompt
             ),
             conditioning = imageConditioning(
@@ -1312,10 +1429,22 @@ class ModelScopeClient(
                 1024,
                 setOf(
                     ImageEngineSchedulerAlgorithm.DPMPP_2M,
-                    ImageEngineSchedulerAlgorithm.EULER,
-                    ImageEngineSchedulerAlgorithm.LCM
+                    ImageEngineSchedulerAlgorithm.EULER
                 ),
-                supportsNegativePrompt = supportsNegativePrompt
+                supportsTextualInversion = true,
+                supportsNegativePrompt = supportsNegativePrompt,
+                // Split SDXL must tear down its UNet process before the VAE
+                // phase; it cannot publish an in-process live preview.
+                supportsLivePreview = false
+            ).copy(
+                supportsUltraFix = true,
+                ultraFixMinWidth = 1_024,
+                ultraFixMaxWidth = 2_048,
+                ultraFixMinHeight = 1_024,
+                ultraFixMaxHeight = 2_048,
+                ultraFixWidthMultiple = 64,
+                ultraFixHeightMultiple = 64,
+                ultraFixRequiredTileSize = 1_024
             )
         )
 
@@ -1327,6 +1456,7 @@ class ModelScopeClient(
             val task = if (controlNet) ImageEngineTask.CONTROL_IMAGE else ImageEngineTask.TEXT_TO_IMAGE
             return ImageEngineExecutionProfileSpec(
                 profileId = profileId,
+                profileRevision = QNN_GEN5_EXECUTION_PROFILE_REVISION,
                 family = if (sd21) ImageEngineModelFamily.SD21 else ImageEngineModelFamily.SD15,
                 variant = when {
                     controlNet -> ImageEngineModelVariant.CONTROLNET_CANNY
@@ -1395,7 +1525,8 @@ class ModelScopeClient(
                         if (sd21) ImageEngineSchedulerAlgorithm.DDIM else ImageEngineSchedulerAlgorithm.EULER
                     ),
                     supportsPromptWeighting = false,
-                    requiresControlImage = controlNet
+                    requiresControlImage = controlNet,
+                    supportsLivePreview = true
                 )
             )
         }
@@ -1505,47 +1636,57 @@ class ModelScopeClient(
             size: Int = 512,
             defaultNegativePrompt: String? = null,
             supportsNegativePrompt: Boolean = true
-        ): ImageEngineExecutionProfileSpec = ImageEngineExecutionProfileSpec(
-            profileId = profileId,
-            family = family,
-            variant = variant,
-            tokenizer = clipTokenizer(
-                ImageEngineTokenizerBackend.SDCPP_NATIVE,
-                separateNegativePrompt = supportsNegativePrompt
-            ),
-            conditioning = imageConditioning(
-                ImageEngineEmbeddingDataType.RUNTIME_NATIVE,
-                ImageEngineEmbeddingConversionStrategy.RUNTIME_NATIVE,
-                1,
-                separateNegativePrompt = supportsNegativePrompt
-            ),
-            scheduler = imageScheduler(
-                algorithm = algorithm,
-                predictionType = if (algorithm == ImageEngineSchedulerAlgorithm.FLOW_MATCH) {
-                    ImageEnginePredictionType.FLOW
-                } else {
-                    ImageEnginePredictionType.EPSILON
-                },
-                defaultSteps = steps,
-                minSteps = 1,
-                maxSteps = 100
-            ),
-            vae = imageVae(ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0, size),
-            graph = ImageEngineGraphContractSpec(workerStrategy = ImageEngineWorkerStrategy.IN_PROCESS),
-            defaults = ImageEngineGenerationDefaultsSpec(
-                width = size,
-                height = size,
-                steps = steps,
-                cfgScale = cfgScale,
-                useCfg = stableDiffusionCppUsesCfg(cfgScale),
-                defaultNegativePrompt = defaultNegativePrompt
-            ),
-            capabilities = stableDiffusionCppCapabilities(
-                stableDiffusionCppSchedulers(algorithm),
-                family = family,
-                supportsNegativePrompt = supportsNegativePrompt
+        ): ImageEngineExecutionProfileSpec {
+            val supportsStableExtensions = family in setOf(
+                ImageEngineModelFamily.SD15,
+                ImageEngineModelFamily.SD21,
+                ImageEngineModelFamily.SDXL,
+                ImageEngineModelFamily.SD_TURBO
             )
-        )
+            return ImageEngineExecutionProfileSpec(
+                profileId = profileId,
+                profileRevision = if (supportsStableExtensions) 2 else 1,
+                family = family,
+                variant = variant,
+                tokenizer = clipTokenizer(
+                    ImageEngineTokenizerBackend.SDCPP_NATIVE,
+                    supportsTextualInversion = supportsStableExtensions,
+                    separateNegativePrompt = supportsNegativePrompt
+                ),
+                conditioning = imageConditioning(
+                    ImageEngineEmbeddingDataType.RUNTIME_NATIVE,
+                    ImageEngineEmbeddingConversionStrategy.RUNTIME_NATIVE,
+                    1,
+                    separateNegativePrompt = supportsNegativePrompt
+                ),
+                scheduler = imageScheduler(
+                    algorithm = algorithm,
+                    predictionType = if (algorithm == ImageEngineSchedulerAlgorithm.FLOW_MATCH) {
+                        ImageEnginePredictionType.FLOW
+                    } else {
+                        ImageEnginePredictionType.EPSILON
+                    },
+                    defaultSteps = steps,
+                    minSteps = 1,
+                    maxSteps = 100
+                ),
+                vae = imageVae(ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0, size),
+                graph = ImageEngineGraphContractSpec(workerStrategy = ImageEngineWorkerStrategy.IN_PROCESS),
+                defaults = ImageEngineGenerationDefaultsSpec(
+                    width = size,
+                    height = size,
+                    steps = steps,
+                    cfgScale = cfgScale,
+                    useCfg = stableDiffusionCppUsesCfg(cfgScale),
+                    defaultNegativePrompt = defaultNegativePrompt
+                ),
+                capabilities = stableDiffusionCppCapabilities(
+                    stableDiffusionCppSchedulers(algorithm),
+                    family = family,
+                    supportsNegativePrompt = supportsNegativePrompt
+                )
+            )
+        }
 
         private fun recommendedImageExecutionProfile(
             recommendationId: String
@@ -1556,18 +1697,16 @@ class ModelScopeClient(
             )
             "dreamshaper_sd15_qnn228" -> qnnSd15ExecutionProfile(
                 profileId = "community.sd15.qnn228",
-                conditioningDataType = ImageEngineEmbeddingDataType.FP32,
-                conversionStrategy = ImageEngineEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
-                defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
+                defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
+                profileRevision = QNN_DREAMSHAPER_SD15_EXECUTION_PROFILE_REVISION
             )
             "realisticvisionhyper_sd15_qnn228" -> qnnSd15ExecutionProfile(
                 profileId = "community.sd15.hyper.qnn228",
                 variant = ImageEngineModelVariant.HYPER,
                 steps = 8,
                 cfgScale = 2.0,
-                conditioningDataType = ImageEngineEmbeddingDataType.FP32,
-                conversionStrategy = ImageEngineEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
-                defaultNegativePrompt = RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT
+                defaultNegativePrompt = RecommendedImageDefaults.PHOTO_NEGATIVE_PROMPT,
+                profileRevision = QNN_REALISTICVISIONHYPER_SD15_EXECUTION_PROFILE_REVISION
             )
             "meinamix_sd15_qnn228" -> qnnSd15ExecutionProfile(
                 profileId = "community.sd15.legacy-fp32.qnn228",
@@ -1691,40 +1830,89 @@ class ModelScopeClient(
             )
         )
 
-        private fun sd15QnnSmokeSpecs(): List<ImageEngineQnnSmokeSpec> = listOf(
-            ImageEngineQnnSmokeSpec(
-                graphName = "model",
-                contextBinary = "unet.bin",
-                width = 512,
-                height = 512,
-                steps = 1,
-                timeoutSeconds = 180,
-                prompt = "a small ceramic cup on a bright wooden desk",
-                inputs = listOf(
-                    ImageEngineQnnSmokeTensorSpec("sample", "uint16", listOf(1, 4, 64, 64)),
-                    ImageEngineQnnSmokeTensorSpec("timestamp", "int32", listOf(1)),
-                    ImageEngineQnnSmokeTensorSpec("text_embedding", "uint16", listOf(1, 77, 768))
-                ),
-                outputs = listOf(
-                    ImageEngineQnnSmokeTensorSpec("output", "uint16", listOf(1, 4, 64, 64), role = "output")
-                )
+        private data class QnnContextIdentity(
+            val sizeBytes: Long,
+            val sha256: String
+        )
+
+        private val QNN_SD15_VAE_ENCODER_IDENTITIES = mapOf(
+            "cyberrealistic_sd15_qnn228" to QnnContextIdentity(
+                sizeBytes = 58_870_768L,
+                sha256 = "f2a5d073d0c4492361eb49005f03acd6ecdceba652c6fc7ba68eddd2b4d98da7"
             ),
-            ImageEngineQnnSmokeSpec(
-                graphName = "model",
-                contextBinary = "vae_decoder.bin",
-                width = 512,
-                height = 512,
-                steps = 1,
-                timeoutSeconds = 180,
-                prompt = "vae decoder smoke",
-                inputs = listOf(
-                    ImageEngineQnnSmokeTensorSpec("input", "uint16", listOf(1, 4, 64, 64))
-                ),
-                outputs = listOf(
-                    ImageEngineQnnSmokeTensorSpec("output", "uint16", listOf(1, 3, 512, 512), role = "output")
-                )
+            "realisticvisionhyper_sd15_qnn228" to QnnContextIdentity(
+                sizeBytes = 58_862_576L,
+                sha256 = "629797a9eb5204a2465fa993e9efa2546c60dce93d9bcd009ba7b06fc62ecf3b"
+            ),
+            "dreamshaper_sd15_qnn228" to QnnContextIdentity(
+                sizeBytes = 58_862_576L,
+                sha256 = "6baf4c28749e310404c1b079230cd47296d389fb4037f05267e589a50294bc66"
+            ),
+            "meinamix_sd15_qnn228" to QnnContextIdentity(
+                sizeBytes = 41_438_176L,
+                sha256 = "b32367e717c331cbacce7dc3482c7e5668dea90c8cc77396dee3761845d2bdd6"
             )
         )
+
+        private fun sd15QnnSmokeSpecs(
+            recommendationId: String
+        ): List<ImageEngineQnnSmokeSpec> {
+            val encoderIdentity = requireNotNull(
+                QNN_SD15_VAE_ENCODER_IDENTITIES[recommendationId]
+            ) { "Missing pinned SD1.5 VAE encoder identity for $recommendationId." }
+            return listOf(
+                ImageEngineQnnSmokeSpec(
+                    graphName = "model",
+                    contextBinary = "unet.bin",
+                    width = 512,
+                    height = 512,
+                    steps = 1,
+                    timeoutSeconds = 180,
+                    prompt = "a small ceramic cup on a bright wooden desk",
+                    inputs = listOf(
+                        ImageEngineQnnSmokeTensorSpec("sample", "uint16", listOf(1, 4, 64, 64)),
+                        ImageEngineQnnSmokeTensorSpec("timestamp", "int32", listOf(1)),
+                        ImageEngineQnnSmokeTensorSpec("text_embedding", "uint16", listOf(1, 77, 768))
+                    ),
+                    outputs = listOf(
+                        ImageEngineQnnSmokeTensorSpec("output", "uint16", listOf(1, 4, 64, 64), role = "output")
+                    )
+                ),
+                ImageEngineQnnSmokeSpec(
+                    graphName = "model",
+                    contextBinary = "vae_decoder.bin",
+                    width = 512,
+                    height = 512,
+                    steps = 1,
+                    timeoutSeconds = 180,
+                    prompt = "vae decoder smoke",
+                    inputs = listOf(
+                        ImageEngineQnnSmokeTensorSpec("input", "uint16", listOf(1, 4, 64, 64))
+                    ),
+                    outputs = listOf(
+                        ImageEngineQnnSmokeTensorSpec("output", "uint16", listOf(1, 3, 512, 512), role = "output")
+                    )
+                ),
+                ImageEngineQnnSmokeSpec(
+                    graphName = "model",
+                    contextBinary = "vae_encoder.bin",
+                    expectedContextSizeBytes = encoderIdentity.sizeBytes,
+                    expectedContextSha256 = encoderIdentity.sha256,
+                    width = 512,
+                    height = 512,
+                    steps = 1,
+                    timeoutSeconds = 180,
+                    prompt = "vae encoder smoke",
+                    inputs = listOf(
+                        ImageEngineQnnSmokeTensorSpec("input", "uint16", listOf(1, 3, 512, 512))
+                    ),
+                    outputs = listOf(
+                        ImageEngineQnnSmokeTensorSpec("mean", "uint16", listOf(1, 4, 64, 64), role = "output"),
+                        ImageEngineQnnSmokeTensorSpec("std", "uint16", listOf(1, 4, 64, 64), role = "output")
+                    )
+                )
+            )
+        }
 
         private fun sdxlQnnSmokeSpecs(): List<ImageEngineQnnSmokeSpec> = listOf(
             ImageEngineQnnSmokeSpec(
@@ -1763,6 +1951,22 @@ class ModelScopeClient(
                 outputs = listOf(
                     ImageEngineQnnSmokeTensorSpec("output", "float32", listOf(1, 3, 512, 512), role = "output")
                 )
+            ),
+            ImageEngineQnnSmokeSpec(
+                graphName = "model",
+                contextBinary = "vae_encoder.bin",
+                width = 1024,
+                height = 1024,
+                steps = 1,
+                timeoutSeconds = 300,
+                prompt = "sdxl vae encoder smoke",
+                inputs = listOf(
+                    ImageEngineQnnSmokeTensorSpec("input", "float32", listOf(1, 3, 1024, 1024))
+                ),
+                outputs = listOf(
+                    ImageEngineQnnSmokeTensorSpec("mean", "float32", listOf(1, 4, 128, 128), role = "output"),
+                    ImageEngineQnnSmokeTensorSpec("std", "float32", listOf(1, 4, 128, 128), role = "output")
+                )
             )
         )
 
@@ -1794,7 +1998,7 @@ class ModelScopeClient(
                     steps = profile.defaults.steps,
                     timeoutSeconds = 240
                 ),
-                qnnSmokeSpecs = sd15QnnSmokeSpecs(),
+                qnnSmokeSpecs = sd15QnnSmokeSpecs(id),
                 requiredRuntimeProfile = ImageEngineQnnRuntimeProfileSpec(
                     qnnSdk = "2.28",
                     // The `min` context targets the publisher's broadest hardware
@@ -1960,25 +2164,32 @@ class ModelScopeClient(
 
         private val DEFAULT_RECOMMENDED_MODELS = listOf(
             ModelScopeRecommendedModel(
-                id = "qwen35_08b_q4",
-                title = "Qwen3.5-0.8B MNN",
-                repoId = "MNN/Qwen3.5-0.8B-MNN",
-                revision = QWEN35_08B_MNN_REVISION,
-                description = "轻量中文多模态聊天首选，体积小、启动快；完整包加载 visual 组件后可直接发送图片。",
+                id = "qwen35_08b_uncensored_mnn",
+                title = "Qwen3.5-0.8B 低拒答实验版 · MNN",
+                repoId = "darkmaniac7/Qwen3.5-0.8B-uncensored-MNN",
+                revision = QWEN35_08B_UNCENSORED_MNN_REVISION,
+                description = "社区 MNN 低拒答实验包；发布者声明其基于 Huihui Qwen3.5 0.8B abliterated 权重转换。完整包含视觉组件，实际图文能力以本机 native load 与 smoke 结果为准。",
                 recommendedFileName = "config.json",
                 parameterScale = "0.8B",
                 quant = "MNN",
                 minRamGb = 4,
-                tags = listOf("低内存", "速度优先", "Qwen3.5", "MNN", "ModelScope"),
+                tags = listOf("低拒答实验", "低内存", "Qwen3.5", "MNN", "Hugging Face"),
                 priority = 0,
-                status = RecommendedModelStatus.RECOMMENDED,
+                status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.LIGHT_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
                 chatRuntime = RecommendedChatRuntime.MNN,
                 mnnModelBundle = MnnModelBundleSpec(
-                    id = "qwen35_08b_mnn_bundle",
-                    title = "Qwen3.5 0.8B MNN",
-                    repoId = "MNN/Qwen3.5-0.8B-MNN",
-                    revision = QWEN35_08B_MNN_REVISION
+                    id = "qwen35_08b_uncensored_mnn_bundle",
+                    title = "Qwen3.5 0.8B 低拒答实验 MNN",
+                    repoId = "darkmaniac7/Qwen3.5-0.8B-uncensored-MNN",
+                    revision = QWEN35_08B_UNCENSORED_MNN_REVISION,
+                    provider = ModelRepositoryProvider.HUGGING_FACE,
+                    components = qwen35CommunityMnnComponents(
+                        tokenizerFileName = "tokenizer.mtok",
+                        requiresVision = true
+                    )
                 )
             ),
             ModelScopeRecommendedModel(
@@ -1993,6 +2204,7 @@ class ModelScopeClient(
                 minRamGb = 6,
                 tags = listOf("轻量", "纯文本已验证", "Qwen3.5", "MNN", "ModelScope"),
                 priority = 1,
+                visibleInRecommendations = false,
                 status = RecommendedModelStatus.RECOMMENDED,
                 group = ModelScopeRecommendedGroup.LIGHT_CHAT,
                 chatRuntime = RecommendedChatRuntime.MNN,
@@ -2001,6 +2213,32 @@ class ModelScopeClient(
                     title = "Qwen3.5 2B MNN",
                     repoId = "MNN/Qwen3.5-2B-MNN",
                     revision = QWEN35_2B_MNN_REVISION
+                )
+            ),
+            ModelScopeRecommendedModel(
+                id = "qwen35_2b_abliterated_gguf",
+                title = "Qwen3.5-2B 低拒答实验版 · GGUF + mmproj",
+                repoId = "mradermacher/Huihui-Qwen3.5-2B-abliterated-GGUF",
+                revision = QWEN35_2B_ABLITERATED_GGUF_REVISION,
+                description = "社区 abliterated GGUF 图文实验包；发布者标记为 uncensored。主模型与匹配 mmproj-f16 会一起安装，实际图文兼容性以本机 native load 与 smoke 为准。",
+                recommendedFileName = "Huihui-Qwen3.5-2B-abliterated.Q4_K_M.gguf",
+                parameterScale = "2B",
+                quant = "Q4_K_M",
+                minRamGb = 6,
+                tags = listOf("低拒答实验", "图文聊天", "Qwen3.5", "GGUF", "Hugging Face"),
+                priority = 1,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.LIGHT_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.GGUF,
+                visionModelBundle = communityLowRefusalGgufVisionBundle(
+                    id = "qwen35_2b_abliterated_gguf_vision_bundle",
+                    title = "Qwen3.5 2B 低拒答实验图文包",
+                    repoId = "mradermacher/Huihui-Qwen3.5-2B-abliterated-GGUF",
+                    revision = QWEN35_2B_ABLITERATED_GGUF_REVISION,
+                    mainFileName = "Huihui-Qwen3.5-2B-abliterated.Q4_K_M.gguf",
+                    projectorFileName = "Huihui-Qwen3.5-2B-abliterated.mmproj-f16.gguf"
                 )
             ),
             ModelScopeRecommendedModel(
@@ -2015,6 +2253,7 @@ class ModelScopeClient(
                 minRamGb = 6,
                 tags = listOf("Gemma 4", "多语种", "MNN", "ModelScope"),
                 priority = 2,
+                visibleInRecommendations = false,
                 status = RecommendedModelStatus.RECOMMENDED,
                 group = ModelScopeRecommendedGroup.LIGHT_CHAT,
                 chatRuntime = RecommendedChatRuntime.MNN,
@@ -2026,6 +2265,24 @@ class ModelScopeClient(
                     installProfile = MnnModelBundleInstallProfile.TEXT_ONLY,
                     components = gemmaTextOnlyMnnComponents()
                 )
+            ),
+            ModelScopeRecommendedModel(
+                id = "gemma4_e2b_uncensored_gguf",
+                title = "Gemma 4 E2B IT 低拒答实验版 · GGUF",
+                repoId = "TrevorJS/gemma-4-E2B-it-uncensored-GGUF",
+                revision = GEMMA4_E2B_UNCENSORED_GGUF_REVISION,
+                description = "社区 norm-preserving abliterated GGUF 文本实验包；发布者提供低拒答评测信息。仅提供文本聊天，仍须遵守上游 Gemma 许可条款，实际加载以本机 native runtime 为准。",
+                recommendedFileName = "gemma-4-E2B-it-uncensored-Q4_K_M.gguf",
+                parameterScale = "E2B",
+                quant = "Q4_K_M",
+                minRamGb = 6,
+                tags = listOf("低拒答实验", "Gemma 4", "文本聊天", "GGUF", "Hugging Face"),
+                priority = 2,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.LIGHT_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.GGUF
             ),
             ModelScopeRecommendedModel(
                 id = "bitcpm4_cann_3b_tq2",
@@ -2067,11 +2324,38 @@ class ModelScopeClient(
                 minRamGb = 12,
                 tags = listOf("图文聊天", "QNN", "QAIRT", "骁龙 NPU", "Qualcomm"),
                 priority = 0,
+                visibleInRecommendations = false,
                 status = RecommendedModelStatus.RECOMMENDED,
                 supportedChipsetCodes = QAIRT_MOBILE_CHIPSETS,
                 group = ModelScopeRecommendedGroup.MAIN_CHAT,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 chatRuntime = RecommendedChatRuntime.GENIEX_QAIRT
+            ),
+            ModelScopeRecommendedModel(
+                id = "qwen3_vl_4b_abliterated_gguf",
+                title = "Qwen3-VL-4B-Instruct 低拒答实验版 · GGUF + mmproj",
+                repoId = "mradermacher/Huihui-Qwen3-VL-4B-Instruct-abliterated-GGUF",
+                revision = QWEN3_VL_4B_ABLITERATED_GGUF_REVISION,
+                description = "社区 abliterated GGUF 图文实验包；发布者标记为 uncensored。主模型与匹配 mmproj-f16 会一起安装，不依赖 QAIRT 或设备白名单，实际图文兼容性以本机 native load 与 smoke 为准。",
+                recommendedFileName = "Huihui-Qwen3-VL-4B-Instruct-abliterated.Q4_K_M.gguf",
+                parameterScale = "4B",
+                quant = "Q4_K_M",
+                minRamGb = 8,
+                tags = listOf("低拒答实验", "图文聊天", "Qwen3-VL", "GGUF", "Hugging Face"),
+                priority = 1,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.MAIN_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.GGUF,
+                visionModelBundle = communityLowRefusalGgufVisionBundle(
+                    id = "qwen3_vl_4b_abliterated_gguf_vision_bundle",
+                    title = "Qwen3-VL 4B 低拒答实验图文包",
+                    repoId = "mradermacher/Huihui-Qwen3-VL-4B-Instruct-abliterated-GGUF",
+                    revision = QWEN3_VL_4B_ABLITERATED_GGUF_REVISION,
+                    mainFileName = "Huihui-Qwen3-VL-4B-Instruct-abliterated.Q4_K_M.gguf",
+                    projectorFileName = "Huihui-Qwen3-VL-4B-Instruct-abliterated.mmproj-f16.gguf"
+                )
             ),
             ModelScopeRecommendedModel(
                 id = "qwen3_4b_2507_qairt_w4a16",
@@ -2085,6 +2369,7 @@ class ModelScopeClient(
                 minRamGb = 16,
                 tags = listOf("纯文本", "中文", "QNN", "QAIRT", "骁龙 NPU", "Qualcomm"),
                 priority = 1,
+                visibleInRecommendations = false,
                 status = RecommendedModelStatus.RECOMMENDED,
                 supportedChipsetCodes = QAIRT_MOBILE_CHIPSETS,
                 group = ModelScopeRecommendedGroup.MAIN_CHAT,
@@ -2092,25 +2377,48 @@ class ModelScopeClient(
                 chatRuntime = RecommendedChatRuntime.GENIEX_QAIRT
             ),
             ModelScopeRecommendedModel(
-                id = "qwen35_4b_q4",
-                title = "Qwen3.5-4B MNN",
-                repoId = "MNN/Qwen3.5-4B-MNN",
-                revision = QWEN35_4B_MNN_REVISION,
-                description = "主力中文多模态聊天模型，速度和内存压力比较均衡；完整 visual 组件就绪后开放图片输入。",
+                id = "qwen3_4b_2507_abliterated_gguf",
+                title = "Qwen3-4B-Instruct-2507 低拒答实验版 · GGUF",
+                repoId = "mradermacher/Huihui-Qwen3-4B-Instruct-2507-abliterated-GGUF",
+                revision = QWEN3_4B_2507_ABLITERATED_GGUF_REVISION,
+                description = "社区 abliterated GGUF 文本实验包；发布者标记为 uncensored。该包不含视觉投影器，不进入 QAIRT 路径，实际加载与生成以本机 llama.cpp runtime 为准。",
+                recommendedFileName = "Huihui-Qwen3-4B-Instruct-2507-abliterated.Q4_K_M.gguf",
+                parameterScale = "4B",
+                quant = "Q4_K_M",
+                minRamGb = 6,
+                tags = listOf("低拒答实验", "文本聊天", "Qwen3", "GGUF", "Hugging Face"),
+                priority = 2,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.MAIN_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.GGUF
+            ),
+            ModelScopeRecommendedModel(
+                id = "qwen35_4b_uncensored_mnn",
+                title = "Qwen3.5-4B 低拒答实验版 · MNN",
+                repoId = "darkmaniac7/Qwen3.5-4B-uncensored-MNN",
+                revision = QWEN35_4B_UNCENSORED_MNN_REVISION,
+                description = "社区 MNN 低拒答实验包；发布者声明其基于 Huihui Qwen3.5 4B abliterated 权重转换。该固定包不含视觉图，当前只提供本地文本聊天，实际加载结果以 native runtime 为准。",
                 recommendedFileName = "config.json",
                 parameterScale = "4B",
                 quant = "MNN",
                 minRamGb = 8,
-                tags = listOf("推荐", "中文", "Qwen3.5", "MNN", "ModelScope"),
+                tags = listOf("低拒答实验", "Qwen3.5", "MNN", "Hugging Face"),
                 priority = 0,
-                status = RecommendedModelStatus.RECOMMENDED,
+                status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.MAIN_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
                 chatRuntime = RecommendedChatRuntime.MNN,
                 mnnModelBundle = MnnModelBundleSpec(
-                    id = "qwen35_4b_mnn_bundle",
-                    title = "Qwen3.5 4B MNN",
-                    repoId = "MNN/Qwen3.5-4B-MNN",
-                    revision = QWEN35_4B_MNN_REVISION
+                    id = "qwen35_4b_uncensored_mnn_bundle",
+                    title = "Qwen3.5 4B 低拒答实验 MNN",
+                    repoId = "darkmaniac7/Qwen3.5-4B-uncensored-MNN",
+                    revision = QWEN35_4B_UNCENSORED_MNN_REVISION,
+                    provider = ModelRepositoryProvider.HUGGING_FACE,
+                    installProfile = MnnModelBundleInstallProfile.TEXT_ONLY,
+                    components = qwen35CommunityMnnComponents(tokenizerFileName = "tokenizer.txt")
                 )
             ),
             ModelScopeRecommendedModel(
@@ -2138,6 +2446,7 @@ class ModelScopeClient(
                 minRamGb = 8,
                 tags = listOf("多模态聊天", "图片输入", "中文", "OpenBMB", "ModelScope"),
                 priority = 1,
+                visibleInRecommendations = false,
                 kind = ModelScopeRecommendedKind.CHAT,
                 status = RecommendedModelStatus.RECOMMENDED,
                 group = ModelScopeRecommendedGroup.MAIN_CHAT,
@@ -2174,6 +2483,33 @@ class ModelScopeClient(
                 )
             ),
             ModelScopeRecommendedModel(
+                id = "minicpm_v46_abliterated_gguf",
+                title = "MiniCPM-V 4.6 低拒答实验版 · GGUF + mmproj",
+                repoId = "mradermacher/Huihui-MiniCPM-V-4.6-abliterated-GGUF",
+                revision = MINICPM_V46_ABLITERATED_GGUF_REVISION,
+                description = "社区 abliterated GGUF 图文实验包；发布者标记为 uncensored。主模型与匹配 mmproj-f16 会作为同一闭包下载，实际图文兼容性以本机 native load 与 smoke 为准。",
+                recommendedFileName = "Huihui-MiniCPM-V-4.6-abliterated.Q4_K_M.gguf",
+                parameterScale = "V-4.6",
+                quant = "Q4_K_M",
+                minRamGb = 8,
+                tags = listOf("低拒答实验", "图文聊天", "MiniCPM-V", "GGUF", "Hugging Face"),
+                priority = 3,
+                kind = ModelScopeRecommendedKind.CHAT,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.MAIN_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.GGUF,
+                visionModelBundle = communityLowRefusalGgufVisionBundle(
+                    id = "minicpm_v46_abliterated_gguf_vision_bundle",
+                    title = "MiniCPM-V 4.6 低拒答实验图文包",
+                    repoId = "mradermacher/Huihui-MiniCPM-V-4.6-abliterated-GGUF",
+                    revision = MINICPM_V46_ABLITERATED_GGUF_REVISION,
+                    mainFileName = "Huihui-MiniCPM-V-4.6-abliterated.Q4_K_M.gguf",
+                    projectorFileName = "Huihui-MiniCPM-V-4.6-abliterated.mmproj-f16.gguf"
+                )
+            ),
+            ModelScopeRecommendedModel(
                 id = "gemma4_e4b_iq4",
                 title = "Gemma 4 E4B IT MNN",
                 repoId = "MNN/gemma-4-E4B-it-MNN",
@@ -2185,6 +2521,7 @@ class ModelScopeClient(
                 minRamGb = 8,
                 tags = listOf("Gemma 4", "多语种", "MNN", "ModelScope"),
                 priority = 2,
+                visibleInRecommendations = false,
                 status = RecommendedModelStatus.RECOMMENDED,
                 group = ModelScopeRecommendedGroup.MAIN_CHAT,
                 chatRuntime = RecommendedChatRuntime.MNN,
@@ -2198,25 +2535,51 @@ class ModelScopeClient(
                 )
             ),
             ModelScopeRecommendedModel(
-                id = "qwen35_9b_q4",
-                title = "Qwen3.5-9B MNN",
-                repoId = "MNN/Qwen3.5-9B-MNN",
-                revision = QWEN35_9B_MNN_REVISION,
-                description = "高质量中文多模态聊天选项，能力更强但资源压力更高；完整 visual 组件就绪后开放图片输入。",
+                id = "gemma4_e4b_uncensored_gguf",
+                title = "Gemma 4 E4B IT 低拒答实验版 · GGUF",
+                repoId = "TrevorJS/gemma-4-E4B-it-uncensored-GGUF",
+                revision = GEMMA4_E4B_UNCENSORED_GGUF_REVISION,
+                description = "社区 norm-preserving abliterated GGUF 文本实验包；发布者提供低拒答评测信息。仅提供文本聊天，仍须遵守上游 Gemma 许可条款，实际加载以本机 native runtime 为准。",
+                recommendedFileName = "gemma-4-E4B-it-uncensored-Q4_K_M.gguf",
+                parameterScale = "E4B",
+                quant = "Q4_K_M",
+                minRamGb = 8,
+                tags = listOf("低拒答实验", "Gemma 4", "文本聊天", "GGUF", "Hugging Face"),
+                priority = 4,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.MAIN_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.GGUF
+            ),
+            ModelScopeRecommendedModel(
+                id = "qwen35_9b_uncensored_mnn",
+                title = "Qwen3.5-9B 低拒答实验版 · MNN",
+                repoId = "darkmaniac7/Qwen3.5-9B-uncensored-MNN",
+                revision = QWEN35_9B_UNCENSORED_MNN_REVISION,
+                description = "社区 MNN 低拒答实验包；发布者声明其基于 Huihui Qwen3.5 9B abliterated 权重转换。包内必须连同独立 embedding 权重安装，当前只提供本地文本聊天，实际加载结果以 native runtime 为准。",
                 recommendedFileName = "config.json",
                 parameterScale = "9B",
                 quant = "MNN",
                 minRamGb = 12,
-                tags = listOf("高质量", "中文", "Qwen3.5", "MNN", "ModelScope"),
+                tags = listOf("低拒答实验", "高质量", "Qwen3.5", "MNN", "Hugging Face"),
                 priority = 0,
-                status = RecommendedModelStatus.RECOMMENDED,
+                status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
                 chatRuntime = RecommendedChatRuntime.MNN,
                 mnnModelBundle = MnnModelBundleSpec(
-                    id = "qwen35_9b_mnn_bundle",
-                    title = "Qwen3.5 9B MNN",
-                    repoId = "MNN/Qwen3.5-9B-MNN",
-                    revision = QWEN35_9B_MNN_REVISION
+                    id = "qwen35_9b_uncensored_mnn_bundle",
+                    title = "Qwen3.5 9B 低拒答实验 MNN",
+                    repoId = "darkmaniac7/Qwen3.5-9B-uncensored-MNN",
+                    revision = QWEN35_9B_UNCENSORED_MNN_REVISION,
+                    provider = ModelRepositoryProvider.HUGGING_FACE,
+                    installProfile = MnnModelBundleInstallProfile.TEXT_ONLY,
+                    components = qwen35CommunityMnnComponents(
+                        tokenizerFileName = "tokenizer.txt",
+                        requiresEmbeddingFile = true
+                    )
                 )
             ),
             ModelScopeRecommendedModel(
@@ -2231,11 +2594,30 @@ class ModelScopeClient(
                 minRamGb = 24,
                 tags = listOf("纯文本", "高质量", "中文", "QNN", "QAIRT", "骁龙 NPU", "Qualcomm"),
                 priority = 2,
+                visibleInRecommendations = false,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 supportedChipsetCodes = QAIRT_MOBILE_CHIPSETS,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 chatRuntime = RecommendedChatRuntime.GENIEX_QAIRT
+            ),
+            ModelScopeRecommendedModel(
+                id = "qwen3_8b_abliterated_gguf",
+                title = "Qwen3-8B 低拒答实验版 · GGUF",
+                repoId = "mradermacher/Huihui-Qwen3-8B-abliterated-v2-GGUF",
+                revision = QWEN3_8B_ABLITERATED_GGUF_REVISION,
+                description = "社区 abliterated v2 GGUF 文本实验包；发布者标记为 uncensored。该包不含视觉投影器，不进入 QAIRT 路径，实际加载与生成以本机 llama.cpp runtime 为准。",
+                recommendedFileName = "Huihui-Qwen3-8B-abliterated-v2.Q4_K_M.gguf",
+                parameterScale = "8B",
+                quant = "Q4_K_M",
+                minRamGb = 8,
+                tags = listOf("低拒答实验", "高质量", "文本聊天", "Qwen3", "GGUF", "Hugging Face"),
+                priority = 1,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.GGUF
             ),
 
             ModelScopeRecommendedModel(
@@ -2250,11 +2632,39 @@ class ModelScopeClient(
                 minRamGb = 24,
                 tags = listOf("图文聊天", "高内存", "QNN", "QAIRT", "Qualcomm"),
                 priority = 3,
+                visibleInRecommendations = false,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 supportedChipsetCodes = QAIRT_MOBILE_CHIPSETS,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 chatRuntime = RecommendedChatRuntime.GENIEX_QAIRT
+            ),
+            ModelScopeRecommendedModel(
+                id = "qwen25_vl_7b_abliterated_gguf",
+                title = "Qwen2.5-VL-7B-Instruct 低拒答实验版 · GGUF + mmproj",
+                repoId = "mradermacher/Qwen2.5-VL-7B-Instruct-abliterated-GGUF",
+                revision = QWEN25_VL_7B_ABLITERATED_GGUF_REVISION,
+                description = "社区 abliterated GGUF 图文实验包；发布者标记为 uncensored。主模型与匹配 mmproj-f16 会一起安装，不依赖 QAIRT 或设备白名单，实际图文兼容性以本机 native load 与 smoke 为准。",
+                recommendedFileName = "Qwen2.5-VL-7B-Instruct-abliterated.Q4_K_M.gguf",
+                parameterScale = "7B",
+                quant = "Q4_K_M",
+                minRamGb = 12,
+                tags = listOf("低拒答实验", "图文聊天", "Qwen2.5-VL", "GGUF", "Hugging Face"),
+                priority = 3,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.GGUF,
+                visionModelBundle = communityLowRefusalGgufVisionBundle(
+                    id = "qwen25_vl_7b_abliterated_gguf_vision_bundle",
+                    title = "Qwen2.5-VL 7B 低拒答实验图文包",
+                    repoId = "mradermacher/Qwen2.5-VL-7B-Instruct-abliterated-GGUF",
+                    revision = QWEN25_VL_7B_ABLITERATED_GGUF_REVISION,
+                    mainFileName = "Qwen2.5-VL-7B-Instruct-abliterated.Q4_K_M.gguf",
+                    projectorFileName = "Qwen2.5-VL-7B-Instruct-abliterated.mmproj-f16.gguf",
+                    smokeTimeoutSeconds = 240
+                )
             ),
 
             ModelScopeRecommendedModel(
@@ -2283,10 +2693,41 @@ class ModelScopeClient(
                 minRamGb = 12,
                 tags = listOf("MoE", "推理蒸馏", "GGUF", "APEX MTP", "第三方"),
                 priority = 1,
+                visibleInRecommendations = false,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
                 provider = ModelRepositoryProvider.MODELSCOPE,
                 chatRuntime = RecommendedChatRuntime.GGUF
+            ),
+            ModelScopeRecommendedModel(
+                id = "qwen36_35b_a3b_abliterated_mnn",
+                title = "Qwen3.6-35B-A3B 低拒答实验版 · MNN",
+                repoId = "darkmaniac7/Qwen3.6-35B-A3B-abliterated-MNN",
+                revision = QWEN36_35B_A3B_ABLITERATED_MNN_REVISION,
+                description = "社区 abliterated 4-bit HQQ MNN 图文实验包；发布者标记为 uncensored，完整包包含视觉塔与 embedding。该大模型仅作实验下载，实际图文兼容性以本机 native load 与 smoke 为准。",
+                recommendedFileName = "config.json",
+                parameterScale = "35B-A3B",
+                quant = "4-bit HQQ MNN",
+                minRamGb = 32,
+                tags = listOf("低拒答实验", "MoE", "图文聊天", "MNN", "Hugging Face"),
+                priority = 2,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.MNN,
+                mnnModelBundle = MnnModelBundleSpec(
+                    id = "qwen36_35b_a3b_abliterated_mnn_bundle",
+                    title = "Qwen3.6 35B-A3B 低拒答实验 MNN 图文包",
+                    repoId = "darkmaniac7/Qwen3.6-35B-A3B-abliterated-MNN",
+                    revision = QWEN36_35B_A3B_ABLITERATED_MNN_REVISION,
+                    provider = ModelRepositoryProvider.HUGGING_FACE,
+                    components = qwen35CommunityMnnComponents(
+                        tokenizerFileName = "tokenizer.mtok",
+                        requiresEmbeddingFile = true,
+                        requiresVision = true
+                    )
+                )
             ),
             ModelScopeRecommendedModel(
                 id = "google_gemma4_26b_a4b_iq2_xxs",
@@ -2300,6 +2741,7 @@ class ModelScopeClient(
                 minRamGb = 12,
                 tags = listOf("Gemma 4", "MoE", "GGUF", "多模态", "mmproj"),
                 priority = 2,
+                visibleInRecommendations = false,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
@@ -2335,6 +2777,34 @@ class ModelScopeClient(
                             fileName = "mmproj-google_gemma-4-26B-A4B-it-f16.gguf"
                         )
                     )
+                )
+            ),
+            ModelScopeRecommendedModel(
+                id = "gemma4_26b_a4b_abliterated_gguf",
+                title = "Gemma 4 26B-A4B 低拒答实验版 · GGUF + mmproj",
+                repoId = "mradermacher/Huihui-gemma-4-26B-A4B-it-abliterated-GGUF",
+                revision = GEMMA4_26B_A4B_ABLITERATED_GGUF_REVISION,
+                description = "社区 abliterated GGUF 图文实验包；主模型与匹配 mmproj-f16 会一起安装。仓库仍受上游 Google Gemma 4 许可条款约束，实际图文兼容性以本机 native load 与 smoke 为准。",
+                recommendedFileName = "Huihui-gemma-4-26B-A4B-it-abliterated.Q4_K_M.gguf",
+                parameterScale = "26B-A4B",
+                quant = "Q4_K_M",
+                minRamGb = 24,
+                tags = listOf("低拒答实验", "Gemma 4", "MoE", "图文聊天", "GGUF", "Hugging Face"),
+                priority = 4,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.GGUF,
+                visionModelBundle = communityLowRefusalGgufVisionBundle(
+                    id = "gemma4_26b_a4b_abliterated_gguf_vision_bundle",
+                    title = "Gemma 4 26B-A4B 低拒答实验图文包",
+                    repoId = "mradermacher/Huihui-gemma-4-26B-A4B-it-abliterated-GGUF",
+                    revision = GEMMA4_26B_A4B_ABLITERATED_GGUF_REVISION,
+                    mainFileName = "Huihui-gemma-4-26B-A4B-it-abliterated.Q4_K_M.gguf",
+                    projectorFileName = "Huihui-gemma-4-26B-A4B-it-abliterated.mmproj-f16.gguf",
+                    smokeImageSize = 896,
+                    smokeTimeoutSeconds = 300
                 )
             ),
             ModelScopeRecommendedModel(
@@ -2545,7 +3015,7 @@ class ModelScopeClient(
                 title = "CyberRealisticXL SDXL QNN 2.28",
                 repoId = "xororz/sdxl-qnn",
                 revision = "ead90f4635e21e7412b8200a5efd220b0193beeb",
-                description = "写实摄影方向的完整 1024×1024 SDXL QNN 包；UNet 与 VAE 使用独立进程执行，安装后以真实 native graph smoke 验证兼容性。",
+                description = "写实摄影方向的 1024×1024 SDXL QNN 实验包；历史真机曾在旧的整张 VAE 输入路径暴露 UNet [1,4,128,128] 与 VAE [1,4,64,64] 形状差异。当前 native 已接入 3×3、共 9 次的 64×64 latent 分块解码与重叠融合兼容路径，但此固定 ZIP 尚待生产 MainActivity 与认证 Local API 复验。下载保持开放且不会静默切换模型。",
                 recommendedFileName = "cyber_realistic_v10_qnn2.28_8gen3.zip",
                 parameterScale = "SDXL",
                 quant = "QNN 2.28",
@@ -2554,6 +3024,7 @@ class ModelScopeClient(
                 priority = 3,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.EXPERIMENTAL,
+                visibleInRecommendations = true,
                 supportedChipsetCodes = SDXL_QNN_CHIPSETS,
                 downloadPolicy = RecommendedModelDownloadPolicy.ANY_SNAPDRAGON,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
@@ -2575,7 +3046,7 @@ class ModelScopeClient(
                 title = "Qualcomm Stable Diffusion 1.5 · 骁龙 8 Elite Gen 5",
                 repoId = "qualcomm/Stable-Diffusion-v1.5",
                 revision = "1815ed2af65018733338c37efacf62310e74bc94",
-                description = "骁龙 8 Elite Gen 5 写实与通用生图官方包；MCA 已完成 text encoder、UNet 与 VAE 的真实 QNN HTP 生图回归。",
+                description = "Qualcomm 固定发布的 Gen5 SD1.5 QNN 包；目录已声明 text encoder、UNet、VAE 资产与执行 profile，尚无生产 MainActivity 和认证 Local API 的真机出图证据。下载保持开放，首次运行以真实 native load/graph execution 结果为准。",
                 recommendedFileName = "stable_diffusion_v1_5-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
                 parameterScale = "SD1.5",
                 quant = "w8a16 QAIRT 2.45",
@@ -2583,7 +3054,8 @@ class ModelScopeClient(
                 tags = listOf("写实", "通用生图", "Gen5", "QNN", "骁龙 NPU", "Qualcomm"),
                 priority = 0,
                 kind = ModelScopeRecommendedKind.IMAGE,
-                status = RecommendedModelStatus.RECOMMENDED,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                visibleInRecommendations = true,
                 supportedChipsetCodes = GEN5_QNN_CHIPSETS,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 downloadable = true,
@@ -2602,7 +3074,7 @@ class ModelScopeClient(
                 title = "Qualcomm Stable Diffusion 2.1 · 骁龙 8 Elite Gen 5",
                 repoId = "qualcomm/Stable-Diffusion-v2.1",
                 revision = "5c79668b496a31d4570b06d5b2919ea393166b36",
-                description = "骁龙 8 Elite Gen 5 通用与艺术风格官方生图包；MCA 已完成 text encoder、UNet 与 VAE 的真实 QNN HTP 生图回归。",
+                description = "Qualcomm 固定发布的 Gen5 SD2.1 QNN 包；目录已声明 text encoder、UNet、VAE 资产与执行 profile，尚无生产 MainActivity 和认证 Local API 的真机出图证据。下载保持开放，首次运行以真实 native load/graph execution 结果为准。",
                 recommendedFileName = "stable_diffusion_v2_1-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
                 parameterScale = "SD2.1",
                 quant = "w8a16 QAIRT 2.45",
@@ -2610,7 +3082,8 @@ class ModelScopeClient(
                 tags = listOf("艺术风格", "通用生图", "Gen5", "QNN", "骁龙 NPU", "Qualcomm"),
                 priority = 1,
                 kind = ModelScopeRecommendedKind.IMAGE,
-                status = RecommendedModelStatus.RECOMMENDED,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                visibleInRecommendations = true,
                 supportedChipsetCodes = GEN5_QNN_CHIPSETS,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 downloadable = true,
@@ -2630,7 +3103,7 @@ class ModelScopeClient(
                 title = "Qualcomm ControlNet Canny · 骁龙 8 Elite Gen 5",
                 repoId = "qualcomm/ControlNet-Canny",
                 revision = "2e0b3bb550cad49caf0f2e135d1f67bced02e61e",
-                description = "Gen5 QNN Canny 控制图生图包；边缘预处理、ControlNet residual 注入与强度参数已接线，首次运行由真实 native graph 结果确认。",
+                description = "Qualcomm 固定发布的 Gen5 ControlNet Canny QNN 包；目录已声明控制图任务与 graph 组件，Canny 预处理、residual 注入及强度参数的产品输入链尚无生产 UI/API 真机执行证据。下载保持开放，首次运行以真实 native graph 结果为准。",
                 recommendedFileName = "controlnet_canny-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
                 parameterScale = "ControlNet",
                 quant = "w8a16 QAIRT 2.45",
@@ -2639,6 +3112,7 @@ class ModelScopeClient(
                 priority = 2,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.EXPERIMENTAL,
+                visibleInRecommendations = true,
                 supportedChipsetCodes = GEN5_QNN_CHIPSETS,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 downloadable = true,
@@ -2687,17 +3161,19 @@ class ModelScopeClient(
                 title = "Stable Diffusion Turbo · 512×512",
                 repoId = "AI-ModelScope/sd-turbo",
                 revision = "dc8a205ed5961a45a1b99c2913a194e616bd284b",
-                description = "Stable Diffusion 2.1 蒸馏文生图模型。512×512、4-step、CFG 1.0 的 conditional-only 路径已完成三次冷启动真机出图；384×384 尚未验证。允许实验下载和手动选择，不会自动设为默认引擎。",
+                description = "Stable Diffusion 2.1 蒸馏文生图模型；当前目录默认 512×512、4-step、CFG 1.0、Euler ancestral。现有归档仅证明 debug worker 以 1-step/Euler 产图，尚未证明当前预设在生产 MainActivity 与认证 Local API 的闭环。下载保持开放，不会自动设为默认引擎。",
                 recommendedFileName = "sd_turbo.safetensors",
                 parameterScale = "SD-Turbo",
                 quant = "FP16",
                 minRamGb = 8,
-                tags = listOf("本地生图", "Stable Diffusion Turbo", "direct 512 已验证", "四步生成", "CPU", "ModelScope", "实验"),
+                tags = listOf("本地生图", "Stable Diffusion Turbo", "当前 512 四步预设", "CPU", "ModelScope", "实验"),
                 priority = 0,
                 kind = ModelScopeRecommendedKind.IMAGE,
-                status = RecommendedModelStatus.RECOMMENDED,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                visibleInRecommendations = true,
                 provider = ModelRepositoryProvider.MODELSCOPE,
                 downloadable = true,
+                downloadBlockReason = null,
                 localImageEngineTier = LocalImageEngineTier.STANDARD,
                 imageEngineBundle = ImageEngineBundleSpec(
                     id = "sd_turbo_512_experimental_bundle",
@@ -2731,7 +3207,7 @@ class ModelScopeClient(
                 title = "Sana Edit V2 · MNN",
                 repoId = "MNN/MNN-Sana-Edit-V2",
                 revision = SANA_EDIT_V2_REVISION,
-                description = "ModelScope 官方 MNN Sana 卡通风格图像编辑包；默认 512×512、10-step、CFG 4.5，完整下载 llm、VAE encoder、transformer 与 VAE decoder，选择原图后运行本地编辑。",
+                description = "ModelScope 官方 MNN Sana 卡通风格图像编辑包；目录声明默认 512×512、10-step、CFG 4.5，并完整下载 llm、VAE encoder、transformer 与 VAE decoder。当前尚无生产 MainActivity 与认证 Local API 的真实编辑证据；下载保持开放，首次运行以真实 native 结果为准。",
                 recommendedFileName = "transformer.mnn",
                 parameterScale = "Sana Edit V2",
                 quant = "MNN",
@@ -2739,7 +3215,7 @@ class ModelScopeClient(
                 tags = listOf("本地图像编辑", "Sana", "MNN", "ModelScope", "512x512", "VAE Encoder"),
                 priority = 2,
                 kind = ModelScopeRecommendedKind.IMAGE,
-                status = RecommendedModelStatus.RECOMMENDED,
+                status = RecommendedModelStatus.EXPERIMENTAL,
                 visibleInRecommendations = true,
                 provider = ModelRepositoryProvider.MODELSCOPE,
                 downloadable = true,

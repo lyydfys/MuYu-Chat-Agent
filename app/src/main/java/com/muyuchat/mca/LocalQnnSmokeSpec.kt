@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import java.io.File
+import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -88,6 +89,8 @@ internal data class QnnSmokeValidationReport(
 internal data class QnnSmokeSpec(
     val graphName: String = "",
     val contextBinary: String = "",
+    val expectedContextSizeBytes: Long? = null,
+    val expectedContextSha256: String? = null,
     val timeoutSeconds: Int = 60,
     val inputs: List<QnnSmokeTensorSpec> = emptyList(),
     val outputs: List<QnnSmokeTensorSpec> = emptyList()
@@ -107,6 +110,17 @@ internal data class QnnSmokeSpec(
                     add("QNN smoke contextBinary is required.")
                 } else if (!contextBinary.isSafeBundleRelativePath()) {
                     add("QNN smoke contextBinary must be a safe relative bundle path.")
+                }
+                if ((expectedContextSizeBytes == null) != (expectedContextSha256 == null)) {
+                    add("QNN smoke context identity must declare both size and SHA-256 or neither.")
+                }
+                expectedContextSizeBytes?.let { size ->
+                    if (size <= 0L) add("QNN smoke expected context size must be positive.")
+                }
+                expectedContextSha256?.let { sha256 ->
+                    if (!sha256.matches(Regex("^[0-9a-f]{64}$"))) {
+                        add("QNN smoke expected context SHA-256 must use lowercase hexadecimal.")
+                    }
                 }
                 if (inputs.isEmpty()) add("QNN smoke requires at least one input tensor.")
                 if (outputs.isEmpty()) add("QNN smoke requires at least one output tensor.")
@@ -132,6 +146,10 @@ internal data class QnnSmokeSpec(
     fun toJson(): JSONObject = JSONObject()
         .put("graphName", graphName)
         .put("contextBinary", contextBinary)
+        .also { json ->
+            expectedContextSizeBytes?.let { json.put("expectedContextSizeBytes", it) }
+            expectedContextSha256?.let { json.put("expectedContextSha256", it) }
+        }
         .put("timeoutSeconds", timeoutSeconds)
         .put("inputs", JSONArray(inputs.map { it.toJson() }))
         .put("outputs", JSONArray(outputs.map { it.toJson() }))
@@ -153,6 +171,9 @@ internal data class QnnSmokeSpec(
                     .ifBlank { smoke.optString("graph").ifBlank { smoke.optString("name") } },
                 contextBinary = smoke.optString("contextBinary")
                     .ifBlank { smoke.optString("context").ifBlank { smoke.optString("contextPath") } },
+                expectedContextSizeBytes = smoke.optLongOrNull("expectedContextSizeBytes"),
+                expectedContextSha256 = smoke.optString("expectedContextSha256")
+                    .takeIf(String::isNotBlank),
                 timeoutSeconds = smoke.optInt("timeoutSeconds", 60).coerceAtLeast(1),
                 inputs = smoke.optJSONArray("inputs").toTensorSpecs(defaultRole = "input"),
                 outputs = smoke.optJSONArray("outputs").toTensorSpecs(defaultRole = "output")
@@ -167,9 +188,13 @@ internal fun QnnSmokeSpec.contextBinaryFileIn(bundleRoot: File): File? {
     val rootCanonical = runCatching { bundleRoot.canonicalFile }.getOrNull() ?: return null
     val candidate = runCatching { File(rootCanonical, normalized).canonicalFile }.getOrNull() ?: return null
     return candidate.takeIf {
-        it.isFile &&
+            it.isFile &&
             it.length() > 0L &&
-            (it.path == rootCanonical.path || it.path.startsWith(rootCanonical.path + File.separator))
+            (it.path == rootCanonical.path || it.path.startsWith(rootCanonical.path + File.separator)) &&
+            expectedContextSizeBytes?.let { expected -> it.length() == expected } != false &&
+            expectedContextSha256?.let { expected ->
+                runCatching { it.sha256Lowercase() == expected }.getOrDefault(false)
+            } != false
     }
 }
 
@@ -283,6 +308,22 @@ private fun JSONObject.optDoubleOrNull(name: String): Double? =
 
 private fun JSONObject.optIntOrNull(name: String): Int? =
     if (has(name)) optInt(name) else null
+
+private fun JSONObject.optLongOrNull(name: String): Long? =
+    if (has(name)) optLong(name) else null
+
+private fun File.sha256Lowercase(): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    inputStream().buffered().use { input ->
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (count > 0) digest.update(buffer, 0, count)
+        }
+    }
+    return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+}
 
 private fun List<QnnSmokeTensorSpec>.missingRequiredTensorReasons(role: String): List<String> =
     flatMapIndexed { index, tensor ->

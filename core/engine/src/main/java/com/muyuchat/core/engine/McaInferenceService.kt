@@ -25,34 +25,6 @@ import java.security.MessageDigest
 import java.util.UUID
 import kotlin.math.max
 
-/**
- * Conservative fallback used before a runtime tokenizer is available.
- *
- * CJK/kana/hangul and supplementary code points are dense token domains,
- * while ordinary Latin text is usually closer to three or four characters
- * per token.  Treating every two UTF-16 code units as a token rejected valid
- * long English documents at more than twice the native MNN token count.
- */
-internal fun estimateLocalPromptTokens(text: String): Int {
-    if (text.isEmpty()) return 1
-    var denseTokens = 0
-    var sparseCharacters = 0
-    var index = 0
-    while (index < text.length) {
-        val codePoint = Character.codePointAt(text, index)
-        when {
-            codePoint in 0x3400..0x9FFF ||
-                codePoint in 0xF900..0xFAFF ||
-                codePoint in 0x3040..0x30FF ||
-                codePoint in 0xAC00..0xD7AF -> denseTokens += 1
-            Character.isSupplementaryCodePoint(codePoint) -> denseTokens += 2
-            else -> sparseCharacters += 1
-        }
-        index += Character.charCount(codePoint)
-    }
-    return max(1, denseTokens + (sparseCharacters + 2) / 3)
-}
-
 data class LocalChatExecutionContext(
     val requestId: String = UUID.randomUUID().toString(),
     val loadAuthorization: LoadAuthorization? = null,
@@ -61,6 +33,8 @@ data class LocalChatExecutionContext(
     val hotOverrideAuthorization: HotOverrideAuthorization? = null,
     val pendingProfileDisposition: PendingProfileDisposition = PendingProfileDisposition.COMMIT_ON_VISIBLE_SUCCESS,
     val lifecycleLease: EngineLifecycleLease? = null,
+    /** Deterministic internal transforms such as prompt translation must not receive wall-clock text. */
+    val includeDeviceClockContext: Boolean = true,
     /**
      * Optional request-scoped observer for privacy-reviewed local-vision preparation diagnostics.
      * The engine isolates observer failures from inference and gives this sink its own JSON copy so
@@ -224,12 +198,14 @@ class McaInferenceService(
     ): HotOverrideAuthorization = parameterCoordinator.createHotOverrideAuthorization(profile, values)
 
     /**
-     * Stops an in-flight request, then waits until the real engine lifecycle is
-     * exclusively owned. Pass the returned lease through LocalChatExecutionContext
-     * for canary generation and always release it in a finally block.
+     * Waits until the real engine lifecycle is exclusively owned. Formal candidate evaluation may
+     * preempt an active stream; deterministic background transforms use the non-preemptive mode so
+     * timing out while waiting can never stop another caller's generation.
      */
-    suspend fun acquireExclusiveLifecycleLease(): EngineLifecycleLease {
-        stopGeneration()
+    suspend fun acquireExclusiveLifecycleLease(
+        stopActiveGeneration: Boolean = true
+    ): EngineLifecycleLease {
+        if (stopActiveGeneration) stopGeneration()
         val owner = Any()
         mutex.lock(owner)
         return EngineLifecycleLease(this, owner)
@@ -587,11 +563,35 @@ class McaInferenceService(
                 return@lifecycle
             }
 
+            val deviceClockContext = if (executionContext.includeDeviceClockContext) {
+                deviceClockContextProvider.contextFor(request.messages)
+            } else {
+                ""
+            }
             val requestWithRuntimeContext = request.copy(
-                runtimeSystemContext = deviceClockContextProvider.contextFor(request.messages)
+                runtimeSystemContext = listOf(request.runtimeSystemContext, deviceClockContext)
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n\n")
             )
 
-            val incomingHasImageAttachments = requestWithRuntimeContext.hasImageAttachments()
+            val contextAdmission = localContextWindowAdmission(requestWithRuntimeContext)
+            if (!contextAdmission.isAccepted) {
+                val message = contextAdmission.userMessage
+                    ?: "\u5f53\u524d\u8bf7\u6c42\u65e0\u6cd5\u653e\u5165\u672c\u5730\u6a21\u578b\u4e0a\u4e0b\u6587\u3002"
+                val errorStats = current.copy(lastError = message)
+                _stats.value = errorStats
+                emit(
+                    GenerateEvent.Error(
+                        message = message,
+                        stats = errorStats,
+                        code = CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
+                    )
+                )
+                return@lifecycle
+            }
+            val contextSafeRequest = contextAdmission.request
+
+            val incomingHasImageAttachments = contextSafeRequest.hasImageAttachments()
             if (activeRuntime == LocalChatRuntime.MNN_CPU && mnnSessionNeedsReloadBeforeNextRequest) {
                 val reloadError = reloadActiveMnnSessionForNextRequestLocked()
                 if (reloadError != null) {
@@ -716,7 +716,7 @@ class McaInferenceService(
                 runCatching {
                     withContext(io) {
                         LocalVisionInputPreparer.prepare(
-                            request = requestWithRuntimeContext,
+                            request = contextSafeRequest,
                             cacheDir = appContext.cacheDir,
                             diagnosticSink = { stage, details ->
                                 dispatchVisionDiagnostic(executionContext, stage, details)
@@ -731,17 +731,9 @@ class McaInferenceService(
                     return@lifecycle
                 }
             } else {
-                requestWithRuntimeContext
+                contextSafeRequest
             }
-
-            val protected = protectContext(requestWithVisionFiles)
-            if (protected.error != null) {
-                val errorStats = current.copy(lastError = protected.error)
-                _stats.value = errorStats
-                emit(GenerateEvent.Error(protected.error, errorStats))
-                return@lifecycle
-            }
-            val activeRequest = protected.request
+            val activeRequest = requestWithVisionFiles
             val runner = runnerFor(activeRuntime)
 
             val started = System.currentTimeMillis()
@@ -1621,62 +1613,6 @@ class McaInferenceService(
         return "qairt" in devices && ("npu" in devices || "htp" in devices)
     }
 
-    private fun protectContext(request: ChatRequest): ContextProtection {
-        val budget = localContextWindowBudget(request.params.nCtx)
-        val nCtx = budget.contextLength
-        val promptBudget = budget.promptBudgetTokens
-        if (promptBudget < budget.minimumPromptBudgetTokens) {
-            return ContextProtection(
-                request = request,
-                error = "上下文预算过小：n_ctx=$nCtx。请提高 n_ctx，或缩短上传文件/历史对话。"
-            )
-        }
-
-        val systemMessages = request.messages.filter { it.role == Role.SYSTEM }
-        val turnMessages = request.messages.filterNot { it.role == Role.SYSTEM }
-        val systemTokens = systemMessages.sumOf { estimateTokens(it.content).toLong() } +
-            estimateTokens(request.params.systemPrompt).toLong() +
-            estimateTokens(request.runtimeSystemContext).toLong() +
-            REASONING_INSTRUCTION_ESTIMATE_TOKENS.toLong()
-        if (systemTokens > promptBudget.toLong()) {
-            return ContextProtection(
-                request = request,
-                error = "系统提示和运行时上下文约 $systemTokens token，超过 n_ctx=$nCtx 的安全提示预算。请缩短系统提示，或提高 n_ctx。"
-            )
-        }
-        val latestTurn = turnMessages.lastOrNull()
-        if (latestTurn != null && systemTokens + estimateTokens(latestTurn.content).toLong() > promptBudget.toLong()) {
-            return ContextProtection(
-                request = request,
-                error = "当前输入约 ${estimateTokens(latestTurn.content)} token，超过本机安全上下文预算。请缩短上传文件/问题，或在参数页提高 n_ctx。"
-            )
-        }
-
-        val estimated = systemTokens + turnMessages.sumOf { estimateTokens(it.content).toLong() }
-        if (estimated <= promptBudget.toLong()) return ContextProtection(request)
-
-        var used = systemTokens
-        val keptReversed = mutableListOf<ChatMessage>()
-        for (message in turnMessages.asReversed()) {
-            val cost = estimateTokens(message.content).toLong()
-            if (used + cost <= promptBudget.toLong()) {
-                keptReversed += message
-                used += cost
-            }
-        }
-        if (keptReversed.isEmpty() && turnMessages.isNotEmpty()) {
-            return ContextProtection(
-                request = request,
-                error = "历史上下文过长，且最新消息无法放入当前 n_ctx=$nCtx。请新建对话或降低文件长度。"
-            )
-        }
-        val trimmedMessages = systemMessages + keptReversed.asReversed()
-        return ContextProtection(
-            request = request.copy(messages = trimmedMessages),
-            trimmedMessages = request.messages.size - trimmedMessages.size
-        )
-    }
-
     private fun formatMb(kb: Long): String = "%.0f MB".format(kb / 1024.0)
 
     private fun mergeNativeStats(
@@ -1769,12 +1705,6 @@ class McaInferenceService(
                 action = "review_parameters"
             )
         }
-
-    private data class ContextProtection(
-        val request: ChatRequest,
-        val error: String? = null,
-        val trimmedMessages: Int = 0
-    )
 
     private data class PreflightRejectionPresentation(
         val message: String,
@@ -1884,6 +1814,7 @@ class McaInferenceService(
         .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private companion object {
+        private const val CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
         private const val REASONING_INSTRUCTION_ESTIMATE_TOKENS = 96
         private const val LOW_MEMORY_START_GUARD_KB = 384L * 1024L
         private const val LOW_MEMORY_RUNTIME_STOP_KB = 256L * 1024L

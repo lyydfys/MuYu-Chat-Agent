@@ -31,5 +31,23 @@ int main() {
     assert(cleanup_names[3] == "unet_context_release_before");
     assert(cleanup_names[4] == "backend_release_before");
     assert(cleanup_names[5] == "runtime_unload_before");
+    const uint64_t preview = mca::qnn::image_stage_bit(ImageStage::PreviewVaeGraphExecute);
+    const auto preview_names = mca::qnn::image_stage_names(preview);
+    assert(preview_names.size() == 1);
+    assert(preview_names[0] == "preview_vae_graph_execute");
+    uint64_t encoder = 0;
+    encoder |= mca::qnn::image_stage_bit(ImageStage::EncoderBinaryMmap);
+    encoder |= mca::qnn::image_stage_bit(ImageStage::EncoderGraphExecute);
+    const auto encoder_names = mca::qnn::image_stage_names(encoder);
+    assert(encoder_names.size() == 2);
+    assert(encoder_names[0] == "encoder_context_binary_mmap");
+    assert(encoder_names[1] == "encoder_graph_execute");
+    assert(mca::qnn::image_stage_bit(ImageStage::EncoderGraphExecute) ==
+           (UINT64_C(1) << 63u));
+    assert(mca::qnn::image_stage_mask_hex(
+               mca::qnn::image_stage_bit(ImageStage::EncoderGraphExecute)) ==
+           "8000000000000000");
+    assert(mca::qnn::image_stage_mask_hex(UINT64_C(511)) == "00000000000001ff");
+    assert(mca::qnn::image_stage_mask_hex(UINT64_C(1023)) == "00000000000003ff");
     return 0;
 }

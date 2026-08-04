@@ -35,13 +35,19 @@ if(DEFINED ANDROID_ABI)
 endif()
 
 add_library(mca_native SHARED native_engine.cpp)
+add_library(mca_prompt_handoff SHARED mnn_qnn_prompt_handoff.cpp)
+target_compile_definitions(mca_prompt_handoff PRIVATE MCA_PROMPT_HANDOFF_BUILDING=1)
 add_library(mca_mnn_native SHARED mnn_native_engine.cpp)
 add_library(mca_qnn_native SHARED qnn_native_bridge.cpp)
+target_link_libraries(mca_mnn_native PRIVATE mca_prompt_handoff)
+target_link_libraries(mca_qnn_native PRIVATE mca_prompt_handoff)
 target_sources(mca_mnn_native PRIVATE
         image_conditioning.cpp
+        textual_inversion_conditioning.cpp
         diffusion_scheduler.cpp)
 target_sources(mca_qnn_native PRIVATE
         image_conditioning.cpp
+        textual_inversion_conditioning.cpp
         image_execution_math.cpp
         qnn_controlnet_execution.cpp
         diffusion_scheduler.cpp)
@@ -79,7 +85,8 @@ else()
 endif()
 target_link_libraries(mca_qnn_native PRIVATE android log dl)
 target_include_directories(mca_qnn_native PRIVATE
-        "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/stable-diffusion.cpp/thirdparty")
+        "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/stable-diffusion.cpp/thirdparty"
+        "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/llama.cpp/vendor")
 set(MCA_QNN_INCLUDE_DIR "")
 foreach(QNN_INCLUDE_CANDIDATE
         "${MCA_QNN_SDK_ROOT}/include"
@@ -198,6 +205,7 @@ set(MCA_MNN_DIFFUSION_SAFE_SRC "${CMAKE_CURRENT_LIST_DIR}/mnn_stable_diffusion_s
 set(MCA_MNN_SANA_DIFFUSION_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/diffusion/engine/src/sana_diffusion.cpp")
 set(MCA_MNN_DIFFUSION_OFFICIAL_TOKENIZER_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/diffusion/engine/src/tokenizer.cpp")
 set(MCA_MNN_DIFFUSION_SCHEDULER_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/diffusion/engine/src/scheduler.cpp")
+set(MCA_MNN_LLM_TOKENIZER_HEADER "${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/src/tokenizer/tokenizer.hpp")
 set(MCA_MNN_LLM_TOKENIZER_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/src/tokenizer/tokenizer.cpp")
 set(MCA_MNN_LLM_UNICODE_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/src/tokenizer/unicode.cpp")
 set(MCA_MNN_LLM_UNICODE_DATA_SRC "${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/src/tokenizer/unicode_data.cpp")
@@ -299,6 +307,7 @@ if(ANDROID_ABI STREQUAL "arm64-v8a" AND EXISTS "${MCA_MNN_LLM_HEADER}" AND MCA_M
             AND EXISTS "${MCA_MNN_SANA_DIFFUSION_SRC}"
             AND EXISTS "${MCA_MNN_DIFFUSION_OFFICIAL_TOKENIZER_SRC}"
             AND EXISTS "${MCA_MNN_DIFFUSION_SCHEDULER_SRC}"
+            AND EXISTS "${MCA_MNN_LLM_TOKENIZER_HEADER}"
             AND EXISTS "${MCA_MNN_LLM_TOKENIZER_SRC}"
             AND EXISTS "${MCA_MNN_LLM_UNICODE_SRC}"
             AND EXISTS "${MCA_MNN_LLM_UNICODE_DATA_SRC}"
@@ -306,6 +315,7 @@ if(ANDROID_ABI STREQUAL "arm64-v8a" AND EXISTS "${MCA_MNN_LLM_HEADER}" AND MCA_M
             AND EXISTS "${MCA_MNN_CV_IMGCODECS_SRC}")
         message(STATUS "MCA building MNN Stable Diffusion safe runner shim.")
         target_sources(mca_mnn_native PRIVATE
+                "${CMAKE_CURRENT_LIST_DIR}/mnn_diffusion_tokenizer.cpp"
                 "${MCA_MNN_SANA_SESSION_SRC}"
                 "${MCA_MNN_DIFFUSION_SAFE_SRC}"
                 # The local engine owns Diffusion's base/factory symbols so the

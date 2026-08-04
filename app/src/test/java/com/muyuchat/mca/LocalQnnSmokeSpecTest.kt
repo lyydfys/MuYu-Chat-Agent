@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import java.io.File
 import java.nio.file.Files
+import java.security.MessageDigest
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -129,6 +130,47 @@ class LocalQnnSmokeSpecTest {
 
         assertFalse(spec.validation.readyForNativeSmoke)
         assertTrue(spec.validation.blockingReasons.any { it.contains("Duplicate input tensor name: latent") })
+    }
+
+    @Test
+    fun qnnSmokeContextIdentityRequiresAnExactSizeAndShaPair() {
+        val root = Files.createTempDirectory("qnn-smoke-context-identity").toFile()
+        val context = File(root, "vae_encoder.bin").apply {
+            writeBytes("encoder-bytes".toByteArray())
+        }
+        val sha256 = MessageDigest.getInstance("SHA-256")
+            .digest(context.readBytes())
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        val valid = QnnSmokeSpec.fromSmokeJson(
+            JSONObject()
+                .put("graphName", "model")
+                .put("contextBinary", "vae_encoder.bin")
+                .put("expectedContextSizeBytes", context.length())
+                .put("expectedContextSha256", sha256)
+                .put("inputs", org.json.JSONArray().put(
+                    JSONObject()
+                        .put("name", "input")
+                        .put("dataType", "uint16")
+                        .put("shape", org.json.JSONArray(listOf(1, 3, 512, 512)))
+                ))
+                .put("outputs", org.json.JSONArray().put(
+                    JSONObject()
+                        .put("name", "mean")
+                        .put("dataType", "uint16")
+                        .put("shape", org.json.JSONArray(listOf(1, 4, 64, 64)))
+                ))
+        )
+
+        assertTrue(valid.completeForGraphSmoke)
+        assertEquals(context.canonicalFile, valid.contextBinaryFileIn(root))
+        assertEquals(context.length(), valid.toJson().getLong("expectedContextSizeBytes"))
+        assertEquals(sha256, valid.toJson().getString("expectedContextSha256"))
+
+        context.appendText("changed")
+        assertEquals(null, valid.contextBinaryFileIn(root))
+
+        val missingSha = valid.copy(expectedContextSha256 = null)
+        assertFalse(missingSha.validation.readyForNativeSmoke)
     }
 
     @Test
@@ -553,6 +595,45 @@ class LocalQnnSmokeSpecTest {
         assertFalse(result.smokePassed)
         assertFalse(result.provesNpuExecution)
         assertFalse(QnnExecutionDiagnostics.from(result).graphExecuted)
+    }
+
+    @Test
+    fun nativeSmokeRequiresCompleteStrictContextMetadataAndOutputProofWhenReported() {
+        fun result(
+            contextRequired: Boolean = false,
+            contextMatched: Boolean = true,
+            metadataMatched: Boolean = true,
+            outputFinite: Boolean = true,
+            outputPassed: Boolean = true,
+            nonZeroElements: Int = 4
+        ): NativeQnnSmokeResult =
+            NativeQnnSmokeResult.fromJson(
+                JSONObject()
+                    .put("message", "strict smoke")
+                    .put("runnerReady", true)
+                    .put("graphRunnerReady", true)
+                    .put("graphExecute", true)
+                    .put("npuActive", true)
+                    .put("smokePassed", true)
+                    .put("smokeSpec", JSONObject()
+                        .put("contextIdentityRequired", contextRequired)
+                        .put("contextIdentityMatched", contextMatched)
+                        .put("metadataContractMatched", metadataMatched)
+                        .put("outputValuesFinite", outputFinite)
+                        .put("outputValidationPassed", outputPassed)
+                        .put("nonZeroOutputElements", nonZeroElements)
+                    )
+                    .toString()
+            )
+
+        assertTrue(result().provesNpuExecution)
+        assertFalse(result(metadataMatched = false, outputPassed = true).provesNpuExecution)
+        assertFalse(result(metadataMatched = true, outputPassed = false).provesNpuExecution)
+        assertFalse(result(outputFinite = false).provesNpuExecution)
+        assertFalse(result(nonZeroElements = 0).provesNpuExecution)
+        assertFalse(
+            result(contextRequired = true, contextMatched = false).provesNpuExecution
+        )
     }
 
     private fun File.touch(name: String): File =

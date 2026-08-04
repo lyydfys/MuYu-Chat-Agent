@@ -26,7 +26,8 @@ private val safeShareFileCharacterPattern = Regex("[^A-Za-z0-9._-]+")
  */
 internal fun createCachedImageShareIntent(
     context: Context,
-    image: ImageAssetUiItem
+    image: ImageAssetUiItem,
+    includePrompt: Boolean = false
 ): Result<Intent> = runCatching {
     val appContext = context.applicationContext
     val sourceUri = Uri.parse(image.uriString.trim())
@@ -71,27 +72,48 @@ internal fun createCachedImageShareIntent(
             appContext.packageName + FILE_PROVIDER_AUTHORITY_SUFFIX,
             shareFile
         )
-        val clip = ClipData.newUri(
-            appContext.contentResolver,
-            image.name.take(128).ifBlank { "MCA image" },
-            contentUri
+        createImageShareChooserIntent(
+            context = appContext,
+            contentUri = contentUri,
+            mimeType = mimeType,
+            displayName = image.name,
+            prompt = image.prompt,
+            includePrompt = includePrompt
         )
-        val sendIntent = Intent(Intent.ACTION_SEND).apply {
-            type = mimeType
-            putExtra(Intent.EXTRA_STREAM, contentUri)
-            image.prompt.takeIf(String::isNotBlank)?.let { putExtra(Intent.EXTRA_TEXT, it) }
-            clipData = clip
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        Intent.createChooser(sendIntent, "分享图片").apply {
-            clipData = clip
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
     } catch (error: Throwable) {
         shareFile.delete()
         throw error
     }
 }
+
+internal fun createImageShareChooserIntent(
+    context: Context,
+    contentUri: Uri,
+    mimeType: String,
+    displayName: String,
+    prompt: String,
+    includePrompt: Boolean = false
+): Intent {
+    val clip = ClipData.newUri(
+        context.contentResolver,
+        displayName.take(128).ifBlank { "MCA image" },
+        contentUri
+    )
+    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+        type = mimeType
+        putExtra(Intent.EXTRA_STREAM, contentUri)
+        imageSharePromptOrNull(prompt, includePrompt)?.let { putExtra(Intent.EXTRA_TEXT, it) }
+        clipData = clip
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    return Intent.createChooser(sendIntent, "分享图片").apply {
+        clipData = clip
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+}
+
+internal fun imageSharePromptOrNull(prompt: String, includePrompt: Boolean = false): String? =
+    prompt.takeIf { includePrompt && it.isNotBlank() }
 
 private fun openSharedImageInput(context: Context, uri: Uri): InputStream =
     when (uri.scheme?.lowercase(Locale.US)) {

@@ -95,6 +95,7 @@ android {
             keepDebugSymbols += setOf(
                 "**/libmca_native.so",
                 "**/libmca_mnn_native.so",
+                "**/libmca_prompt_handoff.so",
                 "**/libmca_qnn_native.so",
                 "**/libmca_sd_native.so",
                 "**/libMNN.so",

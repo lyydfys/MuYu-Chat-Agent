@@ -45,6 +45,8 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -60,6 +62,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -109,6 +113,9 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.DateRangePicker
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -128,10 +135,12 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDateRangePickerState
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -154,6 +163,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
@@ -161,10 +171,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role as SemanticsRole
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -173,6 +186,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -186,14 +203,21 @@ import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.currentCoroutineContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Calendar
 import org.json.JSONArray
 import org.json.JSONObject
@@ -215,12 +239,17 @@ data class ChatUiState(
     val existingImageModelIds: Set<String> = emptySet(),
     val assistants: List<AssistantUiItem> = emptyList(),
     val selectedAssistantId: String = "default",
+    val worldBooks: List<WorldBookUiItem> = emptyList(),
+    val knowledgeBases: List<KnowledgeBaseUiItem> = emptyList(),
     val images: List<ImageAssetUiItem> = emptyList(),
     val generationHistoryInputUris: Set<String> = emptySet(),
     val imageLibraryBackup: ImageLibraryBackupUiState = ImageLibraryBackupUiState(),
     val imageLoras: List<ImageLoraUiItem> = emptyList(),
     val imageLoraImporting: Boolean = false,
     val imageLoraMessage: String = "",
+    val imageTextualInversions: List<ImageTextualInversionUiItem> = emptyList(),
+    val imageTextualInversionImporting: Boolean = false,
+    val imageTextualInversionMessage: String = "",
     val imageUpscalers: List<ImageUpscalerUiItem> = emptyList(),
     val selectedImageUpscalerId: String? = null,
     val imageUpscalerImporting: Boolean = false,
@@ -273,6 +302,27 @@ data class ImageLoraUiItem(
     val sha256: String,
     val inUse: Boolean = false
 )
+
+data class ImageTextualInversionUiItem(
+    val id: String,
+    val name: String,
+    val trigger: String,
+    val format: String = "safetensors",
+    val sizeText: String,
+    val sha256: String,
+    val inUse: Boolean = false,
+    val compatibleWithSelectedModel: Boolean = true,
+)
+
+internal val IMAGE_TEXTUAL_INVERSION_ALL_FORMATS: Set<String> = setOf(
+    "safetensors",
+    "pytorch",
+    "checkpoint",
+    "binary"
+)
+
+private fun ImageTextualInversionUiItem.isSupportedBy(formats: Set<String>): Boolean =
+    format.trim().lowercase() in formats
 
 data class ImageUpscalerUiItem(
     val id: String,
@@ -393,11 +443,31 @@ data class ImageAssetUiItem(
     val generationModelId: String = "",
     val generationModelName: String = "",
     val generationTaskMode: String = "",
+    /** Product history operation; unlike task mode this can distinguish UltraFix from img2img. */
+    val generationOperation: String = "",
     val generationSampler: String = "",
     val parameterShareJson: String = "",
     val generationPreset: ImageGenerationUiPreset? = null,
     val favorite: Boolean = false,
-    val canRecreate: Boolean = false
+    val canRecreate: Boolean = false,
+    val createdAtMillis: Long = 0L,
+    val generationRuntime: String = "",
+    val generationDevice: String = ""
+)
+
+data class WorldBookUiItem(
+    val id: String,
+    val name: String,
+    val entryCount: Int,
+    val scopeLabel: String
+)
+
+data class KnowledgeBaseUiItem(
+    val id: String,
+    val name: String,
+    val description: String,
+    val selected: Boolean,
+    val indexStateLabel: String
 )
 
 internal fun imageAssetBadgeText(image: ImageAssetUiItem): String = when {
@@ -412,6 +482,7 @@ internal fun imageAssetBadgeText(image: ImageAssetUiItem): String = when {
 
 data class ImageGenerationUiPreset(
     val prompt: String,
+    val taskMode: ImageGenerationUiTaskMode? = null,
     val negativePrompt: String? = null,
     val width: Int? = null,
     val height: Int? = null,
@@ -423,7 +494,11 @@ data class ImageGenerationUiPreset(
     val batchCount: Int? = null,
     val vaeTileSize: Int? = null,
     val vaeTileOverlap: Double? = null,
-    val loras: List<ImageGenerationUiLoraSelection> = emptyList()
+    val loras: List<ImageGenerationUiLoraSelection> = emptyList(),
+    val textualInversionIds: List<String> = emptyList(),
+    val ultraFix: ImageGenerationUiUltraFixOptions? = null,
+    val strength: Double? = null,
+    val controlStrength: Double? = null,
 )
 
 internal enum class ImageGenerationPresetField(val label: String) {
@@ -436,6 +511,10 @@ internal enum class ImageGenerationPresetField(val label: String) {
     SAMPLER("采样器"),
     CLIP_SKIP("CLIP skip"),
     LORA("LoRA"),
+    TEXTUAL_INVERSION("Textual Inversion"),
+    ULTRAFIX("UltraFix"),
+    STRENGTH("重绘强度"),
+    CONTROL_STRENGTH("控制强度"),
     BATCH("批次数量"),
     VAE_TILING("VAE 分块")
 }
@@ -495,6 +574,18 @@ enum class ImageGenerationUiTaskMode(val wireName: String, val label: String) {
     EDIT("edit", "编辑")
 }
 
+enum class ImageGenerationUiPreviewMode(val wireName: String) {
+    PROJECTION("projection"),
+    VAE("vae");
+
+    companion object {
+        fun fromWireNameOrNull(value: String?): ImageGenerationUiPreviewMode? {
+            val normalized = value.orEmpty().trim().lowercase().replace('-', '_')
+            return entries.firstOrNull { it.wireName == normalized }
+        }
+    }
+}
+
 data class ImageGenerationUiOptions(
     val taskMode: ImageGenerationUiTaskMode = ImageGenerationUiTaskMode.TEXT_TO_IMAGE,
     val negativePrompt: String? = null,
@@ -513,8 +604,56 @@ data class ImageGenerationUiOptions(
     val steps: Int? = null,
     val cfgScale: Double? = null,
     val seed: Int? = null,
-    val sampleMethod: String? = null
+    val sampleMethod: String? = null,
+    val previewMode: ImageGenerationUiPreviewMode? = null,
+    val previewInterval: Int? = null,
+    val textualInversionIds: List<String> = emptyList(),
+    val ultraFix: ImageGenerationUiUltraFixOptions? = null,
 )
+
+data class ImageGenerationUiUltraFixOptions(
+    val targetWidth: Int,
+    val targetHeight: Int,
+    val strength: Double,
+    val inversionSteps: Int,
+    val refinementSteps: Int,
+    val tileSize: Int,
+    val overlap: Double,
+)
+
+/** Uses the same Float strength that crosses JNI into stable-diffusion.cpp. */
+internal fun imageGenerationUltraFixDenoisingTailStepCount(
+    refinementSteps: Int,
+    strength: Double,
+): Int {
+    require(refinementSteps > 0)
+    val wireStrength = strength.toFloat()
+    require(wireStrength.isFinite() && wireStrength in 0.0f..1.0f)
+    val beginIndex = (refinementSteps.toFloat() * (1.0f - wireStrength))
+        .toInt()
+        .coerceIn(0, refinementSteps - 1)
+    return refinementSteps - beginIndex
+}
+
+/**
+ * Local Dream exposes the effective denoising-step count instead of a raw strength. Choosing the
+ * midpoint of the scheduler's integer interval keeps the Float value crossing JNI away from either
+ * boundary, so the native begin index deterministically yields [denoisingSteps].
+ */
+internal fun imageGenerationUltraFixStrengthForDenoisingSteps(
+    refinementSteps: Int,
+    denoisingSteps: Int,
+): Double {
+    require(refinementSteps > 0)
+    require(denoisingSteps in 1..refinementSteps)
+    val strength = (denoisingSteps.toDouble() - 0.5) / refinementSteps.toDouble()
+    check(imageGenerationUltraFixDenoisingTailStepCount(refinementSteps, strength) == denoisingSteps)
+    return strength
+}
+
+internal const val IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS = 20
+internal const val IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS = 10
+private const val IMAGE_GENERATION_UI_PARAMETER_SNAPSHOT_VERSION = 9
 
 internal data class ImageGenerationUiParameterSnapshot(
     val taskModeName: String,
@@ -534,10 +673,26 @@ internal data class ImageGenerationUiParameterSnapshot(
     val loras: List<ImageGenerationUiLoraDraft> = emptyList(),
     val inputImageUri: String? = null,
     val maskImageUri: String? = null,
-    val controlImageUri: String? = null
+    val controlImageUri: String? = null,
+    val livePreviewMode: ImageGenerationUiPreviewMode? = null,
+    val livePreviewEnabled: Boolean = true,
+    val livePreviewInterval: Int = 1,
+    val livePreviewIntervalExplicit: Boolean = false,
+    val textualInversionIds: List<String> = emptyList(),
+    val ultraFixEnabled: Boolean = false,
+    val ultraFixStrengthText: String = "0.35",
+    val ultraFixInversionStepsText: String = "4",
+    val ultraFixRefinementStepsText: String = "10",
+    val ultraFixTileSizeText: String = "512",
+    val ultraFixTileSizeExplicit: Boolean = false,
+    val ultraFixOverlapText: String = "0.25",
+    /** UltraFix target dimensions are transient execution dimensions, separate from normal size. */
+    val ultraFixTargetWidthText: String = "",
+    val ultraFixTargetHeightText: String = "",
+    internal val sourceVersion: Int = IMAGE_GENERATION_UI_PARAMETER_SNAPSHOT_VERSION
 ) {
     fun toJson(): JSONObject = JSONObject()
-        .put("version", 3)
+        .put("version", IMAGE_GENERATION_UI_PARAMETER_SNAPSHOT_VERSION)
         .put("taskModeName", taskModeName)
         .put("strengthText", strengthText)
         .put("controlStrengthText", controlStrengthText)
@@ -552,8 +707,22 @@ internal data class ImageGenerationUiParameterSnapshot(
         .put("cfgScaleText", cfgScaleText)
         .put("seedText", seedText)
         .put("sampler", sampler)
+        .put("livePreviewEnabled", livePreviewEnabled)
+        .put("livePreviewInterval", livePreviewInterval.coerceIn(1, 10))
+        .put("livePreviewIntervalExplicit", livePreviewIntervalExplicit)
+        .put("textualInversionIds", JSONArray(textualInversionIds))
+        .put("ultraFixEnabled", ultraFixEnabled)
+        .put("ultraFixStrengthText", ultraFixStrengthText)
+        .put("ultraFixInversionStepsText", ultraFixInversionStepsText)
+        .put("ultraFixRefinementStepsText", ultraFixRefinementStepsText)
+        .put("ultraFixTileSizeText", ultraFixTileSizeText)
+        .put("ultraFixTileSizeExplicit", ultraFixTileSizeExplicit)
+        .put("ultraFixOverlapText", ultraFixOverlapText)
+        .put("ultraFixTargetWidthText", ultraFixTargetWidthText)
+        .put("ultraFixTargetHeightText", ultraFixTargetHeightText)
         .put("loras", JSONArray().apply { loras.forEach { put(it.toJson()) } })
         .apply {
+            livePreviewMode?.let { put("livePreviewMode", it.wireName) }
             inputImageUri?.let { put("inputImageUri", it) }
             maskImageUri?.let { put("maskImageUri", it) }
             controlImageUri?.let { put("controlImageUri", it) }
@@ -565,7 +734,16 @@ internal data class ImageGenerationUiParameterSnapshot(
             return runCatching {
                 val json = JSONObject(raw)
                 val version = json.optInt("version", -1)
-                require(version in 1..3)
+                require(version in 1..IMAGE_GENERATION_UI_PARAMETER_SNAPSHOT_VERSION)
+                val previewMode = if (version >= 5) {
+                    json.optString("livePreviewMode").takeIf(String::isNotBlank)?.let { wireName ->
+                        requireNotNull(ImageGenerationUiPreviewMode.fromWireNameOrNull(wireName)) {
+                            "Unknown image live-preview mode."
+                        }
+                    }
+                } else {
+                    null
+                }
                 ImageGenerationUiParameterSnapshot(
                     taskModeName = json.getString("taskModeName"),
                     strengthText = json.getString("strengthText"),
@@ -608,11 +786,69 @@ internal data class ImageGenerationUiParameterSnapshot(
                         json.optString("controlImageUri").takeIf(String::isNotBlank)
                     } else {
                         null
-                    }
+                    },
+                    livePreviewMode = previewMode,
+                    livePreviewEnabled = if (version >= 4) {
+                        json.getBoolean("livePreviewEnabled")
+                    } else {
+                        true
+                    },
+                    livePreviewInterval = if (version >= 4) {
+                        json.getInt("livePreviewInterval").coerceIn(1, 10)
+                    } else {
+                        1
+                    },
+                    livePreviewIntervalExplicit =
+                        version >= 5 &&
+                            json.optBoolean("livePreviewIntervalExplicit", false),
+                    textualInversionIds = if (version >= 6) {
+                        json.optJSONArray("textualInversionIds")?.let { values ->
+                            require(values.length() <= 8)
+                            buildList {
+                                for (index in 0 until values.length()) {
+                                    add(java.util.UUID.fromString(values.getString(index)).toString())
+                                }
+                            }.also { ids -> require(ids.distinct().size == ids.size) }
+                        }.orEmpty()
+                    } else {
+                        emptyList()
+                    },
+                    ultraFixEnabled = version >= 6 && json.optBoolean("ultraFixEnabled", false),
+                    ultraFixStrengthText = json.optString("ultraFixStrengthText", "0.35"),
+                    ultraFixInversionStepsText = json.optString("ultraFixInversionStepsText", "4"),
+                    ultraFixRefinementStepsText = json.optString("ultraFixRefinementStepsText", "10"),
+                    ultraFixTileSizeText = json.optString("ultraFixTileSizeText", "512"),
+                    ultraFixTileSizeExplicit = version >= 7 &&
+                        json.optBoolean("ultraFixTileSizeExplicit", false),
+                    ultraFixOverlapText = json.optString("ultraFixOverlapText", "0.25"),
+                    ultraFixTargetWidthText = if (version >= 9) {
+                        json.optString("ultraFixTargetWidthText", "")
+                    } else {
+                        // Versions 6-8 stored the active UltraFix target in widthText/heightText.
+                        // Keep those values as the target for a one-time, loss-minimizing migration;
+                        // normalizedForImageModel supplies clean ordinary dimensions.
+                        ""
+                    },
+                    ultraFixTargetHeightText = if (version >= 9) {
+                        json.optString("ultraFixTargetHeightText", "")
+                    } else {
+                        ""
+                    },
+                    sourceVersion = version
                 )
             }.getOrNull()
         }
     }
+}
+
+internal fun normalizedImageSamplerForCapabilities(
+    current: String,
+    supported: List<String>,
+    defaultSampler: String
+): String {
+    val available = supported.distinct()
+    if (available.isEmpty() || current in available) return current
+    return defaultSampler.takeIf(available::contains) ?: available.first()
 }
 
 private const val IMAGE_GENERATION_UI_PARAMETER_PREFS = "mca_image_generation_ui_parameters"
@@ -638,6 +874,167 @@ private fun imageLoraDraftsToJson(drafts: List<ImageGenerationUiLoraDraft>): Str
     require(drafts.size <= 8) { "At most 8 LoRA adapters may be selected." }
     return JSONArray().apply { drafts.forEach { put(it.toJson()) } }.toString()
 }
+
+private fun imageTextualInversionIdsFromJson(raw: String): List<String> = runCatching {
+    val array = JSONArray(raw)
+    require(array.length() <= 8)
+    buildList {
+        for (index in 0 until array.length()) {
+            add(java.util.UUID.fromString(array.getString(index)).toString())
+        }
+    }.also { ids -> require(ids.distinct().size == ids.size) }
+}.getOrDefault(emptyList())
+
+private fun imageTextualInversionIdsToJson(ids: List<String>): String {
+    require(ids.size <= 8) { "At most 8 textual inversions may be selected." }
+    val canonical = ids.map { java.util.UUID.fromString(it).toString() }
+    require(canonical.distinct().size == canonical.size)
+    return JSONArray(canonical).toString()
+}
+
+private val IMAGE_TEXTUAL_INVERSION_TRIGGER_PATTERN = Regex("[A-Za-z0-9_:#<>|.-]{1,64}")
+
+internal fun imagePromptContainsTextualInversionTrigger(
+    prompt: String,
+    trigger: String
+): Boolean = imageTextualInversionTriggerRegex(trigger).containsMatchIn(prompt)
+
+internal fun imagePromptWithTextualInversionTrigger(
+    prompt: String,
+    trigger: String
+): String {
+    if (imagePromptContainsTextualInversionTrigger(prompt, trigger)) return prompt
+    val base = prompt.trimEnd()
+    return when {
+        base.isEmpty() -> trigger
+        base.endsWith(',') -> "$base $trigger"
+        else -> "$base, $trigger"
+    }
+}
+
+internal fun imagePromptWithoutTextualInversionTrigger(
+    prompt: String,
+    trigger: String
+): String {
+    val removed = imageTextualInversionTriggerRegex(trigger).replace(prompt, "")
+    return removed
+        .replace(Regex("(?:[\\t ]*,[\\t ]*){2,}"), ", ")
+        .replace(Regex("[\\t ]+"), " ")
+        .trim()
+        .trim(',')
+        .trim()
+}
+
+internal data class ImageTextualInversionSelectionReconciliation(
+    val ids: List<String>,
+    val prompt: String,
+    val triggersById: Map<String, String>,
+    val additionalPrompt: String = "",
+)
+
+internal fun reconcileImageTextualInversionSelection(
+    supportsTextualInversion: Boolean,
+    libraryBusy: Boolean,
+    currentIds: List<String>,
+    prompt: String,
+    knownTriggersById: Map<String, String>,
+    available: List<ImageTextualInversionUiItem>,
+    supportedFormats: Set<String> = IMAGE_TEXTUAL_INVERSION_ALL_FORMATS,
+    additionalPrompt: String = "",
+): ImageTextualInversionSelectionReconciliation {
+    val normalizedFormats = supportedFormats.mapTo(mutableSetOf()) { it.trim().lowercase() }
+    if (libraryBusy) {
+        val knownById = available.associateBy(ImageTextualInversionUiItem::id)
+        val retained = if (supportsTextualInversion) {
+            currentIds.filter { id ->
+                knownById[id]?.isSupportedBy(normalizedFormats) != false
+            }.take(8)
+        } else {
+            emptyList()
+        }
+        var normalizedPrompt = prompt
+        var normalizedAdditionalPrompt = additionalPrompt
+        (currentIds + knownTriggersById.keys)
+            .distinct()
+            .filterNot(retained::contains)
+            .forEach { id ->
+                val trigger = knownTriggersById[id] ?: knownById[id]?.trigger
+                if (trigger != null) {
+                    normalizedPrompt = imagePromptWithoutTextualInversionTrigger(
+                        normalizedPrompt,
+                        trigger
+                    )
+                    normalizedAdditionalPrompt = imagePromptWithoutTextualInversionTrigger(
+                        normalizedAdditionalPrompt,
+                        trigger
+                    )
+                }
+            }
+        return ImageTextualInversionSelectionReconciliation(
+            ids = retained,
+            prompt = normalizedPrompt,
+            additionalPrompt = normalizedAdditionalPrompt,
+            triggersById = knownTriggersById.filterKeys(retained::contains)
+        )
+    }
+    val availableById = available
+        .filter { artifact -> artifact.isSupportedBy(normalizedFormats) }
+        .associateBy(ImageTextualInversionUiItem::id)
+    val retained = if (supportsTextualInversion) {
+        currentIds.filter(availableById::containsKey).take(8)
+    } else {
+        emptyList()
+    }
+    var normalizedPrompt = prompt
+    var normalizedAdditionalPrompt = additionalPrompt
+    (currentIds + knownTriggersById.keys)
+        .distinct()
+        .filterNot(retained::contains)
+        .forEach { id ->
+            val trigger = knownTriggersById[id] ?: availableById[id]?.trigger
+            if (trigger != null) {
+                normalizedPrompt = imagePromptWithoutTextualInversionTrigger(normalizedPrompt, trigger)
+                normalizedAdditionalPrompt = imagePromptWithoutTextualInversionTrigger(
+                    normalizedAdditionalPrompt,
+                    trigger
+                )
+            }
+        }
+    val retainedTriggers = buildMap {
+        retained.forEach { id ->
+            val trigger = requireNotNull(availableById[id]).trigger
+            put(id, trigger)
+            if (!imagePromptContainsTextualInversionTrigger(normalizedAdditionalPrompt, trigger)) {
+                normalizedPrompt = imagePromptWithTextualInversionTrigger(normalizedPrompt, trigger)
+            }
+        }
+    }
+    return ImageTextualInversionSelectionReconciliation(
+        ids = retained,
+        prompt = normalizedPrompt,
+        additionalPrompt = normalizedAdditionalPrompt,
+        triggersById = retainedTriggers
+    )
+}
+
+private fun imageTextualInversionTriggerRegex(trigger: String): Regex {
+    require(IMAGE_TEXTUAL_INVERSION_TRIGGER_PATTERN.matches(trigger)) {
+        "Textual inversion trigger is invalid."
+    }
+    val startsWithWord = trigger.first().isAsciiImageTriggerWordCharacter()
+    val endsWithWord = trigger.last().isAsciiImageTriggerWordCharacter()
+    return Regex(
+        buildString {
+            if (startsWithWord) append("(?<![A-Za-z0-9_])")
+            append(Regex.escape(trigger))
+            if (endsWithWord) append("(?![A-Za-z0-9_])")
+        },
+        RegexOption.IGNORE_CASE
+    )
+}
+
+private fun Char.isAsciiImageTriggerWordCharacter(): Boolean =
+    this in 'a'..'z' || this in 'A'..'Z' || this in '0'..'9' || this == '_'
 
 internal data class GenerationImageGrantReconciliationPlan(
     val retainedOwnedUris: Set<String>,
@@ -853,7 +1250,9 @@ private fun reconcileGenerationImageUriGrants(
         deferRelease = deferRelease
     )
     val retained = plan.retainedOwnedUris.toMutableSet()
-    val releaseWindowOpened = plan.releaseOwnedUris.isEmpty() ||
+    val releaseWindowOpened = if (deferRelease) {
+        plan.releaseOwnedUris.isEmpty()
+    } else {
         releaseOwnedUrisIfCoordinatorIdle {
             plan.releaseOwnedUris.forEach { raw ->
                 val uri = runCatching { Uri.parse(raw) }.getOrNull()
@@ -869,7 +1268,9 @@ private fun reconcileGenerationImageUriGrants(
                 }
                 if (!released || stillPersisted) retained += raw
             }
+            GenerationImageOwnedInputStore(context).pruneUnreferenced(referencedUris)
         }
+    }
     if (!releaseWindowOpened) {
         retained += plan.releaseOwnedUris
     }
@@ -882,6 +1283,9 @@ internal fun persistedGenerationImageUriOrNull(context: Context, raw: String?): 
     val value = raw?.trim()?.takeIf(String::isNotEmpty) ?: return null
     val uri = runCatching { Uri.parse(value) }.getOrNull() ?: return null
     if (!uri.scheme.equals("content", ignoreCase = true)) return null
+    if (isGenerationOwnedInputUri(context, value)) {
+        return GenerationImageOwnedInputStore(context).readableOwnedUriOrNull(value)
+    }
     val permissionStillGranted = context.contentResolver.persistedUriPermissions.any { permission ->
         permission.isReadPermission && permission.uri == uri
     }
@@ -907,11 +1311,20 @@ data class ChatModelChoice(
     val supportsImageNegativePrompt: Boolean = false,
     val supportsImageClipSkip: Boolean = false,
     val supportsImageVaeTiling: Boolean = false,
+    val supportsImageTextualInversion: Boolean = false,
+    val supportedImageTextualInversionFormats: Set<String> =
+        IMAGE_TEXTUAL_INVERSION_ALL_FORMATS,
+    val supportsImageUltraFix: Boolean = false,
     val supportsImageLora: Boolean = false,
     val maxImageBatchCount: Int = 1,
     val imageDefaultWidth: Int = 512,
     val imageDefaultHeight: Int = 512,
+    val imageDefaultVaeTileSize: Int =
+        if (imageDefaultWidth >= 1024 && imageDefaultHeight >= 1024) 1024 else 512,
+    val imageDefaultVaeTileOverlap: Double = 0.5,
     val imageDefaultSteps: Int = 20,
+    val imageMinSteps: Int = 1,
+    val imageMaxSteps: Int = 1_000,
     val imageDefaultCfgScale: Double = 7.0,
     val imageDefaultSeed: Int = 42,
     val imageDefaultSampler: String = "euler",
@@ -921,8 +1334,191 @@ data class ChatModelChoice(
     val imageMaxHeight: Int = 512,
     val imageWidthMultiple: Int = 8,
     val imageHeightMultiple: Int = 8,
-    val imageSupportedSamplers: List<String> = listOf("euler")
+    val imageUltraFixMinWidth: Int = if (supportsImageUltraFix) imageMinWidth else 0,
+    val imageUltraFixMaxWidth: Int = if (supportsImageUltraFix) imageMaxWidth else 0,
+    val imageUltraFixMinHeight: Int = if (supportsImageUltraFix) imageMinHeight else 0,
+    val imageUltraFixMaxHeight: Int = if (supportsImageUltraFix) imageMaxHeight else 0,
+    val imageUltraFixWidthMultiple: Int = if (supportsImageUltraFix) imageWidthMultiple else 0,
+    val imageUltraFixHeightMultiple: Int = if (supportsImageUltraFix) imageHeightMultiple else 0,
+    /** Zero means the selected runtime accepts a user-selectable topology-aligned tile. */
+    val imageUltraFixRequiredTileSize: Int = 0,
+    val imageSupportedSamplers: List<String> = listOf("euler"),
+    val imageImg2ImgSupportedSamplers: List<String> = imageSupportedSamplers,
+    val imagePreviewMode: ImageGenerationUiPreviewMode? = null,
+    val imageDefaultPreviewInterval: Int = 1,
+    val supportsImageLivePreview: Boolean = imagePreviewMode != null
+) {
+    init {
+        require(supportsImageLivePreview == (imagePreviewMode != null)) {
+            "Image live-preview support must match its concrete preview mode."
+        }
+        require(imageMinSteps > 0 && imageMaxSteps >= imageMinSteps) {
+            "Image step bounds must form a positive range."
+        }
+        require(imageDefaultSteps in imageMinSteps..imageMaxSteps) {
+            "Default image steps must be inside the supported range."
+        }
+        require(imageDefaultVaeTileSize in 64..4_096 && imageDefaultVaeTileSize % 8 == 0 &&
+            imageDefaultVaeTileOverlap.isFinite() && imageDefaultVaeTileOverlap in 0.0..0.5
+        ) { "Default VAE tiling controls must satisfy the native product contract." }
+        if (supportsImageUltraFix) {
+            require(imageUltraFixMinWidth in 64..imageUltraFixMaxWidth &&
+                imageUltraFixMinHeight in 64..imageUltraFixMaxHeight &&
+                imageUltraFixMaxWidth <= 8_192 && imageUltraFixMaxHeight <= 8_192 &&
+                imageUltraFixWidthMultiple > 0 && imageUltraFixHeightMultiple > 0 &&
+                (imageUltraFixRequiredTileSize == 0 ||
+                    (imageUltraFixRequiredTileSize in imageUltraFixMinWidth..imageUltraFixMaxWidth &&
+                        imageUltraFixRequiredTileSize in imageUltraFixMinHeight..imageUltraFixMaxHeight &&
+                        imageUltraFixRequiredTileSize % imageUltraFixWidthMultiple == 0 &&
+                        imageUltraFixRequiredTileSize % imageUltraFixHeightMultiple == 0))
+            ) { "UltraFix UI dimensions must expose a bounded executable range." }
+        } else {
+            require(imageUltraFixRequiredTileSize == 0) {
+                "A model without UltraFix support cannot publish a fixed UltraFix graph tile."
+            }
+        }
+    }
+}
+
+internal fun ChatModelChoice.resolvedImagePreviewMode(): ImageGenerationUiPreviewMode? =
+    imagePreviewMode
+
+internal fun ChatModelChoice.resolvedImageUltraFixDefaultTileSize(): Int {
+    imageUltraFixRequiredTileSize.takeIf { it > 0 }?.let { return it }
+    if (!supportsImageUltraFix) return 512
+
+    val widthMultiple = imageUltraFixWidthMultiple.coerceAtLeast(1)
+    val heightMultiple = imageUltraFixHeightMultiple.coerceAtLeast(1)
+    val commonMultiple = leastCommonMultiple(widthMultiple, heightMultiple)
+    val upperBound = minOf(
+        1024,
+        imageDefaultWidth,
+        imageDefaultHeight,
+        imageUltraFixMaxWidth,
+        imageUltraFixMaxHeight,
+        2048,
+    ).toLong()
+    val aligned = (upperBound / commonMultiple) * commonMultiple
+    check(aligned in 128L..2048L) {
+        "UltraFix capabilities do not expose a valid default tile."
+    }
+    return aligned.toInt()
+}
+
+internal fun ChatModelChoice.ultraFixTargetSizeForSourceOrNull(
+    sourceWidth: Int,
+    sourceHeight: Int,
+): Pair<Int, Int>? {
+    if (!supportsImageUltraFix || sourceWidth <= 0 || sourceHeight <= 0) return null
+    val tile = resolvedImageUltraFixDefaultTileSize()
+
+    fun alignedAxis(source: Int, minimum: Int, maximum: Int, multiple: Int): Int? {
+        if (maximum <= 0 || multiple <= 0) return null
+        val requested = maxOf(source, minimum, tile).toLong()
+        val step = multiple.toLong()
+        val aligned = ((requested + step - 1L) / step) * step
+        return aligned.takeIf { it <= maximum.toLong() }?.toInt()
+    }
+
+    val width = alignedAxis(
+        sourceWidth,
+        imageUltraFixMinWidth,
+        imageUltraFixMaxWidth,
+        imageUltraFixWidthMultiple,
+    ) ?: return null
+    val height = alignedAxis(
+        sourceHeight,
+        imageUltraFixMinHeight,
+        imageUltraFixMaxHeight,
+        imageUltraFixHeightMultiple,
+    ) ?: return null
+    if (width.toLong() * height.toLong() > 64L * 1024L * 1024L) return null
+    return width to height
+}
+
+internal data class ImageGenerationUiUltraFixTileSelection(
+    val tileSize: Int,
+    val explicit: Boolean,
 )
+
+internal fun normalizedImageGenerationUltraFixTileSelection(
+    model: ChatModelChoice,
+    rawValue: String,
+    explicit: Boolean,
+    sourceVersion: Int,
+): ImageGenerationUiUltraFixTileSelection {
+    model.imageUltraFixRequiredTileSize.takeIf { it > 0 }?.let { required ->
+        return ImageGenerationUiUltraFixTileSelection(required, explicit = false)
+    }
+
+    val defaultTile = model.resolvedImageUltraFixDefaultTileSize()
+    val parsed = rawValue.trim().toIntOrNull()
+    val valid = parsed != null && parsed in 128..2048 &&
+        parsed <= model.imageUltraFixMaxWidth &&
+        parsed <= model.imageUltraFixMaxHeight &&
+        parsed % model.imageUltraFixWidthMultiple.coerceAtLeast(1) == 0 &&
+        parsed % model.imageUltraFixHeightMultiple.coerceAtLeast(1) == 0
+    val inferredExplicit = when {
+        sourceVersion >= 7 -> explicit
+        rawValue.trim() == "512" -> false
+        else -> valid
+    }
+    return if (inferredExplicit && valid) {
+        ImageGenerationUiUltraFixTileSelection(requireNotNull(parsed), explicit = true)
+    } else {
+        ImageGenerationUiUltraFixTileSelection(defaultTile, explicit = false)
+    }
+}
+
+private fun leastCommonMultiple(first: Int, second: Int): Long {
+    fun greatestCommonDivisor(left: Long, right: Long): Long {
+        var a = left
+        var b = right
+        while (b != 0L) {
+            val remainder = a % b
+            a = b
+            b = remainder
+        }
+        return a
+    }
+
+    val left = first.coerceAtLeast(1).toLong()
+    val right = second.coerceAtLeast(1).toLong()
+    return (left / greatestCommonDivisor(left, right)) * right
+}
+
+internal fun ChatModelChoice.imageSupportedSamplersForTask(
+    taskMode: ImageGenerationUiTaskMode
+): List<String> = when (taskMode) {
+    ImageGenerationUiTaskMode.IMG2IMG,
+    ImageGenerationUiTaskMode.INPAINT -> imageImg2ImgSupportedSamplers
+    else -> imageSupportedSamplers
+}.distinct()
+
+internal data class ImageGenerationUiPreviewRequest(
+    val mode: ImageGenerationUiPreviewMode,
+    val interval: Int
+)
+
+internal fun imageGenerationUiPreviewRequestOrNull(
+    model: ChatModelChoice?,
+    enabled: Boolean,
+    interval: Int
+): ImageGenerationUiPreviewRequest? = model
+    ?.resolvedImagePreviewMode()
+    ?.takeIf { enabled }
+    ?.let { mode ->
+        ImageGenerationUiPreviewRequest(
+            mode = mode,
+            interval = interval.coerceIn(1, 10)
+        )
+    }
+
+internal fun shouldShowImageGenerationVaePreviewCostWarning(
+    mode: ImageGenerationUiPreviewMode?,
+    enabled: Boolean,
+    interval: Int
+): Boolean = mode == ImageGenerationUiPreviewMode.VAE && enabled && interval == 1
 
 internal fun normalizedImageGenerationDimensionText(
     rawValue: String,
@@ -952,24 +1548,165 @@ internal fun normalizedImageGenerationDimensionText(
     return normalized.toString()
 }
 
+internal fun normalizedImageGenerationStepsText(
+    rawValue: String,
+    defaultValue: Int,
+    minValue: Int,
+    maxValue: Int
+): String {
+    val safeMin = minValue.coerceAtLeast(1)
+    val safeMax = maxValue.coerceAtLeast(safeMin)
+    val safeDefault = defaultValue.coerceIn(safeMin, safeMax)
+    return (rawValue.trim().toLongOrNull() ?: safeDefault.toLong())
+        .coerceIn(safeMin.toLong(), safeMax.toLong())
+        .toString()
+}
+
 internal fun ImageGenerationUiParameterSnapshot.normalizedForImageModel(
     model: ChatModelChoice
 ): ImageGenerationUiParameterSnapshot {
     if (model.cloud) return this
+    val taskMode = ImageGenerationUiTaskMode.entries.firstOrNull { it.name == taskModeName }
+        ?: ImageGenerationUiTaskMode.TEXT_TO_IMAGE
+    val supportedSamplers = model.imageSupportedSamplersForTask(taskMode)
+    val targetPreviewMode = model.resolvedImagePreviewMode()
+    val targetPreviewInterval = model.imageDefaultPreviewInterval.coerceIn(1, 10)
+    val currentPreviewInterval = livePreviewInterval.coerceIn(1, 10)
+    val inferredLegacyExplicitInterval = sourceVersion <= 4 && when (targetPreviewMode) {
+        ImageGenerationUiPreviewMode.VAE -> currentPreviewInterval != 1
+        ImageGenerationUiPreviewMode.PROJECTION -> currentPreviewInterval != targetPreviewInterval
+        null -> false
+    }
+    val normalizedPreviewIntervalExplicit =
+        livePreviewIntervalExplicit || inferredLegacyExplicitInterval
+    val normalizedPreviewInterval = when {
+        targetPreviewMode == null -> currentPreviewInterval
+        normalizedPreviewIntervalExplicit -> currentPreviewInterval
+        sourceVersion <= 4 && targetPreviewMode == ImageGenerationUiPreviewMode.PROJECTION ->
+            currentPreviewInterval
+        else -> targetPreviewInterval
+    }
+    val normalizedUltraFixTotalSteps = ultraFixRefinementStepsText.toIntOrNull()
+        ?.coerceIn(1, IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS)
+        ?: 10
+    val legacyDenoisingSteps = ultraFixStrengthText.toDoubleOrNull()
+        ?.takeIf(Double::isFinite)
+        ?.coerceIn(0.0, 1.0)
+        ?.let { strength ->
+            imageGenerationUltraFixDenoisingTailStepCount(
+                normalizedUltraFixTotalSteps,
+                strength,
+            )
+        }
+        ?: 4
+    val normalizedUltraFixInversionSteps = ultraFixInversionStepsText.toIntOrNull()
+        ?.coerceIn(
+            1,
+            minOf(
+                IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS,
+                normalizedUltraFixTotalSteps,
+            ),
+        )
+        ?: legacyDenoisingSteps.coerceIn(
+            1,
+            minOf(
+                IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS,
+                normalizedUltraFixTotalSteps,
+            ),
+        )
+    val normalizedUltraFixStrength = imageGenerationUltraFixStrengthForDenoisingSteps(
+        normalizedUltraFixTotalSteps,
+        normalizedUltraFixInversionSteps,
+    )
+    val normalizedUltraFixEnabled = ultraFixEnabled && model.supportsImageUltraFix &&
+        taskMode == ImageGenerationUiTaskMode.IMG2IMG
+    val normalizedUltraFixTile = normalizedImageGenerationUltraFixTileSelection(
+        model = model,
+        rawValue = ultraFixTileSizeText,
+        explicit = ultraFixTileSizeExplicit,
+        sourceVersion = sourceVersion,
+    )
+    val normalizedUltraFixOverlap = ultraFixOverlapText.toDoubleOrNull()
+        ?.takeIf(Double::isFinite)
+        ?.coerceIn(0.0, 0.5)
+        ?: 0.25
+    val legacyUltraFixTargetWidth = if (ultraFixTargetWidthText.isBlank() && ultraFixEnabled) {
+        widthText
+    } else {
+        ultraFixTargetWidthText
+    }
+    val legacyUltraFixTargetHeight = if (ultraFixTargetHeightText.isBlank() && ultraFixEnabled) {
+        heightText
+    } else {
+        ultraFixTargetHeightText
+    }
+    val ordinaryWidthRaw = if (sourceVersion < 9 && ultraFixEnabled) {
+        model.imageDefaultWidth.toString()
+    } else {
+        widthText
+    }
+    val ordinaryHeightRaw = if (sourceVersion < 9 && ultraFixEnabled) {
+        model.imageDefaultHeight.toString()
+    } else {
+        heightText
+    }
+    val normalizedUltraFixTargetWidth = normalizedImageGenerationDimensionText(
+        rawValue = legacyUltraFixTargetWidth,
+        defaultValue = model.imageDefaultWidth,
+        minValue = maxOf(model.imageUltraFixMinWidth, normalizedUltraFixTile.tileSize),
+        maxValue = model.imageUltraFixMaxWidth,
+        multiple = model.imageUltraFixWidthMultiple
+    )
+    val normalizedUltraFixTargetHeight = normalizedImageGenerationDimensionText(
+        rawValue = legacyUltraFixTargetHeight,
+        defaultValue = model.imageDefaultHeight,
+        minValue = maxOf(model.imageUltraFixMinHeight, normalizedUltraFixTile.tileSize),
+        maxValue = model.imageUltraFixMaxHeight,
+        multiple = model.imageUltraFixHeightMultiple
+    )
     return copy(
+        livePreviewMode = targetPreviewMode,
+        livePreviewInterval = normalizedPreviewInterval,
+        livePreviewIntervalExplicit = normalizedPreviewIntervalExplicit,
+        textualInversionIds = textualInversionIds
+            .distinct()
+            .take(8)
+            .takeIf { model.supportsImageTextualInversion }
+            .orEmpty(),
+        ultraFixEnabled = normalizedUltraFixEnabled,
+        ultraFixStrengthText = normalizedUltraFixStrength.toString(),
+        ultraFixInversionStepsText = normalizedUltraFixInversionSteps.toString(),
+        ultraFixRefinementStepsText = normalizedUltraFixTotalSteps.toString(),
+        ultraFixTileSizeText = normalizedUltraFixTile.tileSize.toString(),
+        ultraFixTileSizeExplicit = normalizedUltraFixTile.explicit,
+        ultraFixOverlapText = normalizedUltraFixOverlap.toString(),
+        ultraFixTargetWidthText = normalizedUltraFixTargetWidth,
+        ultraFixTargetHeightText = normalizedUltraFixTargetHeight,
+        sourceVersion = IMAGE_GENERATION_UI_PARAMETER_SNAPSHOT_VERSION,
         widthText = normalizedImageGenerationDimensionText(
-            rawValue = widthText,
+            rawValue = ordinaryWidthRaw,
             defaultValue = model.imageDefaultWidth,
             minValue = model.imageMinWidth,
             maxValue = model.imageMaxWidth,
             multiple = model.imageWidthMultiple
         ),
         heightText = normalizedImageGenerationDimensionText(
-            rawValue = heightText,
+            rawValue = ordinaryHeightRaw,
             defaultValue = model.imageDefaultHeight,
             minValue = model.imageMinHeight,
             maxValue = model.imageMaxHeight,
             multiple = model.imageHeightMultiple
+        ),
+        stepsText = normalizedImageGenerationStepsText(
+            rawValue = stepsText,
+            defaultValue = model.imageDefaultSteps,
+            minValue = model.imageMinSteps,
+            maxValue = model.imageMaxSteps
+        ),
+        sampler = normalizedImageSamplerForCapabilities(
+            current = sampler,
+            supported = supportedSamplers,
+            defaultSampler = model.imageDefaultSampler
         )
     )
 }
@@ -1009,6 +1746,8 @@ fun ChatScreen(
     onCancelImageLibraryBackup: () -> Unit = {},
     onImportImageLora: (String) -> Unit = {},
     onDeleteImageLora: (String) -> Unit = {},
+    onImportImageTextualInversion: (String, String) -> Unit = { _, _ -> },
+    onDeleteImageTextualInversion: (String) -> Unit = {},
     onImportImageUpscaler: (String) -> Unit = {},
     onDeleteImageUpscaler: (String) -> Unit = {},
     onSelectImageUpscaler: (String) -> Unit = {},
@@ -1016,7 +1755,7 @@ fun ChatScreen(
     onCancelImageUpscale: () -> Unit = {},
     onUseFileAsset: (String) -> Unit = {},
     onDeleteFileAsset: (String) -> Unit = {},
-    onGenerateImagePrompt: (String, ImageGenerationUiOptions) -> Unit = { _, _ -> },
+    onGenerateImagePrompt: (String, ImageGenerationUiOptions) -> Boolean = { _, _ -> false },
     onRetryImageGeneration: (String) -> Unit = {},
     onRecreateImageAsset: (String) -> Unit = {},
     onCancelImageGeneration: () -> Unit = {},
@@ -1036,8 +1775,19 @@ fun ChatScreen(
     onSelectAssistant: (String) -> Unit = {},
     onDeleteAssistant: (String) -> Unit = {},
     onImportAssistantCard: (String) -> Unit = {},
+    onImportAssistantCardFile: () -> Unit = {},
+    onImportWorldBookFile: () -> Unit = {},
+    onDeleteWorldBook: (String) -> Unit = {},
+    onCreateKnowledgeBase: (String) -> Unit = {},
+    onImportKnowledgeDocument: (String) -> Unit = {},
+    onSetKnowledgeBaseSelected: (String, Boolean) -> Unit = { _, _ -> },
+    onDeleteKnowledgeBase: (String) -> Unit = {},
     appMenuOpen: Boolean = false,
     onAppMenuOpenChange: (Boolean) -> Unit = {},
+    onMeasureImagePromptTokens: (suspend (
+        modelId: String,
+        prompt: String,
+    ) -> ImagePromptTokenMeasurement?)? = null,
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
@@ -1061,24 +1811,55 @@ fun ChatScreen(
     var imageInputUri by rememberSaveable { mutableStateOf<String?>(null) }
     var imageMaskUri by rememberSaveable { mutableStateOf<String?>(null) }
     var imageControlUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var imageInputDimensionsUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var imageInputSourceWidth by rememberSaveable { mutableStateOf(0) }
+    var imageInputSourceHeight by rememberSaveable { mutableStateOf(0) }
+    var imageInputDimensionsProbing by remember { mutableStateOf(false) }
+    var imageInputDimensionsProbeFailed by remember { mutableStateOf(false) }
     var imageStrengthText by rememberSaveable { mutableStateOf("0.75") }
     var imageControlStrengthText by rememberSaveable { mutableStateOf("1.0") }
     var imageNegativePrompt by rememberSaveable { mutableStateOf("") }
     var imageDisableModelNegativePrompt by rememberSaveable { mutableStateOf(false) }
     var imageClipSkipText by rememberSaveable { mutableStateOf("") }
     var imageVaeTilingEnabled by rememberSaveable { mutableStateOf(false) }
+    var imageLivePreviewEnabled by rememberSaveable { mutableStateOf(true) }
+    var imageLivePreviewInterval by rememberSaveable { mutableStateOf(1) }
+    var imageLivePreviewIntervalExplicit by rememberSaveable { mutableStateOf(false) }
     var imageBatchCount by rememberSaveable { mutableStateOf(1) }
     var imageWidthText by rememberSaveable { mutableStateOf("512") }
     var imageHeightText by rememberSaveable { mutableStateOf("512") }
+    // imageWidthText/imageHeightText are the active fields shown to the editor. Keep the
+    // ordinary generation dimensions separately so UltraFix can temporarily target a larger
+    // canvas without overwriting the user's normal preset.
+    var imageNormalWidthText by rememberSaveable { mutableStateOf("512") }
+    var imageNormalHeightText by rememberSaveable { mutableStateOf("512") }
+    var imageUltraFixTargetWidthText by rememberSaveable { mutableStateOf("512") }
+    var imageUltraFixTargetHeightText by rememberSaveable { mutableStateOf("512") }
     var imageStepsText by rememberSaveable { mutableStateOf("20") }
     var imageCfgScaleText by rememberSaveable { mutableStateOf("7") }
     var imageSeedText by rememberSaveable { mutableStateOf("") }
     var imageSampler by rememberSaveable { mutableStateOf("euler") }
     var imageLoraDraftJson by rememberSaveable { mutableStateOf("[]") }
+    var imageTextualInversionIdsJson by rememberSaveable { mutableStateOf("[]") }
+    val imageTextualInversionTriggerById = remember { mutableStateMapOf<String, String>() }
+    var imageUltraFixEnabled by rememberSaveable { mutableStateOf(false) }
+    var imageUltraFixStrengthText by rememberSaveable { mutableStateOf("0.35") }
+    var imageUltraFixInversionStepsText by rememberSaveable { mutableStateOf("4") }
+    var imageUltraFixRefinementStepsText by rememberSaveable { mutableStateOf("10") }
+    var imageUltraFixTileSizeText by rememberSaveable { mutableStateOf("512") }
+    var imageUltraFixTileSizeExplicit by rememberSaveable { mutableStateOf(false) }
+    var imageUltraFixOverlapText by rememberSaveable { mutableStateOf("0.25") }
     var restoredImageParameterModelId by rememberSaveable { mutableStateOf<String?>(null) }
     var imageInputRestoreWarning by rememberSaveable { mutableStateOf<String?>(null) }
     var imageLoraRestoreWarning by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingGenerationImageRole by rememberSaveable { mutableStateOf("input") }
+    var pendingUltraFixSubmission by remember {
+        mutableStateOf<Pair<String, ImageGenerationUiOptions>?>(null)
+    }
+    var imageGenerationStartSignal by remember { mutableStateOf(0L) }
+    var generationImageEditorRequest by remember {
+        mutableStateOf<GenerationImageEditorRequest?>(null)
+    }
     val imageTaskMode = ImageGenerationUiTaskMode.entries.firstOrNull {
         it.name == imageTaskModeName
     } ?: ImageGenerationUiTaskMode.TEXT_TO_IMAGE
@@ -1091,7 +1872,26 @@ fun ChatScreen(
     val supportsImageNegativePrompt = selectedImageModelChoice?.supportsImageNegativePrompt == true
     val supportsImageClipSkip = selectedImageModelChoice?.supportsImageClipSkip == true
     val supportsImageVaeTiling = selectedImageModelChoice?.supportsImageVaeTiling == true
+    val supportsImageTextualInversion =
+        selectedImageModelChoice?.supportsImageTextualInversion == true
+    val supportedImageTextualInversionFormats = selectedImageModelChoice
+        ?.supportedImageTextualInversionFormats
+        ?.mapTo(mutableSetOf()) { it.trim().lowercase() }
+        .orEmpty()
+    val imageTextualInversionsForSelectedModel = state.imageTextualInversions.map { artifact ->
+        artifact.copy(
+            compatibleWithSelectedModel = supportsImageTextualInversion &&
+                artifact.isSupportedBy(supportedImageTextualInversionFormats)
+        )
+    }
+    val supportsImageUltraFix = selectedImageModelChoice?.supportsImageUltraFix == true
     val supportsImageLora = selectedImageModelChoice?.supportsImageLora == true
+    val selectedImagePreviewMode = selectedImageModelChoice?.resolvedImagePreviewMode()
+    val supportsImageLivePreview = selectedImagePreviewMode != null
+    val selectedImageSupportedSamplers = selectedImageModelChoice
+        ?.imageSupportedSamplersForTask(imageTaskMode)
+        .orEmpty()
+    val selectedImageDefaultSampler = selectedImageModelChoice?.imageDefaultSampler.orEmpty()
     val maxImageBatchCount = selectedImageModelChoice?.maxImageBatchCount?.coerceIn(1, 8) ?: 1
     val currentImageModelIds = state.existingImageModelIds.ifEmpty {
         state.imageModels.mapTo(mutableSetOf(), ChatModelChoice::id)
@@ -1099,7 +1899,8 @@ fun ChatScreen(
     val transientGenerationImageUris = setOfNotNull(
         imageInputUri,
         imageMaskUri,
-        imageControlUri
+        imageControlUri,
+        generationImageEditorRequest?.sourceUri
     )
     val libraryHistoryGenerationImageUris = normalizedGenerationImageHistoryReferences(
         state.generationHistoryInputUris
@@ -1127,7 +1928,27 @@ fun ChatScreen(
             }
         }
     }
-    LaunchedEffect(state.selectedImageModelId, selectedImageModelChoice?.id) {
+    LaunchedEffect(
+        state.selectedImageModelId,
+        selectedImageModelChoice?.id,
+        selectedImagePreviewMode,
+        selectedImageModelChoice?.imageDefaultPreviewInterval,
+        selectedImageModelChoice?.imageSupportedSamplers,
+        selectedImageModelChoice?.imageImg2ImgSupportedSamplers,
+        selectedImageDefaultSampler,
+        selectedImageModelChoice?.imageDefaultSteps,
+        selectedImageModelChoice?.imageMinSteps,
+        selectedImageModelChoice?.imageMaxSteps,
+        selectedImageModelChoice?.imageDefaultWidth,
+        selectedImageModelChoice?.imageDefaultHeight,
+        selectedImageModelChoice?.imageUltraFixMinWidth,
+        selectedImageModelChoice?.imageUltraFixMaxWidth,
+        selectedImageModelChoice?.imageUltraFixMinHeight,
+        selectedImageModelChoice?.imageUltraFixMaxHeight,
+        selectedImageModelChoice?.imageUltraFixWidthMultiple,
+        selectedImageModelChoice?.imageUltraFixHeightMultiple,
+        selectedImageModelChoice?.imageUltraFixRequiredTileSize,
+    ) {
         val modelId = state.selectedImageModelId
         val model = selectedImageModelChoice
         if (modelId == null || model == null) {
@@ -1142,37 +1963,81 @@ fun ChatScreen(
                 null
             )
         )?.normalizedForImageModel(model)
-        imageTaskModeName = snapshot?.taskModeName
+        val restoredTaskMode = snapshot?.taskModeName
             ?.takeIf { saved -> ImageGenerationUiTaskMode.entries.any { it.name == saved } }
-            ?: ImageGenerationUiTaskMode.TEXT_TO_IMAGE.name
+            ?.let { ImageGenerationUiTaskMode.valueOf(it) }
+            ?: ImageGenerationUiTaskMode.TEXT_TO_IMAGE
+        imageTaskModeName = restoredTaskMode.name
         imageStrengthText = snapshot?.strengthText ?: "0.75"
         imageControlStrengthText = snapshot?.controlStrengthText ?: "1.0"
         imageNegativePrompt = snapshot?.negativePrompt.orEmpty()
         imageDisableModelNegativePrompt = snapshot?.disableModelNegativePrompt ?: false
         imageClipSkipText = snapshot?.clipSkipText.orEmpty()
         imageVaeTilingEnabled = snapshot?.vaeTilingEnabled ?: false
+        imageTextualInversionIdsJson = imageTextualInversionIdsToJson(
+            snapshot?.textualInversionIds.orEmpty()
+        )
+        imageUltraFixEnabled = snapshot?.ultraFixEnabled == true
+        imageUltraFixStrengthText = snapshot?.ultraFixStrengthText ?: "0.35"
+        imageUltraFixInversionStepsText = snapshot?.ultraFixInversionStepsText ?: "4"
+        imageUltraFixRefinementStepsText = snapshot?.ultraFixRefinementStepsText ?: "10"
+        imageUltraFixTileSizeText = snapshot?.ultraFixTileSizeText
+            ?: model.resolvedImageUltraFixDefaultTileSize().toString()
+        imageUltraFixTileSizeExplicit = snapshot?.ultraFixTileSizeExplicit ?: false
+        imageUltraFixOverlapText = snapshot?.ultraFixOverlapText ?: "0.25"
+        imageLivePreviewEnabled = model.resolvedImagePreviewMode() != null &&
+            (snapshot?.livePreviewEnabled ?: true)
+        imageLivePreviewInterval = (
+            snapshot?.livePreviewInterval ?: model.imageDefaultPreviewInterval
+        ).coerceIn(1, 10)
+        imageLivePreviewIntervalExplicit = snapshot?.livePreviewIntervalExplicit ?: false
         imageBatchCount = (snapshot?.batchCount ?: 1).coerceIn(1, model.maxImageBatchCount.coerceIn(1, 8))
-        imageWidthText = snapshot?.widthText ?: normalizedImageGenerationDimensionText(
+        imageNormalWidthText = snapshot?.widthText ?: normalizedImageGenerationDimensionText(
             rawValue = model.imageDefaultWidth.toString(),
             defaultValue = model.imageDefaultWidth,
             minValue = model.imageMinWidth,
             maxValue = model.imageMaxWidth,
             multiple = model.imageWidthMultiple
         )
-        imageHeightText = snapshot?.heightText ?: normalizedImageGenerationDimensionText(
+        imageNormalHeightText = snapshot?.heightText ?: normalizedImageGenerationDimensionText(
             rawValue = model.imageDefaultHeight.toString(),
             defaultValue = model.imageDefaultHeight,
             minValue = model.imageMinHeight,
             maxValue = model.imageMaxHeight,
             multiple = model.imageHeightMultiple
         )
-        imageStepsText = snapshot?.stepsText ?: model.imageDefaultSteps.toString()
+        imageUltraFixTargetWidthText = snapshot?.ultraFixTargetWidthText
+            ?.takeIf(String::isNotBlank)
+            ?: snapshot?.widthText
+            ?: model.imageDefaultWidth.toString()
+        imageUltraFixTargetHeightText = snapshot?.ultraFixTargetHeightText
+            ?.takeIf(String::isNotBlank)
+            ?: snapshot?.heightText
+            ?: model.imageDefaultHeight.toString()
+        imageWidthText = if (imageUltraFixEnabled) {
+            imageUltraFixTargetWidthText
+        } else {
+            imageNormalWidthText
+        }
+        imageHeightText = if (imageUltraFixEnabled) {
+            imageUltraFixTargetHeightText
+        } else {
+            imageNormalHeightText
+        }
+        imageStepsText = snapshot?.stepsText ?: normalizedImageGenerationStepsText(
+            rawValue = model.imageDefaultSteps.toString(),
+            defaultValue = model.imageDefaultSteps,
+            minValue = model.imageMinSteps,
+            maxValue = model.imageMaxSteps
+        )
         imageCfgScaleText = snapshot?.cfgScaleText
             ?: model.imageDefaultCfgScale.toString().trimEnd('0').trimEnd('.')
         imageSeedText = snapshot?.seedText.orEmpty()
-        imageSampler = snapshot?.sampler
-            ?.takeIf { it in model.imageSupportedSamplers }
-            ?: model.imageDefaultSampler
+        imageSampler = normalizedImageSamplerForCapabilities(
+            current = snapshot?.sampler ?: model.imageDefaultSampler,
+            supported = model.imageSupportedSamplersForTask(restoredTaskMode),
+            defaultSampler = model.imageDefaultSampler
+        )
         val availableLoraIds = state.imageLoras.mapTo(mutableSetOf(), ImageLoraUiItem::id)
         val restoredLoras = snapshot?.loras.orEmpty().filter { draft -> draft.id in availableLoraIds }
         imageLoraDraftJson = imageLoraDraftsToJson(
@@ -1213,6 +2078,9 @@ fun ChatScreen(
         imageDisableModelNegativePrompt,
         imageClipSkipText,
         imageVaeTilingEnabled,
+        imageLivePreviewEnabled,
+        imageLivePreviewInterval,
+        imageLivePreviewIntervalExplicit,
         imageBatchCount,
         imageWidthText,
         imageHeightText,
@@ -1221,6 +2089,18 @@ fun ChatScreen(
         imageSeedText,
         imageSampler,
         imageLoraDraftJson,
+        imageTextualInversionIdsJson,
+        imageUltraFixEnabled,
+        imageUltraFixStrengthText,
+        imageUltraFixInversionStepsText,
+        imageUltraFixRefinementStepsText,
+        imageUltraFixTileSizeText,
+        imageUltraFixTileSizeExplicit,
+        imageUltraFixOverlapText,
+        imageNormalWidthText,
+        imageNormalHeightText,
+        imageUltraFixTargetWidthText,
+        imageUltraFixTargetHeightText,
         imageInputUri,
         imageMaskUri,
         imageControlUri
@@ -1236,27 +2116,55 @@ fun ChatScreen(
             disableModelNegativePrompt = imageDisableModelNegativePrompt,
             clipSkipText = imageClipSkipText,
             vaeTilingEnabled = imageVaeTilingEnabled,
+            livePreviewMode = model.resolvedImagePreviewMode(),
+            livePreviewEnabled = imageLivePreviewEnabled,
+            livePreviewInterval = imageLivePreviewInterval.coerceIn(1, 10),
+            livePreviewIntervalExplicit = imageLivePreviewIntervalExplicit,
             batchCount = imageBatchCount,
-            widthText = imageWidthText,
-            heightText = imageHeightText,
+            widthText = if (imageUltraFixEnabled) imageNormalWidthText else imageWidthText,
+            heightText = if (imageUltraFixEnabled) imageNormalHeightText else imageHeightText,
             stepsText = imageStepsText,
             cfgScaleText = imageCfgScaleText,
             seedText = imageSeedText,
             sampler = imageSampler,
             loras = imageLoraDraftsFromJson(imageLoraDraftJson),
+            textualInversionIds = imageTextualInversionIdsFromJson(imageTextualInversionIdsJson),
+            ultraFixEnabled = imageUltraFixEnabled,
+            ultraFixStrengthText = imageUltraFixStrengthText,
+            ultraFixInversionStepsText = imageUltraFixInversionStepsText,
+            ultraFixRefinementStepsText = imageUltraFixRefinementStepsText,
+            ultraFixTileSizeText = imageUltraFixTileSizeText,
+            ultraFixTileSizeExplicit = imageUltraFixTileSizeExplicit,
+            ultraFixOverlapText = imageUltraFixOverlapText,
+            ultraFixTargetWidthText = if (imageUltraFixEnabled) {
+                imageWidthText
+            } else {
+                imageUltraFixTargetWidthText
+            },
+            ultraFixTargetHeightText = if (imageUltraFixEnabled) {
+                imageHeightText
+            } else {
+                imageUltraFixTargetHeightText
+            },
             inputImageUri = imageInputUri,
             maskImageUri = imageMaskUri,
             controlImageUri = imageControlUri
         ).normalizedForImageModel(model)
+        if (imageUltraFixTileSizeText != snapshot.ultraFixTileSizeText) {
+            imageUltraFixTileSizeText = snapshot.ultraFixTileSizeText
+        }
+        if (imageUltraFixTileSizeExplicit != snapshot.ultraFixTileSizeExplicit) {
+            imageUltraFixTileSizeExplicit = snapshot.ultraFixTileSizeExplicit
+        }
         if (!model.cloud && model.imageMinWidth == model.imageMaxWidth &&
-            imageWidthText != snapshot.widthText
+            imageNormalWidthText != snapshot.widthText
         ) {
-            imageWidthText = snapshot.widthText
+            imageNormalWidthText = snapshot.widthText
         }
         if (!model.cloud && model.imageMinHeight == model.imageMaxHeight &&
-            imageHeightText != snapshot.heightText
+            imageNormalHeightText != snapshot.heightText
         ) {
-            imageHeightText = snapshot.heightText
+            imageNormalHeightText = snapshot.heightText
         }
         val committedReferencedUris = setOfNotNull(
             snapshot.inputImageUri,
@@ -1292,10 +2200,18 @@ fun ChatScreen(
     LaunchedEffect(
         state.selectedImageModelId,
         selectedImageTaskModes,
+        imageTaskMode,
         supportsImageNegativePrompt,
         supportsImageClipSkip,
         supportsImageVaeTiling,
+        supportsImageUltraFix,
         supportsImageLora,
+        supportsImageLivePreview,
+        selectedImageSupportedSamplers,
+        selectedImageDefaultSampler,
+        selectedImageModelChoice?.imageDefaultSteps,
+        selectedImageModelChoice?.imageMinSteps,
+        selectedImageModelChoice?.imageMaxSteps,
         state.imageLoras.map(ImageLoraUiItem::id),
         maxImageBatchCount
     ) {
@@ -1314,6 +2230,30 @@ fun ChatScreen(
         }
         if (!supportsImageClipSkip) imageClipSkipText = ""
         if (!supportsImageVaeTiling) imageVaeTilingEnabled = false
+        if ((!supportsImageUltraFix || imageTaskMode != ImageGenerationUiTaskMode.IMG2IMG) &&
+            imageUltraFixEnabled
+        ) {
+            imageUltraFixTargetWidthText = imageWidthText
+            imageUltraFixTargetHeightText = imageHeightText
+            imageWidthText = imageNormalWidthText
+            imageHeightText = imageNormalHeightText
+            imageUltraFixEnabled = false
+        }
+        if (!supportsImageLivePreview) imageLivePreviewEnabled = false
+        imageSampler = normalizedImageSamplerForCapabilities(
+            current = imageSampler,
+            supported = selectedImageSupportedSamplers,
+            defaultSampler = selectedImageDefaultSampler
+        )
+        selectedImageModelChoice?.takeUnless(ChatModelChoice::cloud)?.let { model ->
+            imageStepsText = normalizedImageGenerationStepsText(
+                rawValue = imageStepsText,
+                defaultValue = model.imageDefaultSteps,
+                minValue = model.imageMinSteps,
+                maxValue = model.imageMaxSteps
+            )
+        }
+        imageLivePreviewInterval = imageLivePreviewInterval.coerceIn(1, 10)
         val availableLoraIds = state.imageLoras.mapTo(mutableSetOf(), ImageLoraUiItem::id)
         val currentLoras = imageLoraDraftsFromJson(imageLoraDraftJson)
         val retainedLoras = if (supportsImageLora) {
@@ -1328,6 +2268,36 @@ fun ChatScreen(
             }
         }
         imageBatchCount = imageBatchCount.coerceIn(1, maxImageBatchCount)
+    }
+    LaunchedEffect(
+        supportsImageTextualInversion,
+        supportedImageTextualInversionFormats,
+        state.imageTextualInversionImporting,
+        state.imageTextualInversions.map { artifact ->
+            Triple(artifact.id, artifact.trigger, artifact.format)
+        },
+        imageTextualInversionIdsJson
+    ) {
+        val current = imageTextualInversionIdsFromJson(imageTextualInversionIdsJson)
+        val reconciled = reconcileImageTextualInversionSelection(
+            supportsTextualInversion = supportsImageTextualInversion,
+            libraryBusy = state.imageTextualInversionImporting,
+            currentIds = current,
+            prompt = imagePrompt,
+            additionalPrompt = imageNegativePrompt,
+            knownTriggersById = imageTextualInversionTriggerById,
+            available = state.imageTextualInversions,
+            supportedFormats = supportedImageTextualInversionFormats
+        )
+        imageTextualInversionTriggerById.clear()
+        imageTextualInversionTriggerById.putAll(reconciled.triggersById)
+        if (reconciled.ids != current) {
+            imageTextualInversionIdsJson = imageTextualInversionIdsToJson(reconciled.ids)
+        }
+        if (reconciled.prompt != imagePrompt) imagePrompt = reconciled.prompt
+        if (reconciled.additionalPrompt != imageNegativePrompt) {
+            imageNegativePrompt = reconciled.additionalPrompt
+        }
     }
     fun enqueueImagePrompt(prompt: String) {
         val cleanPrompt = prompt.trim()
@@ -1351,9 +2321,9 @@ fun ChatScreen(
         if (imageTaskMode in setOf(
                 ImageGenerationUiTaskMode.IMG2IMG,
                 ImageGenerationUiTaskMode.INPAINT
-            ) && (strengthValue == null || strengthValue <= 0.0 || strengthValue > 1.0)
+            ) && (strengthValue == null || strengthValue < 0.0 || strengthValue > 1.0)
         ) {
-            Toast.makeText(context, "重绘强度必须在 (0, 1]", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "重绘强度必须在 [0, 1]", Toast.LENGTH_SHORT).show()
             return
         }
         val controlStrengthValue = imageControlStrengthText.toDoubleOrNull()
@@ -1378,20 +2348,65 @@ fun ChatScreen(
         val localControls = selectedImageModelChoice?.takeUnless(ChatModelChoice::cloud)
         val widthValue = localControls?.let { imageWidthText.toIntOrNull() }
         val heightValue = localControls?.let { imageHeightText.toIntOrNull() }
-        if (localControls != null && (
-                widthValue == null || heightValue == null ||
-                    widthValue !in localControls.imageMinWidth..localControls.imageMaxWidth ||
-                    heightValue !in localControls.imageMinHeight..localControls.imageMaxHeight ||
-                    widthValue % localControls.imageWidthMultiple != 0 ||
-                    heightValue % localControls.imageHeightMultiple != 0
-                )
+        val ultraFixSourceTarget = if (imageUltraFixEnabled &&
+            !imageInputDimensionsProbing &&
+            imageInputDimensionsUri == imageInputUri &&
+            imageInputSourceWidth > 0 && imageInputSourceHeight > 0
         ) {
-            Toast.makeText(context, "图片尺寸不符合当前模型的范围或步进要求", Toast.LENGTH_SHORT).show()
+            localControls?.ultraFixTargetSizeForSourceOrNull(
+                imageInputSourceWidth,
+                imageInputSourceHeight
+            )
+        } else {
+            null
+        }
+        val dimensionsValid = if (imageUltraFixEnabled) {
+            localControls != null && widthValue != null && heightValue != null &&
+                ultraFixSourceTarget != null &&
+                widthValue in localControls.imageUltraFixMinWidth..
+                    localControls.imageUltraFixMaxWidth &&
+                heightValue in localControls.imageUltraFixMinHeight..
+                    localControls.imageUltraFixMaxHeight &&
+                widthValue >= ultraFixSourceTarget.first &&
+                heightValue >= ultraFixSourceTarget.second &&
+                widthValue % localControls.imageUltraFixWidthMultiple == 0 &&
+                heightValue % localControls.imageUltraFixHeightMultiple == 0 &&
+                widthValue.toLong() * heightValue.toLong() <= 64L * 1024L * 1024L
+        } else {
+            localControls == null || (
+                widthValue != null && heightValue != null &&
+                    widthValue in localControls.imageMinWidth..localControls.imageMaxWidth &&
+                    heightValue in localControls.imageMinHeight..localControls.imageMaxHeight &&
+                    widthValue % localControls.imageWidthMultiple == 0 &&
+                    heightValue % localControls.imageHeightMultiple == 0
+                )
+        }
+        if (!dimensionsValid) {
+            val message = when {
+                imageUltraFixEnabled && imageInputDimensionsProbing ->
+                    "正在检查 UltraFix 源图尺寸，请稍后重试"
+                imageUltraFixEnabled && ultraFixSourceTarget == null ->
+                    "无法为当前源图选择不缩小的 UltraFix 目标，请先裁剪图片"
+                imageUltraFixEnabled && ultraFixSourceTarget != null &&
+                    widthValue != null && heightValue != null &&
+                    (widthValue < ultraFixSourceTarget.first || heightValue < ultraFixSourceTarget.second) ->
+                    "UltraFix 目标尺寸不能小于源图"
+                else -> "图片尺寸不符合当前模型的范围或步进要求"
+            }
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
             return
         }
         val stepsValue = localControls?.let { imageStepsText.toIntOrNull() }
-        if (localControls != null && (stepsValue == null || stepsValue !in 1..1_000)) {
-            Toast.makeText(context, "采样步数必须为 1-1000", Toast.LENGTH_SHORT).show()
+        if (localControls != null && (
+                stepsValue == null ||
+                    stepsValue !in localControls.imageMinSteps..localControls.imageMaxSteps
+                )
+        ) {
+            Toast.makeText(
+                context,
+                "采样步数必须为 ${localControls.imageMinSteps}-${localControls.imageMaxSteps}",
+                Toast.LENGTH_SHORT
+            ).show()
             return
         }
         val cfgScaleValue = localControls?.let { imageCfgScaleText.toDoubleOrNull() }
@@ -1413,8 +2428,7 @@ fun ChatScreen(
         val sampleMethodValue = localControls?.let { imageSampler.trim() }
         if (localControls != null && (
                 sampleMethodValue.isNullOrBlank() ||
-                    localControls.imageSupportedSamplers.isNotEmpty() &&
-                    sampleMethodValue !in localControls.imageSupportedSamplers
+                    sampleMethodValue !in selectedImageSupportedSamplers
                 )
         ) {
             Toast.makeText(context, "请选择当前模型支持的采样器", Toast.LENGTH_SHORT).show()
@@ -1445,9 +2459,97 @@ fun ChatScreen(
         } else {
             emptyList()
         }
-        onGenerateImagePrompt(
-            cleanPrompt,
-            ImageGenerationUiOptions(
+        val textualInversionIds = if (supportsImageTextualInversion) {
+            val requestedIds = imageTextualInversionIdsFromJson(imageTextualInversionIdsJson)
+            if (requestedIds.isNotEmpty() && state.imageTextualInversionImporting) {
+                Toast.makeText(
+                    context,
+                    "Textual Inversion 库仍在加载或更新，请稍后重试",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+            val availableById = state.imageTextualInversions
+                .filter { artifact ->
+                    artifact.isSupportedBy(supportedImageTextualInversionFormats)
+                }
+                .associateBy(ImageTextualInversionUiItem::id)
+            requestedIds.also { ids ->
+                if (ids.size > 8 || ids.any { it !in availableById }) {
+                    Toast.makeText(context, "所选 Textual Inversion 已失效，请重新选择", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                val missingTriggers = ids.mapNotNull(availableById::get).map { it.trigger }
+                    .filterNot { trigger ->
+                        imagePromptContainsTextualInversionTrigger(cleanPrompt, trigger) ||
+                            imagePromptContainsTextualInversionTrigger(imageNegativePrompt, trigger)
+                    }
+                if (missingTriggers.isNotEmpty()) {
+                    Toast.makeText(
+                        context,
+                        "请在提示词中保留触发词：${missingTriggers.take(3).joinToString()}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return
+                }
+            }
+        } else {
+            emptyList()
+        }
+        val ultraFixOptions = if (imageUltraFixEnabled) {
+            if (!supportsImageUltraFix || imageTaskMode != ImageGenerationUiTaskMode.IMG2IMG ||
+                imageInputUri == null || widthValue == null || heightValue == null ||
+                localControls == null
+            ) {
+                Toast.makeText(context, "当前输入或模型不能执行 UltraFix", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val ultraStrength = imageUltraFixStrengthText.toDoubleOrNull()
+            val totalSteps = imageUltraFixRefinementStepsText.toIntOrNull()
+            val requestedInversionSteps = imageUltraFixInversionStepsText.toIntOrNull()
+            val tileSize = imageUltraFixTileSizeText.toIntOrNull()
+            val overlap = imageUltraFixOverlapText.toDoubleOrNull()
+            val expectedInversionSteps = if (ultraStrength != null && totalSteps != null &&
+                ultraStrength.isFinite() && totalSteps > 0
+            ) {
+                imageGenerationUltraFixDenoisingTailStepCount(totalSteps, ultraStrength)
+            } else {
+                -1
+            }
+            if (ultraStrength == null || !ultraStrength.isFinite() || ultraStrength <= 0.0 || ultraStrength > 1.0 ||
+                totalSteps == null || totalSteps !in 1..IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS ||
+                requestedInversionSteps == null || requestedInversionSteps !in
+                    1..minOf(IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS, totalSteps) ||
+                requestedInversionSteps != expectedInversionSteps ||
+                tileSize == null || tileSize !in 128..2048 ||
+                tileSize % localControls.imageUltraFixWidthMultiple != 0 ||
+                tileSize % localControls.imageUltraFixHeightMultiple != 0 ||
+                (localControls.imageUltraFixRequiredTileSize > 0 &&
+                    tileSize != localControls.imageUltraFixRequiredTileSize) ||
+                tileSize > minOf(widthValue, heightValue) ||
+                overlap == null || !overlap.isFinite() || overlap !in 0.0..0.5
+            ) {
+                Toast.makeText(context, "UltraFix 参数不符合执行合同", Toast.LENGTH_SHORT).show()
+                return
+            }
+            ImageGenerationUiUltraFixOptions(
+                targetWidth = widthValue,
+                targetHeight = heightValue,
+                strength = ultraStrength,
+                inversionSteps = expectedInversionSteps,
+                refinementSteps = totalSteps,
+                tileSize = tileSize,
+                overlap = overlap,
+            )
+        } else {
+            null
+        }
+        val previewRequest = imageGenerationUiPreviewRequestOrNull(
+            model = selectedImageModelChoice,
+            enabled = imageLivePreviewEnabled && ultraFixOptions == null,
+            interval = imageLivePreviewInterval
+        )
+        val generationOptions = ImageGenerationUiOptions(
                 taskMode = imageTaskMode,
                 negativePrompt = if (!supportsImageNegativePrompt) {
                     null
@@ -1462,26 +2564,47 @@ fun ChatScreen(
                         ImageGenerationUiTaskMode.IMG2IMG,
                         ImageGenerationUiTaskMode.INPAINT
                     )
-                ) strengthValue else null,
+                ) ultraFixOptions?.strength ?: strengthValue else null,
                 controlStrength = if (imageTaskMode == ImageGenerationUiTaskMode.CONTROL) {
                     controlStrengthValue
                 } else {
                     null
                 },
                 clipSkip = clipSkipValue,
-                batchCount = imageBatchCount.coerceIn(1, maxImageBatchCount),
+                batchCount = if (ultraFixOptions != null) 1 else
+                    imageBatchCount.coerceIn(1, maxImageBatchCount),
                 loras = loraSelections,
-                vaeTileSize = if (supportsImageVaeTiling && imageVaeTilingEnabled) 512 else null,
-                vaeTileOverlap = if (supportsImageVaeTiling && imageVaeTilingEnabled) 0.5 else null,
+                vaeTileSize = ultraFixOptions?.tileSize
+                    ?: if (supportsImageVaeTiling && imageVaeTilingEnabled) {
+                        selectedImageModelChoice?.imageDefaultVaeTileSize
+                    } else {
+                        null
+                    },
+                vaeTileOverlap = ultraFixOptions?.overlap
+                    ?: if (supportsImageVaeTiling && imageVaeTilingEnabled) {
+                        selectedImageModelChoice?.imageDefaultVaeTileOverlap
+                    } else {
+                        null
+                    },
                 width = widthValue,
                 height = heightValue,
-                steps = stepsValue,
+                steps = ultraFixOptions?.refinementSteps ?: stepsValue,
                 cfgScale = cfgScaleValue,
                 seed = seedValue,
-                sampleMethod = sampleMethodValue
+                sampleMethod = sampleMethodValue,
+                previewMode = previewRequest?.mode,
+                previewInterval = previewRequest?.interval,
+                textualInversionIds = textualInversionIds,
+                ultraFix = ultraFixOptions,
             )
-        )
-        imagePrompt = ""
+        if (ultraFixOptions != null) {
+            pendingUltraFixSubmission = cleanPrompt to generationOptions
+        } else {
+            if (onGenerateImagePrompt(cleanPrompt, generationOptions)) {
+                imageGenerationStartSignal++
+            }
+        }
+        imagePrompt = cleanPrompt
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { onUploadFile(it.toString()) }
@@ -1503,13 +2626,121 @@ fun ChatScreen(
             when (pendingGenerationImageRole) {
                 "mask" -> imageMaskUri = selected
                 "control" -> imageControlUri = selected
-                else -> imageInputUri = selected
+                else -> {
+                    imageInputUri = selected
+                    imageMaskUri = null
+                }
             }
             imageInputRestoreWarning = null
         }
     }
+    LaunchedEffect(imageInputUri) {
+        val sourceUri = imageInputUri
+        imageInputDimensionsProbeFailed = false
+        if (sourceUri == null) {
+            imageInputDimensionsUri = null
+            imageInputSourceWidth = 0
+            imageInputSourceHeight = 0
+            imageInputDimensionsProbing = false
+            return@LaunchedEffect
+        }
+        if (imageInputDimensionsUri != sourceUri) {
+            imageInputSourceWidth = 0
+            imageInputSourceHeight = 0
+        }
+        imageInputDimensionsProbing = true
+        try {
+            val dimensions = withContext(Dispatchers.IO) {
+                val probeJob = currentCoroutineContext()[Job]
+                ImageGenerationBitmapEditing.probeDimensionsBounded(
+                    context = context,
+                    rawUri = sourceUri,
+                    checkCancelled = { probeJob?.ensureActive() }
+                )
+            }
+            if (imageInputUri == sourceUri) {
+                imageInputDimensionsUri = sourceUri
+                imageInputSourceWidth = dimensions.width
+                imageInputSourceHeight = dimensions.height
+                imageInputDimensionsProbeFailed = false
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            if (imageInputUri == sourceUri) {
+                imageInputDimensionsUri = sourceUri
+                imageInputSourceWidth = 0
+                imageInputSourceHeight = 0
+                imageInputDimensionsProbeFailed = true
+            }
+        } finally {
+            if (imageInputUri == sourceUri) imageInputDimensionsProbing = false
+        }
+    }
+    LaunchedEffect(
+        imageUltraFixEnabled,
+        imageInputUri,
+        imageInputDimensionsUri,
+        imageInputSourceWidth,
+        imageInputSourceHeight,
+        imageInputDimensionsProbing,
+        selectedImageModelChoice?.id
+    ) {
+        if (!imageUltraFixEnabled || imageInputUri == null ||
+            imageInputDimensionsUri != imageInputUri ||
+            imageInputDimensionsProbing
+        ) return@LaunchedEffect
+        if (imageInputSourceWidth <= 0 || imageInputSourceHeight <= 0) {
+            imageUltraFixEnabled = false
+            return@LaunchedEffect
+        }
+        val model = selectedImageModelChoice?.takeIf(ChatModelChoice::supportsImageUltraFix)
+            ?: return@LaunchedEffect
+        val target = model.ultraFixTargetSizeForSourceOrNull(
+            imageInputSourceWidth,
+            imageInputSourceHeight
+        ) ?: run {
+            imageUltraFixEnabled = false
+            return@LaunchedEffect
+        }
+        val tile = normalizedImageGenerationUltraFixTileSelection(
+            model = model,
+            rawValue = imageUltraFixTileSizeText,
+            explicit = imageUltraFixTileSizeExplicit,
+            sourceVersion = IMAGE_GENERATION_UI_PARAMETER_SNAPSHOT_VERSION
+        )
+        imageWidthText = normalizedImageGenerationDimensionText(
+            rawValue = imageWidthText,
+            defaultValue = model.imageDefaultWidth,
+            minValue = maxOf(target.first, tile.tileSize, model.imageUltraFixMinWidth),
+            maxValue = model.imageUltraFixMaxWidth,
+            multiple = model.imageUltraFixWidthMultiple
+        )
+        imageHeightText = normalizedImageGenerationDimensionText(
+            rawValue = imageHeightText,
+            defaultValue = model.imageDefaultHeight,
+            minValue = maxOf(target.second, tile.tileSize, model.imageUltraFixMinHeight),
+            maxValue = model.imageUltraFixMaxHeight,
+            multiple = model.imageUltraFixHeightMultiple
+        )
+    }
     val generationLoraPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { selectedUri -> onImportImageLora(selectedUri.toString()) }
+    }
+    val generationTextualInversionPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { selectedUri ->
+            val stem = selectedUri.lastPathSegment.orEmpty()
+                .substringAfterLast('/')
+                .substringAfterLast(':')
+                .substringBeforeLast('.')
+                .replace(Regex("[^A-Za-z0-9_-]"), "_")
+                .trim('_')
+                .take(48)
+                .ifBlank { "embedding" }
+            onImportImageTextualInversion(selectedUri.toString(), "<$stem>")
+        }
     }
     val generationUpscalerPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -1519,9 +2750,12 @@ fun ChatScreen(
     val cameraPicker = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
         bitmap?.let { onUploadFile(saveCameraPreview(context, it).toString()) }
     }
-    LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content) {
+    val streamingScrollBucket = state.messages.lastOrNull()?.let { message ->
+        (message.content.length + message.reasoningContent.length) / STREAMING_SCROLL_CHAR_STEP
+    } ?: 0
+    LaunchedEffect(state.messages.size, state.isGenerating, streamingScrollBucket) {
         if (state.messages.isNotEmpty()) {
-            listState.animateScrollToItem(state.messages.lastIndex)
+            listState.scrollToItem(state.messages.lastIndex)
         }
     }
     val historyBackEnabled = drawerState.currentValue == DrawerValue.Open ||
@@ -1598,7 +2832,10 @@ fun ChatScreen(
                         item { EmptyChatPanel(state.selectedModelName) }
                     }
                     val lastAssistantIndex = state.messages.indexOfLast { it.role == Role.ASSISTANT }
-                    itemsIndexed(state.messages) { index, message ->
+                    itemsIndexed(
+                        items = state.messages,
+                        key = { index, message -> "${message.role.name}:${message.createdAt}:$index" }
+                    ) { index, message ->
                         MessageBubble(
                             message = message,
                             showAssistantActions = index == lastAssistantIndex && message.role == Role.ASSISTANT,
@@ -1655,6 +2892,8 @@ fun ChatScreen(
             ) { pageModifier, closePage ->
                 AssistantRoleScreen(
                     assistants = state.assistants,
+                    worldBooks = state.worldBooks,
+                    knowledgeBases = state.knowledgeBases,
                     selectedAssistantId = state.selectedAssistantId,
                     selectedModelName = state.selectedModelName,
                     selectedModelId = state.selectedModelId,
@@ -1663,6 +2902,13 @@ fun ChatScreen(
                     onSelectAssistant = onSelectAssistant,
                     onDeleteAssistant = onDeleteAssistant,
                     onImportAssistantCard = onImportAssistantCard,
+                    onImportAssistantCardFile = onImportAssistantCardFile,
+                    onImportWorldBookFile = onImportWorldBookFile,
+                    onDeleteWorldBook = onDeleteWorldBook,
+                    onCreateKnowledgeBase = onCreateKnowledgeBase,
+                    onImportKnowledgeDocument = onImportKnowledgeDocument,
+                    onSetKnowledgeBaseSelected = onSetKnowledgeBaseSelected,
+                    onDeleteKnowledgeBase = onDeleteKnowledgeBase,
                     onBack = closePage,
                     modifier = pageModifier
                 )
@@ -1674,6 +2920,7 @@ fun ChatScreen(
             ) { pageModifier, closePage ->
                 ImagesWorkspaceScreen(
                     images = state.images,
+                    generationStartSignal = imageGenerationStartSignal,
                     backupState = state.imageLibraryBackup,
                     jobs = state.imageJobs,
                     imageModels = state.imageModels,
@@ -1684,21 +2931,36 @@ fun ChatScreen(
                     supportsNegativePrompt = supportsImageNegativePrompt,
                     supportsClipSkip = supportsImageClipSkip,
                     supportsVaeTiling = supportsImageVaeTiling,
+                    supportsTextualInversion = supportsImageTextualInversion,
+                    supportsUltraFix = supportsImageUltraFix,
                     supportsLora = supportsImageLora,
+                    supportsLivePreview = supportsImageLivePreview,
                     loras = state.imageLoras,
                     selectedLoras = imageLoraDraftsFromJson(imageLoraDraftJson),
                     loraRestoreWarning = imageLoraRestoreWarning,
                     loraImporting = state.imageLoraImporting,
                     loraMessage = state.imageLoraMessage,
+                    textualInversions = imageTextualInversionsForSelectedModel,
+                    selectedTextualInversionIds = imageTextualInversionIdsFromJson(
+                        imageTextualInversionIdsJson
+                    ),
+                    textualInversionImporting = state.imageTextualInversionImporting,
+                    textualInversionMessage = state.imageTextualInversionMessage,
                     upscalers = state.imageUpscalers,
                     selectedUpscalerId = state.selectedImageUpscalerId,
                     upscalerImporting = state.imageUpscalerImporting,
                     upscalerMessage = state.imageUpscalerMessage,
                     upscaleJob = state.imageUpscaleJob,
-                    batchCount = imageBatchCount,
+                    batchCount = if (imageUltraFixEnabled) 1 else imageBatchCount,
                     maxBatchCount = maxImageBatchCount,
                     taskMode = imageTaskMode,
                     inputImageUri = imageInputUri,
+                    inputImageWidth = imageInputSourceWidth.takeIf {
+                        !imageInputDimensionsProbing && imageInputDimensionsUri == imageInputUri
+                    } ?: 0,
+                    inputImageHeight = imageInputSourceHeight.takeIf {
+                        !imageInputDimensionsProbing && imageInputDimensionsUri == imageInputUri
+                    } ?: 0,
                     maskImageUri = imageMaskUri,
                     controlImageUri = imageControlUri,
                     inputRestoreWarning = imageInputRestoreWarning,
@@ -1707,15 +2969,26 @@ fun ChatScreen(
                     negativePrompt = imageNegativePrompt,
                     disableModelNegativePrompt = imageDisableModelNegativePrompt,
                     clipSkipText = imageClipSkipText,
-                    vaeTilingEnabled = imageVaeTilingEnabled,
+                    // UltraFix forces these values only for its request. The ordinary controls
+                    // remain untouched and are restored verbatim when UltraFix is disabled.
+                    vaeTilingEnabled = imageVaeTilingEnabled || imageUltraFixEnabled,
+                    ultraFixEnabled = imageUltraFixEnabled,
+                    ultraFixStrengthText = imageUltraFixStrengthText,
+                    ultraFixInversionStepsText = imageUltraFixInversionStepsText,
+                    ultraFixRefinementStepsText = imageUltraFixRefinementStepsText,
+                    ultraFixTileSizeText = imageUltraFixTileSizeText,
+                    ultraFixOverlapText = imageUltraFixOverlapText,
+                    livePreviewEnabled = imageLivePreviewEnabled && !imageUltraFixEnabled,
+                    livePreviewInterval = imageLivePreviewInterval,
                     widthText = imageWidthText,
                     heightText = imageHeightText,
                     stepsText = imageStepsText,
                     cfgScaleText = imageCfgScaleText,
                     seedText = imageSeedText,
-                    sampler = imageSampler,
-                    prompt = imagePrompt,
-                    onPromptChange = { imagePrompt = it },
+                     sampler = imageSampler,
+                     prompt = imagePrompt,
+                     onMeasureImagePromptTokens = onMeasureImagePromptTokens,
+                     onPromptChange = { imagePrompt = it },
                     onSubmitPrompt = { enqueueImagePrompt(imagePrompt) },
                     onCancelGeneration = onCancelImageGeneration,
                     onRetryJob = { job -> onRetryImageGeneration(job.id) },
@@ -1746,12 +3019,80 @@ fun ChatScreen(
                         pendingGenerationImageRole = role
                         generationPhotoPicker.launch(arrayOf("image/*"))
                     },
+                    onCropImageRole = { role ->
+                        val source = if (role == "control") imageControlUri else imageInputUri
+                        if (source != null) {
+                            val model = selectedImageModelChoice
+                            val targetWidth = model?.let {
+                                normalizedImageGenerationDimensionText(
+                                    rawValue = imageWidthText,
+                                    defaultValue = it.imageDefaultWidth,
+                                    minValue = if (imageUltraFixEnabled) {
+                                        it.imageUltraFixMinWidth
+                                    } else {
+                                        it.imageMinWidth
+                                    },
+                                    maxValue = if (imageUltraFixEnabled) {
+                                        it.imageUltraFixMaxWidth
+                                    } else {
+                                        it.imageMaxWidth
+                                    },
+                                    multiple = if (imageUltraFixEnabled) {
+                                        it.imageUltraFixWidthMultiple
+                                    } else {
+                                        it.imageWidthMultiple
+                                    }
+                                ).toInt()
+                            } ?: 512
+                            val targetHeight = model?.let {
+                                normalizedImageGenerationDimensionText(
+                                    rawValue = imageHeightText,
+                                    defaultValue = it.imageDefaultHeight,
+                                    minValue = if (imageUltraFixEnabled) {
+                                        it.imageUltraFixMinHeight
+                                    } else {
+                                        it.imageMinHeight
+                                    },
+                                    maxValue = if (imageUltraFixEnabled) {
+                                        it.imageUltraFixMaxHeight
+                                    } else {
+                                        it.imageMaxHeight
+                                    },
+                                    multiple = if (imageUltraFixEnabled) {
+                                        it.imageUltraFixHeightMultiple
+                                    } else {
+                                        it.imageHeightMultiple
+                                    }
+                                ).toInt()
+                            } ?: 512
+                            generationImageEditorRequest = GenerationImageEditorRequest.Crop(
+                                sourceUri = source,
+                                role = role,
+                                targetWidth = targetWidth,
+                                targetHeight = targetHeight
+                            )
+                        }
+                    },
+                    onDrawImageMask = {
+                        imageInputUri?.let { source ->
+                            generationImageEditorRequest = GenerationImageEditorRequest.Mask(source)
+                        }
+                    },
                     onClearImageRole = { role ->
                         imageInputRestoreWarning = null
                         when (role) {
                             "mask" -> imageMaskUri = null
                             "control" -> imageControlUri = null
-                            else -> imageInputUri = null
+                            else -> {
+                                imageInputUri = null
+                                if (imageUltraFixEnabled) {
+                                    imageUltraFixTargetWidthText = imageWidthText
+                                    imageUltraFixTargetHeightText = imageHeightText
+                                    imageWidthText = imageNormalWidthText
+                                    imageHeightText = imageNormalHeightText
+                                    imageUltraFixEnabled = false
+                                }
+                            }
                         }
                     },
                     onStrengthTextChange = { imageStrengthText = it },
@@ -1760,6 +3101,11 @@ fun ChatScreen(
                     onDisableModelNegativePromptChange = { imageDisableModelNegativePrompt = it },
                     onClipSkipTextChange = { imageClipSkipText = it },
                     onVaeTilingEnabledChange = { imageVaeTilingEnabled = it },
+                    onLivePreviewEnabledChange = { imageLivePreviewEnabled = it },
+                    onLivePreviewIntervalChange = {
+                        imageLivePreviewInterval = it.coerceIn(1, 10)
+                        imageLivePreviewIntervalExplicit = true
+                    },
                     onToggleLora = { id ->
                         val current = imageLoraDraftsFromJson(imageLoraDraftJson)
                         val alreadySelected = current.any { it.id == id }
@@ -1785,19 +3131,326 @@ fun ChatScreen(
                     },
                     onImportLora = { generationLoraPicker.launch(arrayOf("*/*")) },
                     onDeleteLora = onDeleteImageLora,
+                    onToggleTextualInversion = onToggleTextualInversion@ { id ->
+                        val artifact = state.imageTextualInversions.firstOrNull { it.id == id }
+                        if (artifact == null) {
+                            Toast.makeText(
+                                context,
+                                "该 Textual Inversion 已不存在",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            return@onToggleTextualInversion
+                        }
+                        val current = imageTextualInversionIdsFromJson(
+                            imageTextualInversionIdsJson
+                        )
+                        if (id !in current &&
+                            !artifact.isSupportedBy(supportedImageTextualInversionFormats)
+                        ) {
+                            Toast.makeText(
+                                context,
+                                "当前模型不支持 ${artifact.format} 格式的 Textual Inversion",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            return@onToggleTextualInversion
+                        }
+                        val next = if (id in current) {
+                            imagePrompt = imagePromptWithoutTextualInversionTrigger(
+                                imagePrompt,
+                                artifact.trigger
+                            )
+                            imageNegativePrompt = imagePromptWithoutTextualInversionTrigger(
+                                imageNegativePrompt,
+                                artifact.trigger
+                            )
+                            imageTextualInversionTriggerById.remove(id)
+                            current - id
+                        } else if (current.size < 8) {
+                            imagePrompt = imagePromptWithTextualInversionTrigger(
+                                imagePrompt,
+                                artifact.trigger
+                            )
+                            imageTextualInversionTriggerById[id] = artifact.trigger
+                            current + id
+                        } else {
+                            Toast.makeText(
+                                context,
+                                "单次最多选择 8 个 Textual Inversion",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            current
+                        }
+                        imageTextualInversionIdsJson = imageTextualInversionIdsToJson(next)
+                    },
+                    onImportTextualInversion = {
+                        generationTextualInversionPicker.launch(
+                            arrayOf("application/octet-stream", "application/zip", "*/*")
+                        )
+                    },
+                    onDeleteTextualInversion = { id ->
+                        val current = imageTextualInversionIdsFromJson(
+                            imageTextualInversionIdsJson
+                        )
+                        if (id in current) {
+                            val trigger = imageTextualInversionTriggerById[id]
+                                ?: state.imageTextualInversions.firstOrNull { it.id == id }?.trigger
+                            if (trigger != null) {
+                                imagePrompt = imagePromptWithoutTextualInversionTrigger(
+                                    imagePrompt,
+                                    trigger
+                                )
+                                imageNegativePrompt = imagePromptWithoutTextualInversionTrigger(
+                                    imageNegativePrompt,
+                                    trigger
+                                )
+                            }
+                            imageTextualInversionIdsJson = imageTextualInversionIdsToJson(current - id)
+                            imageTextualInversionTriggerById.remove(id)
+                        }
+                        onDeleteImageTextualInversion(id)
+                    },
+                    onUltraFixEnabledChange = onUltraFixEnabledChange@ { enabled ->
+                        if (!enabled) {
+                            imageUltraFixTargetWidthText = imageWidthText
+                            imageUltraFixTargetHeightText = imageHeightText
+                            imageWidthText = imageNormalWidthText
+                            imageHeightText = imageNormalHeightText
+                            imageUltraFixEnabled = false
+                            return@onUltraFixEnabledChange true
+                        }
+                        val model = selectedImageModelChoice
+                            ?.takeIf(ChatModelChoice::supportsImageUltraFix)
+                        if (imageInputUri == null) {
+                            Toast.makeText(context, "请先选择 UltraFix 源图", Toast.LENGTH_SHORT).show()
+                            return@onUltraFixEnabledChange false
+                        }
+                        if (imageInputDimensionsProbing) {
+                            Toast.makeText(context, "正在检查源图尺寸，请稍后重试", Toast.LENGTH_SHORT).show()
+                            return@onUltraFixEnabledChange false
+                        }
+                        if (imageInputDimensionsUri != imageInputUri ||
+                            imageInputSourceWidth <= 0 || imageInputSourceHeight <= 0
+                        ) {
+                            Toast.makeText(
+                                context,
+                                if (imageInputDimensionsProbeFailed) {
+                                    "无法安全读取源图尺寸，请重新选择或先裁剪图片"
+                                } else {
+                                    "请等待源图尺寸检查完成"
+                                },
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            return@onUltraFixEnabledChange false
+                        }
+                        val sourceTarget = model?.ultraFixTargetSizeForSourceOrNull(
+                            imageInputSourceWidth,
+                            imageInputSourceHeight
+                        )
+                        if (model == null || sourceTarget == null) {
+                            Toast.makeText(
+                                context,
+                                "源图尺寸超出当前模型的 UltraFix 目标范围，请先裁剪图片",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            return@onUltraFixEnabledChange false
+                        }
+                        if (!imageUltraFixEnabled) {
+                            imageNormalWidthText = imageWidthText
+                            imageNormalHeightText = imageHeightText
+                        }
+                        imageUltraFixEnabled = true
+                        run {
+                            imageTaskModeName = ImageGenerationUiTaskMode.IMG2IMG.name
+                            val refinementSteps = imageUltraFixRefinementStepsText.toIntOrNull()
+                                ?.coerceIn(1, IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS)
+                                ?: 10
+                            val denoisingSteps = imageUltraFixInversionStepsText.toIntOrNull()
+                                ?.coerceIn(
+                                    1,
+                                    minOf(
+                                        IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS,
+                                        refinementSteps,
+                                    ),
+                                )
+                                ?: minOf(4, refinementSteps)
+                            imageUltraFixRefinementStepsText = refinementSteps.toString()
+                            imageUltraFixInversionStepsText = denoisingSteps.toString()
+                            imageUltraFixStrengthText =
+                                imageGenerationUltraFixStrengthForDenoisingSteps(
+                                    refinementSteps,
+                                    denoisingSteps,
+                                ).toString()
+                            model.let {
+                                    val selection = normalizedImageGenerationUltraFixTileSelection(
+                                        model = model,
+                                        rawValue = imageUltraFixTileSizeText,
+                                        explicit = imageUltraFixTileSizeExplicit,
+                                        sourceVersion = IMAGE_GENERATION_UI_PARAMETER_SNAPSHOT_VERSION,
+                                    )
+                                    imageUltraFixTileSizeText = selection.tileSize.toString()
+                                    imageUltraFixTileSizeExplicit = selection.explicit
+                                    imageWidthText = normalizedImageGenerationDimensionText(
+                                        rawValue = imageUltraFixTargetWidthText,
+                                        defaultValue = model.imageDefaultWidth,
+                                        minValue = maxOf(
+                                            sourceTarget.first,
+                                            model.imageUltraFixMinWidth,
+                                            selection.tileSize,
+                                        ),
+                                        maxValue = model.imageUltraFixMaxWidth,
+                                        multiple = model.imageUltraFixWidthMultiple,
+                                    )
+                                    imageHeightText = normalizedImageGenerationDimensionText(
+                                        rawValue = imageUltraFixTargetHeightText,
+                                        defaultValue = model.imageDefaultHeight,
+                                        minValue = maxOf(
+                                            sourceTarget.second,
+                                            model.imageUltraFixMinHeight,
+                                            selection.tileSize,
+                                        ),
+                                        maxValue = model.imageUltraFixMaxHeight,
+                                        multiple = model.imageUltraFixHeightMultiple,
+                                    )
+                                    imageUltraFixTargetWidthText = imageWidthText
+                                    imageUltraFixTargetHeightText = imageHeightText
+                                }
+                        }
+                        true
+                    },
+                     onResetUltraFix = {
+                         val model = selectedImageModelChoice
+                         imageUltraFixRefinementStepsText = "10"
+                         imageUltraFixInversionStepsText = "4"
+                         imageUltraFixStrengthText =
+                             imageGenerationUltraFixStrengthForDenoisingSteps(10, 4).toString()
+                         imageUltraFixTileSizeText = model
+                             ?.resolvedImageUltraFixDefaultTileSize()
+                             ?.toString()
+                             ?: "512"
+                         imageUltraFixTileSizeExplicit = false
+                         imageUltraFixOverlapText = "0.25"
+                         model?.let { selected ->
+                             val tile = selected.resolvedImageUltraFixDefaultTileSize()
+                             val sourceTarget = selected.ultraFixTargetSizeForSourceOrNull(
+                                 imageInputSourceWidth,
+                                 imageInputSourceHeight
+                             )
+                             imageWidthText = normalizedImageGenerationDimensionText(
+                                 rawValue = imageUltraFixTargetWidthText,
+                                 defaultValue = selected.imageDefaultWidth,
+                                 minValue = maxOf(
+                                     sourceTarget?.first ?: 0,
+                                     selected.imageUltraFixMinWidth,
+                                     tile
+                                 ),
+                                 maxValue = selected.imageUltraFixMaxWidth,
+                                 multiple = selected.imageUltraFixWidthMultiple,
+                             )
+                             imageHeightText = normalizedImageGenerationDimensionText(
+                                 rawValue = imageUltraFixTargetHeightText,
+                                 defaultValue = selected.imageDefaultHeight,
+                                 minValue = maxOf(
+                                     sourceTarget?.second ?: 0,
+                                     selected.imageUltraFixMinHeight,
+                                     tile
+                                 ),
+                                 maxValue = selected.imageUltraFixMaxHeight,
+                                 multiple = selected.imageUltraFixHeightMultiple,
+                             )
+                             imageUltraFixTargetWidthText = imageWidthText
+                             imageUltraFixTargetHeightText = imageHeightText
+                         }
+                     },
+                     onUltraFixDenoisingStepsTextChange = { value ->
+                        imageUltraFixInversionStepsText = value.take(3)
+                        val denoisingSteps = value.toIntOrNull()
+                        val refinementSteps = imageUltraFixRefinementStepsText.toIntOrNull()
+                        if (denoisingSteps != null && refinementSteps != null &&
+                            refinementSteps in 1..IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS &&
+                            denoisingSteps in 1..minOf(
+                                IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS,
+                                refinementSteps,
+                            )
+                        ) {
+                            imageUltraFixStrengthText =
+                                imageGenerationUltraFixStrengthForDenoisingSteps(
+                                    refinementSteps,
+                                    denoisingSteps,
+                                ).toString()
+                        }
+                    },
+                    onUltraFixRefinementStepsTextChange = { value ->
+                        imageUltraFixRefinementStepsText = value.take(2)
+                        val refinementSteps = value.toIntOrNull()
+                        if (refinementSteps != null &&
+                            refinementSteps in 1..IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS
+                        ) {
+                            val denoisingSteps = imageUltraFixInversionStepsText.toIntOrNull()
+                                ?.coerceIn(
+                                    1,
+                                    minOf(
+                                        IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS,
+                                        refinementSteps,
+                                    ),
+                                )
+                                ?: minOf(4, refinementSteps)
+                            imageUltraFixInversionStepsText = denoisingSteps.toString()
+                            imageUltraFixStrengthText =
+                                imageGenerationUltraFixStrengthForDenoisingSteps(
+                                    refinementSteps,
+                                    denoisingSteps,
+                                ).toString()
+                        }
+                    },
+                    onUltraFixTileSizeTextChange = { value ->
+                        val required = selectedImageModelChoice
+                            ?.imageUltraFixRequiredTileSize
+                            ?.takeIf { it > 0 }
+                        imageUltraFixTileSizeText = required?.toString() ?: value.take(4)
+                        imageUltraFixTileSizeExplicit = required == null
+                    },
+                    onUltraFixOverlapTextChange = { imageUltraFixOverlapText = it.take(16) },
                     onImportUpscaler = { generationUpscalerPicker.launch(arrayOf("*/*")) },
                     onDeleteUpscaler = onDeleteImageUpscaler,
                     onSelectUpscaler = onSelectImageUpscaler,
                     onUpscaleImage = onUpscaleImageAsset,
                     onCancelUpscale = onCancelImageUpscale,
                     onBatchCountChange = { imageBatchCount = it.coerceIn(1, maxImageBatchCount) },
-                    onWidthTextChange = { imageWidthText = it },
-                    onHeightTextChange = { imageHeightText = it },
+                    onWidthTextChange = { value ->
+                        imageWidthText = value
+                        if (imageUltraFixEnabled) {
+                            imageUltraFixTargetWidthText = value
+                        } else {
+                            imageNormalWidthText = value
+                        }
+                    },
+                    onHeightTextChange = { value ->
+                        imageHeightText = value
+                        if (imageUltraFixEnabled) {
+                            imageUltraFixTargetHeightText = value
+                        } else {
+                            imageNormalHeightText = value
+                        }
+                    },
                     onStepsTextChange = { imageStepsText = it },
                     onCfgScaleTextChange = { imageCfgScaleText = it },
                     onSeedTextChange = { imageSeedText = it },
                     onSamplerChange = { imageSampler = it },
                     onSelectImageModel = onSelectImageModel,
+                    onUseImageAsGenerationInput = { uri, width, height ->
+                        imageInputDimensionsUri = uri
+                        imageInputSourceWidth = width
+                        imageInputSourceHeight = height
+                        // Library assets already carry trusted decoded dimensions. Clear any
+                        // probe state from the previous source before a same-frame UltraFix
+                        // action evaluates readiness; the URI-keyed probe will still revalidate.
+                        imageInputDimensionsProbing = false
+                        imageInputDimensionsProbeFailed = false
+                        imageInputRestoreWarning = null
+                        imageInputUri = uri
+                        imageMaskUri = null
+                        imageControlUri = null
+                    },
                     onUseImageAsset = {
                         onUseImageAsset(it)
                         closePage()
@@ -1810,6 +3463,35 @@ fun ChatScreen(
                     onCancelBackup = onCancelImageLibraryBackup,
                     modifier = pageModifier
                 )
+            }
+
+            generationImageEditorRequest?.let { editorRequest ->
+                SmoothRightToLeftPage(
+                    visible = true,
+                    onDismiss = { generationImageEditorRequest = null }
+                ) { pageModifier, closePage ->
+                    GenerationImageEditorScreen(
+                        request = editorRequest,
+                        onBack = closePage,
+                        onCropConfirmed = { role, ownedUri ->
+                            imageInputRestoreWarning = null
+                            if (role == "control") {
+                                imageControlUri = ownedUri
+                            } else {
+                                imageInputUri = ownedUri
+                                imageMaskUri = null
+                            }
+                            closePage()
+                        },
+                        onMaskConfirmed = { ownedUris ->
+                            imageInputRestoreWarning = null
+                            imageInputUri = ownedUris.inputUri
+                            imageMaskUri = ownedUris.maskUri
+                            closePage()
+                        },
+                        modifier = pageModifier
+                    )
+                }
             }
 
             SmoothRightToLeftPage(
@@ -1860,6 +3542,43 @@ fun ChatScreen(
                 )
             }
 
+            pendingUltraFixSubmission?.let { (prompt, options) ->
+                val ultraFix = requireNotNull(options.ultraFix)
+                AlertDialog(
+                    onDismissRequest = { pendingUltraFixSubmission = null },
+                    title = { Text("开始 UltraFix 精修？") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "将以 ${ultraFix.targetWidth}×${ultraFix.targetHeight} 分块处理整张图片，" +
+                                    "通常明显慢于普通生成并会增加设备发热。"
+                            )
+                            Text(
+                                "当前去噪步数 ${ultraFix.inversionSteps} / 总步数 " +
+                                    "${ultraFix.refinementSteps}。建议该比例不超过 0.5。",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                pendingUltraFixSubmission = null
+                                if (onGenerateImagePrompt(prompt, options)) {
+                                    imageGenerationStartSignal++
+                                }
+                            }
+                        ) { Text("开始精修") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingUltraFixSubmission = null }) {
+                            Text("取消")
+                        }
+                    }
+                )
+            }
+
         }
     }
 }
@@ -1867,6 +3586,8 @@ fun ChatScreen(
 @Composable
 private fun AssistantRoleScreen(
     assistants: List<AssistantUiItem>,
+    worldBooks: List<WorldBookUiItem>,
+    knowledgeBases: List<KnowledgeBaseUiItem>,
     selectedAssistantId: String,
     selectedModelName: String?,
     selectedModelId: String?,
@@ -1875,6 +3596,13 @@ private fun AssistantRoleScreen(
     onSelectAssistant: (String) -> Unit,
     onDeleteAssistant: (String) -> Unit,
     onImportAssistantCard: (String) -> Unit,
+    onImportAssistantCardFile: () -> Unit,
+    onImportWorldBookFile: () -> Unit,
+    onDeleteWorldBook: (String) -> Unit,
+    onCreateKnowledgeBase: (String) -> Unit,
+    onImportKnowledgeDocument: (String) -> Unit,
+    onSetKnowledgeBaseSelected: (String, Boolean) -> Unit,
+    onDeleteKnowledgeBase: (String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1884,12 +3612,14 @@ private fun AssistantRoleScreen(
     var editing by remember { mutableStateOf<AssistantUiItem?>(null) }
     var creating by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
+    var managingContext by remember { mutableStateOf(false) }
     val selected = assistants.firstOrNull { it.id == selectedAssistantId } ?: assistants.firstOrNull()
     val editingAssistant = editing
     fun closeAssistantSubPage() {
         creating = false
         editing = null
         importing = false
+        managingContext = false
     }
 
     Box(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -1933,6 +3663,15 @@ private fun AssistantRoleScreen(
             )
 
             Spacer(modifier = Modifier.height(16.dp))
+            Button(
+                onClick = { managingContext = true },
+                modifier = Modifier.fillMaxWidth().height(48.dp)
+            ) {
+                Icon(Icons.Default.Folder, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("世界书与知识库")
+            }
+            Spacer(modifier = Modifier.height(10.dp))
             Text(
                 "助手列表",
                 modifier = Modifier.padding(start = 8.dp, bottom = 8.dp),
@@ -1975,10 +3714,22 @@ private fun AssistantRoleScreen(
         }
 
         SmoothRightToLeftPage(
-            visible = creating || editingAssistant != null || importing,
+            visible = creating || editingAssistant != null || importing || managingContext,
             onDismiss = ::closeAssistantSubPage
         ) { pageModifier, closePage ->
             when {
+                managingContext -> ContextLibraryPage(
+                    worldBooks = worldBooks,
+                    knowledgeBases = knowledgeBases,
+                    onBack = closePage,
+                    onImportWorldBook = onImportWorldBookFile,
+                    onDeleteWorldBook = onDeleteWorldBook,
+                    onCreateKnowledgeBase = onCreateKnowledgeBase,
+                    onImportKnowledgeDocument = onImportKnowledgeDocument,
+                    onSetKnowledgeBaseSelected = onSetKnowledgeBaseSelected,
+                    onDeleteKnowledgeBase = onDeleteKnowledgeBase,
+                    modifier = pageModifier
+                )
                 creating -> AssistantEditorPage(
                     assistant = null,
                     onBack = closePage,
@@ -2010,6 +3761,7 @@ private fun AssistantRoleScreen(
                 )
                 importing -> AssistantImportPage(
                     onBack = closePage,
+                    onImportFile = onImportAssistantCardFile,
                     onImport = {
                         onImportAssistantCard(it)
                         closePage()
@@ -2386,8 +4138,168 @@ private fun AssistantEditorPage(
 }
 
 @Composable
+private fun ContextLibraryPage(
+    worldBooks: List<WorldBookUiItem>,
+    knowledgeBases: List<KnowledgeBaseUiItem>,
+    onBack: () -> Unit,
+    onImportWorldBook: () -> Unit,
+    onDeleteWorldBook: (String) -> Unit,
+    onCreateKnowledgeBase: (String) -> Unit,
+    onImportKnowledgeDocument: (String) -> Unit,
+    onSetKnowledgeBaseSelected: (String, Boolean) -> Unit,
+    onDeleteKnowledgeBase: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var knowledgeBaseName by rememberSaveable { mutableStateOf("") }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(horizontal = 18.dp, vertical = 14.dp)
+            .navigationBarsPadding()
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回助手列表")
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text("上下文资料", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "世界书与本地知识库",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(14.dp))
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 18.dp)
+        ) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("世界书", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    TextButton(onClick = onImportWorldBook) {
+                        Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("导入")
+                    }
+                }
+            }
+            if (worldBooks.isEmpty()) {
+                item {
+                    Text(
+                        "尚未导入世界书",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
+                    )
+                }
+            } else {
+                items(worldBooks, key = { it.id }) { book ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(book.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "${book.scopeLabel} · ${book.entryCount} 条",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(onClick = { onDeleteWorldBook(book.id) }) {
+                            Icon(Icons.Default.Delete, contentDescription = "删除世界书")
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                }
+            }
+            item {
+                Spacer(modifier = Modifier.height(14.dp))
+                Text("知识库", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = knowledgeBaseName,
+                        onValueChange = { knowledgeBaseName = it.take(96) },
+                        label = { Text("知识库名称") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    IconButton(
+                        onClick = {
+                            val name = knowledgeBaseName.trim()
+                            if (name.isNotEmpty()) {
+                                onCreateKnowledgeBase(name)
+                                knowledgeBaseName = ""
+                            }
+                        },
+                        enabled = knowledgeBaseName.isNotBlank()
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "创建知识库")
+                    }
+                }
+            }
+            if (knowledgeBases.isEmpty()) {
+                item {
+                    Text(
+                        "尚未创建知识库",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
+                    )
+                }
+            } else {
+                items(knowledgeBases, key = { it.id }) { knowledgeBase ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = knowledgeBase.selected,
+                            onCheckedChange = { selected ->
+                                onSetKnowledgeBaseSelected(knowledgeBase.id, selected)
+                            }
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                knowledgeBase.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                knowledgeBase.description.ifBlank { knowledgeBase.indexStateLabel },
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(onClick = { onImportKnowledgeDocument(knowledgeBase.id) }) {
+                            Icon(Icons.Default.Folder, contentDescription = "导入知识库文档")
+                        }
+                        IconButton(onClick = { onDeleteKnowledgeBase(knowledgeBase.id) }) {
+                            Icon(Icons.Default.Delete, contentDescription = "删除知识库")
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun AssistantImportPage(
     onBack: () -> Unit,
+    onImportFile: () -> Unit,
     onImport: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -2421,6 +4333,14 @@ private fun AssistantImportPage(
                 minLines = 8,
                 modifier = Modifier.fillMaxSize().padding(12.dp)
             )
+        }
+        Button(
+            onClick = onImportFile,
+            modifier = Modifier.fillMaxWidth().height(48.dp)
+        ) {
+            Icon(Icons.Default.Folder, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("选择 PNG / JSON 文件")
         }
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -2503,6 +4423,7 @@ private fun String.toAssistantInt(default: Int, min: Int, max: Int): Int =
 @Composable
 private fun ImagesWorkspaceScreen(
     images: List<ImageAssetUiItem>,
+    generationStartSignal: Long,
     backupState: ImageLibraryBackupUiState,
     jobs: List<ImageGenerationUiJob>,
     imageModels: List<ChatModelChoice>,
@@ -2513,12 +4434,19 @@ private fun ImagesWorkspaceScreen(
     supportsNegativePrompt: Boolean,
     supportsClipSkip: Boolean,
     supportsVaeTiling: Boolean,
+    supportsTextualInversion: Boolean,
+    supportsUltraFix: Boolean,
     supportsLora: Boolean,
+    supportsLivePreview: Boolean,
     loras: List<ImageLoraUiItem>,
     selectedLoras: List<ImageGenerationUiLoraDraft>,
     loraRestoreWarning: String?,
     loraImporting: Boolean,
     loraMessage: String,
+    textualInversions: List<ImageTextualInversionUiItem>,
+    selectedTextualInversionIds: List<String>,
+    textualInversionImporting: Boolean,
+    textualInversionMessage: String,
     upscalers: List<ImageUpscalerUiItem>,
     selectedUpscalerId: String?,
     upscalerImporting: Boolean,
@@ -2528,6 +4456,8 @@ private fun ImagesWorkspaceScreen(
     maxBatchCount: Int,
     taskMode: ImageGenerationUiTaskMode,
     inputImageUri: String?,
+    inputImageWidth: Int,
+    inputImageHeight: Int,
     maskImageUri: String?,
     controlImageUri: String?,
     inputRestoreWarning: String?,
@@ -2537,6 +4467,14 @@ private fun ImagesWorkspaceScreen(
     disableModelNegativePrompt: Boolean,
     clipSkipText: String,
     vaeTilingEnabled: Boolean,
+    ultraFixEnabled: Boolean,
+    ultraFixStrengthText: String,
+    ultraFixInversionStepsText: String,
+    ultraFixRefinementStepsText: String,
+    ultraFixTileSizeText: String,
+    ultraFixOverlapText: String,
+    livePreviewEnabled: Boolean,
+    livePreviewInterval: Int,
     widthText: String,
     heightText: String,
     stepsText: String,
@@ -2544,6 +4482,10 @@ private fun ImagesWorkspaceScreen(
     seedText: String,
     sampler: String,
     prompt: String,
+    onMeasureImagePromptTokens: (suspend (
+        modelId: String,
+        prompt: String,
+    ) -> ImagePromptTokenMeasurement?)?,
     onPromptChange: (String) -> Unit,
     onSubmitPrompt: () -> Unit,
     onCancelGeneration: () -> Unit,
@@ -2552,6 +4494,8 @@ private fun ImagesWorkspaceScreen(
     onBack: () -> Unit,
     onTaskModeChange: (ImageGenerationUiTaskMode) -> Unit,
     onPickImageRole: (String) -> Unit,
+    onCropImageRole: (String) -> Unit,
+    onDrawImageMask: () -> Unit,
     onClearImageRole: (String) -> Unit,
     onStrengthTextChange: (String) -> Unit,
     onControlStrengthTextChange: (String) -> Unit,
@@ -2559,10 +4503,21 @@ private fun ImagesWorkspaceScreen(
     onDisableModelNegativePromptChange: (Boolean) -> Unit,
     onClipSkipTextChange: (String) -> Unit,
     onVaeTilingEnabledChange: (Boolean) -> Unit,
+    onLivePreviewEnabledChange: (Boolean) -> Unit,
+    onLivePreviewIntervalChange: (Int) -> Unit,
     onToggleLora: (String) -> Unit,
     onLoraMultiplierChange: (String, String) -> Unit,
     onImportLora: () -> Unit,
     onDeleteLora: (String) -> Unit,
+    onToggleTextualInversion: (String) -> Unit,
+    onImportTextualInversion: () -> Unit,
+    onDeleteTextualInversion: (String) -> Unit,
+    onUltraFixEnabledChange: (Boolean) -> Boolean,
+     onResetUltraFix: () -> Unit,
+     onUltraFixDenoisingStepsTextChange: (String) -> Unit,
+    onUltraFixRefinementStepsTextChange: (String) -> Unit,
+    onUltraFixTileSizeTextChange: (String) -> Unit,
+    onUltraFixOverlapTextChange: (String) -> Unit,
     onImportUpscaler: () -> Unit,
     onDeleteUpscaler: (String) -> Unit,
     onSelectUpscaler: (String) -> Unit,
@@ -2576,6 +4531,7 @@ private fun ImagesWorkspaceScreen(
     onSeedTextChange: (String) -> Unit,
     onSamplerChange: (String) -> Unit,
     onSelectImageModel: (String) -> Unit,
+    onUseImageAsGenerationInput: (String, Int, Int) -> Unit,
     onUseImageAsset: (String) -> Unit,
     onDeleteImageAsset: (String) -> Unit,
     onDeleteImageAssets: (List<String>) -> Unit,
@@ -2595,6 +4551,13 @@ private fun ImagesWorkspaceScreen(
     var favoritesOnly by rememberSaveable { mutableStateOf(false) }
     var libraryModelId by rememberSaveable { mutableStateOf<String?>(null) }
     var libraryTaskMode by rememberSaveable { mutableStateOf<String?>(null) }
+    var libraryOperation by rememberSaveable { mutableStateOf<String?>(null) }
+    var libraryDateStartUtcMillis by rememberSaveable { mutableStateOf<Long?>(null) }
+    var libraryDateEndUtcMillis by rememberSaveable { mutableStateOf<Long?>(null) }
+    var libraryDimensionsKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var libraryScheduler by rememberSaveable { mutableStateOf<String?>(null) }
+    var libraryRuntime by rememberSaveable { mutableStateOf<String?>(null) }
+    var libraryDevice by rememberSaveable { mutableStateOf<String?>(null) }
     var newestFirst by rememberSaveable { mutableStateOf(true) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedImageIds by remember { mutableStateOf(emptySet<String>()) }
@@ -2623,6 +4586,44 @@ private fun ImagesWorkspaceScreen(
         images.map(ImageAssetUiItem::generationTaskMode)
             .filter(String::isNotBlank)
             .distinct()
+            .sorted()
+    }
+    val libraryOperations = remember(images) {
+        images.mapNotNull { imageLibraryOperationWireName(it) }
+            .distinct()
+            .sorted()
+    }
+    val libraryDimensions = remember(images) {
+        images.mapNotNull(ImageLibraryDimensions::from)
+            .distinct()
+            .sortedWith(compareBy<ImageLibraryDimensions> { it.width * it.height }.thenBy { it.key })
+    }
+    val librarySchedulers = remember(images) {
+        images.map(ImageAssetUiItem::generationSampler)
+            .filter(String::isNotBlank)
+            .distinct()
+            .sorted()
+    }
+    val libraryRuntimes = remember(images) {
+        images.map(ImageAssetUiItem::generationRuntime)
+            .filter(String::isNotBlank)
+            .distinct()
+            .sorted()
+    }
+    val libraryDevices = remember(images) {
+        images.map(ImageAssetUiItem::generationDevice)
+            .filter(String::isNotBlank)
+            .distinct()
+            .sorted()
+    }
+    val libraryDateRange = remember(libraryDateStartUtcMillis, libraryDateEndUtcMillis) {
+        imageLibraryDateRangeFromUtcPickerSelection(
+            selectedStartDateMillis = libraryDateStartUtcMillis,
+            selectedEndDateMillis = libraryDateEndUtcMillis
+        )
+    }
+    val libraryDimensionsFilter = remember(libraryDimensionsKey) {
+        ImageLibraryDimensions.fromKeyOrNull(libraryDimensionsKey)
     }
     val filteredImages = remember(
         images,
@@ -2630,27 +4631,30 @@ private fun ImagesWorkspaceScreen(
         favoritesOnly,
         libraryModelId,
         libraryTaskMode,
+        libraryOperation,
+        libraryDateRange,
+        libraryDimensionsFilter,
+        libraryScheduler,
+        libraryRuntime,
+        libraryDevice,
         newestFirst
     ) {
-        val query = libraryQuery.trim().lowercase()
-        images.asSequence()
-            .filter { !favoritesOnly || it.favorite }
-            .filter { libraryModelId == null || it.generationModelId == libraryModelId }
-            .filter { libraryTaskMode == null || it.generationTaskMode == libraryTaskMode }
-            .filter { image ->
-                query.isEmpty() || listOf(
-                    image.name,
-                    image.prompt,
-                    image.generationPrompt,
-                    image.generationModelName,
-                    image.generationSampler,
-                    image.generationTaskMode,
-                    "${image.width}x${image.height}"
-                ).any { value -> query in value.lowercase() }
-            }
-            .let { sequence ->
-                if (newestFirst) sequence.toList() else sequence.toList().asReversed()
-            }
+        filterImageLibrary(
+            images = images,
+            filter = ImageLibraryFilter(
+                query = libraryQuery,
+                favoritesOnly = favoritesOnly,
+                modelId = libraryModelId,
+                taskMode = libraryTaskMode,
+                operation = libraryOperation,
+                dateRange = libraryDateRange,
+                dimensions = libraryDimensionsFilter,
+                scheduler = libraryScheduler,
+                runtime = libraryRuntime,
+                device = libraryDevice,
+                newestFirst = newestFirst
+            )
+        )
     }
     val latestJob = jobs.firstOrNull()
     val activeJob = if (showGenerationCanvas) latestJob else null
@@ -2678,6 +4682,9 @@ private fun ImagesWorkspaceScreen(
     BackHandler(enabled = previewImageId != null) {
         previewImageId = null
     }
+    LaunchedEffect(generationStartSignal) {
+        if (generationStartSignal > 0L) showGenerationCanvas = true
+    }
 
     fun submitFromImages() {
         val cleanPrompt = prompt.trim()
@@ -2698,16 +4705,47 @@ private fun ImagesWorkspaceScreen(
             return
         }
         pendingConversationPrompt = cleanPrompt
-        showGenerationCanvas = true
         onSubmitPrompt()
     }
 
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(if (darkTheme) MaterialTheme.colorScheme.background else Color.White)
-            .navigationBarsPadding()
+    val selectedTextualInversionIdsForAutocomplete = selectedTextualInversionIds.toSet()
+    ImagePromptTagAutocompleteProvider(
+        textualInversionCompletions = textualInversions
+            .asSequence()
+            .filter(ImageTextualInversionUiItem::compatibleWithSelectedModel)
+            .map { artifact ->
+                ImagePromptTextualInversionCompletion(
+                    id = artifact.id,
+                    name = artifact.name,
+                    trigger = artifact.trigger,
+                    selected = artifact.id in selectedTextualInversionIdsForAutocomplete,
+                )
+            }
+            .toList(),
+        onActivateTextualInversion = activate@ { id ->
+            val artifact = textualInversions.firstOrNull { candidate ->
+                candidate.id == id && candidate.compatibleWithSelectedModel
+            } ?: return@activate false
+            if (id in selectedTextualInversionIdsForAutocomplete) return@activate true
+            if (selectedTextualInversionIdsForAutocomplete.size >= 8) {
+                Toast.makeText(
+                    context,
+                    "单次最多选择 8 个 Textual Inversion",
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return@activate false
+            }
+            onToggleTextualInversion(artifact.id)
+            true
+        },
     ) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(if (darkTheme) MaterialTheme.colorScheme.background else Color.White)
+                .navigationBarsPadding()
+                .imePadding()
+        ) {
         if (showGenerationCanvas) {
             ImageGenerationCanvas(
                 prompt = activePrompt,
@@ -2731,9 +4769,22 @@ private fun ImagesWorkspaceScreen(
                 favoritesOnly = favoritesOnly,
                 selectedLibraryModelId = libraryModelId,
                 selectedLibraryTaskMode = libraryTaskMode,
+                selectedLibraryOperation = libraryOperation,
+                selectedLibraryDateRange = libraryDateRange,
+                selectedLibraryDateStartUtcMillis = libraryDateStartUtcMillis,
+                selectedLibraryDateEndUtcMillis = libraryDateEndUtcMillis,
+                selectedLibraryDimensionsKey = libraryDimensionsKey,
+                selectedLibraryScheduler = libraryScheduler,
+                selectedLibraryRuntime = libraryRuntime,
+                selectedLibraryDevice = libraryDevice,
                 newestFirst = newestFirst,
                 libraryModels = libraryModels,
                 libraryTaskModes = libraryTaskModes,
+                libraryOperations = libraryOperations,
+                libraryDimensions = libraryDimensions,
+                librarySchedulers = librarySchedulers,
+                libraryRuntimes = libraryRuntimes,
+                libraryDevices = libraryDevices,
                 selectionMode = selectionMode,
                 selectedImageIds = selectedImageIds,
                 batchSaving = batchSaving,
@@ -2746,16 +4797,25 @@ private fun ImagesWorkspaceScreen(
                 supportsNegativePrompt = supportsNegativePrompt,
                 supportsClipSkip = supportsClipSkip,
                 supportsVaeTiling = supportsVaeTiling,
+                supportsTextualInversion = supportsTextualInversion,
+                supportsUltraFix = supportsUltraFix,
                 supportsLora = supportsLora,
+                supportsLivePreview = supportsLivePreview,
                 loras = loras,
                 selectedLoras = selectedLoras,
                 loraRestoreWarning = loraRestoreWarning,
                 loraImporting = loraImporting,
                 loraMessage = loraMessage,
+                textualInversions = textualInversions,
+                selectedTextualInversionIds = selectedTextualInversionIds,
+                textualInversionImporting = textualInversionImporting,
+                textualInversionMessage = textualInversionMessage,
                 batchCount = batchCount,
                 maxBatchCount = maxBatchCount,
                 taskMode = taskMode,
                 inputImageUri = inputImageUri,
+                inputImageWidth = inputImageWidth,
+                inputImageHeight = inputImageHeight,
                 maskImageUri = maskImageUri,
                 controlImageUri = controlImageUri,
                 inputRestoreWarning = inputRestoreWarning,
@@ -2765,16 +4825,27 @@ private fun ImagesWorkspaceScreen(
                 disableModelNegativePrompt = disableModelNegativePrompt,
                 clipSkipText = clipSkipText,
                 vaeTilingEnabled = vaeTilingEnabled,
+                ultraFixEnabled = ultraFixEnabled,
+                ultraFixStrengthText = ultraFixStrengthText,
+                ultraFixInversionStepsText = ultraFixInversionStepsText,
+                ultraFixRefinementStepsText = ultraFixRefinementStepsText,
+                ultraFixTileSizeText = ultraFixTileSizeText,
+                ultraFixOverlapText = ultraFixOverlapText,
+                livePreviewEnabled = livePreviewEnabled,
+                livePreviewInterval = livePreviewInterval,
                 widthText = widthText,
                 heightText = heightText,
                 stepsText = stepsText,
                 cfgScaleText = cfgScaleText,
                 seedText = seedText,
                 sampler = sampler,
+                onMeasureImagePromptTokens = onMeasureImagePromptTokens,
                 onBack = onBack,
                 onSelectImageModel = onSelectImageModel,
                 onTaskModeChange = onTaskModeChange,
                 onPickImageRole = onPickImageRole,
+                onCropImageRole = onCropImageRole,
+                onDrawImageMask = onDrawImageMask,
                 onClearImageRole = onClearImageRole,
                 onStrengthTextChange = onStrengthTextChange,
                 onControlStrengthTextChange = onControlStrengthTextChange,
@@ -2782,10 +4853,21 @@ private fun ImagesWorkspaceScreen(
                 onDisableModelNegativePromptChange = onDisableModelNegativePromptChange,
                 onClipSkipTextChange = onClipSkipTextChange,
                 onVaeTilingEnabledChange = onVaeTilingEnabledChange,
+                onLivePreviewEnabledChange = onLivePreviewEnabledChange,
+                onLivePreviewIntervalChange = onLivePreviewIntervalChange,
                 onToggleLora = onToggleLora,
                 onLoraMultiplierChange = onLoraMultiplierChange,
                 onImportLora = onImportLora,
                 onDeleteLora = onDeleteLora,
+                onToggleTextualInversion = onToggleTextualInversion,
+                onImportTextualInversion = onImportTextualInversion,
+                onDeleteTextualInversion = onDeleteTextualInversion,
+                 onUltraFixEnabledChange = onUltraFixEnabledChange,
+                 onResetUltraFix = onResetUltraFix,
+                 onUltraFixDenoisingStepsTextChange = onUltraFixDenoisingStepsTextChange,
+                onUltraFixRefinementStepsTextChange = onUltraFixRefinementStepsTextChange,
+                onUltraFixTileSizeTextChange = onUltraFixTileSizeTextChange,
+                onUltraFixOverlapTextChange = onUltraFixOverlapTextChange,
                 onBatchCountChange = onBatchCountChange,
                 onWidthTextChange = onWidthTextChange,
                 onHeightTextChange = onHeightTextChange,
@@ -2801,7 +4883,29 @@ private fun ImagesWorkspaceScreen(
                 onFavoritesOnlyChange = { favoritesOnly = it },
                 onLibraryModelChange = { libraryModelId = it },
                 onLibraryTaskModeChange = { libraryTaskMode = it },
+                onLibraryOperationChange = { libraryOperation = it },
+                onLibraryDateRangeChange = { start, end ->
+                    libraryDateStartUtcMillis = start
+                    libraryDateEndUtcMillis = end
+                },
+                onLibraryDimensionsChange = { libraryDimensionsKey = it },
+                onLibrarySchedulerChange = { libraryScheduler = it },
+                onLibraryRuntimeChange = { libraryRuntime = it },
+                onLibraryDeviceChange = { libraryDevice = it },
                 onNewestFirstChange = { newestFirst = it },
+                onClearLibraryFilters = {
+                    libraryQuery = ""
+                    favoritesOnly = false
+                    libraryModelId = null
+                    libraryTaskMode = null
+                    libraryOperation = null
+                    libraryDateStartUtcMillis = null
+                    libraryDateEndUtcMillis = null
+                    libraryDimensionsKey = null
+                    libraryScheduler = null
+                    libraryRuntime = null
+                    libraryDevice = null
+                },
                 onSelectionModeChange = { enabled ->
                     selectionMode = enabled
                     if (!enabled) selectedImageIds = emptySet()
@@ -2859,6 +4963,8 @@ private fun ImagesWorkspaceScreen(
         ImagePromptBar(
             prompt = prompt,
             onPromptChange = onPromptChange,
+            modelId = selectedImageModelId,
+            onMeasureTokens = onMeasureImagePromptTokens,
             onOpenPhoto = {
                 when (taskMode) {
                     ImageGenerationUiTaskMode.CONTROL -> onPickImageRole("control")
@@ -2882,21 +4988,41 @@ private fun ImagesWorkspaceScreen(
 
         previewImageId?.let { imageId ->
             images.firstOrNull { it.id == imageId }?.let { image ->
+                val selectedModel = imageModels.firstOrNull { it.id == selectedImageModelId }
+                val generationActionsEnabled = jobs.none(ImageGenerationUiJob::isWorking) &&
+                    image.uriString.startsWith("content://", ignoreCase = true)
+                val canUseAsImg2Img = generationActionsEnabled &&
+                    ImageGenerationUiTaskMode.IMG2IMG in supportedTaskModes
+                val ultraFixTargetSize = selectedModel
+                    ?.takeIf { !selectedImageModelIsCloud && canUseAsImg2Img }
+                    ?.ultraFixTargetSizeForSourceOrNull(image.width, image.height)
                 val sourcePresetFields = image.generationPreset
                     ?.let(::availableImageGenerationPresetFields)
                     .orEmpty()
                 val reusablePresetFields = image.generationPreset?.let { preset ->
                     compatibleImageGenerationPresetFields(
                         preset = preset,
-                        selectedModel = imageModels.firstOrNull { it.id == selectedImageModelId },
+                        selectedModel = selectedModel,
                         selectedModelIsCloud = selectedImageModelIsCloud,
                         supportsNegativePrompt = supportsNegativePrompt,
                         supportsClipSkip = supportsClipSkip,
                         supportsVaeTiling = supportsVaeTiling,
                         supportsLora = supportsLora,
                         availableLoraIds = loras.mapTo(mutableSetOf(), ImageLoraUiItem::id),
-                        maxBatchCount = maxBatchCount
-                    )
+                        maxBatchCount = maxBatchCount,
+                        currentTaskMode = taskMode,
+                        supportsTextualInversion = supportsTextualInversion,
+                        supportsUltraFix = supportsUltraFix,
+                        availableTextualInversionIds = textualInversions
+                            .filter { it.compatibleWithSelectedModel }
+                            .mapTo(mutableSetOf(), ImageTextualInversionUiItem::id)
+                    ).let { compatible ->
+                        if (inputImageUri == null) {
+                            compatible - ImageGenerationPresetField.ULTRAFIX
+                        } else {
+                            compatible
+                        }
+                    }
                 }.orEmpty()
                 ImageAssetPreviewOverlay(
                     image = image,
@@ -2909,7 +5035,11 @@ private fun ImagesWorkspaceScreen(
                     onShare = {
                         scope.launch {
                             val result = withContext(Dispatchers.IO) {
-                                createCachedImageShareIntent(context, image)
+                                createCachedImageShareIntent(
+                                    context = context,
+                                    image = image,
+                                    includePrompt = false
+                                )
                             }
                             result
                                 .mapCatching { intent -> context.startActivity(intent) }
@@ -2925,6 +5055,27 @@ private fun ImagesWorkspaceScreen(
                     onDelete = {
                         pendingDeleteIds = setOf(image.id)
                     },
+                    canUseAsImg2Img = canUseAsImg2Img,
+                    canUseUltraFix = ultraFixTargetSize != null,
+                    onUseAsImg2Img = {
+                        onUseImageAsGenerationInput(image.uriString, image.width, image.height)
+                        onTaskModeChange(ImageGenerationUiTaskMode.IMG2IMG)
+                        onUltraFixEnabledChange(false)
+                        image.generationPrompt.takeIf(String::isNotBlank)?.let(onPromptChange)
+                        showGenerationCanvas = true
+                        previewImageId = null
+                    },
+                    onUseUltraFix = onUseUltraFix@ {
+                        val target = ultraFixTargetSize ?: return@onUseUltraFix
+                        onUseImageAsGenerationInput(image.uriString, image.width, image.height)
+                        onTaskModeChange(ImageGenerationUiTaskMode.IMG2IMG)
+                        if (!onUltraFixEnabledChange(true)) return@onUseUltraFix
+                        onWidthTextChange(target.first.toString())
+                        onHeightTextChange(target.second.toString())
+                        image.generationPrompt.takeIf(String::isNotBlank)?.let(onPromptChange)
+                        showGenerationCanvas = true
+                        previewImageId = null
+                    },
                     onImportUpscaler = onImportUpscaler,
                     onDeleteUpscaler = onDeleteUpscaler,
                     onSelectUpscaler = onSelectUpscaler,
@@ -2933,7 +5084,31 @@ private fun ImagesWorkspaceScreen(
                     onSetFavorite = { favorite -> onSetImageAssetFavorite(image.id, favorite) },
                     reusablePresetFields = reusablePresetFields,
                     hiddenPresetFieldCount = sourcePresetFields.size - reusablePresetFields.size,
-                    onUseParameters = { preset, fields ->
+                    onUseParameters = useParameters@ { preset, fields ->
+                        val hasStructuredUltraFixPayload = preset.ultraFix != null
+                        val selectedUltraFix = ImageGenerationPresetField.ULTRAFIX in fields
+                        val compositeUltraFix = preset.ultraFix?.takeIf {
+                            selectedUltraFix
+                        }
+                        if (compositeUltraFix != null) {
+                            val currentSourceTarget = selectedModel
+                                ?.ultraFixTargetSizeForSourceOrNull(
+                                    inputImageWidth,
+                                    inputImageHeight
+                                )
+                            if (currentSourceTarget == null ||
+                                compositeUltraFix.targetWidth < currentSourceTarget.first ||
+                                compositeUltraFix.targetHeight < currentSourceTarget.second
+                            ) {
+                                Toast.makeText(
+                                    context,
+                                    "当前源图尺寸与这组 UltraFix 参数不兼容",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                return@useParameters
+                            }
+                            if (!onUltraFixEnabledChange(true)) return@useParameters
+                        }
                         if (ImageGenerationPresetField.PROMPT in fields) {
                             onPromptChange(preset.prompt)
                         }
@@ -2941,11 +5116,25 @@ private fun ImagesWorkspaceScreen(
                             onNegativePromptChange(preset.negativePrompt.orEmpty())
                             onDisableModelNegativePromptChange(preset.negativePrompt == "")
                         }
-                        if (ImageGenerationPresetField.SIZE in fields) {
+                        if (ImageGenerationPresetField.STRENGTH in fields &&
+                            !hasStructuredUltraFixPayload
+                        ) {
+                            preset.strength?.let { onStrengthTextChange(it.toString()) }
+                        }
+                        if (ImageGenerationPresetField.CONTROL_STRENGTH in fields) {
+                            preset.controlStrength?.let {
+                                onControlStrengthTextChange(it.toString())
+                            }
+                        }
+                        if (ImageGenerationPresetField.SIZE in fields &&
+                            !hasStructuredUltraFixPayload
+                        ) {
                             preset.width?.let { onWidthTextChange(it.toString()) }
                             preset.height?.let { onHeightTextChange(it.toString()) }
                         }
-                        if (ImageGenerationPresetField.STEPS in fields) {
+                        if (ImageGenerationPresetField.STEPS in fields &&
+                            !hasStructuredUltraFixPayload
+                        ) {
                             preset.steps?.let { onStepsTextChange(it.toString()) }
                         }
                         if (ImageGenerationPresetField.CFG in fields) {
@@ -2957,16 +5146,24 @@ private fun ImagesWorkspaceScreen(
                         if (ImageGenerationPresetField.SAMPLER in fields) {
                             val selectedModel = imageModels.firstOrNull { it.id == selectedImageModelId }
                             preset.sampleMethod
-                                ?.takeIf { selectedModel?.imageSupportedSamplers?.contains(it) != false }
+                                ?.takeIf {
+                                    selectedModel
+                                        ?.imageSupportedSamplersForTask(taskMode)
+                                        ?.contains(it) == true
+                                }
                                 ?.let(onSamplerChange)
                         }
                         if (ImageGenerationPresetField.CLIP_SKIP in fields && supportsClipSkip) {
                             preset.clipSkip?.let { onClipSkipTextChange(it.toString()) }
                         }
-                        if (ImageGenerationPresetField.BATCH in fields) {
+                        if (ImageGenerationPresetField.BATCH in fields &&
+                            !hasStructuredUltraFixPayload
+                        ) {
                             preset.batchCount?.let { onBatchCountChange(it.coerceIn(1, maxBatchCount)) }
                         }
-                        if (ImageGenerationPresetField.VAE_TILING in fields && supportsVaeTiling) {
+                        if (ImageGenerationPresetField.VAE_TILING in fields &&
+                            supportsVaeTiling && !hasStructuredUltraFixPayload
+                        ) {
                             onVaeTilingEnabledChange(preset.vaeTileSize != null)
                         }
                         if (ImageGenerationPresetField.LORA in fields && supportsLora) {
@@ -2979,6 +5176,31 @@ private fun ImagesWorkspaceScreen(
                                     onToggleLora(selection.id)
                                 }
                                 onLoraMultiplierChange(selection.id, selection.multiplier.toString())
+                            }
+                        }
+                        if (ImageGenerationPresetField.TEXTUAL_INVERSION in fields &&
+                            supportsTextualInversion
+                        ) {
+                            val desiredIds = preset.textualInversionIds.toSet()
+                            selectedTextualInversionIds
+                                .filterNot(desiredIds::contains)
+                                .forEach(onToggleTextualInversion)
+                            preset.textualInversionIds
+                                .filterNot(selectedTextualInversionIds::contains)
+                                .forEach(onToggleTextualInversion)
+                        }
+                        if (ImageGenerationPresetField.ULTRAFIX in fields && supportsUltraFix) {
+                            preset.ultraFix?.let { ultraFix ->
+                                onWidthTextChange(ultraFix.targetWidth.toString())
+                                onHeightTextChange(ultraFix.targetHeight.toString())
+                                onUltraFixRefinementStepsTextChange(
+                                    ultraFix.refinementSteps.toString()
+                                )
+                                onUltraFixDenoisingStepsTextChange(
+                                    ultraFix.inversionSteps.toString()
+                                )
+                                onUltraFixTileSizeTextChange(ultraFix.tileSize.toString())
+                                onUltraFixOverlapTextChange(ultraFix.overlap.toString())
                             }
                         }
                         previewImageId = null
@@ -2994,6 +5216,7 @@ private fun ImagesWorkspaceScreen(
                     modifier = Modifier.align(Alignment.Center)
                 )
             }
+        }
         }
     }
     if (pendingDeleteIds.isNotEmpty()) {
@@ -3195,9 +5418,22 @@ private fun ImageGalleryHome(
     favoritesOnly: Boolean,
     selectedLibraryModelId: String?,
     selectedLibraryTaskMode: String?,
+    selectedLibraryOperation: String?,
+    selectedLibraryDateRange: ImageLibraryDateRange?,
+    selectedLibraryDateStartUtcMillis: Long?,
+    selectedLibraryDateEndUtcMillis: Long?,
+    selectedLibraryDimensionsKey: String?,
+    selectedLibraryScheduler: String?,
+    selectedLibraryRuntime: String?,
+    selectedLibraryDevice: String?,
     newestFirst: Boolean,
     libraryModels: List<Pair<String, String>>,
     libraryTaskModes: List<String>,
+    libraryOperations: List<String>,
+    libraryDimensions: List<ImageLibraryDimensions>,
+    librarySchedulers: List<String>,
+    libraryRuntimes: List<String>,
+    libraryDevices: List<String>,
     selectionMode: Boolean,
     selectedImageIds: Set<String>,
     batchSaving: Boolean,
@@ -3210,16 +5446,25 @@ private fun ImageGalleryHome(
     supportsNegativePrompt: Boolean,
     supportsClipSkip: Boolean,
     supportsVaeTiling: Boolean,
+    supportsTextualInversion: Boolean,
+    supportsUltraFix: Boolean,
     supportsLora: Boolean,
+    supportsLivePreview: Boolean,
     loras: List<ImageLoraUiItem>,
     selectedLoras: List<ImageGenerationUiLoraDraft>,
     loraRestoreWarning: String?,
     loraImporting: Boolean,
     loraMessage: String,
+    textualInversions: List<ImageTextualInversionUiItem>,
+    selectedTextualInversionIds: List<String>,
+    textualInversionImporting: Boolean,
+    textualInversionMessage: String,
     batchCount: Int,
     maxBatchCount: Int,
     taskMode: ImageGenerationUiTaskMode,
     inputImageUri: String?,
+    inputImageWidth: Int,
+    inputImageHeight: Int,
     maskImageUri: String?,
     controlImageUri: String?,
     inputRestoreWarning: String?,
@@ -3229,16 +5474,30 @@ private fun ImageGalleryHome(
     disableModelNegativePrompt: Boolean,
     clipSkipText: String,
     vaeTilingEnabled: Boolean,
+    ultraFixEnabled: Boolean,
+    ultraFixStrengthText: String,
+    ultraFixInversionStepsText: String,
+    ultraFixRefinementStepsText: String,
+    ultraFixTileSizeText: String,
+    ultraFixOverlapText: String,
+    livePreviewEnabled: Boolean,
+    livePreviewInterval: Int,
     widthText: String,
     heightText: String,
     stepsText: String,
     cfgScaleText: String,
     seedText: String,
     sampler: String,
+    onMeasureImagePromptTokens: (suspend (
+        modelId: String,
+        prompt: String,
+    ) -> ImagePromptTokenMeasurement?)?,
     onBack: () -> Unit,
     onSelectImageModel: (String) -> Unit,
     onTaskModeChange: (ImageGenerationUiTaskMode) -> Unit,
     onPickImageRole: (String) -> Unit,
+    onCropImageRole: (String) -> Unit,
+    onDrawImageMask: () -> Unit,
     onClearImageRole: (String) -> Unit,
     onStrengthTextChange: (String) -> Unit,
     onControlStrengthTextChange: (String) -> Unit,
@@ -3246,10 +5505,21 @@ private fun ImageGalleryHome(
     onDisableModelNegativePromptChange: (Boolean) -> Unit,
     onClipSkipTextChange: (String) -> Unit,
     onVaeTilingEnabledChange: (Boolean) -> Unit,
+    onLivePreviewEnabledChange: (Boolean) -> Unit,
+    onLivePreviewIntervalChange: (Int) -> Unit,
     onToggleLora: (String) -> Unit,
     onLoraMultiplierChange: (String, String) -> Unit,
     onImportLora: () -> Unit,
     onDeleteLora: (String) -> Unit,
+    onToggleTextualInversion: (String) -> Unit,
+    onImportTextualInversion: () -> Unit,
+    onDeleteTextualInversion: (String) -> Unit,
+    onUltraFixEnabledChange: (Boolean) -> Boolean,
+     onResetUltraFix: () -> Unit,
+     onUltraFixDenoisingStepsTextChange: (String) -> Unit,
+    onUltraFixRefinementStepsTextChange: (String) -> Unit,
+    onUltraFixTileSizeTextChange: (String) -> Unit,
+    onUltraFixOverlapTextChange: (String) -> Unit,
     onBatchCountChange: (Int) -> Unit,
     onWidthTextChange: (String) -> Unit,
     onHeightTextChange: (String) -> Unit,
@@ -3265,7 +5535,14 @@ private fun ImageGalleryHome(
     onFavoritesOnlyChange: (Boolean) -> Unit,
     onLibraryModelChange: (String?) -> Unit,
     onLibraryTaskModeChange: (String?) -> Unit,
+    onLibraryOperationChange: (String?) -> Unit,
+    onLibraryDateRangeChange: (Long?, Long?) -> Unit,
+    onLibraryDimensionsChange: (String?) -> Unit,
+    onLibrarySchedulerChange: (String?) -> Unit,
+    onLibraryRuntimeChange: (String?) -> Unit,
+    onLibraryDeviceChange: (String?) -> Unit,
     onNewestFirstChange: (Boolean) -> Unit,
+    onClearLibraryFilters: () -> Unit,
     onSelectionModeChange: (Boolean) -> Unit,
     onToggleImageSelection: (String) -> Unit,
     onSelectAllVisible: () -> Unit,
@@ -3302,15 +5579,24 @@ private fun ImageGalleryHome(
                 supportsNegativePrompt = supportsNegativePrompt,
                 supportsClipSkip = supportsClipSkip,
                 supportsVaeTiling = supportsVaeTiling,
+                supportsTextualInversion = supportsTextualInversion,
+                supportsUltraFix = supportsUltraFix,
                 supportsLora = supportsLora,
+                supportsLivePreview = supportsLivePreview,
                 loras = loras,
                 selectedLoras = selectedLoras,
                 loraRestoreWarning = loraRestoreWarning,
                 loraImporting = loraImporting,
                 loraMessage = loraMessage,
+                textualInversions = textualInversions,
+                selectedTextualInversionIds = selectedTextualInversionIds,
+                textualInversionImporting = textualInversionImporting,
+                textualInversionMessage = textualInversionMessage,
                 batchCount = batchCount,
                 maxBatchCount = maxBatchCount,
                 inputImageUri = inputImageUri,
+                inputImageWidth = inputImageWidth,
+                inputImageHeight = inputImageHeight,
                 maskImageUri = maskImageUri,
                 controlImageUri = controlImageUri,
                 inputRestoreWarning = inputRestoreWarning,
@@ -3320,14 +5606,27 @@ private fun ImageGalleryHome(
                 disableModelNegativePrompt = disableModelNegativePrompt,
                 clipSkipText = clipSkipText,
                 vaeTilingEnabled = vaeTilingEnabled,
+                ultraFixEnabled = ultraFixEnabled,
+                ultraFixStrengthText = ultraFixStrengthText,
+                ultraFixInversionStepsText = ultraFixInversionStepsText,
+                ultraFixRefinementStepsText = ultraFixRefinementStepsText,
+                ultraFixTileSizeText = ultraFixTileSizeText,
+                ultraFixOverlapText = ultraFixOverlapText,
+                livePreviewEnabled = livePreviewEnabled,
+                livePreviewInterval = livePreviewInterval,
                 widthText = widthText,
                 heightText = heightText,
                 stepsText = stepsText,
                 cfgScaleText = cfgScaleText,
                 seedText = seedText,
                 sampler = sampler,
+                modelId = selectedImageModelId,
+                onMeasureTokens = onMeasureImagePromptTokens,
+                onPromptChange = onPromptChange,
                 onTaskModeChange = onTaskModeChange,
                 onPickImageRole = onPickImageRole,
+                onCropImageRole = onCropImageRole,
+                onDrawImageMask = onDrawImageMask,
                 onClearImageRole = onClearImageRole,
                 onStrengthTextChange = onStrengthTextChange,
                 onControlStrengthTextChange = onControlStrengthTextChange,
@@ -3335,10 +5634,21 @@ private fun ImageGalleryHome(
                 onDisableModelNegativePromptChange = onDisableModelNegativePromptChange,
                 onClipSkipTextChange = onClipSkipTextChange,
                 onVaeTilingEnabledChange = onVaeTilingEnabledChange,
+                onLivePreviewEnabledChange = onLivePreviewEnabledChange,
+                onLivePreviewIntervalChange = onLivePreviewIntervalChange,
                 onToggleLora = onToggleLora,
                 onLoraMultiplierChange = onLoraMultiplierChange,
                 onImportLora = onImportLora,
                 onDeleteLora = onDeleteLora,
+                onToggleTextualInversion = onToggleTextualInversion,
+                onImportTextualInversion = onImportTextualInversion,
+                onDeleteTextualInversion = onDeleteTextualInversion,
+                 onUltraFixEnabledChange = onUltraFixEnabledChange,
+                 onResetUltraFix = onResetUltraFix,
+                 onUltraFixDenoisingStepsTextChange = onUltraFixDenoisingStepsTextChange,
+                onUltraFixRefinementStepsTextChange = onUltraFixRefinementStepsTextChange,
+                onUltraFixTileSizeTextChange = onUltraFixTileSizeTextChange,
+                onUltraFixOverlapTextChange = onUltraFixOverlapTextChange,
                 onBatchCountChange = onBatchCountChange,
                 onWidthTextChange = onWidthTextChange,
                 onHeightTextChange = onHeightTextChange,
@@ -3392,9 +5702,22 @@ private fun ImageGalleryHome(
                 favoritesOnly = favoritesOnly,
                 selectedModelId = selectedLibraryModelId,
                 selectedTaskMode = selectedLibraryTaskMode,
+                selectedOperation = selectedLibraryOperation,
+                selectedDateRange = selectedLibraryDateRange,
+                selectedDateStartUtcMillis = selectedLibraryDateStartUtcMillis,
+                selectedDateEndUtcMillis = selectedLibraryDateEndUtcMillis,
+                selectedDimensionsKey = selectedLibraryDimensionsKey,
+                selectedScheduler = selectedLibraryScheduler,
+                selectedRuntime = selectedLibraryRuntime,
+                selectedDevice = selectedLibraryDevice,
                 newestFirst = newestFirst,
                 models = libraryModels,
                 taskModes = libraryTaskModes,
+                operations = libraryOperations,
+                dimensions = libraryDimensions,
+                schedulers = librarySchedulers,
+                runtimes = libraryRuntimes,
+                devices = libraryDevices,
                 selectionMode = selectionMode,
                 selectedCount = selectedImageIds.size,
                 batchSaving = batchSaving,
@@ -3403,7 +5726,14 @@ private fun ImageGalleryHome(
                 onFavoritesOnlyChange = onFavoritesOnlyChange,
                 onModelChange = onLibraryModelChange,
                 onTaskModeChange = onLibraryTaskModeChange,
+                onOperationChange = onLibraryOperationChange,
+                onDateRangeChange = onLibraryDateRangeChange,
+                onDimensionsChange = onLibraryDimensionsChange,
+                onSchedulerChange = onLibrarySchedulerChange,
+                onRuntimeChange = onLibraryRuntimeChange,
+                onDeviceChange = onLibraryDeviceChange,
                 onNewestFirstChange = onNewestFirstChange,
+                onClearFilters = onClearLibraryFilters,
                 onSelectionModeChange = onSelectionModeChange,
                 onSelectAllVisible = onSelectAllVisible,
                 onBatchSave = onBatchSave,
@@ -3478,9 +5808,22 @@ private fun ImageLibraryToolbar(
     favoritesOnly: Boolean,
     selectedModelId: String?,
     selectedTaskMode: String?,
+    selectedOperation: String?,
+    selectedDateRange: ImageLibraryDateRange?,
+    selectedDateStartUtcMillis: Long?,
+    selectedDateEndUtcMillis: Long?,
+    selectedDimensionsKey: String?,
+    selectedScheduler: String?,
+    selectedRuntime: String?,
+    selectedDevice: String?,
     newestFirst: Boolean,
     models: List<Pair<String, String>>,
     taskModes: List<String>,
+    operations: List<String>,
+    dimensions: List<ImageLibraryDimensions>,
+    schedulers: List<String>,
+    runtimes: List<String>,
+    devices: List<String>,
     selectionMode: Boolean,
     selectedCount: Int,
     batchSaving: Boolean,
@@ -3489,7 +5832,14 @@ private fun ImageLibraryToolbar(
     onFavoritesOnlyChange: (Boolean) -> Unit,
     onModelChange: (String?) -> Unit,
     onTaskModeChange: (String?) -> Unit,
+    onOperationChange: (String?) -> Unit,
+    onDateRangeChange: (Long?, Long?) -> Unit,
+    onDimensionsChange: (String?) -> Unit,
+    onSchedulerChange: (String?) -> Unit,
+    onRuntimeChange: (String?) -> Unit,
+    onDeviceChange: (String?) -> Unit,
     onNewestFirstChange: (Boolean) -> Unit,
+    onClearFilters: () -> Unit,
     onSelectionModeChange: (Boolean) -> Unit,
     onSelectAllVisible: () -> Unit,
     onBatchSave: () -> Unit,
@@ -3498,11 +5848,33 @@ private fun ImageLibraryToolbar(
 ) {
     var showModelMenu by remember { mutableStateOf(false) }
     var showTaskMenu by remember { mutableStateOf(false) }
+    var showOperationMenu by remember { mutableStateOf(false) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showDimensionsMenu by remember { mutableStateOf(false) }
+    var showSchedulerMenu by remember { mutableStateOf(false) }
+    var showRuntimeMenu by remember { mutableStateOf(false) }
+    var showDeviceMenu by remember { mutableStateOf(false) }
     val selectedModelLabel = models.firstOrNull { it.first == selectedModelId }?.second
-    val selectedTaskLabel = ImageGenerationUiTaskMode.entries
-        .firstOrNull { it.wireName == selectedTaskMode }
-        ?.label
-        ?: selectedTaskMode
+    val selectedTaskLabel = when (selectedTaskMode) {
+        "ultrafix" -> "UltraFix"
+        else -> ImageGenerationUiTaskMode.entries
+            .firstOrNull { it.wireName == selectedTaskMode }
+            ?.label
+            ?: selectedTaskMode
+    }
+    val selectedOperationLabel = ImageLibraryOperationFacet.labelFor(selectedOperation)
+    val activeFilterCount = listOfNotNull(
+        favoritesOnly.takeIf { it },
+        selectedModelId,
+        selectedTaskMode,
+        selectedOperation,
+        selectedDateRange,
+        selectedDimensionsKey,
+        selectedScheduler,
+        selectedRuntime,
+        selectedDevice,
+        query.takeIf(String::isNotBlank)
+    ).size
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         OutlinedTextField(
             value = query,
@@ -3591,10 +5963,13 @@ private fun ImageLibraryToolbar(
                             }
                         )
                         taskModes.forEach { mode ->
-                            val label = ImageGenerationUiTaskMode.entries
-                                .firstOrNull { it.wireName == mode }
-                                ?.label
-                                ?: mode
+                            val label = when (mode) {
+                                "ultrafix" -> "UltraFix"
+                                else -> ImageGenerationUiTaskMode.entries
+                                    .firstOrNull { it.wireName == mode }
+                                    ?.label
+                                    ?: mode
+                            }
                             DropdownMenuItem(
                                 text = { Text(label) },
                                 onClick = {
@@ -3606,11 +5981,184 @@ private fun ImageLibraryToolbar(
                     }
                 }
             }
+            if (operations.isNotEmpty() || selectedOperation != null) {
+                Box {
+                    FilterChip(
+                        selected = selectedOperation != null,
+                        onClick = { showOperationMenu = true },
+                        label = { Text(selectedOperationLabel ?: "操作") }
+                    )
+                    DropdownMenu(
+                        expanded = showOperationMenu,
+                        onDismissRequest = { showOperationMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("全部操作") },
+                            onClick = {
+                                onOperationChange(null)
+                                showOperationMenu = false
+                            }
+                        )
+                        operations.forEach { operation ->
+                            DropdownMenuItem(
+                                text = { Text(ImageLibraryOperationFacet.labelFor(operation) ?: operation) },
+                                onClick = {
+                                    onOperationChange(operation)
+                                    showOperationMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            FilterChip(
+                selected = selectedDateRange != null,
+                onClick = { showDatePicker = true },
+                label = {
+                    Text(selectedDateRange?.let(::formatImageLibraryDateRange) ?: "日期")
+                }
+            )
+            if (dimensions.isNotEmpty() || selectedDimensionsKey != null) {
+                Box {
+                    FilterChip(
+                        selected = selectedDimensionsKey != null,
+                        onClick = { showDimensionsMenu = true },
+                        label = {
+                            Text(
+                                dimensions.firstOrNull { it.key == selectedDimensionsKey }?.label
+                                    ?: selectedDimensionsKey
+                                    ?: "尺寸"
+                            )
+                        }
+                    )
+                    DropdownMenu(
+                        expanded = showDimensionsMenu,
+                        onDismissRequest = { showDimensionsMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("全部尺寸") },
+                            onClick = {
+                                onDimensionsChange(null)
+                                showDimensionsMenu = false
+                            }
+                        )
+                        dimensions.forEach { size ->
+                            DropdownMenuItem(
+                                text = { Text(size.label) },
+                                onClick = {
+                                    onDimensionsChange(size.key)
+                                    showDimensionsMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            if (schedulers.isNotEmpty() || selectedScheduler != null) {
+                Box {
+                    FilterChip(
+                        selected = selectedScheduler != null,
+                        onClick = { showSchedulerMenu = true },
+                        label = { Text(selectedScheduler ?: "Scheduler") }
+                    )
+                    DropdownMenu(
+                        expanded = showSchedulerMenu,
+                        onDismissRequest = { showSchedulerMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("全部 Scheduler") },
+                            onClick = {
+                                onSchedulerChange(null)
+                                showSchedulerMenu = false
+                            }
+                        )
+                        schedulers.forEach { scheduler ->
+                            DropdownMenuItem(
+                                text = { Text(scheduler) },
+                                onClick = {
+                                    onSchedulerChange(scheduler)
+                                    showSchedulerMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            if (runtimes.isNotEmpty() || selectedRuntime != null) {
+                Box {
+                    FilterChip(
+                        selected = selectedRuntime != null,
+                        onClick = { showRuntimeMenu = true },
+                        label = { Text(selectedRuntime ?: "Runtime") }
+                    )
+                    DropdownMenu(
+                        expanded = showRuntimeMenu,
+                        onDismissRequest = { showRuntimeMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("全部 Runtime") },
+                            onClick = {
+                                onRuntimeChange(null)
+                                showRuntimeMenu = false
+                            }
+                        )
+                        runtimes.forEach { runtime ->
+                            DropdownMenuItem(
+                                text = { Text(runtime) },
+                                onClick = {
+                                    onRuntimeChange(runtime)
+                                    showRuntimeMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            if (devices.isNotEmpty() || selectedDevice != null) {
+                Box {
+                    FilterChip(
+                        selected = selectedDevice != null,
+                        onClick = { showDeviceMenu = true },
+                        label = { Text(selectedDevice ?: "执行设备") }
+                    )
+                    DropdownMenu(
+                        expanded = showDeviceMenu,
+                        onDismissRequest = { showDeviceMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("全部执行设备") },
+                            onClick = {
+                                onDeviceChange(null)
+                                showDeviceMenu = false
+                            }
+                        )
+                        devices.forEach { device ->
+                            DropdownMenuItem(
+                                text = { Text(device) },
+                                onClick = {
+                                    onDeviceChange(device)
+                                    showDeviceMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
             FilterChip(
                 selected = !newestFirst,
                 onClick = { onNewestFirstChange(!newestFirst) },
                 label = { Text(if (newestFirst) "最新优先" else "最早优先") }
             )
+            if (activeFilterCount > 0) {
+                FilterChip(
+                    selected = false,
+                    onClick = onClearFilters,
+                    label = { Text("清除筛选 ($activeFilterCount)") },
+                    leadingIcon = {
+                        Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                    }
+                )
+            }
             FilterChip(
                 selected = selectionMode,
                 onClick = { onSelectionModeChange(!selectionMode) },
@@ -3662,6 +6210,70 @@ private fun ImageLibraryToolbar(
             }
         }
     }
+    if (showDatePicker) {
+        ImageLibraryDateFilterDialog(
+            selectedStartDateMillis = selectedDateStartUtcMillis,
+            selectedEndDateMillis = selectedDateEndUtcMillis,
+            onDismiss = { showDatePicker = false },
+            onClear = {
+                onDateRangeChange(null, null)
+                showDatePicker = false
+            },
+            onConfirm = { start, end ->
+                onDateRangeChange(start, end)
+                showDatePicker = false
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ImageLibraryDateFilterDialog(
+    selectedStartDateMillis: Long?,
+    selectedEndDateMillis: Long?,
+    onDismiss: () -> Unit,
+    onClear: () -> Unit,
+    onConfirm: (Long, Long) -> Unit
+) {
+    val state = rememberDateRangePickerState(
+        initialSelectedStartDateMillis = selectedStartDateMillis,
+        initialSelectedEndDateMillis = selectedEndDateMillis
+    )
+    DatePickerDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            val start = state.selectedStartDateMillis
+            TextButton(
+                onClick = { start?.let { onConfirm(it, state.selectedEndDateMillis ?: it) } },
+                enabled = start != null
+            ) {
+                Text("应用")
+            }
+        },
+        dismissButton = {
+            if (selectedStartDateMillis != null) {
+                TextButton(onClick = onClear) { Text("清除") }
+            }
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    ) {
+        DateRangePicker(
+            state = state,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 560.dp),
+            showModeToggle = false
+        )
+    }
+}
+
+private fun formatImageLibraryDateRange(range: ImageLibraryDateRange): String {
+    val zoneId = ZoneId.systemDefault()
+    val formatter = DateTimeFormatter.ofPattern("MM/dd")
+    val start = Instant.ofEpochMilli(range.startInclusiveMillis).atZone(zoneId).toLocalDate()
+    val end = Instant.ofEpochMilli(range.endExclusiveMillis - 1L).atZone(zoneId).toLocalDate()
+    return if (start == end) formatter.format(start) else "${formatter.format(start)}–${formatter.format(end)}"
 }
 
 @Composable
@@ -3673,15 +6285,24 @@ private fun ImageInputOptionsPanel(
     supportsNegativePrompt: Boolean,
     supportsClipSkip: Boolean,
     supportsVaeTiling: Boolean,
+    supportsTextualInversion: Boolean,
+    supportsUltraFix: Boolean,
     supportsLora: Boolean,
+    supportsLivePreview: Boolean,
     loras: List<ImageLoraUiItem>,
     selectedLoras: List<ImageGenerationUiLoraDraft>,
     loraRestoreWarning: String?,
     loraImporting: Boolean,
     loraMessage: String,
+    textualInversions: List<ImageTextualInversionUiItem>,
+    selectedTextualInversionIds: List<String>,
+    textualInversionImporting: Boolean,
+    textualInversionMessage: String,
     batchCount: Int,
     maxBatchCount: Int,
     inputImageUri: String?,
+    inputImageWidth: Int,
+    inputImageHeight: Int,
     maskImageUri: String?,
     controlImageUri: String?,
     inputRestoreWarning: String?,
@@ -3691,14 +6312,30 @@ private fun ImageInputOptionsPanel(
     disableModelNegativePrompt: Boolean,
     clipSkipText: String,
     vaeTilingEnabled: Boolean,
+    ultraFixEnabled: Boolean,
+    ultraFixStrengthText: String,
+    ultraFixInversionStepsText: String,
+    ultraFixRefinementStepsText: String,
+    ultraFixTileSizeText: String,
+    ultraFixOverlapText: String,
+    livePreviewEnabled: Boolean,
+    livePreviewInterval: Int,
     widthText: String,
     heightText: String,
     stepsText: String,
     cfgScaleText: String,
     seedText: String,
     sampler: String,
+    modelId: String?,
+    onMeasureTokens: (suspend (
+        modelId: String,
+        prompt: String,
+    ) -> ImagePromptTokenMeasurement?)?,
+    onPromptChange: (String) -> Unit,
     onTaskModeChange: (ImageGenerationUiTaskMode) -> Unit,
     onPickImageRole: (String) -> Unit,
+    onCropImageRole: (String) -> Unit,
+    onDrawImageMask: () -> Unit,
     onClearImageRole: (String) -> Unit,
     onStrengthTextChange: (String) -> Unit,
     onControlStrengthTextChange: (String) -> Unit,
@@ -3706,10 +6343,21 @@ private fun ImageInputOptionsPanel(
     onDisableModelNegativePromptChange: (Boolean) -> Unit,
     onClipSkipTextChange: (String) -> Unit,
     onVaeTilingEnabledChange: (Boolean) -> Unit,
+    onLivePreviewEnabledChange: (Boolean) -> Unit,
+    onLivePreviewIntervalChange: (Int) -> Unit,
     onToggleLora: (String) -> Unit,
     onLoraMultiplierChange: (String, String) -> Unit,
     onImportLora: () -> Unit,
     onDeleteLora: (String) -> Unit,
+    onToggleTextualInversion: (String) -> Unit,
+    onImportTextualInversion: () -> Unit,
+    onDeleteTextualInversion: (String) -> Unit,
+    onUltraFixEnabledChange: (Boolean) -> Boolean,
+     onResetUltraFix: () -> Unit,
+     onUltraFixDenoisingStepsTextChange: (String) -> Unit,
+    onUltraFixRefinementStepsTextChange: (String) -> Unit,
+    onUltraFixTileSizeTextChange: (String) -> Unit,
+    onUltraFixOverlapTextChange: (String) -> Unit,
     onBatchCountChange: (Int) -> Unit,
     onWidthTextChange: (String) -> Unit,
     onHeightTextChange: (String) -> Unit,
@@ -3718,18 +6366,218 @@ private fun ImageInputOptionsPanel(
     onSeedTextChange: (String) -> Unit,
     onSamplerChange: (String) -> Unit
 ) {
+    val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
     val selectedLoraById = selectedLoras.associateBy(ImageGenerationUiLoraDraft::id)
     val loraSelectionLimitReached = selectedLoras.size >= 8
+    val selectedTextualInversionIdSet = selectedTextualInversionIds.toSet()
+    val textualInversionSelectionLimitReached = selectedTextualInversionIds.size >= 8
+    val ultraFixTargetForInput = if (inputImageUri != null) {
+        executionModel?.ultraFixTargetSizeForSourceOrNull(inputImageWidth, inputImageHeight)
+    } else {
+        null
+    }
+    val ultraFixInputReady = inputImageUri != null && ultraFixTargetForInput != null
     var pendingLoraDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingTextualInversionDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingParameterImport by remember {
+        mutableStateOf<ImageGenerationParameterImportSelection?>(null)
+    }
     var advancedParametersExpanded by rememberSaveable(
         executionModel?.id,
         selectedModelIsCloud
     ) { mutableStateOf(false) }
+    fun importParametersFromClipboard() {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = clipboard
+            ?.primaryClip
+            ?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(context)
+            ?.toString()
+        ImageGenerationParameterImportCodec.decode(raw)
+            .onSuccess { imported ->
+                val compatible = compatibleImageGenerationParameterImportFields(
+                    imported = imported,
+                    currentTaskMode = taskMode,
+                    selectedModel = executionModel,
+                    selectedModelIsCloud = selectedModelIsCloud,
+                    supportsNegativePrompt = supportsNegativePrompt,
+                    supportsClipSkip = supportsClipSkip,
+                    supportsVaeTiling = supportsVaeTiling,
+                    supportsLora = supportsLora,
+                    availableLoraIds = loras.mapTo(mutableSetOf(), ImageLoraUiItem::id),
+                    maxBatchCount = maxBatchCount,
+                    supportsTextualInversion = supportsTextualInversion,
+                    supportsUltraFix = supportsUltraFix,
+                    ultraFixEnabled = ultraFixEnabled,
+                    hasImageInput = inputImageUri != null,
+                    imageInputWidth = inputImageWidth.takeIf { it > 0 },
+                    imageInputHeight = inputImageHeight.takeIf { it > 0 },
+                    availableTextualInversionIds = textualInversions
+                        .filter { it.compatibleWithSelectedModel }
+                        .mapTo(mutableSetOf(), ImageTextualInversionUiItem::id)
+                )
+                pendingParameterImport = ImageGenerationParameterImportSelection(
+                    imported = imported,
+                    compatibleFields = compatible
+                )
+            }
+            .onFailure { error ->
+                Toast.makeText(
+                    context,
+                    error.message?.takeIf(String::isNotBlank) ?: "无法识别剪贴板图片参数。",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+    }
+    fun applyParameterImport(application: ImageGenerationParameterImportApplication) {
+        val imported = application.imported
+        val preset = imported.preset
+        val fields = application.fields
+        val hasStructuredUltraFixPayload = imported.hasStructuredUltraFixPayload()
+        val selectedUltraFix = ImageGenerationParameterImportField.ULTRAFIX in fields
+        val localDreamUltraFixPayload =
+            imported.source == ImageGenerationParameterImportSource.LOCAL_DREAM &&
+                imported.taskMode.equals("ULTRAFIX", ignoreCase = true) &&
+                ImageGenerationParameterImportField.ULTRAFIX in imported.fields
+        val ultraFixSourceTarget = if (selectedUltraFix) {
+            executionModel?.ultraFixTargetSizeForSourceOrNull(inputImageWidth, inputImageHeight)
+        } else {
+            null
+        }
+        if (selectedUltraFix) {
+            val structured = preset.ultraFix
+            if (ultraFixSourceTarget == null ||
+                (structured != null &&
+                    (structured.targetWidth < ultraFixSourceTarget.first ||
+                        structured.targetHeight < ultraFixSourceTarget.second))
+            ) {
+                Toast.makeText(
+                    context,
+                    "源图或目标尺寸已变化，无法安全应用 UltraFix 参数",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+            // Cross the mode switch before mutating any imported field. A rejected switch leaves
+            // both the ordinary preset and every other selected field untouched.
+            if (!onUltraFixEnabledChange(true)) return
+        }
+        if (ImageGenerationParameterImportField.PROMPT in fields) onPromptChange(preset.prompt)
+        if (ImageGenerationParameterImportField.NEGATIVE_PROMPT in fields) {
+            onNegativePromptChange(preset.negativePrompt.orEmpty())
+            onDisableModelNegativePromptChange(preset.negativePrompt == "")
+        }
+        if (ImageGenerationParameterImportField.SIZE in fields && !hasStructuredUltraFixPayload) {
+            preset.width?.let { onWidthTextChange(it.toString()) }
+            preset.height?.let { onHeightTextChange(it.toString()) }
+        }
+        if (ImageGenerationParameterImportField.STEPS in fields && !hasStructuredUltraFixPayload) {
+            preset.steps?.let { onStepsTextChange(it.toString()) }
+        }
+        if (ImageGenerationParameterImportField.CFG in fields) {
+            preset.cfgScale?.let { onCfgScaleTextChange(it.toString()) }
+        }
+        if (ImageGenerationParameterImportField.SEED in fields) {
+            preset.seed?.let { onSeedTextChange(it.toString()) }
+        }
+        if (ImageGenerationParameterImportField.SAMPLER in fields) {
+            preset.sampleMethod
+                ?.takeIf {
+                    executionModel
+                        ?.imageSupportedSamplersForTask(taskMode)
+                        ?.contains(it) == true
+                }
+                ?.let(onSamplerChange)
+        }
+        if (ImageGenerationParameterImportField.CLIP_SKIP in fields) {
+            preset.clipSkip?.let { onClipSkipTextChange(it.toString()) }
+        }
+        if (ImageGenerationParameterImportField.BATCH in fields && !hasStructuredUltraFixPayload) {
+            preset.batchCount?.let { onBatchCountChange(it.coerceIn(1, maxBatchCount)) }
+        }
+        if (ImageGenerationParameterImportField.VAE_TILING in fields &&
+            !hasStructuredUltraFixPayload
+        ) {
+            onVaeTilingEnabledChange(preset.vaeTileSize != null)
+        }
+        if (ImageGenerationParameterImportField.LORA in fields) {
+            val desiredIds = preset.loras.mapTo(mutableSetOf(), ImageGenerationUiLoraSelection::id)
+            selectedLoras
+                .filterNot { draft -> draft.id in desiredIds }
+                .forEach { draft -> onToggleLora(draft.id) }
+            preset.loras.forEach { selection ->
+                if (selectedLoras.none { draft -> draft.id == selection.id }) {
+                    onToggleLora(selection.id)
+                }
+                onLoraMultiplierChange(selection.id, selection.multiplier.toString())
+            }
+        }
+        if (ImageGenerationParameterImportField.TEXTUAL_INVERSION in fields) {
+            val desiredIds = preset.textualInversionIds.toSet()
+            selectedTextualInversionIds
+                .filterNot(desiredIds::contains)
+                .forEach(onToggleTextualInversion)
+            preset.textualInversionIds
+                .filterNot(selectedTextualInversionIds::contains)
+                .forEach(onToggleTextualInversion)
+        }
+        if (selectedUltraFix) {
+            val sourceTarget = requireNotNull(ultraFixSourceTarget)
+            val structured = preset.ultraFix
+            if (structured != null) {
+                val ultraFix = structured
+                onWidthTextChange(ultraFix.targetWidth.toString())
+                onHeightTextChange(ultraFix.targetHeight.toString())
+                onUltraFixRefinementStepsTextChange(ultraFix.refinementSteps.toString())
+                onUltraFixDenoisingStepsTextChange(ultraFix.inversionSteps.toString())
+                onUltraFixTileSizeTextChange(ultraFix.tileSize.toString())
+                onUltraFixOverlapTextChange(ultraFix.overlap.toString())
+            } else if (localDreamUltraFixPayload) {
+                onWidthTextChange(sourceTarget.first.toString())
+                onHeightTextChange(sourceTarget.second.toString())
+                val refinementSteps = preset.steps
+                    ?.coerceIn(1, IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS)
+                    ?: ultraFixRefinementStepsText.toIntOrNull()
+                        ?.coerceIn(1, IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS)
+                    ?: 10
+                onUltraFixRefinementStepsTextChange(refinementSteps.toString())
+                imported.strength?.let { strength ->
+                    val denoisingSteps = imageGenerationUltraFixDenoisingTailStepCount(
+                        refinementSteps,
+                        strength
+                    ).coerceAtMost(IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS)
+                    onUltraFixDenoisingStepsTextChange(denoisingSteps.toString())
+                }
+            }
+        }
+        if (ImageGenerationParameterImportField.STRENGTH in fields && !hasStructuredUltraFixPayload) {
+            imported.strength?.let { onStrengthTextChange(it.toString()) }
+        }
+        if (ImageGenerationParameterImportField.CONTROL_STRENGTH in fields) {
+            imported.controlStrength?.let { onControlStrengthTextChange(it.toString()) }
+        }
+        val sourceLabel = when (imported.source) {
+            ImageGenerationParameterImportSource.MCA -> "MCA"
+            ImageGenerationParameterImportSource.LOCAL_DREAM -> "Local Dream"
+        }
+        Toast.makeText(
+            context,
+            "已从 $sourceLabel 应用 ${fields.size} 项参数。",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
     LaunchedEffect(pendingLoraDeleteId, loras) {
         val pendingId = pendingLoraDeleteId ?: return@LaunchedEffect
         if (loras.none { adapter -> adapter.id == pendingId && !adapter.inUse }) {
             pendingLoraDeleteId = null
+        }
+    }
+    LaunchedEffect(pendingTextualInversionDeleteId, textualInversions) {
+        val pendingId = pendingTextualInversionDeleteId ?: return@LaunchedEffect
+        if (textualInversions.none { artifact -> artifact.id == pendingId && !artifact.inUse }) {
+            pendingTextualInversionDeleteId = null
         }
     }
     Box {
@@ -3777,19 +6625,62 @@ private fun ImageInputOptionsPanel(
             when (taskMode) {
                 ImageGenerationUiTaskMode.TEXT_TO_IMAGE -> Unit
                 ImageGenerationUiTaskMode.IMG2IMG -> {
-                    ImageInputRoleRow("原图", "input", inputImageUri, onPickImageRole, onClearImageRole)
-                    ImageStrengthField("重绘强度 (0-1]", strengthText, onStrengthTextChange)
+                    ImageInputRoleRow(
+                        "原图",
+                        "input",
+                        inputImageUri,
+                        onPickImageRole,
+                        onClearImageRole,
+                        onEdit = onCropImageRole
+                    )
+                    ImageStrengthField("重绘强度 [0-1]", strengthText, onStrengthTextChange)
                 }
                 ImageGenerationUiTaskMode.EDIT -> {
-                    ImageInputRoleRow("原图", "input", inputImageUri, onPickImageRole, onClearImageRole)
+                    ImageInputRoleRow(
+                        "原图",
+                        "input",
+                        inputImageUri,
+                        onPickImageRole,
+                        onClearImageRole,
+                        onEdit = onCropImageRole
+                    )
                 }
                 ImageGenerationUiTaskMode.INPAINT -> {
-                    ImageInputRoleRow("原图", "input", inputImageUri, onPickImageRole, onClearImageRole)
+                    ImageInputRoleRow(
+                        "原图",
+                        "input",
+                        inputImageUri,
+                        onPickImageRole,
+                        onClearImageRole,
+                        onEdit = onCropImageRole
+                    )
                     ImageInputRoleRow("蒙版", "mask", maskImageUri, onPickImageRole, onClearImageRole)
-                    ImageStrengthField("重绘强度 (0-1]", strengthText, onStrengthTextChange)
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(
+                            onClick = onDrawImageMask,
+                            enabled = inputImageUri != null,
+                            modifier = Modifier.heightIn(min = 48.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Edit,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("绘制蒙版")
+                        }
+                    }
+                    ImageStrengthField("重绘强度 [0-1]", strengthText, onStrengthTextChange)
                 }
                 ImageGenerationUiTaskMode.CONTROL -> {
-                    ImageInputRoleRow("控制图", "control", controlImageUri, onPickImageRole, onClearImageRole)
+                    ImageInputRoleRow(
+                        "控制图",
+                        "control",
+                        controlImageUri,
+                        onPickImageRole,
+                        onClearImageRole,
+                        onEdit = onCropImageRole
+                    )
                     ImageStrengthField("控制强度 [0-2]", controlStrengthText, onControlStrengthTextChange)
                 }
             }
@@ -3854,9 +6745,54 @@ private fun ImageInputOptionsPanel(
                 )
             }
             if (advancedParametersExpanded) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = ::importParametersFromClipboard) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("从剪贴板导入")
+                }
+            }
+            Text(
+                "支持 MCA JSON / MCAPARAMS 与 Local Dream LDPARAMS；仅应用当前模型兼容字段。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall
+            )
             if (!selectedModelIsCloud && executionModel != null) {
-                val fixedWidth = executionModel.imageMinWidth == executionModel.imageMaxWidth
-                val fixedHeight = executionModel.imageMinHeight == executionModel.imageMaxHeight
+                val displayedMinWidth = if (ultraFixEnabled) {
+                    executionModel.imageUltraFixMinWidth
+                } else {
+                    executionModel.imageMinWidth
+                }
+                val displayedMaxWidth = if (ultraFixEnabled) {
+                    executionModel.imageUltraFixMaxWidth
+                } else {
+                    executionModel.imageMaxWidth
+                }
+                val displayedMinHeight = if (ultraFixEnabled) {
+                    executionModel.imageUltraFixMinHeight
+                } else {
+                    executionModel.imageMinHeight
+                }
+                val displayedMaxHeight = if (ultraFixEnabled) {
+                    executionModel.imageUltraFixMaxHeight
+                } else {
+                    executionModel.imageMaxHeight
+                }
+                val displayedWidthMultiple = if (ultraFixEnabled) {
+                    executionModel.imageUltraFixWidthMultiple
+                } else {
+                    executionModel.imageWidthMultiple
+                }
+                val displayedHeightMultiple = if (ultraFixEnabled) {
+                    executionModel.imageUltraFixHeightMultiple
+                } else {
+                    executionModel.imageHeightMultiple
+                }
+                val fixedWidth = displayedMinWidth == displayedMaxWidth
+                val fixedHeight = displayedMinHeight == displayedMaxHeight
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -3870,7 +6806,7 @@ private fun ImageInputOptionsPanel(
                                 if (fixedWidth) {
                                     "模型固定尺寸"
                                 } else {
-                                    "${executionModel.imageMinWidth}-${executionModel.imageMaxWidth} / ${executionModel.imageWidthMultiple}"
+                                    "$displayedMinWidth-$displayedMaxWidth / $displayedWidthMultiple"
                                 }
                             )
                         },
@@ -3887,7 +6823,7 @@ private fun ImageInputOptionsPanel(
                                 if (fixedHeight) {
                                     "模型固定尺寸"
                                 } else {
-                                    "${executionModel.imageMinHeight}-${executionModel.imageMaxHeight} / ${executionModel.imageHeightMultiple}"
+                                    "$displayedMinHeight-$displayedMaxHeight / $displayedHeightMultiple"
                                 }
                             )
                         },
@@ -3904,6 +6840,9 @@ private fun ImageInputOptionsPanel(
                         value = stepsText,
                         onValueChange = onStepsTextChange,
                         label = { Text("步数") },
+                        supportingText = {
+                            Text("${executionModel.imageMinSteps}-${executionModel.imageMaxSteps}")
+                        },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -3925,7 +6864,7 @@ private fun ImageInputOptionsPanel(
                 }
                 Text("采样器", style = MaterialTheme.typography.labelMedium)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(executionModel.imageSupportedSamplers.distinct()) { method ->
+                    items(executionModel.imageSupportedSamplersForTask(taskMode)) { method ->
                         FilterChip(
                             selected = method == sampler,
                             onClick = { onSamplerChange(method) },
@@ -3935,13 +6874,11 @@ private fun ImageInputOptionsPanel(
                 }
             }
             if (supportsNegativePrompt) {
-                OutlinedTextField(
+                ImageNegativePromptTagField(
                     value = negativePrompt,
                     onValueChange = onNegativePromptChange,
-                    label = { Text("负面提示词") },
-                    placeholder = { Text("留空使用模型默认") },
-                    minLines = 2,
-                    maxLines = 4,
+                    modelId = modelId,
+                    onMeasureTokens = onMeasureTokens,
                     modifier = Modifier.fillMaxWidth()
                 )
                 FilterChip(
@@ -4087,6 +7024,115 @@ private fun ImageInputOptionsPanel(
                     }
                 }
             }
+            if (supportsTextualInversion) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Textual Inversion",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            "${selectedTextualInversionIds.size.coerceAtMost(8)} / 8",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    TextButton(
+                        onClick = onImportTextualInversion,
+                        enabled = !textualInversionImporting
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (textualInversionImporting) "导入中" else "导入")
+                    }
+                }
+                if (textualInversionMessage.isNotBlank()) {
+                    val isError = textualInversionMessage.contains("失败") ||
+                        textualInversionMessage.contains("无效") ||
+                        textualInversionMessage.contains("已删除")
+                    Text(
+                        textualInversionMessage,
+                        color = if (isError) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                if (textualInversions.isEmpty()) {
+                    Text(
+                        "尚未导入 Textual Inversion",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else {
+                    textualInversions.forEachIndexed { index, artifact ->
+                        val selected = artifact.id in selectedTextualInversionIdSet
+                        val compatible = artifact.compatibleWithSelectedModel
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onToggleTextualInversion(artifact.id) },
+                                enabled = selected ||
+                                    (compatible && !textualInversionSelectionLimitReached),
+                                label = {
+                                    Text(
+                                        when {
+                                            selected -> "已启用"
+                                            compatible -> "启用"
+                                            else -> "格式不兼容"
+                                        }
+                                    )
+                                }
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    artifact.name,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    "${artifact.trigger} · ${artifact.format} · ${artifact.sizeText} · ${artifact.sha256.take(10)}…",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            IconButton(
+                                onClick = { pendingTextualInversionDeleteId = artifact.id },
+                                enabled = !artifact.inUse && !textualInversionImporting
+                            ) {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = if (artifact.inUse) {
+                                        "当前任务使用中，无法删除 ${artifact.name}"
+                                    } else {
+                                        "删除 ${artifact.name}"
+                                    },
+                                    tint = if (artifact.inUse) {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    } else {
+                                        MaterialTheme.colorScheme.error
+                                    }
+                                )
+                            }
+                        }
+                        if (index != textualInversions.lastIndex) HorizontalDivider()
+                    }
+                }
+            }
             if (supportsClipSkip || supportsVaeTiling) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -4107,19 +7153,173 @@ private fun ImageInputOptionsPanel(
                         FilterChip(
                             selected = vaeTilingEnabled,
                             onClick = { onVaeTilingEnabledChange(!vaeTilingEnabled) },
+                            enabled = !ultraFixEnabled,
                             label = { Text("VAE 分块") }
                         )
+                    }
+                }
+            }
+            if (supportsUltraFix && taskMode == ImageGenerationUiTaskMode.IMG2IMG) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = ultraFixEnabled,
+                        onClick = { onUltraFixEnabledChange(!ultraFixEnabled) },
+                        enabled = ultraFixEnabled || ultraFixInputReady,
+                        label = { Text("UltraFix") }
+                    )
+                    if (!ultraFixEnabled && !ultraFixInputReady) {
+                        Text(
+                            when {
+                                inputImageUri == null -> "选择源图后可启用 UltraFix"
+                                inputImageWidth <= 0 || inputImageHeight <= 0 ->
+                                    "源图尺寸检查完成后可启用 UltraFix"
+                                else -> "源图超出当前模型的 UltraFix 目标范围，请先裁剪图片"
+                            },
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    if (ultraFixEnabled) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = ultraFixRefinementStepsText,
+                                onValueChange = onUltraFixRefinementStepsTextChange,
+                                label = { Text("总精修步数") },
+                                supportingText = { Text("1-20") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = ultraFixInversionStepsText,
+                                onValueChange = onUltraFixDenoisingStepsTextChange,
+                                label = { Text("实际去噪步数") },
+                                supportingText = {
+                                    val maximum = ultraFixRefinementStepsText.toIntOrNull()
+                                        ?.coerceIn(1, IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS)
+                                        ?.let { steps ->
+                                            minOf(
+                                                IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS,
+                                                steps,
+                                            )
+                                        }
+                                        ?: IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS
+                                    Text("1-$maximum · strength $ultraFixStrengthText")
+                                },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = ultraFixTileSizeText,
+                                onValueChange = onUltraFixTileSizeTextChange,
+                                label = { Text("分块尺寸") },
+                                supportingText = {
+                                    Text(
+                                        executionModel?.imageUltraFixRequiredTileSize
+                                            ?.takeIf { it > 0 }
+                                            ?.let { "图固定：$it" }
+                                            ?: "128-2048 / 8"
+                                    )
+                                },
+                                readOnly = executionModel?.imageUltraFixRequiredTileSize
+                                    ?.let { it > 0 } == true,
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = ultraFixOverlapText,
+                                onValueChange = onUltraFixOverlapTextChange,
+                                label = { Text("重叠比例") },
+                                supportingText = { Text("0-0.5") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        TextButton(
+                            onClick = onResetUltraFix
+                        ) {
+                            Icon(
+                                Icons.Default.Replay,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("恢复默认")
+                        }
+                    }
+                }
+            }
+            if (supportsLivePreview) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = livePreviewEnabled,
+                        onClick = { onLivePreviewEnabledChange(!livePreviewEnabled) },
+                        enabled = !ultraFixEnabled,
+                        label = { Text("实时预览") }
+                    )
+                    Text(
+                        "仅影响生成过程中的预览帧，不影响最终图片。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (livePreviewEnabled) {
+                        Text("预览间隔（步）", style = MaterialTheme.typography.labelMedium)
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items((1..10).toList()) { interval ->
+                                FilterChip(
+                                    selected = interval == livePreviewInterval.coerceIn(1, 10),
+                                    onClick = { onLivePreviewIntervalChange(interval) },
+                                    label = { Text(interval.toString()) }
+                                )
+                            }
+                        }
+                        val showVaePreviewCostWarning =
+                            shouldShowImageGenerationVaePreviewCostWarning(
+                                mode = executionModel?.resolvedImagePreviewMode(),
+                                enabled = livePreviewEnabled,
+                                interval = livePreviewInterval
+                            )
+                        if (showVaePreviewCostWarning) {
+                            val vaePreviewPerformanceWarning =
+                                "每一步预览都会额外执行一次完整 VAE 解码，生成会明显变慢。"
+                            Text(
+                                vaePreviewPerformanceWarning,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .semantics {
+                                        stateDescription = vaePreviewPerformanceWarning
+                                    },
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                     }
                 }
             }
             if (maxBatchCount > 1) {
                 Text("输出张数", style = MaterialTheme.typography.labelMedium)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(listOf(1, 2, 4, 8).filter { it <= maxBatchCount }) { count ->
-                        FilterChip(
-                            selected = count == batchCount,
-                            onClick = { onBatchCountChange(count) },
-                            label = { Text(count.toString()) }
+                    // Batch is a product-level sequential coordinator feature for QNN/MNN, so
+                    // expose every valid count instead of skipping 3/5/6/7.
+                    items((1..maxBatchCount.coerceAtLeast(1)).toList()) { count ->
+                            FilterChip(
+                                selected = count == batchCount,
+                                onClick = { onBatchCountChange(count) },
+                                enabled = !ultraFixEnabled,
+                                label = { Text(count.toString()) }
                         )
                     }
                 }
@@ -4130,7 +7330,15 @@ private fun ImageInputOptionsPanel(
                     append(batchCount.coerceIn(1, maxBatchCount))
                     append(" 张")
                     if (supportsVaeTiling && vaeTilingEnabled) {
-                        append(" · VAE 分块 512 / 重叠 0.5")
+                        append(" · VAE 分块 ")
+                        append(executionModel?.imageDefaultVaeTileSize ?: 512)
+                        append(" / 重叠 ")
+                        append(executionModel?.imageDefaultVaeTileOverlap ?: 0.5)
+                    }
+                    if (supportsLivePreview && livePreviewEnabled) {
+                        append(" · 每 ")
+                        append(livePreviewInterval.coerceIn(1, 10))
+                        append(" 步预览")
                     }
                     if (supportsLora && selectedLoras.isNotEmpty()) {
                         append(" · LoRA ")
@@ -4165,8 +7373,120 @@ private fun ImageInputOptionsPanel(
                 )
             }
         }
+        pendingTextualInversionDeleteId?.let { artifactId ->
+            val artifact = textualInversions.firstOrNull { it.id == artifactId }
+            if (artifact != null && !artifact.inUse) {
+                AlertDialog(
+                    onDismissRequest = { pendingTextualInversionDeleteId = null },
+                    title = { Text("删除 Textual Inversion") },
+                    text = { Text("确定删除“${artifact.name}”吗？文件会从本机移除，此操作无法撤销。") },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                pendingTextualInversionDeleteId = null
+                                onDeleteTextualInversion(artifact.id)
+                            }
+                        ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingTextualInversionDeleteId = null }) {
+                            Text("取消")
+                        }
+                    }
+                )
+            }
+        }
+        pendingParameterImport?.let { selection ->
+            ImageGenerationParameterImportDialog(
+                selection = selection,
+                currentModelName = executionModel?.displayName.orEmpty(),
+                currentTaskMode = taskMode,
+                onSelectionChange = { pendingParameterImport = it },
+                onDismiss = { pendingParameterImport = null },
+                onConfirm = {
+                    selection.applicationOrNull(confirm = true)?.let(::applyParameterImport)
+                    pendingParameterImport = null
+                }
+            )
+        }
     }
 
+}
+
+@Composable
+private fun ImageGenerationParameterImportDialog(
+    selection: ImageGenerationParameterImportSelection,
+    currentModelName: String,
+    currentTaskMode: ImageGenerationUiTaskMode,
+    onSelectionChange: (ImageGenerationParameterImportSelection) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    val imported = selection.imported
+    val sourceLabel = when (imported.source) {
+        ImageGenerationParameterImportSource.MCA -> "MCA"
+        ImageGenerationParameterImportSource.LOCAL_DREAM -> "Local Dream"
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择要导入的参数") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 440.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    buildString {
+                        append("来源：").append(sourceLabel)
+                        imported.sourceModelId?.let { append(" · 模型 ").append(it) }
+                        imported.taskMode?.let { append(" · 模式 ").append(it) }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    buildString {
+                        append("仅填入")
+                        append(currentModelName.ifBlank { "当前模型" })
+                        append("的").append(currentTaskMode.label)
+                        append("面板，不会切换模型或模式，也不会立即生成。")
+                        if (selection.hiddenFieldCount > 0) {
+                            append(" 不兼容的 ")
+                            append(selection.hiddenFieldCount)
+                            append(" 项字段已隐藏。")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (selection.compatibleFields.isEmpty()) {
+                    Text(
+                        "没有可用于当前模型与模式的字段。",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                } else {
+                    selection.compatibleFields.forEach { field ->
+                        FilterChip(
+                            selected = field in selection.selectedFields,
+                            onClick = { onSelectionChange(selection.toggle(field)) },
+                            label = { Text(field.label) }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = selection.selectedFields.isNotEmpty()
+            ) { Text("应用") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }
 
 @Composable
@@ -4175,7 +7495,8 @@ private fun ImageInputRoleRow(
     role: String,
     uri: String?,
     onPick: (String) -> Unit,
-    onClear: (String) -> Unit
+    onClear: (String) -> Unit,
+    onEdit: ((String) -> Unit)? = null
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -4196,6 +7517,14 @@ private fun ImageInputRoleRow(
             style = MaterialTheme.typography.bodySmall
         )
         if (uri != null) {
+            if (onEdit != null) {
+                IconButton(
+                    onClick = { onEdit(role) },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = "裁剪$label")
+                }
+            }
             IconButton(onClick = { onClear(role) }) {
                 Icon(Icons.Default.Close, contentDescription = "清除$label")
             }
@@ -4635,7 +7964,11 @@ private fun ImageGenerationResultImage(image: ImageAssetUiItem, onUseImageAsset:
                 onClick = {
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
-                            createCachedImageShareIntent(context, image)
+                            createCachedImageShareIntent(
+                                context = context,
+                                image = image,
+                                includePrompt = false
+                            )
                         }
                         result
                             .mapCatching { intent -> context.startActivity(intent) }
@@ -4862,49 +8195,49 @@ private data class ImagePromptTemplate(
 private val imagePromptTemplates = listOf(
     ImagePromptTemplate(
         "液态金属花园",
-        "通透温室里的液态金属植物精灵，蓝白柔光，干净未来感，精致 3D 渲染",
+        "蓝白金属花园，柔光，精致 3D",
         R.drawable.template_liquid_garden,
         Color(0xFF7EA9F5)
     ),
     ImagePromptTemplate(
         "晨光工作岛",
-        "漂浮在晨光里的蓝白工作岛，模块化桌面、透明任务面板、清爽高效",
+        "晨光工作岛，蓝白桌面，干净未来感",
         R.drawable.template_work_island,
         Color(0xFF74A2E8)
     ),
     ImagePromptTemplate(
         "山海便签",
-        "山海意象的手工便签拼贴，宣纸纹理、雾蓝水墨、压花和小罗盘",
+        "山海便签拼贴，雾蓝水墨，压花",
         R.drawable.template_mountain_memo,
         Color(0xFF8BAFA9)
     ),
     ImagePromptTemplate(
         "纸雕分身",
-        "白色纸雕风迷你分身，浅蓝背景，手持发光铅笔，柔和创意氛围",
+        "纸雕角色，浅蓝背景，发光铅笔",
         R.drawable.template_paper_avatar,
         Color(0xFF8BB7F0)
     ),
     ImagePromptTemplate(
         "旅行手帐",
-        "旅行手帐拼贴，山海远景、纸张纹理、压花和暖色电影感，画面没有可读文字",
+        "旅行手帐拼贴，山海远景，暖色胶片",
         R.drawable.template_travel_journal,
         Color(0xFFD4A36D)
     ),
     ImagePromptTemplate(
         "黑白漫画感",
-        "黑白漫画风原创角色在桌前绘制小机器人，网点阴影，干净分镜感，无文字气泡",
+        "黑白漫画角色，绘制小机器人，无文字",
         R.drawable.template_mono_comic,
         Color(0xFF7F8795)
     ),
     ImagePromptTemplate(
         "未来城市",
-        "玻璃穹顶里的微缩未来城市，蓝白低对比光感、微型绿植和发光河道",
+        "玻璃穹顶未来城市，蓝白柔光，绿植",
         R.drawable.template_future_city,
         Color(0xFF79B6E8)
     ),
     ImagePromptTemplate(
         "陶瓷甜点",
-        "浅蓝陶瓷托盘上的抹茶柑橘甜点静物，清晨柔光，高级生活方式摄影",
+        "浅蓝陶瓷甜点，清晨柔光，静物摄影",
         R.drawable.template_ceramic_dessert,
         Color(0xFFB7D9A7)
     )
@@ -5128,6 +8461,10 @@ private fun ImageAssetPreviewOverlay(
     onDismiss: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
+    canUseAsImg2Img: Boolean,
+    canUseUltraFix: Boolean,
+    onUseAsImg2Img: () -> Unit,
+    onUseUltraFix: () -> Unit,
     onImportUpscaler: () -> Unit,
     onDeleteUpscaler: (String) -> Unit,
     onSelectUpscaler: (String) -> Unit,
@@ -5210,6 +8547,25 @@ private fun ImageAssetPreviewOverlay(
                             onClick = {
                                 showActionsMenu = false
                                 showGenerationDetails = true
+                            }
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = { Text("作为图生图输入") },
+                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                        enabled = canUseAsImg2Img,
+                        onClick = {
+                            showActionsMenu = false
+                            onUseAsImg2Img()
+                        }
+                    )
+                    if (canUseUltraFix) {
+                        DropdownMenuItem(
+                            text = { Text("使用 UltraFix 精修") },
+                            leadingIcon = { Icon(Icons.Default.Replay, contentDescription = null) },
+                            onClick = {
+                                showActionsMenu = false
+                                onUseUltraFix()
                             }
                         )
                     }
@@ -5545,6 +8901,35 @@ private fun ImageAssetPreviewOverlay(
                         ) {
                             Text("复制参数")
                         }
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    val encoded = runCatching {
+                                        ImageGenerationParameterImportCodec.encodeMcaBase64(
+                                            image.parameterShareJson
+                                        )
+                                    }.getOrElse { error ->
+                                        Toast.makeText(
+                                            context,
+                                            error.message?.takeIf(String::isNotBlank) ?: "参数编码失败",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                        return@launch
+                                    }
+                                    clipboard.setClipEntry(
+                                        ClipEntry(
+                                            ClipData.newPlainText(
+                                                "MCA image parameters Base64",
+                                                encoded
+                                            )
+                                        )
+                                    )
+                                    Toast.makeText(context, "Base64 参数已复制", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        ) {
+                            Text("复制 Base64")
+                        }
                     }
                     if (image.generationPreset != null) {
                         TextButton(
@@ -5636,17 +9021,34 @@ private fun ImageAssetPreviewOverlay(
 private fun availableImageGenerationPresetFields(
     preset: ImageGenerationUiPreset
 ): Set<ImageGenerationPresetField> = buildSet {
+    val hasStructuredUltraFixPayload = preset.ultraFix != null
     add(ImageGenerationPresetField.PROMPT)
     add(ImageGenerationPresetField.NEGATIVE_PROMPT)
-    if (preset.width != null && preset.height != null) add(ImageGenerationPresetField.SIZE)
-    if (preset.steps != null) add(ImageGenerationPresetField.STEPS)
+    if (!hasStructuredUltraFixPayload && preset.width != null && preset.height != null) {
+        add(ImageGenerationPresetField.SIZE)
+    }
+    if (!hasStructuredUltraFixPayload && preset.steps != null) {
+        add(ImageGenerationPresetField.STEPS)
+    }
     if (preset.cfgScale != null) add(ImageGenerationPresetField.CFG)
     if (preset.seed != null) add(ImageGenerationPresetField.SEED)
     if (!preset.sampleMethod.isNullOrBlank()) add(ImageGenerationPresetField.SAMPLER)
     if (preset.clipSkip != null) add(ImageGenerationPresetField.CLIP_SKIP)
     if (preset.loras.isNotEmpty()) add(ImageGenerationPresetField.LORA)
-    if (preset.batchCount != null) add(ImageGenerationPresetField.BATCH)
-    if (preset.vaeTileSize != null) add(ImageGenerationPresetField.VAE_TILING)
+    if (preset.textualInversionIds.isNotEmpty()) {
+        add(ImageGenerationPresetField.TEXTUAL_INVERSION)
+    }
+    if (preset.ultraFix != null) add(ImageGenerationPresetField.ULTRAFIX)
+    if (!hasStructuredUltraFixPayload && preset.strength != null) {
+        add(ImageGenerationPresetField.STRENGTH)
+    }
+    if (preset.controlStrength != null) add(ImageGenerationPresetField.CONTROL_STRENGTH)
+    if (!hasStructuredUltraFixPayload && preset.batchCount != null) {
+        add(ImageGenerationPresetField.BATCH)
+    }
+    if (!hasStructuredUltraFixPayload && preset.vaeTileSize != null) {
+        add(ImageGenerationPresetField.VAE_TILING)
+    }
 }
 
 internal fun compatibleImageGenerationPresetFields(
@@ -5658,7 +9060,11 @@ internal fun compatibleImageGenerationPresetFields(
     supportsVaeTiling: Boolean,
     supportsLora: Boolean,
     availableLoraIds: Set<String>,
-    maxBatchCount: Int
+    maxBatchCount: Int,
+    currentTaskMode: ImageGenerationUiTaskMode = ImageGenerationUiTaskMode.TEXT_TO_IMAGE,
+    supportsTextualInversion: Boolean = false,
+    supportsUltraFix: Boolean = false,
+    availableTextualInversionIds: Set<String> = emptySet(),
 ): Set<ImageGenerationPresetField> {
     val available = availableImageGenerationPresetFields(preset)
     return buildSet {
@@ -5666,20 +9072,73 @@ internal fun compatibleImageGenerationPresetFields(
         if (supportsNegativePrompt && ImageGenerationPresetField.NEGATIVE_PROMPT in available) {
             add(ImageGenerationPresetField.NEGATIVE_PROMPT)
         }
+        if (ImageGenerationPresetField.STRENGTH in available &&
+            preset.taskMode in setOf(
+                ImageGenerationUiTaskMode.IMG2IMG,
+                ImageGenerationUiTaskMode.INPAINT,
+            ) &&
+            currentTaskMode in setOf(
+                ImageGenerationUiTaskMode.IMG2IMG,
+                ImageGenerationUiTaskMode.INPAINT,
+            ) &&
+            preset.strength?.let { it.isFinite() && it in 0.0..1.0 } == true
+        ) {
+            add(ImageGenerationPresetField.STRENGTH)
+        }
+        if (ImageGenerationPresetField.CONTROL_STRENGTH in available &&
+            preset.taskMode == ImageGenerationUiTaskMode.CONTROL &&
+            currentTaskMode == ImageGenerationUiTaskMode.CONTROL &&
+            preset.controlStrength?.let { it.isFinite() && it in 0.0..2.0 } == true
+        ) {
+            add(ImageGenerationPresetField.CONTROL_STRENGTH)
+        }
         if (!selectedModelIsCloud && selectedModel != null) {
             val width = preset.width
             val height = preset.height
+            val ultraFixSizeContract = supportsUltraFix &&
+                currentTaskMode == ImageGenerationUiTaskMode.IMG2IMG &&
+                preset.ultraFix != null
+            val minWidth = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixMinWidth
+            } else {
+                selectedModel.imageMinWidth
+            }
+            val maxWidth = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixMaxWidth
+            } else {
+                selectedModel.imageMaxWidth
+            }
+            val minHeight = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixMinHeight
+            } else {
+                selectedModel.imageMinHeight
+            }
+            val maxHeight = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixMaxHeight
+            } else {
+                selectedModel.imageMaxHeight
+            }
+            val widthMultiple = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixWidthMultiple
+            } else {
+                selectedModel.imageWidthMultiple
+            }
+            val heightMultiple = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixHeightMultiple
+            } else {
+                selectedModel.imageHeightMultiple
+            }
             if (ImageGenerationPresetField.SIZE in available &&
                 width != null && height != null &&
-                width in selectedModel.imageMinWidth..selectedModel.imageMaxWidth &&
-                height in selectedModel.imageMinHeight..selectedModel.imageMaxHeight &&
-                width % selectedModel.imageWidthMultiple == 0 &&
-                height % selectedModel.imageHeightMultiple == 0
+                width in minWidth..maxWidth && height in minHeight..maxHeight &&
+                width % widthMultiple == 0 && height % heightMultiple == 0 &&
+                (!ultraFixSizeContract ||
+                    width.toLong() * height.toLong() <= 64L * 1024L * 1024L)
             ) {
                 add(ImageGenerationPresetField.SIZE)
             }
             if (ImageGenerationPresetField.STEPS in available &&
-                preset.steps?.let { it in 1..1_000 } == true
+                preset.steps?.let { it in selectedModel.imageMinSteps..selectedModel.imageMaxSteps } == true
             ) {
                 add(ImageGenerationPresetField.STEPS)
             }
@@ -5692,7 +9151,7 @@ internal fun compatibleImageGenerationPresetFields(
                 add(ImageGenerationPresetField.SEED)
             }
             if (ImageGenerationPresetField.SAMPLER in available &&
-                preset.sampleMethod in selectedModel.imageSupportedSamplers
+                preset.sampleMethod in selectedModel.imageSupportedSamplersForTask(currentTaskMode)
             ) {
                 add(ImageGenerationPresetField.SAMPLER)
             }
@@ -5707,8 +9166,11 @@ internal fun compatibleImageGenerationPresetFields(
         }
         if (supportsVaeTiling &&
             ImageGenerationPresetField.VAE_TILING in available &&
-            preset.vaeTileSize == 512 &&
-            preset.vaeTileOverlap?.let { kotlin.math.abs(it - 0.5) < 0.000_001 } == true
+            selectedModel != null &&
+            preset.vaeTileSize == selectedModel.imageDefaultVaeTileSize &&
+            preset.vaeTileOverlap?.let {
+                kotlin.math.abs(it - selectedModel.imageDefaultVaeTileOverlap) < 0.000_001
+            } == true
         ) {
             add(ImageGenerationPresetField.VAE_TILING)
         }
@@ -5719,6 +9181,290 @@ internal fun compatibleImageGenerationPresetFields(
         ) {
             add(ImageGenerationPresetField.LORA)
         }
+        if (supportsTextualInversion &&
+            ImageGenerationPresetField.TEXTUAL_INVERSION in available &&
+            preset.textualInversionIds.size <= 8 &&
+            preset.textualInversionIds.distinct().size == preset.textualInversionIds.size &&
+            preset.textualInversionIds.all(availableTextualInversionIds::contains)
+        ) {
+            add(ImageGenerationPresetField.TEXTUAL_INVERSION)
+        }
+        val ultraFix = preset.ultraFix
+        if (!selectedModelIsCloud && selectedModel != null && supportsUltraFix &&
+            currentTaskMode == ImageGenerationUiTaskMode.IMG2IMG &&
+            ImageGenerationPresetField.ULTRAFIX in available && ultraFix != null &&
+            ultraFix.targetWidth in selectedModel.imageUltraFixMinWidth..
+                selectedModel.imageUltraFixMaxWidth &&
+            ultraFix.targetHeight in selectedModel.imageUltraFixMinHeight..
+                selectedModel.imageUltraFixMaxHeight &&
+            ultraFix.targetWidth % selectedModel.imageUltraFixWidthMultiple == 0 &&
+            ultraFix.targetHeight % selectedModel.imageUltraFixHeightMultiple == 0 &&
+            ultraFix.targetWidth.toLong() * ultraFix.targetHeight.toLong() <=
+                64L * 1024L * 1024L &&
+            ultraFix.strength.isFinite() && ultraFix.strength > 0.0 && ultraFix.strength <= 1.0 &&
+            ultraFix.refinementSteps in 1..IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS &&
+            ultraFix.inversionSteps in 1..minOf(
+                IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS,
+                ultraFix.refinementSteps,
+            ) &&
+            ultraFix.inversionSteps == imageGenerationUltraFixDenoisingTailStepCount(
+                ultraFix.refinementSteps,
+                ultraFix.strength,
+            ) &&
+            ultraFix.tileSize in 128..2048 && ultraFix.tileSize % 8 == 0 &&
+            ultraFix.tileSize % selectedModel.imageUltraFixWidthMultiple == 0 &&
+            ultraFix.tileSize % selectedModel.imageUltraFixHeightMultiple == 0 &&
+            (selectedModel.imageUltraFixRequiredTileSize == 0 ||
+                ultraFix.tileSize == selectedModel.imageUltraFixRequiredTileSize) &&
+            ultraFix.tileSize <= minOf(ultraFix.targetWidth, ultraFix.targetHeight) &&
+            ultraFix.overlap.isFinite() && ultraFix.overlap in 0.0..0.5
+        ) {
+            add(ImageGenerationPresetField.ULTRAFIX)
+        }
+    }
+}
+
+private const val IMAGE_PROMPT_TOKEN_MEASUREMENT_DEBOUNCE_MILLIS = 250L
+
+private sealed interface ImagePromptTokenUiState {
+    data object Unavailable : ImagePromptTokenUiState
+    data object Measuring : ImagePromptTokenUiState
+    data class Measured(val value: ImagePromptTokenMeasurement) : ImagePromptTokenUiState
+}
+
+private data class ImagePromptTokenPublication(
+    val modelId: String,
+    val prompt: String,
+    val measurement: ImagePromptTokenMeasurement?,
+)
+
+@Composable
+private fun rememberImagePromptTokenUiState(
+    modelId: String?,
+    prompt: String,
+    onMeasureTokens: (suspend (
+        modelId: String,
+        prompt: String,
+    ) -> ImagePromptTokenMeasurement?)?,
+): ImagePromptTokenUiState {
+    val normalizedModelId = modelId?.trim()?.takeIf(String::isNotEmpty)
+    val latestMeasurer by rememberUpdatedState(onMeasureTokens)
+    var publication by remember { mutableStateOf<ImagePromptTokenPublication?>(null) }
+
+    LaunchedEffect(normalizedModelId, prompt, onMeasureTokens != null) {
+        val selectedModelId = normalizedModelId
+        val measurer = latestMeasurer
+        if (selectedModelId == null || measurer == null) {
+            publication = null
+            return@LaunchedEffect
+        }
+        if (prompt.isBlank()) {
+            publication = null
+            return@LaunchedEffect
+        }
+
+        delay(IMAGE_PROMPT_TOKEN_MEASUREMENT_DEBOUNCE_MILLIS)
+        val measured = try {
+            measurer(selectedModelId, prompt)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        currentCoroutineContext().ensureActive()
+        publication = ImagePromptTokenPublication(
+            modelId = selectedModelId,
+            prompt = prompt,
+            measurement = measured?.copy(
+                overflowOffset = measured.overflowOffset?.takeIf { offset ->
+                    offset <= prompt.length
+                },
+            ),
+        )
+    }
+
+    if (normalizedModelId == null || onMeasureTokens == null) {
+        return ImagePromptTokenUiState.Unavailable
+    }
+    // Match Local Dream's empty-field behavior: do not surface BOS/EOS-only
+    // counts or a transient spinner before the user has entered a prompt.
+    if (prompt.isBlank()) {
+        return ImagePromptTokenUiState.Unavailable
+    }
+    val current = publication
+    if (current == null || current.modelId != normalizedModelId || current.prompt != prompt) {
+        return ImagePromptTokenUiState.Measuring
+    }
+    return current.measurement
+        ?.let { ImagePromptTokenUiState.Measured(it) }
+        ?: ImagePromptTokenUiState.Unavailable
+}
+
+private val ImagePromptTokenUiState.measurementOrNull: ImagePromptTokenMeasurement?
+    get() = (this as? ImagePromptTokenUiState.Measured)?.value
+
+private class ImagePromptOverflowVisualTransformation(
+    private val overflowOffset: Int,
+    private val overflowColor: Color,
+) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val start = overflowOffset.coerceIn(0, text.length)
+        if (start >= text.length) return TransformedText(text, OffsetMapping.Identity)
+        return TransformedText(
+            text = buildAnnotatedString {
+                append(text)
+                addStyle(SpanStyle(color = overflowColor), start, text.length)
+            },
+            offsetMapping = OffsetMapping.Identity,
+        )
+    }
+}
+
+@Composable
+private fun imagePromptVisualTransformation(
+    tokenState: ImagePromptTokenUiState,
+): VisualTransformation {
+    val measurement = tokenState.measurementOrNull
+    val overflowColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+    return remember(measurement, overflowColor) {
+        val overflowOffset = measurement
+            ?.takeIf(ImagePromptTokenMeasurement::overflows)
+            ?.overflowOffset
+        if (overflowOffset == null) {
+            VisualTransformation.None
+        } else {
+            ImagePromptOverflowVisualTransformation(overflowOffset, overflowColor)
+        }
+    }
+}
+
+@Composable
+private fun ImagePromptTokenStatus(
+    state: ImagePromptTokenUiState,
+    showUnavailable: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val measurement = state.measurementOrNull
+    val unavailable = state == ImagePromptTokenUiState.Unavailable && showUnavailable
+    val overflowCount = measurement
+        ?.takeIf(ImagePromptTokenMeasurement::overflows)
+        ?.let { it.count - it.maxTokens }
+    val label = when {
+        state == ImagePromptTokenUiState.Measuring -> "正在精确计算 Token…"
+        unavailable -> "Token 数量不可用"
+        measurement == null -> null
+        overflowCount != null ->
+            "超出 $overflowCount 个 Token · ${measurement.count} / ${measurement.maxTokens}"
+        else -> "${measurement.count} / ${measurement.maxTokens} Token"
+    } ?: return
+    val accessibilityLabel = when {
+        state == ImagePromptTokenUiState.Unavailable ->
+            "当前模型无法提供精确 Token 数量"
+        overflowCount != null ->
+            "提示词超出模型上限 $overflowCount 个 Token，当前 ${measurement?.count}，上限 ${measurement?.maxTokens}"
+        measurement != null ->
+            "提示词 Token 数 ${measurement.count}，上限 ${measurement.maxTokens}"
+        else -> "正在使用模型 Tokenizer 精确计算提示词长度"
+    }
+
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelSmall,
+        color = if (overflowCount != null) {
+            MaterialTheme.colorScheme.error
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        modifier = modifier.semantics {
+            stateDescription = accessibilityLabel
+            if (overflowCount != null || unavailable) liveRegion = LiveRegionMode.Polite
+        },
+    )
+}
+
+@Composable
+private fun ImageNegativePromptTagField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modelId: String?,
+    onMeasureTokens: (suspend (
+        modelId: String,
+        prompt: String,
+    ) -> ImagePromptTokenMeasurement?)?,
+    modifier: Modifier = Modifier
+) {
+    val tagSession = LocalImagePromptTagAutocompleteSession.current
+    val editHistory = remember { ImagePromptEditHistory() }
+    var fieldValue by remember {
+        mutableStateOf(TextFieldValue(value, TextRange(value.length)))
+    }
+    var focused by remember { mutableStateOf(false) }
+
+    LaunchedEffect(value) {
+        if (value != fieldValue.text) {
+            fieldValue = TextFieldValue(value, TextRange(value.length))
+            editHistory.replace()
+        }
+    }
+
+    val tokenState = rememberImagePromptTokenUiState(modelId, fieldValue.text, onMeasureTokens)
+    val tokenVisualTransformation = imagePromptVisualTransformation(tokenState)
+    val tokenOverflow = tokenState.measurementOrNull?.overflows == true
+
+    fun commitFieldValue(next: TextFieldValue) {
+        fieldValue = next
+        if (next.text != value) onValueChange(next.text)
+    }
+
+    fun applyFieldValue(next: TextFieldValue) {
+        if (next.text != fieldValue.text) editHistory.recordContinuous(fieldValue)
+        commitFieldValue(next)
+    }
+
+    fun applyDiscreteFieldValue(next: TextFieldValue) {
+        if (next.text != fieldValue.text) editHistory.recordDiscrete(fieldValue)
+        commitFieldValue(next)
+    }
+
+    Column(modifier = modifier) {
+        OutlinedTextField(
+            value = fieldValue,
+            onValueChange = ::applyFieldValue,
+            label = { Text("负面提示词") },
+            placeholder = { Text("留空使用模型默认") },
+            minLines = 2,
+            maxLines = 4,
+            isError = tokenOverflow,
+            visualTransformation = tokenVisualTransformation,
+            trailingIcon = {
+                IconButton(
+                    onClick = tagSession::openManager,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(Icons.Default.Search, contentDescription = "标签联想与词典设置")
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .onFocusChanged { focused = it.isFocused }
+        )
+        ImagePromptTokenStatus(
+            state = tokenState,
+            showUnavailable = fieldValue.text.isNotBlank(),
+            modifier = Modifier
+                .align(Alignment.End)
+                .padding(top = 4.dp, end = 4.dp),
+        )
+        ImagePromptTagAssistPanel(
+            value = fieldValue,
+            focused = focused,
+            onEdit = ::applyDiscreteFieldValue,
+            onUndo = { editHistory.undo(fieldValue)?.let(::commitFieldValue) },
+            onRedo = { editHistory.redo(fieldValue)?.let(::commitFieldValue) },
+            undoEnabled = editHistory.undoEnabled,
+            redoEnabled = editHistory.redoEnabled,
+            modifier = Modifier.padding(top = 8.dp)
+        )
     }
 }
 
@@ -5726,6 +9472,11 @@ internal fun compatibleImageGenerationPresetFields(
 private fun ImagePromptBar(
     prompt: String,
     onPromptChange: (String) -> Unit,
+    modelId: String?,
+    onMeasureTokens: (suspend (
+        modelId: String,
+        prompt: String,
+    ) -> ImagePromptTokenMeasurement?)?,
     onOpenPhoto: () -> Unit,
     onSubmit: () -> Unit,
     placeholder: String = "描述图像",
@@ -5739,79 +9490,174 @@ private fun ImagePromptBar(
     val inputIconSurfaceColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else McaInputIconSurface
     val inputTextColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else McaInputText
     val inputPlaceholderColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else McaInputPlaceholder
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        color = inputShellColor,
-        shape = RoundedCornerShape(36.dp),
-        shadowElevation = 14.dp
-    ) {
-        Row(
-            modifier = Modifier.padding(7.dp),
-            verticalAlignment = Alignment.CenterVertically
+    val tagSession = LocalImagePromptTagAutocompleteSession.current
+    val editHistory = remember { ImagePromptEditHistory() }
+    var fieldValue by remember {
+        mutableStateOf(TextFieldValue(prompt, TextRange(prompt.length)))
+    }
+    var focused by remember { mutableStateOf(false) }
+
+    LaunchedEffect(prompt) {
+        if (prompt != fieldValue.text) {
+            fieldValue = TextFieldValue(prompt, TextRange(prompt.length))
+            editHistory.replace()
+        }
+    }
+
+    val tokenState = rememberImagePromptTokenUiState(modelId, fieldValue.text, onMeasureTokens)
+    val tokenVisualTransformation = imagePromptVisualTransformation(tokenState)
+    val tokenOverflow = tokenState.measurementOrNull?.overflows == true
+
+    fun commitFieldValue(next: TextFieldValue) {
+        fieldValue = next
+        if (next.text != prompt) onPromptChange(next.text)
+    }
+
+    fun applyFieldValue(next: TextFieldValue) {
+        if (next.text != fieldValue.text) editHistory.recordContinuous(fieldValue)
+        commitFieldValue(next)
+    }
+
+    fun applyDiscreteFieldValue(next: TextFieldValue) {
+        if (next.text != fieldValue.text) editHistory.recordDiscrete(fieldValue)
+        commitFieldValue(next)
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        ImagePromptTagAssistPanel(
+            value = fieldValue,
+            focused = focused,
+            onEdit = ::applyDiscreteFieldValue,
+            onUndo = { editHistory.undo(fieldValue)?.let(::commitFieldValue) },
+            onRedo = { editHistory.redo(fieldValue)?.let(::commitFieldValue) },
+            undoEnabled = editHistory.undoEnabled,
+            redoEnabled = editHistory.redoEnabled,
+            modifier = Modifier.padding(horizontal = 16.dp)
+        )
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            color = inputShellColor,
+            shape = RoundedCornerShape(36.dp),
+            shadowElevation = 14.dp
         ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(inputIconSurfaceColor)
-                    .clickable(onClick = onOpenPhoto),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.Image, contentDescription = "添加图片", modifier = Modifier.size(22.dp), tint = McaPrimaryBlue)
-            }
-            Spacer(modifier = Modifier.width(10.dp))
-            Surface(
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 38.dp),
-                color = inputFieldColor,
-                shape = CircleShape
+            Row(
+                modifier = Modifier.padding(7.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 9.dp),
-                    contentAlignment = Alignment.CenterStart
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(inputIconSurfaceColor)
+                        .clickable(onClick = onOpenPhoto),
+                    contentAlignment = Alignment.Center
                 ) {
-                    if (prompt.isBlank()) {
-                        Text(
-                            placeholder,
-                            color = inputPlaceholderColor,
-                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp)
-                        )
-                    }
-                    BasicTextField(
-                        value = prompt,
-                        onValueChange = onPromptChange,
-                        maxLines = 3,
-                        textStyle = TextStyle(
-                            color = inputTextColor,
-                            fontSize = 15.sp,
-                            lineHeight = 20.sp
-                        ),
-                        cursorBrush = SolidColor(McaPrimaryBlue),
-                        modifier = Modifier.fillMaxWidth()
+                    Icon(
+                        Icons.Default.Image,
+                        contentDescription = "添加图片",
+                        modifier = Modifier.size(22.dp),
+                        tint = McaPrimaryBlue
                     )
                 }
-            }
-            Spacer(modifier = Modifier.width(10.dp))
-            FloatingActionButton(
-                onClick = if (isGenerating) onStop else onSubmit,
-                containerColor = when {
-                    isGenerating -> McaPrimaryBlue
-                    prompt.isBlank() -> if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFE5ECF8)
-                    else -> McaPrimaryBlue
-                },
-                elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp),
-                shape = CircleShape,
-                modifier = Modifier.size(40.dp)
-            ) {
-                if (isGenerating) {
-                    Icon(Icons.Default.Stop, contentDescription = "停止生成", tint = Color.White)
-                } else {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "生成图片", tint = if (prompt.isBlank()) inputPlaceholderColor else Color.White)
+                Spacer(modifier = Modifier.width(10.dp))
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp),
+                    color = inputFieldColor,
+                    shape = CircleShape,
+                    border = if (tokenOverflow) {
+                        BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+                    } else {
+                        null
+                    },
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = 16.dp, end = 4.dp, top = 9.dp, bottom = 9.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier.fillMaxWidth(),
+                                contentAlignment = Alignment.CenterStart,
+                            ) {
+                                if (fieldValue.text.isBlank()) {
+                                    Text(
+                                        placeholder,
+                                        color = inputPlaceholderColor,
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            fontSize = 15.sp,
+                                            lineHeight = 20.sp
+                                        )
+                                    )
+                                }
+                                BasicTextField(
+                                    value = fieldValue,
+                                    onValueChange = ::applyFieldValue,
+                                    maxLines = 3,
+                                    visualTransformation = tokenVisualTransformation,
+                                    textStyle = TextStyle(
+                                        color = inputTextColor,
+                                        fontSize = 15.sp,
+                                        lineHeight = 20.sp
+                                    ),
+                                    cursorBrush = SolidColor(McaPrimaryBlue),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .onFocusChanged { focused = it.isFocused }
+                                )
+                            }
+                            ImagePromptTokenStatus(
+                                state = tokenState,
+                                showUnavailable = fieldValue.text.isNotBlank(),
+                                modifier = Modifier
+                                    .align(Alignment.End)
+                                    .padding(top = 2.dp),
+                            )
+                        }
+                        IconButton(
+                            onClick = tagSession::openManager,
+                            modifier = Modifier.size(48.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Search,
+                                contentDescription = "标签联想与词典设置",
+                                tint = McaPrimaryBlue
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                FloatingActionButton(
+                    onClick = if (isGenerating) onStop else onSubmit,
+                    containerColor = when {
+                        isGenerating -> McaPrimaryBlue
+                        prompt.isBlank() -> if (darkTheme) {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        } else {
+                            Color(0xFFE5ECF8)
+                        }
+                        else -> McaPrimaryBlue
+                    },
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp),
+                    shape = CircleShape,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    if (isGenerating) {
+                        Icon(Icons.Default.Stop, contentDescription = "停止生成", tint = Color.White)
+                    } else {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "生成图片",
+                            tint = if (prompt.isBlank()) inputPlaceholderColor else Color.White
+                        )
+                    }
                 }
             }
         }
@@ -5941,6 +9787,7 @@ private fun PredictiveAppMenuPage(
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun SmoothRightToLeftPage(
     visible: Boolean,
     onDismiss: () -> Unit,
@@ -5956,6 +9803,9 @@ private fun SmoothRightToLeftPage(
             val widthPx = with(density) { maxWidth.toPx() }
             val scope = rememberCoroutineScope()
             val offsetX = remember { Animatable(0f) }
+            // Let the IME own the first Back press. Some Android builds dispatch that event
+            // through the page callback while a text field is acquiring focus.
+            val imeVisible = WindowInsets.isImeVisible
 
             LaunchedEffect(visible) {
                 if (visible) offsetX.snapTo(0f)
@@ -5976,7 +9826,7 @@ private fun SmoothRightToLeftPage(
             }
 
             SystemBackMotionHandler(
-                enabled = visible,
+                enabled = visible && !imeVisible,
                 onProgress = { progress ->
                     scope.launch {
                         offsetX.snapTo(widthPx * progress.coerceIn(0f, 1f))
@@ -6386,7 +10236,11 @@ private fun ReasoningPanel(
     awaitingFinalAnswer: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val cleaned = remember(content) { cleanReasoningForDisplay(content) }
+    var visibleCharacters by rememberSaveable { mutableStateOf(MESSAGE_RENDER_PAGE_CHARS) }
+    val boundedContent = remember(content, visibleCharacters) {
+        content.safePrefix(visibleCharacters)
+    }
+    val cleaned = remember(boundedContent) { cleanReasoningForDisplay(boundedContent) }
     if (cleaned.isBlank()) return
 
     var expanded by rememberSaveable { mutableStateOf(true) }
@@ -6400,6 +10254,7 @@ private fun ReasoningPanel(
     }
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val displayText = if (expanded) cleaned else reasoningPreview(cleaned)
+    val wrappedDisplayText = remember(displayText) { wrapForDisplay(displayText) }
 
     Column(
         modifier = modifier
@@ -6441,7 +10296,7 @@ private fun ReasoningPanel(
             Spacer(modifier = Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = wrapForDisplay(displayText),
+                    text = wrappedDisplayText,
                     color = muted.copy(alpha = 0.74f),
                     style = MaterialTheme.typography.bodySmall.copy(
                         fontSize = 13.sp,
@@ -6451,6 +10306,16 @@ private fun ReasoningPanel(
                     overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
                     softWrap = true
                 )
+                if (expanded && boundedContent.length < content.length) {
+                    TextButton(
+                        onClick = {
+                            visibleCharacters = (visibleCharacters + MESSAGE_RENDER_PAGE_CHARS)
+                                .coerceAtMost(content.length)
+                        }
+                    ) {
+                        Text("显示更多（${boundedContent.length}/${content.length}）")
+                    }
+                }
             }
         }
     }
@@ -8699,11 +12564,10 @@ private fun UserMessageBubble(message: ChatMessage) {
                 }
             }
             if (message.content.isNotBlank()) {
-                Text(
-                    text = wrapForDisplay(message.content),
+                PagedPlainMessageText(
+                    content = message.content,
                     color = Color(0xFF202124),
-                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 24.sp),
-                    softWrap = true
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 24.sp)
                 )
             }
         }
@@ -8774,7 +12638,7 @@ private fun AssistantMessageBlock(
                 }
             } else if (message.content.isNotBlank()) {
                 SelectionContainer {
-                    AssistantRichText(message.content)
+                    PagedAssistantRichText(message.content)
                 }
             }
             if (message.sourceReferences.isNotEmpty() || message.webSearchTrace?.hasContent == true) {
@@ -9370,6 +13234,58 @@ private fun AssistantActionRow(
                         onDelete()
                     }
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PagedPlainMessageText(
+    content: String,
+    color: Color,
+    style: TextStyle
+) {
+    var visibleCharacters by rememberSaveable { mutableStateOf(MESSAGE_RENDER_PAGE_CHARS) }
+    val visibleContent = remember(content, visibleCharacters) {
+        content.safePrefix(visibleCharacters)
+    }
+    val displayContent = remember(visibleContent) { wrapForDisplay(visibleContent) }
+    Column {
+        Text(
+            text = displayContent,
+            color = color,
+            style = style,
+            softWrap = true
+        )
+        if (visibleContent.length < content.length) {
+            TextButton(
+                onClick = {
+                    visibleCharacters = (visibleCharacters + MESSAGE_RENDER_PAGE_CHARS)
+                        .coerceAtMost(content.length)
+                }
+            ) {
+                Text("显示更多（${visibleContent.length}/${content.length}）")
+            }
+        }
+    }
+}
+
+@Composable
+private fun PagedAssistantRichText(content: String) {
+    var visibleCharacters by rememberSaveable { mutableStateOf(MESSAGE_RENDER_PAGE_CHARS) }
+    val visibleContent = remember(content, visibleCharacters) {
+        content.safePrefix(visibleCharacters)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AssistantRichText(visibleContent)
+        if (visibleContent.length < content.length) {
+            TextButton(
+                onClick = {
+                    visibleCharacters = (visibleCharacters + MESSAGE_RENDER_PAGE_CHARS)
+                        .coerceAtMost(content.length)
+                }
+            ) {
+                Text("显示更多（${visibleContent.length}/${content.length}）")
             }
         }
     }
@@ -10196,8 +14112,20 @@ private fun wrapForDisplay(value: String): String {
     return out.toString()
 }
 
+private fun String.safePrefix(maxCharacters: Int): String {
+    if (length <= maxCharacters) return this
+    var end = maxCharacters.coerceAtLeast(0)
+    if (end in 1 until length && this[end - 1].isHighSurrogate() && this[end].isLowSurrogate()) {
+        end--
+    }
+    return substring(0, end)
+}
+
 private fun Char.isCjkLike(): Boolean =
     this in '\u4E00'..'\u9FFF' ||
         this in '\u3400'..'\u4DBF' ||
         this in '\u3040'..'\u30FF' ||
         this in '\uAC00'..'\uD7AF'
+
+private const val MESSAGE_RENDER_PAGE_CHARS = 16_384
+private const val STREAMING_SCROLL_CHAR_STEP = 512

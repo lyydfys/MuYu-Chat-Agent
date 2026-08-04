@@ -46,6 +46,7 @@ std::string control_image_preprocess_wire_name(ControlImagePreprocessMode mode);
 
 /** SHA-256 used for encoded, preprocessed, and actual graph-buffer evidence. */
 std::string sha256_hex_bytes(const std::vector<uint8_t>& payload);
+std::string sha256_hex_bytes(const uint8_t* payload, size_t size);
 
 /**
  * Streams an artifact from disk into SHA-256 without imposing a model-size

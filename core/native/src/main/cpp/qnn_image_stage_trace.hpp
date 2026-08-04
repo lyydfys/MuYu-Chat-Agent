@@ -52,6 +52,16 @@ enum class ImageStage : uint8_t {
     LogReleaseAfter,
     RuntimeUnloadBefore,
     RuntimeUnloadAfter,
+    PreviewVaeGraphExecute,
+    EncoderBinaryMmap,
+    EncoderContextCreateBefore,
+    EncoderContextCreateAfter,
+    EncoderGraphRetrieveBefore,
+    EncoderGraphRetrieveAfter,
+    EncoderTensorBindBefore,
+    EncoderTensorBindAfter,
+    // Keep the highest bit exercised across the native JSON/Kotlin ULong wire contract.
+    EncoderGraphExecute = 63,
 };
 
 inline const char* image_stage_name(ImageStage stage) {
@@ -98,6 +108,15 @@ inline const char* image_stage_name(ImageStage stage) {
         case ImageStage::LogReleaseAfter: return "log_release_after";
         case ImageStage::RuntimeUnloadBefore: return "runtime_unload_before";
         case ImageStage::RuntimeUnloadAfter: return "runtime_unload_after";
+        case ImageStage::PreviewVaeGraphExecute: return "preview_vae_graph_execute";
+        case ImageStage::EncoderBinaryMmap: return "encoder_context_binary_mmap";
+        case ImageStage::EncoderContextCreateBefore: return "encoder_context_create_before";
+        case ImageStage::EncoderContextCreateAfter: return "encoder_context_create_after";
+        case ImageStage::EncoderGraphRetrieveBefore: return "encoder_graph_retrieve_before";
+        case ImageStage::EncoderGraphRetrieveAfter: return "encoder_graph_retrieve_after";
+        case ImageStage::EncoderTensorBindBefore: return "encoder_tensor_bind_before";
+        case ImageStage::EncoderTensorBindAfter: return "encoder_tensor_bind_after";
+        case ImageStage::EncoderGraphExecute: return "encoder_graph_execute";
     }
     return "unknown";
 }
@@ -106,9 +125,19 @@ inline uint64_t image_stage_bit(ImageStage stage) {
     return uint64_t{1} << static_cast<uint8_t>(stage);
 }
 
+inline std::string image_stage_mask_hex(uint64_t mask) {
+    static constexpr char kHexDigits[] = "0123456789abcdef";
+    std::string encoded(16, '0');
+    for (size_t index = 0; index < encoded.size(); ++index) {
+        encoded[encoded.size() - 1u - index] = kHexDigits[mask & UINT64_C(0xf)];
+        mask >>= 4u;
+    }
+    return encoded;
+}
+
 inline std::vector<std::string> image_stage_names(uint64_t mask) {
     std::vector<std::string> names;
-    const auto last = static_cast<uint8_t>(ImageStage::RuntimeUnloadAfter);
+    const auto last = static_cast<uint8_t>(ImageStage::EncoderGraphExecute);
     for (uint8_t value = 0; value <= last; ++value) {
         const auto stage = static_cast<ImageStage>(value);
         if ((mask & image_stage_bit(stage)) != 0) names.emplace_back(image_stage_name(stage));

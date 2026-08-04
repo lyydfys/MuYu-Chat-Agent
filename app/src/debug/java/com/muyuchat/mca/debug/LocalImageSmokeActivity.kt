@@ -946,7 +946,8 @@ class LocalImageSmokeActivity : Activity() {
                 .put("embeddingPath", embeddingFile.absolutePath)
                 .put("outputPath", outputFile.absolutePath)
         )
-        val conditioningOrder = if (requestJson.optBoolean("useCfg", true)) {
+        val useCfg = requestJson.optBoolean("useCfg", true)
+        val conditioningOrder = if (useCfg) {
             "negative_then_positive"
         } else {
             "positive_only"
@@ -961,7 +962,9 @@ class LocalImageSmokeActivity : Activity() {
                 requestJson.optInt("height", 1024),
                 requestJson.optString("backendMode", "cpu"),
                 requestJson.optInt("threads", 4),
-                requestJson.optBoolean("promptWeightingSupported", false)
+                useCfg,
+                requestJson.optBoolean("promptWeightingSupported", false),
+                ""
             )
         } else {
             mnnBridge.encodeSd15PromptEmbeddings(
@@ -972,7 +975,8 @@ class LocalImageSmokeActivity : Activity() {
                 requestJson.optString("backendMode", "cpu"),
                 requestJson.optInt("threads", 4),
                 conditioningOrder,
-                requestJson.optBoolean("promptWeightingSupported", false)
+                requestJson.optBoolean("promptWeightingSupported", false),
+                ""
             )
         }
         val embeddingResult = JSONObject(embeddingRaw)

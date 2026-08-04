@@ -1,16 +1,201 @@
 package com.muyuchat.mca
 
+import com.muyuchat.feature.chat.ImageGenerationUiPreviewMode
 import com.muyuchat.feature.chat.ImageGenerationUiTaskMode
 import java.io.File
 import java.nio.file.Files
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalImageUiCapabilitiesTest {
+    @Test
+    fun productBatchMaximumExpandsOnlyCoordinatorBackedRuntimes() {
+        assertEquals(8, productImageBatchCountForUi(LocalImageRuntime.QNN_HTP, 1))
+        assertEquals(8, productImageBatchCountForUi(LocalImageRuntime.MNN_DIFFUSION, 1))
+        assertEquals(1, productImageBatchCountForUi(LocalImageRuntime.STABLE_DIFFUSION_CPP, 1))
+        assertEquals(4, productImageBatchCountForUi(LocalImageRuntime.STABLE_DIFFUSION_CPP, 4))
+        assertEquals(1, productImageBatchCountForUi(LocalImageRuntime.ONNX_RUNTIME, 1))
+        assertEquals(1, productImageBatchCountForUi(LocalImageRuntime.CUSTOM, 1))
+    }
+
+    @Test
+    fun livePreviewCapabilityFollowsRuntimeWorkerTopologyAndTaskOnly() {
+        data class Expected(
+            val runtime: LocalImageRuntime,
+            val workerStrategy: ImageWorkerStrategy?,
+            val task: ImageTask?,
+            val previewMode: ImageGenerationUiPreviewMode?,
+            val defaultPreviewInterval: Int
+        )
+
+        listOf(
+            Expected(
+                LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                ImageWorkerStrategy.SPLIT_UNET_VAE,
+                ImageTask.IMAGE_EDIT,
+                ImageGenerationUiPreviewMode.PROJECTION,
+                1
+            ),
+            Expected(
+                LocalImageRuntime.QNN_HTP,
+                ImageWorkerStrategy.SHARED_UNET_VAE,
+                ImageTask.TEXT_TO_IMAGE,
+                ImageGenerationUiPreviewMode.VAE,
+                4
+            ),
+            Expected(
+                LocalImageRuntime.QNN_HTP,
+                ImageWorkerStrategy.SHARED_TEXT_UNET_VAE,
+                ImageTask.TEXT_TO_IMAGE,
+                ImageGenerationUiPreviewMode.VAE,
+                4
+            ),
+            Expected(
+                LocalImageRuntime.QNN_HTP,
+                ImageWorkerStrategy.SHARED_TEXT_UNET_VAE,
+                ImageTask.CONTROL_IMAGE,
+                ImageGenerationUiPreviewMode.VAE,
+                5
+            ),
+            Expected(
+                LocalImageRuntime.QNN_HTP,
+                ImageWorkerStrategy.SPLIT_UNET_VAE,
+                ImageTask.TEXT_TO_IMAGE,
+                null,
+                0
+            ),
+            Expected(
+                LocalImageRuntime.QNN_HTP,
+                ImageWorkerStrategy.DEDICATED_WORKER,
+                ImageTask.TEXT_TO_IMAGE,
+                null,
+                0
+            ),
+            Expected(
+                LocalImageRuntime.QNN_HTP,
+                null,
+                null,
+                null,
+                0
+            ),
+            Expected(
+                LocalImageRuntime.MNN_DIFFUSION,
+                ImageWorkerStrategy.SHARED_UNET_VAE,
+                ImageTask.TEXT_TO_IMAGE,
+                null,
+                0
+            ),
+            Expected(
+                LocalImageRuntime.ONNX_RUNTIME,
+                ImageWorkerStrategy.SHARED_TEXT_UNET_VAE,
+                ImageTask.CONTROL_IMAGE,
+                null,
+                0
+            ),
+            Expected(
+                LocalImageRuntime.CUSTOM,
+                ImageWorkerStrategy.IN_PROCESS,
+                ImageTask.TEXT_TO_IMAGE,
+                null,
+                0
+            )
+        ).forEach { expected ->
+            val actual = localImagePreviewTopologyForUi(
+                runtime = expected.runtime,
+                task = expected.task,
+                hasSharedQnnVaePreviewTopology = expected.runtime == LocalImageRuntime.QNN_HTP &&
+                    expected.workerStrategy in setOf(
+                        ImageWorkerStrategy.SHARED_UNET_VAE,
+                        ImageWorkerStrategy.SHARED_TEXT_UNET_VAE
+                    )
+            )
+
+            assertEquals(expected.previewMode, actual.previewMode)
+            assertEquals(expected.defaultPreviewInterval, actual.defaultPreviewInterval)
+            assertEquals(expected.previewMode != null, actual.supportsLivePreview)
+        }
+    }
+
+    @Test
+    fun sevenSharedQnnCatalogShapesUseVaeWithoutModelIdAdmission() {
+        data class SharedShape(
+            val family: LocalImageModelFamily,
+            val variant: ImageModelVariant,
+            val workerStrategy: ImageWorkerStrategy,
+            val task: ImageTask
+        )
+
+        val sharedShapes = listOf(
+            SharedShape(
+                LocalImageModelFamily.SD15,
+                ImageModelVariant.STANDARD,
+                ImageWorkerStrategy.SHARED_UNET_VAE,
+                ImageTask.TEXT_TO_IMAGE
+            ),
+            SharedShape(
+                LocalImageModelFamily.SD15,
+                ImageModelVariant.HYPER,
+                ImageWorkerStrategy.SHARED_UNET_VAE,
+                ImageTask.TEXT_TO_IMAGE
+            ),
+            SharedShape(
+                LocalImageModelFamily.SD15,
+                ImageModelVariant.STANDARD,
+                ImageWorkerStrategy.SHARED_UNET_VAE,
+                ImageTask.TEXT_TO_IMAGE
+            ),
+            SharedShape(
+                LocalImageModelFamily.SD15,
+                ImageModelVariant.LEGACY_FP32,
+                ImageWorkerStrategy.SHARED_UNET_VAE,
+                ImageTask.TEXT_TO_IMAGE
+            ),
+            SharedShape(
+                LocalImageModelFamily.SD15,
+                ImageModelVariant.STANDARD,
+                ImageWorkerStrategy.SHARED_TEXT_UNET_VAE,
+                ImageTask.TEXT_TO_IMAGE
+            ),
+            SharedShape(
+                LocalImageModelFamily.SD21,
+                ImageModelVariant.SD21,
+                ImageWorkerStrategy.SHARED_TEXT_UNET_VAE,
+                ImageTask.TEXT_TO_IMAGE
+            ),
+            SharedShape(
+                LocalImageModelFamily.SD15,
+                ImageModelVariant.CONTROLNET_CANNY,
+                ImageWorkerStrategy.SHARED_TEXT_UNET_VAE,
+                ImageTask.CONTROL_IMAGE
+            )
+        )
+
+        assertEquals(7, sharedShapes.size)
+        sharedShapes.forEach { shape ->
+            val actual = localImagePreviewTopologyForUi(
+                runtime = LocalImageRuntime.QNN_HTP,
+                task = shape.task,
+                hasSharedQnnVaePreviewTopology = shape.workerStrategy in setOf(
+                    ImageWorkerStrategy.SHARED_UNET_VAE,
+                    ImageWorkerStrategy.SHARED_TEXT_UNET_VAE
+                )
+            )
+
+            val description = "${shape.family}/${shape.variant}/${shape.workerStrategy}/${shape.task}"
+            assertEquals(description, ImageGenerationUiPreviewMode.VAE, actual.previewMode)
+            assertEquals(
+                description,
+                if (shape.task == ImageTask.CONTROL_IMAGE) 5 else 4,
+                actual.defaultPreviewInterval
+            )
+        }
+    }
+
     @Test
     fun qnnControlPackageOnlyExposesControlMode() {
         val root = Files.createTempDirectory("qnn-control-ui").toFile()
@@ -34,9 +219,12 @@ class LocalImageUiCapabilitiesTest {
             val capabilities = model.imageCapabilitiesForUi()
             assertEquals(false, capabilities.supportsClipSkip)
             assertEquals(false, capabilities.supportsVaeTiling)
-            assertEquals(false, capabilities.supportsLivePreview)
+            assertEquals(true, capabilities.supportsLivePreview)
+            assertEquals(ImageGenerationUiPreviewMode.VAE, capabilities.previewMode)
+            assertEquals(5, capabilities.defaultPreviewInterval)
             assertEquals(false, capabilities.supportsLora)
-            assertEquals(1, capabilities.maxBatchCount)
+            assertEquals(1, capabilities.nativeMaxBatchCount)
+            assertEquals(8, capabilities.maxBatchCount)
         } finally {
             root.deleteRecursively()
         }
@@ -62,8 +250,11 @@ class LocalImageUiCapabilitiesTest {
             assertEquals(false, capabilities.supportsClipSkip)
             assertEquals(false, capabilities.supportsVaeTiling)
             assertEquals(false, capabilities.supportsLivePreview)
+            assertNull(capabilities.previewMode)
+            assertEquals(0, capabilities.defaultPreviewInterval)
             assertEquals(false, capabilities.supportsLora)
-            assertEquals(1, capabilities.maxBatchCount)
+            assertEquals(1, capabilities.nativeMaxBatchCount)
+            assertEquals(8, capabilities.maxBatchCount)
         } finally {
             root.deleteRecursively()
         }
@@ -133,7 +324,13 @@ class LocalImageUiCapabilitiesTest {
                                     .put("cfgScale", 5.5)
                                     .put("seed", 77)
                             )
-                            .put("scheduler", JSONObject().put("algorithm", "DPMPP_2M"))
+                            .put(
+                                "scheduler",
+                                JSONObject()
+                                    .put("algorithm", "DPMPP_2M")
+                                    .put("minSteps", 10)
+                                    .put("maxSteps", 50)
+                            )
                             .put(
                                 "capabilities",
                                 JSONObject()
@@ -162,6 +359,8 @@ class LocalImageUiCapabilitiesTest {
             assertEquals(1024, defaults.width)
             assertEquals(768, defaults.height)
             assertEquals(28, defaults.steps)
+            assertEquals(10, defaults.minSteps)
+            assertEquals(50, defaults.maxSteps)
             assertEquals(5.5, defaults.cfgScale, 0.0)
             assertEquals(77, defaults.seed)
             assertEquals("dpmpp_2m", defaults.sampler)
@@ -196,7 +395,10 @@ class LocalImageUiCapabilitiesTest {
             assertEquals(true, capabilities.supportsClipSkip)
             assertEquals(true, capabilities.supportsVaeTiling)
             assertEquals(true, capabilities.supportsLivePreview)
+            assertEquals(ImageGenerationUiPreviewMode.PROJECTION, capabilities.previewMode)
+            assertEquals(1, capabilities.defaultPreviewInterval)
             assertEquals(true, capabilities.supportsLora)
+            assertEquals(8, capabilities.nativeMaxBatchCount)
             assertEquals(8, capabilities.maxBatchCount)
             assertNull(capabilities.readinessError)
             assertNull(model.localImageReadinessForUi(null, capabilities))
@@ -251,10 +453,202 @@ class LocalImageUiCapabilitiesTest {
 
                 assertEquals(sampler, defaults.sampler)
                 assertEquals(listOf(sampler), defaults.supportedSamplers)
+                assertEquals(1, defaults.minSteps)
+                assertEquals(100, defaults.maxSteps)
                 assertEquals(setOf(ImageGenerationUiTaskMode.TEXT_TO_IMAGE), model.supportedImageTaskModesForUi())
             } finally {
                 root.deleteRecursively()
             }
+        }
+    }
+
+    @Test
+    fun everySplitSdxlRecommendationExposesImageInputsWithoutUnsupportedLivePreview() {
+        listOf(
+            "sdxl_base_qnn228",
+            "realismsdxl_dmd2_alt_qnn228",
+            "animagine_xl_v4_qnn228",
+            "cyberrealisticxl_qnn228"
+        ).forEach { recommendationId ->
+            val root = Files.createTempDirectory("split-sdxl-ui").toFile()
+            try {
+                val model = recommendedRecord(
+                    root = root,
+                    recommendationId = recommendationId,
+                    runtime = LocalImageRuntime.QNN_HTP,
+                    family = LocalImageModelFamily.SDXL
+                )
+                val profile = resolveLocalImageExecutionProfile(
+                    model = model,
+                    options = LocalImageGenerationOptions(),
+                    bundleRoot = root
+                ).profile
+                val capabilities = model.imageCapabilitiesForUi()
+
+                assertEquals(
+                    "$recommendationId worker strategy",
+                    ImageWorkerStrategy.SPLIT_UNET_VAE,
+                    profile.graph.workerStrategy
+                )
+                assertEquals(
+                    "$recommendationId VAE encoder",
+                    "vae_encoder.bin",
+                    profile.graph.vaeEncoder?.relativePath
+                )
+                assertEquals(
+                    "$recommendationId task modes",
+                    setOf(
+                        ImageGenerationUiTaskMode.TEXT_TO_IMAGE,
+                        ImageGenerationUiTaskMode.IMG2IMG,
+                        ImageGenerationUiTaskMode.INPAINT
+                    ),
+                    capabilities.supportedTaskModes
+                )
+                assertEquals("$recommendationId preview", false, capabilities.supportsLivePreview)
+                assertNull("$recommendationId preview mode", capabilities.previewMode)
+                assertEquals("$recommendationId preview interval", 0, capabilities.defaultPreviewInterval)
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun everySharedSd15RecommendationExposesTopologyBackedImg2ImgAndInpaint() {
+        val recommendationIds = listOf(
+            "cyberrealistic_sd15_qnn228",
+            "realisticvisionhyper_sd15_qnn228",
+            "dreamshaper_sd15_qnn228",
+            "meinamix_sd15_qnn228"
+        )
+        recommendationIds.forEach { recommendationId ->
+            val root = Files.createTempDirectory("shared-sd15-img2img-ui").toFile()
+            try {
+                val model = recommendedRecord(
+                    root = root,
+                    recommendationId = recommendationId,
+                    runtime = LocalImageRuntime.QNN_HTP,
+                    family = LocalImageModelFamily.SD15
+                )
+                val profile = resolveLocalImageExecutionProfile(
+                    model = model,
+                    options = LocalImageGenerationOptions(),
+                    bundleRoot = root
+                ).profile
+                val capabilities = model.imageCapabilitiesForUi()
+
+                assertEquals(
+                    "$recommendationId worker strategy",
+                    ImageWorkerStrategy.SHARED_UNET_VAE,
+                    profile.graph.workerStrategy
+                )
+                assertEquals(
+                    "$recommendationId VAE encoder",
+                    "vae_encoder.bin",
+                    profile.graph.vaeEncoder?.relativePath
+                )
+                assertTrue("$recommendationId executable topology", profile.hasSharedQnnImg2ImgTopology())
+                assertTrue("$recommendationId inpaint topology", profile.hasExecutableQnnInpaintTopology())
+                assertEquals(
+                    "$recommendationId inpaint mode",
+                    QnnInpaintMaskTopology.LATENT_BLEND_4,
+                    profile.inspectQnnInpaintTopology().topology
+                )
+                assertEquals(
+                    "$recommendationId task modes",
+                    setOf(
+                        ImageGenerationUiTaskMode.TEXT_TO_IMAGE,
+                        ImageGenerationUiTaskMode.IMG2IMG,
+                        ImageGenerationUiTaskMode.INPAINT
+                    ),
+                    capabilities.supportedTaskModes
+                )
+                assertEquals("$recommendationId native batch", 1, capabilities.nativeMaxBatchCount)
+                assertEquals("$recommendationId product batch", 8, capabilities.maxBatchCount)
+                assertEquals(
+                    "$recommendationId global samplers",
+                    listOf("dpmpp_2m", "euler", "pndm"),
+                    capabilities.executionDefaults.supportedSamplers
+                )
+                assertEquals(
+                    "$recommendationId img2img samplers",
+                    listOf("dpmpp_2m", "euler"),
+                    capabilities.executionDefaults.img2ImgSupportedSamplers
+                )
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun onlyPndmTopologyDoesNotAdvertiseQnnImg2Img() {
+        val root = Files.createTempDirectory("only-pndm-qnn-ui").toFile()
+        try {
+            val model = recommendedRecord(
+                root = root,
+                recommendationId = "cyberrealistic_sd15_qnn228",
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15
+            )
+            val resolvedProfile = resolveLocalImageExecutionProfile(
+                model = model,
+                options = LocalImageGenerationOptions(),
+                bundleRoot = root
+            ).profile
+            val profile = resolvedProfile.copy(
+                profileId = "unknown.only-pndm.shared-qnn",
+                modelFingerprint = "e".repeat(64),
+                capabilities = resolvedProfile.capabilities.copy(
+                    supportedSchedulers = setOf(ImageSchedulerAlgorithm.PNDM_PLMS)
+                )
+            )
+
+            assertTrue(profile.hasExecutableQnnImg2ImgTopology())
+            assertTrue(profile.hasExecutableQnnInpaintTopology())
+            assertFalse(profile.exposesQnnImg2ImgForUi())
+            assertFalse(profile.exposesQnnInpaintForUi())
+            assertTrue(
+                ImageSchedulerAlgorithm.PNDM_PLMS in
+                    profile.supportedSchedulersForProductTask(LocalImageTaskMode.TEXT_TO_IMAGE)
+            )
+            assertTrue(
+                profile.supportedSchedulersForProductTask(LocalImageTaskMode.IMG2IMG).isEmpty()
+            )
+            assertTrue(profile.supportedQnnInpaintSchedulers().isEmpty())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun genericSharedQnnPublishesTaskAwareSamplersWithoutDeviceAdmission() {
+        val root = Files.createTempDirectory("generic-shared-qnn-ui").toFile()
+        try {
+            val primary = File(root, "unet.bin").apply { writeBytes(byteArrayOf(1)) }
+            listOf("text_encoder.bin", "vae.bin", "vae_encoder.bin").forEach { name ->
+                File(root, name).writeBytes(byteArrayOf(1))
+            }
+            val model = record(
+                root = root,
+                primary = primary,
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15
+            )
+
+            val capabilities = model.imageCapabilitiesForUi()
+            assertEquals(null, capabilities.readinessError)
+            assertTrue(ImageGenerationUiTaskMode.IMG2IMG in capabilities.supportedTaskModes)
+            assertTrue(ImageGenerationUiTaskMode.INPAINT in capabilities.supportedTaskModes)
+            assertEquals("pndm", capabilities.executionDefaults.sampler)
+            assertTrue("pndm" in capabilities.executionDefaults.supportedSamplers)
+            assertFalse("pndm" in capabilities.executionDefaults.img2ImgSupportedSamplers)
+            assertEquals(
+                "dpmpp_2m",
+                capabilities.executionDefaults.img2ImgSupportedSamplers.first()
+            )
+        } finally {
+            root.deleteRecursively()
         }
     }
 
@@ -266,7 +660,8 @@ class LocalImageUiCapabilitiesTest {
             val steps: Int,
             val cfgScale: Double,
             val supportsNegativePrompt: Boolean,
-            val supportedSamplers: List<String>
+            val supportedSamplers: List<String>,
+            val supportedTaskModes: Set<ImageGenerationUiTaskMode>
         )
 
         listOf(
@@ -276,7 +671,12 @@ class LocalImageUiCapabilitiesTest {
                 4,
                 1.0,
                 false,
-                listOf("dpmpp_2m", "euler", "lcm")
+                listOf("dpmpp_2m", "euler"),
+                setOf(
+                    ImageGenerationUiTaskMode.TEXT_TO_IMAGE,
+                    ImageGenerationUiTaskMode.IMG2IMG,
+                    ImageGenerationUiTaskMode.INPAINT
+                )
             ),
             Expected(
                 "realisticvisionhyper_sd15_qnn228",
@@ -284,7 +684,12 @@ class LocalImageUiCapabilitiesTest {
                 8,
                 2.0,
                 true,
-                listOf("dpmpp_2m", "euler", "pndm")
+                listOf("dpmpp_2m", "euler", "pndm"),
+                setOf(
+                    ImageGenerationUiTaskMode.TEXT_TO_IMAGE,
+                    ImageGenerationUiTaskMode.IMG2IMG,
+                    ImageGenerationUiTaskMode.INPAINT
+                )
             ),
             Expected(
                 "animagine_xl_v4_qnn228",
@@ -292,7 +697,12 @@ class LocalImageUiCapabilitiesTest {
                 28,
                 5.0,
                 true,
-                listOf("dpmpp_2m", "euler", "lcm")
+                listOf("dpmpp_2m", "euler"),
+                setOf(
+                    ImageGenerationUiTaskMode.TEXT_TO_IMAGE,
+                    ImageGenerationUiTaskMode.IMG2IMG,
+                    ImageGenerationUiTaskMode.INPAINT
+                )
             )
         ).forEach { expected ->
             val root = Files.createTempDirectory("tuned-image-ui-defaults").toFile()
@@ -307,10 +717,12 @@ class LocalImageUiCapabilitiesTest {
 
                 assertEquals(expected.steps, defaults.steps)
                 assertEquals(expected.cfgScale, defaults.cfgScale, 0.0)
+                assertEquals(1, defaults.minSteps)
+                assertEquals(50, defaults.maxSteps)
                 assertEquals("dpmpp_2m", defaults.sampler)
                 assertEquals(expected.supportedSamplers, defaults.supportedSamplers)
                 assertEquals(expected.supportsNegativePrompt, model.supportsNegativePromptForUi())
-                assertEquals(setOf(ImageGenerationUiTaskMode.TEXT_TO_IMAGE), model.supportedImageTaskModesForUi())
+                assertEquals(expected.supportedTaskModes, model.supportedImageTaskModesForUi())
             } finally {
                 root.deleteRecursively()
             }
@@ -353,7 +765,10 @@ class LocalImageUiCapabilitiesTest {
                 assertEquals(false, capabilities.supportsClipSkip)
                 assertEquals(true, capabilities.supportsVaeTiling)
                 assertEquals(true, capabilities.supportsLivePreview)
+                assertEquals(ImageGenerationUiPreviewMode.PROJECTION, capabilities.previewMode)
+                assertEquals(1, capabilities.defaultPreviewInterval)
                 assertEquals(true, capabilities.supportsLora)
+                assertEquals(8, capabilities.nativeMaxBatchCount)
                 assertEquals(8, capabilities.maxBatchCount)
                 assertEquals(
                     setOf(

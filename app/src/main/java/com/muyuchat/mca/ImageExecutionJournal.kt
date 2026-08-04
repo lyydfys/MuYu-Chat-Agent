@@ -5,8 +5,12 @@ import java.io.FileOutputStream
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -33,9 +37,48 @@ internal enum class ImageExecutionPhase {
     }
 }
 
+internal data class ImageExecutionOutputArtifact(
+    val index: Int,
+    val mimeType: String,
+    val bytes: Long,
+    val sha256: String,
+    val seed: Long? = null
+) {
+    init {
+        require(index >= 0) { "Image journal output index must be non-negative." }
+        require(mimeType.startsWith("image/")) { "Image journal output MIME type must use image/*." }
+        require(bytes > 0L) { "Image journal output size must be positive." }
+        require(SHA256.matches(sha256)) { "Image journal output SHA-256 is invalid." }
+    }
+
+    fun toJson(): JSONObject = JSONObject()
+        .put("index", index)
+        .put("mimeType", mimeType)
+        .put("bytes", bytes)
+        .put("sha256", sha256.lowercase())
+        .apply { seed?.let { put("seed", it) } }
+
+    companion object {
+        private val SHA256 = Regex("^[0-9a-fA-F]{64}$")
+
+        fun fromJson(json: JSONObject): ImageExecutionOutputArtifact =
+            ImageExecutionOutputArtifact(
+                index = json.getInt("index"),
+                mimeType = json.requiredString("mimeType"),
+                bytes = json.getLong("bytes"),
+                sha256 = json.requiredString("sha256"),
+                seed = json.optLongOrNull("seed")
+            )
+    }
+}
+
 internal data class ImageExecutionJournalEntry(
     val schemaVersion: Int = SCHEMA_VERSION,
     val requestId: String,
+    val modelId: String = "",
+    val modelName: String = "",
+    val recommendationId: String = "",
+    val recommendationRevision: String = "",
     val modelFingerprint: String,
     val profileFingerprint: String,
     val requestedSummaryJson: String = "{}",
@@ -45,12 +88,14 @@ internal data class ImageExecutionJournalEntry(
     val steps: Int = 0,
     val nativeStageMask: Long = 0L,
     val nativeGenerationSequence: Long? = null,
+    val leaseToken: String = "",
     val workerPid: Int = -1,
     val createdAtMs: Long,
     val updatedAtMs: Long = createdAtMs,
     val latentTempPath: String = "",
     val outputTempPath: String = "",
     val outputTempPaths: List<String> = emptyList(),
+    val outputArtifacts: List<ImageExecutionOutputArtifact> = emptyList(),
     val inputTempPaths: List<String> = emptyList(),
     val cancellationRequested: Boolean = false,
     val errorCode: String = "",
@@ -67,6 +112,9 @@ internal data class ImageExecutionJournalEntry(
         require(nativeGenerationSequence == null || nativeGenerationSequence >= 0L) {
             "Image journal native generation sequence must be non-negative."
         }
+        require(leaseToken.isEmpty() || LEASE_TOKEN.matches(leaseToken)) {
+            "Image journal lease token must be a lowercase 128-bit hex value."
+        }
         require(workerPid >= -1) { "Image journal worker PID is invalid." }
         require(createdAtMs > 0L) { "Image journal creation time must be positive." }
         require(updatedAtMs >= createdAtMs) { "Image journal update time precedes creation time." }
@@ -76,6 +124,9 @@ internal data class ImageExecutionJournalEntry(
         require(outputTempPaths.none(String::isBlank)) {
             "Image journal output temp paths must not contain blank values."
         }
+        require(outputArtifacts.map(ImageExecutionOutputArtifact::index) == outputArtifacts.indices.toList()) {
+            "Image journal output artifacts must be contiguous and start at zero."
+        }
         requireJsonObject(requestedSummaryJson, "requested summary")
         requireJsonObject(resolvedSummaryJson, "resolved summary")
     }
@@ -83,6 +134,10 @@ internal data class ImageExecutionJournalEntry(
     fun toJson(): JSONObject = JSONObject()
         .put("schemaVersion", schemaVersion)
         .put("requestId", requestId)
+        .put("modelId", modelId)
+        .put("modelName", modelName)
+        .put("recommendationId", recommendationId)
+        .put("recommendationRevision", recommendationRevision)
         .put("modelFingerprint", modelFingerprint)
         .put("profileFingerprint", profileFingerprint)
         .put("requested", JSONObject(requestedSummaryJson))
@@ -94,55 +149,79 @@ internal data class ImageExecutionJournalEntry(
         .apply {
             nativeGenerationSequence?.let { put("nativeGenerationSequence", it) }
         }
+        .put("leaseToken", leaseToken)
         .put("workerPid", workerPid)
         .put("createdAtMs", createdAtMs)
         .put("updatedAtMs", updatedAtMs)
         .put("latentTempPath", latentTempPath)
         .put("outputTempPath", outputTempPath)
         .put("outputTempPaths", JSONArray(outputTempPaths))
+        .put("outputArtifacts", JSONArray().apply { outputArtifacts.forEach { put(it.toJson()) } })
         .put("inputTempPaths", JSONArray(inputTempPaths))
         .put("cancellationRequested", cancellationRequested)
         .put("errorCode", errorCode)
         .put("errorMessage", errorMessage)
 
     companion object {
-        const val SCHEMA_VERSION = 1
+        const val SCHEMA_VERSION = 3
+        private const val LEGACY_SCHEMA_VERSION = 1
+        private val LEASE_TOKEN = Regex("^[0-9a-f]{32}$")
 
-        fun fromJson(json: JSONObject): ImageExecutionJournalEntry = ImageExecutionJournalEntry(
-            schemaVersion = json.optInt("schemaVersion", SCHEMA_VERSION),
-            requestId = json.requiredString("requestId"),
-            modelFingerprint = json.requiredString("modelFingerprint"),
-            profileFingerprint = json.requiredString("profileFingerprint"),
-            requestedSummaryJson = (json.optJSONObject("requested") ?: JSONObject()).toString(),
-            resolvedSummaryJson = (json.optJSONObject("resolved") ?: JSONObject()).toString(),
-            phase = ImageExecutionPhase.from(json.requiredString("phase")),
-            step = json.optInt("step", 0),
-            steps = json.optInt("steps", 0),
-            nativeStageMask = json.optLong("nativeStageMask", 0L),
-            nativeGenerationSequence = json.optLongOrNull("nativeGenerationSequence"),
-            workerPid = json.optInt("workerPid", -1),
-            createdAtMs = json.optLong("createdAtMs", 0L),
-            updatedAtMs = json.optLong("updatedAtMs", json.optLong("createdAtMs", 0L)),
-            latentTempPath = json.optString("latentTempPath"),
-            outputTempPath = json.optString("outputTempPath"),
-            outputTempPaths = json.optJSONArray("outputTempPaths")?.let { array ->
-                buildList {
-                    for (index in 0 until array.length()) {
-                        array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+        fun fromJson(json: JSONObject): ImageExecutionJournalEntry {
+            val storedSchemaVersion = json.optInt("schemaVersion", LEGACY_SCHEMA_VERSION)
+            require(storedSchemaVersion in LEGACY_SCHEMA_VERSION..SCHEMA_VERSION) {
+                "Unsupported persisted image journal schema: $storedSchemaVersion"
+            }
+            return ImageExecutionJournalEntry(
+                // Schema 1 entries are losslessly promoted in memory. Their new provenance fields
+                // remain empty until a fresh request is started under schema 2.
+                schemaVersion = SCHEMA_VERSION,
+                requestId = json.requiredString("requestId"),
+                modelId = json.optString("modelId"),
+                modelName = json.optString("modelName"),
+                recommendationId = json.optString("recommendationId"),
+                recommendationRevision = json.optString("recommendationRevision"),
+                modelFingerprint = json.requiredString("modelFingerprint"),
+                profileFingerprint = json.requiredString("profileFingerprint"),
+                requestedSummaryJson = (json.optJSONObject("requested") ?: JSONObject()).toString(),
+                resolvedSummaryJson = (json.optJSONObject("resolved") ?: JSONObject()).toString(),
+                phase = ImageExecutionPhase.from(json.requiredString("phase")),
+                step = json.optInt("step", 0),
+                steps = json.optInt("steps", 0),
+                nativeStageMask = json.optLong("nativeStageMask", 0L),
+                nativeGenerationSequence = json.optLongOrNull("nativeGenerationSequence"),
+                leaseToken = json.optString("leaseToken"),
+                workerPid = json.optInt("workerPid", -1),
+                createdAtMs = json.optLong("createdAtMs", 0L),
+                updatedAtMs = json.optLong("updatedAtMs", json.optLong("createdAtMs", 0L)),
+                latentTempPath = json.optString("latentTempPath"),
+                outputTempPath = json.optString("outputTempPath"),
+                outputTempPaths = json.optJSONArray("outputTempPaths")?.let { array ->
+                    buildList {
+                        for (index in 0 until array.length()) {
+                            array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                        }
                     }
-                }
-            }.orEmpty(),
-            inputTempPaths = json.optJSONArray("inputTempPaths")?.let { array ->
-                buildList {
-                    for (index in 0 until array.length()) {
-                        array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                }.orEmpty(),
+                outputArtifacts = json.optJSONArray("outputArtifacts")?.let { array ->
+                    buildList {
+                        for (index in 0 until array.length()) {
+                            add(ImageExecutionOutputArtifact.fromJson(array.getJSONObject(index)))
+                        }
                     }
-                }
-            }.orEmpty(),
-            cancellationRequested = json.optBoolean("cancellationRequested", false),
-            errorCode = json.optString("errorCode"),
-            errorMessage = json.optString("errorMessage")
-        )
+                }.orEmpty(),
+                inputTempPaths = json.optJSONArray("inputTempPaths")?.let { array ->
+                    buildList {
+                        for (index in 0 until array.length()) {
+                            array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                        }
+                    }
+                }.orEmpty(),
+                cancellationRequested = json.optBoolean("cancellationRequested", false),
+                errorCode = json.optString("errorCode"),
+                errorMessage = json.optString("errorMessage")
+            )
+        }
 
         private fun requireJsonObject(raw: String, label: String) {
             require(runCatching { JSONObject(raw) }.isSuccess) {
@@ -187,38 +266,89 @@ internal class ImageExecutionJournalStore(
     private val parentDirectorySyncer: ParentDirectorySyncer = AndroidParentDirectorySyncer,
     private val clock: () -> Long = System::currentTimeMillis
 ) {
+    private val inProcessStoreLock = processStoreLocks.computeIfAbsent(
+        runCatching { directory.canonicalPath }.getOrElse { directory.absolutePath }
+    ) { ReentrantLock() }
+
     fun create(entry: ImageExecutionJournalEntry): ImageExecutionJournalEntry {
         require(entry.phase == ImageExecutionPhase.PREPARING) {
             "A new image journal must start in PREPARING."
         }
-        val target = journalFile(entry.requestId)
-        require(!target.exists()) { "Image journal already exists for ${entry.requestId}." }
-        writeAtomic(target, entry)
-        return entry
+        return withStoreLock {
+            val target = journalFile(entry.requestId)
+            require(!target.exists()) { "Image journal already exists for ${entry.requestId}." }
+            writeAtomic(target, entry)
+            entry
+        }
+    }
+
+    fun listReadableEntries(): List<ImageExecutionJournalEntry> {
+        directory.mkdirs()
+        return directory.listFiles { file ->
+            file.isFile && file.name.startsWith(JOURNAL_PREFIX) && file.name.endsWith(JOURNAL_SUFFIX)
+        }
+            .orEmpty()
+            .sortedBy(File::getName)
+            .mapNotNull { file ->
+                runCatching {
+                    readFile(file).takeIf { entry ->
+                        journalFile(entry.requestId).canonicalFile == file.canonicalFile
+                    }
+                }.getOrNull()
+            }
+    }
+
+    fun listJournalDigests(): Set<String> {
+        directory.mkdirs()
+        return directory.listFiles().orEmpty().mapNotNull { file ->
+            JOURNAL_FILE_PATTERN.matchEntire(file.name)?.groupValues?.getOrNull(1)
+        }.toSet()
     }
 
     fun read(requestId: String): ImageExecutionJournalEntry? {
         val file = journalFile(requestId)
         if (!file.isFile) return null
-        return readFile(file)
+        val entry = readFile(file)
+        require(entry.requestId == requestId &&
+            journalFile(entry.requestId).canonicalFile == file.canonicalFile
+        ) {
+            "Image journal file identity does not match its requestId."
+        }
+        return entry
     }
 
-    fun update(next: ImageExecutionJournalEntry): ImageExecutionJournalEntry {
+    fun update(
+        next: ImageExecutionJournalEntry,
+        expectedLeaseToken: String? = null
+    ): ImageExecutionJournalEntry = withStoreLock {
+        updateLocked(next, expectedLeaseToken)
+    }
+
+    private fun updateLocked(
+        next: ImageExecutionJournalEntry,
+        expectedLeaseToken: String? = null
+    ): ImageExecutionJournalEntry {
         val current = read(next.requestId) ?: error("Image journal does not exist: ${next.requestId}")
+        requireExpectedLeaseToken(current, expectedLeaseToken)
         validateIdentity(current, next)
         validateTransition(current, next)
         writeAtomic(journalFile(next.requestId), next)
         return next
     }
 
-    fun requestCancellation(requestId: String): ImageExecutionJournalEntry {
+    fun requestCancellation(
+        requestId: String,
+        expectedLeaseToken: String? = null
+    ): ImageExecutionJournalEntry = withStoreLock {
         val current = read(requestId) ?: error("Image journal does not exist: $requestId")
+        requireExpectedLeaseToken(current, expectedLeaseToken)
         require(!current.phase.terminal) { "Terminal image journal cannot be cancelled." }
-        return update(
+        updateLocked(
             current.copy(
                 cancellationRequested = true,
                 updatedAtMs = nextTimestamp(current)
-            )
+            ),
+            expectedLeaseToken = expectedLeaseToken
         )
     }
 
@@ -227,16 +357,21 @@ internal class ImageExecutionJournalStore(
         cleanupRoots: List<File>,
         message: String = "Image generation was cancelled."
     ): ImageExecutionTerminalResult {
-        val requested = requestCancellation(requestId)
-        val cleanup = cleanupTransientFiles(requested, cleanupRoots)
-        val terminal = update(
-            requested.copy(
+        requestCancellation(requestId)
+        val (terminal, cleanup) = withStoreLock {
+            val current = read(requestId) ?: error("Image journal does not exist: $requestId")
+            require(current.cancellationRequested) {
+                "Cancelled image journal lost its cancellation request."
+            }
+            val currentCleanup = cleanupTransientFiles(current, cleanupRoots)
+            val currentTerminal = updateLocked(current.copy(
                 phase = ImageExecutionPhase.CANCELLED,
-                updatedAtMs = nextTimestamp(requested),
+                updatedAtMs = nextTimestamp(current),
                 errorCode = "CANCELLED",
                 errorMessage = message
-            )
-        )
+            ))
+            currentTerminal to currentCleanup
+        }
         return ImageExecutionTerminalResult(terminal, cleanup)
     }
 
@@ -244,22 +379,27 @@ internal class ImageExecutionJournalStore(
         requestId: String,
         phase: ImageExecutionPhase,
         errorCode: String = "",
-        errorMessage: String = ""
-    ): ImageExecutionJournalEntry {
+        errorMessage: String = "",
+        expectedLeaseToken: String? = null
+    ): ImageExecutionJournalEntry = withStoreLock {
         require(phase.terminal) { "markTerminal requires a terminal phase." }
         val current = read(requestId) ?: error("Image journal does not exist: $requestId")
-        return update(
+        requireExpectedLeaseToken(current, expectedLeaseToken)
+        updateLocked(
             current.copy(
                 phase = phase,
                 updatedAtMs = nextTimestamp(current),
                 errorCode = errorCode,
                 errorMessage = errorMessage
-            )
+            ),
+            expectedLeaseToken = expectedLeaseToken
         )
     }
 
     fun recoverInterrupted(
         cleanupRoots: List<File>,
+        preservePublishingOutputs: Boolean = true,
+        validateEntryForCleanup: (ImageExecutionJournalEntry) -> Boolean = { true },
         isProcessAlive: (Int) -> Boolean
     ): ImageExecutionRecoveryReport {
         directory.mkdirs()
@@ -277,6 +417,12 @@ internal class ImageExecutionJournalStore(
                     invalid += file.name
                     return@forEach
                 }
+                if (journalFile(entry.requestId).canonicalFile != file.canonicalFile ||
+                    !validateEntryForCleanup(entry)
+                ) {
+                    invalid += file.name
+                    return@forEach
+                }
                 if (entry.phase.terminal) return@forEach
                 if (entry.workerPid > 0 && isProcessAlive(entry.workerPid)) {
                     stillRunning += entry
@@ -285,7 +431,8 @@ internal class ImageExecutionJournalStore(
                 cleanup += cleanupTransientFiles(
                     entry = entry,
                     cleanupRoots = cleanupRoots,
-                    preservePublishedOutputs = entry.phase == ImageExecutionPhase.PUBLISHING
+                    preservePublishedOutputs = preservePublishingOutputs &&
+                        entry.phase == ImageExecutionPhase.PUBLISHING
                 )
                 val recovered = update(
                     entry.copy(
@@ -305,10 +452,62 @@ internal class ImageExecutionJournalStore(
         )
     }
 
-    fun deleteTerminal(requestId: String): Boolean {
-        val current = read(requestId) ?: return false
+    fun deleteTerminal(
+        requestId: String,
+        expectedLeaseToken: String? = null
+    ): Boolean = withStoreLock {
+        val current = read(requestId) ?: return@withStoreLock false
+        requireExpectedLeaseToken(current, expectedLeaseToken)
         require(current.phase.terminal) { "Non-terminal image journal cannot be deleted." }
-        return journalFile(requestId).delete()
+        journalFile(requestId).delete()
+    }
+
+    /**
+     * Removes terminal request metadata while retaining active or unreadable journals.
+     *
+     * Callers that own temporary output artifacts may provide their cleanup roots. In that mode
+     * every recorded transient is removed before its terminal journal is deleted, which also
+     * closes the crash window left by older writers that published a terminal journal before the
+     * surrounding provider had consumed its output.
+     */
+    fun pruneTerminalJournals(
+        cleanupRoots: List<File> = emptyList(),
+        validateEntryForCleanup: (ImageExecutionJournalEntry) -> Boolean = { true }
+    ): ImageExecutionCleanupReport {
+        directory.mkdirs()
+        return directory.listFiles { file ->
+            file.isFile && file.name.startsWith(JOURNAL_PREFIX) && file.name.endsWith(JOURNAL_SUFFIX)
+        }
+            .orEmpty()
+            .sortedBy(File::getName)
+            .fold(ImageExecutionCleanupReport()) { report, file ->
+                val entry = runCatching { readFile(file) }.getOrNull()
+                if (entry?.phase?.terminal != true ||
+                    journalFile(entry.requestId).canonicalFile != file.canonicalFile ||
+                    !validateEntryForCleanup(entry)
+                ) {
+                    report
+                } else {
+                    val artifactCleanup = if (cleanupRoots.isEmpty()) {
+                        ImageExecutionCleanupReport()
+                    } else {
+                        cleanupTransientFiles(
+                            entry = entry,
+                            cleanupRoots = cleanupRoots,
+                            preservePublishedOutputs = false
+                        )
+                    }
+                    val canDeleteJournal = artifactCleanup.skippedPaths.isEmpty() &&
+                        artifactCleanup.failedPaths.isEmpty()
+                    val journalCleanup = when {
+                        !canDeleteJournal -> ImageExecutionCleanupReport()
+                        runCatching { file.delete() }.getOrDefault(false) ->
+                            ImageExecutionCleanupReport(deletedPaths = listOf(file.canonicalPath))
+                        else -> ImageExecutionCleanupReport(failedPaths = listOf(file.canonicalPath))
+                    }
+                    report + artifactCleanup + journalCleanup
+                }
+            }
     }
 
     private fun cleanupTransientFiles(
@@ -349,8 +548,17 @@ internal class ImageExecutionJournalStore(
     ) {
         require(current.schemaVersion == next.schemaVersion) { "Image journal schema cannot change." }
         require(current.requestId == next.requestId) { "Image journal request identity cannot change." }
+        require(current.modelId == next.modelId) { "Image journal model id cannot change." }
+        require(current.modelName == next.modelName) { "Image journal model name cannot change." }
+        require(current.recommendationId == next.recommendationId) {
+            "Image journal recommendation id cannot change."
+        }
+        require(current.recommendationRevision == next.recommendationRevision) {
+            "Image journal recommendation revision cannot change."
+        }
         require(current.modelFingerprint == next.modelFingerprint) { "Image journal model fingerprint cannot change." }
         require(current.profileFingerprint == next.profileFingerprint) { "Image journal profile fingerprint cannot change." }
+        require(current.leaseToken == next.leaseToken) { "Image journal lease token cannot change." }
         require(current.createdAtMs == next.createdAtMs) { "Image journal creation time cannot change." }
         require(current.inputTempPaths == next.inputTempPaths) {
             "Image journal input temp paths cannot change."
@@ -360,6 +568,16 @@ internal class ImageExecutionJournalStore(
         }
         require(normalizedJsonObject(current.resolvedSummaryJson) == normalizedJsonObject(next.resolvedSummaryJson)) {
             "Image journal resolved summary cannot change."
+        }
+    }
+
+    private fun requireExpectedLeaseToken(
+        current: ImageExecutionJournalEntry,
+        expectedLeaseToken: String?
+    ) {
+        if (expectedLeaseToken == null) return
+        require(expectedLeaseToken.isNotBlank() && current.leaseToken == expectedLeaseToken) {
+            "Image journal lease token does not match the active request epoch."
         }
     }
 
@@ -385,6 +603,9 @@ internal class ImageExecutionJournalStore(
         }
         require(next.outputTempPaths.containsAll(current.outputTempPaths)) {
             "Image journal output temp paths cannot lose observed paths."
+        }
+        require(next.outputArtifacts.take(current.outputArtifacts.size) == current.outputArtifacts) {
+            "Image journal output artifacts cannot lose or rewrite published evidence."
         }
         if (current.steps > 0 && next.steps > 0) {
             require(current.steps == next.steps) { "Image journal total steps cannot change." }
@@ -443,8 +664,12 @@ internal class ImageExecutionJournalStore(
     private fun nextTimestamp(current: ImageExecutionJournalEntry): Long =
         clock().coerceAtLeast(current.updatedAtMs + 1L)
 
-    private fun readFile(file: File): ImageExecutionJournalEntry =
-        ImageExecutionJournalEntry.fromJson(JSONObject(file.readText(Charsets.UTF_8)))
+    private fun readFile(file: File): ImageExecutionJournalEntry {
+        require(file.length() in 1L..MAX_JOURNAL_BYTES) {
+            "Image journal size is outside the bounded metadata contract."
+        }
+        return ImageExecutionJournalEntry.fromJson(JSONObject(file.readText(Charsets.UTF_8)))
+    }
 
     private fun normalizedJsonObject(raw: String): String = JSONObject(raw).toString()
 
@@ -482,6 +707,19 @@ internal class ImageExecutionJournalStore(
         }
     }
 
+    private inline fun <T> withStoreLock(block: () -> T): T =
+        inProcessStoreLock.withLock {
+            directory.mkdirs()
+            val lockFile = File(directory, STORE_LOCK_FILE)
+            java.nio.channels.FileChannel.open(
+                lockFile.toPath(),
+                StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE
+            ).use { channel ->
+                channel.lock().use { block() }
+            }
+        }
+
     private fun journalFile(requestId: String): File {
         require(requestId.isNotBlank()) { "Image journal requestId must not be blank." }
         val digest = MessageDigest.getInstance("SHA-256")
@@ -493,6 +731,10 @@ internal class ImageExecutionJournalStore(
     private companion object {
         const val JOURNAL_PREFIX = "image-execution-"
         const val JOURNAL_SUFFIX = ".json"
+        const val STORE_LOCK_FILE = ".image-execution-store.lock"
+        val JOURNAL_FILE_PATTERN = Regex("^image-execution-([0-9a-f]{64})\\.json$")
+        const val MAX_JOURNAL_BYTES = 1024L * 1024L
+        private val processStoreLocks = ConcurrentHashMap<String, ReentrantLock>()
     }
 }
 

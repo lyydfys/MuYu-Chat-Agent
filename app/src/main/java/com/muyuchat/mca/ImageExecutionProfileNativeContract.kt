@@ -65,6 +65,12 @@ internal object ImageExecutionProfileNativeContract {
         "promptWeightFingerprint"
     )
 
+    /** Native conditioner evidence passed to QNN and upgraded after graph consumption. */
+    val qnnPromptConditioningHandoffFields: Set<String> = linkedSetOf(
+        "nativePromptExecutionSha256",
+        "nativePromptBindingStage"
+    )
+
     /** QNN-only nativeEffective fields; these must not become global runtime requirements. */
     val qnnNativeEffectiveFields: Set<String> = linkedSetOf(
         "pixelRange",
@@ -77,7 +83,9 @@ internal object ImageExecutionProfileNativeContract {
         "conditioningEncoderExecutionCount",
         "textEncoderExecutionCount",
         "conditioningArtifactConsumed",
-        "runtimeSessionMode"
+        "runtimeSessionMode",
+        "nativePromptExecutionSha256",
+        "nativePromptBindingStage"
     )
 
     /** QNN VAE conversion proof emitted only after actual native pixel conversion. */
@@ -95,6 +103,15 @@ internal object ImageExecutionProfileNativeContract {
         resolution.layers.resolved.toJson().apply {
             val profile = resolution.profile
             val scheduler = profile.scheduler
+            val resolved = resolution.layers.resolved
+            if (scheduler.algorithm != resolved.scheduler ||
+                scheduler.predictionType != resolved.predictionType
+            ) {
+                invalid(
+                    "scheduler",
+                    "Resolved scheduler details disagree with the execution-layer algorithm or prediction type."
+                )
+            }
             put("sampleMethod", imageSchedulerProductName(scheduler.algorithm))
             put("numTrainTimesteps", scheduler.numTrainTimesteps)
             put("noiseSchedule", scheduler.noiseSchedule.name)
@@ -133,6 +150,11 @@ internal object ImageExecutionProfileNativeContract {
                 }
                 put("pixelRange", pixelRange.name)
             }
+            profile.verifiedNativeSimplifiedChineseLanguageProofSha256()?.let { proofSha256 ->
+                // Native receives only the verified opaque digest, never the publisher signature
+                // or app signing certificate. It must echo this after consuming the same closure.
+                put("languageProofSha256", proofSha256)
+            }
         }
 
     fun toNativeParamsJsonString(resolution: ImageExecutionProfileResolution): String =
@@ -144,7 +166,7 @@ internal object ImageExecutionProfileNativeContract {
     ): ImageValidatedNativeExecution {
         val json = try {
             JSONObject(nativeExecutionJson)
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
             throw ImageNativeExecutionContractException(
                 code = IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID,
                 field = "nativeExecution",
@@ -172,7 +194,9 @@ internal object ImageExecutionProfileNativeContract {
         }
         if (resolution.layers.resolved.runtime == LocalImageRuntime.QNN_HTP) {
             validateQnnConditioningExecutionEvidence(resolution, nativeEffectiveJson)
+            validateQnnNativeMultilingualTextEncoderEvidence(resolution, nativeEffectiveJson)
         }
+        validateNativeMultilingualLanguageProofReceipt(resolution, nativeEffectiveJson)
         if (resolution.layers.resolved.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
             validateStableDiffusionTokenEvidence(
                 resolution,
@@ -326,19 +350,35 @@ internal object ImageExecutionProfileNativeContract {
         val resolved = resolution.layers.resolved
         val qnnTextEncoder = strategy == ImageWorkerStrategy.SHARED_TEXT_UNET_VAE
         val control = resolution.profile.task == ImageTask.CONTROL_IMAGE
+        // Shared SDXL keeps its MNN dual-CLIP handoff ABI even when the UNet
+        // is distilled to a positive-only sampling pass.
+        val sharedSdxlExternalConditioning =
+            resolution.profile.family == LocalImageModelFamily.SDXL && !qnnTextEncoder
         val expectedMode = if (qnnTextEncoder) "qnn_text_encoder" else "external_mnn_embeddings"
         val expectedBackend = if (qnnTextEncoder) "QNN" else "MNN"
-        val expectedGraph = if (qnnTextEncoder) {
-            resolution.profile.graph.textEncoder?.graphName.orEmpty()
-        } else {
-            resolution.profile.graph.textEncoder
-                ?.relativePath
-                .orEmpty()
-                .substringAfterLast('/')
-                .substringAfterLast('\\')
+        val hasVerifiedChineseTextEncoderEvidence = qnnTextEncoder &&
+            resolution.profile.hasVerifiedNativeSimplifiedChineseTextEncoder()
+        val expectedGraph = when {
+            sharedSdxlExternalConditioning -> "clip.mnn+clip_2.mnn"
+            qnnTextEncoder -> {
+                resolution.profile.graph.textEncoder?.graphName.orEmpty()
+            }
+            else -> {
+                resolution.profile.graph.textEncoder
+                    ?.relativePath
+                    .orEmpty()
+                    .substringAfterLast('/')
+                    .substringAfterLast('\\')
+            }
         }
-        val expectedExecutionCount = if (resolved.useCfg) 2 else 1
-        val expectedOrder = if (resolved.useCfg) {
+        val expectedExecutionCount = if (sharedSdxlExternalConditioning) {
+            4
+        } else if (resolved.useCfg) {
+            2
+        } else {
+            1
+        }
+        val expectedOrder = if (sharedSdxlExternalConditioning || resolved.useCfg) {
             "negative_then_positive"
         } else {
             "positive_only"
@@ -355,12 +395,21 @@ internal object ImageExecutionProfileNativeContract {
             .lowercase()
         val promptWeightFingerprint = nativeEffective.requiredString("promptWeightFingerprint")
             .lowercase()
+        val conditioningGraphMatches = when {
+            // Signed direct-Chinese evidence accepts either native receipt spelling. Its graph
+            // identity is checked alongside the consumed text-encoder asset below.
+            hasVerifiedChineseTextEncoderEvidence -> true
+            // A generic QNN profile can leave graph selection to the runtime default. Only the
+            // verified direct-Chinese path requires an explicit text-encoder graph name.
+            qnnTextEncoder && expectedGraph.isBlank() -> true
+            else -> nativeEffective.requiredString("conditioningGraph") == expectedGraph
+        }
         if (!SHA256.matches(artifactSha256) ||
             !SHA256.matches(graphSha256) ||
             (!qnnTextEncoder && promptWeightFingerprint != artifactSha256) ||
             nativeEffective.requiredString("conditioningExecutionMode") != expectedMode ||
             nativeEffective.requiredString("conditioningBackend") != expectedBackend ||
-            nativeEffective.requiredString("conditioningGraph") != expectedGraph ||
+            !conditioningGraphMatches ||
             nativeEffective.requiredString("conditioningOrder") != expectedOrder ||
             nativeEffective.requiredInt("conditioningEncoderExecutionCount") !=
             expectedExecutionCount ||
@@ -375,6 +424,181 @@ internal object ImageExecutionProfileNativeContract {
                     "conditioningEncoderExecutionCount,textEncoderExecutionCount," +
                     "conditioningArtifactConsumed,runtimeSessionMode",
                 "QNN conditioning and runtime-session evidence differs from the selected worker strategy."
+            )
+        }
+    }
+
+    /**
+     * A multilingual profile is a semantic claim, so its native receipt must identify the exact
+     * immutable QNN context that Android selected.  Do not infer this from UTF-8 transport,
+     * graph names, recommendation ids, or device information.
+     */
+    private fun validateQnnNativeMultilingualTextEncoderEvidence(
+        resolution: ImageExecutionProfileResolution,
+        nativeEffective: JSONObject
+    ) {
+        val profile = resolution.profile
+        if (!profile.hasVerifiedNativeSimplifiedChineseTextEncoder()) return
+
+        require(profile.runtime == LocalImageRuntime.QNN_HTP &&
+            profile.graph.workerStrategy == ImageWorkerStrategy.SHARED_TEXT_UNET_VAE
+        ) {
+            "Verified direct Chinese QNN execution requires a shared native text-encoder graph."
+        }
+        val evidence = requireNotNull(profile.textEncoderLanguage?.evidence) {
+            "Verified direct Chinese QNN execution requires pinned text-encoder evidence."
+        }
+        val expectedClosureAssets = evidence.promptToEncoderAssets
+            .associate { entry -> entry.role to entry.asset }
+        val expectedTokenizer = expectedClosureAssets[ImagePromptToEncoderAssetRole.TOKENIZER_JSON]
+            ?: invalid(
+            "textEncoderLanguage.evidence.promptToEncoderAssets",
+            "Verified direct Chinese QNN execution requires a TOKENIZER_JSON closure asset."
+        )
+        val expectedPath = evidence.textEncoderAsset.relativePath
+            .replace('\\', '/')
+            .trim()
+        val expectedSha256 = evidence.textEncoderAsset.fingerprint.lowercase()
+        val expectedSizeBytes = requireNotNull(evidence.textEncoderAsset.sizeBytes)
+        val expectedGraphName = profile.graph.textEncoder
+            ?.graphName
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: invalid(
+                "graph.textEncoder.graphName",
+                "Verified direct Chinese QNN execution requires an explicit text-encoder graph name."
+            )
+
+        val actualPath = nativeEffective.requiredString("consumedTextEncoderPath")
+            .replace('\\', '/')
+            .trim()
+        val actualSha256 = nativeEffective.requiredString("consumedTextEncoderSha256").lowercase()
+        val actualSizeBytes = nativeEffective.requiredLong("consumedTextEncoderSizeBytes")
+        val conditioningGraphSha256 = nativeEffective.requiredString("conditioningGraphSha256")
+            .lowercase()
+        val requestedGraphName = nativeEffective.requiredString("textEncoderGraphName").trim()
+        val loadedGraphName = nativeEffective.requiredString("loadedTextEncoderGraphName").trim()
+        val actualTokenizerPath = nativeEffective.requiredString("consumedTokenizerPath")
+            .replace('\\', '/')
+            .trim()
+        val actualTokenizerSha256 = nativeEffective.requiredString("consumedTokenizerSha256")
+            .lowercase()
+        val actualTokenizerSizeBytes = nativeEffective.requiredLong("consumedTokenizerSizeBytes")
+        val receiptCanonicalPath = nativeEffective
+            .requiredString("tokenizerReceiptCanonicalPath")
+        val receiptSha256 = nativeEffective.requiredString("tokenizerReceiptSha256").lowercase()
+        val receiptSizeBytes = nativeEffective.requiredLong("tokenizerReceiptSizeBytes")
+        val receiptBindingStage = nativeEffective.requiredString("tokenizerReceiptBindingStage")
+        val actualClosureSha256 = nativeEffective
+            .requiredString("consumedPromptToEncoderClosureSha256")
+            .lowercase()
+        val closureAliasSha256 = nativeEffective
+            .requiredString("promptToEncoderClosureSha256")
+            .lowercase()
+        val expectedClosureSha256 = evidence.promptToEncoderClosureSha256()
+        if (actualPath != expectedPath ||
+            actualSha256 != expectedSha256 ||
+            conditioningGraphSha256 != expectedSha256 ||
+            actualSizeBytes != expectedSizeBytes ||
+            requestedGraphName != expectedGraphName ||
+            loadedGraphName != expectedGraphName ||
+            actualTokenizerPath != expectedTokenizer.relativePath.replace('\\', '/').trim() ||
+            actualTokenizerSha256 != expectedTokenizer.fingerprint.lowercase() ||
+            actualTokenizerSizeBytes != expectedTokenizer.sizeBytes ||
+            !receiptCanonicalPath.isSafeCanonicalNativePath() ||
+            receiptSha256 != expectedTokenizer.fingerprint.lowercase() ||
+            receiptSizeBytes != expectedTokenizer.sizeBytes ||
+            receiptBindingStage != "tokenizer_consumed" ||
+            actualClosureSha256 != expectedClosureSha256 ||
+            closureAliasSha256 != expectedClosureSha256 ||
+            !SHA256.matches(actualSha256) ||
+            !SHA256.matches(conditioningGraphSha256) ||
+            !SHA256.matches(actualTokenizerSha256) ||
+            !SHA256.matches(actualClosureSha256) ||
+            !nativeEffective.requiredBoolean("consumedTextEncoderAssetVerified") ||
+            !nativeEffective.requiredBoolean("consumedTokenizerAssetVerified") ||
+            !nativeEffective.requiredBoolean("mnnPromptHandoffVerified") ||
+            nativeEffective.requiredString("tokenizerBindingStage") != "tokenizer_consumed" ||
+            nativeEffective.requiredString("consumedPromptToEncoderBindingStage") !=
+                "conditioning_consumed" ||
+            !nativeEffective.matchesPromptToEncoderClosure(expectedClosureAssets)
+        ) {
+            invalid(
+                "consumedTextEncoderPath,consumedTextEncoderSha256," +
+                    "consumedTextEncoderSizeBytes,consumedTokenizerPath,consumedTokenizerSha256," +
+                    "consumedTokenizerSizeBytes,tokenizerReceiptCanonicalPath," +
+                    "tokenizerReceiptSha256,tokenizerReceiptSizeBytes," +
+                    "mnnPromptHandoffVerified," +
+                    "consumedPromptToEncoderAssets," +
+                    "consumedPromptToEncoderClosureSha256,promptToEncoderClosureSha256",
+                "QNN native prompt-to-encoder receipt differs from the evidence-bound multilingual profile."
+            )
+        }
+    }
+
+    private fun String.isSafeCanonicalNativePath(): Boolean =
+        startsWith('/') &&
+            length < 4_096 &&
+            '\\' !in this &&
+            "//" !in this &&
+            "/./" !in this &&
+            "/../" !in this &&
+            !endsWith("/.") &&
+            !endsWith("/..") &&
+            '\u0000' !in this
+
+    /** Compares the native role closure exactly; no path, role, or duplicate may be ignored. */
+    private fun JSONObject.matchesPromptToEncoderClosure(
+        expected: Map<ImagePromptToEncoderAssetRole, ImageProfileAsset>
+    ): Boolean {
+        val values = requiredValue("consumedPromptToEncoderAssets") as? org.json.JSONArray
+            ?: invalid(
+                "consumedPromptToEncoderAssets",
+                "Native QNN prompt-to-encoder receipt must be an array."
+            )
+        if (values.length() != expected.size) return false
+        val consumed = linkedMapOf<ImagePromptToEncoderAssetRole, ImageProfileAsset>()
+        for (index in 0 until values.length()) {
+            val entry = values.optJSONObject(index) ?: invalid(
+                "consumedPromptToEncoderAssets[$index]",
+                "Native QNN prompt-to-encoder receipt entry must be an object."
+            )
+            val role = entry.requiredEnum(
+                "role",
+                ImagePromptToEncoderAssetRole.entries
+            )
+            val asset = ImageProfileAsset(
+                relativePath = entry.requiredString("path"),
+                fingerprint = entry.requiredString("sha256"),
+                sizeBytes = entry.requiredLong("sizeBytes")
+            )
+            if (consumed.put(role, asset) != null) return false
+        }
+        return consumed.all { (role, actual) ->
+            val expectedAsset = expected[role] ?: return@all false
+            actual.relativePath.replace('\\', '/').trim() ==
+                expectedAsset.relativePath.replace('\\', '/').trim() &&
+                actual.fingerprint.lowercase() == expectedAsset.fingerprint.lowercase() &&
+                actual.sizeBytes == expectedAsset.sizeBytes
+        }
+    }
+
+    /**
+     * A native receipt may claim that an encoder file was consumed, but that alone does not prove
+     * its language semantics. Android verifies the publisher signature first and requires native
+     * to return the exact resulting payload digest only after conditioning consumed that closure.
+     */
+    private fun validateNativeMultilingualLanguageProofReceipt(
+        resolution: ImageExecutionProfileResolution,
+        nativeEffective: JSONObject
+    ) {
+        val expected = resolution.profile.verifiedNativeSimplifiedChineseLanguageProofSha256()
+            ?: return
+        val actual = nativeEffective.requiredString("languageProofSha256").lowercase()
+        if (!SHA256.matches(actual) || actual != expected) {
+            invalid(
+                "languageProofSha256",
+                "Native multilingual receipt did not bind Android's verified text-encoder semantic proof."
             )
         }
     }

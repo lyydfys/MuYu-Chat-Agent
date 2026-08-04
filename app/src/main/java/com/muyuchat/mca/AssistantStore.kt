@@ -17,6 +17,8 @@ data class AssistantRecord(
     val defaultModelMode: String = "follow_current",
     val defaultModelId: String? = null,
     val paramsJson: String = GenerationParams().toAssistantGenerationJson(),
+    /** Original imported character-card JSON, retained as inert data for lossless re-export. */
+    val characterCardJson: String? = null,
     val memoryEnabled: Boolean = false,
     val webSearchEnabled: Boolean = false,
     val fileContextEnabled: Boolean = true,
@@ -34,6 +36,7 @@ data class AssistantRecord(
         .put("defaultModelMode", defaultModelMode)
         .put("defaultModelId", defaultModelId)
         .put("paramsJson", paramsJson)
+        .apply { characterCardJson?.let { put("characterCardJson", it) } }
         .put("memoryEnabled", memoryEnabled)
         .put("webSearchEnabled", webSearchEnabled)
         .put("fileContextEnabled", fileContextEnabled)
@@ -72,8 +75,8 @@ data class AssistantRecord(
                 id = json.cleanAssistantString("id")
                     .ifBlank { source.cleanAssistantString("id", "character_id") }
                     .ifBlank { UUID.randomUUID().toString() },
-                name = json.cleanAssistantString("name", "title")
-                    .ifBlank { source.cleanAssistantString("name", "title") }
+                name = json.cleanAssistantString("name", "char_name", "title")
+                    .ifBlank { source.cleanAssistantString("name", "char_name", "title") }
                     .ifBlank { defaults.name },
                 avatar = json.cleanAssistantString("avatar", "emoji")
                     .ifBlank { source.cleanAssistantString("avatar", "emoji") }
@@ -91,6 +94,7 @@ data class AssistantRecord(
                     defaultParams,
                     systemPrompt
                 ),
+                characterCardJson = json.rawAssistantString("characterCardJson", "character_card_json"),
                 memoryEnabled = json.optBoolean("memoryEnabled", defaults.memoryEnabled),
                 webSearchEnabled = json.optBoolean("webSearchEnabled", defaults.webSearchEnabled),
                 fileContextEnabled = json.optBoolean("fileContextEnabled", defaults.fileContextEnabled),
@@ -99,17 +103,56 @@ data class AssistantRecord(
             )
         }
 
+        /** Bridges the bounded card codec back to the established assistant persistence format. */
+        fun fromCharacterCard(
+            card: CharacterCard,
+            defaults: AssistantRecord = default()
+        ): AssistantRecord {
+            val imported = fromJson(card.toJson(), defaults)
+            val cardRoot = card.toJson()
+            val cardData = cardRoot.optJSONObject("data") ?: cardRoot
+            val systemPrompt = listOf(
+                card.systemPrompt,
+                cardData.toCharacterCardPrompt(),
+                card.postHistoryInstructions
+            )
+                .filter { it.isNotBlank() }
+                .distinct()
+                .joinToString("\n\n")
+                .ifBlank { imported.systemPrompt }
+                .take(MAX_ASSISTANT_PROMPT_CHARS)
+            val defaultParams = assistantGenerationParamsFromJson(
+                defaults.paramsJson,
+                GenerationParams(),
+                defaults.systemPrompt
+            )
+            return imported.copy(
+                systemPrompt = systemPrompt,
+                paramsJson = sanitizeAssistantParamsJsonPreservingLegacyExecution(
+                    imported.paramsJson,
+                    defaultParams,
+                    systemPrompt
+                ),
+                characterCardJson = card.toJsonString()
+            )
+        }
+
         private fun JSONObject.cleanAssistantString(vararg keys: String): String =
             keys.firstNotNullOfOrNull { key ->
                 optString(key).takeIf { it.isNotBlank() && it != "null" }
             }.orEmpty().trim()
 
+        private fun JSONObject.rawAssistantString(vararg keys: String): String? =
+            keys.firstNotNullOfOrNull { key ->
+                (opt(key) as? String)?.takeIf { it.isNotEmpty() }
+            }
+
         private fun JSONObject.toCharacterCardPrompt(): String {
             val sections = listOf(
-                "角色描述" to cleanAssistantString("description", "desc"),
+                "角色描述" to cleanAssistantString("description", "desc", "char_persona"),
                 "性格" to cleanAssistantString("personality"),
-                "场景" to cleanAssistantString("scenario"),
-                "开场白" to cleanAssistantString("first_mes", "firstMessage", "greeting"),
+                "场景" to cleanAssistantString("scenario", "world_scenario"),
+                "开场白" to cleanAssistantString("first_mes", "firstMessage", "greeting", "char_greeting"),
                 "示例对话" to cleanAssistantString("mes_example", "example_dialogue")
             ).filter { (_, value) -> value.isNotBlank() }
             if (sections.isEmpty()) return ""

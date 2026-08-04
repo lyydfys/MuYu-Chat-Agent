@@ -88,29 +88,45 @@ class RecommendationCatalogTest {
     }
 
     @Test
-    fun gen5VerificationStateChangesTheLabelButNeverTheDownloadAccess() {
+    fun gen5ExperimentalStateNeverRestrictsDownloadAccess() {
         val gen5Sd15 = recommendations.first { it.id == "qualcomm_sd15_gen5_qnn" }
         val verifiedAccess = recommendationDownloadAccess(gen5Sd15, "SM8850", deviceIsSnapdragon = true)
         val controlNet = recommendations.first { it.id == "qualcomm_controlnet_canny_gen5_qnn" }
         val pendingAccess = recommendationDownloadAccess(controlNet, "SM8850", deviceIsSnapdragon = true)
 
         assertTrue(verifiedAccess.canDownload)
-        assertTrue(!verifiedAccess.experimental)
+        assertTrue(verifiedAccess.experimental)
         assertTrue(pendingAccess.canDownload)
         assertTrue(pendingAccess.experimental)
     }
 
     @Test
-    fun sdxlPackageIsShownAsExperimentalDownload() {
-        val sdxl = recommendations.first { it.id == "cyberrealisticxl_qnn228" }
-        val access = recommendationDownloadAccess(sdxl, "SM8750", deviceIsSnapdragon = true)
-
-        assertTrue(access.canDownload)
-        assertEquals("实验下载", recommendationDownloadCtaLabel(sdxl, access.canDownload, access.experimental))
-        assertEquals(
-            "工程状态：已切换完整 1024×1024 包；安装后执行 UNet/VAE 双图 native smoke",
-            recommendationVerificationLine(sdxl, false)
+    fun splitSdxlCardsStayOpenAndDescribeTheUnverifiedProductChainAccurately() {
+        val expectedCopy =
+            "工程状态：已接真实 VAE encoder + 隔离 encoder→UNet→VAE 的 IMG2IMG、Inpaint、UltraFix 与 Textual Inversion 产品链；尚需代表 ARM64 设备的生产 UI/API 真机验证"
+        val ids = listOf(
+            "sdxl_base_qnn228",
+            "realismsdxl_dmd2_alt_qnn228",
+            "animagine_xl_v4_qnn228",
+            "cyberrealisticxl_qnn228"
         )
+
+        ids.forEach { id ->
+            val model = recommendations.first { it.id == id }
+            listOf(
+                Triple("SM8750", true, "matched Snapdragon"),
+                Triple("MT6989", false, "unmatched chipset"),
+                Triple("", false, "unknown chipset")
+            ).forEach { (chipset, isSnapdragon, deviceDescription) ->
+                val access = recommendationDownloadAccess(model, chipset, isSnapdragon)
+                assertTrue("$id must stay downloadable on $deviceDescription", access.canDownload)
+                assertEquals(
+                    "实验下载",
+                    recommendationDownloadCtaLabel(model, access.canDownload, access.experimental)
+                )
+            }
+            assertEquals(expectedCopy, recommendationVerificationLine(model, qairtVerified = false))
+        }
     }
 
     @Test
@@ -124,9 +140,24 @@ class RecommendationCatalogTest {
             recommendationDownloadCtaLabel(realisticVision, access.canDownload, access.experimental)
         )
         assertEquals(
-            "验证状态：默认 8-step、CFG 2.0；产品 worker 三次冷启动和三次复用已通过",
+            "工程状态：已接真实 VAE encoder→共享 UNet/VAE 的 IMG2IMG、Inpaint、UltraFix、Textual Inversion 与 VAE 预览产品链；历史文生图证据不代表这些链路已验收，尚需代表性 ARM64 生产 UI/API 真机验证",
             recommendationVerificationLine(realisticVision, qairtVerified = false)
         )
+    }
+
+    @Test
+    fun sharedSd15CardsDescribeProductWiringWithoutClaimingProductionValidation() {
+        val expectedCopy =
+            "工程状态：已接真实 VAE encoder→共享 UNet/VAE 的 IMG2IMG、Inpaint、UltraFix、Textual Inversion 与 VAE 预览产品链；历史文生图证据不代表这些链路已验收，尚需代表性 ARM64 生产 UI/API 真机验证"
+        listOf(
+            "cyberrealistic_sd15_qnn228",
+            "realisticvisionhyper_sd15_qnn228",
+            "dreamshaper_sd15_qnn228",
+            "meinamix_sd15_qnn228"
+        ).forEach { id ->
+            val model = recommendations.first { it.id == id }
+            assertEquals(expectedCopy, recommendationVerificationLine(model, qairtVerified = false))
+        }
     }
 
     @Test

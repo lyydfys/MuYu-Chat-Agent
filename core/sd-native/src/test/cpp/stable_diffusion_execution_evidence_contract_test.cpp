@@ -57,12 +57,15 @@ int main(int argc, char** argv) {
 
     // Evidence is owned by the native context and copied only after generation.
     require_contains(public_header, "sd_image_execution_evidence_t");
-    require_contains(public_header, "SD_IMAGE_EXECUTION_EVIDENCE_VERSION = 4");
-    require_contains(public_header, "sizeof(sd_image_execution_evidence_t) == 352u");
+    require_contains(public_header, "SD_IMAGE_EXECUTION_EVIDENCE_VERSION = 5");
+    require_contains(public_header, "sizeof(sd_image_execution_evidence_t) == 480u");
     require_contains(public_header, "control_net_compute_attempt_count) == 160u");
     require_contains(public_header, "auxiliary_control_net_residual_consumption_count) == 232u");
     require_contains(public_header, "vae_encode_tiling_invocation_count) == 240u");
     require_contains(public_header, "vae_decode_tile_overlap_y) == 348u");
+    require_contains(public_header, "textual_inversion_requested_count) == 352u");
+    require_contains(public_header, "textual_inversion_requested_mask) == 400u");
+    require_contains(public_header, "textual_inversion_failure_code) == 472u");
     require_contains(public_header, "positive_conditioning_token_count");
     require_contains(public_header, "negative_conditioning_token_count");
     require_contains(public_header, "diffusion_model_compute_count");
@@ -79,6 +82,9 @@ int main(int argc, char** argv) {
     require_contains(public_header, "sd_get_last_image_execution_evidence");
     require_contains(public_header, "sd_copy_last_image_conditioning_artifact");
     require_contains(public_header, "sd_set_preview_callback");
+    require_contains(public_header, "textual_inversion_tokenizer_match_mask");
+    require_contains(public_header, "textual_inversion_consumed_mask");
+    require_contains(public_header, "textual_inversion_clip_g_required_mask");
     require_contains(engine, "ImageExecutionEvidenceScope image_execution_scope");
     require_contains(engine, "mark_generation_completed(");
     require_contains(engine, "get_effective_flow_shift(&effective_flow_shift)");
@@ -93,7 +99,16 @@ int main(int argc, char** argv) {
                    "apply_token_weights(std::move(chunk_hidden_states), chunk_weights)",
                    "record_conditioning_execution_sequence(execution_evidence, tokens, weights");
     require_contains(conditioner, "secondary_tokens");
+    require_contains(conditioner, "token_embed_custom_l");
+    require_contains(conditioner, "token_embed_custom_g");
+    require_contains(conditioner, "num_custom_embeddings_2");
+    require_contains(conditioner, "clip_g_tokens_from_clip_l");
+    require_contains(conditioner, "const bool tensors_loaded = model_loader.load_tensors(on_load, 1)");
+    require_contains(conditioner, "TextualInversionExecutionFailureCode::CLIP_PAIR_MISMATCH");
+    require_contains(conditioner, "return consume_custom_token(str, bpe_tokens, execution_evidence)");
     require_contains(engine, "conditioning_artifact");
+    require_contains(engine, "summary.textual_inversion_consumed_mask |=");
+    require_contains(engine, "textual inversion did not reach every required conditioning graph");
 
     // Cache reuse is not a physical model invocation. The physical counter is
     // incremented only after a non-empty compute result is returned.
@@ -125,11 +140,23 @@ int main(int argc, char** argv) {
     // must never substitute request capacity or UI progress for actual work.
     require_contains(bridge, "sd_get_last_image_execution_evidence(ctx, &execution_evidence)");
     require_contains(bridge, "sha256_hex(conditioning_artifact)");
+    require_contains(bridge, "image_prompt_execution_sha256(");
+    require_contains(bridge, "7b2c4dab5874fc03fd088691ce5bea0ff34ded267b495fc5249853dd2110bed7");
+    require_contains(bridge, "77debda388ee058e0ce51f89e799e2ca7828a06142fc77b2b19cff3844b93579");
     require_contains(bridge, "const uint64_t total_conditioning_token_count =");
     require_contains(bridge, "execution_evidence.positive_conditioning_token_count +");
     require_contains(bridge, "resolvedTokenCount");
     require_contains(bridge, "positiveConditioningTokenCount");
     require_contains(bridge, "negativeConditioningTokenCount");
+    require_contains(bridge, "nativePromptExecutionSha256");
+    require_contains(bridge, "nativePromptBindingStage\"] = \"conditioning_consumed\"");
+    require_contains(bridge, "validate_textual_inversion_execution_evidence(");
+    require_contains(bridge, "TEXTUAL_INVERSION_NATIVE_CONDITIONING_INCOMPLETE");
+    require_contains(bridge, "textual_inversion_selection_fingerprint(");
+    require_contains(bridge, "\"bindingStage\", validated_textual_inversions.empty()");
+    require_before(bridge,
+                   "positive conditioning did not publish actual tokenizer evidence",
+                   "const std::string actual_native_prompt_execution_sha256");
     require_contains(bridge, "actual physical diffusion model computes");
     require_contains(bridge, "actual negative diffusion execution");
     require_contains(bridge, "execution_evidence.control_net_compute_attempt_count");
@@ -164,6 +191,8 @@ int main(int argc, char** argv) {
     require_absent(bridge, "const int actual_token_count = contract.token_count");
     require_absent(bridge, "actual_token_count != contract.token_count");
     require_absent(bridge, "observed_denoiser_callbacks");
+    require_absent(bridge, "context_loaded_trigger_observed");
+    require_absent(bridge, "prompt_contains_textual_trigger");
     require_absent(bridge, "native_effective[\"controlStrengthApplied\"] = control_image_wired");
     require_absent(bridge, "{\"tileSize\", gen.vae_tiling_params.tile_size_x}");
     require_absent(bridge, "9b353b1ac542678089ce3d12ee96ddd6ba3b0252ec0675cdf0540e6aa6b1860e");

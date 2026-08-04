@@ -41,6 +41,10 @@ object LocalApiRuntime {
     @Volatile
     var modelsJsonProvider: () -> String = { "[]" }
 
+    /** App-owned textual-inversion inventory. The public accessor below applies a strict allowlist. */
+    @Volatile
+    var imageTextualInversionsJsonProvider: () -> String = { "[]" }
+
     /**
      * Optional per-model persisted profile summaries keyed by model id. The catalog provider is
      * intentionally kept separate: model discovery must not copy the currently loaded model's
@@ -319,6 +323,13 @@ object LocalApiRuntime {
             val raw = source.optJSONObject(index) ?: continue
             val item = raw.publicCopy(stripExecutionState = true)
             val modelId = item.firstString("id", "modelId").orEmpty()
+            if (item.isImageGenerationCatalogEntry()) {
+                // Image packages have their own worker lifecycle and execution evidence. Do not
+                // synthesize chat profile/tuning/loaded fields onto them; retain only the producer's
+                // already-sanitized discovery contract.
+                result.put(item)
+                continue
+            }
             val active = modelId.isNotBlank() && modelId == activeModelId
             val persisted = perModelStates.stateForModel(modelId)
             val activeProfile = if (active) profile else null
@@ -392,6 +403,58 @@ object LocalApiRuntime {
                 item.put("max_context_length", activeContextLength)
             }
             result.put(item)
+        }
+        return JSONObject()
+            .put("object", root?.optString("object").orEmpty().ifBlank { "list" })
+            .put("data", result)
+            .toString()
+    }
+
+    /**
+     * Authenticated image-extension inventory. Only fields needed to select an artifact are
+     * published; app-private paths and compatibility fingerprints are intentionally discarded.
+     */
+    fun imageTextualInversionsJson(): String {
+        val supplied = runCatching { imageTextualInversionsJsonProvider() }.getOrDefault("[]")
+        val root = supplied.toJsonObjectOrNull()
+        val source = root?.optJSONArray("data")
+            ?: runCatching { org.json.JSONArray(supplied) }.getOrNull()
+            ?: org.json.JSONArray()
+        val result = org.json.JSONArray()
+        val uuidPattern = Regex(
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        )
+        val triggerPattern = Regex("^[A-Za-z0-9_:#<>|.-]{1,64}$")
+        val sha256Pattern = Regex("^[0-9a-f]{64}$")
+        val formats = setOf("safetensors", "pytorch", "checkpoint", "binary")
+
+        for (index in 0 until source.length()) {
+            val item = source.optJSONObject(index) ?: continue
+            val id = item.optString("id").trim().lowercase()
+            val name = item.optString("name").trim()
+            val trigger = item.optString("trigger").trim()
+            val format = item.optString("format").trim().lowercase()
+            val sha256 = item.optString("sha256").trim().lowercase()
+            val sizeBytes = item.optLong("sizeBytes", -1L)
+            val importedAt = item.optLong("importedAt", 0L)
+            if (!uuidPattern.matches(id) || name.isEmpty() || name.length > 128 ||
+                !triggerPattern.matches(trigger) || format !in formats ||
+                !sha256Pattern.matches(sha256) || sizeBytes !in 1L..100L * 1024L * 1024L ||
+                importedAt < 0L
+            ) {
+                continue
+            }
+            result.put(
+                JSONObject()
+                    .put("id", id)
+                    .put("object", "textual_inversion")
+                    .put("name", name)
+                    .put("trigger", trigger)
+                    .put("format", format)
+                    .put("sha256", sha256)
+                    .put("size_bytes", sizeBytes)
+                    .put("created", importedAt / 1_000L)
+            )
         }
         return JSONObject()
             .put("object", root?.optString("object").orEmpty().ifBlank { "list" })
@@ -657,6 +720,10 @@ object LocalApiRuntime {
         }
         return null
     }
+
+    private fun JSONObject.isImageGenerationCatalogEntry(): Boolean =
+        optString("type").equals("image_generation", ignoreCase = true) ||
+            optJSONObject("capabilities")?.optBoolean("image_generation", false) == true
 
     private fun JSONObject.firstString(vararg keys: String): String? =
         keys.asSequence()

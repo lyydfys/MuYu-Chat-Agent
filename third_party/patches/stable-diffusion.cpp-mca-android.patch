@@ -1,1868 +1,2267 @@
 diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
-index e15f1aa..a98bc6d 100644
+index a98bc6d..0041f42 100644
 --- a/include/stable-diffusion.h
 +++ b/include/stable-diffusion.h
-@@ -399,17 +399,106 @@ typedef struct {
-
- typedef struct sd_ctx_t sd_ctx_t;
-
-+enum {
-+    SD_IMAGE_EXECUTION_EVIDENCE_VERSION = 4,
+@@ -372,6 +372,109 @@ typedef struct {
+     sd_hires_params_t hires;
+ } sd_img_gen_params_t;
+ 
++/*
++ * Strict Local-Dream-style UltraFix request. This is deliberately separate from
++ * hires/upscale: the implementation performs VAE encode, DDIM inversion, tiled
++ * UNet refinement, and VAE decode with tiling. Preview is not part of this API.
++ *
++ * Source pixels are fitted to the target canvas before VAE encode. UltraFix
++ * never shrinks either source axis; COVER_CENTER preserves aspect ratio, scales
++ * until the target is covered, then removes equal edge bands around the center.
++ */
++enum sd_ultrafix_source_fit_t {
++    SD_ULTRAFIX_SOURCE_FIT_COVER_CENTER = 0,
 +};
 +
 +typedef struct {
++    const sd_lora_t* loras;
++    uint32_t lora_count;
++    const char* prompt;
++    const char* negative_prompt;
++    int clip_skip;
++    sd_image_t init_image;
++    int width;
++    int height;
++    int inversion_steps;
++    int refinement_steps;
++    int tile_size;
++    float tile_overlap;
++    float strength;
++    float cfg_scale;
++    int64_t seed;
++    enum sample_method_t sample_method;
++    enum scheduler_t scheduler;
++    float eta;
++    const char* extra_sample_args;
++    sd_tiling_params_t vae_tiling_params;
++    enum sd_ultrafix_source_fit_t source_fit;
++} sd_ultrafix_params_t;
++
++#define SD_ULTRAFIX_EXECUTION_EVIDENCE_VERSION 5u
++typedef struct {
 +    uint32_t version;
-+    uint32_t positive_conditioning_observed;
-+    uint32_t negative_conditioning_observed;
-+    uint32_t positive_prompt_weighting_capable;
-+    uint32_t negative_prompt_weighting_capable;
-+    uint32_t prompt_weighting_applied;
 +    uint32_t generation_completed;
-+    uint32_t flow_shift_applied;
-+    uint32_t dynamic_flow_shift;
-+    uint32_t distilled_guidance_applied;
-+    float effective_flow_shift;
-+    float effective_distilled_guidance;
-+    uint64_t positive_conditioning_token_count;
-+    uint64_t negative_conditioning_token_count;
-+    uint64_t positive_non_unity_weight_count;
-+    uint64_t negative_non_unity_weight_count;
-+    uint64_t completed_sampling_step_count;
-+    uint64_t sampling_pass_count;
-+    uint64_t diffusion_model_compute_count;
-+    uint64_t positive_diffusion_model_compute_count;
-+    uint64_t negative_diffusion_model_compute_count;
-+    uint64_t auxiliary_diffusion_model_compute_count;
-+    uint64_t conditioning_artifact_byte_count;
-+    uint32_t lora_requested_count;
-+    uint32_t lora_loaded_count;
-+    uint32_t lora_applied_count;
-+    uint64_t lora_applied_tensor_count;
-+    uint64_t control_net_compute_attempt_count;
-+    uint64_t control_net_compute_success_count;
-+    uint64_t positive_control_net_compute_attempt_count;
-+    uint64_t positive_control_net_compute_success_count;
-+    uint64_t negative_control_net_compute_attempt_count;
-+    uint64_t negative_control_net_compute_success_count;
-+    uint64_t control_net_residual_consumption_count;
-+    uint64_t positive_control_net_residual_consumption_count;
-+    uint64_t negative_control_net_residual_consumption_count;
-+    uint64_t auxiliary_control_net_residual_consumption_count;
-+    uint64_t vae_encode_tiling_invocation_count;
-+    uint64_t vae_encode_tiling_success_count;
-+    uint64_t vae_decode_tiling_invocation_count;
-+    uint64_t vae_decode_tiling_success_count;
-+    uint64_t vae_encode_planned_tile_count;
-+    uint64_t vae_decode_planned_tile_count;
-+    uint64_t vae_encode_tile_compute_attempt_count;
-+    uint64_t vae_encode_tile_compute_success_count;
-+    uint64_t vae_decode_tile_compute_attempt_count;
-+    uint64_t vae_decode_tile_compute_success_count;
-+    uint32_t vae_encode_tile_size_x;
-+    uint32_t vae_encode_tile_size_y;
-+    uint32_t vae_decode_tile_size_x;
-+    uint32_t vae_decode_tile_size_y;
-+    float vae_encode_tile_overlap_x;
-+    float vae_encode_tile_overlap_y;
-+    float vae_decode_tile_overlap_x;
-+    float vae_decode_tile_overlap_y;
-+} sd_image_execution_evidence_t;
-+
-+#ifdef __cplusplus
-+static_assert(SD_IMAGE_EXECUTION_EVIDENCE_VERSION == 4u,
-+              "image execution evidence ABI version changed");
-+static_assert(sizeof(sd_image_execution_evidence_t) == 352u,
-+              "image execution evidence ABI size changed");
-+static_assert(offsetof(sd_image_execution_evidence_t, version) == 0u,
-+              "image execution evidence version offset changed");
-+static_assert(offsetof(sd_image_execution_evidence_t, control_net_compute_attempt_count) == 160u,
-+              "image execution evidence ControlNet offset changed");
-+static_assert(offsetof(sd_image_execution_evidence_t, auxiliary_control_net_residual_consumption_count) == 232u,
-+              "image execution evidence ControlNet tail offset changed");
-+static_assert(offsetof(sd_image_execution_evidence_t, vae_encode_tiling_invocation_count) == 240u,
-+              "image execution evidence VAE offset changed");
-+static_assert(offsetof(sd_image_execution_evidence_t, vae_decode_tile_overlap_y) == 348u,
-+              "image execution evidence VAE tail offset changed");
-+#endif
-+
- typedef void (*sd_log_cb_t)(enum sd_log_level_t level, const char* text, void* data);
- typedef void (*sd_progress_cb_t)(int step, int steps, float time, void* data);
-+typedef bool (*sd_cancel_cb_t)(void* data);
- typedef void (*sd_preview_cb_t)(int step, int frame_count, sd_image_t* frames, bool is_noisy, void* data);
-
- SD_API void sd_set_log_callback(sd_log_cb_t sd_log_cb, void* data);
- SD_API void sd_set_progress_callback(sd_progress_cb_t cb, void* data);
-+SD_API void sd_set_cancel_callback(sd_cancel_cb_t cb, void* data);
- SD_API void sd_set_preview_callback(sd_preview_cb_t cb, enum preview_t mode, int interval, bool denoised, bool noisy, void* data);
- SD_API int32_t sd_get_num_physical_cores();
- SD_API const char* sd_get_system_info();
- SD_API bool sd_ctx_supports_image_generation(const sd_ctx_t* sd_ctx);
- SD_API bool sd_ctx_supports_video_generation(const sd_ctx_t* sd_ctx);
-+SD_API bool sd_ctx_uses_flow_shift(const sd_ctx_t* sd_ctx);
-+SD_API bool sd_ctx_uses_dynamic_flow_shift(const sd_ctx_t* sd_ctx);
-+SD_API bool sd_ctx_uses_distilled_guidance(const sd_ctx_t* sd_ctx);
-+SD_API bool sd_get_last_image_execution_evidence(const sd_ctx_t* sd_ctx,
-+                                                  sd_image_execution_evidence_t* evidence);
-+SD_API bool sd_copy_last_image_conditioning_artifact(const sd_ctx_t* sd_ctx,
-+                                                      uint8_t* destination,
-+                                                      size_t destination_size);
-
- SD_API const char* sd_type_name(enum sd_type_t type);
- SD_API enum sd_type_t str_to_sd_type(const char* str);
-@@ -457,6 +546,36 @@ SD_API bool generate_video(sd_ctx_t* sd_ctx,
-
- typedef struct upscaler_ctx_t upscaler_ctx_t;
-
-+#define SD_UPSCALER_EXECUTION_EVIDENCE_VERSION 1u
-+
-+typedef struct sd_upscaler_execution_evidence_t {
-+    uint32_t version;
-+    uint32_t requested_scale;
-+    uint32_t native_scale;
++    uint32_t cancelled;
++    uint32_t preview_published;
 +    uint32_t source_width;
 +    uint32_t source_height;
-+    uint32_t output_width;
-+    uint32_t output_height;
-+    uint32_t tiled;
-+    uint32_t completed;
-+    uint32_t cancelled;
-+    uint64_t compute_invocation_count;
-+    uint64_t compute_success_count;
-+    uint64_t tile_compute_invocation_count;
-+    uint64_t tile_compute_success_count;
-+} sd_upscaler_execution_evidence_t;
++    uint32_t target_width;
++    uint32_t target_height;
++    uint32_t tile_size;
++    float tile_overlap;
++    uint32_t inversion_steps;
++    uint32_t refinement_steps;
++    uint32_t denoise_step_count;
++    uint32_t sample_method;
++    uint32_t scheduler;
++    uint32_t source_fit;
++    uint32_t source_resized_width;
++    uint32_t source_resized_height;
++    uint32_t source_crop_left;
++    uint32_t source_crop_top;
++    uint64_t vae_encode_invocation_count;
++    uint64_t vae_encode_success_count;
++    uint64_t vae_encode_tile_count;
++    uint64_t vae_encode_tile_success_count;
++    uint64_t ddim_inversion_invocation_count;
++    uint64_t ddim_inversion_success_count;
++    uint64_t ddim_inversion_step_count;
++    uint64_t ddim_inversion_tile_count;
++    uint64_t ddim_inversion_tile_success_count;
++    uint64_t tiled_unet_invocation_count;
++    uint64_t tiled_unet_success_count;
++    uint64_t tiled_unet_tile_count;
++    uint64_t tiled_unet_tile_success_count;
++    uint64_t tiled_unet_step_count;
++    uint64_t tiled_vae_decode_invocation_count;
++    uint64_t tiled_vae_decode_success_count;
++    uint64_t tiled_vae_decode_tile_count;
++    uint64_t tiled_vae_decode_tile_success_count;
++    uint64_t quality_step_evaluation_count;
++    uint64_t noise_injection_step_count;
++    uint64_t noise_injection_seed;
++    uint64_t noise_injection_checksum;
++    uint64_t structure_guidance_step_count;
++    uint64_t structure_guidance_checksum;
++    uint64_t trajectory_noise_checksum;
++} sd_ultrafix_execution_evidence_t;
 +
 +#ifdef __cplusplus
-+static_assert(sizeof(sd_upscaler_execution_evidence_t) == 72u,
-+              "upscaler execution evidence ABI size changed");
-+static_assert(offsetof(sd_upscaler_execution_evidence_t, version) == 0u,
-+              "upscaler execution evidence version offset changed");
-+static_assert(offsetof(sd_upscaler_execution_evidence_t, compute_invocation_count) == 40u,
-+              "upscaler execution evidence compute offset changed");
-+static_assert(offsetof(sd_upscaler_execution_evidence_t, tile_compute_success_count) == 64u,
-+              "upscaler execution evidence tile offset changed");
++static_assert(SD_ULTRAFIX_EXECUTION_EVIDENCE_VERSION == 5u,
++              "UltraFix execution evidence ABI version changed");
++static_assert(sizeof(sd_ultrafix_execution_evidence_t) == 280u,
++              "UltraFix execution evidence ABI size changed");
++static_assert(offsetof(sd_ultrafix_execution_evidence_t, source_fit) == 60u,
++              "UltraFix source-fit evidence offset changed");
++static_assert(offsetof(sd_ultrafix_execution_evidence_t, vae_encode_invocation_count) == 80u,
++              "UltraFix stage evidence offset changed");
++static_assert(offsetof(sd_ultrafix_execution_evidence_t, quality_step_evaluation_count) == 224u,
++              "UltraFix quality evidence offset changed");
++static_assert(offsetof(sd_ultrafix_execution_evidence_t, noise_injection_seed) == 240u,
++              "UltraFix seed evidence offset changed");
++static_assert(offsetof(sd_ultrafix_execution_evidence_t, trajectory_noise_checksum) == 272u,
++              "UltraFix trajectory evidence offset changed");
 +#endif
 +
- SD_API upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path,
-                                         bool offload_params_to_cpu,
-                                         bool direct,
-@@ -471,6 +590,9 @@ SD_API sd_image_t upscale(upscaler_ctx_t* upscaler_ctx,
-                           uint32_t upscale_factor);
-
- SD_API int get_upscale_factor(upscaler_ctx_t* upscaler_ctx);
-+SD_API bool sd_get_upscaler_execution_evidence(
-+    const upscaler_ctx_t* upscaler_ctx,
-+    sd_upscaler_execution_evidence_t* evidence);
-
- SD_API bool convert(const char* input_path,
-                     const char* vae_path,
+ typedef struct {
+     const sd_lora_t* loras;
+     uint32_t lora_count;
+@@ -400,7 +503,16 @@ typedef struct {
+ typedef struct sd_ctx_t sd_ctx_t;
+ 
+ enum {
+-    SD_IMAGE_EXECUTION_EVIDENCE_VERSION = 4,
++    SD_IMAGE_EXECUTION_EVIDENCE_VERSION = 5,
++};
++
++enum sd_textual_inversion_failure_t {
++    SD_TEXTUAL_INVERSION_FAILURE_NONE = 0,
++    SD_TEXTUAL_INVERSION_FAILURE_FILE_LOAD = 1,
++    SD_TEXTUAL_INVERSION_FAILURE_TENSOR_LOAD = 2,
++    SD_TEXTUAL_INVERSION_FAILURE_TENSOR_SCHEMA = 3,
++    SD_TEXTUAL_INVERSION_FAILURE_CLIP_PAIR_MISMATCH = 4,
++    SD_TEXTUAL_INVERSION_FAILURE_CONDITIONING = 5,
+ };
+ 
+ typedef struct {
+@@ -459,12 +571,33 @@ typedef struct {
+     float vae_encode_tile_overlap_y;
+     float vae_decode_tile_overlap_x;
+     float vae_decode_tile_overlap_y;
++    uint32_t textual_inversion_requested_count;
++    uint32_t textual_inversion_load_attempt_count;
++    uint32_t textual_inversion_loaded_count;
++    uint32_t textual_inversion_tokenizer_match_count;
++    uint32_t textual_inversion_applied_count;
++    uint32_t textual_inversion_clip_l_applied_count;
++    uint32_t textual_inversion_clip_g_applied_count;
++    uint32_t textual_inversion_load_failure_count;
++    uint64_t textual_inversion_applied_vector_count;
++    uint64_t textual_inversion_conditioning_consumption_count;
++    uint64_t textual_inversion_requested_mask;
++    uint64_t textual_inversion_load_attempt_mask;
++    uint64_t textual_inversion_loaded_mask;
++    uint64_t textual_inversion_tokenizer_match_mask;
++    uint64_t textual_inversion_applied_mask;
++    uint64_t textual_inversion_consumed_mask;
++    uint64_t textual_inversion_clip_l_mask;
++    uint64_t textual_inversion_clip_g_mask;
++    uint64_t textual_inversion_clip_g_required_mask;
++    uint32_t textual_inversion_failure_code;
++    uint32_t textual_inversion_reserved;
+ } sd_image_execution_evidence_t;
+ 
+ #ifdef __cplusplus
+-static_assert(SD_IMAGE_EXECUTION_EVIDENCE_VERSION == 4u,
++static_assert(SD_IMAGE_EXECUTION_EVIDENCE_VERSION == 5u,
+               "image execution evidence ABI version changed");
+-static_assert(sizeof(sd_image_execution_evidence_t) == 352u,
++static_assert(sizeof(sd_image_execution_evidence_t) == 480u,
+               "image execution evidence ABI size changed");
+ static_assert(offsetof(sd_image_execution_evidence_t, version) == 0u,
+               "image execution evidence version offset changed");
+@@ -476,6 +609,12 @@ static_assert(offsetof(sd_image_execution_evidence_t, vae_encode_tiling_invocati
+               "image execution evidence VAE offset changed");
+ static_assert(offsetof(sd_image_execution_evidence_t, vae_decode_tile_overlap_y) == 348u,
+               "image execution evidence VAE tail offset changed");
++static_assert(offsetof(sd_image_execution_evidence_t, textual_inversion_requested_count) == 352u,
++              "image execution evidence textual-inversion offset changed");
++static_assert(offsetof(sd_image_execution_evidence_t, textual_inversion_requested_mask) == 400u,
++              "image execution evidence textual-inversion mask offset changed");
++static_assert(offsetof(sd_image_execution_evidence_t, textual_inversion_failure_code) == 472u,
++              "image execution evidence textual-inversion tail offset changed");
+ #endif
+ 
+ typedef void (*sd_log_cb_t)(enum sd_log_level_t level, const char* text, void* data);
+@@ -494,6 +633,7 @@ SD_API bool sd_ctx_supports_video_generation(const sd_ctx_t* sd_ctx);
+ SD_API bool sd_ctx_uses_flow_shift(const sd_ctx_t* sd_ctx);
+ SD_API bool sd_ctx_uses_dynamic_flow_shift(const sd_ctx_t* sd_ctx);
+ SD_API bool sd_ctx_uses_distilled_guidance(const sd_ctx_t* sd_ctx);
++SD_API bool sd_ctx_supports_ultrafix(const sd_ctx_t* sd_ctx);
+ SD_API bool sd_get_last_image_execution_evidence(const sd_ctx_t* sd_ctx,
+                                                   sd_image_execution_evidence_t* evidence);
+ SD_API bool sd_copy_last_image_conditioning_artifact(const sd_ctx_t* sd_ctx,
+@@ -537,6 +677,12 @@ SD_API void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params);
+ SD_API char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params);
+ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_gen_params);
+ 
++/* Returns one RGB output image; callers must verify the stage-specific evidence. */
++SD_API sd_image_t* sd_generate_ultrafix(
++        sd_ctx_t* sd_ctx,
++        const sd_ultrafix_params_t* params,
++        sd_ultrafix_execution_evidence_t* evidence);
++
+ SD_API void sd_vid_gen_params_init(sd_vid_gen_params_t* sd_vid_gen_params);
+ SD_API bool generate_video(sd_ctx_t* sd_ctx,
+                            const sd_vid_gen_params_t* sd_vid_gen_params,
 diff --git a/src/conditioner.hpp b/src/conditioner.hpp
-index bb4e1c2..37e33d7 100644
+index 37e33d7..986ad55 100644
 --- a/src/conditioner.hpp
 +++ b/src/conditioner.hpp
-@@ -1,7 +1,9 @@
- #ifndef __CONDITIONER_HPP__
+@@ -2,15 +2,20 @@
  #define __CONDITIONER_HPP__
-
-+#include <algorithm>
- #include <cmath>
-+#include <cstdint>
- #include <limits>
- #include <optional>
-
-@@ -62,6 +64,81 @@ struct SDCondition {
-     }
- };
-
-+struct ConditioningExecutionSequenceEvidence {
-+    std::vector<int32_t> token_ids;
-+    std::vector<float> token_weights;
-+    bool weights_applied = false;
-+    bool counts_toward_token_totals = true;
-+};
-+
-+struct ConditioningExecutionEvidence {
-+    std::vector<ConditioningExecutionSequenceEvidence> sequences;
-+
-+    bool observed() const {
-+        return !sequences.empty();
-+    }
-+
-+    bool prompt_weighting_capable() const {
-+        return observed() &&
-+               std::all_of(sequences.begin(),
-+                           sequences.end(),
-+                           [](const ConditioningExecutionSequenceEvidence& sequence) {
-+                               return sequence.weights_applied;
-+                           });
-+    }
-+};
-+
-+static inline void record_conditioning_execution_sequence(
-+    ConditioningExecutionEvidence* evidence,
-+    const std::vector<int>& tokens,
-+    const std::vector<float>& weights,
-+    bool weights_applied,
-+    bool counts_toward_token_totals = true) {
-+    if (evidence == nullptr || tokens.empty() || tokens.size() != weights.size()) {
-+        return;
-+    }
-+    ConditioningExecutionSequenceEvidence sequence;
-+    sequence.token_ids.assign(tokens.begin(), tokens.end());
-+    sequence.token_weights = weights;
-+    sequence.weights_applied = weights_applied;
-+    sequence.counts_toward_token_totals = counts_toward_token_totals;
-+    evidence->sequences.push_back(std::move(sequence));
-+}
-+
-+static inline void record_conditioning_execution_sequences(
-+    ConditioningExecutionEvidence* evidence,
-+    const std::vector<std::pair<std::vector<int>, std::vector<float>>>& sequences,
-+    bool weights_applied) {
-+    size_t counted_sequence = sequences.size();
-+    bool counted_sequence_has_non_unity_weights = false;
-+    for (size_t index = 0; index < sequences.size(); ++index) {
-+        const auto& tokens = sequences[index].first;
-+        const auto& weights = sequences[index].second;
-+        if (tokens.empty() || tokens.size() != weights.size()) {
-+            continue;
-+        }
-+        const bool has_non_unity_weights = std::any_of(
-+            weights.begin(),
-+            weights.end(),
-+            [](float weight) { return weight != 1.0f; });
-+        if (counted_sequence == sequences.size() ||
-+            (has_non_unity_weights && !counted_sequence_has_non_unity_weights) ||
-+            (has_non_unity_weights == counted_sequence_has_non_unity_weights &&
-+             tokens.size() > sequences[counted_sequence].first.size())) {
-+            counted_sequence = index;
-+            counted_sequence_has_non_unity_weights = has_non_unity_weights;
-+        }
-+    }
-+    for (size_t index = 0; index < sequences.size(); ++index) {
-+        const auto& sequence = sequences[index];
-+        record_conditioning_execution_sequence(evidence,
-+                                               sequence.first,
-+                                               sequence.second,
-+                                               weights_applied,
-+                                               index == counted_sequence);
-+    }
-+}
-+
- static inline sd::Tensor<float> apply_token_weights(sd::Tensor<float> hidden_states,
-                                                     const std::vector<float>& weights) {
-     if (hidden_states.empty()) {
-@@ -105,6 +182,7 @@ struct ConditionerParams {
-     bool zero_out_masked                             = false;
-     int num_input_imgs                               = 0;        // for photomaker
-     const std::vector<sd::Tensor<float>>* ref_images = nullptr;  // for qwen image edit
-+    ConditioningExecutionEvidence* execution_evidence = nullptr;
- };
-
- struct Conditioner {
-@@ -506,7 +584,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
-                                              int clip_skip,
-                                              int width,
-                                              int height,
--                                             bool zero_out_masked = false) {
-+                                             bool zero_out_masked = false,
-+                                             ConditioningExecutionEvidence* execution_evidence = nullptr) {
-         int64_t t0 = ggml_time_ms();
-         sd::Tensor<float> hidden_states;  // [n_token, hidden_size] or [n_token, hidden_size + hidden_size2]
-         sd::Tensor<float> pooled;
-@@ -620,6 +699,24 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
-         if (!vec.empty()) {
-             result.c_vector = std::move(vec);
-         }
-+        record_conditioning_execution_sequence(execution_evidence, tokens, weights, true, true);
-+        if (sd_version_is_sdxl(version)) {
-+            std::vector<int> secondary_tokens = tokens;
-+            for (size_t offset = 0; offset < secondary_tokens.size(); offset += chunk_len) {
-+                auto chunk_begin = secondary_tokens.begin() + offset;
-+                auto chunk_end = secondary_tokens.begin() +
-+                                 std::min(secondary_tokens.size(), offset + chunk_len);
-+                auto eos = std::find(chunk_begin, chunk_end, tokenizer.EOS_TOKEN_ID);
-+                if (eos != chunk_end) {
-+                    std::fill(std::next(eos), chunk_end, 0);
-+                }
-+            }
-+            record_conditioning_execution_sequence(execution_evidence,
-+                                                   secondary_tokens,
-+                                                   weights,
-+                                                   true,
-+                                                   false);
-+        }
-         return result;
-     }
-
-@@ -651,7 +748,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
-                                                  conditioner_params.clip_skip,
-                                                  conditioner_params.width,
-                                                  conditioner_params.height,
--                                                 conditioner_params.zero_out_masked);
-+                                                 conditioner_params.zero_out_masked,
-+                                                 conditioner_params.execution_evidence);
-         return std::make_tuple(cond, clsm);
-     }
-
-@@ -677,7 +775,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
-                                             conditioner_params.clip_skip,
-                                             conditioner_params.width,
-                                             conditioner_params.height,
--                                            conditioner_params.zero_out_masked);
-+                                            conditioner_params.zero_out_masked,
-+                                            conditioner_params.execution_evidence);
-     }
- };
-
-@@ -944,7 +1043,8 @@ struct SD3CLIPEmbedder : public Conditioner {
-     SDCondition get_learned_condition_common(int n_threads,
-                                              std::vector<std::pair<std::vector<int>, std::vector<float>>> token_and_weights,
-                                              int clip_skip,
--                                             bool zero_out_masked = false) {
-+                                             bool zero_out_masked = false,
-+                                             ConditioningExecutionEvidence* execution_evidence = nullptr) {
-         auto& clip_l_tokens  = token_and_weights[0].first;
-         auto& clip_l_weights = token_and_weights[0].second;
-         auto& clip_g_tokens  = token_and_weights[1].first;
-@@ -1098,6 +1198,7 @@ struct SD3CLIPEmbedder : public Conditioner {
-         SDCondition result;
-         result.c_crossattn = std::move(hidden_states);
-         result.c_vector    = std::move(pooled);
-+        record_conditioning_execution_sequences(execution_evidence, token_and_weights, true);
-         return result;
-     }
-
-@@ -1107,7 +1208,8 @@ struct SD3CLIPEmbedder : public Conditioner {
-         return get_learned_condition_common(n_threads,
-                                             tokens_and_weights,
-                                             conditioner_params.clip_skip,
--                                            conditioner_params.zero_out_masked);
-+                                            conditioner_params.zero_out_masked,
-+                                            conditioner_params.execution_evidence);
-     }
- };
-
-@@ -1279,7 +1381,8 @@ struct FluxCLIPEmbedder : public Conditioner {
-     SDCondition get_learned_condition_common(int n_threads,
-                                              std::vector<std::pair<std::vector<int>, std::vector<float>>> token_and_weights,
-                                              int clip_skip,
--                                             bool zero_out_masked = false) {
-+                                             bool zero_out_masked = false,
-+                                             ConditioningExecutionEvidence* execution_evidence = nullptr) {
-         auto& clip_l_tokens  = token_and_weights[0].first;
-         auto& clip_l_weights = token_and_weights[0].second;
-         auto& t5_tokens      = token_and_weights[1].first;
-@@ -1356,6 +1459,7 @@ struct FluxCLIPEmbedder : public Conditioner {
-         SDCondition result;
-         result.c_crossattn = std::move(hidden_states);
-         result.c_vector    = std::move(pooled);
-+        record_conditioning_execution_sequences(execution_evidence, token_and_weights, true);
-         return result;
-     }
-
-@@ -1365,7 +1469,8 @@ struct FluxCLIPEmbedder : public Conditioner {
-         return get_learned_condition_common(n_threads,
-                                             tokens_and_weights,
-                                             conditioner_params.clip_skip,
--                                            conditioner_params.zero_out_masked);
-+                                            conditioner_params.zero_out_masked,
-+                                            conditioner_params.execution_evidence);
-     }
- };
-
-@@ -1505,7 +1610,8 @@ struct T5CLIPEmbedder : public Conditioner {
-     SDCondition get_learned_condition_common(int n_threads,
-                                              std::tuple<std::vector<int>, std::vector<float>, std::vector<float>> token_and_weights,
-                                              int clip_skip,
--                                             bool zero_out_masked = false) {
-+                                             bool zero_out_masked = false,
-+                                             ConditioningExecutionEvidence* execution_evidence = nullptr) {
-         if (!t5) {
-             SDCondition result;
-             result.c_crossattn = sd::Tensor<float>::zeros({4096, 256});
-@@ -1564,6 +1670,10 @@ struct T5CLIPEmbedder : public Conditioner {
-         SDCondition result;
-         result.c_crossattn = std::move(hidden_states);
-         result.c_vector    = std::move(t5_attn_mask);
-+        record_conditioning_execution_sequence(execution_evidence,
-+                                               t5_tokens,
-+                                               t5_weights,
-+                                               true);
-         return result;
-     }
-
-@@ -1573,7 +1683,8 @@ struct T5CLIPEmbedder : public Conditioner {
-         return get_learned_condition_common(n_threads,
-                                             tokens_and_weights,
-                                             conditioner_params.clip_skip,
--                                            conditioner_params.zero_out_masked);
-+                                            conditioner_params.zero_out_masked,
-+                                            conditioner_params.execution_evidence);
-     }
- };
-
-@@ -1695,6 +1806,10 @@ struct AnimaConditioner : public Conditioner {
-         result.c_crossattn  = std::move(hidden_states);
-         result.c_t5_ids     = std::move(t5_ids_tensor);
-         result.c_t5_weights = std::move(t5_weight_tensor);
-+        record_conditioning_execution_sequences(
-+            conditioner_params.execution_evidence,
-+            {{qwen_tokens, qwen_weights}, {t5_tokens, t5_weights}},
-+            true);
-         return result;
-     }
- };
-@@ -1841,7 +1956,8 @@ struct LLMEmbedder : public Conditioner {
-                                     const std::set<int>& out_layers,
-                                     int prompt_template_encode_start_idx,
-                                     bool spell_quotes = false,
--                                    int max_length    = 100000000) {
-+                                    int max_length    = 100000000,
-+                                    ConditioningExecutionEvidence* execution_evidence = nullptr) {
-         auto tokens_weights_mask = tokenize(prompt, prompt_attn_range, min_length, max_length, spell_quotes);
-         auto& tokens             = std::get<0>(tokens_weights_mask);
-         auto& weights            = std::get<1>(tokens_weights_mask);
-@@ -1873,6 +1989,7 @@ struct LLMEmbedder : public Conditioner {
-                                           out_layers);
-         GGML_ASSERT(!hidden_states.empty());
-         hidden_states = apply_token_weights(std::move(hidden_states), weights);
-+        record_conditioning_execution_sequence(execution_evidence, tokens, weights, true);
-         GGML_ASSERT(hidden_states.shape()[1] > prompt_template_encode_start_idx);
-
-         int64_t zero_pad_len = 0;
-@@ -2162,7 +2279,8 @@ struct LLMEmbedder : public Conditioner {
-                                                out_layers,
-                                                0,
-                                                false,
--                                               max_length);
-+                                               max_length,
-+                                               conditioner_params.execution_evidence);
-             GGML_ASSERT(!hidden_states.empty());
-
-             if (hidden_states.shape()[1] > pixeldit_max_length) {
-@@ -2193,7 +2311,8 @@ struct LLMEmbedder : public Conditioner {
-                                            out_layers,
-                                            prompt_template_encode_start_idx,
-                                            spell_quotes,
--                                           max_length);
-+                                           max_length,
-+                                           conditioner_params.execution_evidence);
-         std::vector<sd::Tensor<float>> extra_hidden_states_vec;
-         for (int i = 0; i < extra_prompts.size(); i++) {
-             auto extra_hidden_states = encode_prompt(n_threads,
-@@ -2205,7 +2324,8 @@ struct LLMEmbedder : public Conditioner {
-                                                      out_layers,
-                                                      prompt_template_encode_start_idx,
-                                                      spell_quotes,
--                                                     max_length);
-+                                                     max_length,
-+                                                     conditioner_params.execution_evidence);
-             extra_hidden_states_vec.push_back(std::move(extra_hidden_states));
-         }
-
-diff --git a/src/stable-diffusion.cpp b/src/stable-diffusion.cpp
-index 28598eb..5edca08 100644
---- a/src/stable-diffusion.cpp
-+++ b/src/stable-diffusion.cpp
-@@ -1,6 +1,9 @@
+ 
  #include <algorithm>
++#include <cctype>
  #include <cmath>
-+#include <cstdint>
+ #include <cstdint>
 +#include <cstring>
- #include <cstdlib>
-+#include <unordered_set>
-
- #include "ggml_extend.hpp"
- #include "ggml_graph_cut.h"
-@@ -136,10 +139,274 @@ static float get_cache_reuse_threshold(const sd_cache_params_t& params) {
-     return std::max(0.0f, reuse_threshold);
- }
-
-+enum class DiffusionExecutionBranch : uint32_t {
-+    POSITIVE = 1,
-+    NEGATIVE = 2,
-+    AUXILIARY = 3,
+ #include <limits>
++#include <map>
+ #include <optional>
++#include <sstream>
+ 
+ #include "clip.hpp"
+ #include "llm.hpp"
+ #include "t5.hpp"
+ #include "tensor_ggml.hpp"
++#include "util.h"
+ 
+ struct SDCondition {
+     sd::Tensor<float> c_crossattn;
+@@ -73,6 +78,18 @@ struct ConditioningExecutionSequenceEvidence {
+ 
+ struct ConditioningExecutionEvidence {
+     std::vector<ConditioningExecutionSequenceEvidence> sequences;
++    uint64_t textual_inversion_requested_mask = 0;
++    uint64_t textual_inversion_load_attempt_mask = 0;
++    uint64_t textual_inversion_loaded_mask = 0;
++    uint64_t textual_inversion_tokenizer_match_mask = 0;
++    uint64_t textual_inversion_applied_mask = 0;
++    uint64_t textual_inversion_consumed_mask = 0;
++    uint64_t textual_inversion_clip_l_mask = 0;
++    uint64_t textual_inversion_clip_g_mask = 0;
++    uint64_t textual_inversion_clip_g_required_mask = 0;
++    uint64_t textual_inversion_applied_vector_count = 0;
++    uint64_t textual_inversion_conditioning_consumption_count = 0;
++    uint32_t textual_inversion_failure_code = 0;
+ 
+     bool observed() const {
+         return !sequences.empty();
+@@ -86,8 +103,39 @@ struct ConditioningExecutionEvidence {
+                                return sequence.weights_applied;
+                            });
+     }
++
++    bool textual_inversion_failed() const {
++        return textual_inversion_failure_code != 0;
++    }
 +};
 +
-+struct ImageExecutionEvidenceState {
-+    static constexpr uint32_t VERSION = SD_IMAGE_EXECUTION_EVIDENCE_VERSION;
-+
-+    sd_image_execution_evidence_t summary = {};
-+    std::vector<uint8_t> conditioning_artifact;
-+    bool collecting = false;
-+
-+    void append_u32(uint32_t value) {
-+        for (uint32_t shift = 0; shift < 32; shift += 8) {
-+            conditioning_artifact.push_back(static_cast<uint8_t>((value >> shift) & 0xffu));
-+        }
++enum class TextualInversionExecutionFailureCode : uint32_t {
++    NONE = 0,
++    FILE_LOAD = 1,
++    TENSOR_LOAD = 2,
++    TENSOR_SCHEMA = 3,
++    CLIP_PAIR_MISMATCH = 4,
++    CONDITIONING = 5,
+ };
+ 
++static inline uint32_t textual_inversion_mask_count(uint64_t mask) {
++    uint32_t count = 0;
++    while (mask != 0) {
++        mask &= mask - 1;
++        ++count;
 +    }
++    return count;
++}
 +
-+    void append_u64(uint64_t value) {
-+        for (uint32_t shift = 0; shift < 64; shift += 8) {
-+            conditioning_artifact.push_back(static_cast<uint8_t>((value >> shift) & 0xffu));
-+        }
++static inline void record_textual_inversion_failure(
++    ConditioningExecutionEvidence* evidence,
++    TextualInversionExecutionFailureCode failure_code) {
++    if (evidence != nullptr && evidence->textual_inversion_requested_mask != 0 &&
++        evidence->textual_inversion_failure_code == 0) {
++        evidence->textual_inversion_failure_code = static_cast<uint32_t>(failure_code);
 +    }
++}
 +
-+    void reset() {
-+        summary = {};
-+        summary.version = VERSION;
-+        conditioning_artifact.clear();
-+        conditioning_artifact.insert(conditioning_artifact.end(), {'I', 'C', 'E', 'V'});
-+        append_u32(VERSION);
-+        summary.conditioning_artifact_byte_count = conditioning_artifact.size();
-+        collecting = true;
-+    }
+ static inline void record_conditioning_execution_sequence(
+     ConditioningExecutionEvidence* evidence,
+     const std::vector<int>& tokens,
+@@ -218,10 +266,20 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+ 
+     std::string trigger_word = "img";  // should be user settable
+     std::map<std::string, std::string> embedding_map;
++    std::map<std::string, uint32_t> embedding_index_map;
+     int32_t num_custom_embeddings   = 0;
+     int32_t num_custom_embeddings_2 = 0;
+-    std::vector<uint8_t> token_embed_custom;
+-    std::map<std::string, std::pair<int, int>> embedding_pos_map;
++    std::vector<uint8_t> token_embed_custom_l;
++    std::vector<uint8_t> token_embed_custom_g;
 +
-+    void stop() {
-+        collecting = false;
-+    }
-+
-+    void record_conditioning(DiffusionExecutionBranch branch,
-+                             const ConditioningExecutionEvidence& evidence) {
-+        if (!collecting || branch == DiffusionExecutionBranch::AUXILIARY) {
-+            return;
-+        }
-+
-+        const bool negative = branch == DiffusionExecutionBranch::NEGATIVE;
-+        uint32_t* observed = negative
-+                                 ? &summary.negative_conditioning_observed
-+                                 : &summary.positive_conditioning_observed;
-+        uint32_t* weighting_capable = negative
-+                                          ? &summary.negative_prompt_weighting_capable
-+                                          : &summary.positive_prompt_weighting_capable;
-+        uint64_t* token_count = negative
-+                                    ? &summary.negative_conditioning_token_count
-+                                    : &summary.positive_conditioning_token_count;
-+        uint64_t* non_unity_count = negative
-+                                        ? &summary.negative_non_unity_weight_count
-+                                        : &summary.positive_non_unity_weight_count;
-+
-+        *observed = evidence.observed() ? 1u : 0u;
-+        *weighting_capable = evidence.prompt_weighting_capable() ? 1u : 0u;
-+        *token_count = 0;
-+        *non_unity_count = 0;
-+
-+        append_u32(static_cast<uint32_t>(branch));
-+        append_u32(*observed);
-+        append_u64(static_cast<uint64_t>(evidence.sequences.size()));
-+        for (const auto& sequence : evidence.sequences) {
-+            append_u32(sequence.weights_applied ? 1u : 0u);
-+            append_u32(sequence.counts_toward_token_totals ? 1u : 0u);
-+            append_u64(static_cast<uint64_t>(sequence.token_ids.size()));
-+            if (sequence.token_ids.size() != sequence.token_weights.size()) {
-+                *observed = 0u;
++    struct CustomEmbeddingPosition {
++        uint32_t artifact_index = 0;
++        int32_t clip_l_start = 0;
++        int32_t clip_l_end = 0;
++        int32_t clip_g_start = 0;
++        int32_t clip_g_end = 0;
++    };
++    std::map<std::string, CustomEmbeddingPosition> embedding_pos_map;
+ 
+     FrozenCLIPEmbedderWithCustomWords(ggml_backend_t backend,
+                                       ggml_backend_t params_backend,
+@@ -233,6 +291,10 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+         for (const auto& kv : orig_embedding_map) {
+             std::string name = kv.first;
+             std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
++            if (embedding_map.find(name) != embedding_map.end()) {
 +                continue;
 +            }
-+            if (sequence.counts_toward_token_totals) {
-+                *token_count += static_cast<uint64_t>(sequence.token_ids.size());
-+            }
-+            for (size_t index = 0; index < sequence.token_ids.size(); ++index) {
-+                append_u32(static_cast<uint32_t>(sequence.token_ids[index]));
-+                uint32_t weight_bits = 0;
-+                static_assert(sizeof(weight_bits) == sizeof(sequence.token_weights[index]),
-+                              "conditioning weight must be binary32");
-+                std::memcpy(&weight_bits,
-+                            &sequence.token_weights[index],
-+                            sizeof(weight_bits));
-+                append_u32(weight_bits);
-+                if (sequence.counts_toward_token_totals &&
-+                    sequence.weights_applied &&
-+                    sequence.token_weights[index] != 1.0f) {
-+                    ++(*non_unity_count);
-+                }
-+            }
-+        }
-+        summary.prompt_weighting_applied =
-+            summary.positive_non_unity_weight_count > 0 ||
-+                    summary.negative_non_unity_weight_count > 0
-+                ? 1u
-+                : 0u;
-+        summary.conditioning_artifact_byte_count = conditioning_artifact.size();
-+    }
-+
-+    void record_sampling_pass() {
-+        if (collecting) {
-+            ++summary.sampling_pass_count;
-+        }
-+    }
-+
-+    void record_completed_sampling_step() {
-+        if (collecting) {
-+            ++summary.completed_sampling_step_count;
-+        }
-+    }
-+
-+    void record_diffusion_compute(DiffusionExecutionBranch branch) {
-+        if (!collecting) {
-+            return;
-+        }
-+        ++summary.diffusion_model_compute_count;
-+        switch (branch) {
-+            case DiffusionExecutionBranch::POSITIVE:
-+                ++summary.positive_diffusion_model_compute_count;
-+                break;
-+            case DiffusionExecutionBranch::NEGATIVE:
-+                ++summary.negative_diffusion_model_compute_count;
-+                break;
-+            case DiffusionExecutionBranch::AUXILIARY:
-+                ++summary.auxiliary_diffusion_model_compute_count;
-+                break;
-+        }
-+    }
-+
-+    void record_control_net_compute_attempt(DiffusionExecutionBranch branch) {
-+        if (!collecting) {
-+            return;
-+        }
-+        ++summary.control_net_compute_attempt_count;
-+        switch (branch) {
-+            case DiffusionExecutionBranch::POSITIVE:
-+                ++summary.positive_control_net_compute_attempt_count;
-+                break;
-+            case DiffusionExecutionBranch::NEGATIVE:
-+                ++summary.negative_control_net_compute_attempt_count;
-+                break;
-+            case DiffusionExecutionBranch::AUXILIARY:
-+                break;
-+        }
-+    }
-+
-+    void record_control_net_compute_success(DiffusionExecutionBranch branch) {
-+        if (!collecting) {
-+            return;
-+        }
-+        ++summary.control_net_compute_success_count;
-+        switch (branch) {
-+            case DiffusionExecutionBranch::POSITIVE:
-+                ++summary.positive_control_net_compute_success_count;
-+                break;
-+            case DiffusionExecutionBranch::NEGATIVE:
-+                ++summary.negative_control_net_compute_success_count;
-+                break;
-+            case DiffusionExecutionBranch::AUXILIARY:
-+                break;
-+        }
-+    }
-+
-+    void record_control_net_residual_consumption(DiffusionExecutionBranch branch) {
-+        if (!collecting) {
-+            return;
-+        }
-+        ++summary.control_net_residual_consumption_count;
-+        switch (branch) {
-+            case DiffusionExecutionBranch::POSITIVE:
-+                ++summary.positive_control_net_residual_consumption_count;
-+                break;
-+            case DiffusionExecutionBranch::NEGATIVE:
-+                ++summary.negative_control_net_residual_consumption_count;
-+                break;
-+            case DiffusionExecutionBranch::AUXILIARY:
-+                ++summary.auxiliary_control_net_residual_consumption_count;
-+                break;
-+        }
-+    }
-+
-+    void record_lora_requested(uint32_t count) {
-+        if (collecting) {
-+            summary.lora_requested_count = count;
-+            summary.lora_loaded_count = 0u;
-+            summary.lora_applied_count = 0u;
-+            summary.lora_applied_tensor_count = 0u;
-+        }
-+    }
-+
-+    void record_lora_loaded(uint32_t count) {
-+        if (collecting) {
-+            summary.lora_loaded_count = count;
-+        }
-+    }
-+
-+    void record_lora_applied(uint32_t count, uint64_t tensor_count) {
-+        if (collecting) {
-+            summary.lora_applied_count = count;
-+            summary.lora_applied_tensor_count = tensor_count;
-+        }
-+    }
-+
-+    void mark_generation_completed(bool flow_shift_applied,
-+                                   bool dynamic_flow_shift,
-+                                   float effective_flow_shift,
-+                                   bool distilled_guidance_applied,
-+                                   float effective_distilled_guidance) {
-+        if (collecting) {
-+            summary.generation_completed = 1u;
-+            summary.flow_shift_applied = flow_shift_applied ? 1u : 0u;
-+            summary.dynamic_flow_shift = dynamic_flow_shift ? 1u : 0u;
-+            summary.distilled_guidance_applied = distilled_guidance_applied ? 1u : 0u;
-+            summary.effective_flow_shift = flow_shift_applied ? effective_flow_shift : 0.0f;
-+            summary.effective_distilled_guidance = distilled_guidance_applied
-+                                                       ? effective_distilled_guidance
-+                                                       : 0.0f;
-+        }
-+    }
-+};
-+
-+struct ImageExecutionEvidenceScope {
-+    explicit ImageExecutionEvidenceScope(ImageExecutionEvidenceState& evidence)
-+        : evidence(evidence) {
-+        evidence.reset();
-+    }
-+
-+    ~ImageExecutionEvidenceScope() {
-+        evidence.stop();
-+    }
-+
-+    ImageExecutionEvidenceState& evidence;
-+};
-+
-+struct VaeImageExecutionEvidenceScope {
-+    VaeImageExecutionEvidenceScope(const std::shared_ptr<VAE>& first_stage_model,
-+                                   const std::shared_ptr<VAE>& preview_vae,
-+                                   sd_image_execution_evidence_t* evidence)
-+        : first_stage_model(first_stage_model), preview_vae(preview_vae) {
-+        if (this->first_stage_model != nullptr) {
-+            this->first_stage_model->set_image_execution_evidence(evidence);
-+        }
-+        if (this->preview_vae != nullptr) {
-+            this->preview_vae->set_image_execution_evidence(evidence);
-+        }
-+    }
-+
-+    ~VaeImageExecutionEvidenceScope() {
-+        if (first_stage_model != nullptr) {
-+            first_stage_model->set_image_execution_evidence(nullptr);
-+        }
-+        if (preview_vae != nullptr) {
-+            preview_vae->set_image_execution_evidence(nullptr);
-+        }
-+    }
-+
-+    std::shared_ptr<VAE> first_stage_model;
-+    std::shared_ptr<VAE> preview_vae;
-+};
-+
- /*=============================================== StableDiffusionGGML ================================================*/
-
- class StableDiffusionGGML {
- public:
-+    ImageExecutionEvidenceState image_execution_evidence;
-     std::vector<MmapTensorStore> mmap_tensor_store;
-     SDBackendManager backend_manager;
-
-@@ -155,6 +422,7 @@ public:
-     std::shared_ptr<RNG> sampler_rng = nullptr;
-     int n_threads                    = -1;
-     float default_flow_shift         = INFINITY;
-+    bool distilled_guidance_input_enabled = false;
-
-     std::shared_ptr<Conditioner> cond_stage_model;
-     std::shared_ptr<FrozenCLIPVisionEmbedder> clip_vision;  // for svd or wan2.1 i2v
-@@ -170,6 +438,7 @@ public:
-     std::vector<std::shared_ptr<LoraModel>> cond_stage_lora_models;
-     std::vector<std::shared_ptr<LoraModel>> diffusion_lora_models;
-     std::vector<std::shared_ptr<LoraModel>> first_stage_lora_models;
-+    std::unordered_set<std::string> requested_lora_ids;
-     bool apply_lora_immediately = false;
-
-     std::string taesd_path;
-@@ -1141,6 +1410,19 @@ public:
-                 params_memory_location(pmid_params_mem_size, SDBackendModule::PHOTOMAKER));
++            embedding_index_map[name] = static_cast<uint32_t>(embedding_map.size());
+             embedding_map[name] = kv.second;
+             tokenizer.add_special_token(name);
          }
-
-+        distilled_guidance_input_enabled = false;
-+        if (sd_version_is_flux(version) ||
-+            sd_version_is_flux2(version) ||
-+            sd_version_is_longcat(version)) {
-+            for (const auto& [name, tensor_storage] : tensor_storage_map) {
-+                (void)tensor_storage;
-+                if (name.find("guidance_in.in_layer.weight") != std::string::npos) {
-+                    distilled_guidance_input_enabled = true;
+@@ -302,18 +364,61 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+         }
+     }
+ 
+-    bool load_embedding(std::string embd_name, std::string embd_path, std::vector<int32_t>& bpe_tokens) {
++    uint64_t textual_inversion_requested_mask() const {
++        const size_t count = std::min<size_t>(embedding_map.size(), 64);
++        return count == 64 ? std::numeric_limits<uint64_t>::max()
++                           : (count == 0 ? 0 : (uint64_t{1} << count) - 1);
++    }
++
++    void initialize_textual_inversion_evidence(ConditioningExecutionEvidence* evidence) const {
++        if (evidence == nullptr) {
++            return;
++        }
++        const uint64_t requested = textual_inversion_requested_mask();
++        evidence->textual_inversion_requested_mask |= requested;
++        if (text_model2 != nullptr) {
++            evidence->textual_inversion_clip_g_required_mask |= requested;
++        }
++    }
++
++    bool load_embedding(std::string embd_name,
++                        std::string embd_path,
++                        std::vector<int32_t>& bpe_tokens,
++                        ConditioningExecutionEvidence* evidence) {
++        auto index_iter = embedding_index_map.find(embd_name);
++        if (index_iter == embedding_index_map.end() || index_iter->second >= 64u) {
++            record_textual_inversion_failure(
++                evidence,
++                TextualInversionExecutionFailureCode::TENSOR_SCHEMA);
++            return false;
++        }
++        const uint64_t artifact_bit = uint64_t{1} << index_iter->second;
++        if (evidence != nullptr) {
++            evidence->textual_inversion_load_attempt_mask |= artifact_bit;
++        }
++        if (sd_should_cancel()) {
++            return false;
++        }
+         ModelLoader model_loader;
+         if (!model_loader.init_from_file_and_convert_name(embd_path)) {
+             LOG_ERROR("embedding '%s' failed", embd_name.c_str());
++            record_textual_inversion_failure(
++                evidence,
++                TextualInversionExecutionFailureCode::FILE_LOAD);
+             return false;
+         }
+         auto iter = embedding_pos_map.find(embd_name);
+         if (iter != embedding_pos_map.end()) {
+             LOG_DEBUG("embedding already read in: %s", embd_name.c_str());
+-            for (int i = iter->second.first; i < iter->second.second; i++) {
++            for (int i = iter->second.clip_l_start; i < iter->second.clip_l_end; i++) {
+                 bpe_tokens.push_back(text_model->model.vocab_size + i);
+             }
++            if (evidence != nullptr) {
++                evidence->textual_inversion_loaded_mask |= artifact_bit;
++                evidence->textual_inversion_applied_mask |= artifact_bit;
++                evidence->textual_inversion_applied_vector_count +=
++                    static_cast<uint64_t>(iter->second.clip_l_end - iter->second.clip_l_start);
++            }
+             return true;
+         }
+         ggml_init_params params;
+@@ -321,75 +426,158 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+         params.mem_buffer      = nullptr;
+         params.no_alloc        = false;
+         ggml_context* embd_ctx = ggml_init(params);
++        if (embd_ctx == nullptr) {
++            record_textual_inversion_failure(
++                evidence,
++                TextualInversionExecutionFailureCode::TENSOR_LOAD);
++            return false;
++        }
+         ggml_tensor* embd      = nullptr;
+         ggml_tensor* embd2     = nullptr;
++        bool schema_failed     = false;
+         auto on_load           = [&](const TensorStorage& tensor_storage, ggml_tensor** dst_tensor) {
++            if (sd_should_cancel()) {
++                return false;
++            }
++            if (tensor_storage.n_dims < 1 || tensor_storage.n_dims > 2 ||
++                tensor_storage.ne[0] <= 0 || tensor_storage.ne[1] <= 0 ||
++                tensor_storage.ne[1] > 256) {
++                schema_failed = true;
++                return false;
++            }
+             if (tensor_storage.ne[0] != text_model->model.hidden_size) {
+                 if (text_model2) {
+                     if (tensor_storage.ne[0] == text_model2->model.hidden_size) {
+-                        embd2       = ggml_new_tensor_2d(embd_ctx, tensor_storage.type, text_model2->model.hidden_size, tensor_storage.n_dims > 1 ? tensor_storage.ne[1] : 1);
++                        if (embd2 != nullptr) {
++                            schema_failed = true;
++                            return false;
++                        }
++                        const ggml_type target_type =
++                            text_model2->model.get_token_embed_weight()->type;
++                        embd2 = ggml_new_tensor_2d(
++                            embd_ctx,
++                            target_type,
++                            text_model2->model.hidden_size,
++                            tensor_storage.n_dims > 1 ? tensor_storage.ne[1] : 1);
+                         *dst_tensor = embd2;
+                     } else {
+                         LOG_DEBUG("embedding wrong hidden size, got %i, expected %i or %i", tensor_storage.ne[0], text_model->model.hidden_size, text_model2->model.hidden_size);
++                        schema_failed = true;
+                         return false;
+                     }
+                 } else {
+                     LOG_DEBUG("embedding wrong hidden size, got %i, expected %i", tensor_storage.ne[0], text_model->model.hidden_size);
++                    schema_failed = true;
+                     return false;
+                 }
+             } else {
+-                embd        = ggml_new_tensor_2d(embd_ctx, tensor_storage.type, text_model->model.hidden_size, tensor_storage.n_dims > 1 ? tensor_storage.ne[1] : 1);
++                if (embd != nullptr) {
++                    schema_failed = true;
++                    return false;
++                }
++                const ggml_type target_type = text_model->model.get_token_embed_weight()->type;
++                embd = ggml_new_tensor_2d(
++                    embd_ctx,
++                    target_type,
++                    text_model->model.hidden_size,
++                    tensor_storage.n_dims > 1 ? tensor_storage.ne[1] : 1);
+                 *dst_tensor = embd;
+             }
+             return true;
+         };
+-        model_loader.load_tensors(on_load, 1);
+-        int pos_start = num_custom_embeddings;
+-        if (embd) {
+-            int64_t hidden_size = text_model->model.hidden_size;
+-            token_embed_custom.resize(token_embed_custom.size() + ggml_nbytes(embd));
+-            memcpy((void*)(token_embed_custom.data() + num_custom_embeddings * hidden_size * ggml_type_size(embd->type)),
+-                   embd->data,
+-                   ggml_nbytes(embd));
+-            for (int i = 0; i < embd->ne[1]; i++) {
+-                bpe_tokens.push_back(text_model->model.vocab_size + num_custom_embeddings);
+-                // LOG_DEBUG("new custom token: %i", text_model.vocab_size + num_custom_embeddings);
+-                num_custom_embeddings++;
+-            }
+-            LOG_DEBUG("embedding '%s' applied, custom embeddings: %i", embd_name.c_str(), num_custom_embeddings);
+-        }
+-        if (embd2) {
+-            int64_t hidden_size = text_model2->model.hidden_size;
+-            token_embed_custom.resize(token_embed_custom.size() + ggml_nbytes(embd2));
+-            memcpy((void*)(token_embed_custom.data() + num_custom_embeddings_2 * hidden_size * ggml_type_size(embd2->type)),
+-                   embd2->data,
+-                   ggml_nbytes(embd2));
+-            for (int i = 0; i < embd2->ne[1]; i++) {
+-                bpe_tokens.push_back(text_model2->model.vocab_size + num_custom_embeddings_2);
+-                // LOG_DEBUG("new custom token: %i", text_model.vocab_size + num_custom_embeddings);
+-                num_custom_embeddings_2++;
+-            }
+-            LOG_DEBUG("embedding '%s' applied, custom embeddings: %i (text model 2)", embd_name.c_str(), num_custom_embeddings_2);
+-        }
+-        int pos_end = num_custom_embeddings;
+-        if (pos_end == pos_start) {
++        const bool tensors_loaded = model_loader.load_tensors(on_load, 1);
++        if (!tensors_loaded || schema_failed) {
++            ggml_free(embd_ctx);
++            record_textual_inversion_failure(
++                evidence,
++                schema_failed ? TextualInversionExecutionFailureCode::TENSOR_SCHEMA
++                              : TextualInversionExecutionFailureCode::TENSOR_LOAD);
++            return false;
++        }
++        if (embd == nullptr) {
++            ggml_free(embd_ctx);
++            record_textual_inversion_failure(
++                evidence,
++                TextualInversionExecutionFailureCode::TENSOR_SCHEMA);
++            return false;
++        }
++        if (text_model2 != nullptr &&
++            (embd2 == nullptr || embd2->ne[1] != embd->ne[1])) {
++            ggml_free(embd_ctx);
++            record_textual_inversion_failure(
++                evidence,
++                TextualInversionExecutionFailureCode::CLIP_PAIR_MISMATCH);
+             return false;
+         }
+-        embedding_pos_map[embd_name] = std::pair{pos_start, pos_end};
++
++        CustomEmbeddingPosition position;
++        position.artifact_index = index_iter->second;
++        position.clip_l_start = num_custom_embeddings;
++        position.clip_g_start = num_custom_embeddings_2;
++
++        const size_t clip_l_offset = token_embed_custom_l.size();
++        token_embed_custom_l.resize(clip_l_offset + ggml_nbytes(embd));
++        std::memcpy(token_embed_custom_l.data() + clip_l_offset, embd->data, ggml_nbytes(embd));
++        for (int i = 0; i < embd->ne[1]; ++i) {
++            bpe_tokens.push_back(text_model->model.vocab_size + num_custom_embeddings);
++            ++num_custom_embeddings;
++        }
++        position.clip_l_end = num_custom_embeddings;
++
++        if (embd2 != nullptr) {
++            const size_t clip_g_offset = token_embed_custom_g.size();
++            token_embed_custom_g.resize(clip_g_offset + ggml_nbytes(embd2));
++            std::memcpy(token_embed_custom_g.data() + clip_g_offset, embd2->data, ggml_nbytes(embd2));
++            num_custom_embeddings_2 += static_cast<int32_t>(embd2->ne[1]);
++        }
++        position.clip_g_end = num_custom_embeddings_2;
++        embedding_pos_map[embd_name] = position;
++        ggml_free(embd_ctx);
++
++        if (evidence != nullptr) {
++            evidence->textual_inversion_loaded_mask |= artifact_bit;
++            evidence->textual_inversion_applied_mask |= artifact_bit;
++            evidence->textual_inversion_applied_vector_count +=
++                static_cast<uint64_t>(position.clip_l_end - position.clip_l_start);
++        }
++        LOG_DEBUG("embedding '%s' applied, CLIP-L vectors: %i, CLIP-G vectors: %i",
++                  embd_name.c_str(),
++                  position.clip_l_end - position.clip_l_start,
++                  position.clip_g_end - position.clip_g_start);
++        return true;
++    }
++
++    bool consume_custom_token(std::string& token,
++                              std::vector<int32_t>& bpe_tokens,
++                              ConditioningExecutionEvidence* evidence) {
++        std::string canonical = token;
++        std::transform(canonical.begin(), canonical.end(), canonical.begin(), [](unsigned char c) {
++            return static_cast<char>(std::tolower(c));
++        });
++        auto iter = embedding_map.find(canonical);
++        if (iter == embedding_map.end()) {
++            return false;
++        }
++        auto index_iter = embedding_index_map.find(canonical);
++        if (index_iter == embedding_index_map.end() || index_iter->second >= 64u) {
++            record_textual_inversion_failure(
++                evidence,
++                TextualInversionExecutionFailureCode::TENSOR_SCHEMA);
++            return true;
++        }
++        if (evidence != nullptr) {
++            evidence->textual_inversion_tokenizer_match_mask |=
++                uint64_t{1} << index_iter->second;
++        }
++        // A matched custom word is always consumed by this callback. On failure it must not
++        // fall back to ordinary BPE tokens; the native evidence turns the request into a failure.
++        load_embedding(canonical, iter->second, bpe_tokens, evidence);
+         return true;
+     }
+ 
+     std::vector<int> convert_token_to_id(std::string text) {
+         auto on_new_token_cb = [&](std::string& str, std::vector<int32_t>& bpe_tokens) -> bool {
+-            auto iter = embedding_map.find(str);
+-            if (iter == embedding_map.end()) {
+-                return false;
+-            }
+-            std::string embedding_path = iter->second;
+-            if (load_embedding(str, embedding_path, bpe_tokens)) {
+-                return true;
+-            }
+-            return false;
++            return consume_custom_token(str, bpe_tokens, nullptr);
+         };
+         std::vector<int> curr_tokens = tokenizer.encode(text, on_new_token_cb);
+         return curr_tokens;
+@@ -402,7 +590,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+     std::tuple<std::vector<int>, std::vector<float>, std::vector<bool>>
+     tokenize_with_trigger_token(std::string text,
+                                 int num_input_imgs,
+-                                int32_t image_token) {
++                                int32_t image_token,
++                                ConditioningExecutionEvidence* execution_evidence = nullptr) {
+         auto parsed_attention = parse_prompt_attention(text);
+ 
+         {
+@@ -416,15 +605,7 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+         }
+ 
+         auto on_new_token_cb = [&](std::string& str, std::vector<int32_t>& bpe_tokens) -> bool {
+-            auto iter = embedding_map.find(str);
+-            if (iter == embedding_map.end()) {
+-                return false;
+-            }
+-            std::string embedding_path = iter->second;
+-            if (load_embedding(str, embedding_path, bpe_tokens)) {
+-                return true;
+-            }
+-            return false;
++            return consume_custom_token(str, bpe_tokens, execution_evidence);
+         };
+ 
+         std::vector<int> tokens;
+@@ -517,7 +698,8 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+     std::pair<std::vector<int>, std::vector<float>> tokenize(std::string text,
+                                                              size_t min_length          = 0,
+                                                              size_t max_length          = 0,
+-                                                             bool allow_overflow_expand = true) {
++                                                             bool allow_overflow_expand = true,
++                                                             ConditioningExecutionEvidence* execution_evidence = nullptr) {
+         auto parsed_attention = parse_prompt_attention(text);
+ 
+         {
+@@ -531,15 +713,7 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+         }
+ 
+         auto on_new_token_cb = [&](std::string& str, std::vector<int32_t>& bpe_tokens) -> bool {
+-            auto iter = embedding_map.find(str);
+-            if (iter == embedding_map.end()) {
+-                return false;
+-            }
+-            std::string embedding_path = iter->second;
+-            if (load_embedding(str, embedding_path, bpe_tokens)) {
+-                return true;
+-            }
+-            return false;
++            return consume_custom_token(str, bpe_tokens, execution_evidence);
+         };
+ 
+         std::vector<int> tokens;
+@@ -578,6 +752,68 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+         return {tokens, weights};
+     }
+ 
++    std::vector<int> clip_g_tokens_from_clip_l(const std::vector<int>& clip_l_tokens) const {
++        std::vector<int> clip_g_tokens = clip_l_tokens;
++        if (text_model2 == nullptr) {
++            return clip_g_tokens;
++        }
++        for (int& token : clip_g_tokens) {
++            for (const auto& entry : embedding_pos_map) {
++                const CustomEmbeddingPosition& position = entry.second;
++                const int clip_l_begin = text_model->model.vocab_size + position.clip_l_start;
++                const int clip_l_end = text_model->model.vocab_size + position.clip_l_end;
++                if (token >= clip_l_begin && token < clip_l_end) {
++                    token = text_model2->model.vocab_size + position.clip_g_start +
++                            (token - clip_l_begin);
 +                    break;
 +                }
 +            }
 +        }
++        return clip_g_tokens;
++    }
 +
-         // init denoiser
-         {
-             prediction_t pred_type = sd_ctx_params->prediction;
-@@ -1493,13 +1775,33 @@ public:
-                 first_stage_model->set_weight_adapter(multi_lora_adapter);
-             }
-         }
-+        std::unordered_set<std::string> loaded_ids;
-+        const auto collect_loaded = [&](const std::vector<std::shared_ptr<LoraModel>>& models) {
-+            for (const auto& model : models) {
-+                if (model && !model->lora_tensors.empty()) loaded_ids.insert(model->lora_id);
++    uint64_t custom_embedding_mask_for_tokens(const std::vector<int>& tokens,
++                                              bool clip_g) const {
++        uint64_t mask = 0;
++        const int vocab_size = clip_g && text_model2 != nullptr
++                                   ? text_model2->model.vocab_size
++                                   : text_model->model.vocab_size;
++        for (const auto& entry : embedding_pos_map) {
++            const CustomEmbeddingPosition& position = entry.second;
++            if (position.artifact_index >= 64u) {
++                continue;
 +            }
-+        };
-+        collect_loaded(cond_stage_lora_models);
-+        collect_loaded(diffusion_lora_models);
-+        collect_loaded(first_stage_lora_models);
-+        image_execution_evidence.record_lora_loaded(static_cast<uint32_t>(loaded_ids.size()));
-     }
-
-     void lora_stat() {
-+        std::unordered_set<std::string> applied_ids;
-+        uint64_t applied_tensor_count = 0u;
-+        const auto collect_applied = [&](const std::shared_ptr<LoraModel>& lora_model) {
-+            if (lora_model && !lora_model->applied_lora_tensors.empty()) {
-+                applied_ids.insert(lora_model->lora_id);
-+                applied_tensor_count +=
-+                    static_cast<uint64_t>(lora_model->applied_lora_tensors.size());
++            const int begin = vocab_size +
++                              (clip_g ? position.clip_g_start : position.clip_l_start);
++            const int end = vocab_size +
++                            (clip_g ? position.clip_g_end : position.clip_l_end);
++            if (begin >= end) {
++                continue;
 +            }
-+        };
-         if (!cond_stage_lora_models.empty()) {
-             LOG_INFO("cond_stage_lora_models:");
-             for (auto& lora_model : cond_stage_lora_models) {
-                 lora_model->stat();
-+                collect_applied(lora_model);
++            if (std::any_of(tokens.begin(), tokens.end(), [&](int token) {
++                    return token >= begin && token < end;
++                })) {
++                mask |= uint64_t{1} << position.artifact_index;
++            }
++        }
++        return mask;
++    }
++
++    void update_textual_inversion_consumption(ConditioningExecutionEvidence* evidence) const {
++        if (evidence == nullptr) {
++            return;
++        }
++        const uint64_t clip_ready =
++            evidence->textual_inversion_clip_l_mask &
++            (~evidence->textual_inversion_clip_g_required_mask |
++             evidence->textual_inversion_clip_g_mask);
++        const uint64_t consumed = clip_ready & evidence->textual_inversion_applied_mask;
++        const uint64_t newly_consumed = consumed & ~evidence->textual_inversion_consumed_mask;
++        evidence->textual_inversion_consumed_mask |= consumed;
++        evidence->textual_inversion_conditioning_consumption_count +=
++            textual_inversion_mask_count(newly_consumed);
++    }
++
+     SDCondition get_learned_condition_common(int n_threads,
+                                              std::vector<int>& tokens,
+                                              std::vector<float>& weights,
+@@ -604,16 +840,22 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+ 
+             sd::Tensor<int32_t> input_ids({static_cast<int64_t>(chunk_tokens.size())}, chunk_tokens);
+             sd::Tensor<int32_t> input_ids2;
++            std::vector<int> chunk_tokens2;
+             size_t max_token_idx = 0;
+             if (sd_version_is_sdxl(version)) {
+-                auto it = std::find(chunk_tokens.begin(), chunk_tokens.end(), tokenizer.EOS_TOKEN_ID);
+-                if (it != chunk_tokens.end()) {
+-                    std::fill(std::next(it), chunk_tokens.end(), 0);
++                chunk_tokens2 = clip_g_tokens_from_clip_l(chunk_tokens);
++                auto it = std::find(chunk_tokens2.begin(), chunk_tokens2.end(), tokenizer.EOS_TOKEN_ID);
++                if (it != chunk_tokens2.end()) {
++                    std::fill(std::next(it), chunk_tokens2.end(), 0);
+                 }
+ 
+-                max_token_idx = std::min<size_t>(std::distance(chunk_tokens.begin(), it), chunk_tokens.size() - 1);
++                max_token_idx = std::min<size_t>(
++                    std::distance(chunk_tokens2.begin(), it),
++                    chunk_tokens2.size() - 1);
+ 
+-                input_ids2 = sd::Tensor<int32_t>({static_cast<int64_t>(chunk_tokens.size())}, chunk_tokens);
++                input_ids2 = sd::Tensor<int32_t>(
++                    {static_cast<int64_t>(chunk_tokens2.size())},
++                    chunk_tokens2);
+ 
+                 // for (int i = 0; i < chunk_tokens.size(); i++) {
+                 //     printf("%d ", chunk_tokens[i]);
+@@ -622,36 +864,66 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+             }
+ 
+             {
++                if (sd_should_cancel()) {
++                    record_textual_inversion_failure(
++                        execution_evidence,
++                        TextualInversionExecutionFailureCode::CONDITIONING);
++                    return {};
++                }
+                 auto chunk_hidden_states = text_model->compute(n_threads,
+                                                                input_ids,
+                                                                num_custom_embeddings,
+-                                                               token_embed_custom.data(),
++                                                               token_embed_custom_l.data(),
+                                                                max_token_idx,
+                                                                false,
+                                                                clip_skip);
+-                GGML_ASSERT(!chunk_hidden_states.empty());
++                if (chunk_hidden_states.empty()) {
++                    record_textual_inversion_failure(
++                        execution_evidence,
++                        TextualInversionExecutionFailureCode::CONDITIONING);
++                    return {};
++                }
++                if (execution_evidence != nullptr) {
++                    execution_evidence->textual_inversion_clip_l_mask |=
++                        custom_embedding_mask_for_tokens(chunk_tokens, false);
++                }
+                 if (sd_version_is_sdxl(version)) {
+                     auto chunk_hidden_states2 = text_model2->compute(n_threads,
+                                                                      input_ids2,
+-                                                                     num_custom_embeddings,
+-                                                                     token_embed_custom.data(),
++                                                                     num_custom_embeddings_2,
++                                                                     token_embed_custom_g.data(),
+                                                                      max_token_idx,
+                                                                      false,
+                                                                      clip_skip);
+-                    GGML_ASSERT(!chunk_hidden_states2.empty());
++                    if (chunk_hidden_states2.empty()) {
++                        record_textual_inversion_failure(
++                            execution_evidence,
++                            TextualInversionExecutionFailureCode::CONDITIONING);
++                        return {};
++                    }
++                    if (execution_evidence != nullptr) {
++                        execution_evidence->textual_inversion_clip_g_mask |=
++                            custom_embedding_mask_for_tokens(chunk_tokens2, true);
++                    }
+                     chunk_hidden_states = sd::ops::concat(chunk_hidden_states, chunk_hidden_states2, 0);
+ 
+                     if (chunk_idx == 0) {
+                         pooled = text_model2->compute(n_threads,
+                                                       input_ids2,
+-                                                      num_custom_embeddings,
+-                                                      token_embed_custom.data(),
++                                                      num_custom_embeddings_2,
++                                                      token_embed_custom_g.data(),
+                                                       max_token_idx,
+                                                       true,
+                                                       clip_skip);
+-                        GGML_ASSERT(!pooled.empty());
++                        if (pooled.empty()) {
++                            record_textual_inversion_failure(
++                                execution_evidence,
++                                TextualInversionExecutionFailureCode::CONDITIONING);
++                            return {};
++                        }
+                     }
+                 }
++                update_textual_inversion_consumption(execution_evidence);
+                 int64_t t1 = ggml_time_ms();
+                 LOG_DEBUG("computing condition graph completed, taking %" PRId64 " ms", t1 - t0);
+ 
+@@ -701,7 +973,7 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+         }
+         record_conditioning_execution_sequence(execution_evidence, tokens, weights, true, true);
+         if (sd_version_is_sdxl(version)) {
+-            std::vector<int> secondary_tokens = tokens;
++            std::vector<int> secondary_tokens = clip_g_tokens_from_clip_l(tokens);
+             for (size_t offset = 0; offset < secondary_tokens.size(); offset += chunk_len) {
+                 auto chunk_begin = secondary_tokens.begin() + offset;
+                 auto chunk_end = secondary_tokens.begin() +
+@@ -723,14 +995,16 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+     std::tuple<SDCondition, std::vector<bool>>
+     get_learned_condition_with_trigger(int n_threads,
+                                        const ConditionerParams& conditioner_params) override {
++        initialize_textual_inversion_evidence(conditioner_params.execution_evidence);
+         auto image_tokens = convert_token_to_id(trigger_word);
+         // if(image_tokens.size() == 1){
+         //     printf(" image token id is: %d \n", image_tokens[0]);
+         // }
+         GGML_ASSERT(image_tokens.size() == 1);
+         auto tokens_and_weights     = tokenize_with_trigger_token(conditioner_params.text,
+-                                                                  conditioner_params.num_input_imgs,
+-                                                                  image_tokens[0]);
++                                                                   conditioner_params.num_input_imgs,
++                                                                   image_tokens[0],
++                                                                   conditioner_params.execution_evidence);
+         std::vector<int>& tokens    = std::get<0>(tokens_and_weights);
+         std::vector<float>& weights = std::get<1>(tokens_and_weights);
+         std::vector<bool>& clsm     = std::get<2>(tokens_and_weights);
+@@ -766,7 +1040,12 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
+ 
+     SDCondition get_learned_condition(int n_threads,
+                                       const ConditionerParams& conditioner_params) override {
+-        auto tokens_and_weights     = tokenize(conditioner_params.text, text_model->model.n_token, text_model->model.n_token, true);
++        initialize_textual_inversion_evidence(conditioner_params.execution_evidence);
++        auto tokens_and_weights = tokenize(conditioner_params.text,
++                                           text_model->model.n_token,
++                                           text_model->model.n_token,
++                                           true,
++                                           conditioner_params.execution_evidence);
+         std::vector<int>& tokens    = tokens_and_weights.first;
+         std::vector<float>& weights = tokens_and_weights.second;
+         return get_learned_condition_common(n_threads,
+diff --git a/src/denoiser.hpp b/src/denoiser.hpp
+index 365b1db..1c4173e 100644
+--- a/src/denoiser.hpp
++++ b/src/denoiser.hpp
+@@ -837,6 +837,7 @@ struct Flux2FlowDenoiser : public FluxFlowDenoiser {
+ };
+ 
+ typedef std::function<sd::guidance::GuiderOutput(const sd::Tensor<float>&, float, int)> denoise_cb_t;
++typedef std::function<bool(sd::Tensor<float>*, int, float)> sample_step_cb_t;
+ 
+ static std::pair<float, float> get_ancestral_step(float sigma_from,
+                                                   float sigma_to,
+@@ -909,7 +910,8 @@ static sd::Tensor<float> sample_euler_ancestral(denoise_cb_t model,
+                                                 const std::vector<float>& sigmas,
+                                                 std::shared_ptr<RNG> rng = nullptr,
+                                                 bool is_flow_denoiser    = false,
+-                                                float eta                = 0.f) {
++                                                float eta                = 0.f,
++                                                sample_step_cb_t after_step = {}) {
+     int steps = static_cast<int>(sigmas.size()) - 1;
+     for (int i = 0; i < steps; i++) {
+         float sigma       = sigmas[i];
+@@ -935,13 +937,17 @@ static sd::Tensor<float> sample_euler_ancestral(denoise_cb_t model,
+                 x += sd::Tensor<float>::randn_like(x, rng) * sigma_up;
              }
          }
-
-@@ -1507,6 +1809,7 @@ public:
-             LOG_INFO("diffusion_lora_models:");
-             for (auto& lora_model : diffusion_lora_models) {
-                 lora_model->stat();
-+                collect_applied(lora_model);
-             }
-         }
-
-@@ -1514,20 +1817,28 @@ public:
-             LOG_INFO("first_stage_lora_models:");
-             for (auto& lora_model : first_stage_lora_models) {
-                 lora_model->stat();
-+                collect_applied(lora_model);
-             }
-         }
-+        image_execution_evidence.record_lora_applied(
-+            static_cast<uint32_t>(applied_ids.size()),
-+            applied_tensor_count);
++        if (after_step && !after_step(&x, i, sigma_to)) {
++            return {};
++        }
      }
-
-     void apply_loras(const sd_lora_t* loras, uint32_t lora_count) {
-         std::unordered_map<std::string, float> lora_f2m;
-+        requested_lora_ids.clear();
-         for (uint32_t i = 0; i < lora_count; i++) {
-             std::string lora_id = SAFE_STR(loras[i].path);
-             if (loras[i].is_high_noise) {
-                 lora_id = "|high_noise|" + lora_id;
-             }
-             lora_f2m[lora_id] = loras[i].multiplier;
-+            requested_lora_ids.insert(lora_id);
-             LOG_DEBUG("lora %s:%.2f", lora_id.c_str(), loras[i].multiplier);
-         }
-+        image_execution_evidence.record_lora_requested(
-+            static_cast<uint32_t>(requested_lora_ids.size()));
-         int64_t t0 = ggml_time_ms();
-         if (apply_lora_immediately) {
-             apply_loras_immediately(lora_f2m);
-@@ -1786,14 +2097,29 @@ public:
-         if (preview_mode == PREVIEW_VAE || preview_mode == PREVIEW_TAE) {
-             sd::Tensor<float> vae_latents;
-             sd::Tensor<float> decoded;
-+            const bool record_preview_vae_execution = false;
-             if (preview_vae) {
-                 preview_vae->set_temporal_tiling_enabled(vae_tiling_params.temporal_tiling);
-                 vae_latents = preview_vae->diffusion_to_vae_latents(_latents);
--                decoded     = preview_vae->decode(n_threads, vae_latents, vae_tiling_params, is_video, circular_x, circular_y, true);
-+                decoded     = preview_vae->decode(n_threads,
-+                                                  vae_latents,
-+                                                  vae_tiling_params,
-+                                                  is_video,
-+                                                  circular_x,
-+                                                  circular_y,
-+                                                  true,
-+                                                  record_preview_vae_execution);
-             } else {
-                 first_stage_model->set_temporal_tiling_enabled(vae_tiling_params.temporal_tiling);
-                 vae_latents = first_stage_model->diffusion_to_vae_latents(_latents);
--                decoded     = first_stage_model->decode(n_threads, vae_latents, vae_tiling_params, is_video, circular_x, circular_y, true);
-+                decoded     = first_stage_model->decode(n_threads,
-+                                                        vae_latents,
-+                                                        vae_tiling_params,
-+                                                        is_video,
-+                                                        circular_x,
-+                                                        circular_y,
-+                                                        true,
-+                                                        record_preview_vae_execution);
-             }
-             if (decoded.empty()) {
-                 LOG_ERROR("preview decode failed at step %d", step);
-@@ -1878,6 +2204,7 @@ public:
+     return x;
+ }
+ 
+ static sd::Tensor<float> sample_euler(denoise_cb_t model,
+                                       sd::Tensor<float> x,
+-                                      const std::vector<float>& sigmas) {
++                                      const std::vector<float>& sigmas,
++                                      sample_step_cb_t after_step = {}) {
+     int steps = static_cast<int>(sigmas.size()) - 1;
+     for (int i = 0; i < steps; i++) {
+         float sigma       = sigmas[i];
+@@ -952,6 +958,9 @@ static sd::Tensor<float> sample_euler(denoise_cb_t model,
+         sd::Tensor<float> denoised = std::move(denoised_opt.pred);
+         sd::Tensor<float> d        = (x - denoised) / sigma;
+         x += d * (sigmas[i + 1] - sigma);
++        if (after_step && !after_step(&x, i, sigmas[i + 1])) {
++            return {};
++        }
      }
-
-     void report_sample_progress(int step, size_t total_steps, int64_t t0) {
-+        image_execution_evidence.record_completed_sampling_step();
+     return x;
+ }
+@@ -1150,7 +1159,8 @@ static sd::Tensor<float> sample_dpmpp_2s_ancestral_flow(denoise_cb_t model,
+ 
+ static sd::Tensor<float> sample_dpmpp_2m(denoise_cb_t model,
+                                          sd::Tensor<float> x,
+-                                         const std::vector<float>& sigmas) {
++                                         const std::vector<float>& sigmas,
++                                         sample_step_cb_t after_step = {}) {
+     sd::Tensor<float> old_denoised = x;
+     auto t_fn                      = [](float sigma) -> float { return -log(sigma); };
+ 
+@@ -1176,6 +1186,9 @@ static sd::Tensor<float> sample_dpmpp_2m(denoise_cb_t model,
+             x                            = a * x - b * denoised_d;
+         }
+         old_denoised = denoised;
++        if (after_step && !after_step(&x, i, sigmas[i + 1])) {
++            return {};
++        }
+     }
+     return x;
+ }
+@@ -1223,7 +1236,8 @@ static sd::Tensor<float> sample_lcm(denoise_cb_t model,
+                                     const std::vector<float>& sigmas,
+                                     std::shared_ptr<RNG> rng,
+                                     bool is_flow_denoiser,
+-                                    const SamplerExtraArgs& extra_sample_args) {
++                                    const SamplerExtraArgs& extra_sample_args,
++                                    sample_step_cb_t after_step = {}) {
+     struct LCMSampleArgs {
+         float noise_clip_std    = 0.0f;
+         float noise_scale_start = 1.0f;
+@@ -1296,6 +1310,9 @@ static sd::Tensor<float> sample_lcm(denoise_cb_t model,
+             float noise_scale = args.noise_scale_start + (args.noise_scale_end - args.noise_scale_start) * t;
+             x += noise * (sigmas[i + 1] * noise_scale);
+         }
++        if (after_step && !after_step(&x, i, sigmas[i + 1])) {
++            return {};
++        }
+     }
+     return x;
+ }
+@@ -1854,13 +1871,15 @@ static sd::Tensor<float> sample_k_diffusion(sample_method_t method,
+                                             std::shared_ptr<RNG> rng,
+                                             float eta,
+                                             bool is_flow_denoiser,
+-                                            const char* extra_sample_args) {
++                                            const char* extra_sample_args,
++                                            sample_step_cb_t after_step = {}) {
+     SamplerExtraArgs extra_args = parse_key_value_args(extra_sample_args, "extra sample arg");
+     switch (method) {
+         case EULER_A_SAMPLE_METHOD:
+-            return sample_euler_ancestral(model, std::move(x), sigmas, rng, is_flow_denoiser, eta);
++            return sample_euler_ancestral(
++                model, std::move(x), sigmas, rng, is_flow_denoiser, eta, after_step);
+         case EULER_SAMPLE_METHOD:
+-            return sample_euler(model, std::move(x), sigmas);
++            return sample_euler(model, std::move(x), sigmas, after_step);
+         case HEUN_SAMPLE_METHOD:
+             return sample_heun(model, std::move(x), sigmas);
+         case DPM2_SAMPLE_METHOD:
+@@ -1871,11 +1890,12 @@ static sd::Tensor<float> sample_k_diffusion(sample_method_t method,
+             else
+                 return sample_dpmpp_2s_ancestral(model, std::move(x), sigmas, rng, eta);
+         case DPMPP2M_SAMPLE_METHOD:
+-            return sample_dpmpp_2m(model, std::move(x), sigmas);
++            return sample_dpmpp_2m(model, std::move(x), sigmas, after_step);
+         case DPMPP2Mv2_SAMPLE_METHOD:
+             return sample_dpmpp_2m_v2(model, std::move(x), sigmas);
+         case LCM_SAMPLE_METHOD:
+-            return sample_lcm(model, std::move(x), sigmas, rng, is_flow_denoiser, extra_args);
++            return sample_lcm(
++                model, std::move(x), sigmas, rng, is_flow_denoiser, extra_args, after_step);
+         case IPNDM_SAMPLE_METHOD:
+             return sample_ipndm(model, std::move(x), sigmas);
+         case IPNDM_V_SAMPLE_METHOD:
+@@ -1888,7 +1908,8 @@ static sd::Tensor<float> sample_k_diffusion(sample_method_t method,
+             return sample_er_sde(model, std::move(x), sigmas, rng, is_flow_denoiser, eta);
+         case DDIM_TRAILING_SAMPLE_METHOD:
+             // DDIM is equivalent to Euler Ancestral with the Simple scheduler
+-            return sample_euler_ancestral(model, std::move(x), sigmas, rng, is_flow_denoiser, eta);
++            return sample_euler_ancestral(
++                model, std::move(x), sigmas, rng, is_flow_denoiser, eta, after_step);
+         case TCD_SAMPLE_METHOD:
+             return sample_tcd(model, std::move(x), sigmas, rng, eta);
+         case EULER_CFG_PP_SAMPLE_METHOD:
+diff --git a/src/stable-diffusion.cpp b/src/stable-diffusion.cpp
+index 5edca08..780dd38 100644
+--- a/src/stable-diffusion.cpp
++++ b/src/stable-diffusion.cpp
+@@ -1,8 +1,10 @@
+ #include <algorithm>
++#include <array>
+ #include <cmath>
+ #include <cstdint>
+ #include <cstring>
+ #include <cstdlib>
++#include <limits>
+ #include <unordered_set>
+ 
+ #include "ggml_extend.hpp"
+@@ -15,6 +17,8 @@
+ #include "stable-diffusion.h"
+ #include "util.h"
+ 
++#include "image_execution_math.hpp"
++
+ #include "anima.hpp"
+ #include "auto_encoder_kl.hpp"
+ #include "conditioner.hpp"
+@@ -145,6 +149,19 @@ enum class DiffusionExecutionBranch : uint32_t {
+     AUXILIARY = 3,
+ };
+ 
++static_assert(
++    static_cast<uint32_t>(TextualInversionExecutionFailureCode::FILE_LOAD) ==
++        SD_TEXTUAL_INVERSION_FAILURE_FILE_LOAD &&
++        static_cast<uint32_t>(TextualInversionExecutionFailureCode::TENSOR_LOAD) ==
++            SD_TEXTUAL_INVERSION_FAILURE_TENSOR_LOAD &&
++        static_cast<uint32_t>(TextualInversionExecutionFailureCode::TENSOR_SCHEMA) ==
++            SD_TEXTUAL_INVERSION_FAILURE_TENSOR_SCHEMA &&
++        static_cast<uint32_t>(TextualInversionExecutionFailureCode::CLIP_PAIR_MISMATCH) ==
++            SD_TEXTUAL_INVERSION_FAILURE_CLIP_PAIR_MISMATCH &&
++        static_cast<uint32_t>(TextualInversionExecutionFailureCode::CONDITIONING) ==
++            SD_TEXTUAL_INVERSION_FAILURE_CONDITIONING,
++    "textual inversion failure ABI drifted");
++
+ struct ImageExecutionEvidenceState {
+     static constexpr uint32_t VERSION = SD_IMAGE_EXECUTION_EVIDENCE_VERSION;
+ 
+@@ -238,6 +255,50 @@ struct ImageExecutionEvidenceState {
+                     summary.negative_non_unity_weight_count > 0
+                 ? 1u
+                 : 0u;
++        summary.textual_inversion_requested_mask |=
++            evidence.textual_inversion_requested_mask;
++        summary.textual_inversion_load_attempt_mask |=
++            evidence.textual_inversion_load_attempt_mask;
++        summary.textual_inversion_loaded_mask |=
++            evidence.textual_inversion_loaded_mask;
++        summary.textual_inversion_tokenizer_match_mask |=
++            evidence.textual_inversion_tokenizer_match_mask;
++        summary.textual_inversion_applied_mask |=
++            evidence.textual_inversion_applied_mask;
++        summary.textual_inversion_consumed_mask |=
++            evidence.textual_inversion_consumed_mask;
++        summary.textual_inversion_clip_l_mask |=
++            evidence.textual_inversion_clip_l_mask;
++        summary.textual_inversion_clip_g_mask |=
++            evidence.textual_inversion_clip_g_mask;
++        summary.textual_inversion_clip_g_required_mask |=
++            evidence.textual_inversion_clip_g_required_mask;
++        summary.textual_inversion_applied_vector_count +=
++            evidence.textual_inversion_applied_vector_count;
++        summary.textual_inversion_conditioning_consumption_count +=
++            evidence.textual_inversion_conditioning_consumption_count;
++        if (summary.textual_inversion_failure_code == SD_TEXTUAL_INVERSION_FAILURE_NONE &&
++            evidence.textual_inversion_failure_code != 0) {
++            summary.textual_inversion_failure_code =
++                evidence.textual_inversion_failure_code;
++        }
++        summary.textual_inversion_requested_count = textual_inversion_mask_count(
++            summary.textual_inversion_requested_mask);
++        summary.textual_inversion_load_attempt_count = textual_inversion_mask_count(
++            summary.textual_inversion_load_attempt_mask);
++        summary.textual_inversion_loaded_count = textual_inversion_mask_count(
++            summary.textual_inversion_loaded_mask);
++        summary.textual_inversion_tokenizer_match_count = textual_inversion_mask_count(
++            summary.textual_inversion_tokenizer_match_mask);
++        summary.textual_inversion_applied_count = textual_inversion_mask_count(
++            summary.textual_inversion_applied_mask);
++        summary.textual_inversion_clip_l_applied_count = textual_inversion_mask_count(
++            summary.textual_inversion_clip_l_mask);
++        summary.textual_inversion_clip_g_applied_count = textual_inversion_mask_count(
++            summary.textual_inversion_clip_g_mask);
++        summary.textual_inversion_load_failure_count = textual_inversion_mask_count(
++            summary.textual_inversion_load_attempt_mask &
++            ~summary.textual_inversion_loaded_mask);
+         summary.conditioning_artifact_byte_count = conditioning_artifact.size();
+     }
+ 
+@@ -2203,12 +2264,32 @@ public:
+                                     sd_get_preview_mode()};
+     }
+ 
+-    void report_sample_progress(int step, size_t total_steps, int64_t t0) {
++    void report_auxiliary_progress(int step, size_t total_steps, int64_t t0) {
++        if (step <= 0 || total_steps == 0) {
++            return;
++        }
++        const int64_t t1 = ggml_time_us();
++        pretty_progress(
++            step,
++            static_cast<int>(total_steps),
++            (t1 - t0) / 1000000.f / step);
++    }
++
++    void report_sample_progress(int step,
++                                size_t total_steps,
++                                int64_t t0,
++                                size_t progress_offset = 0,
++                                size_t progress_total = 0) {
+         image_execution_evidence.record_completed_sampling_step();
          int64_t t1 = ggml_time_us();
          if (step > 0 || step == -(int)total_steps) {
              int showstep = std::abs(step);
-@@ -1885,15 +2212,22 @@ public:
+-            pretty_progress(showstep, (int)total_steps, (t1 - t0) / 1000000.f / showstep);
++            const size_t display_total = progress_total > 0 ? progress_total : total_steps;
++            const size_t display_step = progress_offset + static_cast<size_t>(showstep);
++            pretty_progress(
++                static_cast<int>(display_step),
++                static_cast<int>(display_total),
++                (t1 - t0) / 1000000.f / showstep);
          }
      }
-
--    void compute_sample_controls(const sd::Tensor<float>& control_image,
-+    bool compute_sample_controls(const sd::Tensor<float>& control_image,
-                                  const sd::Tensor<float>& noised_input,
-                                  const sd::Tensor<float>& timesteps_tensor,
-                                  const SDCondition& condition,
-+                                 DiffusionExecutionBranch execution_branch,
-                                  std::vector<sd::Tensor<float>>* controls) {
-         GGML_ASSERT(controls != nullptr);
-         controls->clear();
--        if (control_image.empty() || control_net == nullptr) {
--            return;
-+        if (control_image.empty()) {
-+            return true;
+ 
+@@ -2609,6 +2690,298 @@ public:
+         return x0;
+     }
+ 
++    struct UltraFixPrediction {
++        sd::Tensor<float> raw;
++        sd::Tensor<float> denoised;
++        uint64_t tile_count = 0u;
++        float model_timestep = std::numeric_limits<float>::quiet_NaN();
++    };
++
++    bool supports_ultrafix() const {
++        return first_stage_model != nullptr && cond_stage_model != nullptr &&
++               diffusion_model != nullptr && !vae_decode_only &&
++               sd_version_is_unet(version) &&
++               !sd_version_is_inpaint_or_unet_edit(version) &&
++               !is_using_edm_v_parameterization;
++    }
++
++    std::vector<int> ultrafix_tile_starts(int length,
++                                          int tile,
++                                          float overlap,
++                                          int alignment) const {
++        std::vector<int> starts;
++        if (length <= 0 || tile <= 0 || tile > length || alignment <= 0 ||
++            length % alignment != 0 || tile % alignment != 0) {
++            return starts;
++        }
++        if (length == tile) {
++            starts.push_back(0);
++            return starts;
++        }
++        int stride = static_cast<int>(std::floor(static_cast<float>(tile) * (1.0f - overlap)));
++        stride     = std::max(alignment, (stride / alignment) * alignment);
++        int cursor = 0;
++        while (true) {
++            starts.push_back(cursor);
++            if (cursor + tile >= length) {
++                break;
++            }
++            int next = std::min(cursor + stride, length - tile);
++            next     = (next / alignment) * alignment;
++            if (next <= cursor) {
++                starts.clear();
++                return starts;
++            }
++            cursor = next;
++        }
++        return starts;
++    }
++
++    SDCondition ultrafix_tile_condition(const SDCondition& source,
++                                         int tile_x,
++                                         int tile_y,
++                                         int tile_pixels,
++                                         int full_width,
++                                         int full_height) const {
++        SDCondition result = source;
++        if (!sd_version_is_sdxl(version) || source.c_vector.numel() < 1536) {
++            return result;
++        }
++        const int embedding_dim = 256;
++        const int64_t time_id_elements = 6 * embedding_dim;
++        const int64_t offset = result.c_vector.numel() - time_id_elements;
++        const float scale = 1024.0f /
++                            static_cast<float>(std::max(full_width, full_height));
++        const std::array<std::vector<float>, 3> groups = {
++            std::vector<float>{std::round(static_cast<float>(full_height) * scale),
++                               std::round(static_cast<float>(full_width) * scale)},
++            std::vector<float>{std::round(static_cast<float>(tile_y) * scale),
++                               std::round(static_cast<float>(tile_x) * scale)},
++            std::vector<float>{static_cast<float>(tile_pixels),
++                               static_cast<float>(tile_pixels)}};
++        int64_t write_offset = offset;
++        for (const auto& values : groups) {
++            sd::Tensor<float> embedding;
++            set_timestep_embedding(values, &embedding, embedding_dim);
++            std::copy(embedding.values().begin(),
++                      embedding.values().end(),
++                      result.c_vector.values().begin() + write_offset);
++            write_offset += embedding.numel();
++        }
++        GGML_ASSERT(write_offset == result.c_vector.numel());
++        return result;
++    }
++
++    UltraFixPrediction ultrafix_tiled_prediction(const sd::Tensor<float>& x,
++                                                  float sigma,
++                                                  const SDCondition& cond,
++                                                  const SDCondition& uncond,
++                                                  float cfg_scale,
++                                                  int tile_pixels,
++                                                  float overlap,
++                                                  int full_width,
++                                                  int full_height,
++                                                  bool guidance_free) {
++        UltraFixPrediction result;
++        if (!supports_ultrafix() || x.dim() != 4 || x.empty() ||
++            !std::isfinite(sigma) || sigma < 0.0f) {
++            return result;
++        }
++        const int vae_scale = get_vae_scale_factor();
++        const int tile_latent = tile_pixels / vae_scale;
++        // SDXL UNet tiles only require factor-4 latent origins; SD1/2 require
++        // factor-8.  The full-image latent still follows the model's ordinary
++        // generation alignment, while edge-clamped tile origins use the
++        // narrowest topology-safe grid so custom SDXL aspect ratios remain valid.
++        const int alignment = sd_version_is_sdxl(version) ? 4 : 8;
++        const int latent_width = static_cast<int>(x.shape()[0]);
++        const int latent_height = static_cast<int>(x.shape()[1]);
++        const auto x_starts = ultrafix_tile_starts(
++            latent_width, tile_latent, overlap, alignment);
++        const auto y_starts = ultrafix_tile_starts(
++            latent_height, tile_latent, overlap, alignment);
++        if (x_starts.empty() || y_starts.empty()) {
++            return result;
 +        }
 +
-+        image_execution_evidence.record_control_net_compute_attempt(execution_branch);
-+        if (control_net == nullptr) {
-+            LOG_ERROR("control image was provided without a loaded ControlNet");
-+            return false;
-         }
-
-         auto control_result = control_net->compute(n_threads,
-@@ -1902,12 +2236,14 @@ public:
-                                                    timesteps_tensor,
-                                                    condition.c_crossattn,
-                                                    condition.c_vector);
--        if (!control_result.has_value()) {
-+        if (!control_result.has_value() || control_result->empty()) {
-             LOG_ERROR("controlnet compute failed");
--            return;
-+            return false;
-         }
-
-         *controls = std::move(*control_result);
-+        image_execution_evidence.record_control_net_compute_success(execution_branch);
-+        return true;
-     }
-
-     sd::Tensor<float> sample(const std::shared_ptr<DiffusionModelRunner>& work_diffusion_model,
-@@ -1958,6 +2294,7 @@ public:
-         }
-
-         size_t steps       = sigmas.size() - 1;
-+        image_execution_evidence.record_sampling_pass();
-         bool has_skiplayer = (slg_scale != 0.0f || slg_uncond) && !skip_layers.empty();
-         if (has_skiplayer && !sd_version_is_dit(version)) {
-             has_skiplayer = false;
-@@ -1990,6 +2327,10 @@ public:
-         SamplePreviewContext preview = prepare_sample_preview_context();
-
-         auto denoise = [&](const sd::Tensor<float>& x, float sigma, int step) -> sd::guidance::GuiderOutput {
++        const std::vector<float> scalings = denoiser->get_scalings(sigma);
++        if (scalings.size() != 3u) {
++            return result;
++        }
++        const float c_skip = scalings[0];
++        const float c_out  = scalings[1];
++        const float c_in   = scalings[2];
++        const std::vector<float> timestep_values = prepare_sample_timesteps(sigma, 0);
++        if (timestep_values.empty() || !std::isfinite(timestep_values.front())) {
++            return result;
++        }
++        result.model_timestep = timestep_values.front();
++        sd::Tensor<float> timestep_tensor(
++            {static_cast<int64_t>(timestep_values.size())}, timestep_values);
++        std::vector<sd::Tensor<float>> no_controls;
++
++        auto run_condition = [&](const sd::Tensor<float>& tile,
++                                 const SDCondition& condition,
++                                 DiffusionExecutionBranch branch,
++                                 int tile_x,
++                                 int tile_y) -> sd::Tensor<float> {
++            SDCondition tile_condition = ultrafix_tile_condition(
++                condition,
++                tile_x * vae_scale,
++                tile_y * vae_scale,
++                tile_pixels,
++                full_width,
++                full_height);
++            sd::Tensor<float> noised_input = tile * c_in;
++            DiffusionParams diffusion_params;
++            diffusion_params.x = &noised_input;
++            diffusion_params.timesteps = &timestep_tensor;
++            diffusion_params.context = tile_condition.c_crossattn.empty()
++                                           ? nullptr
++                                           : &tile_condition.c_crossattn;
++            diffusion_params.c_concat = tile_condition.c_concat.empty()
++                                            ? nullptr
++                                            : &tile_condition.c_concat;
++            diffusion_params.y = tile_condition.c_vector.empty()
++                                     ? nullptr
++                                     : &tile_condition.c_vector;
++            diffusion_params.ref_latents = tile_condition.c_ref_images.empty()
++                                               ? nullptr
++                                               : &tile_condition.c_ref_images;
++            diffusion_params.increase_ref_index = false;
++            diffusion_params.extra = UNetDiffusionExtra{-1, &no_controls, 0.0f};
 +            if (sd_should_cancel()) {
-+                LOG_WARN("sampling cancelled before step %d", step);
 +                return {};
 +            }
-             if (step == 1 || step == -1) {
-                 pretty_progress(0, (int)steps, 0);
-             }
-@@ -2053,13 +2394,17 @@ public:
-             step_guidance_input.schedule_size = sigmas.size();
-             bool is_skiplayer_step            = skip_layer_guidance.is_enabled_for_step(step_guidance_input);
-
--            compute_sample_controls(control_image,
--                                    noised_input,
--                                    timesteps_tensor,
--                                    cond,
--                                    &controls);
-+            if (!compute_sample_controls(control_image,
-+                                         noised_input,
-+                                         timesteps_tensor,
-+                                         cond,
-+                                         DiffusionExecutionBranch::POSITIVE,
-+                                         &controls)) {
-+                return {};
++            sd::Tensor<float> output = diffusion_model->compute(n_threads, diffusion_params);
++            if (!output.empty()) {
++                image_execution_evidence.record_diffusion_compute(branch);
 +            }
-
-             auto run_condition = [&](const SDCondition& condition,
-+                                     DiffusionExecutionBranch execution_branch,
-                                      const sd::Tensor<float>* c_concat_override = nullptr,
-                                      const std::vector<int>* local_skip_layers  = nullptr) -> sd::Tensor<float> {
-                 diffusion_params.context     = condition.c_crossattn.empty() ? nullptr : &condition.c_crossattn;
-@@ -2103,7 +2448,24 @@ public:
-                     return std::move(cached_output);
-                 }
-
++            return output;
++        };
++
++        std::vector<float> blend_weights(
++            static_cast<size_t>(latent_width) * static_cast<size_t>(latent_height),
++            0.0f);
++        const auto smootherstep = [](float value) {
++            const float x = std::clamp(value, 0.0f, 1.0f);
++            return x * x * x * (x * (x * 6.0f - 15.0f) + 10.0f);
++        };
++        for (size_t tile_y_index = 0; tile_y_index < y_starts.size(); ++tile_y_index) {
++            const int tile_y = y_starts[tile_y_index];
++            const int top_overlap = tile_y_index > 0
++                ? y_starts[tile_y_index - 1] + tile_latent - tile_y
++                : 0;
++            const int bottom_overlap = tile_y_index + 1 < y_starts.size()
++                ? tile_y + tile_latent - y_starts[tile_y_index + 1]
++                : 0;
++            for (size_t tile_x_index = 0; tile_x_index < x_starts.size(); ++tile_x_index) {
++                const int tile_x = x_starts[tile_x_index];
++                const int left_overlap = tile_x_index > 0
++                    ? x_starts[tile_x_index - 1] + tile_latent - tile_x
++                    : 0;
++                const int right_overlap = tile_x_index + 1 < x_starts.size()
++                    ? tile_x + tile_latent - x_starts[tile_x_index + 1]
++                    : 0;
 +                if (sd_should_cancel()) {
-+                    LOG_WARN("sampling cancelled before diffusion compute at step %d", step);
-+                    return sd::Tensor<float>();
++                    return {};
 +                }
-+                const bool control_residuals_wired =
-+                    sd_version_is_unet(version) && !controls.empty();
-                 auto output_opt = work_diffusion_model->compute(n_threads, diffusion_params);
-+                if (!output_opt.empty()) {
-+                    image_execution_evidence.record_diffusion_compute(execution_branch);
-+                    if (control_residuals_wired) {
-+                        image_execution_evidence.record_control_net_residual_consumption(
-+                            execution_branch);
-+                    }
++                const sd::Tensor<float> tile = sd_tensor_split_2d(
++                    x, tile_latent, tile_latent, tile_x, tile_y);
++                sd::Tensor<float> cond_output = run_condition(
++                    tile, cond, DiffusionExecutionBranch::POSITIVE, tile_x, tile_y);
++                if (cond_output.empty()) {
++                    return {};
 +                }
-+                if (sd_should_cancel()) {
-+                    LOG_WARN("sampling cancelled after diffusion compute at step %d", step);
-+                    return sd::Tensor<float>();
-+                }
-                 if (output_opt.empty()) {
-                     LOG_ERROR("diffusion model compute failed");
-                     return sd::Tensor<float>();
-@@ -2114,13 +2476,14 @@ public:
-             };
-
-             if (start_merge_step == -1 || step <= start_merge_step) {
--                cond_out = run_condition(cond);
-+                cond_out = run_condition(cond, DiffusionExecutionBranch::POSITIVE);
-                 if (cond_out.empty()) {
-                     return {};
-                 }
-             } else {
-                 GGML_ASSERT(!id_cond.empty());
-                 cond_out = run_condition(id_cond,
-+                                         DiffusionExecutionBranch::POSITIVE,
-                                          cond.c_concat.empty() ? nullptr : &cond.c_concat);
-                 if (cond_out.empty()) {
-                     return {};
-@@ -2129,24 +2492,31 @@ public:
-
-             if (!uncond.empty()) {
-                 if (!step_cache.is_step_skipped()) {
--                    compute_sample_controls(control_image,
--                                            noised_input,
--                                            timesteps_tensor,
--                                            uncond,
--                                            &controls);
-+                    if (!compute_sample_controls(control_image,
-+                                                 noised_input,
-+                                                 timesteps_tensor,
-+                                                 uncond,
-+                                                 DiffusionExecutionBranch::NEGATIVE,
-+                                                 &controls)) {
++                sd::Tensor<float> raw = std::move(cond_output);
++                if (!guidance_free && !uncond.empty()) {
++                    sd::Tensor<float> uncond_output = run_condition(
++                        tile, uncond, DiffusionExecutionBranch::NEGATIVE, tile_x, tile_y);
++                    if (uncond_output.empty()) {
 +                        return {};
 +                    }
-                 }
-                 const std::vector<int>* uncond_skip_layers = nullptr;
-                 if (is_skiplayer_step && slg_uncond) {
-                     LOG_DEBUG("Skipping layers at uncond step %d\n", step);
-                     uncond_skip_layers = &skip_layer_guidance.layers();
-                 }
--                uncond_out = run_condition(uncond, nullptr, uncond_skip_layers);
-+                uncond_out = run_condition(uncond,
-+                                           DiffusionExecutionBranch::NEGATIVE,
-+                                           nullptr,
-+                                           uncond_skip_layers);
-                 if (uncond_out.empty()) {
-                     return {};
-                 }
-             }
-             if (!img_cond.empty()) {
-                 img_cond_out = run_condition(img_cond,
-+                                             DiffusionExecutionBranch::AUXILIARY,
-                                              cond.c_concat.empty() ? nullptr : &cond.c_concat);
-                 if (img_cond_out.empty()) {
-                     return {};
-@@ -2169,6 +2539,7 @@ public:
-                 if (!step_cache.is_step_skipped()) {
-                     guidance_input.predict_skip_layer = [&]() -> sd::Tensor<float> {
-                         return run_condition(cond,
-+                                             DiffusionExecutionBranch::AUXILIARY,
-                                              cond.c_concat.empty() ? nullptr : &cond.c_concat,
-                                              &skip_layer_guidance.layers());
-                     };
-@@ -2197,13 +2568,21 @@ public:
-                 preview_image(step, denoised, version, preview.mode, preview.callback, preview.data, false);
-             }
-             report_sample_progress(step, steps, t0);
-+            if (sd_should_cancel()) {
-+                LOG_WARN("sampling cancelled after step %d", step);
++                    raw = uncond_output + (raw - uncond_output) * cfg_scale;
++                }
++                sd::Tensor<float> denoised = raw * c_out + tile * c_skip;
++                if (result.raw.empty()) {
++                    std::vector<int64_t> shape = raw.shape();
++                    shape[0] = latent_width;
++                    shape[1] = latent_height;
++                    result.raw = sd::Tensor<float>::zeros(shape);
++                    result.denoised = sd::Tensor<float>::zeros(std::move(shape));
++                }
++                const int64_t tile_plane =
++                    static_cast<int64_t>(tile_latent) * tile_latent;
++                const int64_t full_plane =
++                    static_cast<int64_t>(latent_width) * latent_height;
++                const int64_t planes = raw.numel() / tile_plane;
++                for (int local_y = 0; local_y < tile_latent; ++local_y) {
++                    float weight_y = 1.0f;
++                    if (top_overlap > 0 && local_y < top_overlap) {
++                        weight_y = std::min(
++                            weight_y,
++                            smootherstep(static_cast<float>(local_y + 1) /
++                                         static_cast<float>(top_overlap + 1)));
++                    }
++                    if (bottom_overlap > 0 &&
++                        local_y >= tile_latent - bottom_overlap) {
++                        weight_y = std::min(
++                            weight_y,
++                            smootherstep(static_cast<float>(tile_latent - local_y) /
++                                         static_cast<float>(bottom_overlap + 1)));
++                    }
++                    for (int local_x = 0; local_x < tile_latent; ++local_x) {
++                        float weight_x = 1.0f;
++                        if (left_overlap > 0 && local_x < left_overlap) {
++                            weight_x = std::min(
++                                weight_x,
++                                smootherstep(static_cast<float>(local_x + 1) /
++                                             static_cast<float>(left_overlap + 1)));
++                        }
++                        if (right_overlap > 0 &&
++                            local_x >= tile_latent - right_overlap) {
++                            weight_x = std::min(
++                                weight_x,
++                                smootherstep(static_cast<float>(tile_latent - local_x) /
++                                             static_cast<float>(right_overlap + 1)));
++                        }
++                        const float weight = weight_x * weight_y;
++                        const int64_t tile_offset =
++                            local_x + static_cast<int64_t>(tile_latent) * local_y;
++                        const int64_t full_offset =
++                            (tile_x + local_x) +
++                            static_cast<int64_t>(latent_width) * (tile_y + local_y);
++                        blend_weights[static_cast<size_t>(full_offset)] += weight;
++                        for (int64_t plane = 0; plane < planes; ++plane) {
++                            result.raw[plane * full_plane + full_offset] +=
++                                raw[plane * tile_plane + tile_offset] * weight;
++                            result.denoised[plane * full_plane + full_offset] +=
++                                denoised[plane * tile_plane + tile_offset] * weight;
++                        }
++                    }
++                }
++                ++result.tile_count;
++            }
++        }
++        if (result.raw.empty()) {
++            return result;
++        }
++        const int64_t full_plane =
++            static_cast<int64_t>(latent_width) * latent_height;
++        const int64_t planes = result.raw.numel() / full_plane;
++        for (int64_t offset = 0; offset < full_plane; ++offset) {
++            const float weight = blend_weights[static_cast<size_t>(offset)];
++            if (!(weight > 0.0f) || !std::isfinite(weight)) {
 +                return {};
 +            }
-             output.pred = denoised;
-             return output;
-         };
-
-         auto x0_opt = sample_k_diffusion(method, denoise, x_t, sigmas, sampler_rng, eta, is_flow_denoiser, extra_sample_args);
-         if (x0_opt.empty()) {
--            LOG_ERROR("Diffusion model sampling failed");
-+            if (sd_should_cancel()) {
-+                LOG_WARN("Diffusion model sampling cancelled");
-+            } else {
-+                LOG_ERROR("Diffusion model sampling failed");
++            for (int64_t plane = 0; plane < planes; ++plane) {
++                result.raw[plane * full_plane + offset] /= weight;
++                result.denoised[plane * full_plane + offset] /= weight;
 +            }
-             if (control_net) {
-                 control_net->free_control_ctx();
-                 control_net->free_compute_buffer();
-@@ -2386,6 +2765,26 @@ public:
-         }
-     }
-
-+    bool get_effective_flow_shift(float* flow_shift) const {
-+        if (flow_shift == nullptr) {
-+            return false;
 +        }
-+        auto flow_denoiser = std::dynamic_pointer_cast<DiscreteFlowDenoiser>(denoiser);
-+        if (!flow_denoiser || !std::isfinite(flow_denoiser->shift)) {
-+            return false;
-+        }
-+        *flow_shift = flow_denoiser->shift;
-+        return true;
++        return result;
 +    }
 +
-+    bool uses_dynamic_flow_shift() const {
-+        return std::dynamic_pointer_cast<Flux2FlowDenoiser>(denoiser) != nullptr;
-+    }
-+
-+    bool uses_distilled_guidance() const {
-+        return distilled_guidance_input_enabled;
-+    }
-+
-     bool is_flow_denoiser() {
-         auto flow_denoiser = std::dynamic_pointer_cast<DiscreteFlowDenoiser>(denoiser);
-         return !!flow_denoiser;
-@@ -3058,6 +3457,54 @@ SD_API bool sd_ctx_supports_video_generation(const sd_ctx_t* sd_ctx) {
-     return sd_version_supports_video_generation(sd_ctx->sd->version);
+     int get_vae_scale_factor() {
+         if (sd_version_is_pid(version)) {
+             return 1;
+@@ -3475,6 +3848,11 @@ SD_API bool sd_ctx_uses_distilled_guidance(const sd_ctx_t* sd_ctx) {
+            sd_ctx->sd->uses_distilled_guidance();
  }
-
-+SD_API bool sd_ctx_uses_flow_shift(const sd_ctx_t* sd_ctx) {
-+    if (sd_ctx == nullptr || sd_ctx->sd == nullptr) {
-+        return false;
-+    }
-+    float flow_shift = 0.0f;
-+    return sd_ctx->sd->get_effective_flow_shift(&flow_shift);
-+}
-+
-+SD_API bool sd_ctx_uses_dynamic_flow_shift(const sd_ctx_t* sd_ctx) {
+ 
++SD_API bool sd_ctx_supports_ultrafix(const sd_ctx_t* sd_ctx) {
 +    return sd_ctx != nullptr && sd_ctx->sd != nullptr &&
-+           sd_ctx->sd->uses_dynamic_flow_shift();
++           sd_ctx->sd->supports_ultrafix();
 +}
 +
-+SD_API bool sd_ctx_uses_distilled_guidance(const sd_ctx_t* sd_ctx) {
-+    return sd_ctx != nullptr && sd_ctx->sd != nullptr &&
-+           sd_ctx->sd->uses_distilled_guidance();
-+}
-+
-+SD_API bool sd_get_last_image_execution_evidence(const sd_ctx_t* sd_ctx,
-+                                                  sd_image_execution_evidence_t* evidence) {
-+    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || evidence == nullptr) {
-+        return false;
+ SD_API bool sd_get_last_image_execution_evidence(const sd_ctx_t* sd_ctx,
+                                                   sd_image_execution_evidence_t* evidence) {
+     if (sd_ctx == nullptr || sd_ctx->sd == nullptr || evidence == nullptr) {
+@@ -4552,6 +4930,10 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
+     sd_ctx->sd->image_execution_evidence.record_conditioning(
+         DiffusionExecutionBranch::POSITIVE,
+         positive_execution_evidence);
++    if (positive_execution_evidence.textual_inversion_failed()) {
++        LOG_ERROR("textual inversion failed while preparing positive conditioning");
++        return std::nullopt;
 +    }
-+    const ImageExecutionEvidenceState& state = sd_ctx->sd->image_execution_evidence;
-+    if (state.collecting || state.summary.version != ImageExecutionEvidenceState::VERSION) {
-+        return false;
-+    }
-+    *evidence = state.summary;
-+    return true;
-+}
-+
-+SD_API bool sd_copy_last_image_conditioning_artifact(const sd_ctx_t* sd_ctx,
-+                                                      uint8_t* destination,
-+                                                      size_t destination_size) {
-+    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || destination == nullptr) {
-+        return false;
-+    }
-+    const ImageExecutionEvidenceState& state = sd_ctx->sd->image_execution_evidence;
-+    if (state.collecting || state.summary.version != ImageExecutionEvidenceState::VERSION ||
-+        destination_size != state.conditioning_artifact.size()) {
-+        return false;
-+    }
-+    std::copy(state.conditioning_artifact.begin(),
-+              state.conditioning_artifact.end(),
-+              destination);
-+    return true;
-+}
-+
- enum sample_method_t sd_get_default_sample_method(const sd_ctx_t* sd_ctx) {
-     if (sd_ctx != nullptr && sd_ctx->sd != nullptr) {
-         if (sd_version_is_pid(sd_ctx->sd->version)) {
-@@ -4098,13 +4545,19 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
-     auto id_cond                     = sd_ctx->sd->get_pmid_conditon(request->pm_params, condition_params);
-     int64_t prepare_start_ms         = ggml_time_ms();
-     condition_params.zero_out_masked = false;
-+    ConditioningExecutionEvidence positive_execution_evidence;
-+    condition_params.execution_evidence = &positive_execution_evidence;
-     auto cond                        = sd_ctx->sd->cond_stage_model->get_learned_condition(sd_ctx->sd->n_threads,
-                                                                                            condition_params);
-+    sd_ctx->sd->image_execution_evidence.record_conditioning(
-+        DiffusionExecutionBranch::POSITIVE,
-+        positive_execution_evidence);
      if (cond.c_concat.empty()) {
          cond.c_concat = latents->concat_latent;  // TODO: optimize
      }
-
-     SDCondition uncond;
-+    ConditioningExecutionEvidence negative_execution_evidence;
-     if (request->use_uncond || request->use_high_noise_uncond) {
-         bool zero_out_masked = false;
-         if (sd_version_is_sdxl(sd_ctx->sd->version) &&
-@@ -4114,12 +4567,17 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
-         }
-         condition_params.text            = request->negative_prompt;
-         condition_params.zero_out_masked = zero_out_masked;
-+        condition_params.execution_evidence = &negative_execution_evidence;
-         uncond                           = sd_ctx->sd->cond_stage_model->get_learned_condition(sd_ctx->sd->n_threads,
-                                                                                                condition_params);
-         if (uncond.c_concat.empty()) {
-             uncond.c_concat = latents->uncond_concat_latent;  // TODO: optimize
-         }
-     }
-+    sd_ctx->sd->image_execution_evidence.record_conditioning(
-+        DiffusionExecutionBranch::NEGATIVE,
-+        negative_execution_evidence);
-+    condition_params.execution_evidence = nullptr;
-
+@@ -4579,6 +4961,30 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
+         negative_execution_evidence);
+     condition_params.execution_evidence = nullptr;
+ 
++    const sd_image_execution_evidence_t& native_evidence =
++        sd_ctx->sd->image_execution_evidence.summary;
++    const uint64_t requested_textual_inversions =
++        native_evidence.textual_inversion_requested_mask;
++    if (native_evidence.textual_inversion_failure_code !=
++            SD_TEXTUAL_INVERSION_FAILURE_NONE ||
++        native_evidence.textual_inversion_tokenizer_match_mask !=
++            requested_textual_inversions ||
++        native_evidence.textual_inversion_load_attempt_mask !=
++            requested_textual_inversions ||
++        native_evidence.textual_inversion_loaded_mask !=
++            requested_textual_inversions ||
++        native_evidence.textual_inversion_applied_mask !=
++            requested_textual_inversions ||
++        native_evidence.textual_inversion_clip_l_mask !=
++            requested_textual_inversions ||
++        native_evidence.textual_inversion_consumed_mask !=
++            requested_textual_inversions ||
++        native_evidence.textual_inversion_clip_g_mask !=
++            native_evidence.textual_inversion_clip_g_required_mask) {
++        LOG_ERROR("textual inversion did not reach every required conditioning graph");
++        return std::nullopt;
++    }
++
      int64_t t1 = ggml_time_ms();
      LOG_INFO("get_learned_condition completed, taking %.2fs", (t1 - prepare_start_ms) * 1.0f / 1000);
-@@ -4364,6 +4822,11 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
-     if (sd_ctx == nullptr || sd_img_gen_params == nullptr) {
-         return nullptr;
-     }
-+    ImageExecutionEvidenceScope image_execution_scope(sd_ctx->sd->image_execution_evidence);
+ 
+@@ -5088,6 +5494,644 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
+     return result;
+ }
+ 
++SD_API sd_image_t* sd_generate_ultrafix(
++    sd_ctx_t* sd_ctx,
++    const sd_ultrafix_params_t* params,
++    sd_ultrafix_execution_evidence_t* evidence) {
++    if (evidence == nullptr) {
++        LOG_ERROR("UltraFix requires a stage-specific evidence destination");
++        return nullptr;
++    }
++    *evidence            = {};
++    evidence->version    = SD_ULTRAFIX_EXECUTION_EVIDENCE_VERSION;
++    evidence->cancelled  = sd_should_cancel() ? 1u : 0u;
++    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || params == nullptr) {
++        LOG_ERROR("UltraFix requires a loaded stable-diffusion context and request");
++        return nullptr;
++    }
++
++    evidence->source_width     = params->init_image.width;
++    evidence->source_height    = params->init_image.height;
++    evidence->target_width     = static_cast<uint32_t>(std::max(params->width, 0));
++    evidence->target_height    = static_cast<uint32_t>(std::max(params->height, 0));
++    evidence->tile_size        = static_cast<uint32_t>(std::max(params->tile_size, 0));
++    evidence->tile_overlap     = params->tile_overlap;
++    evidence->inversion_steps  = static_cast<uint32_t>(std::max(params->inversion_steps, 0));
++    evidence->refinement_steps = static_cast<uint32_t>(std::max(params->refinement_steps, 0));
++    evidence->denoise_step_count = evidence->inversion_steps;
++    evidence->sample_method    = static_cast<uint32_t>(params->sample_method);
++    evidence->scheduler        = static_cast<uint32_t>(params->scheduler);
++    evidence->source_fit       = static_cast<uint32_t>(params->source_fit);
++    evidence->noise_injection_seed = static_cast<uint64_t>(params->seed);
++
++    const auto fail = [&](const char* message) -> sd_image_t* {
++        evidence->cancelled = sd_should_cancel() ? 1u : 0u;
++        LOG_ERROR("UltraFix failed: %s", message);
++        return nullptr;
++    };
++    if (!sd_ctx->sd->supports_ultrafix()) {
++        return fail("the loaded topology does not expose VAE encode, standard UNet, and VAE decode");
++    }
++    if (params->prompt == nullptr || params->prompt[0] == '\0' ||
++        params->init_image.data == nullptr || params->init_image.channel != 3u ||
++        params->init_image.width == 0u || params->init_image.height == 0u ||
++        params->width <= 0 || params->height <= 0) {
++        return fail("UltraFix requires a non-empty three-channel source and target canvas");
++    }
++    const uint64_t target_pixels = static_cast<uint64_t>(params->width) *
++                                   static_cast<uint64_t>(params->height);
++    if (params->width > 8192 || params->height > 8192 ||
++        target_pixels > 64u * 1024u * 1024u) {
++        return fail("the target canvas exceeds the bounded UltraFix image contract");
++    }
++    if (params->init_image.width > static_cast<uint32_t>(params->width) ||
++        params->init_image.height > static_cast<uint32_t>(params->height)) {
++        return fail("UltraFix does not shrink either source image axis");
++    }
++    if (params->source_fit != SD_ULTRAFIX_SOURCE_FIT_COVER_CENTER) {
++        return fail("UltraFix requires the aspect-preserving center-cover source fit");
++    }
++    if (!std::isfinite(params->strength) || params->strength <= 0.0f ||
++        params->strength > 1.0f || params->refinement_steps < 1 ||
++        params->refinement_steps > 100 || params->inversion_steps < 1 ||
++        params->inversion_steps > params->refinement_steps) {
++        return fail("strength or step counts are outside the UltraFix contract");
++    }
++    const int denoise_begin = params->refinement_steps - params->inversion_steps;
++    const double strength_begin =
++        static_cast<double>(params->refinement_steps) *
++        (1.0 - static_cast<double>(params->strength));
++    const double strength_boundary_tolerance = std::max(
++        1.0e-6,
++        static_cast<double>(params->refinement_steps) *
++            static_cast<double>(std::numeric_limits<float>::epsilon()) * 4.0);
++    if (strength_begin + strength_boundary_tolerance < static_cast<double>(denoise_begin) ||
++        strength_begin >= static_cast<double>(denoise_begin + 1) +
++            strength_boundary_tolerance) {
++        return fail("inversion steps do not match the strength-derived denoising tail");
++    }
++    if (params->tile_size < 128 || params->tile_size > 2048 ||
++        params->tile_size > std::min(params->width, params->height) ||
++        params->tile_size % 8 != 0 || !std::isfinite(params->tile_overlap) ||
++        params->tile_overlap < 0.0f || params->tile_overlap > 0.5f) {
++        return fail("tile size or overlap is outside the UltraFix contract");
++    }
++    if (!std::isfinite(params->cfg_scale) || params->cfg_scale < 0.0f ||
++        params->cfg_scale > 30.0f || !std::isfinite(params->eta) ||
++        params->eta < 0.0f) {
++        return fail("guidance or sampler eta is outside the UltraFix contract");
++    }
++    const bool sampler_supported =
++        params->sample_method == EULER_SAMPLE_METHOD ||
++        params->sample_method == EULER_A_SAMPLE_METHOD ||
++        params->sample_method == DPMPP2M_SAMPLE_METHOD ||
++        params->sample_method == DDIM_TRAILING_SAMPLE_METHOD ||
++        params->sample_method == LCM_SAMPLE_METHOD;
++    if (!sampler_supported || params->scheduler < 0 ||
++        params->scheduler >= SCHEDULER_COUNT) {
++        return fail("the requested refinement sampler has no full-image UltraFix implementation");
++    }
++    if (!params->vae_tiling_params.enabled ||
++        params->vae_tiling_params.rel_size_x <= 0.0f ||
++        params->vae_tiling_params.rel_size_y <= 0.0f) {
++        return fail("UltraFix requires explicit VAE encode/decode tiling parameters");
++    }
++    const int vae_scale = sd_ctx->sd->get_vae_scale_factor();
++    const int unet_alignment = sd_version_is_sdxl(sd_ctx->sd->version) ? 4 : 8;
++    if (params->width % (vae_scale * unet_alignment) != 0 ||
++        params->height % (vae_scale * unet_alignment) != 0 ||
++        params->tile_size % (vae_scale * unet_alignment) != 0) {
++        return fail("the target and tile dimensions do not align to the loaded UNet topology");
++    }
++    if (sd_should_cancel()) {
++        evidence->cancelled = 1u;
++        return nullptr;
++    }
++
++    ImageExecutionEvidenceScope image_execution_scope(
++        sd_ctx->sd->image_execution_evidence);
 +    VaeImageExecutionEvidenceScope vae_execution_scope(
 +        sd_ctx->sd->first_stage_model,
 +        sd_ctx->sd->preview_vae,
 +        &sd_ctx->sd->image_execution_evidence.summary);
-
-     int64_t t0                    = ggml_time_ms();
-     sd_ctx->sd->vae_tiling_params = sd_img_gen_params->vae_tiling_params;
-@@ -4382,6 +4845,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
-                                                         sd_img_gen_params,
-                                                         &request,
-                                                         &plan);
++
++    sd_img_gen_params_t generation;
++    sd_img_gen_params_init(&generation);
++    generation.loras                         = params->loras;
++    generation.lora_count                    = params->lora_count;
++    generation.prompt                        = params->prompt;
++    generation.negative_prompt               = params->negative_prompt;
++    generation.clip_skip                     = params->clip_skip;
++    generation.init_image                    = params->init_image;
++    generation.width                         = params->width;
++    generation.height                        = params->height;
++    generation.strength                      = 1.0f;
++    generation.seed                          = params->seed;
++    generation.batch_count                   = 1;
++    generation.vae_tiling_params             = params->vae_tiling_params;
++    generation.sample_params.sample_steps    = params->refinement_steps;
++    generation.sample_params.sample_method   = params->sample_method;
++    generation.sample_params.scheduler       = params->scheduler;
++    generation.sample_params.eta             = params->eta;
++    generation.sample_params.extra_sample_args = params->extra_sample_args;
++    generation.sample_params.guidance.txt_cfg = params->cfg_scale;
++
++    sd_ctx->sd->vae_tiling_params = params->vae_tiling_params;
++    GenerationRequest request(sd_ctx, &generation);
++    if (request.width != params->width || request.height != params->height) {
++        return fail("stable-diffusion.cpp would alter the exact UltraFix target canvas");
++    }
++    sd_ctx->sd->rng->manual_seed(request.seed);
++    sd_ctx->sd->sampler_rng->manual_seed(request.seed);
++    sd_ctx->sd->apply_loras(params->loras, params->lora_count);
++    ImageVaeAxesGuard axes_guard(sd_ctx, &generation, request);
++    SamplePlan plan(sd_ctx, &generation, request);
++    if (plan.sample_method != params->sample_method ||
++        plan.sample_steps != params->refinement_steps ||
++        plan.sigmas.size() != static_cast<size_t>(params->refinement_steps + 1)) {
++        return fail("the resolved sampler schedule differs from the immutable UltraFix request");
++    }
++
++    // Match Local Dream's image decoder: preserve aspect ratio, scale until
++    // the target is covered, then center-crop. Keep this inside the native
++    // request so Local API and MainActivity execute identical pixels.
++    const uint64_t source_width = params->init_image.width;
++    const uint64_t source_height = params->init_image.height;
++    const uint64_t target_width = static_cast<uint64_t>(params->width);
++    const uint64_t target_height = static_cast<uint64_t>(params->height);
++    uint64_t resized_width = target_width;
++    uint64_t resized_height = target_height;
++    if (target_width * source_height >= target_height * source_width) {
++        resized_height = source_height * target_width / source_width;
++    } else {
++        resized_width = source_width * target_height / source_height;
++    }
++    if (resized_width < target_width || resized_height < target_height ||
++        resized_width > 8192u || resized_height > 8192u ||
++        resized_width * resized_height > 64u * 1024u * 1024u) {
++        return fail("the aspect-preserving UltraFix source fit exceeds its bounded canvas");
++    }
++    evidence->source_resized_width = static_cast<uint32_t>(resized_width);
++    evidence->source_resized_height = static_cast<uint32_t>(resized_height);
++    evidence->source_crop_left =
++        static_cast<uint32_t>((resized_width - target_width) / 2u);
++    evidence->source_crop_top =
++        static_cast<uint32_t>((resized_height - target_height) / 2u);
++
 +    if (sd_should_cancel()) {
-+        LOG_WARN("image generation cancelled after latent preparation");
++        evidence->cancelled = 1u;
 +        return nullptr;
 +    }
-     if (!latents_opt.has_value()) {
-         return nullptr;
-     }
-@@ -4392,6 +4859,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
-                                                       &request,
-                                                       &plan,
-                                                       &latents);
-+    if (sd_should_cancel()) {
-+        LOG_WARN("image generation cancelled after embedding preparation");
++    sd::Tensor<float> source_tensor = sd_image_to_tensor(params->init_image);
++    if (source_tensor.empty() || sd_should_cancel()) {
++        evidence->cancelled = sd_should_cancel() ? 1u : 0u;
 +        return nullptr;
 +    }
-     if (!embeds_opt.has_value()) {
-         return nullptr;
-     }
-@@ -4403,6 +4874,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
-         int64_t sampling_start = ggml_time_ms();
-         int64_t cur_seed       = request.seed + b;
-         LOG_INFO("generating image: %i/%i - seed %" PRId64, b + 1, request.batch_count, cur_seed);
++    if (resized_width != source_width || resized_height != source_height) {
++        source_tensor = sd::ops::interpolate(
++            source_tensor,
++            {static_cast<int64_t>(resized_width),
++             static_cast<int64_t>(resized_height),
++             3,
++             1},
++            sd::ops::InterpolateMode::Bilinear);
++    }
++    if (source_tensor.empty() || sd_should_cancel()) {
++        evidence->cancelled = sd_should_cancel() ? 1u : 0u;
++        return nullptr;
++    }
++    sd::Tensor<float> fitted_source;
++    if (resized_width == target_width && resized_height == target_height) {
++        fitted_source = std::move(source_tensor);
++    } else {
++        fitted_source = sd::Tensor<float>(
++            {static_cast<int64_t>(target_width),
++             static_cast<int64_t>(target_height),
++             3,
++             1});
++        for (uint64_t y = 0u; y < target_height; ++y) {
++            if ((y & 31u) == 0u && sd_should_cancel()) {
++                evidence->cancelled = 1u;
++                return nullptr;
++            }
++            for (uint64_t x = 0u; x < target_width; ++x) {
++                for (int64_t channel = 0; channel < 3; ++channel) {
++                    fitted_source.index(
++                        static_cast<int64_t>(x),
++                        static_cast<int64_t>(y),
++                        channel,
++                        0) = source_tensor.index(
++                            static_cast<int64_t>(x + evidence->source_crop_left),
++                            static_cast<int64_t>(y + evidence->source_crop_top),
++                            channel,
++                            0);
++                }
++            }
++        }
++    }
++    source_tensor = sd::Tensor<float>();
++
++    evidence->vae_encode_invocation_count = 1u;
++    ImageGenerationLatents latents;
++    latents.init_latent = sd_ctx->sd->encode_first_stage(fitted_source);
++    if (sd_should_cancel()) {
++        evidence->cancelled = 1u;
++        return nullptr;
++    }
++    if (latents.init_latent.empty()) {
++        return fail("VAE encoding did not produce an input latent");
++    }
++    evidence->vae_encode_success_count = 1u;
++    evidence->vae_encode_tile_count =
++        sd_ctx->sd->image_execution_evidence.summary.vae_encode_tile_compute_attempt_count;
++    evidence->vae_encode_tile_success_count =
++        sd_ctx->sd->image_execution_evidence.summary.vae_encode_tile_compute_success_count;
++    auto embeds_opt = prepare_image_generation_embeds(
++        sd_ctx, &generation, &request, &plan, &latents);
++    if (sd_should_cancel()) {
++        evidence->cancelled = 1u;
++        return nullptr;
++    }
++    if (!embeds_opt.has_value()) {
++        return fail("prompt conditioning failed before UltraFix inversion");
++    }
++    ImageGenerationEmbeds embeds = std::move(*embeds_opt);
++
++    const int denoise_start = params->refinement_steps - params->inversion_steps;
++    sd::Tensor<float> inverted = latents.init_latent;
++    float source_sigma = 0.0f;
++    const int64_t inversion_started_us = ggml_time_us();
++    for (int index = params->refinement_steps - 1;
++         index >= denoise_start;
++         --index) {
 +        if (sd_should_cancel()) {
-+            LOG_WARN("image generation cancelled before sampling batch %d", b + 1);
++            evidence->cancelled = 1u;
 +            return nullptr;
 +        }
-
-         sd_ctx->sd->rng->manual_seed(cur_seed);
-         sd_ctx->sd->sampler_rng->manual_seed(cur_seed);
-@@ -4583,6 +5058,16 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
-     }
-
-     auto result = decode_image_outputs(sd_ctx, request, final_latents);
-+    if (sd_should_cancel()) {
-+        LOG_WARN("image generation cancelled after decode");
-+        if (result != nullptr) {
-+            for (int i = 0; i < request.batch_count; i++) {
-+                free(result[i].data);
-+            }
-+            free(result);
++        const float target_sigma = plan.sigmas[static_cast<size_t>(index)];
++        const float evaluation_sigma = source_sigma > 0.0f
++            ? source_sigma
++            : target_sigma;
++        if (!std::isfinite(target_sigma) || target_sigma <= source_sigma ||
++            !std::isfinite(evaluation_sigma) || evaluation_sigma <= 0.0f) {
++            return fail("the inversion ladder is not strictly increasing in noise level");
 +        }
++        ++evidence->ddim_inversion_invocation_count;
++        StableDiffusionGGML::UltraFixPrediction prediction =
++            sd_ctx->sd->ultrafix_tiled_prediction(
++                inverted,
++                evaluation_sigma,
++                embeds.cond,
++                SDCondition(),
++                1.0f,
++                params->tile_size,
++                params->tile_overlap,
++                params->width,
++                params->height,
++                true);
++        if (prediction.denoised.empty() || prediction.tile_count == 0u ||
++            prediction.denoised.shape() != inverted.shape()) {
++            return fail("a tiled DDIM inversion evaluation failed");
++        }
++        sd::Tensor<float> epsilon =
++            (inverted - prediction.denoised) / evaluation_sigma;
++        sd::Tensor<float> x0_prediction = inverted - epsilon * source_sigma;
++        inverted = x0_prediction + epsilon * target_sigma;
++        source_sigma = target_sigma;
++        ++evidence->ddim_inversion_success_count;
++        ++evidence->ddim_inversion_step_count;
++        evidence->ddim_inversion_tile_count += prediction.tile_count;
++        evidence->ddim_inversion_tile_success_count += prediction.tile_count;
++        const int inversion_completed_step = params->refinement_steps - index;
++        sd_ctx->sd->report_auxiliary_progress(
++            inversion_completed_step,
++            static_cast<size_t>(params->inversion_steps) * 2u,
++            inversion_started_us);
++    }
++    if (evidence->ddim_inversion_step_count !=
++        static_cast<uint64_t>(params->inversion_steps) ||
++        std::fabs(source_sigma - plan.sigmas[static_cast<size_t>(denoise_start)]) >
++            std::max(1.0e-6f, std::fabs(source_sigma) * 1.0e-5f)) {
++        return fail("the DDIM inversion ladder did not reach the requested start sigma");
++    }
++
++    if (latents.init_latent.dim() != 4 ||
++        latents.init_latent.shape()[0] <= 0 ||
++        latents.init_latent.shape()[1] <= 0 ||
++        latents.init_latent.shape()[2] <= 0 ||
++        latents.init_latent.shape()[3] <= 0) {
++        return fail("the UltraFix latent does not expose a canonical four-dimensional shape");
++    }
++    const mca::image::SpatialTensorShape ultra_fix_latent_shape{
++        static_cast<size_t>(latents.init_latent.shape()[3]),
++        static_cast<size_t>(latents.init_latent.shape()[2]),
++        static_cast<size_t>(latents.init_latent.shape()[1]),
++        static_cast<size_t>(latents.init_latent.shape()[0]),
++        mca::image::SpatialTensorLayout::Nchw,
++    };
++    std::vector<float> ultra_fix_equivalent_noise;
++    std::string ultra_fix_quality_error;
++    if (params->inversion_steps > 1) {
++        const mca::image::UltraFixNoiseLevel inverted_level{
++            1.0,
++            static_cast<double>(source_sigma),
++            1.0 / std::sqrt(1.0 +
++                static_cast<double>(source_sigma) * source_sigma),
++        };
++        if (!mca::image::ultrafix_equivalent_noise(
++                latents.init_latent.values(),
++                inverted.values(),
++                inverted_level,
++                &ultra_fix_equivalent_noise,
++                &ultra_fix_quality_error)) {
++            return fail(ultra_fix_quality_error.c_str());
++        }
++        evidence->trajectory_noise_checksum =
++            mca::image::ultrafix_tensor_checksum(ultra_fix_equivalent_noise);
++        if (evidence->trajectory_noise_checksum == 0u) {
++            return fail("the UltraFix inverted trajectory lacks checksum evidence");
++        }
++    }
++
++    std::vector<float> denoise_sigmas(
++        plan.sigmas.begin() + denoise_start,
++        plan.sigmas.end());
++    if (denoise_sigmas.size() !=
++        static_cast<size_t>(params->inversion_steps + 1)) {
++        return fail("the strength-derived denoising schedule has the wrong length");
++    }
++    sd_ctx->sd->image_execution_evidence.record_sampling_pass();
++    const int64_t sample_started_us = ggml_time_us();
++    std::vector<mca::image::UltraFixQualitySchedule> quality_schedules(
++        static_cast<size_t>(params->inversion_steps));
++    auto tiled_denoise = [&](const sd::Tensor<float>& x,
++                             float sigma,
++                             int step) -> sd::guidance::GuiderOutput {
++        sd::guidance::GuiderOutput output;
++        if (sd_should_cancel()) {
++            evidence->cancelled = 1u;
++            return output;
++        }
++        ++evidence->tiled_unet_invocation_count;
++        StableDiffusionGGML::UltraFixPrediction prediction =
++            sd_ctx->sd->ultrafix_tiled_prediction(
++                x,
++                sigma,
++                embeds.cond,
++                embeds.uncond,
++                params->cfg_scale,
++                params->tile_size,
++                params->tile_overlap,
++                params->width,
++                params->height,
++                false);
++        if (prediction.denoised.empty() || prediction.tile_count == 0u ||
++            !std::isfinite(prediction.model_timestep) ||
++            prediction.denoised.shape() != x.shape()) {
++            return output;
++        }
++        const int physical_step = std::abs(step) - 1;
++        if (physical_step < 0 || physical_step >= params->inversion_steps) {
++            ultra_fix_quality_error =
++                "the UltraFix sampler reported an out-of-range refinement step";
++            return output;
++        }
++        const bool has_next_step = physical_step + 1 < params->inversion_steps;
++        mca::image::UltraFixQualitySchedule quality_schedule;
++        if (!mca::image::resolve_ultrafix_quality_schedule(
++                static_cast<double>(prediction.model_timestep),
++                has_next_step,
++                &quality_schedule,
++                &ultra_fix_quality_error)) {
++            return output;
++        }
++        quality_schedules[static_cast<size_t>(physical_step)] = quality_schedule;
++        if (has_next_step) {
++            ++evidence->quality_step_evaluation_count;
++        }
++        if (quality_schedule.evaluate_noise_injection) {
++            if (sd_should_cancel() || !(sigma > 0.0f)) {
++                evidence->cancelled = sd_should_cancel() ? 1u : 0u;
++                ultra_fix_quality_error =
++                    "UltraFix quality-noise injection was cancelled or received zero sigma";
++                return output;
++            }
++            std::vector<float> epsilon(prediction.denoised.values().size(), 0.0f);
++            for (size_t index = 0u; index < epsilon.size(); ++index) {
++                epsilon[index] =
++                    (x.values()[index] - prediction.denoised.values()[index]) / sigma;
++            }
++            std::vector<float> mixed_epsilon;
++            uint64_t gaussian_checksum = 0u;
++            uint64_t mixed_checksum = 0u;
++            if (!mca::image::ultrafix_inject_spherical_noise(
++                    epsilon,
++                    static_cast<uint64_t>(params->seed),
++                    static_cast<uint32_t>(physical_step),
++                    quality_schedule.noise_injection_fraction,
++                    &mixed_epsilon,
++                    &gaussian_checksum,
++                    &mixed_checksum,
++                    &ultra_fix_quality_error)) {
++                return output;
++            }
++            for (size_t index = 0u; index < mixed_epsilon.size(); ++index) {
++                prediction.denoised.values()[index] =
++                    x.values()[index] - mixed_epsilon[index] * sigma;
++            }
++            evidence->noise_injection_checksum =
++                mca::image::ultrafix_accumulate_checksum(
++                    evidence->noise_injection_checksum,
++                    static_cast<uint32_t>(physical_step),
++                    gaussian_checksum);
++            evidence->noise_injection_checksum =
++                mca::image::ultrafix_accumulate_checksum(
++                    evidence->noise_injection_checksum,
++                    static_cast<uint32_t>(physical_step),
++                    mixed_checksum);
++            ++evidence->noise_injection_step_count;
++            if (sd_should_cancel()) {
++                evidence->cancelled = 1u;
++                return output;
++            }
++        }
++        ++evidence->tiled_unet_success_count;
++        ++evidence->tiled_unet_step_count;
++        evidence->tiled_unet_tile_count += prediction.tile_count;
++        evidence->tiled_unet_tile_success_count += prediction.tile_count;
++        sd_ctx->sd->report_sample_progress(
++            step < 0 ? -step : step,
++            static_cast<size_t>(params->inversion_steps),
++            sample_started_us,
++            static_cast<size_t>(params->inversion_steps),
++            static_cast<size_t>(params->inversion_steps) * 2u);
++        output.pred = std::move(prediction.denoised);
++        return output;
++    };
++    auto apply_ultra_fix_structure = [&](sd::Tensor<float>* sample,
++                                          int physical_step,
++                                          float next_sigma) -> bool {
++        if (sample == nullptr || sample->empty() || physical_step < 0 ||
++            physical_step >= params->inversion_steps) {
++            ultra_fix_quality_error =
++                "the UltraFix post-step callback received an invalid sample";
++            return false;
++        }
++        if (physical_step + 1 >= params->inversion_steps) {
++            return true;
++        }
++        const mca::image::UltraFixQualitySchedule& schedule =
++            quality_schedules[static_cast<size_t>(physical_step)];
++        if (!schedule.evaluate_structure_guidance) {
++            return true;
++        }
++        if (sd_should_cancel() || ultra_fix_equivalent_noise.empty() ||
++            !std::isfinite(next_sigma) || next_sigma < 0.0f) {
++            evidence->cancelled = sd_should_cancel() ? 1u : 0u;
++            ultra_fix_quality_error =
++                "UltraFix structure guidance was cancelled or lacks its trajectory";
++            return false;
++        }
++        const mca::image::UltraFixNoiseLevel next_level{
++            1.0,
++            static_cast<double>(next_sigma),
++            1.0 / std::sqrt(1.0 +
++                static_cast<double>(next_sigma) * next_sigma),
++        };
++        std::vector<float> trajectory_reference;
++        if (!mca::image::ultrafix_add_noise(
++                latents.init_latent.values(),
++                ultra_fix_equivalent_noise,
++                next_level,
++                &trajectory_reference,
++                &ultra_fix_quality_error)) {
++            return false;
++        }
++        if (sd_should_cancel()) {
++            evidence->cancelled = 1u;
++            return false;
++        }
++        std::vector<float> structured;
++        uint64_t structured_checksum = 0u;
++        const size_t blur_radius =
++            mca::image::ultrafix_structure_blur_radius(
++                static_cast<size_t>(params->tile_size / vae_scale));
++        if (blur_radius == 0u ||
++            !mca::image::ultrafix_apply_structure_guidance(
++                sample->values(),
++                trajectory_reference,
++                ultra_fix_latent_shape,
++                blur_radius,
++                schedule.structure_guidance_weight,
++                &structured,
++                &structured_checksum,
++                &ultra_fix_quality_error)) {
++            return false;
++        }
++        evidence->structure_guidance_checksum =
++            mca::image::ultrafix_accumulate_checksum(
++                evidence->structure_guidance_checksum,
++                static_cast<uint32_t>(physical_step),
++                structured_checksum);
++        ++evidence->structure_guidance_step_count;
++        sample->values() = std::move(structured);
++        if (sd_should_cancel()) {
++            evidence->cancelled = 1u;
++            return false;
++        }
++        return true;
++    };
++    sd::Tensor<float> final_latent = sample_k_diffusion(
++        params->sample_method,
++        tiled_denoise,
++        std::move(inverted),
++        denoise_sigmas,
++        sd_ctx->sd->sampler_rng,
++        params->eta,
++        false,
++        params->extra_sample_args,
++        apply_ultra_fix_structure);
++    if (sd_should_cancel()) {
++        evidence->cancelled = 1u;
 +        return nullptr;
 +    }
-     if (result == nullptr) {
-         return nullptr;
-     }
-@@ -4591,6 +5076,15 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
-
-     int64_t t1 = ggml_time_ms();
-     LOG_INFO("generate_image completed in %.2fs", (t1 - t0) * 1.0f / 1000);
-+    float effective_flow_shift = 0.0f;
-+    const bool flow_shift_applied =
-+        sd_ctx->sd->get_effective_flow_shift(&effective_flow_shift);
-+    sd_ctx->sd->image_execution_evidence.mark_generation_completed(
-+        flow_shift_applied,
-+        sd_ctx->sd->uses_dynamic_flow_shift(),
-+        effective_flow_shift,
-+        sd_ctx->sd->uses_distilled_guidance(),
-+        request.guidance.distilled_guidance);
-     return result;
- }
-
-diff --git a/src/tokenizers/vocab/vocab.cpp b/src/tokenizers/vocab/vocab.cpp
-index 4d2a9b8..7763fb6 100644
---- a/src/tokenizers/vocab/vocab.cpp
-+++ b/src/tokenizers/vocab/vocab.cpp
-@@ -1,5 +1,9 @@
- #include "vocab.h"
- #include "clip_merges.hpp"
-+#include "qwen_merges.hpp"
-+#include "t5.hpp"
-+
-+#if !defined(__ANDROID__)
- #include "gemma2_merges.hpp"
- #include "gemma2_vocab.hpp"
- #include "gemma_merges.hpp"
-@@ -8,9 +12,8 @@
- #include "gpt_oss_vocab.hpp"
- #include "mistral_merges.hpp"
- #include "mistral_vocab.hpp"
--#include "qwen_merges.hpp"
--#include "t5.hpp"
- #include "umt5.hpp"
-+#endif
-
- std::string load_clip_merges() {
-     std::string merges_utf8_str(reinterpret_cast<const char*>(clip_merges_utf8_c_str), sizeof(clip_merges_utf8_c_str));
-@@ -23,13 +26,21 @@ std::string load_qwen2_merges() {
- }
-
- std::string load_mistral_merges() {
-+#if defined(__ANDROID__)
-+    return {};
-+#else
-     std::string merges_utf8_str(reinterpret_cast<const char*>(mistral_merges_utf8_c_str), sizeof(mistral_merges_utf8_c_str));
-     return merges_utf8_str;
-+#endif
- }
-
- std::string load_mistral_vocab_json() {
-+#if defined(__ANDROID__)
-+    return {};
-+#else
-     std::string json_str(reinterpret_cast<const char*>(mistral_vocab_json_utf8_c_str), sizeof(mistral_vocab_json_utf8_c_str));
-     return json_str;
-+#endif
- }
-
- std::string load_t5_tokenizer_json() {
-@@ -38,36 +49,64 @@ std::string load_t5_tokenizer_json() {
- }
-
- std::string load_umt5_tokenizer_json() {
-+#if defined(__ANDROID__)
-+    return {};
-+#else
-     std::string json_str(reinterpret_cast<const char*>(umt5_tokenizer_json_str), sizeof(umt5_tokenizer_json_str));
-     return json_str;
-+#endif
- }
-
- std::string load_gemma_merges() {
-+#if defined(__ANDROID__)
-+    return {};
-+#else
-     std::string merges_utf8_str(reinterpret_cast<const char*>(gemma_merges_utf8_c_str), sizeof(gemma_merges_utf8_c_str));
-     return merges_utf8_str;
-+#endif
- }
-
- std::string load_gemma_vocab_json() {
-+#if defined(__ANDROID__)
-+    return {};
-+#else
-     std::string json_str(reinterpret_cast<const char*>(gemma_vocab_json_utf8_c_str), sizeof(gemma_vocab_json_utf8_c_str));
-     return json_str;
-+#endif
- }
-
- std::string load_gemma2_merges() {
-+#if defined(__ANDROID__)
-+    return {};
-+#else
-     std::string merges_utf8_str(reinterpret_cast<const char*>(gemma2_merges_utf8_c_str), sizeof(gemma2_merges_utf8_c_str));
-     return merges_utf8_str;
-+#endif
- }
-
- std::string load_gemma2_vocab_json() {
-+#if defined(__ANDROID__)
-+    return {};
-+#else
-     std::string json_str(reinterpret_cast<const char*>(gemma2_vocab_json_utf8_c_str), sizeof(gemma2_vocab_json_utf8_c_str));
-     return json_str;
-+#endif
- }
-
- std::string load_gpt_oss_merges() {
-+#if defined(__ANDROID__)
-+    return {};
-+#else
-     std::string merges_utf8_str(reinterpret_cast<const char*>(gpt_oss_merges_utf8_c_str), sizeof(gpt_oss_merges_utf8_c_str));
-     return merges_utf8_str;
-+#endif
- }
-
- std::string load_gpt_oss_vocab_json() {
-+#if defined(__ANDROID__)
-+    return {};
-+#else
-     std::string json_str(reinterpret_cast<const char*>(gpt_oss_vocab_json_utf8_c_str), sizeof(gpt_oss_vocab_json_utf8_c_str));
-     return json_str;
--}
-\ No newline at end of file
-+#endif
-+}
-diff --git a/src/upscaler.cpp b/src/upscaler.cpp
-index 1197ce3..730a56e 100644
---- a/src/upscaler.cpp
-+++ b/src/upscaler.cpp
-@@ -4,8 +4,52 @@
- #include "stable-diffusion.h"
- #include "util.h"
-
-+#include <cstdint>
-+#include <memory>
-+#include <new>
- #include <utility>
-
-+namespace {
-+
-+thread_local sd_upscaler_execution_evidence_t* active_upscaler_evidence = nullptr;
-+
-+class UpscalerEvidenceScope {
-+public:
-+    explicit UpscalerEvidenceScope(sd_upscaler_execution_evidence_t* evidence)
-+        : previous(active_upscaler_evidence) {
-+        active_upscaler_evidence = evidence;
++    const uint64_t quality_step_count = evidence->quality_step_evaluation_count;
++    const bool quality_noise_evidence_consistent =
++        evidence->noise_injection_step_count <= quality_step_count &&
++        ((evidence->noise_injection_step_count == 0u) ==
++         (evidence->noise_injection_checksum == 0u));
++    const bool quality_structure_evidence_consistent =
++        evidence->structure_guidance_step_count <= quality_step_count &&
++        ((evidence->structure_guidance_step_count == 0u) ==
++         (evidence->structure_guidance_checksum == 0u));
++    const bool quality_coverage_complete = quality_step_count == 0u
++        ? evidence->trajectory_noise_checksum == 0u
++        : evidence->trajectory_noise_checksum != 0u &&
++              evidence->noise_injection_step_count +
++                      evidence->structure_guidance_step_count >=
++                  quality_step_count;
++    if (final_latent.empty() ||
++        evidence->tiled_unet_success_count !=
++            static_cast<uint64_t>(params->inversion_steps) ||
++        evidence->tiled_unet_step_count !=
++            static_cast<uint64_t>(params->inversion_steps) ||
++        evidence->quality_step_evaluation_count !=
++            static_cast<uint64_t>(std::max(params->inversion_steps - 1, 0)) ||
++        !quality_noise_evidence_consistent ||
++        !quality_structure_evidence_consistent ||
++        !quality_coverage_complete) {
++        return fail(ultra_fix_quality_error.empty()
++            ? "the full-image refinement scheduler or quality trajectory did not complete"
++            : ultra_fix_quality_error.c_str());
++    }
++    if (sd_ctx->sd->free_params_immediately) {
++        sd_ctx->sd->diffusion_model->free_params_buffer();
 +    }
 +
-+    ~UpscalerEvidenceScope() {
-+        active_upscaler_evidence = previous;
-+    }
-+
-+private:
-+    sd_upscaler_execution_evidence_t* previous;
-+};
-+
-+void record_compute_start(bool tile) {
-+    if (active_upscaler_evidence == nullptr) {
-+        return;
-+    }
-+    ++active_upscaler_evidence->compute_invocation_count;
-+    if (tile) {
-+        ++active_upscaler_evidence->tile_compute_invocation_count;
-+    }
-+}
-+
-+void record_compute_result(bool tile, bool succeeded) {
-+    if (active_upscaler_evidence == nullptr || !succeeded) {
-+        return;
-+    }
-+    ++active_upscaler_evidence->compute_success_count;
-+    if (tile) {
-+        ++active_upscaler_evidence->tile_compute_success_count;
-+    }
-+}
-+
-+}  // namespace
-+
- UpscalerGGML::UpscalerGGML(int n_threads,
-                            bool direct,
-                            int tile_size,
-@@ -68,6 +112,7 @@ bool UpscalerGGML::load_from_file(const std::string& esrgan_path,
-     ModelLoader model_loader;
-     if (!model_loader.init_from_file_and_convert_name(esrgan_path)) {
-         LOG_ERROR("init model loader from file failed: '%s'", esrgan_path.c_str());
-+        return false;
-     }
-     model_loader.set_wtype_override(model_data_type);
-     LOG_INFO("Upscaler weight type: %s", ggml_type_name(model_data_type));
-@@ -87,12 +132,23 @@ bool UpscalerGGML::load_from_file(const std::string& esrgan_path,
-
- sd::Tensor<float> UpscalerGGML::upscale_tensor(const sd::Tensor<float>& input_tensor) {
-     sd::Tensor<float> upscaled;
++    evidence->tiled_vae_decode_invocation_count = 1u;
++    sd::Tensor<float> decoded = sd_ctx->sd->decode_first_stage(final_latent);
 +    if (sd_should_cancel()) {
-+        LOG_WARN("esrgan upscale cancelled before execution");
-+        return {};
++        evidence->cancelled = 1u;
++        return nullptr;
 +    }
-     if (tile_size <= 0 || (input_tensor.shape()[0] <= tile_size && input_tensor.shape()[1] <= tile_size)) {
-+        record_compute_start(false);
-         upscaled = esrgan_upscaler->compute(n_threads, input_tensor);
-+        record_compute_result(false, !upscaled.empty());
-     } else {
-         auto on_processing = [&](const sd::Tensor<float>& input_tile) -> sd::Tensor<float> {
-+            if (sd_should_cancel()) {
-+                return {};
-+            }
-+            record_compute_start(true);
-             auto output_tile = esrgan_upscaler->compute(n_threads, input_tile);
--            if (output_tile.empty()) {
-+            record_compute_result(true, !output_tile.empty());
-+            if (output_tile.empty() || sd_should_cancel()) {
-                 LOG_ERROR("esrgan compute failed while processing a tile");
-                 return {};
-             }
-@@ -111,7 +167,10 @@ sd::Tensor<float> UpscalerGGML::upscale_tensor(const sd::Tensor<float>& input_te
-                                     on_processing);
-     }
-     esrgan_upscaler->free_compute_buffer();
--    if (upscaled.empty()) {
-+    if (upscaled.empty() || sd_should_cancel()) {
-+        if (sd_should_cancel()) {
-+            LOG_WARN("esrgan upscale cancelled");
++    if (decoded.empty()) {
++        return fail("tiled VAE decode returned no image");
++    }
++    evidence->tiled_vae_decode_success_count = 1u;
++    evidence->tiled_vae_decode_tile_count =
++        sd_ctx->sd->image_execution_evidence.summary.vae_decode_tile_compute_attempt_count;
++    evidence->tiled_vae_decode_tile_success_count =
++        sd_ctx->sd->image_execution_evidence.summary.vae_decode_tile_compute_success_count;
++    if (sd_ctx->sd->free_params_immediately) {
++        sd_ctx->sd->first_stage_model->free_params_buffer();
++    }
++
++    sd_image_t decoded_image = tensor_to_sd_image(decoded);
++    if (decoded_image.data == nullptr ||
++        decoded_image.width != static_cast<uint32_t>(params->width) ||
++        decoded_image.height != static_cast<uint32_t>(params->height) ||
++        decoded_image.channel != 3u) {
++        if (decoded_image.data != nullptr) {
++            free(decoded_image.data);
 +        }
-         LOG_ERROR("esrgan compute failed");
-         return {};
-     }
-@@ -119,7 +178,7 @@ sd::Tensor<float> UpscalerGGML::upscale_tensor(const sd::Tensor<float>& input_te
- }
-
- sd_image_t UpscalerGGML::upscale(sd_image_t input_image, uint32_t upscale_factor) {
--    // upscale_factor, unused for RealESRGAN_x4plus_anime_6B.pth
-+    // The public wrapper validates upscale_factor against the loaded model scale.
-     sd_image_t upscaled_image = {0, 0, 0, nullptr};
-     int output_width          = (int)input_image.width * esrgan_upscaler->scale;
-     int output_height         = (int)input_image.height * esrgan_upscaler->scale;
-@@ -142,6 +201,7 @@ sd_image_t UpscalerGGML::upscale(sd_image_t input_image, uint32_t upscale_factor
-
- struct upscaler_ctx_t {
-     UpscalerGGML* upscaler = nullptr;
-+    sd_upscaler_execution_evidence_t execution_evidence{};
- };
-
- upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path_c_str,
-@@ -151,28 +211,72 @@ upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path_c_str,
-                                  int tile_size,
-                                  const char* backend,
-                                  const char* params_backend) {
--    upscaler_ctx_t* upscaler_ctx = (upscaler_ctx_t*)malloc(sizeof(upscaler_ctx_t));
--    if (upscaler_ctx == nullptr) {
-+    std::unique_ptr<upscaler_ctx_t> upscaler_ctx(new (std::nothrow) upscaler_ctx_t());
-+    if (!upscaler_ctx) {
-         return nullptr;
-     }
-     std::string esrgan_path(esrgan_path_c_str);
-
--    upscaler_ctx->upscaler = new UpscalerGGML(n_threads, direct, tile_size, SAFE_STR(backend), SAFE_STR(params_backend));
--    if (upscaler_ctx->upscaler == nullptr) {
-+    std::unique_ptr<UpscalerGGML> upscaler(new (std::nothrow) UpscalerGGML(
-+        n_threads, direct, tile_size, SAFE_STR(backend), SAFE_STR(params_backend)));
-+    if (!upscaler) {
-         return nullptr;
-     }
-
--    if (!upscaler_ctx->upscaler->load_from_file(esrgan_path, offload_params_to_cpu, n_threads)) {
--        delete upscaler_ctx->upscaler;
--        upscaler_ctx->upscaler = nullptr;
--        free(upscaler_ctx);
-+    if (!upscaler->load_from_file(esrgan_path, offload_params_to_cpu, n_threads)) {
-         return nullptr;
-     }
--    return upscaler_ctx;
-+    upscaler_ctx->upscaler = upscaler.release();
-+    return upscaler_ctx.release();
- }
-
- sd_image_t upscale(upscaler_ctx_t* upscaler_ctx, sd_image_t input_image, uint32_t upscale_factor) {
--    return upscaler_ctx->upscaler->upscale(input_image, upscale_factor);
-+    sd_image_t empty = {0, 0, 0, nullptr};
-+    if (upscaler_ctx == nullptr || upscaler_ctx->upscaler == nullptr ||
-+        upscaler_ctx->upscaler->esrgan_upscaler == nullptr) {
-+        return empty;
++        return fail("the final VAE output does not match the requested RGB canvas");
 +    }
-+
-+    const int native_scale = get_upscale_factor(upscaler_ctx);
-+    auto& evidence = upscaler_ctx->execution_evidence;
-+    evidence = {};
-+    evidence.version = SD_UPSCALER_EXECUTION_EVIDENCE_VERSION;
-+    evidence.requested_scale = upscale_factor;
-+    evidence.native_scale = native_scale > 0 ? static_cast<uint32_t>(native_scale) : 0;
-+    evidence.source_width = input_image.width;
-+    evidence.source_height = input_image.height;
-+    evidence.tiled = upscaler_ctx->upscaler->tile_size > 0 &&
-+                             (input_image.width > static_cast<uint32_t>(upscaler_ctx->upscaler->tile_size) ||
-+                              input_image.height > static_cast<uint32_t>(upscaler_ctx->upscaler->tile_size))
-+                         ? 1u
-+                         : 0u;
-+    if (native_scale <= 0 || upscale_factor != static_cast<uint32_t>(native_scale)) {
-+        LOG_ERROR("requested upscale factor %u does not match model scale %d", upscale_factor, native_scale);
-+        return empty;
++    sd_image_t* result = static_cast<sd_image_t*>(calloc(1u, sizeof(sd_image_t)));
++    if (result == nullptr) {
++        free(decoded_image.data);
++        return fail("allocating the UltraFix result descriptor failed");
 +    }
++    result[0] = decoded_image;
 +
-+    UpscalerEvidenceScope evidence_scope(&evidence);
-+    sd_image_t result = upscaler_ctx->upscaler->upscale(input_image, upscale_factor);
-+    evidence.output_width = result.width;
-+    evidence.output_height = result.height;
-+    evidence.cancelled = sd_should_cancel() ? 1u : 0u;
-+    evidence.completed = result.data != nullptr && evidence.cancelled == 0u &&
-+                                 evidence.compute_invocation_count > 0u &&
-+                                 evidence.compute_success_count == evidence.compute_invocation_count
-+                             ? 1u
-+                             : 0u;
++    sd_ctx->sd->lora_stat();
++    sd_ctx->sd->image_execution_evidence.mark_generation_completed(
++        false, false, 0.0f, false, 0.0f);
++    evidence->generation_completed = 1u;
++    evidence->cancelled = 0u;
++    evidence->preview_published = 0u;
 +    return result;
 +}
 +
-+extern "C" SD_API bool sd_get_upscaler_execution_evidence(
-+    const upscaler_ctx_t* upscaler_ctx,
-+    sd_upscaler_execution_evidence_t* evidence) {
-+    if (upscaler_ctx == nullptr || evidence == nullptr ||
-+        upscaler_ctx->execution_evidence.version != SD_UPSCALER_EXECUTION_EVIDENCE_VERSION) {
-+        return false;
-+    }
-+    *evidence = upscaler_ctx->execution_evidence;
-+    return true;
+ static std::optional<ImageGenerationLatents> prepare_video_generation_latents(sd_ctx_t* sd_ctx,
+                                                                               const sd_vid_gen_params_t* sd_vid_gen_params,
+                                                                               GenerationRequest* request) {
+diff --git a/src/tokenizers/bpe_tokenizer.cpp b/src/tokenizers/bpe_tokenizer.cpp
+index ed4e187..27623b0 100644
+--- a/src/tokenizers/bpe_tokenizer.cpp
++++ b/src/tokenizers/bpe_tokenizer.cpp
+@@ -134,7 +134,9 @@ std::vector<int> BPETokenizer::encode(const std::string& text, on_new_token_cb_t
+     std::vector<int32_t> bpe_tokens;
+     std::vector<std::string> token_strs;
+ 
+-    auto splited_texts = split_with_special_tokens(text, special_tokens);
++    // CLIP custom words are canonicalized to lowercase by the conditioner. Match them
++    // case-insensitively, but only as complete tokens: "cat" must not match "catering".
++    auto splited_texts = split_with_special_tokens(text, special_tokens, true, true);
+ 
+     for (auto& splited_text : splited_texts) {
+         if (is_special_token(splited_text)) {
+diff --git a/src/tokenizers/tokenize_util.cpp b/src/tokenizers/tokenize_util.cpp
+index 770bfb5..f175acc 100644
+--- a/src/tokenizers/tokenize_util.cpp
++++ b/src/tokenizers/tokenize_util.cpp
+@@ -947,24 +947,74 @@ std::vector<std::string> token_split(const std::string& text) {
+     return tokens;
  }
-
- int get_upscale_factor(upscaler_ctx_t* upscaler_ctx) {
-@@ -183,9 +287,12 @@ int get_upscale_factor(upscaler_ctx_t* upscaler_ctx) {
- }
-
- void free_upscaler_ctx(upscaler_ctx_t* upscaler_ctx) {
-+    if (upscaler_ctx == nullptr) {
-+        return;
-+    }
-     if (upscaler_ctx->upscaler != nullptr) {
-         delete upscaler_ctx->upscaler;
-         upscaler_ctx->upscaler = nullptr;
-     }
--    free(upscaler_ctx);
-+    delete upscaler_ctx;
- }
-diff --git a/src/util.cpp b/src/util.cpp
-index 77fc542..05399d3 100644
---- a/src/util.cpp
-+++ b/src/util.cpp
-@@ -340,6 +340,8 @@ int32_t sd_get_num_physical_cores() {
-
- static sd_progress_cb_t sd_progress_cb = nullptr;
- void* sd_progress_cb_data              = nullptr;
-+static sd_cancel_cb_t sd_cancel_cb = nullptr;
-+static void* sd_cancel_cb_data     = nullptr;
-
- static sd_preview_cb_t sd_preview_cb = nullptr;
- static void* sd_preview_cb_data      = nullptr;
-@@ -613,6 +615,10 @@ void sd_set_progress_callback(sd_progress_cb_t cb, void* data) {
-     sd_progress_cb      = cb;
-     sd_progress_cb_data = data;
- }
-+void sd_set_cancel_callback(sd_cancel_cb_t cb, void* data) {
-+    sd_cancel_cb      = cb;
-+    sd_cancel_cb_data = data;
-+}
- void sd_set_preview_callback(sd_preview_cb_t cb, preview_t mode, int interval, bool denoised, bool noisy, void* data) {
-     sd_preview_cb       = cb;
-     sd_preview_cb_data  = data;
-@@ -648,6 +654,9 @@ sd_progress_cb_t sd_get_progress_callback() {
- void* sd_get_progress_callback_data() {
-     return sd_progress_cb_data;
- }
-+bool sd_should_cancel() {
-+    return sd_cancel_cb != nullptr && sd_cancel_cb(sd_cancel_cb_data);
-+}
-
- sd_image_t tensor_to_sd_image(const sd::Tensor<float>& tensor, int frame_index) {
-     const auto& shape = tensor.shape();
-diff --git a/src/util.h b/src/util.h
-index c3b06b1..e89d511 100644
---- a/src/util.h
-+++ b/src/util.h
-@@ -88,6 +88,7 @@ std::vector<std::pair<std::string, float>> split_quotation_attention(
-
- sd_progress_cb_t sd_get_progress_callback();
- void* sd_get_progress_callback_data();
-+bool sd_should_cancel();
-
- sd_preview_cb_t sd_get_preview_callback();
- void* sd_get_preview_callback_data();
+ 
+-std::vector<std::string> split_with_special_tokens(
+-    const std::string& text,
+-    const std::vector<std::string>& special_tokens) {
+-    std::vector<std::string> result;
+-    size_t pos      = 0;
+-    size_t text_len = text.size();
+-
+-    while (pos < text_len) {
+-        size_t next_pos = text_len;
+-        std::string matched_token;
+-
+-        for (const auto& token : special_tokens) {
+-            size_t token_pos = text.find(token, pos);
+-            if (token_pos != std::string::npos && token_pos < next_pos) {
+-                next_pos      = token_pos;
+-                matched_token = token;
+-            }
+-        }
++std::vector<std::string> split_with_special_tokens(
++    const std::string& text,
++    const std::vector<std::string>& special_tokens,
++    bool ascii_case_insensitive,
++    bool require_token_boundaries) {
++    std::vector<std::string> result;
++    size_t pos      = 0;
++    size_t text_len = text.size();
++
++    const auto ascii_lower = [](unsigned char value) -> unsigned char {
++        return value >= 'A' && value <= 'Z'
++                   ? static_cast<unsigned char>(value - 'A' + 'a')
++                   : value;
++    };
++    const auto ascii_word = [](unsigned char value) -> bool {
++        return (value >= 'a' && value <= 'z') ||
++               (value >= 'A' && value <= 'Z') ||
++               (value >= '0' && value <= '9') || value == '_';
++    };
++    const auto matches_at = [&](size_t offset, const std::string& token) -> bool {
++        if (token.empty() || offset > text_len || token.size() > text_len - offset) {
++            return false;
++        }
++        for (size_t index = 0; index < token.size(); ++index) {
++            const unsigned char actual = static_cast<unsigned char>(text[offset + index]);
++            const unsigned char expected = static_cast<unsigned char>(token[index]);
++            if (ascii_case_insensitive ? ascii_lower(actual) != ascii_lower(expected)
++                                       : actual != expected) {
++                return false;
++            }
++        }
++        if (!require_token_boundaries) {
++            return true;
++        }
++        const bool token_starts_with_word = ascii_word(static_cast<unsigned char>(token.front()));
++        const bool token_ends_with_word = ascii_word(static_cast<unsigned char>(token.back()));
++        if (token_starts_with_word && offset > 0 &&
++            ascii_word(static_cast<unsigned char>(text[offset - 1]))) {
++            return false;
++        }
++        const size_t end = offset + token.size();
++        if (token_ends_with_word && end < text_len &&
++            ascii_word(static_cast<unsigned char>(text[end]))) {
++            return false;
++        }
++        return true;
++    };
++
++    while (pos < text_len) {
++        size_t next_pos = text_len;
++        std::string matched_token;
++
++        for (const auto& token : special_tokens) {
++            if (token.empty()) {
++                continue;
++            }
++            for (size_t token_pos = pos; token_pos + token.size() <= text_len; ++token_pos) {
++                if (!matches_at(token_pos, token)) {
++                    continue;
++                }
++                if (token_pos < next_pos ||
++                    (token_pos == next_pos && token.size() > matched_token.size())) {
++                    next_pos = token_pos;
++                    matched_token = token;
++                }
++                break;
++            }
++        }
+ 
+         if (next_pos > pos) {
+             result.push_back(text.substr(pos, next_pos - pos));
+diff --git a/src/tokenizers/tokenize_util.h b/src/tokenizers/tokenize_util.h
+index efb0a1c..47b80e6 100644
+--- a/src/tokenizers/tokenize_util.h
++++ b/src/tokenizers/tokenize_util.h
+@@ -5,6 +5,10 @@
+ #include <vector>
+ 
+ std::vector<std::string> token_split(const std::string& text);
+-std::vector<std::string> split_with_special_tokens(const std::string& text, const std::vector<std::string>& special_tokens);
++std::vector<std::string> split_with_special_tokens(
++    const std::string& text,
++    const std::vector<std::string>& special_tokens,
++    bool ascii_case_insensitive = false,
++    bool require_token_boundaries = false);
+ 
+-#endif  // __SD_TOKENIZERS_BPE_TOKENIZE_UTIL_H__
+\ No newline at end of file
++#endif  // __SD_TOKENIZERS_BPE_TOKENIZE_UTIL_H__
 diff --git a/src/vae.hpp b/src/vae.hpp
-index cc4cd96..9360146 100644
+index 9360146..193a0de 100644
 --- a/src/vae.hpp
 +++ b/src/vae.hpp
-@@ -8,6 +8,7 @@ struct VAE : public GGMLRunner {
- protected:
-     SDVersion version;
-     bool scale_input                                      = true;
-+    sd_image_execution_evidence_t* image_execution_evidence = nullptr;
-     virtual sd::Tensor<float> _compute(const int n_threads,
-                                        const sd::Tensor<float>& z,
-                                        bool decode_graph) = 0;
-@@ -27,6 +28,89 @@ protected:
-         }
-     }
-
-+    void record_tiling_invocation(bool decode_graph,
-+                                  int small_width,
-+                                  int small_height,
-+                                  int tile_size_x,
-+                                  int tile_size_y,
-+                                  float tile_overlap,
-+                                  bool circular_x,
-+                                  bool circular_y) {
-+        if (image_execution_evidence == nullptr) {
-+            return;
-+        }
-+        int num_tiles_x = 0;
-+        int num_tiles_y = 0;
-+        float actual_overlap_x = 0.0f;
-+        float actual_overlap_y = 0.0f;
-+        sd_tiling_calc_tiles(num_tiles_x,
-+                             actual_overlap_x,
-+                             small_width,
-+                             tile_size_x,
-+                             tile_overlap,
-+                             circular_x);
-+        sd_tiling_calc_tiles(num_tiles_y,
-+                             actual_overlap_y,
-+                             small_height,
-+                             tile_size_y,
-+                             tile_overlap,
-+                             circular_y);
-+        const uint64_t planned_tile_count =
-+            static_cast<uint64_t>(num_tiles_x) * static_cast<uint64_t>(num_tiles_y);
-+        if (decode_graph) {
-+            ++image_execution_evidence->vae_decode_tiling_invocation_count;
-+            image_execution_evidence->vae_decode_planned_tile_count += planned_tile_count;
-+            image_execution_evidence->vae_decode_tile_size_x =
-+                static_cast<uint32_t>(tile_size_x);
-+            image_execution_evidence->vae_decode_tile_size_y =
-+                static_cast<uint32_t>(tile_size_y);
-+            image_execution_evidence->vae_decode_tile_overlap_x = actual_overlap_x;
-+            image_execution_evidence->vae_decode_tile_overlap_y = actual_overlap_y;
-+        } else {
-+            ++image_execution_evidence->vae_encode_tiling_invocation_count;
-+            image_execution_evidence->vae_encode_planned_tile_count += planned_tile_count;
-+            image_execution_evidence->vae_encode_tile_size_x =
-+                static_cast<uint32_t>(tile_size_x);
-+            image_execution_evidence->vae_encode_tile_size_y =
-+                static_cast<uint32_t>(tile_size_y);
-+            image_execution_evidence->vae_encode_tile_overlap_x = actual_overlap_x;
-+            image_execution_evidence->vae_encode_tile_overlap_y = actual_overlap_y;
-+        }
-+    }
-+
-+    void record_tiling_success(bool decode_graph) {
-+        if (image_execution_evidence == nullptr) {
-+            return;
-+        }
-+        if (decode_graph) {
-+            ++image_execution_evidence->vae_decode_tiling_success_count;
-+        } else {
-+            ++image_execution_evidence->vae_encode_tiling_success_count;
-+        }
-+    }
-+
-+    void record_tile_compute_attempt(bool decode_graph) {
-+        if (image_execution_evidence == nullptr) {
-+            return;
-+        }
-+        if (decode_graph) {
-+            ++image_execution_evidence->vae_decode_tile_compute_attempt_count;
-+        } else {
-+            ++image_execution_evidence->vae_encode_tile_compute_attempt_count;
-+        }
-+    }
-+
-+    void record_tile_compute_success(bool decode_graph) {
-+        if (image_execution_evidence == nullptr) {
-+            return;
-+        }
-+        if (decode_graph) {
-+            ++image_execution_evidence->vae_decode_tile_compute_success_count;
-+        } else {
-+            ++image_execution_evidence->vae_encode_tile_compute_success_count;
-+        }
-+    }
-+
-     sd::Tensor<float> tiled_compute(const sd::Tensor<float>& input,
-                                     int n_threads,
-                                     int output_width,
-@@ -39,13 +123,20 @@ protected:
-                                     bool circular_y,
-                                     bool decode_graph,
-                                     const char* error_message,
--                                    bool silent = false) {
-+                                    bool silent                    = false,
-+                                    bool record_execution_evidence = true) {
+@@ -126,10 +126,16 @@ protected:
+                                     bool silent                    = false,
+                                     bool record_execution_evidence = true) {
          auto on_processing = [&](const sd::Tensor<float>& input_tile) {
-+            if (record_execution_evidence) {
-+                record_tile_compute_attempt(decode_graph);
++            if (sd_should_cancel()) {
++                return sd::Tensor<float>();
 +            }
+             if (record_execution_evidence) {
+                 record_tile_compute_attempt(decode_graph);
+             }
              auto output_tile = _compute(n_threads, input_tile, decode_graph);
++            if (sd_should_cancel()) {
++                return sd::Tensor<float>();
++            }
              if (output_tile.empty()) {
                  LOG_ERROR("%s", error_message);
                  return sd::Tensor<float>();
-             }
-+            if (record_execution_evidence) {
-+                record_tile_compute_success(decode_graph);
-+            }
-             return output_tile;
-         };
-         return ::process_tiles_2d(input,
-@@ -65,6 +156,10 @@ public:
-     VAE(SDVersion version, ggml_backend_t backend, ggml_backend_t params_backend)
-         : version(version), GGMLRunner(backend, params_backend) {}
-
-+    void set_image_execution_evidence(sd_image_execution_evidence_t* evidence) {
-+        image_execution_evidence = evidence;
-+    }
-+
-     int get_scale_factor() {
-         int scale_factor = 8;
-         if (version == VERSION_LTXAV) {
-@@ -129,6 +224,14 @@ public:
-             float tile_overlap;
-             int tile_size_x, tile_size_y;
-             get_tile_sizes(tile_size_x, tile_size_y, tile_overlap, tiling_params, W, H, 1.30539f);
-+            record_tiling_invocation(false,
-+                                     static_cast<int>(W),
-+                                     static_cast<int>(H),
-+                                     tile_size_x,
-+                                     tile_size_y,
-+                                     tile_overlap,
-+                                     circular_x,
-+                                     circular_y);
-             LOG_DEBUG("VAE Tile size: %dx%d", tile_size_x, tile_size_y);
-             output = tiled_compute(input,
-                                    n_threads,
-@@ -142,6 +245,9 @@ public:
-                                    circular_y,
-                                    false,
-                                    "vae encode compute failed while processing a tile");
-+            if (!output.empty()) {
-+                record_tiling_success(false);
-+            }
-         } else {
-             output = _compute(n_threads, input, false);
-         }
-@@ -163,7 +269,8 @@ public:
-                              bool decode_video = false,
-                              bool circular_x   = false,
-                              bool circular_y   = false,
--                             bool silent       = false) {
-+                             bool silent       = false,
-+                             bool record_execution_evidence = true) {
-         int64_t t0              = ggml_time_ms();
-         sd::Tensor<float> input = x;
-         sd::Tensor<float> output;
-@@ -176,6 +283,16 @@ public:
-             float tile_overlap;
-             int tile_size_x, tile_size_y;
-             get_tile_sizes(tile_size_x, tile_size_y, tile_overlap, tiling_params, input.shape()[0], input.shape()[1]);
-+            if (record_execution_evidence) {
-+                record_tiling_invocation(true,
-+                                         static_cast<int>(input.shape()[0]),
-+                                         static_cast<int>(input.shape()[1]),
-+                                         tile_size_x,
-+                                         tile_size_y,
-+                                         tile_overlap,
-+                                         circular_x,
-+                                         circular_y);
-+            }
-             if (!silent) {
-                 LOG_DEBUG("VAE Tile size: %dx%d", tile_size_x, tile_size_y);
-             }
-@@ -192,7 +309,11 @@ public:
-                 circular_y,
-                 true,
-                 "vae decode compute failed while processing a tile",
--                silent);
-+                silent,
-+                record_execution_evidence);
-+            if (!output.empty() && record_execution_evidence) {
-+                record_tiling_success(true);
-+            }
-         } else {
-             output = _compute(n_threads, input, true);
-         }

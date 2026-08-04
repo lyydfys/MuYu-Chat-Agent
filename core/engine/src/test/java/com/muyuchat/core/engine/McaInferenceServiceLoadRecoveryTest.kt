@@ -461,6 +461,81 @@ class McaInferenceServiceLoadRecoveryTest {
     }
 
     @Test
+    fun oversizedLatestUserInputFailsBeforeNativeGeneration() = runBlocking {
+        val runner = FakeLocalChatRunner()
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(LocalChatRuntime.MNN_CPU to runner)
+        )
+        service.loadModel(
+            modelPath = "/models/qwen/config.json",
+            runtime = LocalChatRuntime.MNN_CPU,
+            params = LoadParams(nCtx = 512, nThreads = 4)
+        ).getOrThrow()
+
+        val events = service.streamChat(
+            request = ChatRequest(
+                messages = listOf(ChatMessage(Role.USER, "\u4e2d".repeat(400))),
+                params = GenerationParams(
+                    nCtx = 512,
+                    nPredict = 8,
+                    nThreads = 4,
+                    systemPrompt = "",
+                    reasoningMode = ReasoningMode.OFF,
+                    hideReasoning = true
+                )
+            ),
+            executionContext = LocalChatExecutionContext(includeDeviceClockContext = false)
+        ).toList()
+
+        val error = events.filterIsInstance<GenerateEvent.Error>().single()
+        assertTrue(error.message.contains("\u5f53\u524d\u8f93\u5165"))
+        assertEquals("context_length_exceeded", error.code)
+        assertEquals(0, runner.beginCalls)
+    }
+
+    @Test
+    fun oversizedHistoryIsTrimmedBeforeNativeGenerationAndKeepsLatestUserInput() = runBlocking {
+        val runner = FakeLocalChatRunner()
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(LocalChatRuntime.MNN_CPU to runner)
+        )
+        service.loadModel(
+            modelPath = "/models/qwen/config.json",
+            runtime = LocalChatRuntime.MNN_CPU,
+            params = LoadParams(nCtx = 512, nThreads = 4)
+        ).getOrThrow()
+        val historicalInput = "old-history:" + "a".repeat(3_000)
+        val latestInput = "latest user input"
+        runner.enqueueGeneration("done")
+
+        val events = service.streamChat(
+            request = ChatRequest(
+                messages = listOf(
+                    ChatMessage(Role.USER, historicalInput),
+                    ChatMessage(Role.ASSISTANT, "old answer"),
+                    ChatMessage(Role.USER, latestInput)
+                ),
+                params = GenerationParams(
+                    nCtx = 512,
+                    nPredict = 8,
+                    nThreads = 4,
+                    systemPrompt = "",
+                    reasoningMode = ReasoningMode.OFF,
+                    hideReasoning = true
+                )
+            ),
+            executionContext = LocalChatExecutionContext(includeDeviceClockContext = false)
+        ).toList()
+
+        assertTrue(events.any { it is GenerateEvent.Done })
+        assertEquals(1, runner.beginCalls)
+        assertFalse(runner.lastMessagesJson.contains("old-history:"))
+        assertTrue(runner.lastMessagesJson.contains(latestInput))
+    }
+
+    @Test
     fun gemma4TextIsolationRefreshesBeforeTheFollowingSuccessfulTextRequest() = runBlocking {
         val bundle = Files.createTempDirectory("gemma4-mnn-text-isolation").toFile()
         File(bundle, "config.json").writeText(

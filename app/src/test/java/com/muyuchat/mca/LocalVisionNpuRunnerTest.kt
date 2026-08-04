@@ -50,27 +50,29 @@ class LocalVisionNpuRunnerTest {
     }
 
     @Test
-    fun qnnVisionBundleDoesNotBecomeActiveWhenRuntimeIsMissing() {
+    fun qnnVisionBundleWithMissingRuntimeDiscoveryStillReachesRealSmoke() {
         val bundle = qnnVisionBundle()
         val report = LiteRtQnnVisionRunner(runnerReady = true).health(
             device = snapdragonElite(qnnReady = false),
             bundleRoot = bundle
         )
 
-        assertEquals(LocalVisionNpuState.QNN_RUNTIME_MISSING, report.state)
+        assertEquals(LocalVisionNpuState.SMOKE_REQUIRED, report.state)
         assertFalse(report.npuActive)
+        assertTrue(report.message.contains("smoke", ignoreCase = true))
     }
 
     @Test
-    fun qnnVisionBundleDoesNotBecomeActiveWhenRuntimeLoadProbeFails() {
+    fun qnnVisionBundleWithFailedRuntimeDiscoveryStillReachesRealSmoke() {
         val bundle = qnnVisionBundle()
         val report = LiteRtQnnVisionRunner(runnerReady = true).health(
             device = snapdragonElite(failedRuntime("mock load failure")),
             bundleRoot = bundle
         )
 
-        assertEquals(LocalVisionNpuState.QNN_RUNTIME_MISSING, report.state)
+        assertEquals(LocalVisionNpuState.SMOKE_REQUIRED, report.state)
         assertFalse(report.npuActive)
+        assertTrue(report.message.contains("smoke", ignoreCase = true))
     }
 
     @Test

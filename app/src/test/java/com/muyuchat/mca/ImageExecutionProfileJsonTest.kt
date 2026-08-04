@@ -90,6 +90,49 @@ class ImageExecutionProfileJsonTest {
     }
 
     @Test
+    fun `ultrafix dimensions round trip and absent legacy fields stay disabled`() {
+        val stable = requireNotNull(
+            ImageExecutionProfileResolver.legacyBuiltInProfileForCompatibility(
+                recommendationId = "sd_turbo_512_experimental",
+                modelFingerprint = FINGERPRINT
+            )
+        )
+        val encoded = ImageExecutionProfileJson.toJson(stable)
+        val parsed = requireNotNull(
+            ImageExecutionProfileJson.parseManifest(
+                JSONObject().put("executionProfile", JSONObject(encoded.toString()))
+            )
+        )
+
+        assertTrue(parsed.capabilities.supportsUltraFix)
+        assertEquals(128, parsed.capabilities.ultraFixMinWidth)
+        assertEquals(8_192, parsed.capabilities.ultraFixMaxWidth)
+        assertEquals(128, parsed.capabilities.ultraFixMinHeight)
+        assertEquals(8_192, parsed.capabilities.ultraFixMaxHeight)
+        assertEquals(64, parsed.capabilities.ultraFixWidthMultiple)
+        assertEquals(64, parsed.capabilities.ultraFixHeightMultiple)
+
+        val legacy = JSONObject(encoded.toString()).also { profile ->
+            profile.getJSONObject("capabilities").apply {
+                remove("supportsUltraFix")
+                remove("ultraFixMinWidth")
+                remove("ultraFixMaxWidth")
+                remove("ultraFixMinHeight")
+                remove("ultraFixMaxHeight")
+                remove("ultraFixWidthMultiple")
+                remove("ultraFixHeightMultiple")
+            }
+        }
+        val legacyParsed = requireNotNull(
+            ImageExecutionProfileJson.parseManifest(JSONObject().put("executionProfile", legacy))
+        )
+        assertFalse(legacyParsed.capabilities.supportsUltraFix)
+        assertEquals(0, legacyParsed.capabilities.ultraFixMinWidth)
+        assertEquals(0, legacyParsed.capabilities.ultraFixMaxWidth)
+        assertEquals(0, legacyParsed.capabilities.ultraFixWidthMultiple)
+    }
+
+    @Test
     fun `manifest rejects an out of range advanced batch capability`() {
         listOf(0, 9).forEach { value ->
             val profile = validProfileJson().also {
@@ -519,11 +562,11 @@ class ImageExecutionProfileJsonTest {
             assertNull(ImageExecutionProfileJson.parseSidecars(root))
 
             File(root, "scheduler/scheduler_config.json").also { file ->
-                file.parentFile.mkdirs()
+                requireNotNull(file.parentFile).mkdirs()
                 file.writeText(schedulerJson("DDIMScheduler").toString(), Charsets.UTF_8)
             }
             File(root, "tokenizer/tokenizer_config.json").also { file ->
-                file.parentFile.mkdirs()
+                requireNotNull(file.parentFile).mkdirs()
                 file.writeText(tokenizerJson().toString(), Charsets.UTF_8)
             }
 
@@ -591,7 +634,7 @@ class ImageExecutionProfileJsonTest {
         val root = Files.createTempDirectory("image-profile-malformed-sidecar").toFile()
         try {
             File(root, "scheduler/scheduler_config.json").also { file ->
-                file.parentFile.mkdirs()
+                requireNotNull(file.parentFile).mkdirs()
                 file.writeText("{broken", Charsets.UTF_8)
             }
 

@@ -32,14 +32,23 @@ class NativeQnnBridge {
     ): String
     external fun runSdxlUnetPhase(
         bundleRoot: String,
-        runtimeDirsJson: String,
+        runtimeProfileJson: String,
         paramsJson: String,
         embeddingsPath: String,
+        initialLatentPath: String,
         latentPath: String
+    ): String
+    external fun runSdxlEncoderPhase(
+        bundleRoot: String,
+        runtimeProfileJson: String,
+        paramsJson: String,
+        inputTensorPath: String,
+        latentPath: String,
+        expectedVaeEncoderContextSha256: String
     ): String
     external fun runSdxlVaePhase(
         bundleRoot: String,
-        runtimeDirsJson: String,
+        runtimeProfileJson: String,
         paramsJson: String,
         latentPath: String,
         outputPath: String

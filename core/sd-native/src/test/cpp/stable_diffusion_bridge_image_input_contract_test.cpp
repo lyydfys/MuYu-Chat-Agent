@@ -70,6 +70,9 @@ int main(int argc, char** argv) {
     // Strength changes the actual native denoising timetable and must be
     // validated independently from configured sample steps.
     require_contains(source, "expected_denoising_step_count(contract)");
+    require_contains(source, "backend_denoising_strength(contract)");
+    require_contains(source, "static_cast<float>(contract.steps) * (1.0f - strength)");
+    require_contains(source, "native_effective[\"backendStrength\"]");
     require_contains(source, "actualDenoisingStepCount");
     require_contains(source, "configuredSampleSteps");
 

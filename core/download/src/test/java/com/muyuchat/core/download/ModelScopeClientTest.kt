@@ -281,10 +281,29 @@ class ModelScopeClientTest {
         ).associateWith { id ->
             requireNotNull(recommendations.first { it.id == id }.imageEngineBundle?.executionProfile)
         }
-        qnn228Sd15Profiles.values.forEach { profile ->
-            assertEquals(2, profile.profileRevision)
+        val expectedQnn228Sd15ProfileRevisions = mapOf(
+            "cyberrealistic_sd15_qnn228" to 5,
+            "realisticvisionhyper_sd15_qnn228" to 6,
+            "dreamshaper_sd15_qnn228" to 6,
+            "meinamix_sd15_qnn228" to 5
+        )
+        qnn228Sd15Profiles.forEach { (id, profile) ->
+            assertEquals(
+                "$id execution-profile revision drifted",
+                expectedQnn228Sd15ProfileRevisions.getValue(id),
+                profile.profileRevision
+            )
             assertEquals("clip_v2.mnn", profile.graph.textEncoder)
             assertEquals(ImageEngineWorkerStrategy.SHARED_UNET_VAE, profile.graph.workerStrategy)
+            assertTrue(profile.tokenizer.supportsTextualInversion)
+            assertTrue(profile.capabilities.supportsTextualInversion)
+            assertTrue(profile.capabilities.supportsLivePreview)
+            assertFalse(profile.capabilities.supportsVaeTiling)
+            assertTrue(profile.capabilities.supportsUltraFix)
+            assertEquals(512, profile.capabilities.ultraFixMinWidth)
+            assertEquals(2_048, profile.capabilities.ultraFixMaxWidth)
+            assertEquals(64, profile.capabilities.ultraFixWidthMultiple)
+            assertEquals(512, profile.capabilities.ultraFixRequiredTileSize)
             assertNull(profile.graph.schedulerSidecar)
             assertNull(profile.graph.tokenizerSidecar)
             assertEquals(
@@ -292,22 +311,53 @@ class ModelScopeClientTest {
                 profile.graph.configSidecars
             )
         }
-        assertEquals(
-            ImageEngineEmbeddingDataType.FP16,
-            qnn228Sd15Profiles.getValue("cyberrealistic_sd15_qnn228").conditioning.diskDataType
-        )
+        val sharedGen5Profiles = listOf(
+            "qualcomm_sd15_gen5_qnn",
+            "qualcomm_sd21_gen5_qnn",
+            "qualcomm_controlnet_canny_gen5_qnn"
+        ).map { id ->
+            requireNotNull(recommendations.first { it.id == id }.imageEngineBundle?.executionProfile)
+        }
+        sharedGen5Profiles.forEach { profile ->
+            assertEquals(2, profile.profileRevision)
+            assertEquals(ImageEngineWorkerStrategy.SHARED_TEXT_UNET_VAE, profile.graph.workerStrategy)
+            assertFalse(profile.tokenizer.supportsTextualInversion)
+            assertFalse(profile.capabilities.supportsTextualInversion)
+            assertTrue(profile.capabilities.supportsLivePreview)
+            assertFalse(profile.capabilities.supportsUltraFix)
+        }
         listOf(
+            "sdxl_base_qnn228",
+            "realismsdxl_dmd2_alt_qnn228",
+            "animagine_xl_v4_qnn228",
+            "cyberrealisticxl_qnn228"
+        ).forEach { id ->
+            val profile = requireNotNull(
+                recommendations.first { it.id == id }.imageEngineBundle?.executionProfile
+            )
+            assertEquals(6, profile.profileRevision)
+            assertEquals(ImageEngineWorkerStrategy.SPLIT_UNET_VAE, profile.graph.workerStrategy)
+            assertTrue(profile.tokenizer.supportsTextualInversion)
+            assertTrue(profile.capabilities.supportsTextualInversion)
+            assertFalse(profile.capabilities.supportsLivePreview)
+            assertTrue(profile.capabilities.supportsUltraFix)
+            assertEquals(1_024, profile.capabilities.ultraFixRequiredTileSize)
+        }
+        listOf(
+            "cyberrealistic_sd15_qnn228",
             "realisticvisionhyper_sd15_qnn228",
-            "dreamshaper_sd15_qnn228",
-            "meinamix_sd15_qnn228"
+            "dreamshaper_sd15_qnn228"
         ).forEach { id ->
             val conditioning = qnn228Sd15Profiles.getValue(id).conditioning
-            assertEquals(ImageEngineEmbeddingDataType.FP32, conditioning.diskDataType)
-            assertEquals(
-                ImageEngineEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
-                conditioning.conversionStrategy
-            )
+            assertEquals(ImageEngineEmbeddingDataType.FP16, conditioning.diskDataType)
+            assertEquals(ImageEngineEmbeddingConversionStrategy.NONE, conditioning.conversionStrategy)
         }
+        val meinaConditioning = qnn228Sd15Profiles.getValue("meinamix_sd15_qnn228").conditioning
+        assertEquals(ImageEngineEmbeddingDataType.FP32, meinaConditioning.diskDataType)
+        assertEquals(
+            ImageEngineEmbeddingConversionStrategy.FP32_TO_FP16_STREAMING,
+            meinaConditioning.conversionStrategy
+        )
         listOf(
             "realisticvisionhyper_sd15_qnn228",
             "dreamshaper_sd15_qnn228"
@@ -328,8 +378,18 @@ class ModelScopeClientTest {
                 .imageEngineBundle!!
                 .requiredRuntimeProfile
         )
-        assertEquals(2, cyberRealisticQnn.imageEngineBundle!!.qnnSmokeSpecs.size)
+        assertEquals(3, cyberRealisticQnn.imageEngineBundle!!.qnnSmokeSpecs.size)
         assertEquals("unet.bin", cyberRealisticQnn.imageEngineBundle!!.qnnSmokeSpecs.first().contextBinary)
+        val cyberEncoder = cyberRealisticQnn.imageEngineBundle!!.qnnSmokeSpecs.single {
+            it.contextBinary == "vae_encoder.bin"
+        }
+        assertEquals(58_870_768L, cyberEncoder.expectedContextSizeBytes)
+        assertEquals(
+            "f2a5d073d0c4492361eb49005f03acd6ecdceba652c6fc7ba68eddd2b4d98da7",
+            cyberEncoder.expectedContextSha256
+        )
+        assertEquals(listOf(1, 3, 512, 512), cyberEncoder.inputs.single().shape)
+        assertEquals(setOf("mean", "std"), cyberEncoder.outputs.map { it.name }.toSet())
         assertNotNull(
             cyberRealisticQnn.imageEngineBundle!!
                 .components
@@ -348,8 +408,10 @@ class ModelScopeClientTest {
         assertTrue(cyberRealisticXlQnn.downloadable)
         assertNull(cyberRealisticXlQnn.downloadBlockReason)
         assertTrue(cyberRealisticXlQnn.description.contains("1024×1024"))
-        assertFalse(cyberRealisticXlQnn.description.contains("形状不匹配"))
-        assertEquals(2, cyberRealisticXlQnn.imageEngineBundle!!.qnnSmokeSpecs.size)
+        assertTrue(cyberRealisticXlQnn.description.contains("9 次"))
+        assertTrue(cyberRealisticXlQnn.description.contains("分块解码"))
+        assertTrue(cyberRealisticXlQnn.description.contains("尚待生产 MainActivity 与认证 Local API 复验"))
+        assertEquals(3, cyberRealisticXlQnn.imageEngineBundle!!.qnnSmokeSpecs.size)
         assertEquals("unet.bin", cyberRealisticXlQnn.imageEngineBundle!!.qnnSmokeSpecs.first().contextBinary)
         assertEquals(5, cyberRealisticXlQnn.imageEngineBundle!!.qnnSmokeSpecs.first().inputs.size)
         assertNotNull(
@@ -374,9 +436,10 @@ class ModelScopeClientTest {
         val sdTurbo = recommendations.single { it.id == "sd_turbo_512_experimental" }
         val sdTurboBundle = requireNotNull(sdTurbo.imageEngineBundle)
         assertEquals("Stable Diffusion Turbo · 512×512", sdTurbo.title)
-        assertEquals(RecommendedModelStatus.RECOMMENDED, sdTurbo.status)
-        assertTrue(sdTurbo.description.contains("384×384 尚未验证"))
+        assertEquals(RecommendedModelStatus.EXPERIMENTAL, sdTurbo.status)
+        assertTrue(sdTurbo.description.contains("现有归档仅证明 debug worker 以 1-step/Euler 产图"))
         assertTrue(sdTurbo.downloadable)
+        assertNull(sdTurbo.downloadBlockReason)
         assertEquals(ModelRepositoryProvider.MODELSCOPE, sdTurbo.provider)
         assertEquals(ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP, sdTurboBundle.runtime)
         assertEquals(ImageEngineAccelerator.CPU, sdTurboBundle.accelerator)
@@ -385,6 +448,14 @@ class ModelScopeClientTest {
         assertEquals(512, sdTurboBundle.smokeSpec.width)
         assertEquals(512, sdTurboBundle.smokeSpec.height)
         assertEquals(4, sdTurboBundle.smokeSpec.steps)
+        val sdTurboProfile = requireNotNull(sdTurboBundle.executionProfile)
+        assertEquals(2, sdTurboProfile.profileRevision)
+        assertTrue(sdTurboProfile.tokenizer.supportsTextualInversion)
+        assertTrue(sdTurboProfile.capabilities.supportsTextualInversion)
+        assertTrue(sdTurboProfile.capabilities.supportsUltraFix)
+        assertEquals(128, sdTurboProfile.capabilities.ultraFixMinWidth)
+        assertEquals(8_192, sdTurboProfile.capabilities.ultraFixMaxWidth)
+        assertEquals(64, sdTurboProfile.capabilities.ultraFixWidthMultiple)
         assertTrue(sdTurbo.description.contains("4-step"))
         assertTrue(sdTurbo.description.contains("CFG 1.0"))
         assertEquals(1, sdTurboBundle.requiredComponents.size)
@@ -443,6 +514,62 @@ class ModelScopeClientTest {
                 .components
                 .firstOrNull { it.role == ImageEngineBundleComponentRole.VAE && it.fileName.endsWith("qwen_image_vae.safetensors") }
         )
+    }
+
+    @Test
+    fun unverifiedImageCatalogClaimsStayExperimentalAndDownloadable() {
+        val recommendations = client.userFacingRecommendedModels().associateBy { it.id }
+        val evidenceLimitedIds = setOf(
+            "cyberrealisticxl_qnn228",
+            "qualcomm_sd15_gen5_qnn",
+            "qualcomm_sd21_gen5_qnn",
+            "qualcomm_controlnet_canny_gen5_qnn",
+            "sd_turbo_512_experimental",
+            "mnn_sana_edit_v2"
+        )
+
+        evidenceLimitedIds.forEach { id ->
+            val model = requireNotNull(recommendations[id])
+            assertEquals("$id must not claim verified status", RecommendedModelStatus.EXPERIMENTAL, model.status)
+            assertTrue("$id remains visible", model.visibleInRecommendations)
+            assertTrue("$id remains downloadable", model.downloadable)
+            assertNull("$id has no download block reason", model.downloadBlockReason)
+            assertTrue(
+                "$id remains downloadable without device-profile admission",
+                model.downloadEligibilityFor("", deviceIsSnapdragon = false).canDownload
+            )
+        }
+
+        listOf("qualcomm_sd15_gen5_qnn", "qualcomm_sd21_gen5_qnn").forEach { id ->
+            val description = requireNotNull(recommendations[id]).description
+            assertTrue(description.contains("尚无生产 MainActivity 和认证 Local API 的真机出图证据"))
+            assertFalse(description.contains("已完成"))
+            assertFalse(description.contains("真实 QNN HTP 生图回归"))
+        }
+
+        val controlNetDescription = requireNotNull(
+            recommendations["qualcomm_controlnet_canny_gen5_qnn"]
+        ).description
+        assertTrue(controlNetDescription.contains("产品输入链尚无生产 UI/API 真机执行证据"))
+        assertFalse(controlNetDescription.contains("已接线"))
+
+        val sanaDescription = requireNotNull(recommendations["mnn_sana_edit_v2"]).description
+        assertTrue(sanaDescription.contains("尚无生产 MainActivity 与认证 Local API 的真实编辑证据"))
+        assertFalse(sanaDescription.contains("已验证"))
+
+        val sdTurboDescription = requireNotNull(recommendations["sd_turbo_512_experimental"]).description
+        assertTrue(sdTurboDescription.contains("当前目录默认 512×512、4-step、CFG 1.0、Euler ancestral"))
+        assertTrue(sdTurboDescription.contains("现有归档仅证明 debug worker 以 1-step/Euler 产图"))
+        assertTrue(sdTurboDescription.contains("尚未证明当前预设"))
+        assertFalse(sdTurboDescription.contains("三次冷启动真机出图"))
+
+        val cyberXlDescription = requireNotNull(recommendations["cyberrealisticxl_qnn228"]).description
+        assertTrue(cyberXlDescription.contains("UNet [1,4,128,128]"))
+        assertTrue(cyberXlDescription.contains("VAE [1,4,64,64]"))
+        assertTrue(cyberXlDescription.contains("3×3、共 9 次"))
+        assertTrue(cyberXlDescription.contains("重叠融合兼容路径"))
+        assertTrue(cyberXlDescription.contains("尚待生产 MainActivity 与认证 Local API 复验"))
+        assertTrue(cyberXlDescription.contains("不会静默切换模型"))
     }
 
     @Test
@@ -599,6 +726,18 @@ class ModelScopeClientTest {
             val scheduler = bundle.executionProfile!!.scheduler
             assertEquals(ImageEngineSchedulerAlgorithm.DPMPP_2M, scheduler.algorithm)
             assertEquals(2, scheduler.order)
+            assertEquals(6, bundle.executionProfile!!.profileRevision)
+            assertEquals(
+                setOf(
+                    ImageEngineSchedulerAlgorithm.DPMPP_2M,
+                    ImageEngineSchedulerAlgorithm.EULER
+                ),
+                bundle.executionProfile!!.capabilities.supportedSchedulers
+            )
+            assertFalse(
+                ImageEngineSchedulerAlgorithm.LCM in
+                    bundle.executionProfile!!.capabilities.supportedSchedulers
+            )
             assertNull(bundle.executionProfile!!.graph.htpArch)
             assertNull(bundle.requiredRuntimeProfile)
         }
@@ -811,7 +950,7 @@ class ModelScopeClientTest {
     }
 
     @Test
-    fun sdxlRecommendationsUse1024UnetAndTiled512VaeGraphContracts() {
+    fun sdxlRecommendationsUse1024UnetEncoderAndTiled512VaeGraphContracts() {
         val sdxlIds = setOf(
             "sdxl_base_qnn228",
             "realismsdxl_dmd2_alt_qnn228",
@@ -825,6 +964,7 @@ class ModelScopeClientTest {
             val bundle = requireNotNull(model.imageEngineBundle)
             val unet = bundle.qnnSmokeSpecs.single { it.contextBinary == "unet.bin" }
             val vae = bundle.qnnSmokeSpecs.single { it.contextBinary == "vae_decoder.bin" }
+            val encoder = bundle.qnnSmokeSpecs.single { it.contextBinary == "vae_encoder.bin" }
             assertEquals(1024, unet.width)
             assertEquals(1024, unet.height)
             assertEquals(listOf(1, 4, 128, 128), unet.inputs.single { it.name == "sample" }.shape)
@@ -837,12 +977,45 @@ class ModelScopeClientTest {
             assertEquals("float32", vae.inputs.single().dataType)
             assertEquals(listOf(1, 3, 512, 512), vae.outputs.single().shape)
             assertEquals("float32", vae.outputs.single().dataType)
+            assertEquals(1024, encoder.width)
+            assertEquals(1024, encoder.height)
+            assertEquals(listOf(1, 3, 1024, 1024), encoder.inputs.single().shape)
+            assertEquals("float32", encoder.inputs.single().dataType)
+            assertEquals(setOf("mean", "std"), encoder.outputs.map { it.name }.toSet())
+            assertTrue(encoder.outputs.all {
+                it.dataType == "float32" && it.shape == listOf(1, 4, 128, 128)
+            })
         }
 
         val cyber = models.single { it.id == "cyberrealisticxl_qnn228" }
         assertEquals("xororz/sdxl-qnn", cyber.repoId)
         assertEquals("cyber_realistic_v10_qnn2.28_8gen3.zip", cyber.recommendedFileName)
         assertTrue(cyber.downloadEligibilityFor("", deviceIsSnapdragon = false).canDownload)
+    }
+
+    @Test
+    fun sd15QnnRecommendationsPinDistinctVaeEncoderIdentities() {
+        val expected = mapOf(
+            "cyberrealistic_sd15_qnn228" to (58_870_768L to "f2a5d073d0c4492361eb49005f03acd6ecdceba652c6fc7ba68eddd2b4d98da7"),
+            "realisticvisionhyper_sd15_qnn228" to (58_862_576L to "629797a9eb5204a2465fa993e9efa2546c60dce93d9bcd009ba7b06fc62ecf3b"),
+            "dreamshaper_sd15_qnn228" to (58_862_576L to "6baf4c28749e310404c1b079230cd47296d389fb4037f05267e589a50294bc66"),
+            "meinamix_sd15_qnn228" to (41_438_176L to "b32367e717c331cbacce7dc3482c7e5668dea90c8cc77396dee3761845d2bdd6")
+        )
+
+        expected.forEach { (id, identity) ->
+            val encoder = client.userFacingRecommendedModels()
+                .single { it.id == id }
+                .imageEngineBundle!!
+                .qnnSmokeSpecs
+                .single { it.contextBinary == "vae_encoder.bin" }
+            assertEquals(identity.first, encoder.expectedContextSizeBytes)
+            assertEquals(identity.second, encoder.expectedContextSha256)
+            assertEquals(listOf(1, 3, 512, 512), encoder.inputs.single().shape)
+            assertEquals(
+                setOf("mean", "std"),
+                encoder.outputs.map { it.name }.toSet()
+            )
+        }
     }
 
     @Test
@@ -960,18 +1133,7 @@ class ModelScopeClientTest {
         )
         val gen5Images = npuImage.filter { it.id in gen5ImageIds }
         assertEquals(3, gen5Images.size)
-        assertEquals(
-            RecommendedModelStatus.RECOMMENDED,
-            gen5Images.single { it.id == "qualcomm_sd15_gen5_qnn" }.status
-        )
-        assertEquals(
-            RecommendedModelStatus.RECOMMENDED,
-            gen5Images.single { it.id == "qualcomm_sd21_gen5_qnn" }.status
-        )
-        assertEquals(
-            RecommendedModelStatus.EXPERIMENTAL,
-            gen5Images.single { it.id == "qualcomm_controlnet_canny_gen5_qnn" }.status
-        )
+        assertTrue(gen5Images.all { it.status == RecommendedModelStatus.EXPERIMENTAL })
         assertTrue(gen5Images.all { it.downloadable })
         assertTrue(gen5Images.all { it.supportedChipsetCodes == setOf("SM8850", "SM8850P") })
         val expectedGen5Archives = mapOf(

@@ -35,8 +35,13 @@
             android:process=":local_image" />
 
         <!-- SDXL V75 archive contexts are split into disposable processes.
-             Physical HTP transport is selected dynamically; UNet must die
-             before VAE starts, and neither graph shares an unload lifecycle. -->
+             Physical HTP transport is selected dynamically; encoder, UNet,
+             and decoder must die in order, and no graph shares an unload lifecycle. -->
+        <service
+            android:name=".SdxlEncoderWorkerService"
+            android:exported="false"
+            android:process=":sdxl_encoder_v75" />
+
         <service
             android:name=".SdxlUnetWorkerService"
             android:exported="false"

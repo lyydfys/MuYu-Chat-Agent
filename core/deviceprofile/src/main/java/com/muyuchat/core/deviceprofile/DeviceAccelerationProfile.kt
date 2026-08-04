@@ -7,6 +7,14 @@ import org.json.JSONObject
 import java.io.File
 import java.util.Locale
 
+internal val QNN_PLATFORM_RUNTIME_DIRECTORY_PREFIXES = listOf(
+    "/vendor/",
+    "/odm/",
+    "/system/",
+    "/system_ext/",
+    "/product/"
+)
+
 enum class SnapdragonAccelerationTier(val label: String) {
     NONE("非骁龙 NPU 平台"),
     SNAPDRAGON_8_GEN1("骁龙 8 Gen 1"),
@@ -83,10 +91,9 @@ data class QnnRuntimeProfile(
 }
 
 /**
- * Selects an internally coherent QNN profile. The preferred HTP architecture
- * is only the first transport candidate: if it is absent, keep the feature
- * open and fall back to another complete profile so native context/graph load
- * can make the real compatibility decision.
+ * Selects internally coherent QNN profiles. The preferred HTP architecture is
+ * only an ordering hint: every other discovered architecture and every
+ * permissible host/DSP tuple remains available for real native load.
  */
 object QnnRuntimeProfileSelector {
     fun htpArchVersionForChipsetCode(chipsetCode: String): Int? =
@@ -114,7 +121,46 @@ object QnnRuntimeProfileSelector {
     fun select(
         searchDirectories: List<File>,
         preferredHtpArchVersion: Int? = null
-    ): QnnRuntimeProfile? {
+    ): QnnRuntimeProfile? = candidateSequence(
+        searchDirectories = searchDirectories,
+        preferredHtpArchVersion = preferredHtpArchVersion,
+        isPlatformDirectory = ::isPlatformDirectory
+    ).firstOrNull()
+
+    internal fun select(
+        searchDirectories: List<File>,
+        preferredHtpArchVersion: Int?,
+        isPlatformDirectory: (File) -> Boolean
+    ): QnnRuntimeProfile? = candidateSequence(
+        searchDirectories = searchDirectories,
+        preferredHtpArchVersion = preferredHtpArchVersion,
+        isPlatformDirectory = isPlatformDirectory
+    ).firstOrNull()
+
+    fun candidates(
+        searchDirectories: List<File>,
+        preferredHtpArchVersion: Int? = null
+    ): List<QnnRuntimeProfile> = candidateSequence(
+        searchDirectories = searchDirectories,
+        preferredHtpArchVersion = preferredHtpArchVersion,
+        isPlatformDirectory = ::isPlatformDirectory
+    ).toList()
+
+    internal fun candidates(
+        searchDirectories: List<File>,
+        preferredHtpArchVersion: Int?,
+        isPlatformDirectory: (File) -> Boolean
+    ): List<QnnRuntimeProfile> = candidateSequence(
+        searchDirectories = searchDirectories,
+        preferredHtpArchVersion = preferredHtpArchVersion,
+        isPlatformDirectory = isPlatformDirectory
+    ).toList()
+
+    private fun candidateSequence(
+        searchDirectories: List<File>,
+        preferredHtpArchVersion: Int?,
+        isPlatformDirectory: (File) -> Boolean
+    ): Sequence<QnnRuntimeProfile> = sequence {
         val dirs = searchDirectories
             .mapNotNull { directory -> runCatching { directory.canonicalFile }.getOrNull() }
             .filter(File::isDirectory)
@@ -124,7 +170,7 @@ object QnnRuntimeProfileSelector {
             val htp = File(directory, "libQnnHtp.so")
             if (system.isFile && htp.isFile) HostCandidate(directory, system, htp) else null
         }
-        if (hosts.isEmpty()) return null
+        if (hosts.isEmpty()) return@sequence
 
         val availableVersions = dirs
             .flatMap { directory -> directory.listFiles()?.asList().orEmpty() }
@@ -136,7 +182,8 @@ object QnnRuntimeProfileSelector {
             addAll(availableVersions)
         }.distinct()
 
-        versions.forEach { archVersion ->
+        val emitted = mutableSetOf<Triple<String, String, Int>>()
+        for (archVersion in versions) {
             val dspCandidates = dirs.mapNotNull { directory ->
                 val skel = File(directory, "libQnnHtpV${archVersion}Skel.so")
                 if (!skel.isFile) {
@@ -149,22 +196,33 @@ object QnnRuntimeProfileSelector {
                     )
                 }
             }
-            hosts.forEach { host ->
-                dspCandidates.firstOrNull { dsp -> mayPair(host.directory, dsp.directory) }?.let { dsp ->
-                    return QnnRuntimeProfile(
-                        hostDirectory = host.directory,
-                        dspDirectory = dsp.directory,
-                        systemLibrary = host.system,
-                        htpLibrary = host.htp,
-                        htpSkelLibrary = dsp.skel,
-                        htpStubLibrary = dsp.stub,
-                        cdspRpcLibrary = File(host.directory, "libcdsprpc.so").takeIf(File::isFile),
-                        htpArchVersion = archVersion
-                    )
+            for (host in hosts) {
+                for (dsp in dspCandidates) {
+                    if (mayPair(host.directory, dsp.directory, isPlatformDirectory)) {
+                        val identity = Triple(
+                            host.directory.absolutePath,
+                            dsp.directory.absolutePath,
+                            archVersion
+                        )
+                        if (emitted.add(identity)) {
+                            yield(
+                                QnnRuntimeProfile(
+                                    hostDirectory = host.directory,
+                                    dspDirectory = dsp.directory,
+                                    systemLibrary = host.system,
+                                    htpLibrary = host.htp,
+                                    htpSkelLibrary = dsp.skel,
+                                    htpStubLibrary = dsp.stub,
+                                    cdspRpcLibrary = File(host.directory, "libcdsprpc.so")
+                                        .takeIf(File::isFile),
+                                    htpArchVersion = archVersion
+                                )
+                            )
+                        }
+                    }
                 }
             }
         }
-        return null
     }
 
     private data class HostCandidate(
@@ -186,18 +244,18 @@ object QnnRuntimeProfileSelector {
             ?.getOrNull(1)
             ?.toIntOrNull()
 
-    private fun mayPair(hostDirectory: File, dspDirectory: File): Boolean {
+    private fun mayPair(
+        hostDirectory: File,
+        dspDirectory: File,
+        isPlatformDirectory: (File) -> Boolean
+    ): Boolean {
         if (hostDirectory == dspDirectory) return true
         return isPlatformDirectory(hostDirectory) && isPlatformDirectory(dspDirectory)
     }
 
     private fun isPlatformDirectory(directory: File): Boolean {
         val path = directory.absolutePath.replace('\\', '/')
-        return path.startsWith("/vendor/") ||
-            path.startsWith("/odm/") ||
-            path.startsWith("/system/") ||
-            path.startsWith("/system_ext/") ||
-            path.startsWith("/product/")
+        return QNN_PLATFORM_RUNTIME_DIRECTORY_PREFIXES.any(path::startsWith)
     }
 }
 

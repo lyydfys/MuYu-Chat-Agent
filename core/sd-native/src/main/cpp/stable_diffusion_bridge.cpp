@@ -16,6 +16,7 @@
 #include <dirent.h>
 #include <exception>
 #include <fcntl.h>
+#include <iomanip>
 #include <limits.h>
 #include <limits>
 #include <memory>
@@ -31,6 +32,9 @@
 
 #include "json.hpp"
 #include "stable-diffusion.h"
+#include "image_execution_math.hpp"
+#include "execution_asset_binding.hpp"
+#include "native_prompt_language_contract.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -70,6 +74,7 @@ constexpr uint32_t kStageInputImageDecoded = 1u << 7u;
 constexpr uint32_t kStageMaskImageDecoded = 1u << 8u;
 constexpr uint32_t kStageControlImageDecoded = 1u << 9u;
 constexpr uint32_t kStageLoraValidated = 1u << 10u;
+constexpr uint32_t kStageTextualInversionValidated = 1u << 11u;
 
 constexpr size_t kMaxInputImageBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxInputImageSide = 8192u;
@@ -77,6 +82,10 @@ constexpr uint64_t kMaxInputImagePixels = 64u * 1024u * 1024u;
 constexpr int kMaxBatchCount = 8;
 constexpr size_t kMaxLoraCount = 8u;
 constexpr uint64_t kMaxLoraBytes = 2ull * 1024ull * 1024ull * 1024ull;
+constexpr size_t kMaxTextualInversionCount = 8u;
+// stable-diffusion.cpp's custom-word loader allocates a bounded 100 MiB scratch context.
+// Keep the Android import and native contract limits identical to avoid a late OOM.
+constexpr uint64_t kMaxTextualInversionBytes = 100ull * 1024ull * 1024ull;
 constexpr uint64_t kMaxUpscalerBytes = 2ull * 1024ull * 1024ull * 1024ull;
 constexpr uint32_t kMaxUpscaleInputSide = 2048u;
 constexpr uint64_t kMaxUpscaleInputPixels = 4000000ull;
@@ -464,6 +473,17 @@ bool is_sha256(const std::string &value) {
     });
 }
 
+bool is_textual_inversion_trigger(const std::string &value) {
+    if (value.empty() || value.size() > 64u) return false;
+    return std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return (c >= 'a' && c <= 'z') ||
+               (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') ||
+               c == '_' || c == ':' || c == '#' || c == '<' || c == '>' ||
+               c == '|' || c == '.' || c == '-';
+    });
+}
+
 struct ContractLoraAdapter {
     std::string id;
     std::string name;
@@ -471,6 +491,23 @@ struct ContractLoraAdapter {
     std::string sha256;
     uint64_t size_bytes = 0u;
     double multiplier = 1.0;
+};
+
+struct ContractTextualInversion {
+    std::string id;
+    std::string name;
+    std::string trigger;
+    std::string path;
+    std::string sha256;
+    std::string format;
+    std::string model_fingerprint;
+    std::string tokenizer_fingerprint;
+    std::string profile_id;
+    std::string runtime;
+    std::string native_mode;
+    std::string binding_fingerprint;
+    int profile_revision = 0;
+    uint64_t size_bytes = 0u;
 };
 
 struct StableDiffusionExecutionContract {
@@ -518,11 +555,24 @@ struct StableDiffusionExecutionContract {
     int batch_count = 1;
     std::string lora_root_path;
     std::vector<ContractLoraAdapter> loras;
+    std::string textual_inversion_root_path;
+    std::vector<ContractTextualInversion> textual_inversions;
+    std::string textual_inversion_binding_fingerprint;
+    std::string textual_inversion_native_mode;
+    bool textual_inversion_supported = false;
     bool vae_tiling_enabled = false;
     int vae_tile_size = 0;
     double vae_tile_overlap = 0.0;
     int preview_interval = 0;
     std::string preview_mode = "none";
+    bool ultrafix_enabled = false;
+    int ultrafix_target_width = 0;
+    int ultrafix_target_height = 0;
+    double ultrafix_strength = 0.0;
+    int ultrafix_inversion_steps = 0;
+    int ultrafix_refinement_steps = 0;
+    int ultrafix_tile_size = 0;
+    double ultrafix_overlap = 0.0;
 };
 
 bool task_uses_input_image(const StableDiffusionExecutionContract &contract) {
@@ -547,9 +597,25 @@ int expected_denoising_step_count(const StableDiffusionExecutionContract &contra
     if (!task_uses_init_image(contract) || contract.strength >= 1.0) {
         return contract.steps;
     }
-    const int encoded_steps = static_cast<int>(
-            static_cast<double>(contract.steps) * contract.strength);
-    return std::min(contract.steps, encoded_steps + 1);
+    const float strength = static_cast<float>(contract.strength);
+    const int begin_index = std::clamp(
+            static_cast<int>(static_cast<float>(contract.steps) * (1.0f - strength)),
+            0,
+            contract.steps - 1);
+    return contract.steps - begin_index;
+}
+
+float backend_denoising_strength(const StableDiffusionExecutionContract &contract) {
+    if (!task_uses_init_image(contract)) {
+        return static_cast<float>(contract.strength);
+    }
+    const int effective_steps = expected_denoising_step_count(contract);
+    if (effective_steps >= contract.steps) return 1.0f;
+    // stable-diffusion.cpp uses floor(steps * strength) + 1 entries. Feed
+    // the midpoint of the bin that produces the Local Dream-compatible
+    // tail count, while retaining the user value as product evidence.
+    return (static_cast<float>(effective_steps) - 0.5f) /
+            static_cast<float>(contract.steps);
 }
 
 void resolve_sampler_contract(StableDiffusionExecutionContract &contract) {
@@ -729,6 +795,13 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
 
     contract.prompt = required_string(params, "prompt");
     contract.negative_prompt = required_string(params, "negativePrompt", true);
+    if (!mca::image::prompt_language::is_safe_ascii_diffusion_prompt_pair(
+            contract.prompt,
+            contract.negative_prompt)) {
+        unsupported_contract(
+                "prompt,negativePrompt",
+                "stable-diffusion.cpp has no evidence-bound multilingual text encoder; use canonical ASCII English tags");
+    }
     if (!contract.use_cfg && !contract.negative_prompt.empty()) {
         unsupported_contract(
                 "negativePrompt",
@@ -789,8 +862,8 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
         required_int32(params, "n") != contract.batch_count) {
         invalid_contract("n", "must exactly match batchCount");
     }
-    if (contract.strength <= 0.0 || contract.strength > 1.0) {
-        invalid_contract("strength", "must be in (0, 1]");
+    if (contract.strength < 0.0 || contract.strength > 1.0) {
+        invalid_contract("strength", "must be in [0, 1]");
     }
     if (contract.control_strength < 0.0 || contract.control_strength > 2.0) {
         invalid_contract("controlStrength", "must be in [0, 2]");
@@ -849,6 +922,177 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
         adapter.size_bytes = static_cast<uint64_t>(size_bytes);
         contract.loras.push_back(std::move(adapter));
     }
+
+    // Textual inversion is a native CLIP custom-word path, not an arbitrary prompt embedding
+    // override.  Keep the wire shape explicit so QNN/MNN requests cannot silently ignore it.
+    const auto textual_inversions = params.find("textualInversions");
+    const size_t textual_inversion_count = textual_inversions == params.end()
+            ? 0u
+            : (textual_inversions->is_array() ? textual_inversions->size() : 0u);
+    if (textual_inversions != params.end() && !textual_inversions->is_array()) {
+        invalid_contract("textualInversions", "must be an array when present");
+    }
+    const auto textual_count_field = params.find("textualInversionCount");
+    if (textual_count_field != params.end()) {
+        const int count = required_int32(params, "textualInversionCount");
+        if (count < 0 || static_cast<size_t>(count) != textual_inversion_count) {
+            invalid_contract("textualInversionCount", "must exactly match textualInversions");
+        }
+    }
+    contract.textual_inversion_supported = optional_boolean(
+            params,
+            "textualInversionSupported",
+            false);
+    contract.textual_inversion_native_mode = optional_string(
+            params,
+            "textualInversionNativeMode",
+            "");
+    contract.textual_inversion_root_path = optional_string(
+            params,
+            "textualInversionRootPath",
+            "");
+    contract.textual_inversion_binding_fingerprint = lower_copy(optional_string(
+            params,
+            "textualInversionBindingFingerprint",
+            ""));
+    if (textual_inversion_count == 0u) {
+        if (!contract.textual_inversion_native_mode.empty() ||
+            !contract.textual_inversion_root_path.empty() ||
+            !contract.textual_inversion_binding_fingerprint.empty()) {
+            invalid_contract(
+                    "textualInversions",
+                    "textual inversion metadata must be omitted when no artifact is selected");
+        }
+    } else {
+        if (!contract.textual_inversion_supported) {
+            unsupported_contract(
+                    "textualInversionSupported",
+                    "the resolved graph does not expose a textual-inversion input path");
+        }
+        if (contract.textual_inversion_native_mode != "SDCPP_CUSTOM_WORDS") {
+            unsupported_contract(
+                    "textualInversionNativeMode",
+                    "stable-diffusion.cpp requires the SDCPP_CUSTOM_WORDS custom-word path");
+        }
+        if (contract.textual_inversion_root_path.empty()) {
+            invalid_contract(
+                    "textualInversionRootPath",
+                    "is required when textual inversion artifacts are selected");
+        }
+        if (!is_sha256(contract.textual_inversion_binding_fingerprint)) {
+            invalid_contract(
+                    "textualInversionBindingFingerprint",
+                    "must be a lowercase 64-character SHA-256 value");
+        }
+        if (textual_inversion_count > kMaxTextualInversionCount) {
+            invalid_contract("textualInversions", "at most 8 artifacts may be selected");
+        }
+        std::unordered_set<std::string> textual_ids;
+        std::unordered_set<std::string> textual_paths;
+        std::unordered_set<std::string> textual_triggers;
+        std::string selected_tokenizer_fingerprint;
+        uint64_t active_textual_inversion_bytes = 0u;
+        constexpr uint64_t kMaxActiveTextualInversionBytes =
+                UINT64_C(256) * 1024u * 1024u;
+        contract.textual_inversions.reserve(textual_inversion_count);
+        for (size_t index = 0; index < textual_inversion_count; ++index) {
+            const json &item = (*textual_inversions)[index];
+            if (!item.is_object()) {
+                invalid_contract("textualInversions", "every item must be an object");
+            }
+            ContractTextualInversion artifact;
+            artifact.id = required_string(item, "id");
+            artifact.name = required_string(item, "name");
+            artifact.trigger = required_string(item, "trigger");
+            artifact.path = required_string(item, "path");
+            artifact.sha256 = lower_copy(required_string(item, "sha256"));
+            artifact.format = lower_copy(required_string(item, "format"));
+            artifact.model_fingerprint = lower_copy(required_string(item, "modelFingerprint"));
+            artifact.tokenizer_fingerprint = lower_copy(required_string(item, "tokenizerFingerprint"));
+            artifact.profile_id = required_string(item, "profileId");
+            artifact.runtime = required_string(item, "runtime");
+            artifact.native_mode = required_string(item, "nativeMode");
+            artifact.binding_fingerprint = lower_copy(required_string(item, "bindingFingerprint"));
+            artifact.profile_revision = required_int32(item, "profileRevision");
+            const int64_t size_bytes = required_integer(item, "sizeBytes");
+            if (artifact.id.empty() || artifact.id.size() > 128u ||
+                !std::all_of(artifact.id.begin(), artifact.id.end(), [](unsigned char c) {
+                    return std::isalnum(c) != 0 || c == '-' || c == '_';
+                })) {
+                invalid_contract("textualInversions.id", "must be a bounded opaque identifier");
+            }
+            if (artifact.name.empty() || artifact.name.size() > 128u) {
+                invalid_contract("textualInversions.name", "must be a bounded non-empty name");
+            }
+            if (!is_textual_inversion_trigger(artifact.trigger)) {
+                invalid_contract("textualInversions.trigger", "contains unsupported token characters");
+            }
+            if (!is_sha256(artifact.sha256) || !is_sha256(artifact.model_fingerprint) ||
+                !is_sha256(artifact.tokenizer_fingerprint) ||
+                !is_sha256(artifact.binding_fingerprint)) {
+                invalid_contract(
+                        "textualInversions.sha256",
+                        "artifact and binding fingerprints must be SHA-256 values");
+            }
+            if (artifact.runtime != "STABLE_DIFFUSION_CPP" ||
+                artifact.native_mode != "SDCPP_CUSTOM_WORDS") {
+                unsupported_contract(
+                        "textualInversions.nativeMode",
+                        "every artifact must use the stable-diffusion.cpp custom-word path");
+            }
+            if (artifact.profile_id != contract.profile_id ||
+                artifact.profile_revision != contract.profile_revision ||
+                artifact.model_fingerprint != contract.model_fingerprint) {
+                execution_mismatch(
+                        "textualInversions",
+                        "artifact binding does not match the resolved model profile");
+            }
+            if (selected_tokenizer_fingerprint.empty()) {
+                selected_tokenizer_fingerprint = artifact.tokenizer_fingerprint;
+            } else if (artifact.tokenizer_fingerprint != selected_tokenizer_fingerprint) {
+                execution_mismatch(
+                        "textualInversions.tokenizerFingerprint",
+                        "all textual inversion artifacts must bind to one tokenizer component");
+            }
+            if (artifact.profile_revision <= 0) {
+                invalid_contract("textualInversions.profileRevision", "must be positive");
+            }
+            if (size_bytes < 16 || static_cast<uint64_t>(size_bytes) > kMaxTextualInversionBytes) {
+                invalid_contract(
+                        "textualInversions.sizeBytes",
+                        "must be between 16 bytes and 100 MiB");
+            }
+            if (artifact.format != "safetensors" && artifact.format != "pytorch" &&
+                artifact.format != "checkpoint" && artifact.format != "binary") {
+                invalid_contract("textualInversions.format", "unsupported textual inversion format");
+            }
+            const std::string lower_path = lower_copy(artifact.path);
+            const bool extension_ok =
+                    (artifact.format == "safetensors" && ends_with(lower_path, ".safetensors")) ||
+                    (artifact.format == "pytorch" && ends_with(lower_path, ".pt")) ||
+                    (artifact.format == "checkpoint" && ends_with(lower_path, ".ckpt")) ||
+                    (artifact.format == "binary" && ends_with(lower_path, ".bin"));
+            if (!extension_ok) {
+                invalid_contract("textualInversions.format", "format does not match artifact extension");
+            }
+            if (!textual_ids.insert(artifact.id).second ||
+                !textual_paths.insert(artifact.path).second ||
+                !textual_triggers.insert(lower_copy(artifact.trigger)).second) {
+                invalid_contract(
+                        "textualInversions",
+                        "ids, paths, and triggers must be unique per request");
+            }
+            artifact.size_bytes = static_cast<uint64_t>(size_bytes);
+            if (artifact.size_bytes >
+                kMaxActiveTextualInversionBytes - active_textual_inversion_bytes) {
+                invalid_contract(
+                        "textualInversions.sizeBytes",
+                        "selected artifacts exceed the 256 MiB active-request quota");
+            }
+            active_textual_inversion_bytes += artifact.size_bytes;
+            contract.textual_inversions.push_back(std::move(artifact));
+        }
+    }
     const auto tiling = params.find("vaeTiling");
     if (tiling != params.end()) {
         if (!tiling->is_object()) invalid_contract("vaeTiling", "must be an object when present");
@@ -861,6 +1105,77 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
         }
         if (contract.vae_tile_overlap < 0.0 || contract.vae_tile_overlap > 0.5) {
             invalid_contract("vaeTiling.overlap", "must be a finite ratio in [0, 0.5]");
+        }
+    }
+    const auto ultrafix = params.find("ultraFix");
+    if (ultrafix != params.end()) {
+        if (!ultrafix->is_object()) {
+            invalid_contract("ultraFix", "must be an object when present");
+        }
+        static const std::unordered_set<std::string> fields = {
+            "targetWidth",
+            "targetHeight",
+            "strength",
+            "inversionSteps",
+            "refinementSteps",
+            "tileSize",
+            "overlap",
+        };
+        if (ultrafix->size() != fields.size()) {
+            invalid_contract("ultraFix", "must contain exactly the structured UltraFix fields");
+        }
+        for (auto item = ultrafix->begin(); item != ultrafix->end(); ++item) {
+            if (fields.find(item.key()) == fields.end()) {
+                invalid_contract("ultraFix", "contains an unknown field: " + item.key());
+            }
+        }
+        contract.ultrafix_enabled = true;
+        contract.ultrafix_target_width = required_int32(*ultrafix, "targetWidth");
+        contract.ultrafix_target_height = required_int32(*ultrafix, "targetHeight");
+        contract.ultrafix_strength = required_number(*ultrafix, "strength");
+        contract.ultrafix_inversion_steps = required_int32(*ultrafix, "inversionSteps");
+        contract.ultrafix_refinement_steps = required_int32(*ultrafix, "refinementSteps");
+        contract.ultrafix_tile_size = required_int32(*ultrafix, "tileSize");
+        contract.ultrafix_overlap = required_number(*ultrafix, "overlap");
+        if (contract.ultrafix_target_width < 64 ||
+            contract.ultrafix_target_width > 8192 ||
+            contract.ultrafix_target_height < 64 ||
+            contract.ultrafix_target_height > 8192 ||
+            contract.ultrafix_target_width % 8 != 0 ||
+            contract.ultrafix_target_height % 8 != 0 ||
+            static_cast<uint64_t>(contract.ultrafix_target_width) *
+                static_cast<uint64_t>(contract.ultrafix_target_height) >
+                64u * 1024u * 1024u) {
+            invalid_contract("ultraFix", "target dimensions exceed the bounded aligned canvas");
+        }
+        if (contract.ultrafix_strength <= 0.0 || contract.ultrafix_strength > 1.0 ||
+            contract.ultrafix_inversion_steps < 1 ||
+            contract.ultrafix_inversion_steps > 100 ||
+            contract.ultrafix_refinement_steps < 1 ||
+            contract.ultrafix_refinement_steps > 100) {
+            invalid_contract("ultraFix", "strength and step counts are outside their bounds");
+        }
+        const float ultrafix_wire_strength =
+            static_cast<float>(contract.ultrafix_strength);
+        const int begin = std::clamp(
+            static_cast<int>(static_cast<float>(contract.ultrafix_refinement_steps) *
+                             (1.0f - ultrafix_wire_strength)),
+            0,
+            contract.ultrafix_refinement_steps - 1);
+        if (contract.ultrafix_inversion_steps !=
+            contract.ultrafix_refinement_steps - begin) {
+            invalid_contract(
+                "ultraFix.inversionSteps",
+                "must equal the strength-derived denoising tail length");
+        }
+        if (contract.ultrafix_tile_size < 128 ||
+            contract.ultrafix_tile_size > 2048 ||
+            contract.ultrafix_tile_size % 8 != 0 ||
+            contract.ultrafix_tile_size > std::min(
+                contract.ultrafix_target_width,
+                contract.ultrafix_target_height) ||
+            contract.ultrafix_overlap < 0.0 || contract.ultrafix_overlap > 0.5) {
+            invalid_contract("ultraFix", "tile size or overlap is outside the bounded contract");
         }
     }
     const auto preview = params.find("preview");
@@ -937,6 +1252,34 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
         unsupported_contract(
                 "taskMode",
                 "reference-image edit capability is not exposed by the public native context API; refusing to claim pixel consumption");
+    }
+    if (contract.ultrafix_enabled) {
+        if (contract.task_mode != "img2img" || contract.input_image_path.empty() ||
+            !contract.mask_image_path.empty() || !contract.control_image_path.empty()) {
+            invalid_contract(
+                "ultraFix",
+                "requires exactly one img2img source and no mask or control image");
+        }
+        if (contract.batch_count != 1 || contract.preview_mode != "none") {
+            invalid_contract(
+                "ultraFix",
+                "supports one output and deliberately disables live preview");
+        }
+        if (contract.ultrafix_target_width != contract.width ||
+            contract.ultrafix_target_height != contract.height ||
+            contract.ultrafix_refinement_steps != contract.steps ||
+            std::fabs(contract.ultrafix_strength - contract.strength) > 1.0e-12) {
+            invalid_contract(
+                "ultraFix",
+                "target, strength, and refinement steps must match the outer execution contract");
+        }
+        if (!contract.vae_tiling_enabled ||
+            contract.vae_tile_size != contract.ultrafix_tile_size ||
+            std::fabs(contract.vae_tile_overlap - contract.ultrafix_overlap) > 1.0e-12) {
+            invalid_contract(
+                "ultraFix",
+                "requires matching explicit VAE tiling parameters");
+        }
     }
     const int expected_timetable_count = expected_denoising_step_count(contract);
     if (contract.timetable_count != expected_timetable_count) {
@@ -1209,6 +1552,36 @@ struct ComponentPaths {
     std::string manifest_path;
 };
 
+std::vector<std::string> textual_inversion_consumer_paths(const ComponentPaths& paths) {
+    std::vector<std::string> result;
+    const auto append = [&result](const std::string& path) {
+        if (!path.empty() && std::find(result.begin(), result.end(), path) == result.end()) {
+            result.push_back(path);
+        }
+    };
+    append(paths.primary_path);
+    append(paths.high_noise_diffusion);
+    append(paths.clip_l);
+    append(paths.clip_g);
+    append(paths.t5xxl);
+    append(paths.llm);
+    append(paths.llm_vision);
+    append(paths.embeddings_connectors);
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+bool execution_assets_match_consumers(
+        const ComponentPaths& paths,
+        const mca::image::execution_assets::Binding& binding) {
+    auto expected = textual_inversion_consumer_paths(paths);
+    std::vector<std::string> actual;
+    actual.reserve(binding.assets.size());
+    for (const auto& asset : binding.assets) actual.push_back(asset.path);
+    std::sort(actual.begin(), actual.end());
+    return actual == expected;
+}
+
 bool likely_split_diffusion_family(const std::string &family, const std::string &path) {
     const std::string key = lower_copy(family + " " + path);
     return contains(key, "z_image") ||
@@ -1243,6 +1616,7 @@ ComponentPaths infer_components(const std::string &model_path, const std::string
     if (dir_exists(bundle_root)) {
         collect_model_files(bundle_root, files);
     }
+    std::sort(files.begin(), files.end());
     for (const std::string &path: files) {
         const std::string lower = lower_copy(path);
         if (path == model_path) continue;
@@ -1564,14 +1938,127 @@ std::string sha256_hex(const std::vector<uint8_t> &bytes) {
     return accumulator.finish_hex();
 }
 
+std::string sha256_utf8(const std::string &value) {
+    Sha256Accumulator accumulator;
+    if (!value.empty()) {
+        accumulator.update(
+                reinterpret_cast<const uint8_t *>(value.data()),
+                value.size());
+    }
+    return accumulator.finish_hex();
+}
+
+std::string fixed_width_lower_hex_u64(uint64_t value) {
+    std::ostringstream out;
+    out << std::hex << std::nouppercase << std::setfill('0') << std::setw(16) << value;
+    return out.str();
+}
+
+std::string textual_inversion_binding_fingerprint(
+        const ContractTextualInversion &artifact) {
+    std::ostringstream source;
+    source << "textual-inversion-binding-v1" << '\x1f'
+           << artifact.id << '\x1f'
+           << artifact.sha256 << '\x1f'
+           << lower_copy(artifact.trigger) << '\x1f'
+           << lower_copy(artifact.model_fingerprint) << '\x1f'
+           << lower_copy(artifact.tokenizer_fingerprint) << '\x1f'
+           << artifact.profile_id << '\x1f'
+           << artifact.profile_revision << '\x1f'
+           << artifact.runtime;
+    return sha256_utf8(source.str());
+}
+
+std::string textual_inversion_selection_fingerprint(
+        const std::vector<ContractTextualInversion> &artifacts) {
+    std::vector<std::pair<std::string, std::string>> ordered;
+    ordered.reserve(artifacts.size());
+    for (const auto &artifact: artifacts) {
+        ordered.emplace_back(
+                lower_copy(artifact.trigger),
+                textual_inversion_binding_fingerprint(artifact));
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto &left, const auto &right) {
+        return left.first < right.first;
+    });
+    std::ostringstream source;
+    source << "textual-inversion-selection-v1";
+    for (const auto &entry: ordered) {
+        source << '\x1f' << entry.second;
+    }
+    return sha256_utf8(source.str());
+}
+
+std::string image_prompt_execution_sha256(const std::string &prompt,
+                                          const std::string &negative_prompt) {
+    if (prompt.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+        negative_prompt.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        return {};
+    }
+    Sha256Accumulator accumulator;
+    const auto update_non_null_utf8 = [&accumulator](const std::string &value) {
+        const uint8_t present = 1u;
+        accumulator.update(&present, 1u);
+        const uint32_t size = static_cast<uint32_t>(value.size());
+        const std::array<uint8_t, 4> length = {{
+                static_cast<uint8_t>((size >> 24u) & UINT32_C(0xff)),
+                static_cast<uint8_t>((size >> 16u) & UINT32_C(0xff)),
+                static_cast<uint8_t>((size >> 8u) & UINT32_C(0xff)),
+                static_cast<uint8_t>(size & UINT32_C(0xff))
+        }};
+        accumulator.update(length.data(), length.size());
+        if (!value.empty()) {
+            accumulator.update(
+                    reinterpret_cast<const uint8_t *>(value.data()),
+                    value.size());
+        }
+    };
+    update_non_null_utf8(prompt);
+    update_non_null_utf8(negative_prompt);
+    return accumulator.finish_hex();
+}
+
 bool sha256_implementation_ready() {
     static const bool ready = [] {
         const std::vector<uint8_t> empty;
         const std::vector<uint8_t> abc = {'a', 'b', 'c'};
+        const std::string chinese_prompt =
+                "\xE4\xB8\x80\xE5\x8F\xAA\xE7\xBA\xA2\xE8\x89\xB2\xE6\x9D\xAF\xE5\xAD\x90"
+                "\xE6\x94\xBE\xE5\x9C\xA8\xE8\x93\x9D\xE8\x89\xB2\xE6\xA1\x8C\xE5\xAD\x90"
+                "\xE4\xB8\x8A\xEF\xBC\x8C\xE6\x9D\xAF\xE5\xAD\x90\xE5\xB7\xA6\xE4\xBE\xA7"
+                "\xE6\x9C\x89\xE4\xB8\xA4\xE4\xB8\xAA\xE7\xBB\xBF\xE8\x89\xB2\xE8\x8B\xB9"
+                "\xE6\x9E\x9C";
+        const std::string chinese_negative_prompt =
+                "\xE4\xB8\x8D\xE8\xA6\x81\xE4\xBA\xBA\xE7\x89\xA9\xEF\xBC\x8C\xE4\xB8\x8D"
+                "\xE8\xA6\x81\xE6\x96\x87\xE5\xAD\x97\xEF\xBC\x8C\xE4\xB8\x8D\xE8\xA6\x81"
+                "\xE5\xA4\x9A\xE4\xBD\x99\xE6\xB0\xB4\xE6\x9E\x9C";
+        ContractTextualInversion textual_vector;
+        textual_vector.id = "00000000-0000-0000-0000-000000000001";
+        textual_vector.sha256 =
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        textual_vector.trigger = "cat";
+        textual_vector.model_fingerprint =
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        textual_vector.tokenizer_fingerprint =
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        textual_vector.profile_id = "stable-test";
+        textual_vector.profile_revision = 1;
+        textual_vector.runtime = "STABLE_DIFFUSION_CPP";
         return sha256_hex(empty) ==
                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" &&
                sha256_hex(abc) ==
-                       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+                       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" &&
+               image_prompt_execution_sha256("a", "") ==
+                       "7b2c4dab5874fc03fd088691ce5bea0ff34ded267b495fc5249853dd2110bed7" &&
+               image_prompt_execution_sha256(
+                       chinese_prompt,
+                       chinese_negative_prompt) ==
+                       "77debda388ee058e0ce51f89e799e2ca7828a06142fc77b2b19cff3844b93579" &&
+               textual_inversion_binding_fingerprint(textual_vector) ==
+                       "877205ad6c36ea77782b8c819e0859ec5b70a57541a3c91b357bbdb618867b97" &&
+               textual_inversion_selection_fingerprint(
+                       std::vector<ContractTextualInversion>{textual_vector}) ==
+                       "a9bb38fd3ed3576e7ab41cef7d3aa687bb066bd55e699b7dcff4298c8ca75e2d";
     }();
     return ready;
 }
@@ -1696,6 +2183,71 @@ bool sha256_regular_file(const std::string &path,
         return false;
     }
     digest = accumulator.finish_hex();
+    return true;
+}
+
+bool validate_textual_inversion_file(const std::string &raw_root,
+                                     const ContractTextualInversion &artifact,
+                                     std::string &canonical_path,
+                                     std::string &actual_sha256,
+                                     std::string &error) {
+    char root_buffer[PATH_MAX] = {};
+    char path_buffer[PATH_MAX] = {};
+    if (raw_root.empty() || realpath(raw_root.c_str(), root_buffer) == nullptr ||
+        !dir_exists(root_buffer)) {
+        error = "textual inversion root does not exist";
+        return false;
+    }
+    struct stat link_stat {};
+    if (artifact.path.empty() || lstat(artifact.path.c_str(), &link_stat) != 0 ||
+        !S_ISREG(link_stat.st_mode)) {
+        error = "textual inversion must be a regular non-symlink file";
+        return false;
+    }
+    if (link_stat.st_size < 0 || static_cast<uint64_t>(link_stat.st_size) != artifact.size_bytes) {
+        error = "textual inversion size differs from the worker-verified contract";
+        return false;
+    }
+    if (realpath(artifact.path.c_str(), path_buffer) == nullptr ||
+        !file_exists(path_buffer)) {
+        error = "textual inversion file does not exist";
+        return false;
+    }
+    const std::string root(root_buffer);
+    const std::string path(path_buffer);
+    if (path != artifact.path) {
+        error = "textual inversion path must already be canonical";
+        return false;
+    }
+    const size_t separator = path.find_last_of('/');
+    if (separator == std::string::npos || path.substr(0, separator) != root) {
+        error = "textual inversion must be a direct child of its app-owned root";
+        return false;
+    }
+    const std::string lower = lower_copy(path);
+    const bool extension_ok =
+            (artifact.format == "safetensors" && ends_with(lower, ".safetensors")) ||
+            (artifact.format == "pytorch" && ends_with(lower, ".pt")) ||
+            (artifact.format == "checkpoint" && ends_with(lower, ".ckpt")) ||
+            (artifact.format == "binary" && ends_with(lower, ".bin"));
+    if (!extension_ok) {
+        error = "textual inversion format does not match its extension";
+        return false;
+    }
+    RegularFileIdentity identity;
+    if (!sha256_regular_file(
+            path,
+            artifact.size_bytes,
+            actual_sha256,
+            identity,
+            error)) {
+        return false;
+    }
+    if (actual_sha256 != artifact.sha256) {
+        error = "textual inversion SHA-256 differs from the worker-verified contract";
+        return false;
+    }
+    canonical_path = path;
     return true;
 }
 
@@ -2104,6 +2656,149 @@ bool build_output_paths(const std::string &raw_output_path,
     return true;
 }
 
+bool output_parent_is_still_canonical(const std::string &target) {
+    const size_t slash = target.find_last_of('/');
+    if (slash == std::string::npos) return false;
+    const std::string parent = slash == 0u ? "/" : target.substr(0, slash);
+    char canonical_parent[PATH_MAX] = {};
+    if (realpath(parent.c_str(), canonical_parent) == nullptr ||
+        !dir_exists(canonical_parent)) {
+        return false;
+    }
+    return parent == canonical_parent;
+}
+
+bool fsync_output_parent(const std::string &target, std::string &error) {
+    const size_t slash = target.find_last_of('/');
+    if (slash == std::string::npos) {
+        error = "output path has no parent directory";
+        return false;
+    }
+    const std::string parent = slash == 0u ? "/" : target.substr(0, slash);
+    const int descriptor = open(
+        parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) {
+        error = "output directory could not be opened for commit";
+        return false;
+    }
+    const bool synced = fsync(descriptor) == 0;
+    const int close_result = close(descriptor);
+    if (!synced || close_result != 0) {
+        error = "output directory commit could not be synchronized";
+        return false;
+    }
+    return true;
+}
+
+bool write_png_atomic(const std::string &target,
+                      int width,
+                      int height,
+                      int channels,
+                      const uint8_t *pixels,
+                      std::string &output_sha256,
+                      uint64_t &output_bytes,
+                      std::string &error) {
+    output_sha256.clear();
+    output_bytes = 0u;
+    if (pixels == nullptr || width <= 0 || height <= 0 || channels <= 0 ||
+        channels > 4 || width > std::numeric_limits<int>::max() / channels ||
+        !output_parent_is_still_canonical(target)) {
+        error = "atomic PNG request or output parent is invalid";
+        return false;
+    }
+    const std::string partial = target + ".part";
+    struct stat stale_stat {};
+    if (lstat(partial.c_str(), &stale_stat) == 0) {
+        if (!S_ISREG(stale_stat.st_mode) || unlink(partial.c_str()) != 0) {
+            error = "stale partial output is not a removable regular file";
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        error = "partial output path could not be inspected";
+        return false;
+    }
+    if (stbi_write_png(
+            partial.c_str(), width, height, channels, pixels, width * channels) == 0) {
+        std::remove(partial.c_str());
+        error = "native PNG encoder failed before atomic publication";
+        return false;
+    }
+    const int descriptor = open(
+        partial.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) {
+        std::remove(partial.c_str());
+        error = "partial PNG could not be opened without following links";
+        return false;
+    }
+    struct stat partial_stat {};
+    static constexpr std::array<uint8_t, 8> png_magic = {{
+        0x89u, 0x50u, 0x4eu, 0x47u, 0x0du, 0x0au, 0x1au, 0x0au,
+    }};
+    std::array<uint8_t, 8> observed_magic = {};
+    const bool valid_partial =
+        fstat(descriptor, &partial_stat) == 0 &&
+        S_ISREG(partial_stat.st_mode) && partial_stat.st_size > 0 &&
+        static_cast<uint64_t>(partial_stat.st_size) <= 256u * 1024u * 1024u &&
+        pread(descriptor, observed_magic.data(), observed_magic.size(), 0) ==
+            static_cast<ssize_t>(observed_magic.size()) &&
+        observed_magic == png_magic && fsync(descriptor) == 0;
+    const int close_result = close(descriptor);
+    if (!valid_partial || close_result != 0) {
+        std::remove(partial.c_str());
+        error = "partial PNG failed bounded format or durability validation";
+        return false;
+    }
+    if (g_cancel_requested.load(std::memory_order_relaxed)) {
+        std::remove(partial.c_str());
+        error = "cancelled before atomic PNG publication";
+        return false;
+    }
+    struct stat target_stat {};
+    errno = 0;
+    if (!output_parent_is_still_canonical(target) ||
+        lstat(target.c_str(), &target_stat) == 0 || errno != ENOENT) {
+        std::remove(partial.c_str());
+        error = "atomic PNG target changed before publication";
+        return false;
+    }
+    if (rename(partial.c_str(), target.c_str()) != 0) {
+        std::remove(partial.c_str());
+        error = "atomic PNG rename failed";
+        return false;
+    }
+    if (!fsync_output_parent(target, error)) {
+        std::remove(target.c_str());
+        std::string ignored;
+        fsync_output_parent(target, ignored);
+        return false;
+    }
+    struct stat committed_stat {};
+    if (lstat(target.c_str(), &committed_stat) != 0 ||
+        !S_ISREG(committed_stat.st_mode) || committed_stat.st_size <= 0 ||
+        static_cast<uint64_t>(committed_stat.st_size) > 256u * 1024u * 1024u) {
+        std::remove(target.c_str());
+        error = "committed PNG failed bounded regular-file validation";
+        return false;
+    }
+    output_bytes = static_cast<uint64_t>(committed_stat.st_size);
+    RegularFileIdentity hashed_identity;
+    if (!sha256_regular_file(
+            target,
+            output_bytes,
+            output_sha256,
+            hashed_identity,
+            error) ||
+        !is_sha256(output_sha256)) {
+        std::remove(target.c_str());
+        std::string ignored;
+        fsync_output_parent(target, ignored);
+        output_sha256.clear();
+        output_bytes = 0u;
+        return false;
+    }
+    return true;
+}
+
 void free_generated_images(sd_image_t *images, int count) {
     if (images == nullptr) return;
     for (int index = 0; index < count; ++index) {
@@ -2115,6 +2810,119 @@ void free_generated_images(sd_image_t *images, int count) {
 
 void remove_output_files(const std::vector<std::string> &paths) {
     for (const std::string &path: paths) std::remove(path.c_str());
+}
+
+uint32_t mask_bit_count(uint64_t mask) {
+    uint32_t count = 0u;
+    while (mask != 0u) {
+        mask &= mask - 1u;
+        ++count;
+    }
+    return count;
+}
+
+bool validate_textual_inversion_execution_evidence(
+        const sd_image_execution_evidence_t &evidence,
+        size_t selected_count,
+        std::string &failure_code,
+        std::string &failure_message) {
+    const uint64_t expected_mask = selected_count == 0u
+            ? 0u
+            : (uint64_t{1} << selected_count) - 1u;
+    const auto fail = [&](const char *code, const char *message) {
+        failure_code = code;
+        failure_message = message;
+        return false;
+    };
+    if (evidence.textual_inversion_failure_code !=
+        SD_TEXTUAL_INVERSION_FAILURE_NONE) {
+        switch (evidence.textual_inversion_failure_code) {
+            case SD_TEXTUAL_INVERSION_FAILURE_FILE_LOAD:
+                return fail(
+                        "TEXTUAL_INVERSION_NATIVE_FILE_LOAD_FAILED",
+                        "stable-diffusion.cpp could not open the selected textual inversion file");
+            case SD_TEXTUAL_INVERSION_FAILURE_TENSOR_LOAD:
+                return fail(
+                        "TEXTUAL_INVERSION_NATIVE_TENSOR_LOAD_FAILED",
+                        "stable-diffusion.cpp could not load the selected textual inversion tensors");
+            case SD_TEXTUAL_INVERSION_FAILURE_TENSOR_SCHEMA:
+                return fail(
+                        "TEXTUAL_INVERSION_NATIVE_TENSOR_SCHEMA_INVALID",
+                        "the selected textual inversion tensor schema is incompatible with the loaded CLIP graph");
+            case SD_TEXTUAL_INVERSION_FAILURE_CLIP_PAIR_MISMATCH:
+                return fail(
+                        "TEXTUAL_INVERSION_NATIVE_CLIP_PAIR_MISMATCH",
+                        "the selected SDXL textual inversion does not contain a matching CLIP-L and CLIP-G pair");
+            case SD_TEXTUAL_INVERSION_FAILURE_CONDITIONING:
+                return fail(
+                        "TEXTUAL_INVERSION_NATIVE_CONDITIONING_FAILED",
+                        "stable-diffusion.cpp could not consume the selected textual inversion during conditioning");
+            default:
+                return fail(
+                        "TEXTUAL_INVERSION_NATIVE_FAILURE_UNKNOWN",
+                        "stable-diffusion.cpp reported an unknown textual inversion failure");
+        }
+    }
+    if (evidence.textual_inversion_requested_mask != expected_mask ||
+        evidence.textual_inversion_requested_count != selected_count) {
+        return fail(
+                "TEXTUAL_INVERSION_NATIVE_REQUEST_MISMATCH",
+                "stable-diffusion.cpp did not receive the complete textual inversion selection");
+    }
+    if (evidence.textual_inversion_tokenizer_match_mask != expected_mask ||
+        evidence.textual_inversion_tokenizer_match_count != selected_count) {
+        return fail(
+                "TEXTUAL_INVERSION_TRIGGER_NOT_MATCHED",
+                "every selected textual inversion trigger must occur as a complete prompt token");
+    }
+    if (evidence.textual_inversion_load_attempt_mask != expected_mask ||
+        evidence.textual_inversion_load_attempt_count != selected_count) {
+        return fail(
+                "TEXTUAL_INVERSION_NATIVE_LOAD_NOT_ATTEMPTED",
+                "not every selected textual inversion reached the native loader");
+    }
+    if (evidence.textual_inversion_loaded_mask != expected_mask ||
+        evidence.textual_inversion_loaded_count != selected_count ||
+        evidence.textual_inversion_load_failure_count != 0u) {
+        return fail(
+                "TEXTUAL_INVERSION_NATIVE_LOAD_INCOMPLETE",
+                "not every selected textual inversion was loaded by the native conditioner");
+    }
+    if (evidence.textual_inversion_applied_mask != expected_mask ||
+        evidence.textual_inversion_applied_count != selected_count ||
+        (selected_count > 0u &&
+         evidence.textual_inversion_applied_vector_count < selected_count)) {
+        return fail(
+                "TEXTUAL_INVERSION_NATIVE_APPLY_INCOMPLETE",
+                "not every selected textual inversion produced custom token vectors");
+    }
+    if (evidence.textual_inversion_clip_g_required_mask != 0u &&
+        evidence.textual_inversion_clip_g_required_mask != expected_mask) {
+        return fail(
+                "TEXTUAL_INVERSION_NATIVE_CLIP_PAIR_MISMATCH",
+                "the native conditioner reported an incomplete SDXL CLIP pair requirement");
+    }
+    if (evidence.textual_inversion_clip_l_mask != expected_mask ||
+        evidence.textual_inversion_clip_l_applied_count != selected_count ||
+        evidence.textual_inversion_clip_g_mask !=
+                evidence.textual_inversion_clip_g_required_mask ||
+        evidence.textual_inversion_clip_g_applied_count !=
+                mask_bit_count(evidence.textual_inversion_clip_g_required_mask) ||
+        evidence.textual_inversion_consumed_mask != expected_mask ||
+        (selected_count > 0u &&
+         evidence.textual_inversion_conditioning_consumption_count < selected_count)) {
+        return fail(
+                "TEXTUAL_INVERSION_NATIVE_CONDITIONING_INCOMPLETE",
+                "not every selected textual inversion was consumed by each required CLIP conditioning graph");
+    }
+    if (selected_count == 0u &&
+        (evidence.textual_inversion_applied_vector_count != 0u ||
+         evidence.textual_inversion_conditioning_consumption_count != 0u)) {
+        return fail(
+                "TEXTUAL_INVERSION_NATIVE_UNEXPECTED_EVIDENCE",
+                "native textual inversion evidence was present for a request without a selection");
+    }
+    return true;
 }
 
 std::string component_selection_json(const ComponentPaths &paths) {
@@ -2309,7 +3117,11 @@ bool resolve_component_paths(const std::string &model_path,
     return true;
 }
 
-std::string make_context_key(const ComponentPaths &paths, int threads) {
+std::string make_context_key(
+        const ComponentPaths &paths,
+        const std::vector<ContractTextualInversion> &textual_inversions,
+        int threads,
+        const std::string& execution_asset_composite) {
     std::ostringstream key;
     key << paths.model << "|"
         << paths.diffusion << "|"
@@ -2326,11 +3138,19 @@ std::string make_context_key(const ComponentPaths &paths, int threads) {
         << paths.selection_mode << "|"
         << paths.tokenizer_path << "|"
         << threads << "|"
-        << sd_runtime_backend_label();
+        << sd_runtime_backend_label() << "|assets:"
+        << execution_asset_composite;
+    for (const auto &artifact: textual_inversions) {
+        key << "|ti:" << lower_copy(artifact.trigger)
+            << ":" << artifact.path
+            << ":" << artifact.sha256
+            << ":" << artifact.tokenizer_fingerprint;
+    }
     return key.str();
 }
 
 sd_ctx_t *ensure_context(const ComponentPaths &paths,
+                         const std::vector<ContractTextualInversion> &textual_inversions,
                          const std::string &ctx_key,
                          int threads) {
     if (g_ctx != nullptr && g_ctx_key == ctx_key) return g_ctx;
@@ -2370,6 +3190,16 @@ sd_ctx_t *ensure_context(const ComponentPaths &paths,
     params.backend = "cpu";
     params.params_backend = "cpu";
     params.max_vram = 0.0f;
+    std::vector<sd_embedding_t> native_embeddings;
+    native_embeddings.reserve(textual_inversions.size());
+    for (const auto &artifact: textual_inversions) {
+        sd_embedding_t embedding{};
+        embedding.name = artifact.trigger.c_str();
+        embedding.path = artifact.path.c_str();
+        native_embeddings.push_back(embedding);
+    }
+    params.embeddings = native_embeddings.empty() ? nullptr : native_embeddings.data();
+    params.embedding_count = static_cast<uint32_t>(native_embeddings.size());
 
     g_ctx = new_sd_ctx(&params);
     if (g_ctx == nullptr) {
@@ -2522,6 +3352,13 @@ std::string generate_impl(const std::string &model_path,
                 input_error)) {
             return runtime_failure("INPUT_IMAGE_INVALID", input_error).dump();
         }
+        if (contract.ultrafix_enabled &&
+            (input_image.width > static_cast<uint32_t>(contract.ultrafix_target_width) ||
+             input_image.height > static_cast<uint32_t>(contract.ultrafix_target_height))) {
+            return runtime_failure(
+                    "ULTRAFIX_SOURCE_SHRINK_UNSUPPORTED",
+                    "UltraFix target width and height must each be at least the oriented source size").dump();
+        }
         if (!input_image.pixels.empty()) mark_generation_stage(kStageInputImageDecoded);
         if (!contract.mask_image_path.empty() && !load_canonical_input_image(
                 contract.mask_image_path,
@@ -2562,6 +3399,50 @@ std::string generate_impl(const std::string &model_path,
             canonical_lora_paths.push_back(std::move(canonical_path));
         }
         if (!canonical_lora_paths.empty()) mark_generation_stage(kStageLoraValidated);
+
+        std::vector<ContractTextualInversion> validated_textual_inversions =
+                contract.textual_inversions;
+        if (!validated_textual_inversions.empty() && !sha256_implementation_ready()) {
+            return runtime_failure(
+                    "TEXTUAL_INVERSION_HASH_UNAVAILABLE",
+                    "native SHA-256 self-test failed before textual inversion binding").dump();
+        }
+        for (const auto &artifact: validated_textual_inversions) {
+            if (textual_inversion_binding_fingerprint(artifact) !=
+                artifact.binding_fingerprint) {
+                execution_mismatch(
+                        "textualInversions.bindingFingerprint",
+                        "artifact binding fingerprint does not match its canonical model/tokenizer binding");
+            }
+        }
+        if (!validated_textual_inversions.empty() &&
+            textual_inversion_selection_fingerprint(validated_textual_inversions) !=
+                    contract.textual_inversion_binding_fingerprint) {
+            execution_mismatch(
+                    "textualInversionBindingFingerprint",
+                    "selection binding fingerprint does not match the canonical artifact set");
+        }
+        for (auto &artifact: validated_textual_inversions) {
+            std::string canonical_path;
+            std::string actual_sha256;
+            std::string textual_error;
+            if (!validate_textual_inversion_file(
+                    contract.textual_inversion_root_path,
+                    artifact,
+                    canonical_path,
+                    actual_sha256,
+                    textual_error)) {
+                if (g_cancel_requested.load(std::memory_order_relaxed)) {
+                    return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+                }
+                return runtime_failure("TEXTUAL_INVERSION_FILE_INVALID", textual_error).dump();
+            }
+            artifact.path = std::move(canonical_path);
+            artifact.sha256 = std::move(actual_sha256);
+        }
+        if (!validated_textual_inversions.empty()) {
+            mark_generation_stage(kStageTextualInversionValidated);
+        }
 
         set_progress(
                 "initializing",
@@ -2612,9 +3493,47 @@ std::string generate_impl(const std::string &model_path,
                     "CONTROLNET_COMPONENT_MISSING",
                     "control generation requires a concrete ControlNet model component").dump();
         }
+        mca::image::execution_assets::Binding execution_asset_binding;
+        const bool has_execution_asset_binding = !validated_textual_inversions.empty();
+        if (has_execution_asset_binding) {
+            std::string asset_error;
+            if (!mca::image::execution_assets::parse(
+                    params,
+                    "STABLE_DIFFUSION_CPP",
+                    execution_asset_binding,
+                    asset_error) ||
+                !execution_assets_match_consumers(paths, execution_asset_binding) ||
+                !std::all_of(
+                    validated_textual_inversions.begin(),
+                    validated_textual_inversions.end(),
+                    [&execution_asset_binding](const auto& artifact) {
+                        return artifact.tokenizer_fingerprint ==
+                            execution_asset_binding.composite_sha256;
+                    }) ||
+                !mca::image::execution_assets::verify_initial(
+                    execution_asset_binding,
+                    [] { return g_cancel_requested.load(std::memory_order_relaxed); },
+                    asset_error)) {
+                if (g_cancel_requested.load(std::memory_order_relaxed) || asset_error == "cancelled") {
+                    return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+                }
+                if (asset_error.empty()) {
+                    asset_error = "execution asset descriptors do not match the resolved native consumers";
+                }
+                return runtime_failure(
+                    "TEXTUAL_INVERSION_EXECUTION_ASSET_MISMATCH",
+                    asset_error).dump();
+            }
+        }
         const std::string selected_components_json = component_selection_json(paths);
         set_progress_component_selection(selected_components_json);
-        const std::string ctx_key = make_context_key(paths, contract.threads);
+        const std::string ctx_key = make_context_key(
+                paths,
+                validated_textual_inversions,
+                contract.threads,
+                has_execution_asset_binding
+                    ? execution_asset_binding.composite_sha256
+                    : std::string());
         set_progress(
                 "loading",
                 "loading stable-diffusion.cpp context",
@@ -2624,7 +3543,11 @@ std::string generate_impl(const std::string &model_path,
                 contract.width,
                 contract.height,
                 contract.threads);
-        sd_ctx_t *ctx = ensure_context(paths, ctx_key, contract.threads);
+        sd_ctx_t *ctx = ensure_context(
+                paths,
+                validated_textual_inversions,
+                ctx_key,
+                contract.threads);
         if (ctx == nullptr) {
             set_progress(
                     "failed",
@@ -2665,6 +3588,12 @@ std::string generate_impl(const std::string &model_path,
                     "distilledGuidance",
                     "the loaded checkpoint has no distilled-guidance graph input");
         }
+        if (contract.ultrafix_enabled &&
+            (!sd_ctx_supports_ultrafix(ctx) || contract.prediction_wire == "FLOW")) {
+            unsupported_contract(
+                    "ultraFix",
+                    "the loaded graph does not expose the complete standard-UNet UltraFix topology");
+        }
         if (g_cancel_requested.load(std::memory_order_relaxed)) {
             set_progress(
                     "cancelled",
@@ -2698,7 +3627,7 @@ std::string generate_impl(const std::string &model_path,
         gen.seed = contract.seed;
         gen.batch_count = contract.batch_count;
         gen.clip_skip = contract.clip_skip;
-        gen.strength = static_cast<float>(contract.strength);
+        gen.strength = backend_denoising_strength(contract);
         gen.control_strength = static_cast<float>(contract.control_strength);
         if (!input_image.pixels.empty()) gen.init_image = input_image.view();
         if (!mask_image.pixels.empty()) gen.mask_image = mask_image.view();
@@ -2781,8 +3710,36 @@ std::string generate_impl(const std::string &model_path,
                     &preview_context);
         }
         sd_image_t *images = nullptr;
+        sd_ultrafix_execution_evidence_t ultrafix_evidence{};
         try {
-            images = generate_image(ctx, &gen);
+            if (contract.ultrafix_enabled) {
+                sd_ultrafix_params_t ultrafix{};
+                ultrafix.loras = gen.loras;
+                ultrafix.lora_count = gen.lora_count;
+                ultrafix.prompt = gen.prompt;
+                ultrafix.negative_prompt = gen.negative_prompt;
+                ultrafix.clip_skip = gen.clip_skip;
+                ultrafix.init_image = gen.init_image;
+                ultrafix.width = contract.ultrafix_target_width;
+                ultrafix.height = contract.ultrafix_target_height;
+                ultrafix.inversion_steps = contract.ultrafix_inversion_steps;
+                ultrafix.refinement_steps = contract.ultrafix_refinement_steps;
+                ultrafix.tile_size = contract.ultrafix_tile_size;
+                ultrafix.tile_overlap = static_cast<float>(contract.ultrafix_overlap);
+                ultrafix.strength = static_cast<float>(contract.ultrafix_strength);
+                ultrafix.cfg_scale = gen.sample_params.guidance.txt_cfg;
+                ultrafix.seed = gen.seed;
+                ultrafix.sample_method = gen.sample_params.sample_method;
+                ultrafix.scheduler = gen.sample_params.scheduler;
+                ultrafix.eta = gen.sample_params.sample_method == EULER_A_SAMPLE_METHOD
+                        ? 1.0f : 0.0f;
+                ultrafix.extra_sample_args = gen.sample_params.extra_sample_args;
+                ultrafix.vae_tiling_params = gen.vae_tiling_params;
+                ultrafix.source_fit = SD_ULTRAFIX_SOURCE_FIT_COVER_CENTER;
+                images = sd_generate_ultrafix(ctx, &ultrafix, &ultrafix_evidence);
+            } else {
+                images = generate_image(ctx, &gen);
+            }
         } catch (...) {
             sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, false, false, nullptr);
             throw;
@@ -2801,6 +3758,17 @@ std::string generate_impl(const std::string &model_path,
                     contract.threads);
             return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
         }
+        sd_image_execution_evidence_t execution_evidence{};
+        const bool native_evidence_available =
+                sd_get_last_image_execution_evidence(ctx, &execution_evidence);
+        std::string textual_inversion_failure_code;
+        std::string textual_inversion_failure_message;
+        const bool textual_inversion_evidence_valid = native_evidence_available &&
+                validate_textual_inversion_execution_evidence(
+                        execution_evidence,
+                        validated_textual_inversions.size(),
+                        textual_inversion_failure_code,
+                        textual_inversion_failure_message);
         bool complete_batch = images != nullptr;
         if (complete_batch) {
             for (int index = 0; index < contract.batch_count; ++index) {
@@ -2812,6 +3780,22 @@ std::string generate_impl(const std::string &model_path,
         }
         if (!complete_batch) {
             free_generated_images(images, contract.batch_count);
+            remove_output_files(output_paths);
+            if (!validated_textual_inversions.empty() && native_evidence_available &&
+                !textual_inversion_evidence_valid) {
+                set_progress(
+                        "failed",
+                        textual_inversion_failure_message,
+                        0,
+                        contract.steps,
+                        0.0f,
+                        contract.width,
+                        contract.height,
+                        contract.threads);
+                return runtime_failure(
+                        textual_inversion_failure_code,
+                        textual_inversion_failure_message).dump();
+            }
             set_progress(
                     "failed",
                     "stable-diffusion.cpp returned no image",
@@ -2875,8 +3859,7 @@ std::string generate_impl(const std::string &model_path,
             return runtime_failure(code, message).dump();
         };
 
-        sd_image_execution_evidence_t execution_evidence{};
-        if (!sd_get_last_image_execution_evidence(ctx, &execution_evidence)) {
+        if (!native_evidence_available) {
             release_images_and_mismatch(
                     "nativeExecutionEvidence",
                     "native image execution did not publish context-local completion evidence");
@@ -2886,6 +3869,155 @@ std::string generate_impl(const std::string &model_path,
             release_images_and_mismatch(
                     "nativeExecutionEvidence",
                     "native image execution evidence is incomplete or has an unsupported version");
+        }
+        if (!textual_inversion_evidence_valid) {
+            return release_images_and_lora_failure(
+                    textual_inversion_failure_code,
+                    textual_inversion_failure_message);
+        }
+        if (contract.ultrafix_enabled) {
+            const uint64_t expected_denoise_steps =
+                    static_cast<uint64_t>(contract.ultrafix_inversion_steps);
+            const uint64_t expected_refinement_branches = contract.use_cfg ? 2u : 1u;
+            const bool dimensions_match =
+                    ultrafix_evidence.source_width == input_image.width &&
+                    ultrafix_evidence.source_height == input_image.height &&
+                    ultrafix_evidence.target_width == static_cast<uint32_t>(contract.width) &&
+                    ultrafix_evidence.target_height == static_cast<uint32_t>(contract.height);
+            const uint64_t source_width = ultrafix_evidence.source_width;
+            const uint64_t source_height = ultrafix_evidence.source_height;
+            const uint64_t target_width = ultrafix_evidence.target_width;
+            const uint64_t target_height = ultrafix_evidence.target_height;
+            uint64_t expected_resized_width = target_width;
+            uint64_t expected_resized_height = target_height;
+            bool source_fit_matches =
+                    source_width > 0u && source_height > 0u &&
+                    source_width <= target_width && source_height <= target_height;
+            if (source_fit_matches) {
+                if (target_width * source_height >= target_height * source_width) {
+                    expected_resized_height = source_height * target_width / source_width;
+                } else {
+                    expected_resized_width = source_width * target_height / source_height;
+                }
+                source_fit_matches =
+                        ultrafix_evidence.source_fit ==
+                                static_cast<uint32_t>(SD_ULTRAFIX_SOURCE_FIT_COVER_CENTER) &&
+                        ultrafix_evidence.source_resized_width == expected_resized_width &&
+                        ultrafix_evidence.source_resized_height == expected_resized_height &&
+                        ultrafix_evidence.source_crop_left ==
+                                (expected_resized_width - target_width) / 2u &&
+                        ultrafix_evidence.source_crop_top ==
+                                (expected_resized_height - target_height) / 2u;
+            }
+            const bool request_matches =
+                    ultrafix_evidence.version == SD_ULTRAFIX_EXECUTION_EVIDENCE_VERSION &&
+                    ultrafix_evidence.generation_completed == 1u &&
+                    ultrafix_evidence.cancelled == 0u &&
+                    ultrafix_evidence.preview_published == 0u &&
+                    dimensions_match && source_fit_matches &&
+                    ultrafix_evidence.tile_size ==
+                            static_cast<uint32_t>(contract.ultrafix_tile_size) &&
+                    std::fabs(static_cast<double>(ultrafix_evidence.tile_overlap) -
+                              contract.ultrafix_overlap) <= 1.0e-6 &&
+                    ultrafix_evidence.inversion_steps == expected_denoise_steps &&
+                    ultrafix_evidence.refinement_steps ==
+                            static_cast<uint32_t>(contract.ultrafix_refinement_steps) &&
+                    ultrafix_evidence.denoise_step_count == expected_denoise_steps &&
+                    ultrafix_evidence.sample_method ==
+                            static_cast<uint32_t>(gen.sample_params.sample_method) &&
+                    ultrafix_evidence.scheduler ==
+                            static_cast<uint32_t>(gen.sample_params.scheduler);
+            const bool vae_stages_complete =
+                    ultrafix_evidence.vae_encode_invocation_count == 1u &&
+                    ultrafix_evidence.vae_encode_success_count == 1u &&
+                    ultrafix_evidence.vae_encode_tile_count ==
+                            ultrafix_evidence.vae_encode_tile_success_count &&
+                    ultrafix_evidence.tiled_vae_decode_invocation_count == 1u &&
+                    ultrafix_evidence.tiled_vae_decode_success_count == 1u &&
+                    ultrafix_evidence.tiled_vae_decode_tile_count ==
+                            ultrafix_evidence.tiled_vae_decode_tile_success_count &&
+                    ultrafix_evidence.vae_encode_tile_count ==
+                            execution_evidence.vae_encode_tile_compute_attempt_count &&
+                    ultrafix_evidence.vae_encode_tile_success_count ==
+                            execution_evidence.vae_encode_tile_compute_success_count &&
+                    ultrafix_evidence.tiled_vae_decode_tile_count ==
+                            execution_evidence.vae_decode_tile_compute_attempt_count &&
+                    ultrafix_evidence.tiled_vae_decode_tile_success_count ==
+                            execution_evidence.vae_decode_tile_compute_success_count;
+            const bool inversion_complete =
+                    ultrafix_evidence.ddim_inversion_invocation_count ==
+                            expected_denoise_steps &&
+                    ultrafix_evidence.ddim_inversion_success_count ==
+                            expected_denoise_steps &&
+                    ultrafix_evidence.ddim_inversion_step_count ==
+                            expected_denoise_steps &&
+                    ultrafix_evidence.ddim_inversion_tile_count > 0u &&
+                    ultrafix_evidence.ddim_inversion_tile_success_count ==
+                            ultrafix_evidence.ddim_inversion_tile_count;
+            const bool refinement_complete =
+                    ultrafix_evidence.tiled_unet_invocation_count ==
+                            expected_denoise_steps &&
+                    ultrafix_evidence.tiled_unet_success_count ==
+                            expected_denoise_steps &&
+                    ultrafix_evidence.tiled_unet_step_count ==
+                            expected_denoise_steps &&
+                    ultrafix_evidence.tiled_unet_tile_count > 0u &&
+                    ultrafix_evidence.tiled_unet_tile_success_count ==
+                            ultrafix_evidence.tiled_unet_tile_count;
+            const uint64_t expected_physical_diffusion_count =
+                    ultrafix_evidence.ddim_inversion_tile_count +
+                    ultrafix_evidence.tiled_unet_tile_count *
+                            expected_refinement_branches;
+            const bool physical_counts_match =
+                    execution_evidence.diffusion_model_compute_count ==
+                            expected_physical_diffusion_count &&
+                    execution_evidence.positive_diffusion_model_compute_count ==
+                            ultrafix_evidence.ddim_inversion_tile_count +
+                            ultrafix_evidence.tiled_unet_tile_count &&
+                    execution_evidence.negative_diffusion_model_compute_count ==
+                            (contract.use_cfg
+                                ? ultrafix_evidence.tiled_unet_tile_count
+                                : 0u) &&
+                    execution_evidence.auxiliary_diffusion_model_compute_count == 0u &&
+                    execution_evidence.sampling_pass_count == 1u &&
+                    execution_evidence.completed_sampling_step_count ==
+                            expected_denoise_steps;
+            const std::string quality_seed_descriptor =
+                    mca::image::ultrafix_noise_seed_descriptor(
+                            static_cast<uint64_t>(gen.seed),
+                            expected_denoise_steps);
+            const uint64_t quality_step_count =
+                    ultrafix_evidence.quality_step_evaluation_count;
+            const bool quality_noise_evidence_consistent =
+                    ultrafix_evidence.noise_injection_step_count <= quality_step_count &&
+                    ((ultrafix_evidence.noise_injection_step_count == 0u) ==
+                     (ultrafix_evidence.noise_injection_checksum == 0u));
+            const bool quality_structure_evidence_consistent =
+                    ultrafix_evidence.structure_guidance_step_count <= quality_step_count &&
+                    ((ultrafix_evidence.structure_guidance_step_count == 0u) ==
+                     (ultrafix_evidence.structure_guidance_checksum == 0u));
+            const bool quality_coverage_complete = quality_step_count == 0u
+                    ? ultrafix_evidence.trajectory_noise_checksum == 0u
+                    : ultrafix_evidence.trajectory_noise_checksum != 0u &&
+                            ultrafix_evidence.noise_injection_step_count +
+                                    ultrafix_evidence.structure_guidance_step_count >=
+                                quality_step_count;
+            const bool quality_execution_match =
+                    ultrafix_evidence.noise_injection_seed ==
+                            static_cast<uint64_t>(gen.seed) &&
+                    ultrafix_evidence.quality_step_evaluation_count ==
+                            (expected_denoise_steps > 0u
+                                ? expected_denoise_steps - 1u : 0u) &&
+                    quality_noise_evidence_consistent &&
+                    quality_structure_evidence_consistent &&
+                    quality_coverage_complete;
+            if (!request_matches || !vae_stages_complete || !inversion_complete ||
+                !refinement_complete || !physical_counts_match ||
+                !quality_execution_match || quality_seed_descriptor.empty()) {
+                release_images_and_mismatch(
+                        "ultraFixEvidence",
+                        "native UltraFix stage evidence is incomplete or conflicts with physical execution counts");
+            }
         }
         const uint32_t expected_lora_count = static_cast<uint32_t>(contract.loras.size());
         if (execution_evidence.lora_requested_count != expected_lora_count) {
@@ -3127,7 +4259,8 @@ std::string generate_impl(const std::string &model_path,
                     "unetExecutionCount",
                     "strict image execution does not support auxiliary diffusion branches");
         }
-        if (actual_positive_execution_count != actual_timetable_count) {
+        if (!contract.ultrafix_enabled &&
+            actual_positive_execution_count != actual_timetable_count) {
             release_images_and_mismatch(
                     "positiveDiffusionExecutionCount",
                     "positive conditioning did not physically execute once per completed sampling step");
@@ -3260,10 +4393,14 @@ std::string generate_impl(const std::string &model_path,
         if (actual_use_cfg) {
             if (execution_evidence.negative_conditioning_observed == 0u ||
                 execution_evidence.negative_conditioning_token_count == 0u ||
-                actual_negative_execution_count != actual_timetable_count) {
+                (!contract.ultrafix_enabled &&
+                    actual_negative_execution_count != actual_timetable_count) ||
+                (contract.ultrafix_enabled &&
+                    static_cast<uint64_t>(actual_negative_execution_count) !=
+                        ultrafix_evidence.tiled_unet_tile_count)) {
                 release_images_and_mismatch(
                         "unconditionalBranch",
-                        "CFG did not execute evidenced negative conditioning once per sampling step");
+                        "CFG did not execute evidenced negative conditioning for every refinement evaluation");
             }
         } else if (execution_evidence.negative_conditioning_observed != 0u ||
                    execution_evidence.negative_conditioning_token_count != 0u ||
@@ -3319,6 +4456,17 @@ std::string generate_impl(const std::string &model_path,
         // tokenizer may consume more slots for long prompts or a model-native
         // conditioner such as T5. The exact executed count is reported above
         // and is intentionally not replaced with the request capacity.
+        const std::string actual_native_prompt_execution_sha256 =
+                image_prompt_execution_sha256(
+                        gen.prompt == nullptr ? std::string() : std::string(gen.prompt),
+                        gen.negative_prompt == nullptr
+                                ? std::string()
+                                : std::string(gen.negative_prompt));
+        if (!is_sha256(actual_native_prompt_execution_sha256)) {
+            release_images_and_mismatch(
+                    "nativePromptExecutionSha256",
+                    "native prompt framing could not be hashed after conditioning execution");
+        }
 
         const int64_t total_unet_execution_count = evidence_int(
                 execution_evidence.diffusion_model_compute_count,
@@ -3339,20 +4487,41 @@ std::string generate_impl(const std::string &model_path,
                     "timetableCount",
                     "actual completed native sampling steps differ from the resolved timetableCount");
         }
-        if (actual_unet_execution_count != contract.unet_execution_count) {
+        if (!contract.ultrafix_enabled &&
+            actual_unet_execution_count != contract.unet_execution_count) {
             release_images_and_mismatch(
                     "unetExecutionCount",
                     "actual physical diffusion model computes differ from the resolved contract");
         }
+        if (has_execution_asset_binding) {
+            std::string asset_error;
+            if (!mca::image::execution_assets::verify_final(
+                    execution_asset_binding,
+                    [] { return g_cancel_requested.load(std::memory_order_relaxed); },
+                    asset_error)) {
+                if (g_cancel_requested.load(std::memory_order_relaxed) || asset_error == "cancelled") {
+                    free_generated_images(images, contract.batch_count);
+                    return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+                }
+                release_images_and_mismatch(
+                    "textualInversionExecutionAssets",
+                    asset_error.empty()
+                        ? "execution assets changed during native generation"
+                        : asset_error);
+            }
+        }
 
         const double actual_cfg_scale =
                 static_cast<double>(gen.sample_params.guidance.txt_cfg);
+        const int semantic_unet_execution_count = contract.ultrafix_enabled
+                ? contract.unet_execution_count
+                : actual_unet_execution_count;
         json native_effective = native_effective_json(
                 contract,
                 prediction_wire,
                 gen.sample_params.sample_steps,
                 actual_timetable_count,
-                actual_unet_execution_count,
+                semantic_unet_execution_count,
                 actual_cfg_scale,
                 actual_use_cfg,
                 actual_token_count,
@@ -3374,8 +4543,12 @@ std::string generate_impl(const std::string &model_path,
         native_effective["inputImageSha256"] = input_image.sha256;
         native_effective["maskImageSha256"] = mask_image.sha256;
         native_effective["controlImageSha256"] = control_image.sha256;
-        native_effective["strength"] = input_image_wired
-                ? static_cast<double>(gen.strength) : contract.strength;
+        native_effective["strength"] = contract.strength;
+        native_effective["backendStrength"] = input_image_wired
+                ? (contract.ultrafix_enabled
+                    ? contract.ultrafix_strength
+                    : static_cast<double>(gen.strength))
+                : contract.strength;
         native_effective["controlStrength"] = control_image_wired
                 ? static_cast<double>(gen.control_strength) : contract.control_strength;
         native_effective["strengthApplied"] = input_image_wired;
@@ -3409,6 +4582,80 @@ std::string generate_impl(const std::string &model_path,
                         {"overlapY", actual_vae_decode_tile_overlap_y}
                 }}
         };
+        if (contract.ultrafix_enabled) {
+            native_effective["ultraFix"] = {
+                    {"version", ultrafix_evidence.version},
+                    {"generationCompleted", ultrafix_evidence.generation_completed == 1u},
+                    {"cancelled", ultrafix_evidence.cancelled == 1u},
+                    {"previewPublished", ultrafix_evidence.preview_published == 1u},
+                    {"sourceWidth", ultrafix_evidence.source_width},
+                    {"sourceHeight", ultrafix_evidence.source_height},
+                    {"targetWidth", ultrafix_evidence.target_width},
+                    {"targetHeight", ultrafix_evidence.target_height},
+                    {"sourceFit", "cover_center"},
+                    {"sourceResizedWidth", ultrafix_evidence.source_resized_width},
+                    {"sourceResizedHeight", ultrafix_evidence.source_resized_height},
+                    {"sourceCropLeft", ultrafix_evidence.source_crop_left},
+                    {"sourceCropTop", ultrafix_evidence.source_crop_top},
+                    {"tileSize", ultrafix_evidence.tile_size},
+                    {"overlap", ultrafix_evidence.tile_overlap},
+                    {"inversionSteps", ultrafix_evidence.inversion_steps},
+                    {"refinementSteps", ultrafix_evidence.refinement_steps},
+                    {"denoiseStepCount", ultrafix_evidence.denoise_step_count},
+                    {"sampleMethod", sd_sample_method_name(gen.sample_params.sample_method)},
+                    {"nativeScheduler", sd_scheduler_name(gen.sample_params.scheduler)},
+                    {"vaeEncode", {
+                            {"invocationCount", ultrafix_evidence.vae_encode_invocation_count},
+                            {"successCount", ultrafix_evidence.vae_encode_success_count},
+                            {"tileInvocationCount", ultrafix_evidence.vae_encode_tile_count},
+                            {"tileSuccessCount", ultrafix_evidence.vae_encode_tile_success_count},
+                            {"stepCount", 1}
+                    }},
+                    {"ddimInversion", {
+                            {"invocationCount", ultrafix_evidence.ddim_inversion_invocation_count},
+                            {"successCount", ultrafix_evidence.ddim_inversion_success_count},
+                            {"tileInvocationCount", ultrafix_evidence.ddim_inversion_tile_count},
+                            {"tileSuccessCount", ultrafix_evidence.ddim_inversion_tile_success_count},
+                            {"stepCount", ultrafix_evidence.ddim_inversion_step_count}
+                    }},
+                    {"tiledUnetRefinement", {
+                            {"invocationCount", ultrafix_evidence.tiled_unet_invocation_count},
+                            {"successCount", ultrafix_evidence.tiled_unet_success_count},
+                            {"tileInvocationCount", ultrafix_evidence.tiled_unet_tile_count},
+                            {"tileSuccessCount", ultrafix_evidence.tiled_unet_tile_success_count},
+                            {"stepCount", ultrafix_evidence.tiled_unet_step_count}
+                    }},
+                    {"tiledVaeDecode", {
+                            {"invocationCount", ultrafix_evidence.tiled_vae_decode_invocation_count},
+                            {"successCount", ultrafix_evidence.tiled_vae_decode_success_count},
+                            {"tileInvocationCount", ultrafix_evidence.tiled_vae_decode_tile_count},
+                            {"tileSuccessCount", ultrafix_evidence.tiled_vae_decode_tile_success_count},
+                            {"stepCount", 1}
+                    }},
+                    {"physicalDiffusionModelComputeCount",
+                            execution_evidence.diffusion_model_compute_count},
+                    {"qualityStepEvaluationCount",
+                            ultrafix_evidence.quality_step_evaluation_count},
+                    {"noiseInjectionStepCount",
+                            ultrafix_evidence.noise_injection_step_count},
+                    {"noiseInjectionSeedFingerprint",
+                            sha256_utf8(mca::image::ultrafix_noise_seed_descriptor(
+                                    ultrafix_evidence.noise_injection_seed,
+                                    ultrafix_evidence.denoise_step_count))},
+                    {"noiseInjectionChecksum",
+                            fixed_width_lower_hex_u64(
+                                    ultrafix_evidence.noise_injection_checksum)},
+                    {"structureGuidanceStepCount",
+                            ultrafix_evidence.structure_guidance_step_count},
+                    {"structureGuidanceChecksum",
+                            fixed_width_lower_hex_u64(
+                                    ultrafix_evidence.structure_guidance_checksum)},
+                    {"trajectoryNoiseChecksum",
+                            fixed_width_lower_hex_u64(
+                                    ultrafix_evidence.trajectory_noise_checksum)}
+            };
+            native_effective["strengthMechanism"] = "ddim_inversion";
+        }
         native_effective["outputCount"] = contract.batch_count;
         native_effective["n"] = contract.batch_count;
         native_effective["totalUnetExecutionCount"] = total_unet_execution_count;
@@ -3425,6 +4672,9 @@ std::string generate_impl(const std::string &model_path,
                 execution_evidence.negative_conditioning_token_count;
         native_effective["conditioningArtifactSha256"] =
                 actual_prompt_weight_fingerprint;
+        native_effective["nativePromptExecutionSha256"] =
+                actual_native_prompt_execution_sha256;
+        native_effective["nativePromptBindingStage"] = "conditioning_consumed";
         native_effective["requestedDistilledGuidance"] = contract.distilled_guidance;
         native_effective["distilledGuidanceSpecified"] =
                 contract.distilled_guidance_specified;
@@ -3471,6 +4721,55 @@ std::string generate_impl(const std::string &model_path,
                 {"appliedCount", execution_evidence.lora_applied_count},
                 {"appliedTensorCount", execution_evidence.lora_applied_tensor_count}
         };
+        native_effective["textualInversions"] = json::array();
+        for (const auto &artifact: validated_textual_inversions) {
+            native_effective["textualInversions"].push_back({
+                    {"id", artifact.id},
+                    {"trigger", artifact.trigger},
+                    {"sha256", artifact.sha256},
+                    {"sizeBytes", artifact.size_bytes},
+                    {"format", artifact.format},
+                    {"runtime", artifact.runtime},
+                    {"modelFingerprint", artifact.model_fingerprint},
+                    {"tokenizerFingerprint", artifact.tokenizer_fingerprint},
+                    {"profileId", artifact.profile_id},
+                    {"profileRevision", artifact.profile_revision},
+                    {"bindingFingerprint", artifact.binding_fingerprint}
+            });
+        }
+        native_effective["textualInversionEvidence"] = {
+                {"requestedCount", execution_evidence.textual_inversion_requested_count},
+                {"validatedCount", validated_textual_inversions.size()},
+                {"loadAttemptCount", execution_evidence.textual_inversion_load_attempt_count},
+                {"loadedCount", execution_evidence.textual_inversion_loaded_count},
+                {"tokenizerMatchCount", execution_evidence.textual_inversion_tokenizer_match_count},
+                {"appliedCount", execution_evidence.textual_inversion_applied_count},
+                {"appliedVectorCount", execution_evidence.textual_inversion_applied_vector_count},
+                {"conditioningConsumptionCount",
+                        execution_evidence.textual_inversion_conditioning_consumption_count},
+                {"clipLAppliedCount", execution_evidence.textual_inversion_clip_l_applied_count},
+                {"clipGAppliedCount", execution_evidence.textual_inversion_clip_g_applied_count},
+                {"requestedMask", execution_evidence.textual_inversion_requested_mask},
+                {"loadedMask", execution_evidence.textual_inversion_loaded_mask},
+                {"tokenizerMatchMask", execution_evidence.textual_inversion_tokenizer_match_mask},
+                {"appliedMask", execution_evidence.textual_inversion_applied_mask},
+                {"consumedMask", execution_evidence.textual_inversion_consumed_mask},
+                {"clipLMask", execution_evidence.textual_inversion_clip_l_mask},
+                {"clipGMask", execution_evidence.textual_inversion_clip_g_mask},
+                {"clipGRequiredMask",
+                        execution_evidence.textual_inversion_clip_g_required_mask},
+                {"failureCode", "none"},
+                {"bindingFingerprint", contract.textual_inversion_binding_fingerprint},
+                {"nativeMode", validated_textual_inversions.empty()
+                        ? "none" : "SDCPP_CUSTOM_WORDS"},
+                {"bindingStage", validated_textual_inversions.empty()
+                        ? "none" : "conditioning_consumed"}
+        };
+        if (has_execution_asset_binding) {
+            mca::image::execution_assets::append_evidence(
+                    native_effective,
+                    execution_asset_binding);
+        }
 
         set_progress(
                 "writing",
@@ -3490,14 +4789,30 @@ std::string generate_impl(const std::string &model_path,
         }
         const int stride = actual_width * actual_channels;
         bool write_ok = true;
+        std::string output_write_error;
+        std::vector<std::string> output_sha256s(
+                static_cast<size_t>(contract.batch_count));
+        std::vector<uint64_t> output_byte_counts(
+                static_cast<size_t>(contract.batch_count), 0u);
         for (int index = 0; index < contract.batch_count; ++index) {
-            if (stbi_write_png(
-                    output_paths[static_cast<size_t>(index)].c_str(),
-                    actual_width,
-                    actual_height,
-                    actual_channels,
-                    images[index].data,
-                    stride) == 0) {
+            const bool wrote = contract.ultrafix_enabled
+                    ? write_png_atomic(
+                        output_paths[static_cast<size_t>(index)],
+                        actual_width,
+                        actual_height,
+                        actual_channels,
+                        images[index].data,
+                        output_sha256s[static_cast<size_t>(index)],
+                        output_byte_counts[static_cast<size_t>(index)],
+                        output_write_error)
+                    : stbi_write_png(
+                        output_paths[static_cast<size_t>(index)].c_str(),
+                        actual_width,
+                        actual_height,
+                        actual_channels,
+                        images[index].data,
+                        stride) != 0;
+            if (!wrote) {
                 write_ok = false;
                 break;
             }
@@ -3505,16 +4820,34 @@ std::string generate_impl(const std::string &model_path,
         free_generated_images(images, contract.batch_count);
         if (!write_ok) {
             remove_output_files(output_paths);
+            if (g_cancel_requested.load(std::memory_order_relaxed)) {
+                set_progress(
+                        "cancelled",
+                        "cancelled before output publication",
+                        actual_timetable_count,
+                        actual_timetable_count,
+                        0.0f,
+                        actual_width,
+                        actual_height,
+                        contract.threads);
+                return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+            }
             set_progress(
                     "failed",
-                    "failed to write png",
+                    output_write_error.empty()
+                        ? "failed to write png"
+                        : output_write_error,
                     actual_timetable_count,
                     actual_timetable_count,
                     0.0f,
                     actual_width,
                     actual_height,
                     contract.threads);
-            return runtime_failure("OUTPUT_WRITE_FAILED", "failed to write the complete PNG batch").dump();
+            return runtime_failure(
+                    "OUTPUT_WRITE_FAILED",
+                    output_write_error.empty()
+                        ? "failed to write the complete PNG batch"
+                        : output_write_error).dump();
         }
         mark_generation_stage(kStageOutputWritten);
         set_progress(
@@ -3535,7 +4868,7 @@ std::string generate_impl(const std::string &model_path,
         out["mimeType"] = "image/png";
         out["outputs"] = json::array();
         for (int index = 0; index < contract.batch_count; ++index) {
-            out["outputs"].push_back({
+            json output_entry = {
                     {"index", index},
                     {"path", output_paths[static_cast<size_t>(index)]},
                     {"mimeType", "image/png"},
@@ -3543,7 +4876,22 @@ std::string generate_impl(const std::string &model_path,
                     {"width", actual_width},
                     {"height", actual_height},
                     {"channels", actual_channels}
-            });
+            };
+            if (contract.ultrafix_enabled) {
+                output_entry["sha256"] = output_sha256s[static_cast<size_t>(index)];
+                output_entry["sizeBytes"] = output_byte_counts[static_cast<size_t>(index)];
+                output_entry["atomicCommit"] = true;
+            }
+            out["outputs"].push_back(std::move(output_entry));
+        }
+        if (contract.ultrafix_enabled) {
+            out["outputSha256"] = output_sha256s.front();
+            out["outputSizeBytes"] = output_byte_counts.front();
+            out["outputAtomicCommit"] = true;
+            native_effective["outputSha256"] = output_sha256s.front();
+            native_effective["outputSizeBytes"] = output_byte_counts.front();
+            native_effective["outputAtomicCommit"] = true;
+            out["nativeEffective"] = native_effective;
         }
         out["outputCount"] = contract.batch_count;
         out["n"] = contract.batch_count;
@@ -3567,6 +4915,9 @@ std::string generate_impl(const std::string &model_path,
         out["actualNegativeConditioningTokenCount"] =
                 execution_evidence.negative_conditioning_token_count;
         out["conditioningArtifactSha256"] = actual_prompt_weight_fingerprint;
+        out["nativePromptExecutionSha256"] =
+                actual_native_prompt_execution_sha256;
+        out["nativePromptBindingStage"] = "conditioning_consumed";
         out["totalUnetExecutionCount"] = total_unet_execution_count;
         out["uiProgressCallbackCount"] = ui_progress_callback_count;
         out["uiProgressReportedSteps"] = ui_progress_reported_steps;
@@ -3617,12 +4968,15 @@ std::string generate_impl(const std::string &model_path,
         out["imageInputConsumption"] = native_effective["imageInputConsumption"];
         out["controlNetEvidence"] = native_effective["controlNetEvidence"];
         out["strength"] = native_effective["strength"];
+        out["backendStrength"] = native_effective["backendStrength"];
         out["controlStrength"] = native_effective["controlStrength"];
         out["clipSkip"] = native_effective["clipSkip"];
         out["batchCount"] = native_effective["batchCount"];
         out["vaeTiling"] = native_effective["vaeTiling"];
         out["loras"] = native_effective["loras"];
         out["loraEvidence"] = native_effective["loraEvidence"];
+        out["textualInversions"] = native_effective["textualInversions"];
+        out["textualInversionEvidence"] = native_effective["textualInversionEvidence"];
         out["backendMode"] = "cpu";
         out["backend"] = "stable-diffusion.cpp";
         out["runtimeBackend"] = sd_runtime_backend_label();

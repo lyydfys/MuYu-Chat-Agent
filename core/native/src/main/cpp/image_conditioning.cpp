@@ -471,11 +471,279 @@ bool encode_clip_sequence(tokenizers::Tokenizer* tokenizer, const std::string& t
     };
     return tokenize_weighted_clip_sequence_with_encoder(text, config, encoder, output, error);
 }
+
+bool ascii_trigger_word_character(unsigned char value) {
+    return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+           (value >= '0' && value <= '9') || value == '_';
+}
+
+bool ascii_equal_ignore_case(unsigned char left, unsigned char right) {
+    const auto lower = [](unsigned char value) {
+        return value >= 'A' && value <= 'Z'
+                ? static_cast<unsigned char>(value - 'A' + 'a')
+                : value;
+    };
+    return lower(left) == lower(right);
+}
+
+bool trigger_matches_at(const std::string& text, size_t offset, const std::string& trigger) {
+    if (trigger.empty() || offset > text.size() || trigger.size() > text.size() - offset) {
+        return false;
+    }
+    for (size_t index = 0; index < trigger.size(); ++index) {
+        if (!ascii_equal_ignore_case(
+                static_cast<unsigned char>(text[offset + index]),
+                static_cast<unsigned char>(trigger[index]))) {
+            return false;
+        }
+    }
+    if (ascii_trigger_word_character(static_cast<unsigned char>(trigger.front())) &&
+        offset > 0U &&
+        ascii_trigger_word_character(static_cast<unsigned char>(text[offset - 1U]))) {
+        return false;
+    }
+    const size_t end = offset + trigger.size();
+    return !ascii_trigger_word_character(static_cast<unsigned char>(trigger.back())) ||
+           end == text.size() ||
+           !ascii_trigger_word_character(static_cast<unsigned char>(text[end]));
+}
+
+bool validate_textual_inversion_embeddings(
+        const std::vector<ClipTextualInversionEmbedding>& embeddings,
+        size_t* embedding_width,
+        std::string* error) {
+    if (embedding_width == nullptr || error == nullptr) return false;
+    *embedding_width = 0U;
+    if (embeddings.empty() || embeddings.size() > 8U) {
+        *error = "Textual inversion selection must contain between one and eight embeddings.";
+        return false;
+    }
+    std::vector<std::string> normalized_triggers;
+    std::vector<size_t> artifact_indices;
+    for (size_t index = 0; index < embeddings.size(); ++index) {
+        const auto& embedding = embeddings[index];
+        if (embedding.artifact_index >= 63U || embedding.trigger.empty() ||
+            embedding.embedding_width == 0U || embedding.values.empty() ||
+            embedding.values.size() % embedding.embedding_width != 0U) {
+            *error = "Textual inversion embedding metadata or shape is invalid.";
+            return false;
+        }
+        if (std::find(artifact_indices.begin(), artifact_indices.end(), embedding.artifact_index) !=
+            artifact_indices.end()) {
+            *error = "Textual inversion artifact indices must be unique.";
+            return false;
+        }
+        artifact_indices.push_back(embedding.artifact_index);
+        const size_t rows = embedding.values.size() / embedding.embedding_width;
+        if (rows == 0U || rows > 75U ||
+            std::any_of(embedding.values.begin(), embedding.values.end(), [](float value) {
+                return !std::isfinite(value);
+            })) {
+            *error = "Textual inversion tensor rows must be finite and fit the CLIP content budget.";
+            return false;
+        }
+        if (*embedding_width == 0U) *embedding_width = embedding.embedding_width;
+        if (*embedding_width != embedding.embedding_width) {
+            *error = "Textual inversion tensors in one CLIP encoder must share one width.";
+            return false;
+        }
+        std::string normalized = embedding.trigger;
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char value) {
+            return value >= 'A' && value <= 'Z' ? static_cast<char>(value - 'A' + 'a')
+                                                 : static_cast<char>(value);
+        });
+        if (std::find(normalized_triggers.begin(), normalized_triggers.end(), normalized) !=
+            normalized_triggers.end()) {
+            *error = "Textual inversion triggers must be unique ignoring ASCII case.";
+            return false;
+        }
+        normalized_triggers.push_back(std::move(normalized));
+    }
+    return true;
+}
+
+bool encode_conditioned_clip_sequence(
+        tokenizers::Tokenizer* tokenizer,
+        const std::string& text,
+        const ClipTokenizerConfig& config,
+        const std::vector<ClipTextualInversionEmbedding>& embeddings,
+        ClipConditionedSequence* output,
+        std::string* error) {
+    if (tokenizer == nullptr || output == nullptr || error == nullptr) return false;
+    *output = ClipConditionedSequence{};
+    size_t embedding_width = 0U;
+    if (!validate_config(config, error) ||
+        !validate_textual_inversion_embeddings(embeddings, &embedding_width, error)) {
+        return false;
+    }
+    const ClipFragmentEncoder encoder = [tokenizer](
+            const std::string& fragment,
+            std::vector<int32_t>* token_ids,
+            std::string* encode_error) {
+        if (token_ids == nullptr || encode_error == nullptr) return false;
+        try {
+            const std::vector<int> encoded = tokenizer->Encode(fragment);
+            token_ids->assign(encoded.begin(), encoded.end());
+            return true;
+        } catch (const std::exception& exception) {
+            *encode_error = std::string("Tokenizer execution failed: ") + exception.what();
+            return false;
+        } catch (...) {
+            *encode_error = "Tokenizer execution failed with an unknown native exception.";
+            return false;
+        }
+    };
+
+    std::vector<WeightedPromptFragment> fragments;
+    if (config.enable_prompt_weighting) {
+        if (!parse_clip_prompt_weighting(text, &fragments, error)) return false;
+    } else {
+        fragments.push_back(WeightedPromptFragment{text, 1.0f});
+    }
+
+    std::vector<int32_t> content_ids;
+    std::vector<float> content_weights;
+    std::vector<uint8_t> content_override_mask;
+    std::vector<float> content_overrides;
+    uint64_t tokenizer_match_mask = 0U;
+    struct AppliedOccurrence {
+        size_t artifact_index = 0U;
+        size_t end_content_index = 0U;
+        size_t vector_count = 0U;
+    };
+    std::vector<AppliedOccurrence> occurrences;
+
+    const auto append_literal = [&](const std::string& literal, float weight) -> bool {
+        if (literal.empty()) return true;
+        std::vector<int32_t> ids;
+        if (!encoder(literal, &ids, error)) return false;
+        if (std::any_of(ids.begin(), ids.end(), [](int32_t id) { return id < 0; })) {
+            *error = "Tokenizer returned a negative token id.";
+            return false;
+        }
+        content_ids.insert(content_ids.end(), ids.begin(), ids.end());
+        content_weights.insert(content_weights.end(), ids.size(), weight);
+        content_override_mask.insert(content_override_mask.end(), ids.size(), UINT8_C(0));
+        content_overrides.resize(content_ids.size() * embedding_width, 0.0f);
+        return true;
+    };
+
+    for (const auto& fragment : fragments) {
+        size_t cursor = 0U;
+        while (cursor < fragment.text.size()) {
+            size_t match_offset = std::string::npos;
+            size_t match_index = 0U;
+            size_t match_length = 0U;
+            for (size_t offset = cursor; offset < fragment.text.size(); ++offset) {
+                for (size_t index = 0; index < embeddings.size(); ++index) {
+                    const auto& trigger = embeddings[index].trigger;
+                    if (trigger_matches_at(fragment.text, offset, trigger) &&
+                        (match_offset == std::string::npos || offset < match_offset ||
+                         (offset == match_offset && trigger.size() > match_length))) {
+                        match_offset = offset;
+                        match_index = index;
+                        match_length = trigger.size();
+                    }
+                }
+                if (match_offset != std::string::npos) break;
+            }
+            if (match_offset == std::string::npos) {
+                if (!append_literal(fragment.text.substr(cursor), fragment.weight)) return false;
+                cursor = fragment.text.size();
+                continue;
+            }
+            if (!append_literal(
+                    fragment.text.substr(cursor, match_offset - cursor),
+                    fragment.weight)) {
+                return false;
+            }
+            const auto& embedding = embeddings[match_index];
+            const size_t rows = embedding.values.size() / embedding_width;
+            const size_t first_row = content_ids.size();
+            content_ids.insert(content_ids.end(), rows, config.eos_id);
+            content_weights.insert(content_weights.end(), rows, fragment.weight);
+            content_override_mask.insert(content_override_mask.end(), rows, UINT8_C(1));
+            content_overrides.resize(content_ids.size() * embedding_width, 0.0f);
+            std::copy(
+                embedding.values.begin(),
+                embedding.values.end(),
+                content_overrides.begin() + first_row * embedding_width);
+            tokenizer_match_mask |= UINT64_C(1) << embedding.artifact_index;
+            occurrences.push_back(AppliedOccurrence{
+                embedding.artifact_index,
+                content_ids.size(),
+                rows,
+            });
+            cursor = match_offset + match_length;
+        }
+    }
+
+    const size_t special_count = (config.add_bos ? 1U : 0U) + (config.add_eos ? 1U : 0U);
+    const size_t content_capacity = static_cast<size_t>(config.max_length) - special_count;
+    for (const auto& occurrence : occurrences) {
+        if (occurrence.end_content_index > content_capacity) {
+            *error = "A selected textual inversion trigger was truncated before all embedding vectors reached CLIP.";
+            return false;
+        }
+    }
+    if (!finalize_clip_sequence(
+            content_ids,
+            content_weights,
+            config,
+            &output->tokens,
+            error)) {
+        return false;
+    }
+    output->embedding_width = embedding_width;
+    output->override_mask.assign(static_cast<size_t>(config.max_length), UINT8_C(0));
+    output->embedding_overrides.assign(
+        static_cast<size_t>(config.max_length) * embedding_width,
+        0.0f);
+    const size_t retained = std::min(content_ids.size(), content_capacity);
+    const size_t output_offset = config.add_bos ? 1U : 0U;
+    for (size_t content_index = 0U; content_index < retained; ++content_index) {
+        if (content_override_mask[content_index] == 0U) continue;
+        const size_t output_index = output_offset + content_index;
+        output->override_mask[output_index] = UINT8_C(1);
+        std::copy_n(
+            content_overrides.begin() + content_index * embedding_width,
+            embedding_width,
+            output->embedding_overrides.begin() + output_index * embedding_width);
+    }
+    output->tokenizer_match_mask = tokenizer_match_mask;
+    for (const auto& occurrence : occurrences) {
+        output->applied_mask |= UINT64_C(1) << occurrence.artifact_index;
+        output->applied_vector_count += occurrence.vector_count;
+    }
+    return true;
+}
 #endif
 
 }  // namespace
 
 std::string sha256_hex_bytes(const std::vector<uint8_t>& payload) {
+    return sha256_hex(payload);
+}
+
+std::string image_prompt_execution_sha256(const std::string& prompt,
+                                          const std::string& negative_prompt) {
+    if (prompt.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+        negative_prompt.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        return {};
+    }
+    std::vector<uint8_t> payload;
+    payload.reserve(10U + prompt.size() + negative_prompt.size());
+    const auto append_non_null_utf8 = [&payload](const std::string& value) {
+        payload.push_back(1U);
+        const uint32_t size = static_cast<uint32_t>(value.size());
+        payload.push_back(static_cast<uint8_t>((size >> 24U) & UINT32_C(0xff)));
+        payload.push_back(static_cast<uint8_t>((size >> 16U) & UINT32_C(0xff)));
+        payload.push_back(static_cast<uint8_t>((size >> 8U) & UINT32_C(0xff)));
+        payload.push_back(static_cast<uint8_t>(size & UINT32_C(0xff)));
+        payload.insert(payload.end(), value.begin(), value.end());
+    };
+    append_non_null_utf8(prompt);
+    append_non_null_utf8(negative_prompt);
     return sha256_hex(payload);
 }
 
@@ -502,6 +770,18 @@ std::string ClipTokenPair::weighting_fingerprint() const {
         return {};
     }
     return sha256_hex(payload);
+}
+
+uint64_t ClipConditionedPair::tokenizer_match_mask() const {
+    return negative.tokenizer_match_mask | positive.tokenizer_match_mask;
+}
+
+uint64_t ClipConditionedPair::applied_mask() const {
+    return negative.applied_mask | positive.applied_mask;
+}
+
+size_t ClipConditionedPair::applied_vector_count() const {
+    return negative.applied_vector_count + positive.applied_vector_count;
 }
 
 bool parse_clip_prompt_weighting(const std::string& prompt,
@@ -684,7 +964,8 @@ bool tokenize_clip_pair_from_json(const std::string& tokenizer_json_path,
                                   const std::string& positive_prompt,
                                   const std::string& negative_prompt,
                                   const ClipTokenizerConfig& config, ClipTokenPair* output,
-                                  std::string* error) {
+                                  std::string* error,
+                                  bool include_negative) {
     if (output == nullptr || error == nullptr) return false;
     output->negative = ClipTokenSequence{};
     output->positive = ClipTokenSequence{};
@@ -708,13 +989,137 @@ bool tokenize_clip_pair_from_json(const std::string& tokenizer_json_path,
         *error = "Tokenizer JSON did not create a tokenizer instance.";
         return false;
     }
-    return encode_clip_sequence(tokenizer.get(), negative_prompt, config, &output->negative,
-                                error) &&
+    return (!include_negative ||
+            encode_clip_sequence(
+                tokenizer.get(), negative_prompt, config, &output->negative, error)) &&
            encode_clip_sequence(tokenizer.get(), positive_prompt, config, &output->positive, error);
 #else
     (void)tokenizer_json_path;
     (void)positive_prompt;
     (void)negative_prompt;
+    (void)include_negative;
+    *error = "The standard tokenizer backend is not packaged in this build.";
+    return false;
+#endif
+}
+
+bool measure_clip_prompt_from_json(const std::string& tokenizer_json_path,
+                                   const std::string& prompt,
+                                   const ClipTokenizerConfig& config,
+                                   ClipPromptTokenMeasurement* output,
+                                   std::string* error) {
+    if (output == nullptr || error == nullptr) return false;
+    *output = ClipPromptTokenMeasurement{};
+    error->clear();
+    if (!validate_config(config, error)) return false;
+
+#if MCA_WITH_TOKENIZERS_CPP
+    std::string tokenizer_json;
+    if (!read_bounded_file(tokenizer_json_path, &tokenizer_json, error)) return false;
+    std::unique_ptr<tokenizers::Tokenizer> tokenizer;
+    try {
+        tokenizer = tokenizers::Tokenizer::FromBlobJSON(tokenizer_json);
+    } catch (const std::exception& exception) {
+        *error = std::string("Tokenizer JSON parse failed: ") + exception.what();
+        return false;
+    } catch (...) {
+        *error = "Tokenizer JSON parse failed with an unknown native exception.";
+        return false;
+    }
+    if (!tokenizer) {
+        *error = "Tokenizer JSON did not create a tokenizer instance.";
+        return false;
+    }
+
+    const auto measure = [&](const std::string& candidate, size_t* count) -> bool {
+        if (count == nullptr) return false;
+        ClipTokenSequence sequence;
+        std::string candidate_error;
+        if (!encode_clip_sequence(tokenizer.get(), candidate, config, &sequence,
+                                  &candidate_error)) {
+            return false;
+        }
+        *count = sequence.untruncated_token_count;
+        return true;
+    };
+
+    size_t full_count = 0U;
+    if (!measure(prompt, &full_count)) {
+        *error = "Tokenizer could not measure the complete prompt.";
+        return false;
+    }
+    output->token_count = full_count;
+    output->max_length = static_cast<size_t>(config.max_length);
+    // tokenizers-cpp does not expose source offsets in its small public API.
+    // A prefix-by-prefix retry turns long-prompt typing into O(n^2) tokenizer
+    // work, so return the exact count without a source offset. The Kotlin UI
+    // already treats this field as optional and can still show overflow.
+    return true;
+#else
+    (void)tokenizer_json_path;
+    (void)prompt;
+    (void)config;
+    *error = "The standard tokenizer backend is not packaged in this build.";
+    return false;
+#endif
+}
+
+bool tokenize_clip_pair_with_textual_inversion_from_json(
+        const std::string& tokenizer_json_path,
+        const std::string& positive_prompt,
+        const std::string& negative_prompt,
+        const ClipTokenizerConfig& config,
+        const std::vector<ClipTextualInversionEmbedding>& embeddings,
+        ClipConditionedPair* output,
+        std::string* error,
+        bool include_negative) {
+    if (output == nullptr || error == nullptr) return false;
+    *output = ClipConditionedPair{};
+    error->clear();
+    if (!validate_config(config, error)) return false;
+#if MCA_WITH_TOKENIZERS_CPP
+    std::string tokenizer_json;
+    if (!read_bounded_file(tokenizer_json_path, &tokenizer_json, error)) return false;
+    std::unique_ptr<tokenizers::Tokenizer> tokenizer;
+    try {
+        tokenizer = tokenizers::Tokenizer::FromBlobJSON(tokenizer_json);
+    } catch (const std::exception& exception) {
+        *error = std::string("Tokenizer JSON parse failed: ") + exception.what();
+        return false;
+    } catch (...) {
+        *error = "Tokenizer JSON parse failed with an unknown native exception.";
+        return false;
+    }
+    if (!tokenizer) {
+        *error = "Tokenizer JSON did not create a tokenizer instance.";
+        return false;
+    }
+    if ((include_negative && !encode_conditioned_clip_sequence(
+            tokenizer.get(), negative_prompt, config, embeddings, &output->negative, error)) ||
+        !encode_conditioned_clip_sequence(
+            tokenizer.get(), positive_prompt, config, embeddings, &output->positive, error)) {
+        return false;
+    }
+    const uint64_t expected_mask = embeddings.size() >= 64U
+            ? UINT64_MAX
+            : ((UINT64_C(1) << embeddings.size()) - UINT64_C(1));
+    const uint64_t tokenizer_match_mask = include_negative
+        ? output->tokenizer_match_mask()
+        : output->positive.tokenizer_match_mask;
+    const uint64_t applied_mask = include_negative
+        ? output->applied_mask()
+        : output->positive.applied_mask;
+    if (tokenizer_match_mask != expected_mask || applied_mask != expected_mask) {
+        *error = "Every selected textual inversion trigger must match and reach a CLIP input row.";
+        return false;
+    }
+    return true;
+#else
+    (void)tokenizer_json_path;
+    (void)positive_prompt;
+    (void)negative_prompt;
+    (void)embeddings;
+    (void)include_negative;
     *error = "The standard tokenizer backend is not packaged in this build.";
     return false;
 #endif

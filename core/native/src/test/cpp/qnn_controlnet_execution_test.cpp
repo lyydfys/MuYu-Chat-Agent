@@ -78,6 +78,10 @@ void test_preprocessed_canny_is_strictly_grayscale() {
     std::string error;
     assert(mca::qnn::controlnet::sha256_hex_bytes({0U, 0U, 0U}) ==
            "709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c");
+    const std::vector<uint8_t> mapped_context_bytes{0U, 0U, 0U};
+    assert(mca::qnn::controlnet::sha256_hex_bytes(
+               mapped_context_bytes.data(), mapped_context_bytes.size()) ==
+           "709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c");
     std::vector<float> black_tensor;
     size_t black_edges = 0U;
     std::string black_hash;

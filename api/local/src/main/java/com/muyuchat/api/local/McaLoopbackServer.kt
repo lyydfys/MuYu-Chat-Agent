@@ -9,25 +9,35 @@ import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.engine.localContextWindowBudget
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.util.LinkedHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.UUID
 
@@ -40,6 +50,10 @@ class McaLoopbackServer(
     private var scope = CoroutineScope(SupervisorJob() + dispatcher)
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
+    private val imageRequestLock = Any()
+    private val activeImageRequestJobs = linkedMapOf<String, Job>()
+    private var imageRequestCancellationEpoch: Long = 0L
+    private var imageRequestAdmissionPauseCount: Int = 0
 
     val isRunning: Boolean
         get() = serverSocket?.isClosed == false
@@ -58,6 +72,7 @@ class McaLoopbackServer(
         val socket = ServerSocket()
         socket.reuseAddress = true
         socket.bind(InetSocketAddress(bindAddress, port), SERVER_BACKLOG)
+        synchronized(imageRequestLock) { imageRequestAdmissionPauseCount = 0 }
         serverSocket = socket
         logInfo("Local API listening on $bindHost:$port")
         acceptJob = scope.launch {
@@ -99,6 +114,9 @@ class McaLoopbackServer(
     }
 
     fun stop() {
+        cancelActiveImageRequests(
+            "Local API server stopped during image generation."
+        )
         acceptJob?.cancel()
         acceptJob = null
         runCatching { serverSocket?.close() }
@@ -146,6 +164,8 @@ class McaLoopbackServer(
                 method == "HEAD" && path == "/health" -> writeNoContent(client)
                 method == "GET" && path == "/health" -> writeJson(client, """{"status":"ok","name":"MuYu Chat Agent"}""")
                 method == "GET" && (path == "/v1/models" || path == "/models") -> writeJson(client, LocalApiRuntime.modelsJson())
+                method == "GET" && path in IMAGE_TEXTUAL_INVERSION_PATHS ->
+                    writeJson(client, LocalApiRuntime.imageTextualInversionsJson())
                 method == "GET" && path == "/v1/mca/device" -> writeJson(client, LocalApiRuntime.deviceProfileJsonProvider())
                 method == "GET" && path == "/v1/mca/runtime" -> writeJson(client, localApiRuntimeStateJson())
                 method == "GET" && path == "/v1/mca/profile" -> writeJson(client, LocalApiRuntime.publicProfileJson())
@@ -167,7 +187,18 @@ class McaLoopbackServer(
                 }
                 method == "GET" && path == "/metrics" -> writeText(client, LocalApiRuntime.metricsJson())
                 method == "POST" && path == "/v1/generate/stop" -> {
-                    LocalApiRuntime.stopGeneration()
+                    val imageRequests = cancelActiveImageRequests(
+                        "Local API generation was stopped by the client."
+                    )
+                    try {
+                        LocalApiRuntime.stopGeneration()
+                    } finally {
+                        try {
+                            awaitImageRequestTermination(imageRequests)
+                        } finally {
+                            resumeImageRequestAdmission()
+                        }
+                    }
                     writeJson(client, """{"stopped":true}""")
                 }
                 method == "POST" && path in GENERATION_PATHS -> {
@@ -189,6 +220,7 @@ class McaLoopbackServer(
     }
 
     private suspend fun handleImageGeneration(socket: Socket, body: String) {
+        val cancellationEpoch = synchronized(imageRequestLock) { imageRequestCancellationEpoch }
         val request = try {
             ImageGenerationApiContract.parseRequest(body)
         } catch (error: ImageGenerationContractException) {
@@ -225,8 +257,30 @@ class McaLoopbackServer(
         }
 
         val requestId = "img-${UUID.randomUUID()}"
+        val requestJob = requireNotNull(currentCoroutineContext()[Job]) {
+            "Local API image generation requires a request coroutine."
+        }
+        if (!registerImageRequest(requestId, requestJob, cancellationEpoch)) {
+            writeError(
+                socket,
+                "409 Conflict",
+                "image_generation_cancelled",
+                "Local image generation was cancelled before provider admission."
+            )
+            return
+        }
         val providerResponse = try {
-            LocalApiRuntime.generateImage(requestId, request.rawBody)
+            withImageClientDisconnectCancellation(socket, requestId, requestJob) {
+                LocalApiRuntime.generateImage(requestId, request.rawBody)
+            }
+        } catch (cancelled: CancellationException) {
+            writeError(
+                socket,
+                "409 Conflict",
+                "image_generation_cancelled",
+                cancelled.message ?: "Local image generation was cancelled."
+            )
+            return
         } catch (error: ImageGenerationProviderException) {
             writeError(
                 socket,
@@ -245,6 +299,8 @@ class McaLoopbackServer(
                 error.message ?: "Local image generation failed."
             )
             return
+        } finally {
+            unregisterImageRequest(requestId, requestJob)
         }
         if (providerResponse == null) {
             writeError(
@@ -268,6 +324,100 @@ class McaLoopbackServer(
             return
         }
         writeJson(socket, response.rawBody)
+    }
+
+    /**
+     * The server owns one coroutine per authenticated image request. Explicit stop and server
+     * shutdown cancel that exact coroutine; MainViewModel then forwards cancellation to the
+     * native image worker and releases its coordinator lease in the provider's single finally.
+     */
+    private fun registerImageRequest(
+        requestId: String,
+        requestJob: Job,
+        cancellationEpoch: Long
+    ): Boolean = synchronized(imageRequestLock) {
+        if (imageRequestAdmissionPauseCount > 0 || cancellationEpoch != imageRequestCancellationEpoch) {
+            false
+        } else {
+            check(requestId !in activeImageRequestJobs) { "Duplicate Local API image request id." }
+            activeImageRequestJobs[requestId] = requestJob
+            true
+        }
+    }
+
+    private fun unregisterImageRequest(requestId: String, requestJob: Job) {
+        synchronized(imageRequestLock) {
+            if (activeImageRequestJobs[requestId] === requestJob) {
+                activeImageRequestJobs.remove(requestId)
+            }
+        }
+    }
+
+    private fun cancelImageRequest(requestId: String, requestJob: Job, reason: String) {
+        val ownsRequest = synchronized(imageRequestLock) {
+            activeImageRequestJobs[requestId] === requestJob
+        }
+        if (ownsRequest) requestJob.cancel(CancellationException(reason))
+    }
+
+    private fun cancelActiveImageRequests(reason: String): List<Job> {
+        val requests = synchronized(imageRequestLock) {
+            imageRequestCancellationEpoch += 1L
+            imageRequestAdmissionPauseCount += 1
+            activeImageRequestJobs.values.toList()
+        }
+        requests.forEach { requestJob -> requestJob.cancel(CancellationException(reason)) }
+        return requests
+    }
+
+    private fun resumeImageRequestAdmission() {
+        synchronized(imageRequestLock) {
+            if (imageRequestAdmissionPauseCount > 0) imageRequestAdmissionPauseCount -= 1
+        }
+    }
+
+    private suspend fun awaitImageRequestTermination(requests: List<Job>) {
+        requests.joinAll()
+    }
+
+    /**
+     * A reset/IO failure after the request body has been consumed means the response peer is gone.
+     * Plain EOF is intentionally not treated as cancellation: an HTTP client may half-close its
+     * request output while continuing to read the response (the JVM contract tests do this).
+     */
+    private suspend fun <T> withImageClientDisconnectCancellation(
+        socket: Socket,
+        requestId: String,
+        requestJob: Job,
+        block: suspend () -> T
+    ): T = coroutineScope {
+        val completed = AtomicBoolean(false)
+        val input = socket.getInputStream()
+        val disconnectMonitor = launch {
+            while (isActive && !completed.get()) {
+                try {
+                    if (input.read() < 0) return@launch
+                } catch (_: SocketTimeoutException) {
+                    // Keep polling so cancellation of a long native image request remains visible.
+                } catch (error: IOException) {
+                    if (!completed.get()) {
+                        cancelImageRequest(
+                            requestId = requestId,
+                            requestJob = requestJob,
+                            reason = "Local API image client disconnected: ${error.javaClass.simpleName}."
+                        )
+                    }
+                    return@launch
+                }
+            }
+        }
+        try {
+            block()
+        } finally {
+            completed.set(true)
+            runCatching { if (!socket.isInputShutdown) socket.shutdownInput() }
+            withContext(NonCancellable) { disconnectMonitor.cancelAndJoin() }
+        }
     }
 
     /**
@@ -1560,6 +1710,10 @@ class McaLoopbackServer(
         }
         private val GENERATION_PATHS = setOf("/v1/chat/completions", "/chat/completions", "/v1/completions", "/completion")
         private val IMAGE_GENERATION_PATHS = setOf("/v1/images/generations", "/images/generations")
+        private val IMAGE_TEXTUAL_INVERSION_PATHS = setOf(
+            "/v1/images/textual-inversions",
+            "/images/textual-inversions"
+        )
         private val CRLFCRLF = byteArrayOf('\r'.code.toByte(), '\n'.code.toByte(), '\r'.code.toByte(), '\n'.code.toByte())
         private val LFLF = byteArrayOf('\n'.code.toByte(), '\n'.code.toByte())
         private const val MAX_HEADER_BYTES = 64 * 1024
