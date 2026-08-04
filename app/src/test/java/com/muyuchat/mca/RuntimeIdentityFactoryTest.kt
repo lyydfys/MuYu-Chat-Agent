@@ -199,7 +199,7 @@ class RuntimeIdentityFactoryTest {
                 installationScopeId = "scope"
             )
             assertEquals("b".repeat(64), result.identity.projectorFingerprint)
-            assertTrue(result.identity.runtimeVersion.contains("llama.cpp@4d8cc0c56ffba3f8b7fdb0130627fed2a6f71958"))
+            assertTrue(result.identity.runtimeVersion.contains("llama.cpp@f26efa02a77dc3660f94ac90efee59394f3bc74d"))
             assertEquals("runtime-parameters-v2-sparse-moe-mmap", result.identity.parameterPolicyVersion)
             assertTrue(result.identity.evaluatorFingerprint.length == 64)
             assertTrue("local_chat" in result.identity.capabilities)

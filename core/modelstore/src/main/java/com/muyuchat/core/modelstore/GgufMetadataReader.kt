@@ -232,7 +232,10 @@ object GgufMetadataReader {
     }
 
     private fun inferQuant(fileName: String): String? {
-        val quantPattern = Regex("(Q[0-9]_[A-Z]_[A-Z]|Q[0-9]_[A-Z]|Q[0-9]|IQ[0-9]_[A-Z]+|F16|BF16)", RegexOption.IGNORE_CASE)
+        val quantPattern = Regex(
+            "(Q[0-9]_[A-Z0-9]+(?:_[A-Z0-9]+)?|Q[0-9]|IQ[0-9]_[A-Z]+|TQ[0-9]_[0-9]|MXFP4_MOE|NVFP4|F16|BF16)",
+            RegexOption.IGNORE_CASE
+        )
         return quantPattern.find(fileName)?.value?.uppercase()
     }
 
@@ -241,9 +244,9 @@ object GgufMetadataReader {
         1 -> "F16"
         2 -> "Q4_0"
         3 -> "Q4_1"
-        6 -> "Q5_0"
-        7 -> "Q5_1"
-        8 -> "Q8_0"
+        7 -> "Q8_0"
+        8 -> "Q5_0"
+        9 -> "Q5_1"
         10 -> "Q2_K"
         11 -> "Q3_K_S"
         12 -> "Q3_K_M"
@@ -267,8 +270,12 @@ object GgufMetadataReader {
         30 -> "IQ4_XS"
         31 -> "IQ1_M"
         32 -> "BF16"
-        35 -> "IQ4_NL"
-        36 -> "IQ4_XS"
+        36 -> "TQ1_0"
+        37 -> "TQ2_0"
+        38 -> "MXFP4_MOE"
+        39 -> "NVFP4"
+        40 -> "Q1_0"
+        41 -> "Q2_0"
         else -> null
     }
 

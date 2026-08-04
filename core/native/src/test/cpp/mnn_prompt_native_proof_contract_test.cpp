@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
     require_contains(source, "useClip1Weight ? clip1WeightPath : \"\"");
     require_occurrences(source, "useClipWeight ? clipWeightPath : \"\"", 2U);
     require_contains(source, "const bool useCommunityClip = mnn_contract_uses_community_clip(contract);");
-    require_contains(source, "if (!useCommunityClip || !has_community_clip_bundle(root))");
+    require_contains(source, "if (!useCommunityClip || !has_community_clip_bundle(root, selectedTextEncoderPath))");
     require_not_contains_between(
             source,
             "json run_mnn_sd15_interpreter_direct(",
@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
                    "if (!write_float_file(outputPath, combined, error))",
                    "{\"nativePromptBindingStage\", \"conditioning_encoded\"}");
     require_before(source,
-                   "Failed to publish weighted CLIP token payload.",
-                   "Weighted CLIP token payload prompt SHA-256 could not be derived.");
+                   "Weighted CLIP token payload prompt SHA-256 could not be derived.",
+                   "Failed to publish weighted CLIP token payload.");
     return 0;
 }

@@ -56,7 +56,7 @@ class ModelCompatibilityTest {
     }
 
     @Test
-    fun atomicImportStagingFileKeepsAuxiliaryAndSplitGuardsEffective() {
+    fun filenameHintsDoNotPreemptNativeGgufAdmission() {
         val directory = Files.createTempDirectory("gguf-import-guards-").toFile()
         val mmproj = File(directory, "mmproj-Qwen3.5.gguf")
         val mtp = File(directory, "mtp-Qwen3.5.gguf")
@@ -67,7 +67,7 @@ class ModelCompatibilityTest {
             staging.parentFile?.mkdirs()
             staging.writeBytes(fakeGguf(architecture = "qwen3", fileType = 15))
             assertEquals(finalFile.name, staging.name)
-            assertFalse(ModelCompatibility.check(staging).canLoad)
+            assertTrue(ModelCompatibility.check(staging).canLoad)
         }
     }
 
@@ -185,21 +185,22 @@ class ModelCompatibilityTest {
     }
 
     @Test
-    fun mmprojIsBlockedBeforeNativeLoad() {
+    fun projectorLikeFilenameIsEvaluatedFromMetadata() {
         val file = ggufFile("mmproj-Qwen3.5-4B-BF16.gguf", architecture = "clip", fileType = 1)
         val result = ModelCompatibility.check(file)
 
         assertFalse(result.canLoad)
-        assertTrue(result.message.contains("视觉投影辅助文件"))
+        assertTrue(result.message.contains("architecture=clip"))
     }
 
     @Test
-    fun splitPartIsBlockedBeforeNativeLoad() {
+    fun splitPartIsAllowedToReachNativeLoader() {
         val file = ggufFile("Qwen3.6-27B-BF16-00001-of-00002.gguf", architecture = "qwen3", fileType = 32)
+
         val result = ModelCompatibility.check(file)
 
-        assertFalse(result.canLoad)
-        assertTrue(result.message.contains("分片"))
+        assertTrue(result.canLoad)
+        assertTrue(result.warnings.any { it.contains("sharded GGUF") })
     }
 
     @Test

@@ -149,10 +149,14 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
             ${MTMD_SRC}/models/cogvlm.cpp
             ${MTMD_SRC}/models/conformer.cpp
             ${MTMD_SRC}/models/dotsocr.cpp
+            ${MTMD_SRC}/models/exaone4_5.cpp
             ${MTMD_SRC}/models/gemma4a.cpp
             ${MTMD_SRC}/models/gemma4v.cpp
+            ${MTMD_SRC}/models/gemma4ua.cpp
+            ${MTMD_SRC}/models/gemma4uv.cpp
             ${MTMD_SRC}/models/glm4v.cpp
             ${MTMD_SRC}/models/granite-speech.cpp
+            ${MTMD_SRC}/models/granite4-vision.cpp
             ${MTMD_SRC}/models/hunyuanvl.cpp
             ${MTMD_SRC}/models/internvl.cpp
             ${MTMD_SRC}/models/kimivl.cpp
@@ -163,17 +167,21 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
             ${MTMD_SRC}/models/minicpmv.cpp
             ${MTMD_SRC}/models/paddleocr.cpp
             ${MTMD_SRC}/models/pixtral.cpp
+            ${MTMD_SRC}/models/minimax-m3.cpp
             ${MTMD_SRC}/models/qwen2vl.cpp
             ${MTMD_SRC}/models/qwen3vl.cpp
             ${MTMD_SRC}/models/mimovl.cpp
+            ${MTMD_SRC}/models/mimo-audio.cpp
             ${MTMD_SRC}/models/qwen3a.cpp
             ${MTMD_SRC}/models/step3vl.cpp
             ${MTMD_SRC}/models/siglip.cpp
             ${MTMD_SRC}/models/whisper-enc.cpp
             ${MTMD_SRC}/models/deepseekocr.cpp
+            ${MTMD_SRC}/models/deepseekocr2.cpp
             ${MTMD_SRC}/models/mobilenetv5.cpp
             ${MTMD_SRC}/models/youtuvl.cpp
-            ${MTMD_SRC}/models/yasa2.cpp)
+            ${MTMD_SRC}/models/yasa2.cpp
+            ${MTMD_SRC}/models/parakeet.cpp)
     target_include_directories(mca_mtmd PUBLIC ${MTMD_SRC})
     target_include_directories(mca_mtmd PRIVATE ${LLAMA_SRC} ${LLAMA_SRC}/vendor)
     target_link_libraries(mca_mtmd PUBLIC ggml llama)

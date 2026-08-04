@@ -56,6 +56,7 @@ enum class GenerationStopReason : int {
     NORMAL_FINISHED,
     RUNNER_UNAVAILABLE,
     BEGIN_FAILED,
+    LOAD_FAILED,
     GENERATION_FAILED,
     CONTEXT_SHIFT_FAILED,
     DECODE_FAILED,
@@ -170,6 +171,7 @@ const char *generation_stop_reason_name(GenerationStopReason reason) {
         case GenerationStopReason::NORMAL_FINISHED: return "normal_finished";
         case GenerationStopReason::RUNNER_UNAVAILABLE: return "runner_unavailable";
         case GenerationStopReason::BEGIN_FAILED: return "begin_failed";
+        case GenerationStopReason::LOAD_FAILED: return "load_failed";
         case GenerationStopReason::GENERATION_FAILED: return "generation_failed";
         case GenerationStopReason::CONTEXT_SHIFT_FAILED: return "context_shift_failed";
         case GenerationStopReason::DECODE_FAILED: return "decode_failed";
@@ -797,6 +799,21 @@ std::string lower_ascii(std::string value) {
     return value;
 }
 
+bool load_mode_uses_mmap(llama_load_mode mode) {
+    return mode == LLAMA_LOAD_MODE_MMAP || mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
+}
+
+bool load_mode_uses_mlock(llama_load_mode mode) {
+    return mode == LLAMA_LOAD_MODE_MLOCK || mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
+}
+
+llama_load_mode load_mode_from_flags(bool use_mmap, bool use_mlock) {
+    if (use_mmap) {
+        return use_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP;
+    }
+    return use_mlock ? LLAMA_LOAD_MODE_MLOCK : LLAMA_LOAD_MODE_NONE;
+}
+
 RuntimeConfig default_runtime_config() {
     RuntimeConfig config;
     const int threads_default = std::max(1, (int) sysconf(_SC_NPROCESSORS_ONLN) - 2);
@@ -806,8 +823,8 @@ RuntimeConfig default_runtime_config() {
     config.n_gpu_layers = model_defaults.n_gpu_layers;
     config.main_gpu = model_defaults.main_gpu;
     config.split_mode = "layer";
-    config.mmap = model_defaults.use_mmap;
-    config.mlock = model_defaults.use_mlock;
+    config.mmap = load_mode_uses_mmap(model_defaults.load_mode);
+    config.mlock = load_mode_uses_mlock(model_defaults.load_mode);
     return config;
 }
 
@@ -1125,15 +1142,8 @@ bool model_supports_autoregressive_chat(
             !model_meta_declares_pooling(model, architecture);
 }
 
-int model_mtp_layer_count(const llama_model *model, const std::string &architecture) {
-    if (architecture.empty()) return 0;
-    const std::string raw = model_meta_string(model, architecture + ".nextn_predict_layers");
-    if (raw.empty()) return 0;
-    try {
-        return std::stoi(raw);
-    } catch (...) {
-        return -1;
-    }
+int model_mtp_layer_count(const llama_model *model) {
+    return model == nullptr ? 0 : llama_model_n_layer_nextn(model);
 }
 
 common_params_sampling build_sampling_params(const std::string &params_json) {
@@ -1545,23 +1555,34 @@ int prefill_multimodal_locked(
     }
 
     std::vector<mtmd_bitmap *> owned_bitmaps;
+    std::vector<mtmd_helper_video *> owned_videos;
+    const auto free_media = [&]() {
+        for (auto *owned: owned_bitmaps) mtmd_bitmap_free(owned);
+        for (auto *owned: owned_videos) mtmd_helper_video_free(owned);
+    };
     std::vector<const mtmd_bitmap *> bitmap_ptrs;
     for (const auto &message: messages) {
         for (const auto &path: message.image_paths) {
-            mtmd_bitmap *bitmap = mtmd_helper_bitmap_init_from_file(g_mtmd_context, path.c_str());
+            const auto loaded = mtmd_helper_bitmap_init_from_file(
+                    g_mtmd_context,
+                    path.c_str(),
+                    false);
+            mtmd_bitmap *bitmap = loaded.bitmap;
             if (bitmap == nullptr) {
-                for (auto *owned: owned_bitmaps) mtmd_bitmap_free(owned);
+                if (loaded.video_ctx != nullptr) mtmd_helper_video_free(loaded.video_ctx);
+                free_media();
                 g_last_error = "Failed to load local vision image: " + path;
                 return -5;
             }
             owned_bitmaps.push_back(bitmap);
+            if (loaded.video_ctx != nullptr) owned_videos.push_back(loaded.video_ctx);
             bitmap_ptrs.push_back(bitmap);
         }
     }
 
     mtmd_input_chunks *chunks = mtmd_input_chunks_init();
     if (chunks == nullptr) {
-        for (auto *owned: owned_bitmaps) mtmd_bitmap_free(owned);
+        free_media();
         g_last_error = "mtmd_input_chunks_init returned null.";
         return -6;
     }
@@ -1570,6 +1591,7 @@ int prefill_multimodal_locked(
     const auto formatted = format_messages(marked_messages, chat_options);
     mtmd_input_text text{};
     text.text = formatted.c_str();
+    text.text_len = formatted.size();
     text.add_special = true;
     text.parse_special = true;
 
@@ -1579,7 +1601,7 @@ int prefill_multimodal_locked(
             &text,
             bitmap_ptrs.empty() ? nullptr : bitmap_ptrs.data(),
             bitmap_ptrs.size());
-    for (auto *owned: owned_bitmaps) mtmd_bitmap_free(owned);
+    free_media();
     if (tokenize_rc != 0) {
         mtmd_input_chunks_free(chunks);
         g_last_error = "mtmd_tokenize failed: " + std::to_string(tokenize_rc);
@@ -2088,6 +2110,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_initBackends(
         jobject,
         jstring nativeLibDir
 ) {
+    try {
 #if MCA_WITH_LLAMA_CPP
     llama_log_set(android_llama_log, nullptr);
     mtmd_helper_log_set(android_llama_log, nullptr);
@@ -2107,6 +2130,19 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_initBackends(
     (void) nativeLibDir;
     __android_log_print(ANDROID_LOG_INFO, "MCA", "Native stub backends initialized");
 #endif
+    } catch (const std::exception &e) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_backend_device_count = 0;
+        g_backend_gpu_device_count = 0;
+        g_gpu_offload_supported = false;
+        set_last_error(std::string("initBackends exception: ") + e.what());
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_backend_device_count = 0;
+        g_backend_gpu_device_count = 0;
+        g_gpu_offload_supported = false;
+        set_last_error("initBackends exception: unknown native error");
+    }
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -2116,6 +2152,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         jstring modelPath,
         jstring paramsJson
 ) {
+    try {
     std::lock_guard<std::mutex> lock(g_mutex);
     const std::string path = jstring_to_string(env, modelPath);
     const std::string params = jstring_to_string(env, paramsJson);
@@ -2193,8 +2230,8 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     }
 
     llama_model_params model_params = llama_model_default_params();
-    model_params.use_mmap = effective.mmap;
-    model_params.use_mlock = effective.mlock;
+    model_params.load_mode = load_mode_from_flags(effective.mmap, effective.mlock);
+    model_params.load_mtp = g_spec_requested;
     model_params.n_gpu_layers = effective.n_gpu_layers;
     model_params.main_gpu = mca::llama::modelMainGpuForLoad(
             g_gpu_offload_supported,
@@ -2214,20 +2251,20 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     }
 
     g_mmap_fallback_allowed = mca::llama::shouldRetryModelLoadWithoutMmap(
-            model_params.use_mmap,
+            load_mode_uses_mmap(model_params.load_mode),
             g_model_file_size_bytes);
-    g_mmap_prefetch_enabled = model_params.use_mmap &&
+    g_mmap_prefetch_enabled = load_mode_uses_mmap(model_params.load_mode) &&
             mca::llama::shouldPrefetchModelMmap(g_model_file_size_bytes);
     mca_llama_set_model_mmap_prefetch_enabled(g_mmap_prefetch_enabled);
     g_model = llama_model_load_from_file(path.c_str(), model_params);
     if (g_model == nullptr && g_mmap_fallback_allowed) {
         g_last_error += "\nRetrying model load with mmap=false.";
-        model_params.use_mmap = false;
+        model_params.load_mode = load_mode_from_flags(false, effective.mlock);
         g_effective_config.mmap = false;
         g_mmap_prefetch_enabled = false;
         mca_llama_set_model_mmap_prefetch_enabled(false);
         g_model = llama_model_load_from_file(path.c_str(), model_params);
-    } else if (g_model == nullptr && model_params.use_mmap) {
+    } else if (g_model == nullptr && load_mode_uses_mmap(model_params.load_mode)) {
         g_last_error += "\nLarge-model mmap load failed; unsafe mmap=false retry is disabled.";
     }
     if (g_model == nullptr) {
@@ -2246,7 +2283,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         free_llama_locked();
         return 18;
     }
-    g_model_mtp_layers = model_mtp_layer_count(g_model, g_model_architecture);
+    g_model_mtp_layers = model_mtp_layer_count(g_model);
     g_model_hybrid = llama_model_is_hybrid(g_model);
     g_model_recurrent = llama_model_is_recurrent(g_model);
     refresh_prefix_cache_strategy_locked();
@@ -2314,6 +2351,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         llama_context_params mtp_params = ctx_params;
         mtp_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
         mtp_params.n_rs_seq = 0;
+        mtp_params.ctx_other = g_context;
         g_mtp_context = llama_init_from_model(g_model, mtp_params);
         if (g_mtp_context == nullptr) {
             g_last_error = "draft-mtp was requested, but the model has no usable MTP head/context.";
@@ -2384,6 +2422,39 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     mark_generation_inactive(GenerationStopReason::IDLE);
     return 0;
 #endif
+    } catch (const std::exception &e) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_stop_requested.store(true, std::memory_order_relaxed);
+        mark_generation_inactive(GenerationStopReason::LOAD_FAILED);
+#if MCA_WITH_LLAMA_CPP
+        try {
+            free_llama_locked();
+        } catch (...) {
+        }
+#else
+        g_stub_chunks.clear();
+        g_stub_chunk_index = 0;
+#endif
+        g_loaded = false;
+        set_last_error(std::string("loadModel exception: ") + e.what());
+        return 19;
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_stop_requested.store(true, std::memory_order_relaxed);
+        mark_generation_inactive(GenerationStopReason::LOAD_FAILED);
+#if MCA_WITH_LLAMA_CPP
+        try {
+            free_llama_locked();
+        } catch (...) {
+        }
+#else
+        g_stub_chunks.clear();
+        g_stub_chunk_index = 0;
+#endif
+        g_loaded = false;
+        set_last_error("loadModel exception: unknown native error");
+        return 19;
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL

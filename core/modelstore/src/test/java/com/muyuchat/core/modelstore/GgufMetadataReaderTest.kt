@@ -59,6 +59,31 @@ class GgufMetadataReaderTest {
         assertEquals(262_144, metadata.contextLength)
     }
 
+    @Test
+    fun mapsCurrentLlamaFileTypesToTheirActualQuantizations() {
+        val expected = mapOf(
+            7 to "Q8_0",
+            8 to "Q5_0",
+            9 to "Q5_1",
+            36 to "TQ1_0",
+            37 to "TQ2_0",
+            38 to "MXFP4_MOE",
+            39 to "NVFP4",
+            40 to "Q1_0",
+            41 to "Q2_0"
+        )
+
+        expected.forEach { (fileType, quant) ->
+            val metadata = GgufMetadataReader.read(
+                ByteArrayInputStream(ggufWithFileType(fileType)),
+                "model.gguf"
+            )
+
+            assertEquals("file type $fileType", quant, metadata.quant)
+            assertEquals("file type $fileType", fileType, metadata.fileType)
+        }
+    }
+
     private fun ggufWithContext(architecture: String, contextLength: Int): ByteArray =
         ByteArrayOutputStream().apply {
             write("GGUF".toByteArray())
@@ -71,6 +96,20 @@ class GgufMetadataReaderTest {
             writeGgufString("$architecture.context_length")
             write(uint32Le(4))
             write(uint32Le(contextLength.toLong()))
+        }.toByteArray()
+
+    private fun ggufWithFileType(fileType: Int): ByteArray =
+        ByteArrayOutputStream().apply {
+            write("GGUF".toByteArray())
+            write(uint32Le(3L))
+            write(uint64Le(0L))
+            write(uint64Le(2L))
+            writeGgufString("general.architecture")
+            write(uint32Le(8))
+            writeGgufString("qwen3")
+            writeGgufString("general.file_type")
+            write(uint32Le(4))
+            write(uint32Le(fileType.toLong()))
         }.toByteArray()
 
     private fun ByteArrayOutputStream.writeGgufString(value: String) {

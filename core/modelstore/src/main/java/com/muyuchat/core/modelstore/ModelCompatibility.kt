@@ -34,23 +34,6 @@ object ModelCompatibility {
             return blocked("文件头不是 GGUF", "文件可能是下载错误页、损坏文件或辅助文件")
         }
 
-        val lower = file.name.lowercase()
-        val pathLower = file.absolutePath.lowercase()
-        when {
-            "mmproj" in pathLower || "projector" in pathLower -> {
-                return blocked("这是视觉投影辅助文件", "mmproj 不能作为聊天主模型加载，请下载 Q4_K_M/Q5_K_M 主模型")
-            }
-            "imatrix" in pathLower -> {
-                return blocked("这是量化校准辅助文件", "imatrix 不能直接推理，请选择主模型 GGUF")
-            }
-            lower.startsWith("mtp-") -> {
-                return blocked("这是投机解码辅助文件", "MTP 文件不能作为当前聊天主模型加载")
-            }
-            Regex("""-\d{5}-of-\d{5}\.gguf$""").containsMatchIn(lower) -> {
-                return blocked("这是分片 GGUF 的其中一片", "MCA 首版只把单文件 GGUF 作为聊天主模型管理")
-            }
-        }
-
         val architecture = metadata.architecture?.lowercase()
         if (architecture in NON_CHAT_ARCHITECTURES) {
             return blocked("这不是聊天生成主模型", "architecture=$architecture 不能作为 decoder-only 聊天模型加载")
@@ -66,6 +49,16 @@ object ModelCompatibility {
         }
 
         val warnings = buildList {
+            val lowerName = file.name.lowercase()
+            if ("mmproj" in lowerName || "projector" in lowerName || "imatrix" in lowerName) {
+                add("Filename suggests an auxiliary GGUF; native model loading remains authoritative.")
+            }
+            if (lowerName.startsWith("mtp-")) {
+                add("Filename suggests an MTP artifact; native model loading remains authoritative.")
+            }
+            if (Regex("""-\d{5}-of-\d{5}\.gguf$""").containsMatchIn(lowerName)) {
+                add("This looks like a sharded GGUF; native model loading will verify the complete shard set.")
+            }
             if (architecture == null) add("没有读到 general.architecture，将按文件名推断")
             if (architecture != null && !isKnownChatArchitecture(architecture)) {
                 add("architecture=$architecture 不在内置保守调参列表，将由当前 llama.cpp 原生加载结果最终判定")

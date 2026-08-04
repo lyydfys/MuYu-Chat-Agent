@@ -309,7 +309,7 @@ internal object RuntimeIdentityFactory {
 
     private fun runtimeVersion(runtime: LocalChatRuntime, platform: PlatformSnapshot): String {
         val implementation = when (runtime) {
-            LocalChatRuntime.LLAMA_CPP -> "llama.cpp@4d8cc0c56ffba3f8b7fdb0130627fed2a6f71958"
+            LocalChatRuntime.LLAMA_CPP -> "llama.cpp@f26efa02a77dc3660f94ac90efee59394f3bc74d"
             LocalChatRuntime.MNN_CPU -> "mnn@3.6.0-cc20f672af9e177e2fa338c332dc097de2fc9264"
             LocalChatRuntime.GENIEX_LLAMA_CPP -> "geniex@0.3.12-mca1+llama.cpp"
             LocalChatRuntime.GENIEX_QAIRT -> "geniex-qairt@0.3.12-mca1"
