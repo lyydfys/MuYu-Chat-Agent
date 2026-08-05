@@ -15,11 +15,13 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "llama_load_failure_policy.hpp"
 #include "llama_model_memory_policy.hpp"
 
 #if MCA_WITH_LLAMA_CPP
@@ -29,6 +31,7 @@
 #include "common.h"
 #include "ggml-backend.h"
 #include "llama.h"
+#include "src/llama-ext.h"
 #include "llama_model_device_policy.hpp"
 #include "llama_prefix_cache_policy.hpp"
 #include "mtmd.h"
@@ -72,6 +75,11 @@ long long g_completion_tokens = 0;
 long long g_context_shifts = 0;
 long long g_prefill_started_ms = 0;
 long long g_prefill_finished_ms = 0;
+// These snapshots are intentionally atomic: beginCompletion() holds g_mutex
+// for the entire native prefill, while the UI polls this small progress record
+// from another JVM thread. Do not use them to infer cache state or timing.
+std::atomic<int> g_prefill_progress_completed_tokens{0};
+std::atomic<int> g_prefill_progress_total_tokens{0};
 long long g_decode_started_ms = 0;
 long long g_decode_finished_ms = 0;
 // Process-lifetime acceptance trace. Model unload/reload must not reset it.
@@ -81,6 +89,7 @@ std::uint64_t g_model_file_size_bytes = 0;
 bool g_mmap_fallback_allowed = false;
 bool g_mmap_prefetch_enabled = false;
 std::string g_last_error;
+std::string g_load_failure_code;
 std::string g_native_lib_dir;
 bool g_backend_initialized = false;
 size_t g_backend_device_count = 0;
@@ -101,6 +110,62 @@ bool g_last_use_jinja = true;
 bool g_last_enable_thinking = true;
 bool g_vision_ready = false;
 std::string g_mmproj_path;
+
+void reset_prefill_progress() {
+    g_prefill_progress_completed_tokens.store(0, std::memory_order_release);
+    g_prefill_progress_total_tokens.store(0, std::memory_order_release);
+}
+
+void begin_prefill_progress(size_t total_tokens, size_t completed_tokens = 0) {
+    const int total = total_tokens > (size_t) std::numeric_limits<int>::max()
+                      ? std::numeric_limits<int>::max()
+                      : (int) total_tokens;
+    const int completed = std::min(
+            total,
+            completed_tokens > (size_t) std::numeric_limits<int>::max()
+            ? std::numeric_limits<int>::max()
+            : (int) completed_tokens);
+    g_prefill_progress_total_tokens.store(total, std::memory_order_release);
+    g_prefill_progress_completed_tokens.store(completed, std::memory_order_release);
+}
+
+void advance_prefill_progress(size_t decoded_tokens) {
+    const int total = g_prefill_progress_total_tokens.load(std::memory_order_acquire);
+    if (total <= 0 || decoded_tokens == 0) return;
+    const int increment = decoded_tokens > (size_t) std::numeric_limits<int>::max()
+                          ? std::numeric_limits<int>::max()
+                          : (int) decoded_tokens;
+    int observed = g_prefill_progress_completed_tokens.load(std::memory_order_acquire);
+    while (observed < total) {
+        const int next = std::min(total, observed > total - increment ? total : observed + increment);
+        if (g_prefill_progress_completed_tokens.compare_exchange_weak(
+                observed,
+                next,
+                std::memory_order_release,
+                std::memory_order_acquire)) {
+            return;
+        }
+    }
+}
+
+void report_reused_prefill_tokens(size_t reused_tokens) {
+    const int total = g_prefill_progress_total_tokens.load(std::memory_order_acquire);
+    if (total <= 0) return;
+    const int reused = reused_tokens > (size_t) std::numeric_limits<int>::max()
+                       ? std::numeric_limits<int>::max()
+                       : (int) reused_tokens;
+    int observed = g_prefill_progress_completed_tokens.load(std::memory_order_acquire);
+    const int target = std::min(total, reused);
+    while (observed < target) {
+        if (g_prefill_progress_completed_tokens.compare_exchange_weak(
+                observed,
+                target,
+                std::memory_order_release,
+                std::memory_order_acquire)) {
+            return;
+        }
+    }
+}
 
 struct RuntimeConfig {
     int n_ctx = 4096;
@@ -128,6 +193,20 @@ RuntimeConfig g_requested_config;
 RuntimeConfig g_effective_config;
 size_t g_backend_gpu_device_count = 0;
 bool g_gpu_offload_supported = false;
+// Configuration is only a request.  A loaded GPU backend is not enough to
+// claim that this request ran on it: the label is published only after both
+// allocation evidence and a successful llama_decode on this context.
+bool g_gpu_offload_active = false;
+bool g_gpu_offload_allocation_observed = false;
+bool g_gpu_offload_execution_observed = false;
+bool g_gpu_offload_layers_known = false;
+size_t g_gpu_offload_bytes = 0;
+size_t g_gpu_offload_model_bytes = 0;
+size_t g_gpu_offload_context_bytes = 0;
+size_t g_gpu_offload_compute_bytes = 0;
+int g_gpu_offload_layers = 0;
+bool g_gpu_auto_fallback_applied = false;
+std::string g_gpu_auto_fallback_reason = "not_attempted";
 bool g_cache_state_valid = false;
 bool g_cache_reuse_hit = false;
 int g_cache_reused_tokens = 0;
@@ -135,6 +214,11 @@ long long g_cache_reuse_hits = 0;
 long long g_cache_reuse_misses = 0;
 std::string g_cache_reuse_reason = "not_attempted";
 std::string g_cache_reuse_strategy = "disabled";
+bool g_persistent_prefix_cache_attempted = false;
+bool g_persistent_prefix_cache_hit = false;
+bool g_persistent_prefix_cache_saved = false;
+int g_persistent_prefix_cache_tokens = 0;
+std::string g_persistent_prefix_cache_reason = "not_requested";
 bool g_cache_checkpoint_valid = false;
 size_t g_cache_checkpoint_tokens = 0;
 size_t g_cache_checkpoint_bytes = 0;
@@ -156,9 +240,32 @@ constexpr bool LLAMA_RUNTIME_FEATURES_COMPILED = true;
 constexpr bool LLAMA_RUNTIME_FEATURES_COMPILED = false;
 #endif
 
+struct PersistentPrefixCacheNativeRequest {
+    bool requested = false;
+    std::string restore_state_path;
+    std::string write_state_path;
+    std::string fixed_system_prompt;
+};
+
+thread_local PersistentPrefixCacheNativeRequest g_thread_prefix_cache_request;
+
 void set_last_error(const std::string &message) {
     g_last_error = message;
     __android_log_print(ANDROID_LOG_ERROR, "MCA", "%s", message.c_str());
+}
+
+void clear_load_failure() {
+    g_last_error.clear();
+    g_load_failure_code.clear();
+}
+
+void set_load_failure_code(const char *code) {
+    g_load_failure_code = code == nullptr ? "" : code;
+}
+
+void set_load_failure(const char *code, const std::string &message) {
+    set_load_failure_code(code);
+    set_last_error(message);
 }
 
 const char *generation_stop_reason_name(GenerationStopReason reason) {
@@ -563,6 +670,8 @@ std::string stats_json(const char *backend) {
     const long long decode_ms = g_decode_finished_ms > g_decode_started_ms
                                 ? g_decode_finished_ms - g_decode_started_ms : 0;
     const double tps = decode_ms > 0 ? (double) g_completion_tokens * 1000.0 / (double) decode_ms : 0.0;
+    const double prefill_tps = prefill_ms > 0
+                               ? (double) g_prompt_tokens * 1000.0 / (double) prefill_ms : 0.0;
     std::ostringstream out;
     out << "{"
         << "\"backend\":\"" << backend << "\","
@@ -586,6 +695,7 @@ std::string stats_json(const char *backend) {
         << "\","
         << "\"contextShifts\":" << g_context_shifts << ","
         << "\"prefillMs\":" << prefill_ms << ","
+        << "\"prefillTps\":" << prefill_tps << ","
         << "\"decodeMs\":" << decode_ms << ","
         << "\"decodeTps\":" << tps << ","
         << "\"nThreads\":" << g_n_threads << ","
@@ -596,6 +706,22 @@ std::string stats_json(const char *backend) {
         << "\"maxAllTokens\":" << g_effective_config.n_ctx << ","
         << "\"maxNewTokens\":" << g_max_new_tokens << ","
         << "\"nGpuLayers\":" << g_effective_config.n_gpu_layers << ","
+        << "\"gpuOffloadActive\":" << (g_gpu_offload_active ? "true" : "false") << ","
+        << "\"gpuOffloadAllocationObserved\":"
+        << (g_gpu_offload_allocation_observed ? "true" : "false") << ","
+        << "\"gpuOffloadExecutionObserved\":"
+        << (g_gpu_offload_execution_observed ? "true" : "false") << ","
+        << "\"gpuOffloadBytes\":" << g_gpu_offload_bytes << ","
+        << "\"gpuOffloadModelBytes\":" << g_gpu_offload_model_bytes << ","
+        << "\"gpuOffloadContextBytes\":" << g_gpu_offload_context_bytes << ","
+        << "\"gpuOffloadComputeBytes\":" << g_gpu_offload_compute_bytes << ","
+        << "\"gpuOffloadLayers\":" << g_gpu_offload_layers << ","
+        << "\"gpuOffloadLayersKnown\":"
+        << (g_gpu_offload_layers_known ? "true" : "false") << ","
+        << "\"gpuAutoFallbackApplied\":"
+        << (g_gpu_auto_fallback_applied ? "true" : "false") << ","
+        << "\"gpuAutoFallbackReason\":\""
+        << json_escape(g_gpu_auto_fallback_reason) << "\","
         << "\"mainGpu\":" << g_effective_config.main_gpu << ","
         << "\"splitMode\":\"" << json_escape(g_effective_config.split_mode) << "\","
         << "\"nCpuMoe\":" << g_effective_config.n_cpu_moe << ","
@@ -627,6 +753,15 @@ std::string stats_json(const char *backend) {
         << "\"backendCapabilities\":{"
         << "\"gpuOffloadSupported\":" << (g_gpu_offload_supported ? "true" : "false") << ","
         << "\"gpuDeviceCount\":" << g_backend_gpu_device_count << ","
+        << "\"gpuOffloadActive\":" << (g_gpu_offload_active ? "true" : "false") << ","
+        << "\"gpuOffloadAllocationObserved\":"
+        << (g_gpu_offload_allocation_observed ? "true" : "false") << ","
+        << "\"gpuOffloadExecutionObserved\":"
+        << (g_gpu_offload_execution_observed ? "true" : "false") << ","
+        << "\"gpuOffloadBytes\":" << g_gpu_offload_bytes << ","
+        << "\"gpuOffloadLayers\":" << g_gpu_offload_layers << ","
+        << "\"gpuOffloadLayersKnown\":"
+        << (g_gpu_offload_layers_known ? "true" : "false") << ","
         << "\"modelArchitecture\":\"" << json_escape(g_model_architecture) << "\","
         << "\"modelMtpLayers\":" << g_model_mtp_layers << ","
         << "\"dynamicBackendLoading\":" << (LLAMA_RUNTIME_FEATURES_COMPILED ? "true" : "false") << ","
@@ -647,6 +782,13 @@ std::string stats_json(const char *backend) {
         << "\"modelHybrid\":" << (g_model_hybrid ? "true" : "false") << ","
         << "\"modelRecurrent\":" << (g_model_recurrent ? "true" : "false")
         << "},"
+        << "\"persistentPrefixCache\":{"
+        << "\"attempted\":" << (g_persistent_prefix_cache_attempted ? "true" : "false") << ","
+        << "\"hit\":" << (g_persistent_prefix_cache_hit ? "true" : "false") << ","
+        << "\"saved\":" << (g_persistent_prefix_cache_saved ? "true" : "false") << ","
+        << "\"tokens\":" << g_persistent_prefix_cache_tokens << ","
+        << "\"reason\":\"" << json_escape(g_persistent_prefix_cache_reason) << "\""
+        << "},"
         << "\"speculative\":{"
         << "\"requested\":" << (g_spec_requested ? "true" : "false") << ","
         << "\"contextReady\":" << (g_spec_context_ready ? "true" : "false") << ","
@@ -658,6 +800,7 @@ std::string stats_json(const char *backend) {
         << "\"reason\":\"" << json_escape(g_spec_request_reason) << "\""
         << "},"
         << "\"nativeLibDir\":\"" << json_escape(g_native_lib_dir) << "\","
+        << "\"loadFailureCode\":\"" << json_escape(g_load_failure_code) << "\","
         << "\"lastError\":\"" << json_escape(g_last_error) << "\""
         << "}";
     return out.str();
@@ -669,6 +812,30 @@ std::uint64_t regular_file_size_bytes(const std::string &path) {
         return 0;
     }
     return static_cast<std::uint64_t>(st.st_size);
+}
+
+enum class GgufHeaderProbe {
+    VALID,
+    UNREADABLE,
+    INVALID_MAGIC,
+    TRUNCATED,
+};
+
+GgufHeaderProbe probe_gguf_header(const std::string &path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) return GgufHeaderProbe::UNREADABLE;
+
+    // A GGUF header contains magic, version, tensor count, and metadata count.
+    char header[24] = {};
+    input.read(header, static_cast<std::streamsize>(sizeof(header)));
+    const std::streamsize bytes_read = input.gcount();
+    if (bytes_read < 4) return GgufHeaderProbe::TRUNCATED;
+    if (header[0] != 'G' || header[1] != 'G' || header[2] != 'U' || header[3] != 'F') {
+        return GgufHeaderProbe::INVALID_MAGIC;
+    }
+    return bytes_read == static_cast<std::streamsize>(sizeof(header))
+           ? GgufHeaderProbe::VALID
+           : GgufHeaderProbe::TRUNCATED;
 }
 
 #if MCA_WITH_LLAMA_CPP
@@ -700,6 +867,87 @@ int g_n_keep = 128;
 std::string g_cached_token_chars;
 
 using ordered_json = nlohmann::ordered_json;
+
+void clear_gpu_offload_evidence_locked() {
+    g_gpu_offload_active = false;
+    g_gpu_offload_allocation_observed = false;
+    g_gpu_offload_execution_observed = false;
+    g_gpu_offload_layers_known = false;
+    g_gpu_offload_bytes = 0;
+    g_gpu_offload_model_bytes = 0;
+    g_gpu_offload_context_bytes = 0;
+    g_gpu_offload_compute_bytes = 0;
+    g_gpu_offload_layers = 0;
+}
+
+void reconcile_gpu_offload_evidence_locked() {
+    g_gpu_offload_active = g_gpu_offload_allocation_observed &&
+                           g_gpu_offload_execution_observed;
+}
+
+void refresh_gpu_offload_evidence_locked() {
+    // Keep execution evidence until this model/context is released. Runtime
+    // stats are polled between tokens, so clearing it here would make a real
+    // GPU request oscillate back to CPU after its first successful decode.
+    g_gpu_offload_active = false;
+    g_gpu_offload_allocation_observed = false;
+    g_gpu_offload_layers_known = false;
+    g_gpu_offload_bytes = 0;
+    g_gpu_offload_model_bytes = 0;
+    g_gpu_offload_context_bytes = 0;
+    g_gpu_offload_compute_bytes = 0;
+    g_gpu_offload_layers = 0;
+    if (!g_gpu_offload_supported || g_model == nullptr || g_context == nullptr) return;
+
+    try {
+        const llama_memory_breakdown breakdown = llama_get_memory_breakdown(g_context);
+        for (const auto &[buffer_type, memory]: breakdown) {
+            const ggml_backend_dev_t device = ggml_backend_buft_get_device(buffer_type);
+            if (device == nullptr ||
+                ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+                continue;
+            }
+            g_gpu_offload_model_bytes += memory.model;
+            g_gpu_offload_context_bytes += memory.context;
+            g_gpu_offload_compute_bytes += memory.compute;
+        }
+    } catch (const std::exception &error) {
+        __android_log_print(
+                ANDROID_LOG_WARN,
+                "MCA",
+                "Unable to read llama.cpp GPU allocation evidence: %s",
+                error.what());
+        return;
+    } catch (...) {
+        __android_log_print(
+                ANDROID_LOG_WARN,
+                "MCA",
+                "Unable to read llama.cpp GPU allocation evidence.");
+        return;
+    }
+
+    g_gpu_offload_bytes = g_gpu_offload_model_bytes +
+                          g_gpu_offload_context_bytes +
+                          g_gpu_offload_compute_bytes;
+    g_gpu_offload_allocation_observed =
+            g_gpu_offload_model_bytes > 0 &&
+            (g_gpu_offload_context_bytes > 0 || g_gpu_offload_compute_bytes > 0);
+    if (g_gpu_offload_allocation_observed) {
+        // llama.cpp exposes allocation totals, but not a public read-back of
+        // how many transformer layers were really placed by every backend.
+        // Never substitute the requested n_gpu_layers for this unknown value.
+        g_gpu_offload_layers = -1;
+    }
+    reconcile_gpu_offload_evidence_locked();
+}
+
+void record_gpu_decode_execution_locked() {
+    refresh_gpu_offload_evidence_locked();
+    if (g_gpu_offload_allocation_observed) {
+        g_gpu_offload_execution_observed = true;
+    }
+    reconcile_gpu_offload_evidence_locked();
+}
 
 mca::llama::PrefixCacheStrategy active_prefix_cache_strategy_locked() {
     const size_t reuse_tokens = g_effective_config.cache_reuse > 0
@@ -797,6 +1045,10 @@ std::string lower_ascii(std::string value) {
         return (char) std::tolower(c);
     });
     return value;
+}
+
+std::string load_failure_code_from_llama_error(const std::string &detail) {
+    return mca::llama::loadFailureCodeFromLlamaError(detail);
 }
 
 bool load_mode_uses_mmap(llama_load_mode mode) {
@@ -1146,6 +1398,18 @@ int model_mtp_layer_count(const llama_model *model) {
     return model == nullptr ? 0 : llama_model_n_layer_nextn(model);
 }
 
+bool model_supports_requested_mtp(
+        const std::string &architecture,
+        int mtp_layers) {
+    if (mtp_layers <= 0) return false;
+    if (mtp_layers == 1) return true;
+    // The pinned llama.cpp speculative driver has a chained-head graph only
+    // for Step35.  Other architectures still assert a single MTP block in
+    // their graph builders, so accepting them here would turn a capability
+    // request into a native crash.
+    return lowercase_trimmed_ascii(architecture) == "step35";
+}
+
 common_params_sampling build_sampling_params(const std::string &params_json) {
     common_params_sampling params;
     params.no_perf = !g_effective_config.perf;
@@ -1320,6 +1584,7 @@ void android_llama_log(ggml_log_level level, const char *text, void *) {
 void free_llama_locked() {
     g_speculative.reset();
     g_spec_request_active = false;
+    clear_gpu_offload_evidence_locked();
     invalidate_prefix_cache_checkpoint_locked();
     if (g_mtp_context != nullptr) {
         llama_free(g_mtp_context);
@@ -1378,6 +1643,11 @@ void free_llama_locked() {
     g_cache_reuse_hit = false;
     g_cache_reused_tokens = 0;
     g_cache_reuse_reason = "model_unloaded";
+    g_persistent_prefix_cache_attempted = false;
+    g_persistent_prefix_cache_hit = false;
+    g_persistent_prefix_cache_saved = false;
+    g_persistent_prefix_cache_tokens = 0;
+    g_persistent_prefix_cache_reason = "model_unloaded";
     g_model_hybrid = false;
     g_model_recurrent = false;
     g_cache_reuse_strategy = "disabled";
@@ -1437,12 +1707,14 @@ int decode_tokens(const llama_tokens &tokens, bool logits_last) {
             common_batch_add(g_batch, tokens[i + j], g_current_position + j, {0}, want_logits);
         }
         if (llama_decode(g_context, g_batch) != 0) return 2;
+        record_gpu_decode_execution_locked();
         if (g_spec_request_active &&
             (g_speculative == nullptr || !common_speculative_process(g_speculative.get(), g_batch))) {
             g_last_error += "\ncommon_speculative_process failed during target prefill.";
             return 6;
         }
         g_current_position += batch_size;
+        advance_prefill_progress((size_t) batch_size);
     }
     return 0;
 }
@@ -1485,6 +1757,8 @@ struct ChatTemplateOptions {
     int thinking_budget = 1024;
 };
 
+void clear_target_context_locked(const std::string &reason);
+
 std::string format_messages(const std::vector<ParsedMessage> &messages, const ChatTemplateOptions &options) {
     const bool has_template = g_chat_templates != nullptr;
 
@@ -1519,6 +1793,158 @@ std::string format_messages(const std::vector<ParsedMessage> &messages, const Ch
     }
     formatted += "assistant: ";
     return formatted;
+}
+
+struct PersistentPrefixPreparation {
+    bool handled = false;
+    size_t reused_tokens = 0;
+};
+
+/**
+ * Restores or materializes only the stable system/persona prefix. The full
+ * prompt is still token-prefix checked before any state is accepted; a
+ * template/tokenizer boundary that cannot be proven is a normal cache miss.
+ */
+PersistentPrefixPreparation prepare_persistent_prefix_locked(
+        const std::vector<ParsedMessage> &messages,
+        const ChatTemplateOptions &chat_options,
+        const llama_tokens &full_tokens,
+        const PersistentPrefixCacheNativeRequest &request) {
+    PersistentPrefixPreparation result;
+    if (!request.requested) return result;
+    g_persistent_prefix_cache_attempted = true;
+
+    if (request.fixed_system_prompt.empty() || messages.empty() ||
+        lower_ascii(messages.front().role) != "system" ||
+        messages.front().content.rfind(request.fixed_system_prompt, 0) != 0) {
+        g_persistent_prefix_cache_reason = "fixed_system_prefix_unavailable";
+        return result;
+    }
+
+    // The marker is used only for a probe render and is never sent to the
+    // model. Several candidates avoid treating user-supplied marker text as a
+    // boundary; token-prefix equality remains the final acceptance check.
+    std::string probe_formatted;
+    size_t marker_position = std::string::npos;
+    for (int attempt = 0; attempt < 8 && marker_position == std::string::npos; ++attempt) {
+        const std::string marker =
+                "MCA_PREFIX_CACHE_BOUNDARY_V1_" + std::to_string(attempt) + "_9f2a";
+        bool marker_in_input = false;
+        for (const auto &message : messages) {
+            if (message.content.find(marker) != std::string::npos) {
+                marker_in_input = true;
+                break;
+            }
+        }
+        if (marker_in_input) continue;
+        auto probe_messages = messages;
+        probe_messages.front().content = request.fixed_system_prompt + marker;
+        try {
+            probe_formatted = format_messages(probe_messages, chat_options);
+        } catch (...) {
+            probe_formatted.clear();
+        }
+        const size_t first = probe_formatted.find(marker);
+        if (first != std::string::npos && probe_formatted.find(marker, first + marker.size()) == std::string::npos) {
+            marker_position = first;
+        }
+    }
+    if (marker_position == std::string::npos || probe_formatted.empty()) {
+        g_persistent_prefix_cache_reason = "template_boundary_unavailable";
+        return result;
+    }
+
+    const std::string prefix_text = probe_formatted.substr(0, marker_position);
+    llama_tokens prefix_tokens;
+    try {
+        prefix_tokens = common_tokenize(g_context, prefix_text, true, true);
+    } catch (...) {
+        prefix_tokens.clear();
+    }
+    if (prefix_tokens.empty() || prefix_tokens.size() >= full_tokens.size() ||
+        !mca::llama::tokenPrefixMatches(full_tokens, prefix_tokens)) {
+        g_persistent_prefix_cache_reason = "token_prefix_mismatch";
+        return result;
+    }
+
+    // A sequence state file contains the complete attention/recurrent state;
+    // it must be loaded into a clean sequence and validated against the exact
+    // token prefix before the dynamic suffix is evaluated.
+    clear_target_context_locked("persistent_prefix_prepare");
+    if (!request.restore_state_path.empty()) {
+        try {
+            llama_tokens restored(prefix_tokens.size());
+            size_t restored_count = 0;
+            const size_t loaded = llama_state_seq_load_file(
+                    g_context,
+                    request.restore_state_path.c_str(),
+                    0,
+                    restored.data(),
+                    restored.size(),
+                    &restored_count);
+            const bool restored_tokens_match =
+                    std::equal(restored.begin(), restored.end(), prefix_tokens.begin());
+            const bool full_prompt_prefix_matches =
+                    mca::llama::tokenPrefixMatches(full_tokens, restored);
+            if (loaded > 0 && mca::llama::canRestorePersistentPrefixState(
+                    prefix_tokens.size(),
+                    restored_count,
+                    restored_tokens_match,
+                    full_prompt_prefix_matches)) {
+                g_current_position = (llama_pos) restored_count;
+                g_context_tokens = prefix_tokens;
+                g_cache_state_valid = true;
+                g_cache_reuse_hit = true;
+                g_cache_reused_tokens = (int) restored_count;
+                g_cache_reuse_hits++;
+                g_cache_reuse_reason = "persistent_prefix_hit";
+                g_persistent_prefix_cache_hit = true;
+                g_persistent_prefix_cache_tokens = (int) restored_count;
+                g_persistent_prefix_cache_reason = "state_loaded";
+                result.handled = true;
+                result.reused_tokens = restored_count;
+                return result;
+            }
+            g_persistent_prefix_cache_reason = "state_token_mismatch";
+        } catch (...) {
+            g_persistent_prefix_cache_reason = "state_load_failed";
+        }
+        clear_target_context_locked("persistent_state_load_failed");
+    }
+
+    const int prefix_rc = decode_tokens(prefix_tokens, false);
+    if (prefix_rc != 0 || g_context_shifts != 0) {
+        g_persistent_prefix_cache_reason = prefix_rc == 0
+                                            ? "prefix_context_shifted"
+                                            : "prefix_prefill_failed";
+        clear_target_context_locked(g_persistent_prefix_cache_reason);
+        return result;
+    }
+
+    g_persistent_prefix_cache_tokens = (int) prefix_tokens.size();
+    if (!request.write_state_path.empty()) {
+        try {
+            const size_t saved = llama_state_seq_save_file(
+                    g_context,
+                    request.write_state_path.c_str(),
+                    0,
+                    prefix_tokens.data(),
+                    prefix_tokens.size());
+            if (saved > 0) {
+                g_persistent_prefix_cache_saved = true;
+                g_persistent_prefix_cache_reason = "state_saved";
+            } else {
+                g_persistent_prefix_cache_reason = "state_save_failed";
+            }
+        } catch (...) {
+            g_persistent_prefix_cache_reason = "state_save_failed";
+        }
+    } else {
+        g_persistent_prefix_cache_reason = "no_write_path";
+    }
+    result.handled = true;
+    result.reused_tokens = prefix_tokens.size();
+    return result;
 }
 
 bool messages_have_images(const std::vector<ParsedMessage> &messages) {
@@ -1608,6 +2034,9 @@ int prefill_multimodal_locked(
         return -7;
     }
 
+    const size_t multimodal_prompt_tokens = mtmd_helper_get_n_tokens(chunks);
+    begin_prefill_progress(multimodal_prompt_tokens);
+
     llama_pos new_position = 0;
     const int eval_rc = mtmd_helper_eval_chunks(
             g_mtmd_context,
@@ -1618,13 +2047,14 @@ int prefill_multimodal_locked(
             g_n_batch,
             true,
             &new_position);
-    g_prompt_tokens = (long long) mtmd_helper_get_n_tokens(chunks);
+    g_prompt_tokens = (long long) multimodal_prompt_tokens;
     mtmd_input_chunks_free(chunks);
     if (eval_rc != 0) {
         g_last_error = "mtmd_helper_eval_chunks failed: " + std::to_string(eval_rc);
         return -8;
     }
     g_current_position = new_position;
+    report_reused_prefill_tokens(multimodal_prompt_tokens);
     return 0;
 }
 
@@ -1664,6 +2094,15 @@ void invalidate_speculative_contexts_locked(const std::string &reason) {
     if (g_mtp_context != nullptr) {
         llama_memory_clear(llama_get_memory(g_mtp_context), false);
     }
+}
+
+bool stop_speculative_request_if_requested_locked() {
+    if (!g_stop_requested.load(std::memory_order_acquire)) return false;
+    // requestStop() is intentionally lock-free so it can be issued from the
+    // UI while a native draft step is executing.  Do not allow that narrow
+    // race to commit or return one more speculative chunk.
+    invalidate_speculative_contexts_locked("stopped");
+    return true;
 }
 
 bool trim_speculative_contexts_locked(llama_pos position, const char *label) {
@@ -1943,11 +2382,23 @@ SpecStepResult speculative_step_locked() {
         result.done = true;
         return result;
     }
+    if (stop_speculative_request_if_requested_locked()) {
+        result.done = true;
+        return result;
+    }
     const auto *vocab = llama_model_get_vocab(g_model);
 
     if (!g_spec_pending_valid) {
         const llama_token token = common_sampler_sample(g_sampler, g_context, -1);
+        if (stop_speculative_request_if_requested_locked()) {
+            result.done = true;
+            return result;
+        }
         common_sampler_accept(g_sampler, token, true);
+        if (stop_speculative_request_if_requested_locked()) {
+            result.done = true;
+            return result;
+        }
         if (llama_vocab_is_eog(vocab, token)) {
             g_spec_done = true;
             result.done = true;
@@ -1990,7 +2441,7 @@ SpecStepResult speculative_step_locked() {
             result.ok = false;
             return result;
         }
-        if (g_stop_requested.load(std::memory_order_relaxed)) {
+        if (stop_speculative_request_if_requested_locked()) {
             result.done = true;
             return result;
         }
@@ -2014,14 +2465,14 @@ SpecStepResult speculative_step_locked() {
         result.ok = false;
         return result;
     }
+    record_gpu_decode_execution_locked();
     if (!common_speculative_process(g_speculative.get(), g_batch)) {
         g_last_error = "common_speculative_process failed during draft-mtp verification.";
         trim_speculative_contexts_locked(base, "process failure");
         result.ok = false;
         return result;
     }
-    if (g_stop_requested.load(std::memory_order_relaxed)) {
-        trim_speculative_contexts_locked(base, "stop rollback");
+    if (stop_speculative_request_if_requested_locked()) {
         result.done = true;
         return result;
     }
@@ -2029,7 +2480,15 @@ SpecStepResult speculative_step_locked() {
     const llama_token committed_pending = g_spec_pending_token;
     if (g_spec_draft_tokens.empty()) {
         const llama_token next = common_sampler_sample(g_sampler, g_context, 0);
+        if (stop_speculative_request_if_requested_locked()) {
+            result.done = true;
+            return result;
+        }
         common_sampler_accept(g_sampler, next, true);
+        if (stop_speculative_request_if_requested_locked()) {
+            result.done = true;
+            return result;
+        }
         g_context_tokens.push_back(committed_pending);
         g_spec_prompt_tokens.push_back(committed_pending);
         g_current_position = base + 1;
@@ -2046,12 +2505,20 @@ SpecStepResult speculative_step_locked() {
         }
         g_spec_pending_token = next;
         g_spec_pending_valid = true;
+        if (stop_speculative_request_if_requested_locked()) {
+            result.done = true;
+            return result;
+        }
         result.output.push_back(next);
         g_spec_steps++;
         return result;
     }
 
     llama_tokens sampled = common_sampler_sample_and_accept_n(g_sampler, g_context, g_spec_draft_tokens);
+    if (stop_speculative_request_if_requested_locked()) {
+        result.done = true;
+        return result;
+    }
     if (sampled.empty()) {
         g_last_error = "draft-mtp verification returned no sampled tokens.";
         trim_speculative_contexts_locked(base, "empty verification result");
@@ -2068,6 +2535,10 @@ SpecStepResult speculative_step_locked() {
     }
     const uint16_t accepted = (uint16_t) std::min(eog_index, sampled.size() - 1);
     common_speculative_accept(g_speculative.get(), 0, accepted);
+    if (stop_speculative_request_if_requested_locked()) {
+        result.done = true;
+        return result;
+    }
 
     g_context_tokens.push_back(committed_pending);
     g_spec_prompt_tokens.push_back(committed_pending);
@@ -2095,6 +2566,10 @@ SpecStepResult speculative_step_locked() {
         g_spec_pending_token = sampled.back();
         g_spec_pending_valid = true;
     }
+    if (stop_speculative_request_if_requested_locked()) {
+        result.output.clear();
+        result.done = true;
+    }
     return result;
 }
 #else
@@ -2117,7 +2592,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_initBackends(
     const auto path = jstring_to_string(env, nativeLibDir);
     std::lock_guard<std::mutex> lock(g_mutex);
     g_native_lib_dir = path;
-    g_last_error.clear();
+    clear_load_failure();
     ensure_backends_loaded_locked();
     __android_log_print(
             ANDROID_LOG_INFO,
@@ -2135,13 +2610,15 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_initBackends(
         g_backend_device_count = 0;
         g_backend_gpu_device_count = 0;
         g_gpu_offload_supported = false;
-        set_last_error(std::string("initBackends exception: ") + e.what());
+        set_load_failure(
+                "MCA_LOAD_BACKEND_UNAVAILABLE",
+                std::string("initBackends exception: ") + e.what());
     } catch (...) {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_backend_device_count = 0;
         g_backend_gpu_device_count = 0;
         g_gpu_offload_supported = false;
-        set_last_error("initBackends exception: unknown native error");
+        set_load_failure("MCA_LOAD_BACKEND_UNAVAILABLE", "initBackends exception: unknown native error");
     }
 }
 
@@ -2167,12 +2644,15 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     g_completion_tokens = 0;
     g_prefill_started_ms = 0;
     g_prefill_finished_ms = 0;
+    reset_prefill_progress();
     g_decode_started_ms = 0;
     g_decode_finished_ms = 0;
-    g_last_error.clear();
+    clear_load_failure();
     g_model_file_size_bytes = regular_file_size_bytes(path);
     g_mmap_fallback_allowed = false;
     g_mmap_prefetch_enabled = false;
+    g_gpu_auto_fallback_applied = false;
+    g_gpu_auto_fallback_reason = "not_attempted";
 
 #if MCA_WITH_LLAMA_CPP
     free_llama_locked();
@@ -2182,6 +2662,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     std::string config_error;
     if (!parse_runtime_config(params, default_runtime_config(), requested, config_error)) {
         g_last_error = "Invalid llama runtime config: " + config_error;
+        set_load_failure_code("MCA_LOAD_RUNTIME_CONFIG_INVALID");
         return 12;
     }
     if (params.find("\"n_threads\"") != std::string::npos &&
@@ -2189,12 +2670,14 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         requested.n_threads_batch = requested.n_threads;
         if (!validate_runtime_config(requested, config_error)) {
             g_last_error = "Invalid llama runtime config: " + config_error;
+            set_load_failure_code("MCA_LOAD_RUNTIME_CONFIG_INVALID");
             return 12;
         }
     }
     g_requested_config = requested;
 
     if (!ensure_backends_loaded_locked()) {
+        set_load_failure_code("MCA_LOAD_BACKEND_UNAVAILABLE");
         return 11;
     }
     g_last_error.clear();
@@ -2202,6 +2685,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     RuntimeConfig effective;
     if (!resolve_backend_config(requested, effective, config_error)) {
         g_last_error = "Unsupported llama runtime config: " + config_error;
+        set_load_failure_code("MCA_LOAD_RUNTIME_CONFIG_UNSUPPORTED");
         return 13;
     }
     g_effective_config = effective;
@@ -2225,126 +2709,176 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         std::ifstream input(path, std::ios::binary);
         if (!input.good()) {
             g_last_error = "Model file is not readable: " + path;
+            set_load_failure_code("MCA_LOAD_FILE_UNREADABLE");
             return 10;
         }
     }
 
-    llama_model_params model_params = llama_model_default_params();
-    model_params.load_mode = load_mode_from_flags(effective.mmap, effective.mlock);
-    model_params.load_mtp = g_spec_requested;
-    model_params.n_gpu_layers = effective.n_gpu_layers;
-    model_params.main_gpu = mca::llama::modelMainGpuForLoad(
-            g_gpu_offload_supported,
-            effective.n_gpu_layers,
-            effective.main_gpu);
-    model_params.split_mode = split_mode_from_name(effective.split_mode);
-
-    std::list<std::string> moe_patterns;
-    std::vector<llama_model_tensor_buft_override> tensor_overrides;
-    for (int i = 0; i < effective.n_cpu_moe; ++i) {
-        moe_patterns.push_back(llm_ffn_exps_block_regex(i));
-        tensor_overrides.push_back({moe_patterns.back().c_str(), ggml_backend_cpu_buffer_type()});
-    }
-    if (!tensor_overrides.empty()) {
-        tensor_overrides.push_back({nullptr, nullptr});
-        model_params.tensor_buft_overrides = tensor_overrides.data();
+    switch (probe_gguf_header(path)) {
+        case GgufHeaderProbe::VALID:
+            break;
+        case GgufHeaderProbe::UNREADABLE:
+            set_load_failure("MCA_LOAD_FILE_UNREADABLE", "Model file became unreadable before GGUF header validation: " + path);
+            return 10;
+        case GgufHeaderProbe::INVALID_MAGIC:
+            set_load_failure("MCA_LOAD_GGUF_CORRUPT_OR_TRUNCATED", "Invalid GGUF magic in model file: " + path);
+            return 1;
+        case GgufHeaderProbe::TRUNCATED:
+            set_load_failure("MCA_LOAD_GGUF_CORRUPT_OR_TRUNCATED", "GGUF header is truncated: " + path);
+            return 1;
     }
 
-    g_mmap_fallback_allowed = mca::llama::shouldRetryModelLoadWithoutMmap(
-            load_mode_uses_mmap(model_params.load_mode),
-            g_model_file_size_bytes);
-    g_mmap_prefetch_enabled = load_mode_uses_mmap(model_params.load_mode) &&
-            mca::llama::shouldPrefetchModelMmap(g_model_file_size_bytes);
-    mca_llama_set_model_mmap_prefetch_enabled(g_mmap_prefetch_enabled);
-    g_model = llama_model_load_from_file(path.c_str(), model_params);
-    if (g_model == nullptr && g_mmap_fallback_allowed) {
-        g_last_error += "\nRetrying model load with mmap=false.";
-        model_params.load_mode = load_mode_from_flags(false, effective.mlock);
-        g_effective_config.mmap = false;
-        g_mmap_prefetch_enabled = false;
-        mca_llama_set_model_mmap_prefetch_enabled(false);
+    const bool auto_gpu_cpu_fallback_allowed =
+            requested.n_gpu_layers == -1 &&
+            effective.n_gpu_layers != 0 &&
+            effective.n_cpu_moe == 0;
+    g_gpu_auto_fallback_applied = false;
+    g_gpu_auto_fallback_reason = auto_gpu_cpu_fallback_allowed
+                                 ? "pending"
+                                 : (requested.n_gpu_layers == -1
+                                    ? "no_gpu_backend_cpu"
+                                    : "not_requested");
+
+    auto restore_load_state_for_attempt = [&]() {
+        g_spec_requested = effective.spec_type == "draft-mtp";
+        g_spec_context_ready = false;
+        g_spec_request_active = false;
+        g_spec_done = false;
+        g_spec_request_reason = g_spec_requested ? "awaiting_text_request" : "disabled";
+        g_cache_reuse_reason = requested.spec_type == "draft-mtp" && requested.cache_reuse > 0
+                               ? "disabled_by_draft_mtp"
+                               : (effective.cache_reuse > 0 ? "no_cached_prefix" : "disabled");
+        g_model_architecture.clear();
+        g_model_mtp_layers = 0;
+        g_model_hybrid = false;
+        g_model_recurrent = false;
+    };
+
+    auto load_model_for_effective_config = [&]() -> bool {
+        llama_model_params model_params = llama_model_default_params();
+        model_params.load_mode = load_mode_from_flags(effective.mmap, effective.mlock);
+        model_params.load_mtp = g_spec_requested;
+        model_params.n_gpu_layers = effective.n_gpu_layers;
+        model_params.main_gpu = mca::llama::modelMainGpuForLoad(
+                g_gpu_offload_supported,
+                effective.n_gpu_layers,
+                effective.main_gpu);
+        model_params.split_mode = split_mode_from_name(effective.split_mode);
+
+        std::list<std::string> moe_patterns;
+        std::vector<llama_model_tensor_buft_override> tensor_overrides;
+        for (int i = 0; i < effective.n_cpu_moe; ++i) {
+            moe_patterns.push_back(llm_ffn_exps_block_regex(i));
+            tensor_overrides.push_back({moe_patterns.back().c_str(), ggml_backend_cpu_buffer_type()});
+        }
+        if (!tensor_overrides.empty()) {
+            tensor_overrides.push_back({nullptr, nullptr});
+            model_params.tensor_buft_overrides = tensor_overrides.data();
+        }
+
+        g_mmap_fallback_allowed = mca::llama::shouldRetryModelLoadWithoutMmap(
+                load_mode_uses_mmap(model_params.load_mode),
+                g_model_file_size_bytes);
+        g_mmap_prefetch_enabled = load_mode_uses_mmap(model_params.load_mode) &&
+                mca::llama::shouldPrefetchModelMmap(g_model_file_size_bytes);
+        mca_llama_set_model_mmap_prefetch_enabled(g_mmap_prefetch_enabled);
         g_model = llama_model_load_from_file(path.c_str(), model_params);
-    } else if (g_model == nullptr && load_mode_uses_mmap(model_params.load_mode)) {
-        g_last_error += "\nLarge-model mmap load failed; unsafe mmap=false retry is disabled.";
-    }
-    if (g_model == nullptr) {
-        if (g_last_error.empty()) {
-            g_last_error = "llama_model_load_from_file returned null. The file may be incomplete, unsupported, or not a chat model GGUF.";
+        if (g_model == nullptr && g_mmap_fallback_allowed) {
+            g_last_error += "\nRetrying model load with mmap=false.";
+            model_params.load_mode = load_mode_from_flags(false, effective.mlock);
+            effective.mmap = false;
+            g_effective_config = effective;
+            g_mmap_prefetch_enabled = false;
+            mca_llama_set_model_mmap_prefetch_enabled(false);
+            g_model = llama_model_load_from_file(path.c_str(), model_params);
+        } else if (g_model == nullptr && load_mode_uses_mmap(model_params.load_mode)) {
+            g_last_error += "\nLarge-model mmap load failed; unsafe mmap=false retry is disabled.";
         }
-        return 1;
-    }
-    g_model_architecture = model_meta_string(g_model, "general.architecture");
-    if (!model_supports_autoregressive_chat(g_model, g_model_architecture)) {
-        g_last_error = "The selected GGUF is not an autoregressive chat model supported by the current generation path";
-        if (!g_model_architecture.empty()) {
-            g_last_error += ": architecture=" + g_model_architecture;
+        return g_model != nullptr;
+    };
+
+    auto validate_loaded_model_for_effective_config = [&]() -> int {
+        g_model_architecture = model_meta_string(g_model, "general.architecture");
+        if (!model_supports_autoregressive_chat(g_model, g_model_architecture)) {
+            g_last_error = "The selected GGUF is not an autoregressive chat model supported by the current generation path";
+            if (!g_model_architecture.empty()) {
+                g_last_error += ": architecture=" + g_model_architecture;
+            }
+            g_last_error += ".";
+            set_load_failure_code("MCA_LOAD_GGUF_NOT_AUTOREGRESSIVE_CHAT");
+            free_llama_locked();
+            return 18;
         }
-        g_last_error += ".";
-        free_llama_locked();
-        return 18;
-    }
-    g_model_mtp_layers = model_mtp_layer_count(g_model);
-    g_model_hybrid = llama_model_is_hybrid(g_model);
-    g_model_recurrent = llama_model_is_recurrent(g_model);
-    refresh_prefix_cache_strategy_locked();
-    if (g_spec_requested && g_model_mtp_layers != 1) {
-        g_last_error = g_model_mtp_layers <= 0
-                       ? "draft-mtp was requested, but the GGUF has no nextn_predict_layers metadata/MTP head."
-                       : "draft-mtp currently requires exactly one MTP block; model reports " +
-                         std::to_string(g_model_mtp_layers) + ".";
-        free_llama_locked();
-        return 17;
-    }
-    if (effective.n_cpu_moe > llama_model_n_layer(g_model)) {
-        g_last_error = "n_cpu_moe exceeds the model layer count (" +
-                       std::to_string(llama_model_n_layer(g_model)) + ").";
-        free_llama_locked();
-        return 14;
-    }
+        g_model_mtp_layers = model_mtp_layer_count(g_model);
+        g_model_hybrid = llama_model_is_hybrid(g_model);
+        g_model_recurrent = llama_model_is_recurrent(g_model);
+        refresh_prefix_cache_strategy_locked();
+        if (g_spec_requested && !model_supports_requested_mtp(
+                g_model_architecture,
+                g_model_mtp_layers)) {
+            g_last_error = g_model_mtp_layers <= 0
+                           ? "draft-mtp was requested, but the GGUF has no nextn_predict_layers metadata/MTP head."
+                           : "draft-mtp supports one MTP block for this architecture; multi-head chaining is currently supported only by Step35. "
+                             "Model architecture=" + g_model_architecture +
+                             ", MTP blocks=" + std::to_string(g_model_mtp_layers) + ".";
+            set_load_failure_code("MCA_LOAD_BUILD_UNSUPPORTED_QUANTIZATION_OR_OPERATION");
+            free_llama_locked();
+            return 17;
+        }
+        if (effective.n_cpu_moe > llama_model_n_layer(g_model)) {
+            g_last_error = "n_cpu_moe exceeds the model layer count (" +
+                           std::to_string(llama_model_n_layer(g_model)) + ").";
+            set_load_failure_code("MCA_LOAD_RUNTIME_CONFIG_UNSUPPORTED");
+            free_llama_locked();
+            return 14;
+        }
+        return 0;
+    };
 
-    g_n_ctx = effective.n_ctx;
-    const int n_threads = effective.n_threads;
+    llama_context_params ctx_params{};
+    uint32_t speculative_rollback_window = 0;
+    int n_threads = 0;
+    auto create_contexts_for_effective_config = [&]() -> int {
+        g_n_ctx = effective.n_ctx;
+        n_threads = effective.n_threads;
+        ctx_params = llama_context_default_params();
+        ctx_params.n_ctx = g_n_ctx;
+        ctx_params.n_batch = effective.n_batch;
+        ctx_params.n_ubatch = effective.n_ubatch;
+        ctx_params.n_seq_max = 1;
+        speculative_rollback_window = g_spec_requested
+                                      ? (uint32_t) effective.spec_draft_n_max + 1U
+                                      : 0U;
+        ctx_params.n_rs_seq = speculative_rollback_window;
+        ctx_params.n_threads = n_threads;
+        ctx_params.n_threads_batch = effective.n_threads_batch;
+        ctx_params.type_k = cache_type_from_name(effective.cache_type_k);
+        ctx_params.type_v = cache_type_from_name(effective.cache_type_v);
+        ctx_params.flash_attn_type = flash_attn_from_name(effective.flash_attn);
+        ctx_params.no_perf = !effective.perf;
+        g_n_threads = n_threads;
+        g_n_threads_batch = effective.n_threads_batch;
+        g_n_batch = effective.n_batch;
+        g_n_ubatch = effective.n_ubatch;
+        g_context = llama_init_from_model(g_model, ctx_params);
+        if (g_context == nullptr) {
+            g_last_error += "\nllama_init_from_model returned null for the requested context/KV/flash configuration.";
+            return 2;
+        }
 
-    llama_context_params ctx_params = llama_context_default_params();
-    ctx_params.n_ctx = g_n_ctx;
-    ctx_params.n_batch = effective.n_batch;
-    ctx_params.n_ubatch = effective.n_ubatch;
-    ctx_params.n_seq_max = 1;
-    const uint32_t speculative_rollback_window = g_spec_requested
-                                                 ? (uint32_t) effective.spec_draft_n_max + 1U
-                                                 : 0U;
-    ctx_params.n_rs_seq = speculative_rollback_window;
-    ctx_params.n_threads = n_threads;
-    ctx_params.n_threads_batch = effective.n_threads_batch;
-    ctx_params.type_k = cache_type_from_name(effective.cache_type_k);
-    ctx_params.type_v = cache_type_from_name(effective.cache_type_v);
-    ctx_params.flash_attn_type = flash_attn_from_name(effective.flash_attn);
-    ctx_params.no_perf = !effective.perf;
-    g_n_threads = n_threads;
-    g_n_threads_batch = effective.n_threads_batch;
-    g_n_batch = effective.n_batch;
-    g_n_ubatch = effective.n_ubatch;
-    g_context = llama_init_from_model(g_model, ctx_params);
-    if (g_context == nullptr) {
-        g_last_error += "\nllama_init_from_model returned null for the requested context/KV/flash configuration.";
-        free_llama_locked();
-        return 2;
-    }
+        g_n_ctx = (int) llama_n_ctx(g_context);
+        g_n_batch = (int) llama_n_batch(g_context);
+        g_n_ubatch = (int) llama_n_ubatch(g_context);
+        g_effective_config.n_ctx = g_n_ctx;
+        g_effective_config.n_batch = g_n_batch;
+        g_effective_config.n_ubatch = g_n_ubatch;
 
-    g_n_ctx = (int) llama_n_ctx(g_context);
-    g_n_batch = (int) llama_n_batch(g_context);
-    g_n_ubatch = (int) llama_n_ubatch(g_context);
-    g_effective_config.n_ctx = g_n_ctx;
-    g_effective_config.n_batch = g_n_batch;
-    g_effective_config.n_ubatch = g_n_ubatch;
-
-    if (g_spec_requested) {
+        if (!g_spec_requested) return 0;
         const auto seq_rm_type = common_context_can_seq_rm(g_context);
         if (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO || seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
             (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS &&
              llama_n_rs_seq(g_context) < speculative_rollback_window)) {
             g_last_error = "draft-mtp requires bounded partial target-context rollback; this model/context does not provide it.";
-            free_llama_locked();
             return 15;
         }
 
@@ -2355,26 +2889,88 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         g_mtp_context = llama_init_from_model(g_model, mtp_params);
         if (g_mtp_context == nullptr) {
             g_last_error = "draft-mtp was requested, but the model has no usable MTP head/context.";
-            free_llama_locked();
             return 16;
         }
         g_spec_context_ready = true;
+        return 0;
+    };
+
+    auto fallback_to_cpu = [&](const char *stage) {
+        const std::string gpu_error = g_last_error;
+        free_llama_locked();
+        effective.n_gpu_layers = 0;
+        effective.main_gpu = 0;
+        effective.split_mode = "none";
+        effective.n_cpu_moe = 0;
+        g_effective_config = effective;
+        g_gpu_auto_fallback_applied = true;
+        g_gpu_auto_fallback_reason = stage;
+        g_last_error = std::string("GPU auto initialization failed at ") + stage +
+                       "; retrying with the CPU backend.";
+        if (!gpu_error.empty()) {
+            g_last_error += "\nGPU attempt: " + gpu_error;
+        }
+        restore_load_state_for_attempt();
+    };
+
+    bool retried_auto_gpu_on_cpu = false;
+    while (true) {
+        if (!load_model_for_effective_config()) {
+            if (auto_gpu_cpu_fallback_allowed && !retried_auto_gpu_on_cpu) {
+                fallback_to_cpu("model_load");
+                retried_auto_gpu_on_cpu = true;
+                continue;
+            }
+            if (g_last_error.empty()) {
+                g_last_error = "llama_model_load_from_file returned null. The file may be incomplete, unsupported, or not a chat model GGUF.";
+            }
+            set_load_failure_code(load_failure_code_from_llama_error(g_last_error).c_str());
+            return 1;
+        }
+
+        const int model_validation_rc = validate_loaded_model_for_effective_config();
+        if (model_validation_rc != 0) return model_validation_rc;
+
+        const int context_rc = create_contexts_for_effective_config();
+        if (context_rc == 0) break;
+        if ((context_rc == 2 || context_rc == 16) &&
+            auto_gpu_cpu_fallback_allowed && !retried_auto_gpu_on_cpu) {
+            fallback_to_cpu(context_rc == 2 ? "context_create" : "mtp_context_create");
+            retried_auto_gpu_on_cpu = true;
+            continue;
+        }
+        const std::string failure_code = load_failure_code_from_llama_error(g_last_error);
+        set_load_failure_code(
+                failure_code == "MCA_LOAD_OUT_OF_MEMORY"
+                ? "MCA_LOAD_OUT_OF_MEMORY"
+                : (context_rc == 15
+                   ? "MCA_LOAD_BUILD_UNSUPPORTED_QUANTIZATION_OR_OPERATION"
+                   : "MCA_LOAD_CONTEXT_CREATION_FAILED"));
+        free_llama_locked();
+        return context_rc;
     }
 
     g_batch = llama_batch_init(g_n_batch, 0, 1);
     g_batch_ready = true;
     try {
         g_chat_templates = common_chat_templates_init(g_model, "");
+    } catch (const std::bad_alloc &) {
+        set_load_failure("MCA_LOAD_OUT_OF_MEMORY", "common_chat_templates_init failed: native out of memory.");
+        free_llama_locked();
+        return 4;
     } catch (const std::exception &e) {
         set_last_error(std::string("common_chat_templates_init exception: ") + e.what());
+        set_load_failure_code("MCA_LOAD_GGUF_METADATA_OR_ARCHITECTURE_INVALID");
         free_llama_locked();
         return 4;
     } catch (...) {
         set_last_error("common_chat_templates_init exception: unknown native error");
+        set_load_failure_code("MCA_LOAD_GGUF_METADATA_OR_ARCHITECTURE_INVALID");
         free_llama_locked();
         return 4;
     }
     if (!configure_sampler_locked(params)) {
+        set_load_failure_code("MCA_LOAD_BUILD_UNSUPPORTED_QUANTIZATION_OR_OPERATION");
         free_llama_locked();
         return 3;
     }
@@ -2384,6 +2980,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         std::ifstream projector_input(mmproj_path, std::ios::binary);
         if (!projector_input.good()) {
             g_last_error = "Vision projector file is not readable: " + mmproj_path;
+            set_load_failure_code("MCA_LOAD_FILE_UNREADABLE");
             free_llama_locked();
             return 5;
         }
@@ -2398,17 +2995,20 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
             if (g_last_error.empty()) {
                 g_last_error = "mtmd_init_from_file returned null. The mmproj may not match this main model.";
             }
+            set_load_failure_code("MCA_LOAD_BUILD_UNSUPPORTED_QUANTIZATION_OR_OPERATION");
             free_llama_locked();
             return 6;
         }
         if (!mtmd_support_vision(g_mtmd_context)) {
             g_last_error = "The attached mtmd projector does not report vision support.";
+            set_load_failure_code("MCA_LOAD_BUILD_UNSUPPORTED_QUANTIZATION_OR_OPERATION");
             free_llama_locked();
             return 7;
         }
         g_vision_ready = true;
         g_mmproj_path = mmproj_path;
     }
+    refresh_gpu_offload_evidence_locked();
     g_load_ms = now_ms() - started;
     g_loaded = true;
     g_stop_requested.store(false, std::memory_order_relaxed);
@@ -2422,6 +3022,22 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     mark_generation_inactive(GenerationStopReason::IDLE);
     return 0;
 #endif
+    } catch (const std::bad_alloc &) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_stop_requested.store(true, std::memory_order_relaxed);
+        mark_generation_inactive(GenerationStopReason::LOAD_FAILED);
+#if MCA_WITH_LLAMA_CPP
+        try {
+            free_llama_locked();
+        } catch (...) {
+        }
+#else
+        g_stub_chunks.clear();
+        g_stub_chunk_index = 0;
+#endif
+        g_loaded = false;
+        set_load_failure("MCA_LOAD_OUT_OF_MEMORY", "loadModel failed: native out of memory.");
+        return 19;
     } catch (const std::exception &e) {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_stop_requested.store(true, std::memory_order_relaxed);
@@ -2436,7 +3052,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         g_stub_chunk_index = 0;
 #endif
         g_loaded = false;
-        set_last_error(std::string("loadModel exception: ") + e.what());
+        set_load_failure("MCA_LOAD_NATIVE_LOAD_EXCEPTION", std::string("loadModel exception: ") + e.what());
         return 19;
     } catch (...) {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -2452,7 +3068,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         g_stub_chunk_index = 0;
 #endif
         g_loaded = false;
-        set_last_error("loadModel exception: unknown native error");
+        set_load_failure("MCA_LOAD_NATIVE_LOAD_EXCEPTION", "loadModel exception: unknown native error");
         return 19;
     }
 }
@@ -2471,6 +3087,29 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_unloadModel(JNIEnv *, jobj
     g_loaded = false;
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_invalidateTextContext(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_stop_requested.store(true, std::memory_order_release);
+    mark_generation_inactive(GenerationStopReason::STOP_REQUESTED);
+#if MCA_WITH_LLAMA_CPP
+    // A user-visible conversation mutation must not be serviced from the old
+    // token tail. This also clears the MTP context when speculative decoding
+    // was active.
+    invalidate_speculative_contexts_locked("invalidated_by_conversation_edit");
+    g_cached_token_chars.clear();
+#else
+    g_stub_chunks.clear();
+    g_stub_chunk_index = 0;
+    g_cache_state_valid = false;
+    g_cache_reuse_hit = false;
+    g_cache_reused_tokens = 0;
+    g_cache_reuse_reason = "invalidated_by_conversation_edit";
+    g_spec_request_active = false;
+    g_spec_request_reason = "invalidated_by_conversation_edit";
+#endif
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         JNIEnv *env,
@@ -2483,6 +3122,15 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         g_cache_reuse_hit = false;
         g_cache_reused_tokens = 0;
         g_cache_reuse_reason = "not_attempted";
+        g_persistent_prefix_cache_attempted = g_thread_prefix_cache_request.requested;
+        g_persistent_prefix_cache_hit = false;
+        g_persistent_prefix_cache_saved = false;
+        g_persistent_prefix_cache_tokens = 0;
+        g_persistent_prefix_cache_reason = g_thread_prefix_cache_request.requested
+                                            ? "not_attempted"
+                                            : "not_requested";
+        const PersistentPrefixCacheNativeRequest persistent_prefix_request = g_thread_prefix_cache_request;
+        g_thread_prefix_cache_request = PersistentPrefixCacheNativeRequest{};
         if (!g_loaded) {
             mark_generation_inactive(GenerationStopReason::BEGIN_FAILED);
             return -1;
@@ -2496,6 +3144,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         g_completion_tokens = 0;
         g_prefill_started_ms = now_ms();
         g_prefill_finished_ms = g_prefill_started_ms;
+        reset_prefill_progress();
         g_decode_started_ms = 0;
         g_decode_finished_ms = 0;
 
@@ -2587,7 +3236,9 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
                 return -13;
             }
             g_prompt_tokens = (long long) tokens.size();
+            begin_prefill_progress(tokens.size());
             size_t reused = 0;
+            PersistentPrefixPreparation persistent_prefix;
             if (g_spec_requested) {
                 clear_target_context_locked("disabled_by_draft_mtp");
                 if (!prepare_speculative_request_locked()) return -14;
@@ -2598,8 +3249,22 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
                 if (g_mtp_context != nullptr) {
                     llama_memory_clear(llama_get_memory(g_mtp_context), false);
                 }
-                reused = prepare_text_prefix_locked(tokens);
+                if (mca::llama::canAttemptPersistentPrefixCache(
+                        persistent_prefix_request.requested,
+                        false,
+                        false,
+                        (size_t) request_config.n_parallel)) {
+                    persistent_prefix = prepare_persistent_prefix_locked(
+                            messages,
+                            chat_options,
+                            tokens,
+                            persistent_prefix_request);
+                }
+                reused = persistent_prefix.handled
+                        ? persistent_prefix.reused_tokens
+                        : prepare_text_prefix_locked(tokens);
             }
+            report_reused_prefill_tokens(reused);
             rc = decode_text_prompt_locked(tokens, reused);
             if (rc == 0) {
                 if (mca::llama::canPersistPrefixCacheAfterPrefill(
@@ -2620,6 +3285,9 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
                     common_speculative_begin(g_speculative.get(), 0, g_spec_prompt_tokens);
                 }
             } else {
+                if (g_spec_requested) {
+                    invalidate_speculative_contexts_locked("prefill_failed");
+                }
                 invalidate_prefix_cache_checkpoint_locked();
                 g_cache_state_valid = false;
                 g_context_tokens.clear();
@@ -2665,6 +3333,50 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
     }
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletionWithPrefixCache(
+        JNIEnv *env,
+        jobject obj,
+        jstring messagesJson,
+        jstring paramsJson,
+        jstring restoreStatePath,
+        jstring writeStatePath,
+        jstring fixedSystemPrompt
+) {
+    g_thread_prefix_cache_request = PersistentPrefixCacheNativeRequest{};
+    g_thread_prefix_cache_request.requested = true;
+    g_thread_prefix_cache_request.restore_state_path = jstring_to_string(env, restoreStatePath);
+    g_thread_prefix_cache_request.write_state_path = jstring_to_string(env, writeStatePath);
+    g_thread_prefix_cache_request.fixed_system_prompt = jstring_to_string(env, fixedSystemPrompt);
+    return Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
+            env,
+            obj,
+            messagesJson,
+            paramsJson);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getPrefillProgressJson(JNIEnv *env, jobject) {
+    const int total = std::max(
+            0,
+            g_prefill_progress_total_tokens.load(std::memory_order_acquire));
+    const int completed = std::clamp(
+            g_prefill_progress_completed_tokens.load(std::memory_order_acquire),
+            0,
+            total);
+    std::ostringstream out;
+    out << "{\"completedTokens\":" << completed
+        << ",\"totalTokens\":" << total << "}";
+    return string_to_jstring(env, out.str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_resetPrefillProgress(JNIEnv *, jobject) {
+    // This is deliberately lock-free. beginCompletion() owns the text context
+    // with g_mutex, while the progress record is an independent atomic snapshot.
+    reset_prefill_progress();
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -2702,6 +3414,15 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *
             throw_java_illegal_state(
                     env,
                     g_last_error.empty() ? "draft-mtp generation failed." : g_last_error);
+            return nullptr;
+        }
+        // A lock-free stop can land after speculative_step_locked() has
+        // sampled but before this JNI call commits its chunk.  Suppress that
+        // chunk and tear down both synchronized contexts instead of exposing
+        // output after cancellation.
+        if (g_stop_requested.load(std::memory_order_acquire)) {
+            stop_speculative_request_if_requested_locked();
+            finish_generation_if_active(GenerationStopReason::STOP_REQUESTED);
             return nullptr;
         }
         if (step.output.empty()) {
@@ -2755,6 +3476,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *
         finish_generation_if_active(GenerationStopReason::DECODE_FAILED);
         return nullptr;
     }
+    record_gpu_decode_execution_locked();
     g_current_position++;
     g_completion_tokens++;
     if (g_cache_state_valid) {
@@ -2816,8 +3538,10 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getRuntimeStatsJson(JNIEnv *env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
 #if MCA_WITH_LLAMA_CPP
-    const bool using_gpu_config = g_gpu_offload_supported && g_effective_config.n_gpu_layers != 0;
-    return string_to_jstring(env, stats_json(using_gpu_config ? "llama.cpp-gpu" : "llama.cpp-cpu"));
+    refresh_gpu_offload_evidence_locked();
+    return string_to_jstring(
+            env,
+            stats_json(g_gpu_offload_active ? "llama.cpp-gpu" : "llama.cpp-cpu"));
 #else
     return string_to_jstring(env, stats_json("cpu-stub"));
 #endif

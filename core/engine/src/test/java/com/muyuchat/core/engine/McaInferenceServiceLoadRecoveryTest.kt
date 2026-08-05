@@ -70,7 +70,7 @@ class McaInferenceServiceLoadRecoveryTest {
     }
 
     @Test
-    fun constrainedRamFullKvQairtGraphRequestsIsolatedCanaryInsteadOfStaticDeviceBlock() = runBlocking {
+    fun constrainedRamFullKvQairtGraphStillReachesNormalNativeLoad() = runBlocking {
         val mnnRunner = FakeLocalChatRunner()
         val qairtRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.GENIEX_QAIRT)
         val bundle = qairtBundle(kvSpan = 4_095)
@@ -89,14 +89,14 @@ class McaInferenceServiceLoadRecoveryTest {
             params = LoadParams(nCtx = 512, nThreads = 4)
         )
 
-        assertTrue(result.isFailure)
-        assertEquals(0, qairtRunner.loadCalls)
+        assertTrue(result.isSuccess)
+        assertEquals(1, qairtRunner.loadCalls)
         assertEquals(QairtExecutionAdmissionMode.ISOLATED_DRY_RUN, service.qairtExecutionAdmission?.mode)
-        assertTrue(result.exceptionOrNull() is QairtIsolatedDryRunRequiredException)
+        assertTrue(service.qairtExecutionAdmission?.canAttempt == true)
     }
 
     @Test
-    fun constrainedRamSegmentedQairtGraphAlsoRequestsIsolatedCanary() = runBlocking {
+    fun constrainedRamSegmentedQairtGraphStillReachesNormalNativeLoad() = runBlocking {
         val mnnRunner = FakeLocalChatRunner()
         val qairtRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.GENIEX_QAIRT)
         val bundle = qairtBundle(kvSpan = 1_023)
@@ -115,13 +115,13 @@ class McaInferenceServiceLoadRecoveryTest {
             params = LoadParams(nCtx = 512, nThreads = 4)
         )
 
-        assertTrue(result.isFailure)
-        assertEquals(0, qairtRunner.loadCalls)
+        assertTrue(result.isSuccess)
+        assertEquals(1, qairtRunner.loadCalls)
         assertEquals(QairtExecutionAdmissionMode.ISOLATED_DRY_RUN, service.qairtExecutionAdmission?.mode)
     }
 
     @Test
-    fun unknownDeviceMemoryRequestsRealIsolatedCanary() = runBlocking {
+    fun unknownDeviceMemoryRemainsAdvisoryForNormalQairtLoad() = runBlocking {
         val qairtRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.GENIEX_QAIRT)
         val service = McaInferenceService(
             context = FakeContext(),
@@ -138,14 +138,14 @@ class McaInferenceServiceLoadRecoveryTest {
             params = LoadParams(nCtx = 512, nThreads = 4)
         )
 
-        assertTrue(result.isFailure)
-        assertEquals(0, qairtRunner.loadCalls)
+        assertTrue(result.isSuccess)
+        assertEquals(1, qairtRunner.loadCalls)
         assertEquals(QairtExecutionAdmissionMode.ISOLATED_DRY_RUN, service.qairtExecutionAdmission?.mode)
         assertTrue(service.qairtExecutionAdmission?.memoryAdvisory.orEmpty().contains("unavailable"))
     }
 
     @Test
-    fun lowAvailableMemoryRequestsRealIsolatedCanary() = runBlocking {
+    fun lowAvailableMemoryRemainsAdvisoryForNormalQairtLoad() = runBlocking {
         val qairtRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.GENIEX_QAIRT)
         val service = McaInferenceService(
             context = FakeContext(),
@@ -167,8 +167,8 @@ class McaInferenceServiceLoadRecoveryTest {
             params = LoadParams(nCtx = 512, nThreads = 4)
         )
 
-        assertTrue(result.isFailure)
-        assertEquals(0, qairtRunner.loadCalls)
+        assertTrue(result.isSuccess)
+        assertEquals(1, qairtRunner.loadCalls)
         assertEquals(QairtExecutionAdmissionMode.ISOLATED_DRY_RUN, service.qairtExecutionAdmission?.mode)
         assertTrue(service.qairtExecutionAdmission?.memoryAdvisory.orEmpty().contains("advisory native headroom"))
     }
@@ -878,6 +878,107 @@ class McaInferenceServiceLoadRecoveryTest {
     }
 
     @Test
+    fun isolatedWorkerLossRestoresTheExactLoadedSessionBeforeTheNextTurn() = runBlocking {
+        val runner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.LLAMA_CPP)
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(LocalChatRuntime.LLAMA_CPP to runner),
+            installationScopeId = "test-installation"
+        )
+        service.loadModel(
+            modelPath = "/models/worker-recovery/model.gguf",
+            runtime = LocalChatRuntime.LLAMA_CPP,
+            params = LoadParams(nCtx = 4096, nThreads = 4)
+        ).getOrThrow()
+        runner.simulateWorkerSessionLoss()
+        runner.enqueueGeneration("recovered after worker loss")
+
+        val events = service.streamChat(
+            ChatRequest(
+                messages = listOf(ChatMessage(Role.USER, "continue")),
+                params = GenerationParams(
+                    nCtx = 4096,
+                    nPredict = 8,
+                    nThreads = 4,
+                    reasoningMode = ReasoningMode.OFF,
+                    hideReasoning = true
+                )
+            )
+        ).toList()
+
+        assertTrue(events.any { event ->
+            event is GenerateEvent.Phase && event.phase == GenerationPhase.LOAD
+        })
+        assertTrue(events.any { it is GenerateEvent.Done })
+        assertEquals(2, runner.loadCalls)
+        assertTrue(service.stats.value.loaded)
+        assertEquals(null, service.stats.value.lastError)
+    }
+
+    @Test
+    fun thrownWorkerReloadIsCoherentAndRetriesOnTheNextTurn() = runBlocking {
+        val runner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.LLAMA_CPP)
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(LocalChatRuntime.LLAMA_CPP to runner),
+            installationScopeId = "test-installation"
+        )
+        service.loadModel(
+            modelPath = "/models/worker-recovery/model.gguf",
+            runtime = LocalChatRuntime.LLAMA_CPP,
+            params = LoadParams(nCtx = 4096, nThreads = 4)
+        ).getOrThrow()
+        runner.simulateWorkerSessionLoss()
+        runner.loadFailure = IllegalStateException("binder died during reload")
+
+        val failed = service.streamChat(simpleWorkerRecoveryRequest()).toList()
+
+        assertTrue(failed.last() is GenerateEvent.Error)
+        assertFalse(service.stats.value.loaded)
+        assertTrue(service.stats.value.lastError.orEmpty().contains("binder died"))
+        assertEquals(2, runner.loadCalls)
+
+        runner.loadFailure = null
+        runner.enqueueGeneration("recovered after retry")
+        val recovered = service.streamChat(simpleWorkerRecoveryRequest()).toList()
+
+        assertTrue(recovered.last() is GenerateEvent.Done)
+        assertTrue(service.stats.value.loaded)
+        assertEquals(3, runner.loadCalls)
+    }
+
+    @Test
+    fun cancelledWorkerReloadCleansUpAndRemainsRetryable() = runBlocking {
+        val runner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.LLAMA_CPP)
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(LocalChatRuntime.LLAMA_CPP to runner),
+            installationScopeId = "test-installation"
+        )
+        service.loadModel(
+            modelPath = "/models/worker-recovery/model.gguf",
+            runtime = LocalChatRuntime.LLAMA_CPP,
+            params = LoadParams(nCtx = 4096, nThreads = 4)
+        ).getOrThrow()
+        runner.simulateWorkerSessionLoss()
+        runner.loadFailure = kotlinx.coroutines.CancellationException("reload cancelled")
+
+        var cancelled = false
+        try {
+            service.streamChat(simpleWorkerRecoveryRequest()).toList()
+        } catch (_: kotlinx.coroutines.CancellationException) {
+            cancelled = true
+        }
+        assertTrue(cancelled)
+        assertFalse(service.stats.value.loaded)
+
+        runner.loadFailure = null
+        runner.enqueueGeneration("recovered after cancellation")
+        assertTrue(service.streamChat(simpleWorkerRecoveryRequest()).toList().last() is GenerateEvent.Done)
+        assertEquals(3, runner.loadCalls)
+    }
+
+    @Test
     fun repeatedLlamaLoadSignatureMismatchDoesNotEnterReloadLoop() = runBlocking {
         val runner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.LLAMA_CPP)
         val service = McaInferenceService(
@@ -965,6 +1066,37 @@ class McaInferenceServiceLoadRecoveryTest {
         assertEquals(2, runner.loadCalls)
         assertEquals(2, runner.beginCalls)
         assertTrue(runner.unloadCalls >= 2)
+    }
+
+    @Test
+    fun qairtWorkerLossRestoresTheExactLoadedSessionBeforeTheNextTurn() = runBlocking {
+        val runner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.GENIEX_QAIRT)
+        val bundle = qairtBundle(kvSpan = 1_023)
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(
+                LocalChatRuntime.MNN_CPU to FakeLocalChatRunner(),
+                LocalChatRuntime.GENIEX_QAIRT to runner
+            ),
+            memorySnapshotProvider = { generousMemorySnapshot() },
+            installationScopeId = "test-installation"
+        )
+        service.loadModel(
+            modelPath = bundle.absolutePath,
+            runtime = LocalChatRuntime.GENIEX_QAIRT,
+            params = LoadParams(nCtx = 4096, nThreads = 4)
+        ).getOrThrow()
+        runner.simulateWorkerSessionLoss()
+        runner.enqueueGeneration("recovered QAIRT session")
+
+        val events = service.streamChat(simpleWorkerRecoveryRequest()).toList()
+
+        assertTrue(events.any { event ->
+            event is GenerateEvent.Phase && event.phase == GenerationPhase.LOAD
+        })
+        assertTrue(events.any { it is GenerateEvent.Done })
+        assertEquals(2, runner.loadCalls)
+        assertTrue(service.stats.value.loaded)
     }
 
     @Test
@@ -1431,6 +1563,17 @@ class McaInferenceServiceLoadRecoveryTest {
         params = testGenerationParams()
     )
 
+    private fun simpleWorkerRecoveryRequest(): ChatRequest = ChatRequest(
+        messages = listOf(ChatMessage(Role.USER, "continue")),
+        params = GenerationParams(
+            nCtx = 4096,
+            nPredict = 8,
+            nThreads = 4,
+            reasoningMode = ReasoningMode.OFF,
+            hideReasoning = true
+        )
+    )
+
     private fun testGenerationParams(): GenerationParams = GenerationParams(
         nCtx = 32768,
         nPredict = 8,
@@ -1465,6 +1608,7 @@ class McaInferenceServiceLoadRecoveryTest {
         var shutdownCalls = 0
         var beginReturnCode = 0
         var beginFailure: Throwable? = null
+        var loadFailure: Throwable? = null
         var lastMessagesJson: String = ""
         var lastBeginParamsJson: String = ""
         val loadParamsJson = mutableListOf<String>()
@@ -1480,6 +1624,7 @@ class McaInferenceServiceLoadRecoveryTest {
         override fun loadModel(modelPath: String, paramsJson: String): Int {
             loadCalls += 1
             loadParamsJson += paramsJson
+            loadFailure?.let { throw it }
             if (loadReturnCode == 0) {
                 statsJson = loadedStatsJson(runtime, paramsJson)
             }
@@ -1529,6 +1674,16 @@ class McaInferenceServiceLoadRecoveryTest {
                 stats.put("generationStopReason", reason)
             }
             statsJson = stats.toString()
+        }
+
+        fun simulateWorkerSessionLoss() {
+            statsJson = JSONObject()
+                .put("backend", runtime.backendId)
+                .put("loaded", false)
+                .put("runnerReady", false)
+                .put("workerSessionLost", true)
+                .put("lastError", "isolated worker exited")
+                .toString()
         }
 
         private companion object {

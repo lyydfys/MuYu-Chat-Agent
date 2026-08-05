@@ -615,6 +615,46 @@ object LocalApiRuntime {
                 ) metrics.put(key, value)
             }
         }
+        // Do not let an allocation-only or stale backend label claim GPU
+        // execution through the public Local API. Native and Kotlin use the
+        // same three-part proof: allocation, successful decode, active flag.
+        if (source.has("gpuOffloadActive") ||
+            source.has("gpuOffloadAllocationObserved") ||
+            source.has("gpuOffloadExecutionObserved")
+        ) {
+            val allocationObserved = source.optBoolean("gpuOffloadAllocationObserved", false)
+            val executionObserved = source.optBoolean("gpuOffloadExecutionObserved", false)
+            val verifiedGpuExecution = source.optBoolean("gpuOffloadActive", false) &&
+                allocationObserved && executionObserved
+            metrics.put("gpuOffloadActive", verifiedGpuExecution)
+            metrics.put("gpuOffloadAllocationObserved", allocationObserved)
+            metrics.put("gpuOffloadExecutionObserved", executionObserved)
+            if (!verifiedGpuExecution && metrics.optString("backend") == "llama.cpp-gpu") {
+                metrics.put("backend", "llama.cpp-cpu")
+            }
+        }
+        // llama.cpp and MNN publish cache details as a nested diagnostic
+        // object. Flatten only bounded scalar evidence for the Local API.
+        source.optJSONObject("cacheReuse")?.let { cache ->
+            metrics.put("cacheReuseHit", cache.optBoolean("hit", false))
+            metrics.put("cacheReusedTokens", cache.optInt("reusedTokens", 0).coerceAtLeast(0))
+            metrics.put("cacheReuseHits", cache.optLong("hits", 0L).coerceAtLeast(0L))
+            metrics.put("cacheReuseMisses", cache.optLong("misses", 0L).coerceAtLeast(0L))
+            cache.optString("reason")
+                .takeIf { it.isNotBlank() && it.length <= MAX_PUBLIC_METRIC_STRING_LENGTH }
+                ?.takeIf(PUBLIC_TOKEN_PATTERN::matches)
+                ?.let { reason -> metrics.put("cacheReuseReason", reason) }
+        }
+        source.optJSONObject("persistentPrefixCache")?.let { cache ->
+            metrics.put("persistentPrefixCacheAttempted", cache.optBoolean("attempted", false))
+            metrics.put("persistentPrefixCacheHit", cache.optBoolean("hit", false))
+            metrics.put("persistentPrefixCacheSaved", cache.optBoolean("saved", false))
+            metrics.put("persistentPrefixCacheTokens", cache.optInt("tokens", 0).coerceAtLeast(0))
+            cache.optString("reason")
+                .takeIf { it.isNotBlank() && it.length <= MAX_PUBLIC_METRIC_STRING_LENGTH }
+                ?.takeIf(PUBLIC_TOKEN_PATTERN::matches)
+                ?.let { reason -> metrics.put("persistentPrefixCacheReason", reason) }
+        }
         return metrics
     }
 
@@ -859,8 +899,11 @@ object LocalApiRuntime {
         "splitMode",
         "cacheTypeK",
         "cacheTypeV",
+        "cacheReuseReason",
+        "persistentPrefixCacheReason",
         "flashAttn",
-        "specType"
+        "specType",
+        "gpuAutoFallbackReason"
     )
     private val NATIVE_METRIC_FIELDS = NATIVE_METRIC_STRING_FIELDS + setOf(
         "loaded",
@@ -885,6 +928,7 @@ object LocalApiRuntime {
         "contextShifts",
         "ttftMs",
         "prefillMs",
+        "prefillTps",
         "decodeMs",
         "decodeTps",
         "generatedSteps",
@@ -898,10 +942,30 @@ object LocalApiRuntime {
         "maxAllTokens",
         "maxNewTokens",
         "nGpuLayers",
+        "gpuOffloadActive",
+        "gpuOffloadAllocationObserved",
+        "gpuOffloadExecutionObserved",
+        "gpuOffloadBytes",
+        "gpuOffloadModelBytes",
+        "gpuOffloadContextBytes",
+        "gpuOffloadComputeBytes",
+        "gpuOffloadLayers",
+        "gpuOffloadLayersKnown",
+        "gpuAutoFallbackApplied",
         "mainGpu",
         "nCpuMoe",
         "nParallel",
         "cacheReuseThreshold",
+        "cacheReuseHit",
+        "cacheReusedTokens",
+        "cacheReuseHits",
+        "cacheReuseMisses",
+        "cacheReuseReason",
+        "persistentPrefixCacheAttempted",
+        "persistentPrefixCacheHit",
+        "persistentPrefixCacheSaved",
+        "persistentPrefixCacheTokens",
+        "persistentPrefixCacheReason",
         "specDraftNMax",
         "temperature",
         "topK",

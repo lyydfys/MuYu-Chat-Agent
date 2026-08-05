@@ -78,7 +78,7 @@ class TuningEngineTest {
     }
 
     @Test
-    fun qwen36A3bMtpUsesAndroidCpuSafePresetWithoutFakeGpuOffload() {
+    fun mtpLookingFileNameDoesNotEnableDraftMtpWithoutMetadataWitness() {
         val plan = engine.recommend(
             device = device(totalGb = 16, bigCores = 7, cores = 9),
             modelParametersB = 3.0,
@@ -95,8 +95,8 @@ class TuningEngineTest {
         assertEquals("q4_0", advanced.getString("cache_type_v"))
         assertEquals("on", advanced.getString("flash_attn"))
         assertEquals(256, advanced.getInt("cache_reuse"))
-        assertEquals("draft-mtp", advanced.getString("spec_type"))
-        assertEquals(2, advanced.getInt("spec_draft_n_max"))
+        assertEquals("none", advanced.getString("spec_type"))
+        assertEquals(0, advanced.getInt("spec_draft_n_max"))
         assertEquals(1, advanced.getInt("n_parallel"))
         assertTrue(advanced.getBoolean("perf"))
         assertTrue(advanced.getBoolean("use_jinja"))
@@ -162,7 +162,7 @@ class TuningEngineTest {
         assertEquals(1, advanced.getJSONObject("future_native").getInt("x"))
         assertEquals(3, advanced.getInt("n_threads_batch"))
         assertEquals(2048, advanced.getInt("n_batch"))
-        assertEquals("draft-mtp", advanced.getString("spec_type"))
+        assertEquals("none", advanced.getString("spec_type"))
         assertFalse(advanced.has("n_gpu_layers"))
         assertFalse(advanced.has("main_gpu"))
         assertFalse(advanced.has("split_mode"))

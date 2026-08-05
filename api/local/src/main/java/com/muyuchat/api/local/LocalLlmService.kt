@@ -120,6 +120,7 @@ class LocalLlmService : Service() {
                             LocalApiRuntime.recordGenerationSequence(requestId, it)
                         }
                         when (event) {
+                            is GenerateEvent.Phase -> Unit
                             is GenerateEvent.Chunk -> callback.onChunk(sessionId, event.text)
                             is GenerateEvent.Done -> callback.onDone(sessionId)
                             is GenerateEvent.Error -> callback.onError(sessionId, event.message)

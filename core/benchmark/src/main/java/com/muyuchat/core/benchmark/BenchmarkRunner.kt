@@ -21,10 +21,15 @@ data class BenchmarkResult(
     val loadMs: Long = 0,
     val ttftMs: Long = 0,
     val promptTokens: Int = 0,
+    val prefillMs: Long = 0,
+    val prefillTps: Double = 0.0,
     val genTokens: Int = 0,
     val decodeMs: Long = 0,
     val decodeTps: Double = 0.0,
     val e2eTps: Double = 0.0,
+    val cacheReuseHit: Boolean = false,
+    val cacheReusedTokens: Int = 0,
+    val cacheReuseReason: String? = null,
     val nativePssKb: Long = 0,
     val processRssKb: Long = 0,
     val nativeHeapKb: Long = 0,
@@ -44,10 +49,15 @@ data class BenchmarkResult(
         .put("loadMs", loadMs)
         .put("ttftMs", ttftMs)
         .put("promptTokens", promptTokens)
+        .put("prefillMs", prefillMs)
+        .put("prefillTps", prefillTps)
         .put("genTokens", genTokens)
         .put("decodeMs", decodeMs)
         .put("decodeTps", decodeTps)
         .put("e2eTps", e2eTps)
+        .put("cacheReuseHit", cacheReuseHit)
+        .put("cacheReusedTokens", cacheReusedTokens)
+        .put("cacheReuseReason", cacheReuseReason)
         .put("nativePssKb", nativePssKb)
         .put("processRssKb", processRssKb)
         .put("nativeHeapKb", nativeHeapKb)
@@ -133,6 +143,7 @@ class BenchmarkRunner(
                     .put("mode", config.mode.name)
                     .put("repeats", config.repeatsPerCandidate)
                     .put("decodeTps", result.decodeTps)
+                    .put("prefillTps", result.prefillTps)
                     .put("ttftMs", result.ttftMs)
                     .put("decodeMs", result.decodeMs)
                     .put("genTokens", result.genTokens)
@@ -211,6 +222,8 @@ class BenchmarkRunner(
                 BenchmarkSweepMode.POWER_SAVE -> avgTps
             },
             e2eTps = avgE2e,
+            prefillMs = successful.map { it.prefillMs }.average().toLong(),
+            prefillTps = successful.map { it.prefillTps }.average(),
             bestThreadCount = threads,
             thermalDelta = thermalDelta,
             stable = stable
@@ -296,16 +309,22 @@ class BenchmarkRunner(
         var result = BenchmarkResult(error = "Benchmark did not complete.")
         engine.streamChat(request).collect { event ->
             when (event) {
+                is GenerateEvent.Phase -> Unit
                 is GenerateEvent.Chunk -> {
                     val stats = event.stats
                     result = BenchmarkResult(
                         loadMs = stats.loadMs,
                         ttftMs = stats.ttftMs,
                         promptTokens = stats.promptTokens,
+                        prefillMs = stats.prefillMs,
+                        prefillTps = stats.prefillTps,
                         genTokens = stats.completionTokens,
                         decodeMs = stats.decodeMs,
                         decodeTps = stats.decodeTps,
                         e2eTps = stats.e2eTps,
+                        cacheReuseHit = stats.cacheReuseHit,
+                        cacheReusedTokens = stats.cacheReusedTokens,
+                        cacheReuseReason = stats.cacheReuseReason,
                         nativePssKb = stats.nativePssKb,
                         processRssKb = stats.processRssKb,
                         nativeHeapKb = stats.nativeHeapKb,
@@ -325,10 +344,15 @@ class BenchmarkRunner(
                         loadMs = stats.loadMs,
                         ttftMs = stats.ttftMs,
                         promptTokens = stats.promptTokens,
+                        prefillMs = stats.prefillMs,
+                        prefillTps = stats.prefillTps,
                         genTokens = stats.completionTokens,
                         decodeMs = stats.decodeMs,
                         decodeTps = stats.decodeTps,
                         e2eTps = stats.e2eTps,
+                        cacheReuseHit = stats.cacheReuseHit,
+                        cacheReusedTokens = stats.cacheReusedTokens,
+                        cacheReuseReason = stats.cacheReuseReason,
                         nativePssKb = stats.nativePssKb,
                         processRssKb = stats.processRssKb,
                         nativeHeapKb = stats.nativeHeapKb,

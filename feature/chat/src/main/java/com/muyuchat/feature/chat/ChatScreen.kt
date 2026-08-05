@@ -197,10 +197,14 @@ import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
+import com.muyuchat.core.engine.GenerationPhase
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
+import com.muyuchat.core.engine.TokenProgress
+import com.muyuchat.core.engine.PromptContextUsage
+import com.muyuchat.core.engine.PromptMessageRetention
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
@@ -224,6 +228,7 @@ import org.json.JSONObject
 import kotlin.math.roundToInt
 
 private const val CLOUD_REASONING_LOCKED_TIP = "云端思考由模型服务商控制，MCA 已默认启用，暂不支持切换。"
+private const val MAX_ASSISTANT_SYSTEM_PROMPT_CHARS = 12_000
 private val McaPrimaryBlue = Color(0xFF3F7DE8)
 private val McaInputShell = Color(0xFFFEFEFF)
 private val McaInputField = Color(0xFFF3F7FF)
@@ -261,6 +266,9 @@ data class ChatUiState(
     val activeConversationId: String? = null,
     val input: String = "",
     val isGenerating: Boolean = false,
+    val generationPhase: GenerationPhase? = null,
+    val generationTokenProgress: TokenProgress? = null,
+    val promptContextUsage: PromptContextUsage? = null,
     val selectedModelId: String? = null,
     val selectedModelName: String? = null,
     val selectedModelIsCloud: Boolean = false,
@@ -461,6 +469,13 @@ data class WorldBookUiItem(
     val entryCount: Int,
     val scopeLabel: String
 )
+
+/** Scope selected before the host launches a world-book document picker. */
+enum class WorldBookImportScope(val label: String) {
+    GLOBAL("全局"),
+    ASSISTANT("当前角色"),
+    CHAT("当前对话")
+}
 
 data class KnowledgeBaseUiItem(
     val id: String,
@@ -1736,6 +1751,7 @@ fun ChatScreen(
     onExportConversation: (String) -> Unit,
     onRegenerate: () -> Unit,
     onDeleteMessage: (Int) -> Unit,
+    onDeleteLastTurn: () -> Unit = {},
     onUploadFile: (String) -> Unit,
     onUseImageAsset: (String) -> Unit = {},
     onDeleteImageAsset: (String) -> Unit = {},
@@ -1776,7 +1792,7 @@ fun ChatScreen(
     onDeleteAssistant: (String) -> Unit = {},
     onImportAssistantCard: (String) -> Unit = {},
     onImportAssistantCardFile: () -> Unit = {},
-    onImportWorldBookFile: () -> Unit = {},
+    onImportWorldBookFile: (WorldBookImportScope) -> Unit = {},
     onDeleteWorldBook: (String) -> Unit = {},
     onCreateKnowledgeBase: (String) -> Unit = {},
     onImportKnowledgeDocument: (String) -> Unit = {},
@@ -2819,6 +2835,10 @@ fun ChatScreen(
                     onOpenAppMenu = { onAppMenuOpenChange(true) }
                 )
 
+                state.promptContextUsage?.let { usage ->
+                    PromptContextUsageLine(usage)
+                }
+
                 LazyColumn(
                     state = listState,
                     modifier = Modifier
@@ -2841,8 +2861,19 @@ fun ChatScreen(
                             showAssistantActions = index == lastAssistantIndex && message.role == Role.ASSISTANT,
                             canRegenerate = !state.isGenerating,
                             isGenerating = state.isGenerating && index == lastAssistantIndex,
+                            generationPhase = if (state.isGenerating && index == lastAssistantIndex) {
+                                state.generationPhase
+                            } else {
+                                null
+                            },
+                            generationTokenProgress = if (state.isGenerating && index == lastAssistantIndex) {
+                                state.generationTokenProgress
+                            } else {
+                                null
+                            },
                             onRegenerate = onRegenerate,
-                            onDelete = { onDeleteMessage(index) }
+                            onDelete = { onDeleteMessage(index) },
+                            onDeleteLastTurn = onDeleteLastTurn
                         )
                     }
                 }
@@ -2895,6 +2926,7 @@ fun ChatScreen(
                     worldBooks = state.worldBooks,
                     knowledgeBases = state.knowledgeBases,
                     selectedAssistantId = state.selectedAssistantId,
+                    hasActiveConversation = state.activeConversationId != null,
                     selectedModelName = state.selectedModelName,
                     selectedModelId = state.selectedModelId,
                     selectedModelIsCloud = state.selectedModelIsCloud,
@@ -3589,6 +3621,7 @@ private fun AssistantRoleScreen(
     worldBooks: List<WorldBookUiItem>,
     knowledgeBases: List<KnowledgeBaseUiItem>,
     selectedAssistantId: String,
+    hasActiveConversation: Boolean,
     selectedModelName: String?,
     selectedModelId: String?,
     selectedModelIsCloud: Boolean,
@@ -3597,7 +3630,7 @@ private fun AssistantRoleScreen(
     onDeleteAssistant: (String) -> Unit,
     onImportAssistantCard: (String) -> Unit,
     onImportAssistantCardFile: () -> Unit,
-    onImportWorldBookFile: () -> Unit,
+    onImportWorldBookFile: (WorldBookImportScope) -> Unit,
     onDeleteWorldBook: (String) -> Unit,
     onCreateKnowledgeBase: (String) -> Unit,
     onImportKnowledgeDocument: (String) -> Unit,
@@ -3721,6 +3754,7 @@ private fun AssistantRoleScreen(
                 managingContext -> ContextLibraryPage(
                     worldBooks = worldBooks,
                     knowledgeBases = knowledgeBases,
+                    hasActiveConversation = hasActiveConversation,
                     onBack = closePage,
                     onImportWorldBook = onImportWorldBookFile,
                     onDeleteWorldBook = onDeleteWorldBook,
@@ -3898,7 +3932,9 @@ private fun AssistantEditorPage(
     var name by remember(assistant?.id) { mutableStateOf(assistant?.name ?: "") }
     var avatar by remember(assistant?.id) { mutableStateOf(assistant?.avatar ?: "") }
     var tag by remember(assistant?.id) { mutableStateOf(assistant?.tag ?: "") }
-    var prompt by remember(assistant?.id) { mutableStateOf(assistant?.systemPrompt ?: "") }
+    var prompt by remember(assistant?.id) {
+        mutableStateOf((assistant?.systemPrompt ?: "").take(MAX_ASSISTANT_SYSTEM_PROMPT_CHARS))
+    }
     var defaultModelMode by remember(assistant?.id) { mutableStateOf(assistant?.defaultModelMode ?: "follow_current") }
     var defaultModelId by remember(assistant?.id) { mutableStateOf(assistant?.defaultModelId) }
     var temperatureText by remember(assistant?.id) { mutableStateOf((assistant?.temperature ?: GenerationParams().temperature).cleanParamText()) }
@@ -3979,7 +4015,7 @@ private fun AssistantEditorPage(
                 item {
                     OutlinedTextField(
                         value = prompt,
-                        onValueChange = { prompt = it },
+                        onValueChange = { prompt = it.take(MAX_ASSISTANT_SYSTEM_PROMPT_CHARS) },
                         label = { Text("系统提示词") },
                         minLines = 6,
                         modifier = Modifier.fillMaxWidth()
@@ -4141,8 +4177,9 @@ private fun AssistantEditorPage(
 private fun ContextLibraryPage(
     worldBooks: List<WorldBookUiItem>,
     knowledgeBases: List<KnowledgeBaseUiItem>,
+    hasActiveConversation: Boolean,
     onBack: () -> Unit,
-    onImportWorldBook: () -> Unit,
+    onImportWorldBook: (WorldBookImportScope) -> Unit,
     onDeleteWorldBook: (String) -> Unit,
     onCreateKnowledgeBase: (String) -> Unit,
     onImportKnowledgeDocument: (String) -> Unit,
@@ -4151,6 +4188,7 @@ private fun ContextLibraryPage(
     modifier: Modifier = Modifier
 ) {
     var knowledgeBaseName by rememberSaveable { mutableStateOf("") }
+    var worldBookScopeMenuOpen by rememberSaveable { mutableStateOf(false) }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -4183,10 +4221,39 @@ private fun ContextLibraryPage(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("世界书", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                    TextButton(onClick = onImportWorldBook) {
-                        Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("导入")
+                    Box {
+                        TextButton(onClick = { worldBookScopeMenuOpen = true }) {
+                            Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("导入")
+                        }
+                        DropdownMenu(
+                            expanded = worldBookScopeMenuOpen,
+                            onDismissRequest = { worldBookScopeMenuOpen = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("导入到全局") },
+                                onClick = {
+                                    worldBookScopeMenuOpen = false
+                                    onImportWorldBook(WorldBookImportScope.GLOBAL)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("导入到当前角色") },
+                                onClick = {
+                                    worldBookScopeMenuOpen = false
+                                    onImportWorldBook(WorldBookImportScope.ASSISTANT)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("导入到当前对话") },
+                                enabled = hasActiveConversation,
+                                onClick = {
+                                    worldBookScopeMenuOpen = false
+                                    onImportWorldBook(WorldBookImportScope.CHAT)
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -10322,7 +10389,12 @@ private fun ReasoningPanel(
 }
 
 @Composable
-private fun PendingReasoningPanel(startedAt: Long, modifier: Modifier = Modifier) {
+private fun PendingReasoningPanel(
+    startedAt: Long,
+    phase: GenerationPhase?,
+    tokenProgress: TokenProgress?,
+    modifier: Modifier = Modifier
+) {
     var elapsedMs by remember(startedAt) { mutableStateOf(0L) }
     LaunchedEffect(startedAt) {
         while (true) {
@@ -10331,7 +10403,11 @@ private fun PendingReasoningPanel(startedAt: Long, modifier: Modifier = Modifier
         }
     }
     val seconds = elapsedMs.div(1000).coerceAtLeast(0)
-    val title = if (seconds > 0) "正在思考（用时 ${seconds} 秒）" else "正在思考"
+    val phaseTitle = generationPhaseLabel(phase)
+    val displayTitle = if (seconds > 0) "$phaseTitle (\u5df2\u7528\u65f6 ${seconds} \u79d2)" else phaseTitle
+    val progressText = tokenProgress?.let { progress ->
+        "\u5df2\u5904\u7406 ${progress.completedTokens}/${progress.totalTokens} tokens"
+    }
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
 
     Column(
@@ -10344,7 +10420,7 @@ private fun PendingReasoningPanel(startedAt: Long, modifier: Modifier = Modifier
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = title,
+                text = displayTitle,
                 style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp),
                 color = muted,
                 fontWeight = FontWeight.Medium
@@ -10357,6 +10433,144 @@ private fun PendingReasoningPanel(startedAt: Long, modifier: Modifier = Modifier
                 modifier = Modifier.size(18.dp)
             )
         }
+        if (phase != null) {
+            if (tokenProgress != null) {
+                LinearProgressIndicator(
+                    progress = {
+                        tokenProgress.completedTokens.toFloat() / tokenProgress.totalTokens.toFloat()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp)
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(99.dp))
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp)
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(99.dp))
+                )
+            }
+            progressText?.let { text ->
+                Text(
+                    text = text,
+                    modifier = Modifier.padding(top = 5.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = muted
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PromptContextUsageLine(usage: PromptContextUsage) {
+    val summary = buildString {
+        append("\u4fdd\u7559 ").append(usage.retainedMessageCount).append(" \u6761")
+        if (usage.trimmedMessageCount > 0) {
+            append(" \u00b7 \u88c1\u526a ").append(usage.trimmedMessageCount).append(" \u6761")
+        }
+        append(" \u00b7 \u89d2\u8272 ").append(usage.roleTokens).append(" tokens")
+        append(" \u00b7 \u4e16\u754c\u4e66 ").append(usage.worldBookTokens).append(" tokens")
+        append(" \u00b7 \u77e5\u8bc6\u5e93 ").append(usage.knowledgeTokens).append(" tokens")
+    }
+    val retained = usage.messageRetention.filter { it.retained }
+    val trimmed = usage.messageRetention.filterNot { it.retained }
+    val historyDetails = buildList {
+        if (retained.isNotEmpty()) appendPromptDecision("\u4fdd\u7559", retained)
+        if (trimmed.isNotEmpty()) appendPromptDecision("\u88c1\u526a", trimmed)
+    }.joinToString(" \u00b7 ")
+    val sourceDetails = buildList {
+        appendIdDecision("\u4e16\u754c\u4e66\u547d\u4e2d", usage.selectedWorldBookEntryIds)
+        appendIdDecision("\u4e16\u754c\u4e66\u8df3\u8fc7", usage.skippedWorldBookEntryIds)
+        appendIdDecision("\u77e5\u8bc6\u5e93\u547d\u4e2d", usage.selectedKnowledgeChunkIds)
+        appendIdDecision("\u77e5\u8bc6\u5e93\u8df3\u8fc7", usage.skippedKnowledgeChunkIds)
+    }.joinToString(" \u00b7 ")
+    val details = listOf(
+        "$summary \u00b7 \u603b ${usage.totalEstimatedTokens} tokens",
+        historyDetails,
+        sourceDetails
+    ).filter { it.isNotBlank() }.joinToString("\n")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 2.dp)
+            .semantics {
+                stateDescription = "\u5f53\u524d\u4e0a\u4e0b\u6587\u4f7f\u7528\u60c5\u51b5"
+            },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Default.Info,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+            modifier = Modifier.size(14.dp)
+        )
+        Spacer(modifier = Modifier.width(5.dp))
+        Text(
+            text = details,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f)
+        )
+    }
+}
+
+private fun MutableList<String>.appendPromptDecision(
+    label: String,
+    decisions: List<PromptMessageRetention>
+) {
+    val visible = decisions.take(4).joinToString(",") { decision ->
+        val role = when (decision.role) {
+            Role.SYSTEM -> "S"
+            Role.USER -> "U"
+            Role.ASSISTANT -> "A"
+        }
+        "#${decision.originalIndex + 1}$role"
+    }
+    val remainder = decisions.size - minOf(decisions.size, 4)
+    add(buildString {
+        append(label).append(' ').append(visible)
+        if (remainder > 0) append(" +").append(remainder)
+    })
+}
+
+private fun MutableList<String>.appendIdDecision(label: String, ids: List<String>) {
+    if (ids.isEmpty()) return
+    val visible = ids.take(3).joinToString(",") { it.take(8) }
+    val remainder = ids.size - minOf(ids.size, 3)
+    add(buildString {
+        append(label).append(' ').append(visible)
+        if (remainder > 0) append(" +").append(remainder)
+    })
+}
+
+private fun generationPhaseLabel(phase: GenerationPhase?): String = when (phase) {
+    GenerationPhase.LOAD -> "\u6b63\u5728\u52a0\u8f7d\u8fd0\u884c\u65f6"
+    GenerationPhase.TOKENIZE -> "\u6b63\u5728\u5206\u8bcd"
+    GenerationPhase.PREFILL -> "\u6b63\u5728\u9884\u5904\u7406\u4e0a\u4e0b\u6587"
+    GenerationPhase.DECODE -> "\u6b63\u5728\u751f\u6210\u56de\u7b54"
+    GenerationPhase.PERSIST -> "\u6b63\u5728\u5b8c\u6210\u63a8\u7406\u6536\u5c3e"
+    null -> "\u6b63\u5728\u601d\u8003"
+}
+
+private fun cacheEvidenceLabel(stats: RuntimeStats): String? {
+    val persistentReason = stats.persistentPrefixCacheReason
+        ?.takeUnless { it in setOf("not_requested", "not_attempted", "model_unloaded") }
+    val inMemoryReason = stats.cacheReuseReason
+        ?.takeUnless { it in setOf("not_attempted", "model_unloaded") }
+    return when {
+        stats.persistentPrefixCacheHit ->
+            "\u56fa\u5b9a\u524d\u7f00\u7f13\u5b58\u547d\u4e2d \u00b7 \u590d\u7528 ${stats.persistentPrefixCacheTokens} tokens"
+        persistentReason != null -> "\u56fa\u5b9a\u524d\u7f00\u7f13\u5b58\u672a\u547d\u4e2d \u00b7 $persistentReason"
+        stats.cacheReuseHit -> "\u4e0a\u4e0b\u6587 KV \u547d\u4e2d \u00b7 \u590d\u7528 ${stats.cacheReusedTokens} tokens"
+        stats.cacheReusedTokens > 0 -> "\u4e0a\u4e0b\u6587 KV \u590d\u7528 ${stats.cacheReusedTokens} tokens"
+        inMemoryReason != null -> "\u4e0a\u4e0b\u6587 KV \u672a\u547d\u4e2d \u00b7 $inMemoryReason"
+        else -> null
     }
 }
 
@@ -10374,6 +10588,7 @@ private fun ChatStatusBar(
     val apiActive = state.selectedModelIsCloud || state.apiEnabled || state.restEnabled
     var modelMenuExpanded by rememberSaveable { mutableStateOf(false) }
     val modelRuntimeLabel = state.selectedModelRuntimeLabel?.takeIf { it.isNotBlank() }
+    val cacheEvidence = cacheEvidenceLabel(state.stats)
     val modelSubtitle = if (state.selectedModelName == null) {
         modelRuntimeLabel ?: "未加载本地或云端推理引擎"
     } else {
@@ -10426,9 +10641,20 @@ private fun ChatStatusBar(
                         )
                         Text(
                             text = modelSubtitle,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 13.sp),
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        cacheEvidence?.let { evidence ->
+                            Text(
+                                text = evidence,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
+                            )
+                        }
                     }
                     Surface(
                         color = if (apiActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
@@ -12473,8 +12699,11 @@ private fun MessageBubble(
     showAssistantActions: Boolean,
     canRegenerate: Boolean,
     isGenerating: Boolean,
+    generationPhase: GenerationPhase?,
+    generationTokenProgress: TokenProgress?,
     onRegenerate: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onDeleteLastTurn: () -> Unit
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
@@ -12493,8 +12722,11 @@ private fun MessageBubble(
                 showActions = showAssistantActions,
                 canRegenerate = canRegenerate,
                 isGenerating = isGenerating,
+                generationPhase = generationPhase,
+                generationTokenProgress = generationTokenProgress,
                 onRegenerate = onRegenerate,
                 onDelete = onDelete,
+                onDeleteLastTurn = onDeleteLastTurn,
                 onCopy = {
                     scope.launch {
                         clipboard.setClipEntry(
@@ -12581,8 +12813,11 @@ private fun AssistantMessageBlock(
     showActions: Boolean,
     canRegenerate: Boolean,
     isGenerating: Boolean,
+    generationPhase: GenerationPhase?,
+    generationTokenProgress: TokenProgress?,
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
+    onDeleteLastTurn: () -> Unit,
     onCopy: () -> Unit
 ) {
     Surface(
@@ -12630,6 +12865,8 @@ private fun AssistantMessageBlock(
                         Spacer(modifier = Modifier.width(10.dp))
                         PendingReasoningPanel(
                             startedAt = message.createdAt,
+                            phase = generationPhase,
+                            tokenProgress = generationTokenProgress,
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -12652,6 +12889,7 @@ private fun AssistantMessageBlock(
                     canRegenerate = canRegenerate,
                     onRegenerate = onRegenerate,
                     onDelete = onDelete,
+                    onDeleteLastTurn = onDeleteLastTurn,
                     onCopy = onCopy
                 )
             }
@@ -13153,6 +13391,7 @@ private fun AssistantActionRow(
     canRegenerate: Boolean,
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
+    onDeleteLastTurn: () -> Unit,
     onCopy: () -> Unit
 ) {
     val tint = MaterialTheme.colorScheme.onSurfaceVariant
@@ -13218,6 +13457,20 @@ private fun AssistantActionRow(
                     onClick = {
                         menuOpen = false
                         onRegenerate()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("\u5220\u9664\u672c\u8f6e\u5bf9\u8bdd", color = MaterialTheme.colorScheme.error) },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    },
+                    onClick = {
+                        menuOpen = false
+                        onDeleteLastTurn()
                     }
                 )
                 DropdownMenuItem(

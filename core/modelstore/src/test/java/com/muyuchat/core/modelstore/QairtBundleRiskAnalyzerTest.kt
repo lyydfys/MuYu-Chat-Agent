@@ -49,8 +49,9 @@ class QairtBundleRiskAnalyzerTest {
         )
         assertEquals(QairtExecutionAdmissionMode.ISOLATED_DRY_RUN, unknown.mode)
         assertTrue(unknown.canAttempt)
-        assertTrue(unknown.requiresIsolatedDryRun)
-        assertTrue(unknown.message.contains("does not block download or execution"))
+        assertTrue(unknown.recommendsIsolatedDryRun)
+        assertTrue(unknown.message.contains("does not block download, load, or execution"))
+        assertTrue(unknown.message.contains("concrete native execution decides compatibility"))
         assertNotNull(unknown.memoryAdvisory)
 
         val identity = QairtBundleRuntimeIdentity(
@@ -66,7 +67,7 @@ class QairtBundleRiskAnalyzerTest {
         )
         assertEquals(QairtExecutionAdmissionMode.VERIFIED_ALLOW, verified.mode)
         assertTrue(verified.canAttempt)
-        assertFalse(verified.requiresIsolatedDryRun)
+        assertFalse(verified.recommendsIsolatedDryRun)
 
         val runtimeMismatch = profile.admissionForDeviceMemory(
             totalRamBytes = 12L * 1024L * 1024L * 1024L,

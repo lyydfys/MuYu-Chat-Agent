@@ -28,6 +28,7 @@ class KnowledgeBaseRoomContractTest {
 
         assertCallsInOrder(
             body,
+            "require(chunks.all",
             "knowledgeBaseExists(document.knowledgeBaseId)",
             "deleteKnowledgeChunksForDocument(document.id)",
             "deleteKnowledgeDocument(document.id)",
@@ -40,12 +41,23 @@ class KnowledgeBaseRoomContractTest {
     @Test
     fun sessionReplacementPrunesBindingsInsideTheSnapshotTransaction() {
         val source = chatSessionStoreSource()
-        val body = transactionalFunctionBody(source, "replaceAll")
+        val replaceBody = transactionalFunctionBody(source, "replaceAll")
+        assertTrue(replaceBody.contains("reconcileSnapshot(ChatHistoryPersistenceBounds.bound(records))"))
 
-        assertCallsInOrder(body, "clearMessages()", "clearSessions()")
-        assertTrue(body.contains("if (records.isEmpty())"))
-        assertTrue(body.contains("clearKnowledgeBindings()"))
-        assertCallsInOrder(body, "insertSessions(records.map { it.toEntity() })", "pruneKnowledgeBindings(records.map { it.id })")
+        val reconcileBody = functionBody(source, "reconcileSnapshot")
+        assertTrue(reconcileBody.contains("if (records.isEmpty())"))
+        assertCallsInOrder(
+            reconcileBody,
+            "clearMessages()",
+            "clearKnowledgeBindings()",
+            "clearSessions()"
+        )
+        assertCallsInOrder(
+            reconcileBody,
+            "upsertSessions(changedSessions)",
+            "pruneKnowledgeBindings(liveSessionIds)",
+            "pruneSessions(liveSessionIds)"
+        )
 
         val clearQuery = queryForFunction(source, "clearKnowledgeBindings")
         assertTrue(clearQuery.contains("DELETE FROM chat_knowledge_base_bindings"))
@@ -57,36 +69,218 @@ class KnowledgeBaseRoomContractTest {
     }
 
     @Test
-    fun knowledgeRetrievalJoinsLiveBasesAndAppliesHardBoundsBeforeRanking() {
+    fun knowledgeRetrievalUsesBoundedKeysetPagesAndKeepsGlobalTopRanking() {
         val roomSource = chatSessionStoreSource()
-        val query = queryForFunction(roomSource, "knowledgeChunksForBases")
+        val query = queryForFunction(roomSource, "knowledgeChunkPageForBases")
 
         assertTrue(query.contains("INNER JOIN knowledge_bases"))
         assertTrue(query.contains("knowledge_bases.id = knowledge_chunks.knowledgeBaseId"))
+        assertTrue(query.contains("INNER JOIN knowledge_documents"))
+        assertTrue(query.contains("knowledge_documents.id = knowledge_chunks.documentId"))
+        assertTrue(query.contains("knowledge_documents.knowledgeBaseId = knowledge_chunks.knowledgeBaseId"))
+        assertTrue(query.contains(":afterKnowledgeBaseId IS NULL"))
+        assertTrue(query.contains("knowledge_chunks.knowledgeBaseId > :afterKnowledgeBaseId"))
+        assertTrue(query.contains("knowledge_chunks.documentId > :afterDocumentId"))
+        assertTrue(query.contains("knowledge_chunks.position > :afterPosition"))
+        assertTrue(query.contains("knowledge_chunks.id > :afterId"))
+        assertTrue(query.contains("ORDER BY"))
+        assertTrue(query.contains("knowledge_chunks.knowledgeBaseId ASC"))
+        assertTrue(query.contains("knowledge_chunks.documentId ASC"))
+        assertTrue(query.contains("knowledge_chunks.position ASC"))
+        assertTrue(query.contains("knowledge_chunks.id ASC"))
         assertTrue(query.contains("LIMIT :limit"))
+
+        val roomRetrievalBody = transactionalFunctionBody(roomSource, "knowledgeChunkPageForBaseRecords")
+        assertTrue(roomRetrievalBody.contains(".take(MAX_KNOWLEDGE_BASE_IDS_PER_ROOM_OPERATION)"))
+        assertTrue(roomRetrievalBody.contains("limit.coerceAtMost(MAX_KNOWLEDGE_CHUNKS_PER_ROOM_PAGE)"))
 
         val storeSource = knowledgeBaseStoreSource()
         val retrieveBody = functionBody(storeSource, "retrieve")
         assertTrue(retrieveBody.contains(".take(MAX_SELECTED_KNOWLEDGE_BASES)"))
-        assertTrue(retrieveBody.contains("limit = MAX_RETRIEVAL_CANDIDATE_CHUNKS"))
+        assertTrue(retrieveBody.contains("while (true)"))
+        assertTrue(retrieveBody.contains("afterKnowledgeBaseId = cursor?.knowledgeBaseId"))
+        assertTrue(retrieveBody.contains("afterDocumentId = cursor?.documentId"))
+        assertTrue(retrieveBody.contains("afterPosition = cursor?.position"))
+        assertTrue(retrieveBody.contains("afterId = cursor?.id"))
+        assertTrue(retrieveBody.contains("mergeTopRanked"))
+        assertTrue(retrieveBody.contains("limit = RETRIEVAL_PAGE_SIZE"))
 
         val selectedBaseLimit = constantValue(storeSource, "MAX_SELECTED_KNOWLEDGE_BASES")
-        val candidateChunkLimit = constantValue(storeSource, "MAX_RETRIEVAL_CANDIDATE_CHUNKS")
+        val candidateChunkLimit = constantValue(storeSource, "RETRIEVAL_PAGE_SIZE")
         assertTrue(selectedBaseLimit in 1..64)
-        assertTrue(candidateChunkLimit in 1..4_096)
+        assertTrue(candidateChunkLimit in 1..256)
     }
 
     @Test
-    fun migrationChainFrom16To18CreatesKnowledgeTablesWithoutReplacingExistingData() {
+    fun bindingReplacementValidatesLiveParentsBeforeMutatingBindings() {
+        val source = chatSessionStoreSource()
+        val body = transactionalFunctionBody(source, "replaceKnowledgeBindings")
+
+        assertCallsInOrder(
+            body,
+            "require(knowledgeBaseIds.size <= MAX_KNOWLEDGE_BASE_IDS_PER_ROOM_OPERATION)",
+            "chatSessionExists(chatSessionId)",
+            "existingKnowledgeBaseIds(normalizedKnowledgeBaseIds)",
+            "deleteKnowledgeBindingsForChat(chatSessionId)"
+        )
+        assertTrue(body.contains("knowledgeBaseIds.all { it.isNotBlank() }"))
+        assertTrue(body.contains("knowledgeBaseIds.distinct().sorted()"))
+
+        val sessionExistsQuery = queryForFunction(source, "chatSessionExists")
+        assertTrue(sessionExistsQuery.contains("SELECT COUNT(*) > 0 FROM chat_sessions"))
+
+        val existingBasesQuery = queryForFunction(source, "existingKnowledgeBaseIds")
+        assertTrue(existingBasesQuery.contains("SELECT id FROM knowledge_bases WHERE id IN (:knowledgeBaseIds)"))
+    }
+
+    @Test
+    fun knowledgeBaseUpdatesUseUpsertSoForeignKeysCannotCascadeDeleteDocuments() {
+        val source = chatSessionStoreSource()
+        val declaration = source.substring(
+            source.indexOf("suspend fun insertKnowledgeBases") - 64,
+            source.indexOf("suspend fun insertKnowledgeBases") + 96
+        )
+
+        assertTrue(declaration.contains("@Upsert"))
+        assertFalse(declaration.contains("@Insert(onConflict = OnConflictStrategy.REPLACE)"))
+    }
+
+    @Test
+    fun selectedBindingsAndDocumentDeletionUseLiveParents() {
+        val roomSource = chatSessionStoreSource()
+        val bindingQuery = queryForFunction(roomSource, "knowledgeBaseIdsForChat")
+        assertTrue(bindingQuery.contains("INNER JOIN chat_sessions"))
+        assertTrue(bindingQuery.contains("INNER JOIN knowledge_bases"))
+
+        val deleteBody = transactionalFunctionBody(roomSource, "deleteKnowledgeDocumentCompletely")
+        assertCallsInOrder(
+            deleteBody,
+            "knowledgeDocument(documentId) ?: return",
+            "knowledgeBaseExists(document.knowledgeBaseId)",
+            "deleteKnowledgeChunksForDocument(documentId)",
+            "deleteKnowledgeDocument(documentId)",
+            "invalidateKnowledgeBaseIndex(document.knowledgeBaseId, updatedAt)"
+        )
+
+        val storeSource = knowledgeBaseStoreSource()
+        val setSelectedBody = functionBody(storeSource, "setSelectedKnowledgeBaseIds")
+        assertCallsInOrder(
+            setSelectedBody,
+            "require(ids.size <= MAX_SELECTED_KNOWLEDGE_BASES)",
+            ".take(MAX_SELECTED_KNOWLEDGE_BASES)",
+            "replaceKnowledgeBindings"
+        )
+        assertTrue(setSelectedBody.contains("ids.all { it.isNotBlank() }"))
+
+        val deleteDocumentBody = functionBody(storeSource, "deleteDocument")
+        assertFalse(deleteDocumentBody.contains("knowledgeDocument(documentId)"))
+    }
+
+    @Test
+    fun firstMessagePersistsSessionAndKnowledgeBindingsInOneRoomTransaction() {
+        val roomSource = chatSessionStoreSource()
+        val transactionBody = transactionalFunctionBody(roomSource, "replaceAllWithKnowledgeBindings")
+        assertCallsInOrder(
+            transactionBody,
+            "reconcileSnapshot(boundedRecords)",
+            "replaceKnowledgeBindings("
+        )
+
+        val source = sourceFile("MainViewModel.kt")
+        val persistBody = functionBody(source, "persistChatSessions")
+        assertTrue(persistBody.contains("pendingKnowledgeBindings[sessionId] = knowledgeBaseIds.toSet()"))
+        assertTrue(persistBody.contains("chatSessionStore.save(snapshot, knowledgeBindingsForSave)"))
+        assertFalse(persistBody.contains("knowledgeBaseStore.setSelectedKnowledgeBaseIds"))
+        val sendBody = functionBody(source, "sendMessage")
+        assertTrue(sendBody.contains("knowledgeBinding = chatSessionIdForKnowledgeBinding"))
+        assertFalse(sendBody.contains("persistKnowledgeBaseBindings(sessionId, selectedKnowledgeBaseIdsForBinding)"))
+    }
+
+    @Test
+    fun coalescedSnapshotsKeepPendingBindingsAndDiscardDeletedSessionBindings() {
+        val body = functionBody(sourceFile("MainViewModel.kt"), "persistChatSessions")
+
+        assertCallsInOrder(
+            body,
+            "pendingKnowledgeBindings[sessionId] = knowledgeBaseIds.toSet()",
+            "if (sequence != chatSessionPersistenceSequence.get()) return@withLock",
+            ".filterKeys { it in liveSessionIds }",
+            "chatSessionStore.save(snapshot, knowledgeBindingsForSave)"
+        )
+        assertTrue(body.contains("pendingKnowledgeBindings.keys"))
+        assertTrue(body.contains(".filterNot { it in liveSessionIds }"))
+    }
+
+    @Test
+    fun sessionDeletionDelegatesBindingCleanupToSnapshotTransaction() {
+        val source = sourceFile("MainViewModel.kt")
+        val deleteBody = functionBody(source, "deleteChatSession")
+
+        assertTrue(deleteBody.contains("persistConversationMutation(remaining, rollback)"))
+        assertFalse(deleteBody.contains("setSelectedKnowledgeBaseIds(sessionId, emptySet())"))
+    }
+
+    @Test
+    fun worldBookCleanupRunsOnlyAfterCanonicalOwnerPersistence() {
+        val source = sourceFile("MainViewModel.kt")
+        val persistBody = functionBody(source, "persistChatSessions")
+        assertCallsInOrder(
+            persistBody,
+            "chatSessionStore.save(snapshot, knowledgeBindingsForSave)",
+            "cleanupPendingWorldBooksAfterOwnerCommit("
+        )
+
+        listOf(
+            "deleteChatSession",
+            "clearChatHistory",
+            "deleteMessageAt",
+            "deleteLastConversationTurn"
+        ).forEach { functionName ->
+            val body = functionBody(source, functionName)
+            assertFalse("$functionName must not delete world books before Room commit", body.contains("removeScoped("))
+        }
+
+        val deleteAssistantBody = functionBody(source, "deleteAssistant")
+        assertCallsInOrder(
+            deleteAssistantBody,
+            "assistantStore.saveAssistants(remaining)",
+            "queueWorldBookCleanup(WorldBookScope.ASSISTANT",
+            "cleanupPendingWorldBooksAfterOwnerCommit("
+        )
+        assertTrue(deleteAssistantBody.contains("助手和关联世界书均未修改"))
+    }
+
+    @Test
+    fun localUiKeepsSearchEvidenceRequestScopedAndOptsInStablePersonaOnly() {
+        val source = sourceFile("MainViewModel.kt")
+        val body = functionBody(source, "startGeneration")
+
+        assertFalse(body.contains("systemPrompt = listOf(requestParams.systemPrompt, webSearchTurn.promptContext)"))
+        assertTrue(body.contains("runtimeSystemContextForTurn"))
+        assertTrue(body.contains("webSearchTurn.promptContext"))
+        assertTrue(body.contains("activeRuntimeIdentity?.runtime == LocalChatRuntime.LLAMA_CPP"))
+        assertTrue(body.contains("persistentPrefixSystemPrompt = persistentLlamaPrefix"))
+
+        val cloudRequest = body.substring(
+            body.indexOf("cloudChatProvider.streamChat("),
+            body.indexOf("} else {", body.indexOf("cloudChatProvider.streamChat("))
+        )
+        assertFalse(cloudRequest.contains("persistentPrefixSystemPrompt"))
+    }
+
+    @Test
+    fun migrationChainFrom16To20CreatesKnowledgeTablesWithoutReplacingExistingData() {
         val source = chatSessionStoreSource()
 
-        assertTrue(Regex("""version\s*=\s*18""").containsMatchIn(source))
+        assertTrue(Regex("""version\s*=\s*20""").containsMatchIn(source))
         val builder = source.substring(
             source.indexOf("Room.databaseBuilder"),
             source.indexOf(".build()", source.indexOf("Room.databaseBuilder"))
         )
         assertTrue(builder.contains("MIGRATION_16_17"))
         assertTrue(builder.contains("MIGRATION_17_18"))
+        assertTrue(builder.contains("MIGRATION_18_19"))
+        assertTrue(builder.contains("MIGRATION_19_20"))
 
         val migration16To17 = region(source, "private val MIGRATION_16_17", "private val MIGRATION_17_18")
         assertTrue(migration16To17.contains("createKnowledgeBaseTablesIfMissing(db)"))
@@ -104,13 +298,40 @@ class KnowledgeBaseRoomContractTest {
         assertEquals(6, Regex("CREATE INDEX IF NOT EXISTS").findAll(knowledgeSchema).count())
         assertNonDestructive(knowledgeSchema)
 
-        val migration17To18 = region(source, "private val MIGRATION_17_18", "private fun addProjectIdColumnIfMissing")
+        val migration17To18 = region(source, "private val MIGRATION_17_18", "private val MIGRATION_18_19")
         assertTrue(migration17To18.contains("addAssistantCharacterCardJsonColumnIfMissing(db)"))
         assertNonDestructive(migration17To18)
 
         val assistantUpgrade = functionBody(source, "addAssistantCharacterCardJsonColumnIfMissing")
         assertTrue(assistantUpgrade.contains("ALTER TABLE assistants ADD COLUMN characterCardJson TEXT"))
         assertNonDestructive(assistantUpgrade)
+
+        val migration18To19 = region(source, "private val MIGRATION_18_19", "private val MIGRATION_19_20")
+        assertTrue(migration18To19.contains("addChatSessionAssistantSnapshotColumnIfMissing(db)"))
+        assertNonDestructive(migration18To19)
+
+        val snapshotUpgrade = functionBody(source, "addChatSessionAssistantSnapshotColumnIfMissing")
+        assertTrue(snapshotUpgrade.contains("ALTER TABLE chat_sessions ADD COLUMN assistantSnapshotJson TEXT"))
+        assertNonDestructive(snapshotUpgrade)
+
+        val migration19To20 = region(source, "private val MIGRATION_19_20", "private fun addProjectIdColumnIfMissing")
+        assertTrue(migration19To20.contains("rebuildKnowledgeTablesWithForeignKeys(db)"))
+
+        val foreignKeyRebuild = functionBody(source, "rebuildKnowledgeTablesWithForeignKeys")
+        assertCallsInOrder(
+            foreignKeyRebuild,
+            "rebuildKnowledgeDocumentsWithForeignKeys(db)",
+            "rebuildKnowledgeChunksWithForeignKeys(db)",
+            "rebuildChatKnowledgeBaseBindingsWithForeignKeys(db)"
+        )
+
+        listOf(
+            "createKnowledgeDocumentsTableWithForeignKeys",
+            "createKnowledgeChunksTableWithForeignKeys",
+            "createChatKnowledgeBaseBindingsTableWithForeignKeys"
+        ).forEach { functionName ->
+            assertTrue(functionBody(source, functionName).contains("ON DELETE CASCADE"))
+        }
     }
 
     private fun transactionalFunctionBody(source: String, functionName: String): String {

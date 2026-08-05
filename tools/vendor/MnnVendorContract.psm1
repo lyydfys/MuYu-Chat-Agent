@@ -68,7 +68,8 @@ function Get-MnnVendorTextSha256 {
 }
 
 function Get-MnnVendorGitExecutable {
-    $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+    $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
     if (-not $git) {
         throw 'Git is required to prepare or verify the pinned MNN vendor checkout.'
     }

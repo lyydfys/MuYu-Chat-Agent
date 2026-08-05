@@ -9,6 +9,7 @@ import com.muyuchat.core.modelstore.QairtExecutionAdmission
 import com.muyuchat.core.modelstore.QairtExecutionAdmissionMode
 import com.muyuchat.core.modelstore.QairtGraphRiskLevel
 import com.muyuchat.core.telemetry.SocFamily
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
@@ -237,10 +238,12 @@ class RuntimeIdentityFactoryTest {
     }
 
     @Test
-    fun verifiedSparseMoeOnTwelveGigabytesCarriesMmapAndMtpCapabilities() {
+    fun llamaMtpCandidateRequiresGgufMetadataNotModelHashOrFileName() {
         val root = tempDirectory()
         try {
-            val modelFile = File(root, "qwen36.gguf").apply { writeText("model") }
+            val modelFile = File(root, "qwen36.gguf").apply {
+                writeBytes(ggufWithMtp("qwen35moe", 2))
+            }
             val model = manifest(
                 modelFile,
                 sha256 = "1fb8a998362ebb5f7f3c8ece6d4803a74ba32211c751de2e76b81e3379fbf050"
@@ -256,6 +259,7 @@ class RuntimeIdentityFactoryTest {
             assertTrue("sparse_moe" in result.identity.capabilities)
             assertTrue("sparse_moe_16gb_tier" in result.identity.capabilities)
             assertTrue("draft_mtp" in result.identity.capabilities)
+            assertTrue("gpu_offload" in result.identity.capabilities)
             assertTrue("verified_q4_kv_cache" in result.identity.capabilities)
 
             val unverified = build(
@@ -263,7 +267,8 @@ class RuntimeIdentityFactoryTest {
                 device = device(totalRamGiB = 16)
             )
             assertTrue("sparse_moe_16gb_tier" in unverified.identity.capabilities)
-            assertFalse("draft_mtp" in unverified.identity.capabilities)
+            assertTrue("draft_mtp" in unverified.identity.capabilities)
+            assertTrue("gpu_offload" in unverified.identity.capabilities)
             assertFalse("verified_q4_kv_cache" in unverified.identity.capabilities)
 
             val aboveTier = build(
@@ -278,6 +283,16 @@ class RuntimeIdentityFactoryTest {
                 device = device(totalRamGiB = 0)
             )
             assertTrue("sparse_moe_16gb_tier" in unknownRam.identity.capabilities)
+
+            val misleadingName = build(
+                model.copy(
+                    path = File(root, "Qwen3.6-APEX-MTP-only-name.gguf")
+                        .apply { writeText("not a GGUF") }
+                        .absolutePath,
+                    fileName = "Qwen3.6-APEX-MTP-only-name.gguf"
+                )
+            )
+            assertFalse("draft_mtp" in misleadingName.identity.capabilities)
         } finally {
             root.deleteRecursively()
         }
@@ -330,6 +345,32 @@ class RuntimeIdentityFactoryTest {
     )
 
     private fun tempDirectory(): File = Files.createTempDirectory("runtime-identity-test").toFile()
+
+    private fun ggufWithMtp(architecture: String, nextnPredictLayers: Int): ByteArray =
+        ByteArrayOutputStream().apply {
+            write("GGUF".toByteArray(Charsets.US_ASCII))
+            write(uint32Le(3))
+            write(uint64Le(0))
+            write(uint64Le(2))
+            writeGgufString("general.architecture")
+            write(uint32Le(8))
+            writeGgufString(architecture)
+            writeGgufString("$architecture.nextn_predict_layers")
+            write(uint32Le(4))
+            write(uint32Le(nextnPredictLayers))
+        }.toByteArray()
+
+    private fun ByteArrayOutputStream.writeGgufString(value: String) {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        write(uint64Le(bytes.size.toLong()))
+        write(bytes)
+    }
+
+    private fun uint32Le(value: Int): ByteArray =
+        ByteArray(4) { index -> ((value.toLong() ushr (index * 8)) and 0xff).toByte() }
+
+    private fun uint64Le(value: Long): ByteArray =
+        ByteArray(8) { index -> ((value ushr (index * 8)) and 0xff).toByte() }
 
     private companion object {
         const val GB = 1024L * 1024L * 1024L

@@ -438,8 +438,6 @@ object SafeBaselineFactory {
         val blockedAction = when {
             !capabilities.metadataReadable -> "请重新导入可读取 metadata 的完整模型包"
             !capabilities.chatTemplateReady -> "请补充或选择经过验证的 chat template"
-            capabilities.runtime == TuningRuntime.QAIRT && !capabilities.qairtAdmissionPassed ->
-                "请先完成 QAIRT create/generate/destroy admission"
             else -> null
         }
         val backend = when (capabilities.runtime) {

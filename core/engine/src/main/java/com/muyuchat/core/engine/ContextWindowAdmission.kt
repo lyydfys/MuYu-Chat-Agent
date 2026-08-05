@@ -55,6 +55,7 @@ data class ContextWindowAdmission(
     val limits: ContextWindowInputLimits,
     val admittedUsage: ContextWindowUsage,
     val trimmedMessageCount: Int = 0,
+    val messageRetention: List<PromptMessageRetention> = emptyList(),
     val rejectionCode: ContextWindowRejectionCode? = null,
     val limitExceeded: ContextWindowLimit? = null,
     val userMessage: String? = null
@@ -200,7 +201,10 @@ fun localContextWindowAdmission(request: ChatRequest): ContextWindowAdmission {
         request = request,
         budget = budget,
         limits = limits,
-        admittedUsage = usage.snapshot()
+        admittedUsage = usage.snapshot(),
+        messageRetention = request.messages.mapIndexed { index, message ->
+            PromptMessageRetention(index, message.role, retained = true)
+        }
     )
 
     val keptMessages = ArrayList<ChatMessage>(selected.size)
@@ -213,7 +217,10 @@ fun localContextWindowAdmission(request: ChatRequest): ContextWindowAdmission {
         budget = budget,
         limits = limits,
         admittedUsage = usage.snapshot(),
-        trimmedMessageCount = request.messages.size - keptMessages.size
+        trimmedMessageCount = request.messages.size - keptMessages.size,
+        messageRetention = request.messages.mapIndexed { index, message ->
+            PromptMessageRetention(index, message.role, retained = index in selected)
+        }
     )
 }
 

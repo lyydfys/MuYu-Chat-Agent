@@ -72,11 +72,12 @@ val mcaMnnVendorRequired = strictBooleanProperty(
 // rather than that implementation detail, to identify an isolated debug
 // runtime experiment. A release invocation can never opt out of vendor
 // verification.
-val mcaMnnDebugRuntimeExperiment = run {
+val mcaDebugOnlyInvocation = run {
     val requestedTasks = gradle.startParameter.taskNames.map(String::lowercase)
-    mcaMnnVendorRequired == false &&
-        requestedTasks.any { "debug" in it } &&
-        requestedTasks.none { "release" in it }
+    requestedTasks.any { "debug" in it } && requestedTasks.none { "release" in it }
+}
+val mcaMnnDebugRuntimeExperiment = run {
+    mcaMnnVendorRequired == false && mcaDebugOnlyInvocation
 }
 // MNN 3.5 is only used in an isolated chat/VLM compatibility experiment. Its
 // diffusion API predates the local safe runner, so it must be possible to
@@ -547,9 +548,9 @@ tasks.configureEach {
             lowerName.startsWith("externalnativebuild") ||
             lowerName.startsWith("configurecmake") ||
             lowerName.startsWith("buildcmake")
-    val isReleaseTask = "release" in lowerName
+    val isReleaseProductBuild = "release" in lowerName && !mcaDebugOnlyInvocation
     if (isProductNativeBuildTask) {
-        if (isReleaseTask && !mcaMnnDebugRuntimeExperiment) {
+        if (isReleaseProductBuild && !mcaMnnDebugRuntimeExperiment) {
             dependsOn(verifyMcaQnnSdkHeaders)
             dependsOn(verifyMcaMnnVendor)
         } else if (mcaQnnTypedBindingsRequired == true) {

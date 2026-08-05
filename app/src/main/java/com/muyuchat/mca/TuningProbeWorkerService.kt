@@ -14,7 +14,6 @@ import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.GenerateEvent
 import com.muyuchat.core.engine.GenerationParams
-import com.muyuchat.core.engine.LoadParams
 import com.muyuchat.core.engine.LocalChatExecutionContext
 import com.muyuchat.core.engine.LocalChatRuntime
 import com.muyuchat.core.engine.McaInferenceService
@@ -27,6 +26,7 @@ import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.modelstore.ModelStoreRepository
 import com.muyuchat.core.tuning.BatchKvCanaryPolicy
+import com.muyuchat.core.tuning.BootstrapLoadCanaryPolicy
 import com.muyuchat.core.tuning.CandidateExecutionEnvironment
 import com.muyuchat.core.tuning.CandidateHardGate
 import com.muyuchat.core.tuning.CandidateIsolationPolicy
@@ -46,7 +46,6 @@ import com.muyuchat.core.tuning.SpecializedCanaryViolation
 import com.muyuchat.core.tuning.SpeculativeMtpCanaryPolicy
 import com.muyuchat.core.tuning.TuningCandidateCanaryPlanner
 import com.muyuchat.core.tuning.TuningExecutionProfile
-import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -54,6 +53,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -62,7 +62,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Disposable process for persisted, load-bound smart-tuning candidates.
+ * Disposable process for persisted bootstrap loads and load-bound tuning candidates.
  *
  * The worker never accepts caller prompts. It reconstructs the exact candidate from the local
  * pending journal, runs compile-time canaries, unloads native state, returns bounded evidence, and
@@ -154,6 +154,11 @@ class TuningProbeWorkerService : Service() {
                 val startedAt = System.currentTimeMillis()
                 val watchdog = Runnable {
                     if (synchronized(lock) { active === next }) {
+                        val diagnostic = IsolatedNativeFailureDiagnostics.watchdog(
+                            stage = next.stage,
+                            timeoutMs = TuningProbeWorkerProtocol.HARD_PROCESS_TIMEOUT_MS
+                        )
+                        sendError(callback, request.requestId, diagnostic.code, diagnostic.message)
                         Process.killProcess(Process.myPid())
                     }
                 }
@@ -161,14 +166,20 @@ class TuningProbeWorkerService : Service() {
                 try {
                     val result = execute(next, startedAt)
                     if (!next.cancelRequested) sendComplete(callback, result)
+                } catch (_: TimeoutCancellationException) {
+                    if (!next.cancelRequested) {
+                        val diagnostic = IsolatedNativeFailureDiagnostics.timeout(next.stage)
+                        sendError(callback, request.requestId, diagnostic.code, diagnostic.message)
+                    }
                 } catch (_: CancellationException) {
                     // The caller cancelled or died. Never publish partial evidence.
                 } catch (error: Throwable) {
+                    val diagnostic = IsolatedNativeFailureDiagnostics.classify(error, next.stage)
                     sendError(
                         callback,
                         request.requestId,
-                        "probe_failed",
-                        (error.message ?: error::class.java.simpleName).take(MAX_ERROR_CHARS)
+                        diagnostic.code,
+                        diagnostic.message.take(MAX_ERROR_CHARS)
                     )
                 } finally {
                     handler.removeCallbacks(watchdog)
@@ -260,26 +271,55 @@ class TuningProbeWorkerService : Service() {
         require(candidateProfile.runtimeIdentity.identityHash == request.identityKey) {
             "The runtime identity hash does not match the journal."
         }
-        val rollbackId = pending.journal.rollbackTargetProfileId
-            ?: error("A load-bound probe requires an exact committed rollback profile.")
-        val committedProfile = profileStore.reconstructedProfile(rollbackId)
-            ?: error("The committed rollback profile is unavailable.")
-        require(committedProfile.runtimeIdentity.identityHash == request.identityKey) {
-            "The committed and candidate profiles have different runtime identities."
+        val persistedProbeKind = runCatching {
+            JSONObject(pending.pendingProfile.sourceSummaryJson).optString("probeKind")
+        }.getOrDefault("")
+        require(persistedProbeKind == request.probeKind.name) {
+            "The pending profile was staged for another probe kind."
         }
-        val candidate = candidateProfile.toIsolatedTuningProfile()
-        val committed = committedProfile.toIsolatedTuningProfile()
-        val plan = TuningCandidateCanaryPlanner.plan(committed, candidate)
-        require(plan.processBoundary == CandidateProcessBoundary.ISOLATED_PROCESS_REQUIRED) {
-            "The disposable worker accepts only load-bound candidates."
+        val tuningProbe = when (request.probeKind) {
+            TuningProbeWorkerProtocol.ProbeKind.TUNING_CANDIDATE -> {
+                val rollbackId = pending.journal.rollbackTargetProfileId
+                    ?: error("A load-bound tuning probe requires an exact committed rollback profile.")
+                val committedProfile = profileStore.reconstructedProfile(rollbackId)
+                    ?: error("The committed rollback profile is unavailable.")
+                require(committedProfile.runtimeIdentity.identityHash == request.identityKey) {
+                    "The committed and candidate profiles have different runtime identities."
+                }
+                val candidate = candidateProfile.toIsolatedTuningProfile()
+                val committed = committedProfile.toIsolatedTuningProfile()
+                val plan = TuningCandidateCanaryPlanner.plan(committed, candidate)
+                require(plan.processBoundary == CandidateProcessBoundary.ISOLATED_PROCESS_REQUIRED) {
+                    "The disposable worker accepts only load-bound candidates."
+                }
+                val isolation = CandidateIsolationPolicy.assess(
+                    plan,
+                    CandidateExecutionEnvironment.ISOLATED_PROCESS
+                )
+                require(isolation.passed) {
+                    isolation.violations.joinToString("; ") { it.message }
+                }
+                candidate to plan
+            }
+            TuningProbeWorkerProtocol.ProbeKind.BOOTSTRAP_LOAD -> {
+                pending.journal.rollbackTargetProfileId?.let { rollbackId ->
+                    val rollback = profileStore.reconstructedProfile(rollbackId)
+                        ?: error("The optional bootstrap rollback profile is unavailable.")
+                    require(rollback.runtimeIdentity.identityHash == request.identityKey) {
+                        "The bootstrap rollback profile belongs to another runtime identity."
+                    }
+                }
+                null
+            }
         }
-        val isolation = CandidateIsolationPolicy.assess(plan, CandidateExecutionEnvironment.ISOLATED_PROCESS)
-        require(isolation.passed) { isolation.violations.joinToString("; ") { it.message } }
 
         profileStore.updateJournalStage(
             transactionId = request.transactionId,
             state = TuningJournalState.VALIDATING,
-            stage = "ISOLATED_NATIVE_PROBE"
+            stage = when (request.probeKind) {
+                TuningProbeWorkerProtocol.ProbeKind.TUNING_CANDIDATE -> "ISOLATED_NATIVE_PROBE"
+                TuningProbeWorkerProtocol.ProbeKind.BOOTSTRAP_LOAD -> "BOOTSTRAP_ISOLATED_NATIVE_PROBE"
+            }
         )
 
         val initialModel = modelStore.getModel(request.modelId)
@@ -288,6 +328,14 @@ class TuningProbeWorkerService : Service() {
         require(validation.canLoad) { "Model package validation failed: ${validation.message}" }
         val model = modelStore.getModel(initialModel.id) ?: initialModel
         require(model.id == candidateProfile.modelId) { "The model record changed during validation." }
+        if (request.probeKind == TuningProbeWorkerProtocol.ProbeKind.BOOTSTRAP_LOAD) {
+            require(model.runtime == ChatModelRuntime.MNN || model.runtime == ChatModelRuntime.LLAMA_CPP) {
+                "BOOTSTRAP_LOAD accepts only ordinary MNN or llama.cpp runtimes."
+            }
+            require(candidateProfile.runtimeIdentity.runtime == model.runtime.toTuningRuntime()) {
+                "The persisted bootstrap runtime does not match the model package."
+            }
+        }
 
         val installationScopeId = profileStore.installationScopeId()
         val engine = McaInferenceService(
@@ -302,7 +350,7 @@ class TuningProbeWorkerService : Service() {
                 engine.loadModel(
                     modelPath = model.path,
                     runtime = model.runtime.toTuningRuntime(),
-                    params = model.loadParamsFor(candidateProfile),
+                    params = model.loadParamsForExecutionProfile(candidateProfile),
                     qairtBundleSha256 = model.sha256.takeIf { model.runtime == ChatModelRuntime.GENIEX_QAIRT },
                     qairtExecutionPurpose = QairtExecutionPurpose.NORMAL,
                     runtimeIdentity = candidateProfile.runtimeIdentity,
@@ -314,7 +362,7 @@ class TuningProbeWorkerService : Service() {
 
             val loadedSnapshot = engine.parameterSignatureSnapshot()
                 ?: error("The isolated runtime did not publish parameter signatures.")
-            val signatureEvidence = signatureEvidence(candidate, loadedSnapshot)
+            val signatureEvidence = signatureEvidence(candidateProfile, loadedSnapshot)
             val violations = mutableListOf<SpecializedCanaryViolation>()
             if (!signatureEvidence.matched) {
                 violations += SpecializedCanaryViolation(
@@ -323,12 +371,98 @@ class TuningProbeWorkerService : Service() {
                 )
             }
 
+            if (request.probeKind == TuningProbeWorkerProtocol.ProbeKind.BOOTSTRAP_LOAD) {
+                emit(
+                    activeRequest,
+                    startedAt,
+                    "bootstrap_canary",
+                    "Running the fixed bootstrap-load canary."
+                )
+                val bootstrap = runFixedCanary(
+                    engine = engine,
+                    purpose = "bootstrap_load",
+                    prompt = BootstrapLoadCanaryPolicy.prompt,
+                    params = candidateProfile.bootstrapCanaryGenerationParams(),
+                    timeoutMs = BOOTSTRAP_GENERATION_TIMEOUT_MS
+                )
+                if (bootstrap.error != null || !BootstrapLoadCanaryPolicy.matches(bootstrap.output)) {
+                    violations += SpecializedCanaryViolation(
+                        "bootstrap_output_failed",
+                        bootstrap.error ?: "The fixed bootstrap-load output contract failed."
+                    )
+                }
+                if (bootstrap.sequenceAfter <= bootstrap.sequenceBefore) {
+                    violations += SpecializedCanaryViolation(
+                        "bootstrap_generation_not_observed",
+                        "The native generation sequence did not advance for BOOTSTRAP_LOAD."
+                    )
+                }
+                val endMemory = peakMemoryPoint(
+                    listOf(
+                        readMemoryPoint(bootstrap.stats),
+                        bootstrap.beforeMemory,
+                        bootstrap.afterMemory
+                    )
+                )
+                val lowMemory = startMemory.lowMemory || endMemory.lowMemory || bootstrap.stats.isLowMemory
+                if (lowMemory) {
+                    violations += SpecializedCanaryViolation(
+                        "low_memory",
+                        "BOOTSTRAP_LOAD observed Android or native low-memory pressure."
+                    )
+                }
+                val evidence = buildEvidenceJson(
+                    request = request,
+                    modelArtifactFingerprint = candidateProfile.runtimeIdentity.artifactFingerprint,
+                    planProbes = listOf("BOOTSTRAP_LOAD"),
+                    changedLoadFields = emptySet(),
+                    signatureEvidence = signatureEvidence,
+                    runs = listOf(bootstrap),
+                    startMemory = startMemory,
+                    endMemory = endMemory,
+                    violations = violations
+                )
+                emit(activeRequest, startedAt, "unload", "Unloading the isolated bootstrap runtime.")
+                withTimeout(UNLOAD_TIMEOUT_MS) { engine.unloadModel() }
+                loaded = false
+                return TuningProbeWorkerProtocol.Result(
+                    requestId = request.requestId,
+                    probeKind = request.probeKind,
+                    transactionId = request.transactionId,
+                    identityKey = request.identityKey,
+                    modelId = request.modelId,
+                    profileId = request.profileId,
+                    resolvedLoadSignature = request.resolvedLoadSignature,
+                    committedExecutionSignature = request.committedExecutionSignature,
+                    passed = violations.isEmpty(),
+                    signatureMatched = signatureEvidence.matched,
+                    output = bootstrap.output,
+                    detail = if (violations.isEmpty()) {
+                        "The isolated bootstrap load, generation, and unload passed."
+                    } else {
+                        violations.joinToString("; ") { "${it.code}: ${it.message}" }
+                    },
+                    runtimeStatsJson = bootstrap.stats.toWorkerJson(bootstrap.nativeStatsJson),
+                    evidenceJson = evidence.toString(),
+                    startAvailableMemoryBytes = startMemory.availableBytes,
+                    startPssBytes = startMemory.pssBytes,
+                    startRssBytes = startMemory.rssBytes,
+                    endAvailableMemoryBytes = endMemory.availableBytes,
+                    endPssBytes = endMemory.pssBytes,
+                    endRssBytes = endMemory.rssBytes,
+                    lowMemoryTriggered = lowMemory,
+                    elapsedMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                )
+            }
+
+            val (candidate, plan) = requireNotNull(tuningProbe) {
+                "The tuning candidate plan was not constructed."
+            }
             val runEvidence = mutableListOf<FixedCanaryRun>()
             val beforeMinimumNative = engine.nativeStatsJson()
             emit(activeRequest, startedAt, "minimum_text", "Running the fixed minimum-text canary.")
             val minimum = runFixedCanary(
                 engine = engine,
-                candidate = candidate,
                 purpose = "minimum_text",
                 prompt = MinimumTextCanaryPolicy.prompt,
                 params = CanaryEvaluationParams(maxOutputTokens = 48).toGenerationParams(candidate),
@@ -356,7 +490,6 @@ class TuningProbeWorkerService : Service() {
                 ) {
                     runEvidence += runFixedCanary(
                         engine = engine,
-                        candidate = candidate,
                         purpose = "batch_kv_${runEvidence.size + 1}",
                         prompt = MinimumTextCanaryPolicy.prompt,
                         params = CanaryEvaluationParams(maxOutputTokens = 48).toGenerationParams(candidate),
@@ -399,7 +532,6 @@ class TuningProbeWorkerService : Service() {
                 }
                 val prefixMeasurement = runFixedCanary(
                     engine = engine,
-                    candidate = candidate,
                     purpose = "long_context_prefix_measure",
                     prompt = prefixPrompt,
                     params = CanaryEvaluationParams(maxOutputTokens = 1).toGenerationParams(candidate),
@@ -408,7 +540,6 @@ class TuningProbeWorkerService : Service() {
                 runEvidence += prefixMeasurement
                 val longRun = runFixedCanary(
                     engine = engine,
-                    candidate = candidate,
                     purpose = "long_context_needle",
                     prompt = spec.prompt(fillerBefore, fillerAfter),
                     params = CanaryEvaluationParams(maxOutputTokens = spec.maximumOutputTokens)
@@ -454,6 +585,7 @@ class TuningProbeWorkerService : Service() {
             }
             val evidence = buildEvidenceJson(
                 request = request,
+                modelArtifactFingerprint = candidateProfile.runtimeIdentity.artifactFingerprint,
                 planProbes = plan.probes.map { it.name },
                 changedLoadFields = plan.changedLoadFields,
                 signatureEvidence = signatureEvidence,
@@ -467,6 +599,7 @@ class TuningProbeWorkerService : Service() {
             loaded = false
             return TuningProbeWorkerProtocol.Result(
                 requestId = request.requestId,
+                probeKind = request.probeKind,
                 transactionId = request.transactionId,
                 identityKey = request.identityKey,
                 modelId = request.modelId,
@@ -481,7 +614,7 @@ class TuningProbeWorkerService : Service() {
                 } else {
                     violations.joinToString("; ") { "${it.code}: ${it.message}" }
                 },
-                runtimeStatsJson = minimum.stats.toWorkerJson(),
+                runtimeStatsJson = minimum.stats.toWorkerJson(minimum.nativeStatsJson),
                 evidenceJson = evidence.toString(),
                 startAvailableMemoryBytes = startMemory.availableBytes,
                 startPssBytes = startMemory.pssBytes,
@@ -500,7 +633,6 @@ class TuningProbeWorkerService : Service() {
 
     private suspend fun runFixedCanary(
         engine: McaInferenceService,
-        candidate: TuningExecutionProfile,
         purpose: String,
         prompt: String,
         params: GenerationParams,
@@ -521,13 +653,14 @@ class TuningProbeWorkerService : Service() {
                 LocalChatExecutionContext(requestId = requestId)
             ).collect { event ->
                 when (event) {
+                    is GenerateEvent.Phase -> stats = event.stats
                     is GenerateEvent.Chunk -> {
                         output.append(event.text)
                         stats = event.stats
                     }
                     is GenerateEvent.Done -> stats = event.stats
                     is GenerateEvent.Error -> {
-                        errorMessage = event.message
+                        errorMessage = LocalDiagnosticRedactor.sanitize(event.message, listOf(prompt))
                         stats = event.stats
                     }
                 }
@@ -536,13 +669,15 @@ class TuningProbeWorkerService : Service() {
         val nativeStatsJson = engine.nativeStatsJson()
         val after = JSONObject(nativeStatsJson)
         val afterMemory = readMemoryPoint(stats)
+        val safeNativeError = LocalDiagnosticRedactor.sanitize(stats.lastError, listOf(prompt))
         return FixedCanaryRun(
             purpose = purpose,
             requestId = requestId,
             sequenceBefore = before.optLong("generationSequence", -1L),
             sequenceAfter = after.optLong("generationSequence", -1L),
             output = output.toString(),
-            error = errorMessage ?: stats.lastError,
+            promptFingerprint = LocalDiagnosticRedactor.promptFingerprint(prompt),
+            error = errorMessage ?: safeNativeError.takeIf(String::isNotBlank),
             stats = stats,
             nativeStatsJson = nativeStatsJson,
             beforeMemory = beforeMemory,
@@ -608,16 +743,10 @@ class TuningProbeWorkerService : Service() {
     }
 
     private fun signatureEvidence(
-        candidate: TuningExecutionProfile,
+        profile: ModelExecutionProfile,
         snapshot: ParameterSignatureSnapshot
     ): SignatureEvidence {
-        val expected = candidate.expectedSignatures()
-        val matched = snapshot.desired.digest == candidate.engineProfile.desiredSignature.digest &&
-            snapshot.resolved.digest == candidate.engineProfile.resolvedLoadSignature.digest &&
-            snapshot.active?.digest == expected.activeLoaded.digest &&
-            snapshot.committed.digest == candidate.engineProfile.committedExecutionSignature.digest &&
-            snapshot.override.isNone &&
-            snapshot.effective?.digest == expected.effectiveExecution.digest
+        val matched = profile.matchesExactParameterSignatures(snapshot)
         return SignatureEvidence(
             matched = matched,
             desired = snapshot.desired.digest,
@@ -631,6 +760,7 @@ class TuningProbeWorkerService : Service() {
 
     private fun buildEvidenceJson(
         request: TuningProbeWorkerProtocol.Request,
+        modelArtifactFingerprint: String,
         planProbes: List<String>,
         changedLoadFields: Set<String>,
         signatureEvidence: SignatureEvidence,
@@ -640,9 +770,11 @@ class TuningProbeWorkerService : Service() {
         violations: List<SpecializedCanaryViolation>
     ): JSONObject = JSONObject()
         .put("requestId", request.requestId)
+        .put("probeKind", request.probeKind.name)
         .put("transactionId", request.transactionId)
         .put("identityKey", request.identityKey)
         .put("profileId", request.profileId)
+        .put("modelArtifactFingerprint", modelArtifactFingerprint.takeIf { SHA256_HEX.matches(it) })
         .put("probes", JSONArray(planProbes))
         .put("changedLoadFields", JSONArray(changedLoadFields.sorted()))
         .put("signatures", JSONObject()
@@ -664,6 +796,7 @@ class TuningProbeWorkerService : Service() {
                 put(JSONObject()
                     .put("purpose", run.purpose)
                     .put("requestId", run.requestId)
+                    .put("promptFingerprint", run.promptFingerprint)
                     .put("generationSequenceBefore", run.sequenceBefore)
                     .put("generationSequenceAfter", run.sequenceAfter)
                     .put("promptTokens", run.stats.promptTokens)
@@ -678,7 +811,7 @@ class TuningProbeWorkerService : Service() {
                     .put("flashAttn", native.opt("flashAttn"))
                     .put("contextShifts", native.opt("contextShifts"))
                     .put("speculative", native.optJSONObject("speculative"))
-                    .put("error", run.error)
+                    .put("error", LocalDiagnosticRedactor.sanitize(run.error))
                     .put("memoryBefore", run.beforeMemory.toJson())
                     .put("memoryAfter", run.afterMemory.toJson())
                 )
@@ -717,6 +850,7 @@ class TuningProbeWorkerService : Service() {
 
     private fun emit(activeRequest: ActiveRequest, startedAt: Long, stage: String, message: String) {
         if (activeRequest.cancelRequested) throw CancellationException("Tuning probe cancelled.")
+        activeRequest.stage = stage
         runCatching {
             activeRequest.callback.onProgress(
                 TuningProbeWorkerProtocol.progress(
@@ -807,6 +941,7 @@ class TuningProbeWorkerService : Service() {
         val sequenceBefore: Long,
         val sequenceAfter: Long,
         val output: String,
+        val promptFingerprint: String,
         val error: String?,
         val stats: RuntimeStats,
         val nativeStatsJson: String,
@@ -846,12 +981,16 @@ class TuningProbeWorkerService : Service() {
         var job: Job? = null
 
         @Volatile
+        var stage: String = "request"
+
+        @Volatile
         var cancelRequested: Boolean = false
     }
 
     companion object {
         private val PROCESS_EPOCH = AtomicLong(0L)
         private const val LOAD_TIMEOUT_MS = 120_000L
+        private const val BOOTSTRAP_GENERATION_TIMEOUT_MS = 120_000L
         private const val GENERATION_TIMEOUT_MS = 90_000L
         private const val LONG_CONTEXT_TIMEOUT_MS = 150_000L
         private const val UNLOAD_TIMEOUT_MS = 30_000L
@@ -971,25 +1110,7 @@ private fun ChatModelRuntime.toTuningRuntime(): LocalChatRuntime = when (this) {
     ChatModelRuntime.GENIEX_QAIRT -> LocalChatRuntime.GENIEX_QAIRT
 }
 
-private fun ModelManifest.loadParamsFor(profile: ModelExecutionProfile): LoadParams {
-    val values = profile.resolvedLoadBoundValues
-        .plus(profile.hotExecutionValues)
-        .plus(profile.modelBehaviorValues)
-        .toJsonObject()
-    val projector = if (runtime == ChatModelRuntime.LLAMA_CPP) {
-        visionProjectorPath?.takeIf(String::isNotBlank)?.takeIf { File(it).isFile }
-    } else {
-        null
-    }
-    val base = LoadParams(
-        nCtx = (profile.resolvedLoadBoundValues.value("n_ctx") as? Number)?.toInt() ?: 4_096,
-        nThreads = (profile.hotExecutionValues.value("n_threads") as? Number)?.toInt() ?: 1,
-        visionProjectorPath = projector
-    )
-    return LoadParams.fromJson(values.toString(), base).copy(visionProjectorPath = projector)
-}
-
-private fun RuntimeStats.toWorkerJson(): String = JSONObject()
+private fun RuntimeStats.toWorkerJson(nativeStatsJson: String = "{}"): String = JSONObject()
     .put("loaded", loaded)
     .put("backend", backend)
     .put("loadMs", loadMs)
@@ -1013,5 +1134,13 @@ private fun RuntimeStats.toWorkerJson(): String = JSONObject()
     .put("maxAllTokens", maxAllTokens)
     .put("maxNewTokens", maxNewTokens)
     .put("isLowMemory", isLowMemory)
-    .put("lastError", lastError)
+    .put("lastError", LocalDiagnosticRedactor.sanitize(lastError))
+    .put(
+        "loadFailureCode",
+        runCatching { JSONObject(nativeStatsJson).optString("loadFailureCode") }
+            .getOrDefault("")
+            .takeIf(String::isNotBlank)
+    )
     .toString()
+
+private val SHA256_HEX = Regex("^[A-Fa-f0-9]{64}$")

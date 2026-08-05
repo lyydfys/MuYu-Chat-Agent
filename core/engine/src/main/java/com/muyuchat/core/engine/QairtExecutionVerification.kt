@@ -3,7 +3,6 @@ package com.muyuchat.core.engine
 import android.app.Application
 import android.content.Context
 import android.os.Build
-import com.muyuchat.core.modelstore.QairtExecutionAdmission
 import com.muyuchat.core.modelstore.QairtBundleRuntimeIdentity
 import org.json.JSONArray
 import org.json.JSONObject
@@ -13,25 +12,19 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 /**
- * QAIRT packages use an automatic isolated canary before an unknown native
- * context is created in the product process. This is crash containment, not a
- * chipset admission list; the real create/generate/destroy result is decisive.
+ * Normal QAIRT inference runs in the generic isolated text worker. The dry-run
+ * purpose is an optional diagnostic that can cache exact execution evidence;
+ * it is never a prerequisite for a user-facing load or run attempt.
  */
 enum class QairtExecutionPurpose {
     NORMAL,
     ISOLATED_DRY_RUN
 }
 
-class QairtIsolatedDryRunRequiredException(
-    val admission: QairtExecutionAdmission
-) : IllegalStateException(
-    "该 QAIRT 模型包需要先完成自动隔离安全启动。${admission.message}"
-)
-
 /**
- * The canary activity is declared in this secondary process. Checking the
- * process here ensures only the worker records isolated execution evidence;
- * normal product availability never depends on a model-name or chipset list.
+ * The diagnostic activity is declared in this secondary process. Checking the
+ * process here ensures only that worker records reusable execution evidence;
+ * normal product availability never depends on this evidence.
  */
 internal fun isQairtIsolatedDryRunProcess(context: Context): Boolean {
     val expected = "${context.packageName}:qairt_smoke"
@@ -49,8 +42,8 @@ internal fun isQairtIsolatedDryRunProcess(context: Context): Boolean {
 
 /**
  * Persistent evidence that an exact runtime combination completed a real,
- * isolated create/generate/destroy canary. It skips repeated canaries but is
- * never populated from a static device list.
+ * isolated create/generate/destroy diagnostic. It can skip repeated diagnostics
+ * but is never populated from a static device list or used as an admission gate.
  */
 class QairtExecutionVerificationStore(
     private val file: File

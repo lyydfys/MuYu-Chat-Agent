@@ -1886,8 +1886,8 @@ private fun LocalModelCard(
             Text(
                 when {
                     isMnnRuntime -> "MNN CPU 高速路径"
-                    isQairtRuntime && qairtVerified -> "已通过 QAIRT 自动隔离安全启动"
-                    isQairtRuntime -> "QAIRT 已开放加载；首次点击会自动在隔离进程安全启动"
+                    isQairtRuntime && qairtVerified -> "已有当前设备 QAIRT 隔离运行诊断证据"
+                    isQairtRuntime -> "QAIRT 使用隔离 native worker；实际加载结果决定兼容性"
                     else -> "GGUF / llama.cpp 兼容路径"
                 },
                 style = MaterialTheme.typography.bodySmall,

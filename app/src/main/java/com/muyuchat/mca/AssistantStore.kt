@@ -45,13 +45,20 @@ data class AssistantRecord(
 
     companion object {
         const val DEFAULT_ID = "default"
+        /** Maximum persisted/manual system-prompt length shared by import and editor paths. */
+        const val MAX_SYSTEM_PROMPT_CHARS = 12_000
+        const val MAX_ASSISTANT_PROMPT_CHARS = MAX_SYSTEM_PROMPT_CHARS
 
         fun default(systemPrompt: String = GenerationParams().systemPrompt, params: GenerationParams = GenerationParams()): AssistantRecord =
             AssistantRecord(
                 id = DEFAULT_ID,
                 name = "默认助手",
-                systemPrompt = systemPrompt.ifBlank { GenerationParams().systemPrompt },
-                paramsJson = params.copy(systemPrompt = systemPrompt.ifBlank { GenerationParams().systemPrompt }).toAssistantGenerationJson(),
+                systemPrompt = systemPrompt.ifBlank { GenerationParams().systemPrompt }
+                    .take(MAX_SYSTEM_PROMPT_CHARS),
+                paramsJson = params.copy(
+                    systemPrompt = systemPrompt.ifBlank { GenerationParams().systemPrompt }
+                        .take(MAX_SYSTEM_PROMPT_CHARS)
+                ).toAssistantGenerationJson(),
                 createdAt = 0L,
                 updatedAt = 0L
             )
@@ -63,6 +70,7 @@ data class AssistantRecord(
                 .ifBlank { source.cleanAssistantString("systemPrompt", "system_prompt", "prompt", "instructions") }
                 .ifBlank { source.toCharacterCardPrompt() }
                 .ifBlank { defaults.systemPrompt }
+                .take(MAX_SYSTEM_PROMPT_CHARS)
             val rawParams = json.cleanAssistantString("paramsJson", "params_json")
                 .ifBlank { source.cleanAssistantString("paramsJson", "params_json") }
                 .ifBlank { defaults.paramsJson }
@@ -84,7 +92,7 @@ data class AssistantRecord(
                 tag = json.cleanAssistantString("tag", "category")
                     .ifBlank { source.cleanAssistantString("tag", "category", "creator", "creator_notes") }
                     .ifBlank { defaults.tag },
-                systemPrompt = systemPrompt.take(MAX_ASSISTANT_PROMPT_CHARS),
+                systemPrompt = systemPrompt,
                 defaultModelMode = json.cleanAssistantString("defaultModelMode", "default_model_mode")
                     .ifBlank { defaults.defaultModelMode },
                 defaultModelId = json.cleanAssistantString("defaultModelId", "default_model_id")
@@ -120,7 +128,7 @@ data class AssistantRecord(
                 .distinct()
                 .joinToString("\n\n")
                 .ifBlank { imported.systemPrompt }
-                .take(MAX_ASSISTANT_PROMPT_CHARS)
+                .take(MAX_SYSTEM_PROMPT_CHARS)
             val defaultParams = assistantGenerationParamsFromJson(
                 defaults.paramsJson,
                 GenerationParams(),
@@ -159,7 +167,138 @@ data class AssistantRecord(
             return sections.joinToString("\n\n") { (label, value) -> "$label：\n$value" }
         }
 
-        private const val MAX_ASSISTANT_PROMPT_CHARS = 12_000
+    }
+}
+
+/**
+ * The persona contract captured by a conversation when the user chooses an
+ * assistant.  Generation controls remain live, but the system prompt and
+ * assistant-scoped capabilities stay stable for the life of that conversation.
+ * This is important both for conversational continuity and for a reusable
+ * llama.cpp prefix cache.
+ */
+data class AssistantConversationSnapshot(
+    val assistantId: String,
+    val name: String,
+    val systemPrompt: String,
+    val memoryEnabled: Boolean,
+    val webSearchEnabled: Boolean,
+    val fileContextEnabled: Boolean,
+    val capturedAt: Long
+) {
+    init {
+        require(assistantId.isNotBlank()) { "Assistant snapshot requires an assistant id." }
+        require(systemPrompt.isNotBlank()) { "Assistant snapshot requires a system prompt." }
+        require(capturedAt >= 0L) { "Assistant snapshot capture time must not be negative." }
+    }
+
+    fun applyTo(params: GenerationParams): GenerationParams =
+        params.copy(systemPrompt = systemPrompt)
+
+    fun toJsonString(): String = JSONObject()
+        .put("schema", SCHEMA)
+        .put("version", VERSION)
+        .put("assistantId", assistantId)
+        .put("name", name)
+        .put("systemPrompt", systemPrompt)
+        .put("memoryEnabled", memoryEnabled)
+        .put("webSearchEnabled", webSearchEnabled)
+        .put("fileContextEnabled", fileContextEnabled)
+        .put("capturedAt", capturedAt)
+        .toString()
+
+    companion object {
+        const val SCHEMA = "mca.assistant.conversation_snapshot"
+        const val VERSION = 1
+
+        fun fromAssistant(
+            assistant: AssistantRecord,
+            capturedAt: Long = System.currentTimeMillis()
+        ): AssistantConversationSnapshot {
+            val prompt = assistant.systemPrompt
+                .trim()
+                .take(AssistantRecord.MAX_SYSTEM_PROMPT_CHARS)
+                .ifBlank { GenerationParams().systemPrompt }
+            return AssistantConversationSnapshot(
+                assistantId = assistant.id.trim().take(MAX_ASSISTANT_ID_CHARS)
+                    .ifBlank { AssistantRecord.DEFAULT_ID },
+                name = assistant.name.trim().take(MAX_ASSISTANT_NAME_CHARS).ifBlank { "Assistant" },
+                systemPrompt = prompt,
+                memoryEnabled = assistant.memoryEnabled,
+                webSearchEnabled = assistant.webSearchEnabled,
+                fileContextEnabled = assistant.fileContextEnabled,
+                capturedAt = capturedAt.coerceAtLeast(0L)
+            )
+        }
+
+        fun fromJsonOrNull(raw: String?): AssistantConversationSnapshot? {
+            if (raw.isNullOrBlank()) return null
+            return runCatching {
+                val json = JSONObject(raw)
+                val schema = json.optString("schema").trim()
+                require(schema.isBlank() || schema == SCHEMA) {
+                    "Unsupported assistant snapshot schema."
+                }
+                val version = if (json.has("version")) json.optInt("version", -1) else VERSION
+                require(version == VERSION) {
+                    "Unsupported assistant snapshot version."
+                }
+                val assistantId = json.optString("assistantId")
+                    .trim()
+                    .take(MAX_ASSISTANT_ID_CHARS)
+                val systemPrompt = json.optString("systemPrompt")
+                    .trim()
+                    .take(AssistantRecord.MAX_SYSTEM_PROMPT_CHARS)
+                AssistantConversationSnapshot(
+                    assistantId = assistantId,
+                    name = json.optString("name")
+                        .trim()
+                        .take(MAX_ASSISTANT_NAME_CHARS)
+                        .ifBlank { "Assistant" },
+                    systemPrompt = systemPrompt,
+                    memoryEnabled = json.optBoolean("memoryEnabled", false),
+                    webSearchEnabled = json.optBoolean("webSearchEnabled", false),
+                    fileContextEnabled = !json.has("fileContextEnabled") ||
+                        json.optBoolean("fileContextEnabled", true),
+                    capturedAt = json.optLong("capturedAt", 0L).coerceAtLeast(0L)
+                )
+            }.getOrNull()
+        }
+
+        private const val MAX_ASSISTANT_ID_CHARS = 128
+        private const val MAX_ASSISTANT_NAME_CHARS = 96
+    }
+}
+
+internal fun AssistantRecord.toConversationSnapshot(
+    capturedAt: Long = System.currentTimeMillis()
+): AssistantConversationSnapshot = AssistantConversationSnapshot.fromAssistant(this, capturedAt)
+
+/**
+ * Backfills durable persona snapshots for conversations created before the
+ * snapshot schema.  A missing or removed assistant falls back to the default
+ * assistant only for that legacy migration; existing snapshots are untouched.
+ */
+internal fun List<ChatSessionRecord>.withBackfilledAssistantSnapshots(
+    assistants: List<AssistantRecord>
+): List<ChatSessionRecord> {
+    val fallback = assistants.firstOrNull { it.id == AssistantRecord.DEFAULT_ID }
+        ?: assistants.firstOrNull()
+        ?: return this
+    return map { session ->
+        if (session.assistantSnapshot != null) {
+            session
+        } else {
+            val assistant = session.assistantId
+                ?.let { assistantId -> assistants.firstOrNull { it.id == assistantId } }
+                ?: fallback
+            session.copy(
+                assistantId = session.assistantId ?: assistant.id,
+                assistantSnapshot = assistant.toConversationSnapshot(
+                    capturedAt = session.updatedAt.coerceAtLeast(0L)
+                )
+            )
+        }
     }
 }
 
@@ -197,10 +336,10 @@ class AssistantStore(context: Context) {
 
     fun saveAssistants(assistants: List<AssistantRecord>) = runBlocking(Dispatchers.IO) {
         val normalized = assistants.distinctBy { it.id }
+        // Room is the canonical store.  Do not advance the legacy mirror when
+        // the canonical transaction fails, and never suppress that failure.
+        database.chatSessionDao().replaceAssistants(normalized)
         saveLegacyAssistants(normalized)
-        runCatching {
-            database.chatSessionDao().replaceAssistants(normalized)
-        }
     }
 
     private fun loadLegacyAssistants(fallback: AssistantRecord): List<AssistantRecord> {

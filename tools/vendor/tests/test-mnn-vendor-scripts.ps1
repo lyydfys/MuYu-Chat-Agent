@@ -7,7 +7,8 @@ $ErrorActionPreference = 'Stop'
 $vendorTools = Split-Path -Parent $PSScriptRoot
 $verifyScript = Join-Path $vendorTools 'verify-mnn-vendor.ps1'
 $bootstrapScript = Join-Path $vendorTools 'bootstrap-mnn-vendor.ps1'
-$git = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+$git = (Get-Command git -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1).Source
 $tempBase = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $tempRoot = Join-Path $tempBase ("mca-mnn-vendor-test-" + [guid]::NewGuid().ToString('N'))
 

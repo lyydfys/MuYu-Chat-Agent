@@ -140,6 +140,7 @@ val requiredWorkerAidlInterfaces = listOf(
     "ILocalImageWorkerCallback",
     "IQairtDryRunWorker",
     "IQairtDryRunWorkerCallback",
+    "ILocalChatWorker",
     "ISdxlImagePhaseWorker",
     "ISdxlImagePhaseWorkerCallback",
     "ITuningProbeWorker",
@@ -236,4 +237,5 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.json)
+    testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
 }

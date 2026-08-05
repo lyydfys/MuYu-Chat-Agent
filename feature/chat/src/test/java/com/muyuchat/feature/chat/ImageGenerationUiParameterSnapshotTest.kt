@@ -122,7 +122,7 @@ class ImageGenerationUiParameterSnapshotTest {
     }
 
     @Test
-    fun `version seven round trip preserves advanced image controls`() {
+    fun `current version round trip preserves advanced image controls`() {
         val expected = ImageGenerationUiParameterSnapshot(
             taskModeName = ImageGenerationUiTaskMode.INPAINT.name,
             strengthText = "0.65",
@@ -166,7 +166,7 @@ class ImageGenerationUiParameterSnapshotTest {
         )
 
         assertEquals(expected, actual)
-        assertEquals(7, expected.toJson().getInt("version"))
+        assertEquals(9, expected.toJson().getInt("version"))
         assertEquals("vae", expected.toJson().getString("livePreviewMode"))
         assertTrue(expected.toJson().getBoolean("ultraFixTileSizeExplicit"))
     }
@@ -195,8 +195,10 @@ class ImageGenerationUiParameterSnapshotTest {
 
         assertEquals("512", normalized.ultraFixTileSizeText)
         assertTrue(normalized.ultraFixTileSizeExplicit)
-        assertEquals("512", normalized.widthText)
-        assertEquals("512", normalized.heightText)
+        assertEquals("1024", normalized.widthText)
+        assertEquals("1024", normalized.heightText)
+        assertEquals("512", normalized.ultraFixTargetWidthText)
+        assertEquals("512", normalized.ultraFixTargetHeightText)
     }
 
     @Test
@@ -223,8 +225,10 @@ class ImageGenerationUiParameterSnapshotTest {
 
         assertEquals("768", normalized.ultraFixTileSizeText)
         assertTrue(normalized.ultraFixTileSizeExplicit)
-        assertEquals("768", normalized.widthText)
-        assertEquals("768", normalized.heightText)
+        assertEquals("1024", normalized.widthText)
+        assertEquals("1024", normalized.heightText)
+        assertEquals("768", normalized.ultraFixTargetWidthText)
+        assertEquals("768", normalized.ultraFixTargetHeightText)
     }
 
     @Test

@@ -127,5 +127,7 @@ data class GgufMetadata(
     val causalAttention: Boolean? = null,
     val poolingType: Int? = null,
     /** Model-declared training/runtime context limit from `<arch>.context_length`. */
-    val contextLength: Int? = null
+    val contextLength: Int? = null,
+    /** Native MTP/NextN head count from `<arch>.nextn_predict_layers`. */
+    val nextnPredictLayers: Int? = null
 )

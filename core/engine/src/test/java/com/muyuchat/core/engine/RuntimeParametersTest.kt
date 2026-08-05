@@ -12,6 +12,46 @@ import org.junit.Test
 
 class RuntimeParametersTest {
     @Test
+    fun llamaCacheReuseUsesConservativeDefaultButHonorsExplicitOverrides() {
+        val adapter = LlamaCppRuntimeParameterAdapter()
+        val baseIdentity = identity(LocalChatRuntime.LLAMA_CPP)
+
+        val defaults = adapter.resolveLoadProfile(baseIdentity, "{}")
+        assertEquals(256, defaults.profile.hotExecutionValues.value("cache_reuse"))
+        assertEquals("runtime-default", defaults.sourceByField["cache_reuse"])
+        assertEquals(256, JSONObject(adapter.nativeLoadJson(defaults.profile)).getInt("cache_reuse"))
+
+        val explicitDisabled = adapter.resolveLoadProfile(baseIdentity, "{\"cache_reuse\":0}")
+        assertEquals(0, explicitDisabled.profile.hotExecutionValues.value("cache_reuse"))
+        assertEquals("requested-profile", explicitDisabled.sourceByField["cache_reuse"])
+
+        val explicitThreshold = adapter.resolveLoadProfile(baseIdentity, "{\"cache_reuse\":512}")
+        assertEquals(512, explicitThreshold.profile.hotExecutionValues.value("cache_reuse"))
+        assertEquals("requested-profile", explicitThreshold.sourceByField["cache_reuse"])
+    }
+
+    @Test
+    fun unsupportedDraftMtpStillDisablesCacheReuseDespiteTheNewDefault() {
+        val identity = identity(LocalChatRuntime.LLAMA_CPP)
+        val resolution = LlamaCppRuntimeParameterAdapter().resolveLoadProfile(
+            identity,
+            """{
+                "cache_reuse":512,
+                "advanced_json":{
+                    "spec_type":"draft-mtp",
+                    "spec_draft_n_max":2
+                }
+            }""".trimIndent()
+        )
+
+        // The requested profile remains auditable, but the resolved execution
+        // values retain the existing safety fallback for unsupported MTP.
+        assertEquals(512, resolution.profile.desiredHotExecutionValues.value("cache_reuse"))
+        assertEquals(0, resolution.profile.hotExecutionValues.value("cache_reuse"))
+        assertEquals("runtime-safety", resolution.sourceByField["spec_type"])
+    }
+
+    @Test
     fun registryIsRuntimeAndNativeVersionSpecificAndUnknownFailsClosed() {
         val override = VersionedParameterPolicySet(
             runtime = LocalChatRuntime.MNN_CPU,
@@ -192,6 +232,72 @@ class RuntimeParametersTest {
         assertEquals(8192, resolution.profile.resolvedLoadBoundValues.value("n_ctx"))
         assertEquals("requested-profile", resolution.sourceByField["n_ctx"])
         assertFalse(resolution.warnings.any { it.startsWith("n_ctx normalized") })
+    }
+
+    @Test
+    fun llamaAutoGpuRequestAcceptsOnlyTheNativeCpuFallbackPair() {
+        val identity = identity(
+            LocalChatRuntime.LLAMA_CPP,
+            capabilities = setOf("gpu_offload")
+        )
+        val adapter = LlamaCppRuntimeParameterAdapter()
+        val resolution = adapter.resolveLoadProfile(identity, "{}")
+        assertEquals(-1, resolution.profile.resolvedLoadBoundValues.value("n_gpu_layers"))
+        assertEquals("layer", resolution.profile.resolvedLoadBoundValues.value("split_mode"))
+
+        val cpuFallback = resolution.profile.resolvedLoadBoundValues.toJsonObject()
+            .put("n_gpu_layers", 0)
+            .put("split_mode", "none")
+        val active = adapter.activeLoadedSignature(
+            identity,
+            JSONObject().put("loaded", true).put("effectiveConfig", cpuFallback).toString(),
+            resolution.profile.resolvedLoadSignature
+        )
+        assertNotNull(active)
+        assertEquals(-1, active!!.values.value("n_gpu_layers"))
+        assertEquals("layer", active.values.value("split_mode"))
+
+        val incompleteFallback = JSONObject(cpuFallback.toString()).put("split_mode", "layer")
+        assertNull(
+            adapter.activeLoadedSignature(
+                identity,
+                JSONObject().put("loaded", true).put("effectiveConfig", incompleteFallback).toString(),
+                resolution.profile.resolvedLoadSignature
+            )
+        )
+
+        val unrelatedMismatch = JSONObject(cpuFallback.toString()).put("n_batch", 256)
+        assertNull(
+            adapter.activeLoadedSignature(
+                identity,
+                JSONObject().put("loaded", true).put("effectiveConfig", unrelatedMismatch).toString(),
+                resolution.profile.resolvedLoadSignature
+            )
+        )
+    }
+
+    @Test
+    fun llamaForcedGpuRequestNeverAcceptsCpuReadbackAsAnAutomaticFallback() {
+        val identity = identity(
+            LocalChatRuntime.LLAMA_CPP,
+            capabilities = setOf("gpu_offload")
+        )
+        val adapter = LlamaCppRuntimeParameterAdapter()
+        val resolution = adapter.resolveLoadProfile(
+            identity,
+            """{"advanced_json":{"n_gpu_layers":12,"split_mode":"layer"}}"""
+        )
+        val invalidCpuReadback = resolution.profile.resolvedLoadBoundValues.toJsonObject()
+            .put("n_gpu_layers", 0)
+            .put("split_mode", "none")
+
+        assertNull(
+            adapter.activeLoadedSignature(
+                identity,
+                JSONObject().put("loaded", true).put("effectiveConfig", invalidCpuReadback).toString(),
+                resolution.profile.resolvedLoadSignature
+            )
+        )
     }
 
     @Test

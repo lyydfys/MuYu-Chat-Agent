@@ -67,6 +67,15 @@
             android:process=":tuning"
             android:stopWithTask="true" />
 
+        <!-- Long-lived ordinary local text runtimes live outside the UI
+             process. A native crash or hang is contained here and is surfaced
+             to the main process as a Binder/load error. -->
+        <service
+            android:name=".LocalChatWorkerService"
+            android:exported="false"
+            android:process=":local_chat"
+            android:stopWithTask="true" />
+
         <service
             android:name=".LocalApiForegroundService"
             android:exported="false"

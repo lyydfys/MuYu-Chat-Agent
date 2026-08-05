@@ -51,6 +51,45 @@ index aa4db6eeede9aa02a67c9216a31f8a0ce88f630e..39f9a0ca9458e99cdd1c7fcf865a1d16
 +
 +通过标准是合并结果完全由新的 INPUT buffer 持有；“先 `Variable::input`，再 `_Concat`，
 +最后才 memcpy”仍会在到达最终 memcpy 前崩溃，不算完成物化。
+diff --git a/test/op/PromptCacheTest.cpp b/test/op/PromptCacheTest.cpp
+index 8120b11bcb165d5da0dde858970f695a609e9fad..a370513f9922fb2af005422ac6a2b8de153567f1 100644
+--- a/test/op/PromptCacheTest.cpp
++++ b/test/op/PromptCacheTest.cpp
+@@ -10,6 +10,7 @@
+ #include "prompt_cache_utils.hpp"
+ 
+ using MNN::Transformer::stripThinkBlocks;
++using MNN::Transformer::promptCacheReusableTokenPrefix;
+ 
+ class PromptCacheStripThinkTest : public MNNTestCase {
+ public:
+@@ -57,6 +58,26 @@ public:
+             stripThinkBlocks(text);
+             MNNTEST_ASSERT(text == "ac");
+         }
++        // A sampled EOS is present in history_tokens but not yet in live KV.
++        // It must be replayed as part of the next prefill, not counted reused.
++        {
++            const std::vector<int> live = {1, 2, 3, 99};
++            const std::vector<int> desired = {1, 2, 3, 99, 4, 5};
++            MNNTEST_ASSERT(promptCacheReusableTokenPrefix(live, 3, desired) == 3);
++        }
++        // A protocol marker can be forwarded into KV and then removed from the
++        // visible transcript. Token LCP must invalidate it before extension.
++        {
++            const std::vector<int> live = {1, 2, 77, 78};
++            const std::vector<int> desired = {1, 2, 99, 4};
++            MNNTEST_ASSERT(promptCacheReusableTokenPrefix(live, 4, desired) == 2);
++        }
++        // Lazy KV removal may leave physical history longer than effective KV.
++        {
++            const std::vector<int> live = {1, 2, 3, 40, 41};
++            const std::vector<int> desired = {1, 2, 3, 50};
++            MNNTEST_ASSERT(promptCacheReusableTokenPrefix(live, 3, desired) == 3);
++        }
+         return true;
+     }
+ };
 diff --git a/transformers/diffusion/engine/include/diffusion/sana_diffusion.hpp b/transformers/diffusion/engine/include/diffusion/sana_diffusion.hpp
 index 418658f2e74ab8f3cecc8fb71c0316ec64529e05..afc456901af84aad68ac09e30096e55918e675ff 100644
 --- a/transformers/diffusion/engine/include/diffusion/sana_diffusion.hpp
@@ -964,7 +1003,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
  
      } // namespace DIFFUSION
 diff --git a/transformers/llm/engine/src/llm.cpp b/transformers/llm/engine/src/llm.cpp
-index 2f163a4906932667b501cd830bab0b6355b41478..ea838a0ebecfa8e7d7d75f3e154d7c0758e0e8f5 100644
+index 2f163a4906932667b501cd830bab0b6355b41478..d575d7cb7ad4e629ab99634a57a2377d2ad61bf2 100644
 --- a/transformers/llm/engine/src/llm.cpp
 +++ b/transformers/llm/engine/src/llm.cpp
 @@ -10,6 +10,7 @@
@@ -1074,7 +1113,63 @@ index 2f163a4906932667b501cd830bab0b6355b41478..ea838a0ebecfa8e7d7d75f3e154d7c07
          mContext->status = LlmStatus::INTERNAL_ERROR;
          return {};
      }
-@@ -1617,4 +1660,4 @@ bool Llm::is_stop(int token_id) {
+@@ -1123,30 +1166,34 @@ void Llm::response(const ChatMessages& chat_prompts, std::ostream* os, const cha
+             return;
+         }
+ 
+-        // Tokenize the full prompt and split at a token boundary rather than
+-        // tokenizing a text substring (which can land mid-token for BPE/UTF-8).
++        // Tokenize the complete desired prompt, then compare token ids against
++        // the sequence that is actually present in live KV. Rendered text is
++        // only an eligibility check: sampled EOS tokens, protocol truncation,
++        // and template normalization can all make it diverge from live KV.
+         std::vector<int> full_tokens = tokenizer_encode(prompt);
+-        // Detect prefix token count (BOS, etc.) by encoding an empty string.
+-        // tokenizer_encode("") returns only the prefix tokens that are
+-        // automatically prepended to every input (e.g., <|begin_of_text|>).
+-        // This count is used to skip prefix tokens when mapping text
+-        // positions to token indices, since they don't correspond to any
+-        // prompt text bytes. Assumption: prefix tokens are constant across
+-        // inputs for a given tokenizer configuration.
+-        size_t prefix_count = tokenizer_encode("").size();
+-        size_t char_pos = 0;
+-        size_t token_split = prefix_count; // start after prefix tokens
+-        for (size_t i = prefix_count; i < full_tokens.size(); i++) {
+-            std::string piece = tokenizer_decode(full_tokens[i]);
+-            if (char_pos + piece.size() > text_common)
+-                break;
+-            char_pos += piece.size();
+-            token_split++;
++        const size_t effective_kv_tokens = static_cast<size_t>(
++                std::max(0, mContext->all_seq_len));
++        size_t token_split = promptCacheReusableTokenPrefix(
++                mContext->history_tokens,
++                effective_kv_tokens,
++                full_tokens);
++        // generate(delta) owns the logits used by the following stepping
++        // decode. If the desired prompt is already fully cached, replay its
++        // final token so stale logits from a lazily rolled-back request cannot
++        // escape into the new generation.
++        if (!full_tokens.empty() && token_split == full_tokens.size()) {
++            --token_split;
++        }
++        if (token_split < effective_kv_tokens && mMeta->previous > token_split) {
++            eraseHistory(token_split, 0);
++        }
++        if (mContext->history_tokens.size() > token_split) {
++            mContext->history_tokens.resize(token_split);
+         }
+         std::vector<int> delta(full_tokens.begin() + token_split, full_tokens.end());
+-        MNN_PRINT("[prompt_cache] cached=%d, compare=%d, common=%d, token_split=%d, delta=%d\n",
+-                  (int)mCachedPromptText.size(), (int)prompt_for_compare.size(), (int)text_common, (int)token_split,
+-                  (int)delta.size());
++        MNN_PRINT("[prompt_cache] cached=%d, compare=%d, common=%d, live_kv=%d, token_split=%d, delta=%d\n",
++                  (int)mCachedPromptText.size(), (int)prompt_for_compare.size(), (int)text_common,
++                  (int)effective_kv_tokens, (int)token_split, (int)delta.size());
+ 
+         // Save/restore KV state across generate_init — only the delta path
+         // should preserve KV; other response() overloads clear as normal.
+@@ -1617,4 +1664,4 @@ bool Llm::is_stop(int token_id) {
      return stop;
  }
  } // namespace Transformer
@@ -2323,6 +2418,42 @@ index 0000000000000000000000000000000000000000..7233070e9bc89954b11fa0f9c5a5827a
 +} // namespace MNN
 +
 +#endif
+diff --git a/transformers/llm/engine/src/prompt_cache_utils.hpp b/transformers/llm/engine/src/prompt_cache_utils.hpp
+index ecf649598524c520928d4ef8506dff78c5cca120..199b5c558a959fe938f2efbfc41eb59253937a1e 100644
+--- a/transformers/llm/engine/src/prompt_cache_utils.hpp
++++ b/transformers/llm/engine/src/prompt_cache_utils.hpp
+@@ -1,7 +1,10 @@
+ #ifndef PROMPT_CACHE_UTILS_HPP
+ #define PROMPT_CACHE_UTILS_HPP
+ 
++#include <algorithm>
++#include <cstddef>
+ #include <string>
++#include <vector>
+ 
+ namespace MNN {
+ namespace Transformer {
+@@ -25,6 +28,20 @@ inline void stripThinkBlocks(std::string& text) {
+     }
+ }
+ 
++inline std::size_t promptCacheReusableTokenPrefix(
++        const std::vector<int>& liveHistory,
++        std::size_t effectiveKvTokens,
++        const std::vector<int>& desiredPrompt) {
++    const std::size_t limit = std::min(
++            std::min(effectiveKvTokens, liveHistory.size()),
++            desiredPrompt.size());
++    std::size_t reusable = 0;
++    while (reusable < limit && liveHistory[reusable] == desiredPrompt[reusable]) {
++        ++reusable;
++    }
++    return reusable;
++}
++
+ }  // namespace Transformer
+ }  // namespace MNN
+ 
 diff --git a/transformers/llm/engine/src/sampler.cpp b/transformers/llm/engine/src/sampler.cpp
 index d070c4a3318a30e1ccefe05e96191f890daac2a1..8e716da0f4e4a464299628ded0595686ca764980 100644
 --- a/transformers/llm/engine/src/sampler.cpp

@@ -30,6 +30,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -88,6 +89,11 @@ class QairtDryRunWorkerService : Service() {
                         // Native graph calls are synchronous and are not safely interruptible.
                         // Kill only this disposable process; the app process receives binder death
                         // and never records the exact-identity verification.
+                        val diagnostic = IsolatedNativeFailureDiagnostics.watchdog(
+                            stage = next.stage,
+                            timeoutMs = HARD_PROCESS_TIMEOUT_MS
+                        )
+                        sendError(callback, request.requestId, diagnostic.code, diagnostic.message)
                         Process.killProcess(Process.myPid())
                     }
                 }
@@ -98,15 +104,20 @@ class QairtDryRunWorkerService : Service() {
                         // Result delivery is the last action; McaInferenceService has already
                         // atomically persisted the exact identity before this callback.
                     }
+                } catch (_: TimeoutCancellationException) {
+                    if (!next.cancelRequested) {
+                        val diagnostic = IsolatedNativeFailureDiagnostics.timeout(next.stage)
+                        sendError(callback, request.requestId, diagnostic.code, diagnostic.message)
+                    }
                 } catch (_: CancellationException) {
                     // Caller died/cancelled. Do not certify and let finally unload any handle.
                 } catch (error: Throwable) {
+                    val diagnostic = IsolatedNativeFailureDiagnostics.classify(error, next.stage)
                     sendError(
                         callback,
                         request.requestId,
-                        code = "dry_run_failed",
-                        message = error.message?.take(MAX_ERROR_MESSAGE_CHARS)
-                            ?: "QAIRT 隔离安全启动失败。"
+                        code = diagnostic.code,
+                        message = diagnostic.message.take(MAX_ERROR_MESSAGE_CHARS)
                     )
                 } finally {
                     handler.removeCallbacks(hardWatchdog)
@@ -180,6 +191,7 @@ class QairtDryRunWorkerService : Service() {
                 }
             }
             emit(activeRequest, startedAt, "npu_ready", "已确认 QAIRT 骁龙 NPU 执行证据，正在生成固定检查回答…")
+            emit(activeRequest, startedAt, "smoke", "正在执行固定 QAIRT smoke 检查…")
             val answer = withTimeout(GENERATION_TIMEOUT_MS) {
                 generateFixedAnswer(engine, model, visionChecked, request.nCtx).also { value ->
                     ensureActive()
@@ -258,6 +270,7 @@ class QairtDryRunWorkerService : Service() {
                 )
             ).collect { event ->
                 when (event) {
+                    is GenerateEvent.Phase -> Unit
                     is GenerateEvent.Chunk -> output.append(event.text)
                     is GenerateEvent.Error -> error(event.message)
                     is GenerateEvent.Done -> Unit
@@ -298,6 +311,7 @@ class QairtDryRunWorkerService : Service() {
 
     private fun emit(activeRequest: ActiveRequest, startedAt: Long, stage: String, message: String) {
         if (activeRequest.cancelRequested) throw CancellationException("QAIRT dry-run cancelled.")
+        activeRequest.stage = stage
         runCatching {
             activeRequest.callback.onProgress(
                 QairtDryRunWorkerProtocol.progress(
@@ -357,6 +371,9 @@ class QairtDryRunWorkerService : Service() {
     ) {
         var deathRecipient: IBinder.DeathRecipient? = null
         var job: Job? = null
+
+        @Volatile
+        var stage: String = "request"
 
         @Volatile
         var cancelRequested: Boolean = false

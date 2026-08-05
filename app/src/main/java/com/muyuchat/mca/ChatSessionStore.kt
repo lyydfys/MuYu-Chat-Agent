@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
+import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.ColumnInfo
@@ -14,6 +15,7 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
+import androidx.room.Upsert
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.muyuchat.core.engine.ChatImageAttachment
@@ -28,6 +30,92 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
+private const val MAX_KNOWLEDGE_BASE_IDS_PER_ROOM_OPERATION = 32
+private const val MAX_KNOWLEDGE_CHUNKS_PER_ROOM_PAGE = 256
+
+/** Hard caps for persisted chat history, independent of the live conversation buffer. */
+internal data class ChatHistoryPersistenceLimits(
+    val maxSessions: Int = 100,
+    val maxMessages: Int = 2_000,
+    val maxSerializedBytes: Long = 16L * 1024L * 1024L
+) {
+    init {
+        require(maxSessions > 0) { "maxSessions must be positive." }
+        require(maxMessages > 0) { "maxMessages must be positive." }
+        require(maxSerializedBytes > 0L) { "maxSerializedBytes must be positive." }
+    }
+}
+
+/**
+ * Bounds the Room representation before a write. Inline image bytes are not
+ * counted because [ChatMessage.toEntity] deliberately never persists them.
+ */
+internal object ChatHistoryPersistenceBounds {
+    fun bound(
+        records: List<ChatSessionRecord>,
+        limits: ChatHistoryPersistenceLimits = ChatHistoryPersistenceLimits()
+    ): List<ChatSessionRecord> {
+        val prioritized = records
+            .withIndex()
+            .sortedWith(
+                compareByDescending<IndexedValue<ChatSessionRecord>> { it.value.pinned }
+                    .thenByDescending { it.value.updatedAt }
+                    .thenBy { it.index }
+            )
+            .asSequence()
+            .distinctBy { it.value.id }
+            .take(limits.maxSessions)
+            .map { it.value }
+            .toList()
+
+        var usedBytes = 0L
+        var usedMessages = 0
+        val retained = mutableListOf<ChatSessionRecord>()
+        for (record in prioritized) {
+            val sessionBytes = record.toEntity().serializedByteCount()
+            if (!fitsWithin(usedBytes, sessionBytes, limits.maxSerializedBytes)) continue
+
+            var recordBytes = sessionBytes
+            val tailMessages = mutableListOf<ChatMessage>()
+            for (index in record.messages.indices.reversed()) {
+                if (usedMessages + tailMessages.size >= limits.maxMessages) break
+                val message = record.messages[index]
+                val messageBytes = message.toEntity(record.id, index).serializedByteCount()
+                if (
+                    !fitsWithin(
+                        usedBytes.saturatingAdd(recordBytes),
+                        messageBytes,
+                        limits.maxSerializedBytes
+                    )
+                ) {
+                    // Keeping an older message while dropping the newest one
+                    // makes the persisted transcript misleading. Stop at its tail.
+                    break
+                }
+                tailMessages += message
+                recordBytes = recordBytes.saturatingAdd(messageBytes)
+            }
+
+            retained += record.copy(messages = tailMessages.asReversed())
+            usedBytes = usedBytes.saturatingAdd(recordBytes)
+            usedMessages += tailMessages.size
+        }
+        return retained
+    }
+
+    internal fun serializedByteCount(records: List<ChatSessionRecord>): Long =
+        records.fold(0L) { total, record ->
+            val sessionBytes = record.toEntity().serializedByteCount()
+            val messageBytes = record.messages.foldIndexed(0L) { index, messagesTotal, message ->
+                messagesTotal.saturatingAdd(message.toEntity(record.id, index).serializedByteCount())
+            }
+            total.saturatingAdd(sessionBytes).saturatingAdd(messageBytes)
+        }
+
+    private fun fitsWithin(current: Long, next: Long, limit: Long): Boolean =
+        current <= limit && next <= limit - current
+}
+
 class ChatSessionStore(context: Context) {
     private val appContext = context.applicationContext
     private val database = McaRoomDatabase.get(appContext)
@@ -36,18 +124,45 @@ class ChatSessionStore(context: Context) {
     fun load(): List<ChatSessionRecord> = runBlocking(Dispatchers.IO) {
         runCatching {
             val records = database.chatSessionDao().loadRecords()
-            if (records.isNotEmpty()) {
+            val loaded = if (records.isNotEmpty()) {
                 records
             } else {
                 migrateLegacyJsonIfNeeded()
             }
+            normalizePersistedHistory(loaded)
         }.getOrElse {
-            runCatching { migrateLegacyJsonIfNeeded() }.getOrElse { emptyList() }
+            runCatching { normalizePersistedHistory(migrateLegacyJsonIfNeeded()) }
+                .getOrElse { emptyList() }
         }
     }
 
     fun save(sessions: List<ChatSessionRecord>) = runBlocking(Dispatchers.IO) {
-        database.chatSessionDao().replaceAll(sessions)
+        database.chatSessionDao().replaceAll(ChatHistoryPersistenceBounds.bound(sessions))
+    }
+
+    /**
+     * Replaces the session snapshot and any newly-created knowledge bindings in
+     * one Room transaction.  A first message can create both rows at once;
+     * keeping them together prevents the binding from being lost when a newer
+     * coalesced snapshot supersedes the original write.
+     */
+    fun save(
+        sessions: List<ChatSessionRecord>,
+        knowledgeBindings: Map<String, Set<String>>
+    ) = runBlocking(Dispatchers.IO) {
+        val boundedSessions = ChatHistoryPersistenceBounds.bound(sessions)
+        database.chatSessionDao().replaceAllWithKnowledgeBindings(
+            records = boundedSessions,
+            bindingSessionIds = knowledgeBindings.keys.toList(),
+            bindings = knowledgeBindings.flatMap { (chatSessionId, knowledgeBaseIds) ->
+                knowledgeBaseIds.map { knowledgeBaseId ->
+                    ChatKnowledgeBaseBindingEntity(
+                        chatSessionId = chatSessionId,
+                        knowledgeBaseId = knowledgeBaseId
+                    )
+                }
+            }
+        )
     }
 
     fun loadImages(): List<ImageAssetRecord> = runBlocking(Dispatchers.IO) {
@@ -105,15 +220,24 @@ class ChatSessionStore(context: Context) {
                 array.getJSONObject(index).toChatSessionRecord()
             }.sortedForHistory()
         }.getOrElse { return emptyList() }
-        if (records.isNotEmpty()) {
-            database.chatSessionDao().replaceAll(records)
-        }
+        val boundedRecords = ChatHistoryPersistenceBounds.bound(records)
+        database.chatSessionDao().replaceAll(boundedRecords)
         runCatching {
             if (!legacyFile.delete()) {
                 legacyFile.renameTo(File(legacyFile.parentFile, "${legacyFile.name}.migrated"))
             }
         }
-        return records
+        return boundedRecords
+    }
+
+    private suspend fun normalizePersistedHistory(
+        records: List<ChatSessionRecord>
+    ): List<ChatSessionRecord> {
+        val boundedRecords = ChatHistoryPersistenceBounds.bound(records)
+        if (boundedRecords != records) {
+            database.chatSessionDao().replaceAll(boundedRecords)
+        }
+        return boundedRecords
     }
 
     private fun JSONObject.toChatSessionRecord(): ChatSessionRecord =
@@ -126,6 +250,10 @@ class ChatSessionStore(context: Context) {
             updatedAt = optLong("updatedAt", System.currentTimeMillis()),
             projectId = optString("projectId").takeIf { it.isNotBlank() },
             assistantId = optString("assistantId").takeIf { it.isNotBlank() },
+            assistantSnapshot = AssistantConversationSnapshot.fromJsonOrNull(
+                optString("assistantSnapshotJson").takeIf { it.isNotBlank() }
+                    ?: optJSONObject("assistantSnapshot")?.toString()
+            ),
             modelMode = optString("modelMode").takeIf { it.isNotBlank() },
             modelId = optString("modelId").takeIf { it.isNotBlank() }
         )
@@ -166,7 +294,7 @@ class ChatSessionStore(context: Context) {
         KnowledgeChunkEntity::class,
         ChatKnowledgeBaseBindingEntity::class
     ],
-    version = 18,
+    version = 20,
     exportSchema = false
 )
 abstract class McaRoomDatabase : RoomDatabase() {
@@ -193,7 +321,9 @@ abstract class McaRoomDatabase : RoomDatabase() {
                         MIGRATION_14_15,
                         MIGRATION_15_16,
                         MIGRATION_16_17,
-                        MIGRATION_17_18
+                        MIGRATION_17_18,
+                        MIGRATION_18_19,
+                        MIGRATION_19_20
                     )
                     .build()
                     .also { instance = it }
@@ -324,6 +454,18 @@ abstract class McaRoomDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addChatSessionAssistantSnapshotColumnIfMissing(db)
+            }
+        }
+
+        private val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                rebuildKnowledgeTablesWithForeignKeys(db)
+            }
+        }
+
         private fun addProjectIdColumnIfMissing(db: SupportSQLiteDatabase) {
             runCatching {
                 db.execSQL("ALTER TABLE chat_sessions ADD COLUMN projectId TEXT")
@@ -407,6 +549,198 @@ abstract class McaRoomDatabase : RoomDatabase() {
             db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_knowledge_base_bindings_knowledgeBaseId ON chat_knowledge_base_bindings(knowledgeBaseId)")
         }
 
+        /**
+         * SQLite cannot add a foreign key to an existing table. Rebuild only
+         * the dependent knowledge tables and copy rows whose parents still
+         * exist, preserving all valid v19 data before replacing the old tables.
+         */
+        private fun rebuildKnowledgeTablesWithForeignKeys(db: SupportSQLiteDatabase) {
+            rebuildKnowledgeDocumentsWithForeignKeys(db)
+            rebuildKnowledgeChunksWithForeignKeys(db)
+            rebuildChatKnowledgeBaseBindingsWithForeignKeys(db)
+        }
+
+        private fun rebuildKnowledgeDocumentsWithForeignKeys(db: SupportSQLiteDatabase) {
+            if (!tableExists(db, "knowledge_documents")) {
+                createKnowledgeDocumentsTableWithForeignKeys(db, "knowledge_documents")
+                createKnowledgeDocumentIndices(db)
+                return
+            }
+
+            createKnowledgeDocumentsTableWithForeignKeys(db, "knowledge_documents_new")
+            db.execSQL(
+                """
+                INSERT INTO knowledge_documents_new (
+                    id, knowledgeBaseId, title, source, contentHash, contentLength, chunkCount, createdAt, updatedAt
+                )
+                SELECT
+                    documents.id,
+                    documents.knowledgeBaseId,
+                    documents.title,
+                    documents.source,
+                    documents.contentHash,
+                    documents.contentLength,
+                    documents.chunkCount,
+                    documents.createdAt,
+                    documents.updatedAt
+                FROM knowledge_documents AS documents
+                INNER JOIN knowledge_bases AS bases ON bases.id = documents.knowledgeBaseId
+                """.trimIndent()
+            )
+            db.execSQL("DROP TABLE knowledge_documents")
+            db.execSQL("ALTER TABLE knowledge_documents_new RENAME TO knowledge_documents")
+            createKnowledgeDocumentIndices(db)
+        }
+
+        private fun rebuildKnowledgeChunksWithForeignKeys(db: SupportSQLiteDatabase) {
+            if (!tableExists(db, "knowledge_chunks")) {
+                createKnowledgeChunksTableWithForeignKeys(db, "knowledge_chunks")
+                createKnowledgeChunkIndices(db)
+                return
+            }
+
+            createKnowledgeChunksTableWithForeignKeys(db, "knowledge_chunks_new")
+            db.execSQL(
+                """
+                INSERT INTO knowledge_chunks_new (
+                    id, knowledgeBaseId, documentId, position, content, contentHash, estimatedTokens
+                )
+                SELECT
+                    chunks.id,
+                    chunks.knowledgeBaseId,
+                    chunks.documentId,
+                    chunks.position,
+                    chunks.content,
+                    chunks.contentHash,
+                    chunks.estimatedTokens
+                FROM knowledge_chunks AS chunks
+                INNER JOIN knowledge_bases AS bases ON bases.id = chunks.knowledgeBaseId
+                INNER JOIN knowledge_documents AS documents
+                    ON documents.id = chunks.documentId
+                    AND documents.knowledgeBaseId = chunks.knowledgeBaseId
+                """.trimIndent()
+            )
+            db.execSQL("DROP TABLE knowledge_chunks")
+            db.execSQL("ALTER TABLE knowledge_chunks_new RENAME TO knowledge_chunks")
+            createKnowledgeChunkIndices(db)
+        }
+
+        private fun rebuildChatKnowledgeBaseBindingsWithForeignKeys(db: SupportSQLiteDatabase) {
+            if (!tableExists(db, "chat_knowledge_base_bindings")) {
+                createChatKnowledgeBaseBindingsTableWithForeignKeys(db, "chat_knowledge_base_bindings")
+                createChatKnowledgeBaseBindingIndices(db)
+                return
+            }
+
+            createChatKnowledgeBaseBindingsTableWithForeignKeys(
+                db,
+                "chat_knowledge_base_bindings_new"
+            )
+            db.execSQL(
+                """
+                INSERT INTO chat_knowledge_base_bindings_new (chatSessionId, knowledgeBaseId)
+                SELECT bindings.chatSessionId, bindings.knowledgeBaseId
+                FROM chat_knowledge_base_bindings AS bindings
+                INNER JOIN chat_sessions AS sessions ON sessions.id = bindings.chatSessionId
+                INNER JOIN knowledge_bases AS bases ON bases.id = bindings.knowledgeBaseId
+                """.trimIndent()
+            )
+            db.execSQL("DROP TABLE chat_knowledge_base_bindings")
+            db.execSQL(
+                "ALTER TABLE chat_knowledge_base_bindings_new RENAME TO chat_knowledge_base_bindings"
+            )
+            createChatKnowledgeBaseBindingIndices(db)
+        }
+
+        private fun createKnowledgeDocumentsTableWithForeignKeys(
+            db: SupportSQLiteDatabase,
+            tableName: String
+        ) {
+            db.execSQL(
+                """
+                CREATE TABLE $tableName (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    knowledgeBaseId TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    contentHash TEXT NOT NULL,
+                    contentLength INTEGER NOT NULL,
+                    chunkCount INTEGER NOT NULL,
+                    createdAt INTEGER NOT NULL,
+                    updatedAt INTEGER NOT NULL,
+                    FOREIGN KEY(knowledgeBaseId) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+                )
+                """.trimIndent()
+            )
+        }
+
+        private fun createKnowledgeChunksTableWithForeignKeys(
+            db: SupportSQLiteDatabase,
+            tableName: String
+        ) {
+            db.execSQL(
+                """
+                CREATE TABLE $tableName (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    knowledgeBaseId TEXT NOT NULL,
+                    documentId TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    contentHash TEXT NOT NULL,
+                    estimatedTokens INTEGER NOT NULL,
+                    FOREIGN KEY(knowledgeBaseId) REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+                    FOREIGN KEY(documentId) REFERENCES knowledge_documents(id) ON DELETE CASCADE
+                )
+                """.trimIndent()
+            )
+        }
+
+        private fun createChatKnowledgeBaseBindingsTableWithForeignKeys(
+            db: SupportSQLiteDatabase,
+            tableName: String
+        ) {
+            db.execSQL(
+                """
+                CREATE TABLE $tableName (
+                    chatSessionId TEXT NOT NULL,
+                    knowledgeBaseId TEXT NOT NULL,
+                    PRIMARY KEY(chatSessionId, knowledgeBaseId),
+                    FOREIGN KEY(chatSessionId) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY(knowledgeBaseId) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+                )
+                """.trimIndent()
+            )
+        }
+
+        private fun createKnowledgeDocumentIndices(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_knowledge_documents_knowledgeBaseId " +
+                    "ON knowledge_documents(knowledgeBaseId)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_knowledge_documents_contentHash " +
+                    "ON knowledge_documents(contentHash)"
+            )
+        }
+
+        private fun createKnowledgeChunkIndices(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_knowledge_chunks_knowledgeBaseId " +
+                    "ON knowledge_chunks(knowledgeBaseId)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_knowledge_chunks_documentId " +
+                    "ON knowledge_chunks(documentId)"
+            )
+        }
+
+        private fun createChatKnowledgeBaseBindingIndices(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_chat_knowledge_base_bindings_knowledgeBaseId " +
+                    "ON chat_knowledge_base_bindings(knowledgeBaseId)"
+            )
+        }
+
         private fun addImageGenerationMetadataColumnIfMissing(db: SupportSQLiteDatabase) {
             if ("generationMetadataJson" !in tableColumns(db, "image_assets")) {
                 db.execSQL(
@@ -435,6 +769,12 @@ abstract class McaRoomDatabase : RoomDatabase() {
             }
             runCatching {
                 db.execSQL("ALTER TABLE chat_sessions ADD COLUMN modelId TEXT")
+            }
+        }
+
+        private fun addChatSessionAssistantSnapshotColumnIfMissing(db: SupportSQLiteDatabase) {
+            if ("assistantSnapshotJson" !in tableColumns(db, "chat_sessions")) {
+                db.execSQL("ALTER TABLE chat_sessions ADD COLUMN assistantSnapshotJson TEXT")
             }
         }
 
@@ -764,17 +1104,29 @@ interface ChatSessionDao {
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY position ASC")
     suspend fun messages(sessionId: String): List<ChatMessageEntity>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertSessions(sessions: List<ChatSessionEntity>)
+    @Query("SELECT * FROM chat_messages WHERE sessionId IN (:sessionIds) ORDER BY sessionId ASC, position ASC")
+    suspend fun messagesForSessions(sessionIds: List<String>): List<ChatMessageEntity>
+
+    @Upsert
+    suspend fun upsertSessions(sessions: List<ChatSessionEntity>)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessages(messages: List<ChatMessageEntity>)
+
+    @Query("DELETE FROM chat_messages WHERE sessionId = :sessionId")
+    suspend fun deleteMessagesForSession(sessionId: String)
+
+    @Query("DELETE FROM chat_messages WHERE sessionId NOT IN (:sessionIds)")
+    suspend fun pruneMessages(sessionIds: List<String>)
 
     @Query("DELETE FROM chat_messages")
     suspend fun clearMessages()
 
     @Query("DELETE FROM chat_sessions")
     suspend fun clearSessions()
+
+    @Query("DELETE FROM chat_sessions WHERE id NOT IN (:sessionIds)")
+    suspend fun pruneSessions(sessionIds: List<String>)
 
     @Query("SELECT * FROM image_assets ORDER BY createdAt DESC")
     suspend fun images(): List<ImageAssetEntity>
@@ -821,7 +1173,7 @@ interface ChatSessionDao {
     @Query("SELECT * FROM knowledge_bases ORDER BY updatedAt DESC, name ASC")
     suspend fun knowledgeBases(): List<KnowledgeBaseEntity>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertKnowledgeBases(records: List<KnowledgeBaseEntity>)
 
     @Query("DELETE FROM knowledge_bases WHERE id = :knowledgeBaseId")
@@ -846,13 +1198,43 @@ interface ChatSessionDao {
         """
         SELECT knowledge_chunks.* FROM knowledge_chunks
         INNER JOIN knowledge_bases ON knowledge_bases.id = knowledge_chunks.knowledgeBaseId
+        INNER JOIN knowledge_documents
+            ON knowledge_documents.id = knowledge_chunks.documentId
+            AND knowledge_documents.knowledgeBaseId = knowledge_chunks.knowledgeBaseId
         WHERE knowledge_chunks.knowledgeBaseId IN (:knowledgeBaseIds)
-        ORDER BY knowledge_chunks.documentId ASC, knowledge_chunks.position ASC
+            AND (
+                :afterKnowledgeBaseId IS NULL
+                OR knowledge_chunks.knowledgeBaseId > :afterKnowledgeBaseId
+                OR (
+                    knowledge_chunks.knowledgeBaseId = :afterKnowledgeBaseId
+                    AND knowledge_chunks.documentId > :afterDocumentId
+                )
+                OR (
+                    knowledge_chunks.knowledgeBaseId = :afterKnowledgeBaseId
+                    AND knowledge_chunks.documentId = :afterDocumentId
+                    AND knowledge_chunks.position > :afterPosition
+                )
+                OR (
+                    knowledge_chunks.knowledgeBaseId = :afterKnowledgeBaseId
+                    AND knowledge_chunks.documentId = :afterDocumentId
+                    AND knowledge_chunks.position = :afterPosition
+                    AND knowledge_chunks.id > :afterId
+                )
+            )
+        ORDER BY
+            knowledge_chunks.knowledgeBaseId ASC,
+            knowledge_chunks.documentId ASC,
+            knowledge_chunks.position ASC,
+            knowledge_chunks.id ASC
         LIMIT :limit
         """
     )
-    suspend fun knowledgeChunksForBases(
+    suspend fun knowledgeChunkPageForBases(
         knowledgeBaseIds: List<String>,
+        afterKnowledgeBaseId: String?,
+        afterDocumentId: String?,
+        afterPosition: Int?,
+        afterId: String?,
         limit: Int
     ): List<KnowledgeChunkEntity>
 
@@ -865,7 +1247,16 @@ interface ChatSessionDao {
     @Query("DELETE FROM knowledge_chunks WHERE knowledgeBaseId = :knowledgeBaseId")
     suspend fun deleteKnowledgeChunksForBase(knowledgeBaseId: String)
 
-    @Query("SELECT knowledgeBaseId FROM chat_knowledge_base_bindings WHERE chatSessionId = :chatSessionId ORDER BY knowledgeBaseId ASC")
+    @Query(
+        """
+        SELECT chat_knowledge_base_bindings.knowledgeBaseId
+        FROM chat_knowledge_base_bindings
+        INNER JOIN chat_sessions ON chat_sessions.id = chat_knowledge_base_bindings.chatSessionId
+        INNER JOIN knowledge_bases ON knowledge_bases.id = chat_knowledge_base_bindings.knowledgeBaseId
+        WHERE chat_knowledge_base_bindings.chatSessionId = :chatSessionId
+        ORDER BY chat_knowledge_base_bindings.knowledgeBaseId ASC
+        """
+    )
     suspend fun knowledgeBaseIdsForChat(chatSessionId: String): List<String>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -885,6 +1276,12 @@ interface ChatSessionDao {
 
     @Query("SELECT COUNT(*) > 0 FROM knowledge_bases WHERE id = :knowledgeBaseId")
     suspend fun knowledgeBaseExists(knowledgeBaseId: String): Boolean
+
+    @Query("SELECT COUNT(*) > 0 FROM chat_sessions WHERE id = :chatSessionId")
+    suspend fun chatSessionExists(chatSessionId: String): Boolean
+
+    @Query("SELECT id FROM knowledge_bases WHERE id IN (:knowledgeBaseIds)")
+    suspend fun existingKnowledgeBaseIds(knowledgeBaseIds: List<String>): List<String>
 
     @Query(
         """
@@ -911,6 +1308,9 @@ interface ChatSessionDao {
                 updatedAt = session.updatedAt,
                 projectId = session.projectId,
                 assistantId = session.assistantId,
+                assistantSnapshot = AssistantConversationSnapshot.fromJsonOrNull(
+                    session.assistantSnapshotJson
+                ),
                 modelMode = session.modelMode,
                 modelId = session.modelId
             )
@@ -918,21 +1318,73 @@ interface ChatSessionDao {
 
     @Transaction
     suspend fun replaceAll(records: List<ChatSessionRecord>) {
-        clearMessages()
-        clearSessions()
+        reconcileSnapshot(ChatHistoryPersistenceBounds.bound(records))
+    }
+
+    /** Reconciles a full UI snapshot without deleting and recreating unchanged rows. */
+    @Transaction
+    suspend fun reconcileSnapshot(records: List<ChatSessionRecord>) {
         if (records.isEmpty()) {
+            clearMessages()
             clearKnowledgeBindings()
+            clearSessions()
             return
         }
-        insertSessions(records.map { it.toEntity() })
-        pruneKnowledgeBindings(records.map { it.id })
-        insertMessages(
-            records.flatMap { session ->
-                session.messages.mapIndexed { index, message ->
-                    message.toEntity(session.id, index)
+
+        val sessionEntities = records.map { it.toEntity() }
+        val liveSessionIds = sessionEntities.map { it.id }
+        val persistedSessionsById = sessions().associateBy { it.id }
+        val changedSessions = sessionEntities.filter { session ->
+            persistedSessionsById[session.id] != session
+        }
+        if (changedSessions.isNotEmpty()) {
+            upsertSessions(changedSessions)
+        }
+
+        val persistedMessagesBySession = messagesForSessions(liveSessionIds)
+            .groupBy { it.sessionId }
+        records.forEach { session ->
+            val desiredMessages = session.messages.mapIndexed { index, message ->
+                message.toEntity(session.id, index)
+            }
+            if (persistedMessagesBySession[session.id].orEmpty() != desiredMessages) {
+                deleteMessagesForSession(session.id)
+                if (desiredMessages.isNotEmpty()) {
+                    insertMessages(desiredMessages)
                 }
             }
-        )
+        }
+        // Chat messages predate Room foreign keys, so prune them explicitly.
+        pruneMessages(liveSessionIds)
+        pruneKnowledgeBindings(liveSessionIds)
+        pruneSessions(liveSessionIds)
+    }
+
+    /** Session snapshot plus binding writes used by the first-message path. */
+    @Transaction
+    suspend fun replaceAllWithKnowledgeBindings(
+        records: List<ChatSessionRecord>,
+        bindingSessionIds: List<String>,
+        bindings: List<ChatKnowledgeBaseBindingEntity>
+    ) {
+        val boundedRecords = ChatHistoryPersistenceBounds.bound(records)
+        reconcileSnapshot(boundedRecords)
+        if (boundedRecords.isEmpty() || bindingSessionIds.isEmpty()) return
+
+        val liveSessionIds = boundedRecords.mapTo(hashSetOf()) { it.id }
+        val bindingsBySession = bindings.groupBy { it.chatSessionId }
+        bindingSessionIds
+            .asSequence()
+            .filter { it in liveSessionIds }
+            .distinct()
+            .forEach { chatSessionId ->
+                replaceKnowledgeBindings(
+                    chatSessionId = chatSessionId,
+                    knowledgeBaseIds = bindingsBySession[chatSessionId]
+                        .orEmpty()
+                        .map { it.knowledgeBaseId }
+                )
+            }
     }
 
     @Transaction
@@ -997,6 +1449,11 @@ interface ChatSessionDao {
         document: KnowledgeDocumentEntity,
         chunks: List<KnowledgeChunkEntity>
     ) {
+        require(chunks.all { chunk ->
+            chunk.knowledgeBaseId == document.knowledgeBaseId && chunk.documentId == document.id
+        }) {
+            "Knowledge chunks must belong to the document and knowledge base being replaced."
+        }
         check(knowledgeBaseExists(document.knowledgeBaseId)) {
             "Knowledge base no longer exists."
         }
@@ -1010,12 +1467,13 @@ interface ChatSessionDao {
     @Transaction
     suspend fun deleteKnowledgeDocumentCompletely(
         documentId: String,
-        knowledgeBaseId: String,
         updatedAt: Long
     ) {
+        val document = knowledgeDocument(documentId) ?: return
+        if (!knowledgeBaseExists(document.knowledgeBaseId)) return
         deleteKnowledgeChunksForDocument(documentId)
         deleteKnowledgeDocument(documentId)
-        invalidateKnowledgeBaseIndex(knowledgeBaseId, updatedAt)
+        invalidateKnowledgeBaseIndex(document.knowledgeBaseId, updatedAt)
     }
 
     @Transaction
@@ -1028,10 +1486,25 @@ interface ChatSessionDao {
 
     @Transaction
     suspend fun replaceKnowledgeBindings(chatSessionId: String, knowledgeBaseIds: List<String>) {
+        require(knowledgeBaseIds.size <= MAX_KNOWLEDGE_BASE_IDS_PER_ROOM_OPERATION) {
+            "At most $MAX_KNOWLEDGE_BASE_IDS_PER_ROOM_OPERATION knowledge bases can be selected."
+        }
+        require(knowledgeBaseIds.all { it.isNotBlank() }) {
+            "Knowledge base IDs must not be blank."
+        }
+        val normalizedKnowledgeBaseIds = knowledgeBaseIds.distinct().sorted()
+        check(chatSessionExists(chatSessionId)) {
+            "Chat session no longer exists."
+        }
+        if (normalizedKnowledgeBaseIds.isNotEmpty()) {
+            check(existingKnowledgeBaseIds(normalizedKnowledgeBaseIds).toSet() == normalizedKnowledgeBaseIds.toSet()) {
+                "One or more knowledge bases no longer exist."
+            }
+        }
         deleteKnowledgeBindingsForChat(chatSessionId)
-        if (knowledgeBaseIds.isNotEmpty()) {
+        if (normalizedKnowledgeBaseIds.isNotEmpty()) {
             insertKnowledgeBindings(
-                knowledgeBaseIds.map { knowledgeBaseId ->
+                normalizedKnowledgeBaseIds.map { knowledgeBaseId ->
                     ChatKnowledgeBaseBindingEntity(
                         chatSessionId = chatSessionId,
                         knowledgeBaseId = knowledgeBaseId
@@ -1042,15 +1515,33 @@ interface ChatSessionDao {
     }
 
     @Transaction
-    suspend fun knowledgeChunksForBaseRecords(
+    suspend fun knowledgeChunkPageForBaseRecords(
         knowledgeBaseIds: List<String>,
+        afterKnowledgeBaseId: String?,
+        afterDocumentId: String?,
+        afterPosition: Int?,
+        afterId: String?,
         limit: Int
-    ): List<KnowledgeChunkRecord> =
-        if (knowledgeBaseIds.isEmpty() || limit <= 0) {
+    ): List<KnowledgeChunkRecord> {
+        val boundedKnowledgeBaseIds = knowledgeBaseIds.asSequence()
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(MAX_KNOWLEDGE_BASE_IDS_PER_ROOM_OPERATION)
+            .sorted()
+            .toList()
+        return if (boundedKnowledgeBaseIds.isEmpty() || limit <= 0) {
             emptyList()
         } else {
-            knowledgeChunksForBases(knowledgeBaseIds, limit).map { it.toRecord() }
+            knowledgeChunkPageForBases(
+                knowledgeBaseIds = boundedKnowledgeBaseIds,
+                afterKnowledgeBaseId = afterKnowledgeBaseId,
+                afterDocumentId = afterDocumentId,
+                afterPosition = afterPosition,
+                afterId = afterId,
+                limit = limit.coerceAtMost(MAX_KNOWLEDGE_CHUNKS_PER_ROOM_PAGE)
+            ).map { it.toRecord() }
         }
+    }
 }
 
 @Entity(tableName = "chat_sessions")
@@ -1062,6 +1553,7 @@ data class ChatSessionEntity(
     val updatedAt: Long,
     val projectId: String? = null,
     val assistantId: String? = null,
+    val assistantSnapshotJson: String? = null,
     val modelMode: String? = null,
     val modelId: String? = null
 )
@@ -1157,7 +1649,15 @@ data class KnowledgeBaseEntity(
 
 @Entity(
     tableName = "knowledge_documents",
-    indices = [Index("knowledgeBaseId"), Index("contentHash")]
+    indices = [Index("knowledgeBaseId"), Index("contentHash")],
+    foreignKeys = [
+        ForeignKey(
+            entity = KnowledgeBaseEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["knowledgeBaseId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ]
 )
 data class KnowledgeDocumentEntity(
     @PrimaryKey val id: String,
@@ -1173,7 +1673,21 @@ data class KnowledgeDocumentEntity(
 
 @Entity(
     tableName = "knowledge_chunks",
-    indices = [Index("knowledgeBaseId"), Index("documentId")]
+    indices = [Index("knowledgeBaseId"), Index("documentId")],
+    foreignKeys = [
+        ForeignKey(
+            entity = KnowledgeBaseEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["knowledgeBaseId"],
+            onDelete = ForeignKey.CASCADE
+        ),
+        ForeignKey(
+            entity = KnowledgeDocumentEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["documentId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ]
 )
 data class KnowledgeChunkEntity(
     @PrimaryKey val id: String,
@@ -1188,7 +1702,21 @@ data class KnowledgeChunkEntity(
 @Entity(
     tableName = "chat_knowledge_base_bindings",
     primaryKeys = ["chatSessionId", "knowledgeBaseId"],
-    indices = [Index("knowledgeBaseId")]
+    indices = [Index("knowledgeBaseId")],
+    foreignKeys = [
+        ForeignKey(
+            entity = ChatSessionEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["chatSessionId"],
+            onDelete = ForeignKey.CASCADE
+        ),
+        ForeignKey(
+            entity = KnowledgeBaseEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["knowledgeBaseId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ]
 )
 data class ChatKnowledgeBaseBindingEntity(
     val chatSessionId: String,
@@ -1219,6 +1747,75 @@ data class ChatMessageEntity(
     val webSearchTraceJson: String = "{}"
 )
 
+private const val SERIALIZED_ROW_OVERHEAD_BYTES = 16L
+private const val SERIALIZED_STRING_LENGTH_BYTES = 4L
+private const val SERIALIZED_NULL_FIELD_BYTES = 1L
+
+/**
+ * Counts persisted column payloads without allocating a UTF-8 byte array.
+ * The fixed overhead keeps the limit conservative with respect to Room row
+ * metadata while avoiding image attachment inline data, which is not stored.
+ */
+private fun ChatSessionEntity.serializedByteCount(): Long =
+    SERIALIZED_ROW_OVERHEAD_BYTES
+        .saturatingAdd(id.serializedFieldByteCount())
+        .saturatingAdd(title.serializedFieldByteCount())
+        .saturatingAdd(1L) // pinned
+        .saturatingAdd(1L) // manualTitle
+        .saturatingAdd(8L) // updatedAt
+        .saturatingAdd(projectId.nullableSerializedFieldByteCount())
+        .saturatingAdd(assistantId.nullableSerializedFieldByteCount())
+        .saturatingAdd(assistantSnapshotJson.nullableSerializedFieldByteCount())
+        .saturatingAdd(modelMode.nullableSerializedFieldByteCount())
+        .saturatingAdd(modelId.nullableSerializedFieldByteCount())
+
+private fun ChatMessageEntity.serializedByteCount(): Long =
+    SERIALIZED_ROW_OVERHEAD_BYTES
+        .saturatingAdd(sessionId.serializedFieldByteCount())
+        .saturatingAdd(4L) // position
+        .saturatingAdd(role.serializedFieldByteCount())
+        .saturatingAdd(content.serializedFieldByteCount())
+        .saturatingAdd(8L) // createdAt
+        .saturatingAdd(if (tokenCount == null) SERIALIZED_NULL_FIELD_BYTES else 5L)
+        .saturatingAdd(reasoningContent.serializedFieldByteCount())
+        .saturatingAdd(8L) // reasoningDurationMs
+        .saturatingAdd(imageAttachmentsJson.serializedFieldByteCount())
+        .saturatingAdd(sourceReferencesJson.serializedFieldByteCount())
+        .saturatingAdd(webSearchTraceJson.serializedFieldByteCount())
+
+private fun String.serializedFieldByteCount(): Long =
+    SERIALIZED_STRING_LENGTH_BYTES.saturatingAdd(serializedUtf8ByteCount())
+
+private fun String?.nullableSerializedFieldByteCount(): Long =
+    if (this == null) SERIALIZED_NULL_FIELD_BYTES else serializedFieldByteCount()
+
+private fun String.serializedUtf8ByteCount(): Long {
+    var total = 0L
+    var index = 0
+    while (index < length) {
+        val character = this[index]
+        val bytes = when {
+            character <= '\u007f' -> 1L
+            character <= '\u07ff' -> 2L
+            Character.isHighSurrogate(character) &&
+                index + 1 < length && Character.isLowSurrogate(this[index + 1]) -> {
+                index += 1
+                4L
+            }
+            else -> 3L
+        }
+        total = total.saturatingAdd(bytes)
+        index += 1
+    }
+    return total
+}
+
+private fun Long.saturatingAdd(value: Long): Long = when {
+    this < 0L || value < 0L -> Long.MAX_VALUE
+    this > Long.MAX_VALUE - value -> Long.MAX_VALUE
+    else -> this + value
+}
+
 private fun ChatSessionRecord.toEntity(): ChatSessionEntity =
     ChatSessionEntity(
         id = id,
@@ -1228,6 +1825,7 @@ private fun ChatSessionRecord.toEntity(): ChatSessionEntity =
         updatedAt = updatedAt,
         projectId = projectId,
         assistantId = assistantId,
+        assistantSnapshotJson = assistantSnapshot?.toJsonString(),
         modelMode = modelMode,
         modelId = modelId
     )

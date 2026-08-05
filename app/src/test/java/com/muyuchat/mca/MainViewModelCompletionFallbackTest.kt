@@ -259,16 +259,14 @@ class MainViewModelCompletionFallbackTest {
     }
 
     @Test
-    fun qairtCanaryReleasesMainProcessModelBeforeBindingWorker() {
+    fun qairtLoadUsesGenericEnginePathWithoutMandatoryDiagnosticCanary() {
         val body = functionBody(mainViewModelSource(), "fun loadModel(")
-        val canaryBranch = body.indexOf("if (shouldRunAutomaticQairtCanary")
-        val unload = body.indexOf("engine.unloadModel()", canaryBranch)
-        val worker = body.indexOf("QairtDryRunWorkerClient", canaryBranch)
+        val nativeLoad = body.indexOf("val nativeLoad = engine.loadModel(")
 
-        assertTrue(canaryBranch >= 0)
-        assertTrue(unload > canaryBranch)
-        assertTrue(worker > unload)
-        assertTrue(body.contains("restoreLoadedRuntimeSnapshot("))
+        assertTrue(nativeLoad >= 0)
+        assertTrue(body.contains("qairtBundleSha256 = qairtBundleSha256"))
+        assertFalse(body.contains("shouldRunAutomaticQairtCanary"))
+        assertFalse(body.contains("QairtDryRunWorkerClient"))
     }
 
     @Test

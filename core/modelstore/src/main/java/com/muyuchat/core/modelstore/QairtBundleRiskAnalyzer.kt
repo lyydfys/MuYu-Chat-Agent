@@ -27,10 +27,10 @@ data class QairtBundleRuntimeIdentity(
 }
 
 enum class QairtExecutionAdmissionMode {
-    /** A prior real-device smoke verified this exact bundle, chipset and runtime. */
+    /** A prior real-device diagnostic verified this exact bundle, chipset and runtime. */
     VERIFIED_ALLOW,
 
-    /** Attempt only in an isolated worker with a short create/generate/destroy smoke. */
+    /** A short isolated create/generate/destroy diagnostic is recommended. */
     ISOLATED_DRY_RUN
 }
 
@@ -47,8 +47,13 @@ data class QairtExecutionAdmission(
     val canAttempt: Boolean
         get() = true
 
-    val requiresIsolatedDryRun: Boolean
+    val recommendsIsolatedDryRun: Boolean
         get() = mode == QairtExecutionAdmissionMode.ISOLATED_DRY_RUN
+
+    /** Compatibility alias. This value is a diagnostic hint, never an admission requirement. */
+    @Deprecated("Diagnostic hint only; use recommendsIsolatedDryRun.")
+    val requiresIsolatedDryRun: Boolean
+        get() = recommendsIsolatedDryRun
 }
 
 data class QairtGraphMemoryProfile(
@@ -69,8 +74,7 @@ data class QairtGraphMemoryProfile(
     /**
      * Legacy compatibility hook. Static KV/RAM profiles are advisory only, so
      * callers must not use this method to reject a download or a load attempt.
-     * Use [admissionForDeviceMemory] to choose verified execution versus an
-     * isolated dry-run worker.
+     * Use [admissionForDeviceMemory] only for diagnostics and recommendations.
      */
     fun blockerForTotalRam(totalRamBytes: Long): String? {
         return null
@@ -79,18 +83,18 @@ data class QairtGraphMemoryProfile(
     /**
      * Legacy compatibility hook. It intentionally returns no blocker: memory
      * telemetry is too imprecise to turn a QAIRT package into an un-downloadable
-     * or un-runnable model. New callers should inspect [admissionForDeviceMemory]
-     * and launch unknown combinations in an isolated worker.
+     * or un-runnable model. New callers may inspect [admissionForDeviceMemory]
+     * to recommend an additional diagnostic.
      */
     fun blockerForDeviceMemory(totalRamBytes: Long, availableRamBytes: Long): String? {
         return null
     }
 
     /**
-     * Decides how to attempt QAIRT execution without treating model metadata or
-     * RAM as a static deny-list. Exact previously verified combinations are
-     * allowed normally; every other combination remains runnable through an
-     * isolated, short create/generate/destroy dry-run.
+     * Describes QAIRT diagnostic evidence without treating model metadata, RAM,
+     * or exact device identity as an admission list. Every structurally valid
+     * package remains runnable in the generic isolated worker; missing evidence
+     * only recommends an additional create/generate/destroy diagnostic.
      */
     fun admissionForDeviceMemory(
         totalRamBytes: Long,
@@ -109,7 +113,8 @@ data class QairtGraphMemoryProfile(
                 graphRisk = riskLevel,
                 memoryAdvisory = memoryAdvisory,
                 message = buildString {
-                    append("Verified QAIRT bundle/chipset/runtime combination may run. ")
+                    append("Prior QAIRT diagnostic evidence exists for this exact bundle/chipset/runtime. ")
+                    append("Normal inference remains governed by concrete native execution. ")
                     append(diagnosticSummary())
                     memoryAdvisory?.let { advisory -> append(". Advisory: ").append(advisory) }
                 }
@@ -120,9 +125,10 @@ data class QairtGraphMemoryProfile(
                 graphRisk = riskLevel,
                 memoryAdvisory = memoryAdvisory,
                 message = buildString {
-                    append("QAIRT bundle/chipset/runtime combination is not verified; ")
-                    append("run a short isolated create/generate/destroy dry-run before normal use. ")
-                    append("Static KV/RAM analysis is advisory and does not block download or execution. ")
+                    append("QAIRT bundle/chipset/runtime diagnostic evidence is not cached; ")
+                    append("an optional isolated create/generate/destroy diagnostic is recommended. ")
+                    append("Normal inference still uses the generic isolated worker, and concrete native execution decides compatibility. ")
+                    append("Static KV/RAM analysis is advisory and does not block download, load, or execution. ")
                     append(diagnosticSummary())
                     memoryAdvisory?.let { advisory -> append(". Advisory: ").append(advisory) }
                 }
@@ -137,12 +143,12 @@ data class QairtGraphMemoryProfile(
         append(", kvBytes=").append(estimatedKvInputBytes)
         append(", kvEstimate=").append(if (kvByteEstimateComplete) "complete" else "incomplete")
         append(", graphRisk=").append(riskLevel.name.lowercase())
-        append(", admission=isolated-dry-run-unless-exact-combination-verified")
+        append(", diagnostic=isolated-dry-run-recommended-unless-exact-combination-verified")
     }
 
     private fun memoryAdvisory(totalRamBytes: Long, availableRamBytes: Long): String? {
         if (totalRamBytes <= 0L || availableRamBytes <= 0L) {
-            return "Device memory telemetry is unavailable; use the isolated dry-run result instead of a static RAM decision."
+            return "Device memory telemetry is unavailable; rely on the concrete native attempt instead of a static RAM decision."
         }
         val requiredAvailableBytes = maxOf(
             MIN_AVAILABLE_RAM_BYTES,
@@ -153,7 +159,7 @@ data class QairtGraphMemoryProfile(
         )
         return if (availableRamBytes < requiredAvailableBytes) {
             "Available memory ($availableRamBytes bytes) is below the advisory native headroom " +
-                "($requiredAvailableBytes bytes); close background apps before the isolated dry-run."
+                "($requiredAvailableBytes bytes); close background apps before the native attempt."
         } else {
             null
         }

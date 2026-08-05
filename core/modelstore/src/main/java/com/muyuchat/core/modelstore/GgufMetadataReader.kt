@@ -33,7 +33,8 @@ object GgufMetadataReader {
                 fileType = null,
                 causalAttention = null,
                 poolingType = null,
-                contextLength = null
+                contextLength = null,
+                nextnPredictLayers = null
             )
         }
         return GgufMetadata(
@@ -44,7 +45,8 @@ object GgufMetadataReader {
             fileType = parsed.fileType,
             causalAttention = parsed.causalAttention,
             poolingType = parsed.poolingType,
-            contextLength = parsed.contextLength
+            contextLength = parsed.contextLength,
+            nextnPredictLayers = parsed.nextnPredictLayers
         )
     }
 
@@ -56,6 +58,7 @@ object GgufMetadataReader {
         val causalAttentionByArchitecture = mutableMapOf<String, Boolean>()
         val poolingTypeByArchitecture = mutableMapOf<String, Int>()
         val contextLengthByArchitecture = mutableMapOf<String, Int>()
+        val nextnPredictLayersByArchitecture = mutableMapOf<String, Int>()
 
         for (index in 0 until metadataCount.toInt()) {
             val key = input.readGgufString()
@@ -87,6 +90,13 @@ object GgufMetadataReader {
                         ?.toInt()
                         ?.let { contextLengthByArchitecture[owner] = it }
                 }
+                key.endsWith(NEXTN_PREDICT_LAYERS_SUFFIX) && type.isIntegerType() -> {
+                    val owner = key.removeSuffix(NEXTN_PREDICT_LAYERS_SUFFIX)
+                    input.readIntegerValue(type)
+                        .takeIf { it in 0L..MAX_NEXTN_PREDICT_LAYERS.toLong() }
+                        ?.toInt()
+                        ?.let { nextnPredictLayersByArchitecture[owner] = it }
+                }
                 else -> input.skipGgufValue(type)
             }
         }
@@ -97,6 +107,8 @@ object GgufMetadataReader {
             ?: poolingTypeByArchitecture.values.singleOrNull()
         val contextLength = architecture?.let(contextLengthByArchitecture::get)
             ?: contextLengthByArchitecture.values.singleOrNull()
+        val nextnPredictLayers = architecture?.let(nextnPredictLayersByArchitecture::get)
+            ?: nextnPredictLayersByArchitecture.values.singleOrNull()
 
         return ParsedGgufMetadata(
             architecture = architecture,
@@ -104,7 +116,8 @@ object GgufMetadataReader {
             fileType = fileType,
             causalAttention = causalAttention,
             poolingType = poolingType,
-            contextLength = contextLength
+            contextLength = contextLength,
+            nextnPredictLayers = nextnPredictLayers
         )
     }
 
@@ -285,7 +298,8 @@ object GgufMetadataReader {
         val fileType: Int?,
         val causalAttention: Boolean?,
         val poolingType: Int?,
-        val contextLength: Int?
+        val contextLength: Int?,
+        val nextnPredictLayers: Int?
     )
 
     private const val MAX_METADATA_KEYS = 4_096L
@@ -294,8 +308,10 @@ object GgufMetadataReader {
     private const val ATTENTION_CAUSAL_SUFFIX = ".attention.causal"
     private const val POOLING_TYPE_SUFFIX = ".pooling_type"
     private const val CONTEXT_LENGTH_SUFFIX = ".context_length"
+    private const val NEXTN_PREDICT_LAYERS_SUFFIX = ".nextn_predict_layers"
     private const val MIN_CONTEXT_LENGTH = 128
     private const val MAX_CONTEXT_LENGTH = 1_048_576
+    private const val MAX_NEXTN_PREDICT_LAYERS = 128
 
     private const val GGUF_TYPE_UINT8 = 0
     private const val GGUF_TYPE_INT8 = 1

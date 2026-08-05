@@ -861,6 +861,7 @@ class McaLoopbackServer(
         stream.collect { event ->
             captureGenerationSequence()
             when (event) {
+                is GenerateEvent.Phase -> finalStats = event.stats
                 is GenerateEvent.Chunk -> {
                     finalStats = event.stats
                     if (event.reasoning.isNotBlank()) {
@@ -924,6 +925,7 @@ class McaLoopbackServer(
                 }
             generationSequence?.let { LocalApiRuntime.recordGenerationSequence(requestId, it) }
             when (event) {
+                is GenerateEvent.Phase -> finalStats = event.stats
                 is GenerateEvent.Chunk -> {
                     finalStats = event.stats
                     if (event.text.isNotBlank()) builder.append(event.text)
@@ -1605,23 +1607,30 @@ class McaLoopbackServer(
                     "Content-Length must be a non-negative integer."
                 )
             }
-            if (parsed > MAX_REQUEST_BODY_BYTES.toLong()) {
+            val requestBodyLimit = requestBodyLimitFor(requestMethod, requestPath)
+            if (parsed > requestBodyLimit.toLong()) {
                 throw HttpRequestRejected(
                     "413 Payload Too Large",
                     "request_body_too_large",
-                    "Request body exceeds $MAX_REQUEST_BODY_BYTES bytes."
+                    "Request body exceeds $requestBodyLimit bytes."
                 )
             }
             parsed.toInt()
         } ?: 0
         val alreadyRead = raw.copyOfRange(bodyStart, raw.size)
-        val bodyBytes = ByteArray(contentLength)
         val copied = alreadyRead.size.coerceAtMost(contentLength)
-        alreadyRead.copyInto(bodyBytes, endIndex = copied)
+        val bodyBuffer = ByteArrayOutputStream(
+            contentLength.coerceAtMost(REQUEST_BODY_INITIAL_CAPACITY)
+        )
+        if (copied > 0) {
+            bodyBuffer.write(alreadyRead, 0, copied)
+        }
         var offset = copied
+        val readBuffer = ByteArray(REQUEST_BODY_READ_BUFFER_BYTES)
         while (offset < contentLength) {
-            val read = input.read(bodyBytes, offset, contentLength - offset)
+            val read = input.read(readBuffer, 0, minOf(readBuffer.size, contentLength - offset))
             if (read <= 0) break
+            bodyBuffer.write(readBuffer, 0, read)
             offset += read
         }
         if (offset != contentLength) {
@@ -1634,8 +1643,19 @@ class McaLoopbackServer(
         return HttpRequest(
             requestLine = requestLine,
             headers = headers,
-            body = String(bodyBytes.copyOf(offset), Charsets.UTF_8)
+            body = String(bodyBuffer.toByteArray(), Charsets.UTF_8)
         )
+    }
+
+    internal fun requestBodyLimitFor(method: String, path: String): Int {
+        val normalizedPath = path.substringBefore("?")
+        return when {
+            method.equals("POST", ignoreCase = true) && normalizedPath in IMAGE_GENERATION_PATHS ->
+                MAX_IMAGE_REQUEST_BODY_BYTES
+            method.equals("POST", ignoreCase = true) && normalizedPath in GENERATION_PATHS ->
+                MAX_CHAT_REQUEST_BODY_BYTES
+            else -> MAX_CONTROL_REQUEST_BODY_BYTES
+        }
     }
 
     private fun findHeaderEnd(bytes: ByteArray): Int {
@@ -1717,7 +1737,12 @@ class McaLoopbackServer(
         private val CRLFCRLF = byteArrayOf('\r'.code.toByte(), '\n'.code.toByte(), '\r'.code.toByte(), '\n'.code.toByte())
         private val LFLF = byteArrayOf('\n'.code.toByte(), '\n'.code.toByte())
         private const val MAX_HEADER_BYTES = 64 * 1024
-        private const val MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
+        /** Image generation compatibility limit retained from the original API. */
+        private const val MAX_IMAGE_REQUEST_BODY_BYTES = 64 * 1024 * 1024
+        private const val MAX_CHAT_REQUEST_BODY_BYTES = 8 * 1024 * 1024
+        private const val MAX_CONTROL_REQUEST_BODY_BYTES = 1 * 1024 * 1024
+        private const val REQUEST_BODY_INITIAL_CAPACITY = 16 * 1024
+        private const val REQUEST_BODY_READ_BUFFER_BYTES = 16 * 1024
         private const val CLIENT_READ_TIMEOUT_MS = 15_000
         private const val SERVER_BACKLOG = 128
         private const val TAG = "McaLoopbackServer"

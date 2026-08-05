@@ -167,6 +167,31 @@ std::string g_generation_stop_reason = "idle";
 #if MCA_WITH_MNN_LLM
 MNN::Transformer::Llm* g_llm = nullptr;
 
+struct MnnPromptCacheRuntimeState {
+    std::vector<MNN::Transformer::ChatMessage> committed_messages;
+    std::vector<MNN::Transformer::ChatMessage> request_messages;
+    size_t kv_history_before = 0;
+    size_t token_history_before = 0;
+    size_t token_history_after_prefill = 0;
+    size_t generation_history_start = 0;
+    int prefilled_tokens = 0;
+    int reused_tokens = 0;
+    bool request_active = false;
+    bool enabled = false;
+    bool hit = false;
+    bool committed = false;
+    bool rolled_back = false;
+    bool prefix_extended = false;
+    bool last_request_multimodal = false;
+    bool reset_before_next_text = false;
+    std::string state = "cold";
+    std::string reason = "model_not_loaded";
+};
+
+MnnPromptCacheRuntimeState g_mnn_prompt_cache;
+long long g_mnn_prompt_cache_hits = 0;
+long long g_mnn_prompt_cache_misses = 0;
+
 void append_mnn_debug_raw_output(const char* data, size_t size) {
     if (!g_mnn_debug_trace_enabled || data == nullptr || size == 0) return;
     constexpr size_t kMaxDebugRawOutputBytes = 384;
@@ -6702,6 +6727,224 @@ struct ParsedMnnChatMessages {
     }
 };
 
+bool mnn_chat_messages_prefix(
+        const std::vector<MNN::Transformer::ChatMessage>& prefix,
+        const std::vector<MNN::Transformer::ChatMessage>& messages) {
+    if (prefix.size() > messages.size()) return false;
+    for (size_t index = 0; index < prefix.size(); ++index) {
+        if (prefix[index].first != messages[index].first ||
+                prefix[index].second != messages[index].second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void clear_mnn_prompt_cache_tracking_locked(const std::string& reason) {
+    g_mnn_prompt_cache = MnnPromptCacheRuntimeState();
+    g_mnn_prompt_cache.state = "cold";
+    g_mnn_prompt_cache.reason = reason;
+}
+
+void reset_mnn_native_prompt_cache_locked() {
+    if (g_llm == nullptr) return;
+    // reset() clears both the vendor prompt text and the live KV sequence. It
+    // is used only for a text request after an invalidated session, or when a
+    // transaction cannot be rolled back to a known committed prefix. Never
+    // call it immediately before a multimodal response: Qwen visual exports
+    // have a separate executor lifetime contract.
+    g_llm->reset();
+    g_mnn_request_lifecycle.lastRequestReset = true;
+}
+
+size_t mnn_effective_kv_history_locked() {
+    if (g_llm == nullptr || g_llm->getContext() == nullptr) return 0;
+    return static_cast<size_t>(std::max(0, g_llm->getContext()->all_seq_len));
+}
+
+std::string mnn_prompt_cache_assistant_text_locked() {
+    if (g_llm == nullptr || g_llm->getContext() == nullptr) return {};
+    const auto* context = g_llm->getContext();
+    const size_t start = std::min(
+            g_mnn_prompt_cache.generation_history_start,
+            context->history_tokens.size());
+    std::string response;
+    for (size_t index = start; index < context->history_tokens.size(); ++index) {
+        const int token = context->history_tokens[index];
+        if (g_llm->is_stop(token)) continue;
+        response += g_llm->tokenizer_decode(token);
+    }
+    // Protocol stop markers are not necessarily tokenizer stop ids. Keep the
+    // cached transcript aligned with the visible stream by dropping anything
+    // from the first configured marker onward.
+    size_t markerEnd = std::string::npos;
+    for (const auto& marker : g_active_stop_markers) {
+        if (marker.empty()) continue;
+        const auto markerPos = response.find(marker);
+        if (markerPos != std::string::npos) {
+            markerEnd = std::min(markerEnd, markerPos);
+        }
+    }
+    if (markerEnd != std::string::npos) response.resize(markerEnd);
+    return response;
+}
+
+void mark_mnn_prompt_cache_disabled_locked(bool multimodal, const std::string& reason) {
+    g_mnn_prompt_cache = MnnPromptCacheRuntimeState();
+    g_mnn_prompt_cache.enabled = false;
+    g_mnn_prompt_cache.last_request_multimodal = multimodal;
+    g_mnn_prompt_cache.reset_before_next_text = multimodal;
+    g_mnn_prompt_cache.state = multimodal ? "disabled_multimodal" : "disabled";
+    g_mnn_prompt_cache.reason = reason;
+}
+
+void prepare_mnn_text_prompt_cache_locked(
+        const std::vector<MNN::Transformer::ChatMessage>& messages) {
+    if (g_mnn_prompt_cache.reset_before_next_text) {
+        reset_mnn_native_prompt_cache_locked();
+        g_mnn_prompt_cache.committed_messages.clear();
+        g_mnn_prompt_cache.reset_before_next_text = false;
+        g_mnn_prompt_cache.state = "cleared_after_invalidation";
+    }
+
+    const bool hasCommittedTranscript = !g_mnn_prompt_cache.committed_messages.empty();
+    const bool extendsCommittedTranscript = hasCommittedTranscript &&
+            mnn_chat_messages_prefix(g_mnn_prompt_cache.committed_messages, messages);
+    const size_t currentHistory = mnn_effective_kv_history_locked();
+    // A live KV sequence without a matching transcript is never eligible for
+    // reuse. This can occur after an interrupted multimodal request or an
+    // external clear-history action; clear it before accepting a text turn.
+    if (!hasCommittedTranscript && currentHistory > 0) {
+        reset_mnn_native_prompt_cache_locked();
+    }
+
+    g_mnn_prompt_cache.request_messages = messages;
+    g_mnn_prompt_cache.kv_history_before = mnn_effective_kv_history_locked();
+    g_mnn_prompt_cache.token_history_before =
+            g_llm != nullptr && g_llm->getContext() != nullptr
+            ? g_llm->getContext()->history_tokens.size()
+            : 0;
+    g_mnn_prompt_cache.token_history_after_prefill = 0;
+    g_mnn_prompt_cache.generation_history_start = 0;
+    g_mnn_prompt_cache.prefilled_tokens = 0;
+    g_mnn_prompt_cache.reused_tokens = 0;
+    g_mnn_prompt_cache.request_active = true;
+    g_mnn_prompt_cache.enabled = true;
+    g_mnn_prompt_cache.hit = false;
+    g_mnn_prompt_cache.committed = false;
+    g_mnn_prompt_cache.rolled_back = false;
+    g_mnn_prompt_cache.prefix_extended = extendsCommittedTranscript;
+    g_mnn_prompt_cache.last_request_multimodal = false;
+    g_mnn_prompt_cache.state = extendsCommittedTranscript ? "pending_hit" : "pending_miss";
+    g_mnn_prompt_cache.reason = extendsCommittedTranscript ? "prefix_candidate" : "cold_or_prefix_changed";
+}
+
+bool capture_mnn_text_prefill_locked(std::string& error) {
+    if (g_llm == nullptr || g_llm->getContext() == nullptr) {
+        error = "MNN text prefill produced no context.";
+        return false;
+    }
+    const auto* context = g_llm->getContext();
+    using MNN::Transformer::LlmStatus;
+    if (context->status == LlmStatus::INTERNAL_ERROR ||
+            context->status == LlmStatus::TIMEOUT ||
+            context->status == LlmStatus::NOT_LOADED) {
+        error = "MNN text prefill failed before decode.";
+        return false;
+    }
+    g_mnn_prompt_cache.token_history_after_prefill = context->history_tokens.size();
+    g_mnn_prompt_cache.generation_history_start = context->history_tokens.size();
+    g_mnn_prompt_cache.prefilled_tokens = std::max(0, context->prompt_len);
+    const size_t effectiveHistory = mnn_effective_kv_history_locked();
+    const size_t retained = effectiveHistory >
+                    static_cast<size_t>(g_mnn_prompt_cache.prefilled_tokens)
+            ? effectiveHistory -
+                    static_cast<size_t>(g_mnn_prompt_cache.prefilled_tokens)
+            : 0;
+    g_mnn_prompt_cache.reused_tokens = static_cast<int>(std::min<size_t>(
+            retained, static_cast<size_t>(std::numeric_limits<int>::max())));
+    g_mnn_prompt_cache.hit = g_mnn_prompt_cache.reused_tokens > 0;
+    g_mnn_prompt_cache.state = g_mnn_prompt_cache.hit ? "hit" : "miss";
+    g_mnn_prompt_cache.reason = g_mnn_prompt_cache.hit
+            ? "native_history_retained"
+            : (g_mnn_prompt_cache.prefix_extended ? "prefix_not_reused" : "cold_or_prefix_changed");
+    if (g_mnn_prompt_cache.hit) {
+        ++g_mnn_prompt_cache_hits;
+    } else {
+        ++g_mnn_prompt_cache_misses;
+    }
+    return true;
+}
+
+void commit_mnn_text_prompt_cache_locked(const std::string& reason) {
+    if (!g_mnn_prompt_cache.request_active || !g_mnn_prompt_cache.enabled || g_llm == nullptr) {
+        return;
+    }
+    auto committed = g_mnn_prompt_cache.request_messages;
+    const auto response = mnn_prompt_cache_assistant_text_locked();
+    if (!response.empty()) {
+        committed.emplace_back("assistant", response);
+    }
+    g_llm->syncPromptCache(committed);
+    g_mnn_prompt_cache.committed_messages = std::move(committed);
+    g_mnn_prompt_cache.request_messages.clear();
+    g_mnn_prompt_cache.request_active = false;
+    g_mnn_prompt_cache.committed = true;
+    g_mnn_prompt_cache.rolled_back = false;
+    g_mnn_prompt_cache.state = g_mnn_prompt_cache.hit ? "committed_hit" : "committed_miss";
+    g_mnn_prompt_cache.reason = reason;
+}
+
+void rollback_mnn_text_prompt_cache_locked(
+        const std::string& reason,
+        bool forceClear) {
+    if (!g_mnn_prompt_cache.request_active) return;
+    bool restored = false;
+    const bool canRestoreCommittedPrefix = !forceClear &&
+            g_mnn_prompt_cache.prefix_extended &&
+            g_mnn_prompt_cache.kv_history_before > 0 &&
+            !g_mnn_prompt_cache.committed_messages.empty() &&
+            g_llm != nullptr;
+    if (canRestoreCommittedPrefix) {
+        const size_t currentHistory = mnn_effective_kv_history_locked();
+        if (currentHistory >= g_mnn_prompt_cache.kv_history_before) {
+            if (currentHistory > g_mnn_prompt_cache.kv_history_before) {
+                g_llm->eraseHistory(g_mnn_prompt_cache.kv_history_before, 0);
+            }
+            g_llm->syncPromptCache(g_mnn_prompt_cache.committed_messages);
+            restored = true;
+        }
+    }
+    if (!restored) {
+        reset_mnn_native_prompt_cache_locked();
+        g_mnn_prompt_cache.committed_messages.clear();
+        g_mnn_prompt_cache.reset_before_next_text = false;
+    }
+    g_mnn_prompt_cache.request_messages.clear();
+    g_mnn_prompt_cache.request_active = false;
+    g_mnn_prompt_cache.committed = false;
+    g_mnn_prompt_cache.rolled_back = true;
+    g_mnn_prompt_cache.hit = false;
+    g_mnn_prompt_cache.state = restored ? "rolled_back" : "cleared_after_rollback";
+    g_mnn_prompt_cache.reason = reason;
+}
+
+void settle_mnn_text_prompt_cache_locked(const std::string& reason) {
+    if (!g_mnn_prompt_cache.request_active) return;
+    if (g_stop_requested || g_llm == nullptr || g_llm->getContext() == nullptr) {
+        rollback_mnn_text_prompt_cache_locked(reason, true);
+        return;
+    }
+    using MNN::Transformer::LlmStatus;
+    const auto status = g_llm->getContext()->status;
+    if (status == LlmStatus::USER_CANCEL || status == LlmStatus::INTERNAL_ERROR ||
+            status == LlmStatus::TIMEOUT || status == LlmStatus::NOT_LOADED) {
+        rollback_mnn_text_prompt_cache_locked(reason, true);
+        return;
+    }
+    commit_mnn_text_prompt_cache_locked(reason);
+}
+
 void collect_mnn_raw_media_tags_from_content(
         const json& content,
         mca::mnn::MnnRawMediaTags& tags) {
@@ -6912,7 +7155,11 @@ json build_mnn_config(const std::string& config_path, const std::string& params_
     config["power"] = "normal";
     config["use_mmap"] = opt_bool(params, "mmap", true);
     config["kvcache_mmap"] = opt_bool(params, "kvcache_mmap", true);
-    config["reuse_kv"] = false;
+    // The patched MNN ChatMessages path owns longest-common-prefix prompt
+    // reuse. Keep it enabled for the loaded text runtime; beginCompletion()
+    // switches it off for every request that carries media.
+    config["reuse_kv"] = true;
+    config["prompt_cache"] = true;
     // This bridge pre-fills in beginCompletion() and decodes one token per JNI call.
     // MNN's async default can leave the prefill output unreadable when the first
     // decode call arrives, producing a spurious immediate stop after a cold reload.
@@ -6981,7 +7228,11 @@ json build_mnn_config(const std::string& config_path, const std::string& params_
     // MNN runtime supports both modes and per-request A/B showed that silently
     // forcing no-thinking can materially change multimodal answer quality.
     config["async"] = false;
-    config["reuse_kv"] = false;
+    // Do not allow an advanced override to silently disable the transaction
+    // contract. The request-level multimodal guard below is the only path that
+    // turns these flags off.
+    config["reuse_kv"] = true;
+    config["prompt_cache"] = true;
     // Apply after all user-controlled advanced config is merged.  The current
     // product has no audio attachment route, while Gemma 4's llm_config.json
     // advertises audio and MNN 3.6 crashes when that unused processor is
@@ -7051,6 +7302,9 @@ void destroy_llm_locked() {
     g_multimodal_system_prompt_suppressed = false;
     g_multimodal_history_suppressed = false;
     g_sync_stepping = true;
+    clear_mnn_prompt_cache_tracking_locked("model_unloaded");
+    g_mnn_prompt_cache_hits = 0;
+    g_mnn_prompt_cache_misses = 0;
     g_mnn_request_lifecycle.onModelUnloaded();
 }
 
@@ -7167,6 +7421,10 @@ void filter_mnn_stop_markers_locked(bool flush) {
         g_generation_stop_reason = g_stream_protocol_filter.stop_reason.empty()
                 ? "stop_marker"
                 : g_stream_protocol_filter.stop_reason;
+        // The protocol filter has observed a complete, successful stop marker.
+        // Commit the text transaction before the visible terminal chunk is
+        // drained; cancellation/error paths never enter this branch.
+        settle_mnn_text_prompt_cache_locked(g_generation_stop_reason);
     }
 }
 #endif
@@ -7177,14 +7435,20 @@ std::string stats_json_locked() {
     int64_t prefill_ms = 0;
     int64_t decode_ms = 0;
     int64_t ttft_ms = 0;
+    double prefill_tps = 0.0;
     double decode_tps = 0.0;
 #if MCA_WITH_MNN_LLM
     if (g_llm != nullptr && g_llm->getContext() != nullptr) {
         const auto* context = g_llm->getContext();
-        prompt_tokens = context->prompt_len;
+        prompt_tokens = g_mnn_prompt_cache.enabled
+                ? g_mnn_prompt_cache.reused_tokens + g_mnn_prompt_cache.prefilled_tokens
+                : context->prompt_len;
         completion_tokens = context->gen_seq_len;
         prefill_ms = context->prefill_us / 1000;
         decode_ms = context->decode_us / 1000;
+        if (prefill_ms > 0 && prompt_tokens > 0) {
+            prefill_tps = prompt_tokens * 1000.0 / prefill_ms;
+        }
         if (decode_ms > 0 && completion_tokens > 0) {
             decode_tps = completion_tokens * 1000.0 / decode_ms;
         }
@@ -7214,9 +7478,48 @@ std::string stats_json_locked() {
         << "\"visualModelPath\":\"" << escape_json(g_visual_model_path) << "\","
         << "\"promptTokens\":" << prompt_tokens << ","
         << "\"completionTokens\":" << completion_tokens << ","
+#if MCA_WITH_MNN_LLM
+        << "\"promptCache\":{"
+        << "\"enabled\":" << (g_mnn_prompt_cache.enabled ? "true" : "false") << ","
+        << "\"hit\":" << (g_mnn_prompt_cache.hit ? "true" : "false") << ","
+        << "\"reusedTokens\":" << g_mnn_prompt_cache.reused_tokens << ","
+        << "\"prefillTokens\":" << g_mnn_prompt_cache.prefilled_tokens << ","
+        << "\"prefixExtended\":" << (g_mnn_prompt_cache.prefix_extended ? "true" : "false") << ","
+        << "\"committed\":" << (g_mnn_prompt_cache.committed ? "true" : "false") << ","
+        << "\"multimodalDisabled\":"
+        << (g_mnn_prompt_cache.last_request_multimodal ? "true" : "false") << ","
+        << "\"state\":\"" << escape_json(g_mnn_prompt_cache.state) << "\","
+        << "\"reason\":\"" << escape_json(g_mnn_prompt_cache.reason) << "\"},"
+        // Flat aliases keep the status consumable by older diagnostics clients
+        // that do not yet parse the structured promptCache object.
+        << "\"promptCacheEnabled\":" << (g_mnn_prompt_cache.enabled ? "true" : "false") << ","
+        << "\"promptCacheHit\":" << (g_mnn_prompt_cache.hit ? "true" : "false") << ","
+        << "\"promptCacheReusedTokens\":" << g_mnn_prompt_cache.reused_tokens << ","
+        << "\"promptCachePrefillTokens\":" << g_mnn_prompt_cache.prefilled_tokens << ","
+        << "\"promptCacheState\":\"" << escape_json(g_mnn_prompt_cache.state) << "\","
+        << "\"promptCacheReason\":\"" << escape_json(g_mnn_prompt_cache.reason) << "\","
+        << "\"cacheReuse\":{"
+        << "\"hit\":" << (g_mnn_prompt_cache.hit ? "true" : "false") << ","
+        << "\"reusedTokens\":" << g_mnn_prompt_cache.reused_tokens << ","
+        << "\"hits\":" << g_mnn_prompt_cache_hits << ","
+        << "\"misses\":" << g_mnn_prompt_cache_misses << ","
+        << "\"reason\":\"" << escape_json(g_mnn_prompt_cache.reason) << "\"},"
+#else
+        << "\"promptCache\":{\"enabled\":false,\"hit\":false,\"reusedTokens\":0,"
+        << "\"prefillTokens\":0,\"state\":\"unavailable\",\"reason\":\"mnn_llm_not_linked\"},"
+        << "\"promptCacheEnabled\":false,"
+        << "\"promptCacheHit\":false,"
+        << "\"promptCacheReusedTokens\":0,"
+        << "\"promptCachePrefillTokens\":0,"
+        << "\"promptCacheState\":\"unavailable\","
+        << "\"promptCacheReason\":\"mnn_llm_not_linked\","
+        << "\"cacheReuse\":{\"hit\":false,\"reusedTokens\":0,\"hits\":0,\"misses\":0,"
+        << "\"reason\":\"mnn_llm_not_linked\"},"
+#endif
         << "\"generationSequence\":" << g_generation_sequence << ","
         << "\"ttftMs\":" << ttft_ms << ","
         << "\"prefillMs\":" << prefill_ms << ","
+        << "\"prefillTps\":" << prefill_tps << ","
         << "\"decodeMs\":" << decode_ms << ","
         << "\"decodeTps\":" << decode_tps << ","
         << "\"generationActive\":" << (g_generation_active ? "true" : "false") << ","
@@ -7447,11 +7750,25 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
         set_error("MNN beginCompletion requested before a model is loaded.");
         return kMnnInvalidState;
     }
+    bool requestHasMedia = false;
     try {
+        // A caller may start a replacement request after receiving the final
+        // visible chunk but before asking for the terminal null chunk. Settle
+        // that transaction first so its partial KV can never leak forward.
+        if (g_mnn_prompt_cache.request_active) {
+            if (g_generation_active && !g_stop_requested && context_finished_locked()) {
+                g_generation_active = false;
+                g_generation_stop_reason = generation_stop_reason_locked();
+                settle_mnn_text_prompt_cache_locked(g_generation_stop_reason);
+            } else {
+                rollback_mnn_text_prompt_cache_locked("superseded", true);
+            }
+        }
         const auto params = jstring_to_std(env, paramsJson);
         const auto parsed_params = json::parse(params, nullptr, false);
         configure_mnn_debug_trace_locked(parsed_params);
         const auto parsed = parse_chat_messages(jstring_to_std(env, messagesJson));
+        requestHasMedia = parsed.hasMediaInputs();
         auto config = build_mnn_config(g_model_path, params, false);
         const auto loaded_config = json::parse(g_loaded_config_json, nullptr, false);
         if (loaded_config.is_discarded() || !loaded_config.is_object()) {
@@ -7468,6 +7785,12 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
             set_error("MNN completion load signature mismatch; reload required. changed_fields=" + detail.str());
             return kMnnLoadSignatureMismatch;
         }
+        // Prompt/KV reuse is a text-only capability. A visual request uses the
+        // official multimodal response path and must not inherit stale text KV,
+        // even when the loaded package itself is capable of vision.
+        const bool textOnlyRequest = !parsed.hasMediaInputs();
+        config["reuse_kv"] = textOnlyRequest;
+        config["prompt_cache"] = textOnlyRequest;
         mca::mnn::applyProductMnnMultimodalRequestPolicy(
                 config,
                 parsed.hasMediaInputs(),
@@ -7495,6 +7818,13 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
         if (resetBeforeRequest) {
             g_llm->reset();
         }
+        if (textOnlyRequest) {
+            prepare_mnn_text_prompt_cache_locked(parsed.messages);
+        } else {
+            mark_mnn_prompt_cache_disabled_locked(
+                    true,
+                    "multimodal_request_requires_fresh_visual_prefill");
+        }
         g_llm->set_config(g_last_config_json);
         const bool completedSynchronously = begin_mnn_response(parsed);
         g_sync_stepping = !completedSynchronously;
@@ -7505,7 +7835,23 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
             // through an already-stopped filter and drop the whole answer.
             g_generation_active = false;
             g_generation_stop_reason = generation_stop_reason_locked();
+            if (requestHasMedia) {
+                // response(string) has already performed the visual request;
+                // invalidate any prior text transcript without calling reset()
+                // on the visual executor in this lifecycle boundary.
+                mark_mnn_prompt_cache_disabled_locked(
+                        true,
+                        "multimodal_completed_cache_cleared");
+            } else {
+                settle_mnn_text_prompt_cache_locked(g_generation_stop_reason);
+            }
         } else {
+            if (textOnlyRequest) {
+                std::string prefillError;
+                if (!capture_mnn_text_prefill_locked(prefillError)) {
+                    throw std::runtime_error(prefillError);
+                }
+            }
             filter_mnn_stop_markers_locked(false);
             restore_stepping_status_if_needed_locked();
         }
@@ -7516,6 +7862,11 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
     } catch (const std::exception& e) {
         g_generation_active = false;
         const std::string detail = e.what();
+        if (requestHasMedia) {
+            mark_mnn_prompt_cache_disabled_locked(true, "multimodal_begin_failed");
+        } else {
+            rollback_mnn_text_prompt_cache_locked("begin_failed", true);
+        }
         g_generation_stop_reason = detail.find("mnn_multimodal_prefill_failed") != std::string::npos
                 ? "prefill_failed"
                 : "begin_failed";
@@ -7523,6 +7874,11 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
         return kMnnBeginFailed;
     } catch (...) {
         g_generation_active = false;
+        if (requestHasMedia) {
+            mark_mnn_prompt_cache_disabled_locked(true, "multimodal_begin_failed");
+        } else {
+            rollback_mnn_text_prompt_cache_locked("begin_failed", true);
+        }
         g_generation_stop_reason = "begin_failed";
         set_error("MNN beginCompletion exception: unknown native error");
         return kMnnBeginFailed;
@@ -7556,6 +7912,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk(JNIEnv* en
     if (g_generated_steps >= g_max_new_tokens || context_finished_locked()) {
         g_generation_active = false;
         g_generation_stop_reason = generation_stop_reason_locked();
+        settle_mnn_text_prompt_cache_locked(g_generation_stop_reason);
         filter_mnn_stop_markers_locked(true);
         if (!g_pending_chunk.empty() || !g_pending_utf8_tail.empty()) {
             bool emitted = false;
@@ -7576,6 +7933,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk(JNIEnv* en
         if (context_finished_locked()) {
             g_generation_active = false;
             g_generation_stop_reason = generation_stop_reason_locked();
+            settle_mnn_text_prompt_cache_locked(g_generation_stop_reason);
             filter_mnn_stop_markers_locked(true);
             if (!g_pending_chunk.empty() || !g_pending_utf8_tail.empty()) {
                 bool emitted = false;
@@ -7587,10 +7945,12 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk(JNIEnv* en
         return utf8_to_jstring(env, "");
     } catch (const std::exception& e) {
         g_generation_active = false;
+        rollback_mnn_text_prompt_cache_locked("generate_failed", true);
         set_error(std::string("MNN generateNextChunk exception: ") + e.what());
         return nullptr;
     } catch (...) {
         g_generation_active = false;
+        rollback_mnn_text_prompt_cache_locked("generate_failed", true);
         set_error("MNN generateNextChunk exception: unknown native error");
         return nullptr;
     }
@@ -7602,9 +7962,20 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk(JNIEnv* en
 extern "C" JNIEXPORT void JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStop(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lock(g_mnn_mutex);
+#if MCA_WITH_MNN_LLM
+    if (g_generation_active && context_finished_locked()) {
+        g_generation_active = false;
+        g_generation_stop_reason = generation_stop_reason_locked();
+        settle_mnn_text_prompt_cache_locked(g_generation_stop_reason);
+        return;
+    }
+#endif
     g_stop_requested = true;
     g_generation_active = false;
     g_generation_stop_reason = "stop_requested";
+#if MCA_WITH_MNN_LLM
+    rollback_mnn_text_prompt_cache_locked("stop_requested", false);
+#endif
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -7618,12 +7989,16 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStopIfActive(JNIEnv*,
     if (g_generation_active && context_finished_locked()) {
         g_generation_active = false;
         g_generation_stop_reason = generation_stop_reason_locked();
+        settle_mnn_text_prompt_cache_locked(g_generation_stop_reason);
     }
 #endif
     if (!g_generation_active) return JNI_FALSE;
     g_stop_requested = true;
     g_generation_active = false;
     g_generation_stop_reason = "stop_requested";
+ #if MCA_WITH_MNN_LLM
+    rollback_mnn_text_prompt_cache_locked("stop_requested", false);
+ #endif
     return JNI_TRUE;
 }
 

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
 import com.muyuchat.core.modelstore.QairtBundleRuntimeIdentity
+import com.muyuchat.core.modelstore.QairtExecutionAdmissionMode
 import com.muyuchat.core.telemetry.MemorySnapshot
 import java.io.File
 import java.nio.file.Files
@@ -17,7 +18,7 @@ import org.junit.Test
 
 class QairtIsolatedDryRunAdmissionTest {
     @Test
-    fun unknownExactIdentityRequiresRealIsolatedCanaryBeforeNormalLoad() = runBlocking {
+    fun unknownExactIdentityDoesNotGateNormalLoadOrNativeExecution() = runBlocking {
         val bundle = qairtBundle()
         val identity = QairtBundleRuntimeIdentity(
             bundleSha256 = "qwen3-vl-4b-exact-bundle",
@@ -32,15 +33,17 @@ class QairtIsolatedDryRunAdmissionTest {
             verificationFile = File(bundle, "verifications.json")
         )
 
-        val normalAttempt = service.loadModel(
+        service.loadModel(
             modelPath = bundle.absolutePath,
             runtime = LocalChatRuntime.GENIEX_QAIRT,
             params = LoadParams(nCtx = 1024, nThreads = 4),
             qairtBundleSha256 = identity.bundleSha256
+        ).getOrThrow()
+        assertEquals(1, qairtRunner.loadCalls)
+        assertEquals(
+            QairtExecutionAdmissionMode.ISOLATED_DRY_RUN,
+            service.qairtExecutionAdmission?.mode
         )
-        assertTrue(normalAttempt.isFailure)
-        assertTrue(normalAttempt.exceptionOrNull() is QairtIsolatedDryRunRequiredException)
-        assertEquals(0, qairtRunner.loadCalls)
 
         service.loadModel(
             modelPath = bundle.absolutePath,
@@ -49,7 +52,7 @@ class QairtIsolatedDryRunAdmissionTest {
             qairtBundleSha256 = identity.bundleSha256,
             qairtExecutionPurpose = QairtExecutionPurpose.ISOLATED_DRY_RUN
         ).getOrThrow()
-        assertEquals(1, qairtRunner.loadCalls)
+        assertEquals(2, qairtRunner.loadCalls)
         // A handle alone never certifies the package.
         assertFalse(service.recordVerifiedQairtDryRun(identity.bundleSha256))
 
@@ -73,7 +76,40 @@ class QairtIsolatedDryRunAdmissionTest {
             params = LoadParams(nCtx = 1024, nThreads = 4),
             qairtBundleSha256 = identity.bundleSha256
         ).getOrThrow()
-        assertEquals(2, qairtRunner.loadCalls)
+        assertEquals(3, qairtRunner.loadCalls)
+    }
+
+    @Test
+    fun isolatedDiagnosticWithoutCompleteIdentityStillReachesNativeLoad() = runBlocking {
+        val bundle = qairtBundle()
+        val runner = FakeRunner(LocalChatRuntime.GENIEX_QAIRT)
+        val service = service(
+            qairtRunner = runner,
+            identity = null,
+            isolatedProcess = true,
+            verificationFile = File(bundle, "verifications.json")
+        )
+
+        service.loadModel(
+            modelPath = bundle.absolutePath,
+            runtime = LocalChatRuntime.GENIEX_QAIRT,
+            params = LoadParams(nCtx = 1024, nThreads = 4),
+            qairtBundleSha256 = null,
+            qairtExecutionPurpose = QairtExecutionPurpose.ISOLATED_DRY_RUN
+        ).getOrThrow()
+
+        assertEquals(1, runner.loadCalls)
+        runner.enqueue("diagnostic output")
+        assertTrue(
+            service.streamChat(
+                ChatRequest(
+                    messages = listOf(ChatMessage(Role.USER, "run diagnostic")),
+                    params = GenerationParams(nCtx = 1024, nPredict = 8, nThreads = 4)
+                )
+            ).toList().any { it is GenerateEvent.Done }
+        )
+        service.unloadModel()
+        assertFalse(service.recordVerifiedQairtDryRun(null))
     }
 
     @Test
@@ -103,7 +139,7 @@ class QairtIsolatedDryRunAdmissionTest {
 
     private fun service(
         qairtRunner: FakeRunner,
-        identity: QairtBundleRuntimeIdentity,
+        identity: QairtBundleRuntimeIdentity?,
         isolatedProcess: Boolean,
         verificationFile: File
     ): McaInferenceService = McaInferenceService(
@@ -116,7 +152,7 @@ class QairtIsolatedDryRunAdmissionTest {
             MemorySnapshot(totalMemKb = 16L * 1024L * 1024L, availMemKb = 8L * 1024L * 1024L)
         },
         qairtVerificationStoreOverride = QairtExecutionVerificationStore(verificationFile),
-        qairtIdentityProviderOverride = { requested -> identity.takeIf { it.bundleSha256 == requested } },
+        qairtIdentityProviderOverride = { requested -> identity?.takeIf { it.bundleSha256 == requested } },
         qairtDryRunProcessVerifierOverride = { isolatedProcess }
     )
 

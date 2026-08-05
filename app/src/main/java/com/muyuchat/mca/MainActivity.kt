@@ -65,6 +65,7 @@ import com.muyuchat.feature.chat.ImageUpscaleUiJob
 import com.muyuchat.feature.chat.ChatModelChoice
 import com.muyuchat.feature.chat.ChatUiState
 import com.muyuchat.feature.chat.KnowledgeBaseUiItem
+import com.muyuchat.feature.chat.WorldBookImportScope
 import com.muyuchat.feature.chat.WorldBookUiItem
 import com.muyuchat.feature.modelhub.ModelHubScreen
 import com.muyuchat.feature.modelhub.CloudApiUiState
@@ -91,6 +92,8 @@ import com.muyuchat.core.telemetry.SocFamily
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
+private const val PENDING_WORLD_BOOK_SCOPE_KEY = "pending_world_book_scope"
+
 internal fun existingImageModelChoiceIds(
     localModelIds: Iterable<String>,
     cloudImageModelIds: Iterable<String>
@@ -108,9 +111,13 @@ class MainActivity : ComponentActivity() {
     private var pendingChatExportSessionId: String? = null
     private var pendingVisionProjectorModelId: String? = null
     private var pendingKnowledgeBaseId: String? = null
+    private var pendingWorldBookImportScope: WorldBookScope = WorldBookScope.GLOBAL
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingWorldBookImportScope = WorldBookScope.fromWireName(
+            savedInstanceState?.getString(PENDING_WORLD_BOOK_SCOPE_KEY)
+        )
         lifecycle.addObserver(
             LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_STOP) {
@@ -128,7 +135,9 @@ class MainActivity : ComponentActivity() {
             if (uri != null) viewModel.importAssistantCardFile(uri.toString())
         }
         val worldBookImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) viewModel.importWorldBookFile(uri.toString())
+            val scope = pendingWorldBookImportScope
+            pendingWorldBookImportScope = WorldBookScope.GLOBAL
+            if (uri != null) viewModel.importWorldBookFile(uri.toString(), scope)
         }
         val knowledgeDocumentImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             val knowledgeBaseId = pendingKnowledgeBaseId
@@ -181,7 +190,12 @@ class MainActivity : ComponentActivity() {
                             arrayOf("image/png", "application/json", "text/json", "text/plain", "*/*")
                         )
                     },
-                    onImportWorldBookFile = {
+                    onImportWorldBookFile = { scope ->
+                        pendingWorldBookImportScope = when (scope) {
+                            WorldBookImportScope.GLOBAL -> WorldBookScope.GLOBAL
+                            WorldBookImportScope.ASSISTANT -> WorldBookScope.ASSISTANT
+                            WorldBookImportScope.CHAT -> WorldBookScope.CHAT
+                        }
                         worldBookImportLauncher.launch(
                             arrayOf("application/json", "text/json", "text/plain", "*/*")
                         )
@@ -213,6 +227,11 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(PENDING_WORLD_BOOK_SCOPE_KEY, pendingWorldBookImportScope.wireName)
+        super.onSaveInstanceState(outState)
+    }
 }
 @Composable
 private fun McaApp(
@@ -221,7 +240,7 @@ private fun McaApp(
     onImport: () -> Unit,
     onImportLocalImageModel: () -> Unit,
     onImportAssistantCardFile: () -> Unit,
-    onImportWorldBookFile: () -> Unit,
+    onImportWorldBookFile: (WorldBookImportScope) -> Unit,
     onImportKnowledgeDocument: (String) -> Unit,
     onAttachVisionProjector: (String) -> Unit,
     onExportDiagnostics: () -> Unit,
@@ -635,6 +654,9 @@ private fun McaApp(
                     activeConversationId = state.activeChatSessionId,
                     input = state.input,
                     isGenerating = state.isGenerating,
+                    generationPhase = state.generationPhase,
+                    generationTokenProgress = state.generationTokenProgress,
+                    promptContextUsage = state.promptContextUsage,
                     selectedModelId = if (state.selectedChatBackend == ChatBackend.CLOUD) {
                         state.selectedCloudChatModelId?.let { MainViewModel.CLOUD_MODEL_CHOICE_PREFIX + it }
                     } else {
@@ -706,6 +728,7 @@ private fun McaApp(
                 onExportConversation = onExportChatSession,
                 onRegenerate = viewModel::regenerateLastResponse,
                 onDeleteMessage = viewModel::deleteMessageAt,
+                onDeleteLastTurn = viewModel::deleteLastConversationTurn,
                 onUploadFile = viewModel::attachFile,
                 onUseImageAsset = viewModel::useImageAsset,
                 onDeleteImageAsset = viewModel::deleteImageAsset,
@@ -1080,6 +1103,8 @@ private fun McaApp(
                 onClearChatHistory = viewModel::clearChatHistory,
                 onClearImageLibrary = viewModel::clearImageLibrary,
                 onClearFileLibrary = viewModel::clearFileLibrary,
+                onPersistentPrefixCacheEnabledChanged = viewModel::setPersistentPrefixCacheEnabled,
+                onClearPersistentPrefixCache = viewModel::clearPersistentPrefixCache,
                 onSaveWebSearchSettings = { draft: WebSearchSettingsDraft ->
                     viewModel.saveWebSearchConfig(
                         enabled = draft.enabled,
@@ -1330,6 +1355,9 @@ private fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
     imageAssetBytes = images.sumOf { it.sizeBytes },
     fileAssetCount = files.size,
     fileAssetBytes = files.sumOf { it.sizeBytes },
+    persistentPrefixCacheEnabled = persistentPrefixCacheEnabled,
+    persistentPrefixCacheEntryCount = persistentPrefixCacheEntryCount,
+    persistentPrefixCacheBytes = persistentPrefixCacheBytes,
     statusMessage = statusMessage,
     webSearch = WebSearchSettingsUiState(
         enabled = webSearchConfig.enabled,
@@ -1425,6 +1453,7 @@ private fun MainUiState.toWebSearchTurnModeLabel(): String {
             else -> "手动"
         }
     }
+
 }
 
 internal fun ImageGenerationUiOptions.toLocalImagePreviewOptions(): LocalImagePreviewOptions? {

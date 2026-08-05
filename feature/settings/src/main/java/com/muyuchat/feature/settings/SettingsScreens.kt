@@ -86,6 +86,9 @@ data class SettingsUiState(
     val imageAssetBytes: Long = 0L,
     val fileAssetCount: Int = 0,
     val fileAssetBytes: Long = 0L,
+    val persistentPrefixCacheEnabled: Boolean = true,
+    val persistentPrefixCacheEntryCount: Int = 0,
+    val persistentPrefixCacheBytes: Long = 0L,
     val statusMessage: String? = null,
     val webSearch: WebSearchSettingsUiState = WebSearchSettingsUiState()
 )
@@ -194,6 +197,8 @@ fun SettingsHubScreen(
     onClearChatHistory: () -> Unit,
     onClearImageLibrary: () -> Unit,
     onClearFileLibrary: () -> Unit,
+    onPersistentPrefixCacheEnabledChanged: (Boolean) -> Unit,
+    onClearPersistentPrefixCache: () -> Unit,
     onSaveWebSearchSettings: (WebSearchSettingsDraft) -> Unit,
     onPreflightWebSearch: (WebSearchSettingsDraft) -> Unit,
     onTestWebSearch: (String, WebSearchSettingsDraft) -> Unit,
@@ -262,6 +267,8 @@ fun SettingsHubScreen(
                 onClearChatHistory = onClearChatHistory,
                 onClearImageLibrary = onClearImageLibrary,
                 onClearFileLibrary = onClearFileLibrary,
+                onPersistentPrefixCacheEnabledChanged = onPersistentPrefixCacheEnabledChanged,
+                onClearPersistentPrefixCache = onClearPersistentPrefixCache,
                 modifier = Modifier.weight(1f)
             )
             SettingsSection.SEARCH -> SearchSettingsScreen(
@@ -436,11 +443,14 @@ fun PrivacyDataScreen(
     onClearChatHistory: () -> Unit,
     onClearImageLibrary: () -> Unit,
     onClearFileLibrary: () -> Unit,
+    onPersistentPrefixCacheEnabledChanged: (Boolean) -> Unit,
+    onClearPersistentPrefixCache: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var confirmClearChats by rememberSaveable { mutableStateOf(false) }
     var confirmClearImages by rememberSaveable { mutableStateOf(false) }
     var confirmClearFiles by rememberSaveable { mutableStateOf(false) }
+    var confirmClearPersistentPrefixCache by rememberSaveable { mutableStateOf(false) }
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -468,6 +478,23 @@ fun PrivacyDataScreen(
                 title = "文件库索引",
                 primary = if (state.fileAssetCount > 0) "已索引 ${state.fileAssetCount} 个文件" else "暂无文件索引",
                 secondary = "上传的文本、Markdown、JSON、代码文件会保存为本机文本索引，便于从输入框重新添加到当前聊天。"
+            )
+        }
+        item {
+            PersistentPrefixCacheCard(
+                enabled = state.persistentPrefixCacheEnabled,
+                entryCount = state.persistentPrefixCacheEntryCount,
+                bytes = state.persistentPrefixCacheBytes,
+                confirmClear = confirmClearPersistentPrefixCache,
+                onEnabledChanged = onPersistentPrefixCacheEnabledChanged,
+                onRequestClear = {
+                    if (confirmClearPersistentPrefixCache) {
+                        confirmClearPersistentPrefixCache = false
+                        onClearPersistentPrefixCache()
+                    } else {
+                        confirmClearPersistentPrefixCache = true
+                    }
+                }
             )
         }
         item {
@@ -509,6 +536,57 @@ fun PrivacyDataScreen(
                     }
                 }
             )
+        }
+    }
+}
+
+@Composable
+private fun PersistentPrefixCacheCard(
+    enabled: Boolean,
+    entryCount: Int,
+    bytes: Long,
+    confirmClear: Boolean,
+    onEnabledChanged: (Boolean) -> Unit,
+    onRequestClear: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("持久化前缀缓存", fontWeight = FontWeight.Bold)
+                    Text(
+                        "在本机保存 llama.cpp 的前缀 KV 缓存，用于减少重复预填充。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = enabled, onCheckedChange = onEnabledChanged)
+            }
+            Text(
+                "缓存项 $entryCount 个 · 占用 ${formatBytes(bytes)}",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                "仅缓存固定的系统提示词和角色设定前缀，且只保存在本机；每次请求中的消息、附件和其他请求范围内容不会写入缓存。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            TextButton(
+                onClick = onRequestClear,
+                enabled = entryCount > 0,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(if (confirmClear) "确认清空前缀缓存" else "清空前缀缓存")
+            }
         }
     }
 }

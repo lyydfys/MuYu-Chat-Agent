@@ -133,10 +133,8 @@ class KnowledgeBaseStore(context: Context) {
     }
 
     fun deleteDocument(documentId: String) = runBlocking(Dispatchers.IO) {
-        val document = database.chatSessionDao().knowledgeDocument(documentId) ?: return@runBlocking
         database.chatSessionDao().deleteKnowledgeDocumentCompletely(
-            documentId = document.id,
-            knowledgeBaseId = document.knowledgeBaseId,
+            documentId = documentId,
             updatedAt = System.currentTimeMillis()
         )
     }
@@ -146,9 +144,20 @@ class KnowledgeBaseStore(context: Context) {
     }
 
     fun setSelectedKnowledgeBaseIds(chatSessionId: String, ids: Set<String>) = runBlocking(Dispatchers.IO) {
+        require(ids.size <= MAX_SELECTED_KNOWLEDGE_BASES) {
+            "At most $MAX_SELECTED_KNOWLEDGE_BASES knowledge bases can be selected."
+        }
+        require(ids.all { it.isNotBlank() }) {
+            "Knowledge base IDs must not be blank."
+        }
+        val boundedKnowledgeBaseIds = ids.asSequence()
+            .distinct()
+            .sorted()
+            .take(MAX_SELECTED_KNOWLEDGE_BASES)
+            .toList()
         database.chatSessionDao().replaceKnowledgeBindings(
             chatSessionId = chatSessionId,
-            knowledgeBaseIds = ids.distinct().sorted()
+            knowledgeBaseIds = boundedKnowledgeBaseIds
         )
     }
 
@@ -168,14 +177,31 @@ class KnowledgeBaseStore(context: Context) {
             .sorted()
             .take(MAX_SELECTED_KNOWLEDGE_BASES)
             .toList()
-        val candidates = runBlocking(Dispatchers.IO) {
-            database.chatSessionDao().knowledgeChunksForBaseRecords(
-                knowledgeBaseIds = boundedKnowledgeBaseIds,
-                limit = MAX_RETRIEVAL_CANDIDATE_CHUNKS
-            )
+        val ranked = runBlocking(Dispatchers.IO) {
+            var cursor: KnowledgeChunkRecord? = null
+            var topCandidates = emptyList<KnowledgeLexicalRetriever.RankedChunk>()
+
+            while (true) {
+                val page = database.chatSessionDao().knowledgeChunkPageForBaseRecords(
+                    knowledgeBaseIds = boundedKnowledgeBaseIds,
+                    afterKnowledgeBaseId = cursor?.knowledgeBaseId,
+                    afterDocumentId = cursor?.documentId,
+                    afterPosition = cursor?.position,
+                    afterId = cursor?.id,
+                    limit = RETRIEVAL_PAGE_SIZE
+                )
+                if (page.isEmpty()) break
+
+                topCandidates = KnowledgeLexicalRetriever.mergeTopRanked(
+                    existing = topCandidates,
+                    incoming = KnowledgeLexicalRetriever.rank(query, page),
+                    limit = MAX_RANKED_CANDIDATES
+                )
+                cursor = page.last()
+                if (page.size < RETRIEVAL_PAGE_SIZE) break
+            }
+            topCandidates
         }
-        val ranked = KnowledgeLexicalRetriever.rank(query, candidates)
-            .take(MAX_RANKED_CANDIDATES)
         var used = 0
         val selected = mutableListOf<KnowledgeChunkRecord>()
         val skipped = mutableListOf<String>()
@@ -229,7 +255,7 @@ class KnowledgeBaseStore(context: Context) {
         const val DEFAULT_TOKEN_BUDGET = 768
         const val MAX_RANKED_CANDIDATES = 64
         const val MAX_SELECTED_KNOWLEDGE_BASES = 32
-        const val MAX_RETRIEVAL_CANDIDATE_CHUNKS = 4_096
+        const val RETRIEVAL_PAGE_SIZE = 256
     }
 }
 
@@ -279,19 +305,34 @@ object KnowledgeChunker {
 object KnowledgeLexicalRetriever {
     data class RankedChunk(val chunk: KnowledgeChunkRecord, val score: Int)
 
+    private val rankedChunkOrder: Comparator<RankedChunk> =
+        compareByDescending<RankedChunk> { it.score }
+            .thenBy { it.chunk.documentId }
+            .thenBy { it.chunk.position }
+            .thenBy { it.chunk.id }
+
     fun rank(query: String, chunks: List<KnowledgeChunkRecord>): List<RankedChunk> {
         val queryTerms = terms(query)
         if (queryTerms.isEmpty()) return emptyList()
         return chunks.asSequence()
             .map { chunk -> RankedChunk(chunk, score(queryTerms, terms(chunk.content))) }
             .filter { it.score > 0 }
-            .sortedWith(
-                compareByDescending<RankedChunk> { it.score }
-                    .thenBy { it.chunk.documentId }
-                    .thenBy { it.chunk.position }
-            )
+            .sortedWith(rankedChunkOrder)
             .toList()
     }
+
+    fun mergeTopRanked(
+        existing: List<RankedChunk>,
+        incoming: List<RankedChunk>,
+        limit: Int
+    ): List<RankedChunk> =
+        if (limit <= 0) {
+            emptyList()
+        } else {
+            (existing + incoming)
+                .sortedWith(rankedChunkOrder)
+                .take(limit)
+        }
 
     fun terms(text: String): Set<String> {
         val normalized = Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase(Locale.ROOT)

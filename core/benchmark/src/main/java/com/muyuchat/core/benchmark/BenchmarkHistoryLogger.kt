@@ -44,10 +44,18 @@ data class BenchmarkHistoryRecord(
                 loadMs = optLong("loadMs"),
                 ttftMs = optLong("ttftMs"),
                 promptTokens = optInt("promptTokens"),
+                prefillMs = optLong("prefillMs"),
+                prefillTps = optDouble("prefillTps", 0.0)
+                    .takeIf(Double::isFinite)
+                    ?: 0.0,
                 genTokens = optInt("genTokens"),
                 decodeMs = optLong("decodeMs"),
                 decodeTps = optDouble("decodeTps"),
                 e2eTps = optDouble("e2eTps"),
+                cacheReuseHit = optBoolean("cacheReuseHit", false),
+                cacheReusedTokens = optInt("cacheReusedTokens"),
+                cacheReuseReason = optString("cacheReuseReason")
+                    .takeIf { it.isNotBlank() && it != "null" },
                 nativePssKb = optLong("nativePssKb"),
                 processRssKb = optLong("processRssKb"),
                 nativeHeapKb = optLong("nativeHeapKb"),

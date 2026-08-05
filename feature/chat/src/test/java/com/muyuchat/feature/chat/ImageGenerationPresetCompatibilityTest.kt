@@ -209,13 +209,12 @@ class ImageGenerationPresetCompatibilityTest {
             )
 
         assertEquals(
-            setOf(ImageGenerationPresetField.PROMPT, ImageGenerationPresetField.SIZE),
+            setOf(ImageGenerationPresetField.PROMPT),
             reusableTile(160)
         )
         assertEquals(
             setOf(
                 ImageGenerationPresetField.PROMPT,
-                ImageGenerationPresetField.SIZE,
                 ImageGenerationPresetField.ULTRAFIX
             ),
             reusableTile(192)

@@ -164,10 +164,19 @@ class RecommendationCatalogTest {
     fun collapsedTierShowsOnlyItsApprovedFirstModelWithoutReordering() {
         val catalog = catalogFor("SM8750")
 
-        assertEquals(listOf("qwen35_08b_q4"), collapsedRecommendationModels(catalog.lightChat).map { it.id })
-        assertEquals(listOf("qwen35_4b_q4"), collapsedRecommendationModels(catalog.mainChat).map { it.id })
-        assertEquals(listOf("qwen35_9b_q4"), collapsedRecommendationModels(catalog.qualityChat).map { it.id })
-        assertEquals(listOf("qwen3_vl_4b_qairt_w4a16"), collapsedRecommendationModels(catalog.npuChat).map { it.id })
+        assertEquals(
+            listOf("qwen35_08b_uncensored_mnn"),
+            collapsedRecommendationModels(catalog.lightChat).map { it.id }
+        )
+        assertEquals(
+            listOf("qwen35_4b_uncensored_mnn"),
+            collapsedRecommendationModels(catalog.mainChat).map { it.id }
+        )
+        assertEquals(
+            listOf("qwen35_9b_uncensored_mnn"),
+            collapsedRecommendationModels(catalog.qualityChat).map { it.id }
+        )
+        assertEquals(emptyList<String>(), collapsedRecommendationModels(catalog.npuChat).map { it.id })
         assertEquals(listOf(catalog.cpuImage.first().id), collapsedRecommendationModels(catalog.cpuImage).map { it.id })
         assertEquals(listOf("cyberrealistic_sd15_qnn228"), collapsedRecommendationModels(catalog.npuImageSd15).map { it.id })
         assertEquals(listOf("sdxl_base_qnn228"), collapsedRecommendationModels(catalog.npuImageSdxl).map { it.id })
@@ -184,7 +193,7 @@ class RecommendationCatalogTest {
 
     @Test
     fun gemma4TwentySixBCardStaysDownloadableAndPointsAtItsRealRepository() {
-        val gemma = recommendations.first { it.id == "google_gemma4_26b_a4b_iq2_xxs" }
+        val gemma = recommendations.first { it.id == "gemma4_26b_a4b_abliterated_gguf" }
         val access = recommendationDownloadAccess(gemma, "")
 
         assertTrue(catalogFor("").qualityChat.any { it.id == gemma.id })
@@ -192,14 +201,15 @@ class RecommendationCatalogTest {
         assertTrue(access.experimental)
         assertEquals("实验下载", recommendationDownloadCtaLabel(gemma, access.canDownload, access.experimental))
         assertEquals(
-            "https://hf-mirror.com/bartowski/google_gemma-4-26B-A4B-it-GGUF",
+            "https://hf-mirror.com/mradermacher/Huihui-gemma-4-26B-A4B-it-abliterated-GGUF",
             gemma.modelPageUrl
         )
     }
 
     @Test
     fun npuChatChipsetMatchIsAdvisoryAndNeverBlocksDownload() {
-        val qwenVl = recommendations.first { it.id == "qwen3_vl_4b_qairt_w4a16" }
+        val qwenVl = ModelScopeClient().recommendedModels()
+            .first { it.id == "qwen3_vl_4b_qairt_w4a16" }
 
         assertTrue(recommendationDownloadAccess(qwenVl, "SM8750").canDownload)
         assertTrue(recommendationDownloadAccess(qwenVl, "SM8550").canDownload)
@@ -218,9 +228,9 @@ class RecommendationCatalogTest {
 
     @Test
     fun recommendationCardPolicySeparatesHardwareAndEngineeringState() {
-        val qwen = recommendations.first { it.id == "qwen35_4b_q4" }
+        val qwen = ModelScopeClient().recommendedModels().first { it.id == "qwen35_2b_q4" }
 
-        assertEquals("硬件适配：建议 8GB+ · 适合本机", recommendationHardwareLine(qwen, "适合本机"))
+        assertEquals("硬件适配：建议 6GB+ · 适合本机", recommendationHardwareLine(qwen, "适合本机"))
         assertEquals(
             "验证状态：MNN 文本与图文链路已通过代表机型回归；兼容 ARM64 设备默认开放",
             recommendationVerificationLine(qwen, qairtVerified = false)
@@ -230,8 +240,9 @@ class RecommendationCatalogTest {
 
     @Test
     fun verifiedQairtCardsReflectTheCompletedEliteRegressions() {
-        val qwenVl = recommendations.first { it.id == "qwen3_vl_4b_qairt_w4a16" }
-        val qwenText = recommendations.first { it.id == "qwen3_4b_2507_qairt_w4a16" }
+        val allRecommendations = ModelScopeClient().recommendedModels()
+        val qwenVl = allRecommendations.first { it.id == "qwen3_vl_4b_qairt_w4a16" }
+        val qwenText = allRecommendations.first { it.id == "qwen3_4b_2507_qairt_w4a16" }
 
         assertEquals(
             "验证状态：当前设备冷态、连续图文、Local API 与取消恢复已通过",
@@ -288,20 +299,36 @@ class RecommendationCatalogTest {
 
     private fun assertCpuCatalog(catalog: RecommendationCatalog) {
         assertEquals(3, catalog.lightChat.size)
-        assertEquals(3, catalog.mainChat.size)
-        assertEquals(3, catalog.qualityChat.size)
-        assertEquals(9, catalog.lightChat.size + catalog.mainChat.size + catalog.qualityChat.size)
-        assertEquals(4, catalog.npuChat.size)
+        assertEquals(5, catalog.mainChat.size)
+        assertEquals(5, catalog.qualityChat.size)
+        assertEquals(13, catalog.lightChat.size + catalog.mainChat.size + catalog.qualityChat.size)
+        assertEquals(0, catalog.npuChat.size)
         assertEquals(
-            listOf("qwen35_08b_q4", "qwen35_2b_q4", "gemma4_e2b_iq4"),
+            listOf(
+                "qwen35_08b_uncensored_mnn",
+                "qwen35_2b_abliterated_gguf",
+                "gemma4_e2b_uncensored_gguf"
+            ),
             catalog.lightChat.map { it.id }
         )
         assertEquals(
-            listOf("qwen35_4b_q4", "minicpm_v46_q4", "gemma4_e4b_iq4"),
+            listOf(
+                "qwen35_4b_uncensored_mnn",
+                "qwen3_vl_4b_abliterated_gguf",
+                "qwen3_4b_2507_abliterated_gguf",
+                "minicpm_v46_abliterated_gguf",
+                "gemma4_e4b_uncensored_gguf"
+            ),
             catalog.mainChat.map { it.id }
         )
         assertEquals(
-            listOf("qwen35_9b_q4", "qwen35_35b_a3b_iq2_xxs", "google_gemma4_26b_a4b_iq2_xxs"),
+            listOf(
+                "qwen35_9b_uncensored_mnn",
+                "qwen3_8b_abliterated_gguf",
+                "qwen36_35b_a3b_abliterated_mnn",
+                "qwen25_vl_7b_abliterated_gguf",
+                "gemma4_26b_a4b_abliterated_gguf"
+            ),
             catalog.qualityChat.map { it.id }
         )
 

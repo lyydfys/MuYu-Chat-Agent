@@ -3,20 +3,26 @@ package com.muyuchat.mca
 import org.json.JSONObject
 
 /**
- * String-only Binder protocol for load-bound tuning probes.
+ * String-only Binder protocol for persisted load-bound probes.
  *
  * Requests intentionally contain only persisted transaction/model/profile identity. Prompts,
  * messages, sampling settings, model paths, and any user-authored data are forbidden at this
  * boundary; the worker owns a small set of compile-time canaries.
  */
 internal object TuningProbeWorkerProtocol {
-    private const val VERSION = 1
+    private const val VERSION = 2
     internal const val HARD_PROCESS_TIMEOUT_MS = 420_000L
     internal const val CLIENT_RUN_TIMEOUT_MS = 450_000L
+
+    enum class ProbeKind {
+        TUNING_CANDIDATE,
+        BOOTSTRAP_LOAD
+    }
 
     internal val requestKeys: Set<String> = setOf(
         "version",
         "requestId",
+        "probeKind",
         "transactionId",
         "identityKey",
         "modelId",
@@ -27,6 +33,7 @@ internal object TuningProbeWorkerProtocol {
 
     data class Request(
         val requestId: String,
+        val probeKind: ProbeKind,
         val transactionId: String,
         val identityKey: String,
         val modelId: String,
@@ -44,6 +51,7 @@ internal object TuningProbeWorkerProtocol {
 
     data class Result(
         val requestId: String,
+        val probeKind: ProbeKind,
         val transactionId: String,
         val identityKey: String,
         val modelId: String,
@@ -75,6 +83,7 @@ internal object TuningProbeWorkerProtocol {
     fun start(request: Request): String = JSONObject()
         .put("version", VERSION)
         .put("requestId", request.requestId)
+        .put("probeKind", request.probeKind.name)
         .put("transactionId", request.transactionId)
         .put("identityKey", request.identityKey)
         .put("modelId", request.modelId)
@@ -90,6 +99,7 @@ internal object TuningProbeWorkerProtocol {
         require(unexpected.isEmpty()) { "Tuning probe request contains forbidden fields: ${unexpected.sorted()}" }
         return Request(
             requestId = json.requiredString("requestId"),
+            probeKind = json.requiredProbeKind("probeKind"),
             transactionId = json.requiredString("transactionId"),
             identityKey = json.requiredString("identityKey"),
             modelId = json.requiredString("modelId"),
@@ -130,6 +140,7 @@ internal object TuningProbeWorkerProtocol {
     fun complete(result: Result): String = JSONObject()
         .put("version", VERSION)
         .put("requestId", result.requestId)
+        .put("probeKind", result.probeKind.name)
         .put("transactionId", result.transactionId)
         .put("identityKey", result.identityKey)
         .put("modelId", result.modelId)
@@ -154,8 +165,10 @@ internal object TuningProbeWorkerProtocol {
 
     fun parseComplete(raw: String): Result {
         val json = JSONObject(raw)
+        require(json.optInt("version", -1) == VERSION) { "Unsupported tuning worker protocol version." }
         return Result(
             requestId = json.requiredString("requestId"),
+            probeKind = json.requiredProbeKind("probeKind"),
             transactionId = json.requiredString("transactionId"),
             identityKey = json.requiredString("identityKey"),
             modelId = json.requiredString("modelId"),
@@ -205,6 +218,12 @@ internal object TuningProbeWorkerProtocol {
 
     private fun JSONObject.requiredObject(field: String): JSONObject =
         optJSONObject(field) ?: error("Missing $field object.")
+
+    private fun JSONObject.requiredProbeKind(field: String): ProbeKind {
+        val value = requiredString(field)
+        return runCatching { ProbeKind.valueOf(value) }
+            .getOrElse { throw IllegalArgumentException("Unknown tuning probe kind: $value", it) }
+    }
 
     private const val MAX_STAGE_CHARS = 96
     private const val MAX_CODE_CHARS = 96

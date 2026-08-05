@@ -12,12 +12,13 @@ class ChatSessionLegacyMigrationContractTest {
         val body = functionBody(source, "migrateLegacyJsonIfNeeded")
 
         val parseFailureReturn = body.indexOf("}.getOrElse { return emptyList() }")
-        val databaseWrite = body.indexOf("database.chatSessionDao().replaceAll(records)")
+        val databaseWrite = body.indexOf("database.chatSessionDao().replaceAll(boundedRecords)")
         val legacyRetirement = body.indexOf("legacyFile.delete()")
 
         assertTrue("Parse failures must return without retiring the source file", parseFailureReturn >= 0)
         assertTrue("Room persistence must happen after a successful parse", databaseWrite > parseFailureReturn)
         assertTrue("The source file must be retired only after Room persistence", legacyRetirement > databaseWrite)
+        assertTrue(body.contains("ChatHistoryPersistenceBounds.bound(records)"))
         assertFalse(body.contains("}.getOrElse {\n            emptyList()\n        }"))
     }
 

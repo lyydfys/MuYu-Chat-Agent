@@ -34,6 +34,10 @@ class ContextWindowAdmissionTest {
         assertEquals(ContextWindowAdmissionStatus.ACCEPTED, admission.status)
         assertSame(request, admission.request)
         assertEquals(0, admission.trimmedMessageCount)
+        assertEquals(
+            listOf(PromptMessageRetention(0, Role.USER, retained = true)),
+            admission.messageRetention
+        )
         assertTrue(admission.admittedUsage.estimatedTokens <= admission.limits.promptTokenLimit)
     }
 
@@ -56,6 +60,10 @@ class ContextWindowAdmissionTest {
         assertTrue(first.trimmedMessageCount >= 1)
         assertFalse(first.request.messages.any { it.content == oldUser })
         assertTrue(first.request.messages.any { it.role == Role.USER && it.content == latestUser })
+        assertEquals(request.messages.size, first.messageRetention.size)
+        assertEquals(first.trimmedMessageCount, first.messageRetention.count { !it.retained })
+        assertTrue(first.messageRetention.single { it.originalIndex == 3 }.retained)
+        assertFalse(first.messageRetention.single { it.originalIndex == 1 }.retained)
         assertEquals(64, first.budget.reservedOutputTokens)
         assertTrue(first.admittedUsage.estimatedTokens <= first.limits.promptTokenLimit)
     }

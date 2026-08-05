@@ -8,9 +8,12 @@ import com.muyuchat.core.telemetry.MemorySnapshot
 import com.muyuchat.core.telemetry.RuntimeMetrics
 import com.muyuchat.core.telemetry.SocDetector
 import com.muyuchat.core.telemetry.TelemetryLogger
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -42,6 +45,54 @@ data class LocalChatExecutionContext(
      */
     val visionDiagnosticSink: ((String, JSONObject) -> Unit)? = null
 )
+
+private data class NativeGpuOffloadEvidence(
+    val active: Boolean,
+    val allocationObserved: Boolean,
+    val executionObserved: Boolean,
+    val bytes: Long,
+    val layers: Int,
+    val layersKnown: Boolean,
+    val autoFallbackApplied: Boolean,
+    val autoFallbackReason: String?
+)
+
+/**
+ * Native allocation alone must never promote a runtime to GPU execution. This
+ * is the shared projection used by load, streaming, UI, and Local API stats.
+ */
+private fun nativeGpuOffloadEvidence(
+    nativeStats: JSONObject?,
+    fallback: RuntimeStats
+): NativeGpuOffloadEvidence {
+    if (nativeStats == null) {
+        return NativeGpuOffloadEvidence(
+            active = fallback.hasVerifiedGpuExecution,
+            allocationObserved = fallback.gpuOffloadAllocationObserved,
+            executionObserved = fallback.gpuOffloadExecutionObserved,
+            bytes = fallback.gpuOffloadBytes,
+            layers = fallback.gpuOffloadLayers,
+            layersKnown = fallback.gpuOffloadLayersKnown,
+            autoFallbackApplied = fallback.gpuAutoFallbackApplied,
+            autoFallbackReason = fallback.gpuAutoFallbackReason
+        )
+    }
+    val allocationObserved = nativeStats.optBoolean("gpuOffloadAllocationObserved", false)
+    val executionObserved = nativeStats.optBoolean("gpuOffloadExecutionObserved", false)
+    val active = nativeStats.optBoolean("gpuOffloadActive", false) &&
+        allocationObserved && executionObserved
+    return NativeGpuOffloadEvidence(
+        active = active,
+        allocationObserved = allocationObserved,
+        executionObserved = executionObserved,
+        bytes = nativeStats.optLong("gpuOffloadBytes", 0L).coerceAtLeast(0L),
+        layers = nativeStats.optInt("gpuOffloadLayers", 0),
+        layersKnown = nativeStats.optBoolean("gpuOffloadLayersKnown", false),
+        autoFallbackApplied = nativeStats.optBoolean("gpuAutoFallbackApplied", false),
+        autoFallbackReason = nativeStats.optString("gpuAutoFallbackReason")
+            .takeIf { it.isNotBlank() }
+    )
+}
 
 /** Opaque, engine-owned exclusive lifecycle lease used by formal candidate evaluation. */
 class EngineLifecycleLease internal constructor(
@@ -81,8 +132,15 @@ class McaInferenceService(
     qairtDryRunProcessVerifierOverride: (() -> Boolean)? = null,
     private val parameterCoordinator: ParameterCoordinator = ParameterCoordinator(),
     installationScopeId: String? = null,
-    private val deviceClockContextProvider: DeviceClockContextProvider = DeviceClockContextProvider()
+    private val deviceClockContextProvider: DeviceClockContextProvider = DeviceClockContextProvider(),
+    persistentPrefixCacheStoreOverride: PersistentPrefixCacheStore? = null,
+    private val prefillProgressPollIntervalMs: Long = PREFILL_PROGRESS_POLL_INTERVAL_MS
 ) {
+    init {
+        require(prefillProgressPollIntervalMs > 0L) {
+            "prefillProgressPollIntervalMs must be positive."
+        }
+    }
     private val runners: Map<LocalChatRuntime, LocalChatRunner> =
         runners ?: defaultLocalChatRunners(context.applicationContext)
     private val mutex = Mutex()
@@ -92,6 +150,16 @@ class McaInferenceService(
     private val parameterInstallationScopeId = installationScopeId
         ?.takeIf { it.isNotBlank() }
         ?: "process-local:${UUID.randomUUID()}"
+    private val persistentPrefixCacheStore: PersistentPrefixCacheStore by lazy {
+        persistentPrefixCacheStoreOverride ?: PersistentPrefixCacheStore(
+            rootDirectory = runCatching { appContext.noBackupFilesDir }
+                .getOrNull()
+                ?.let { File(it, "mca_llama_prefix_cache/v1") }
+                // Unit-test Context wrappers may not implement noBackupFilesDir;
+                // production Android always takes the no-backup branch above.
+                ?: File(appContext.filesDir, "mca_llama_prefix_cache/v1")
+        )
+    }
     private val qairtVerificationStore = qairtVerificationStoreOverride
         ?: QairtExecutionVerificationStore.forContext(appContext)
     private val qairtIdentityProvider: (String?) -> QairtBundleRuntimeIdentity? =
@@ -106,20 +174,44 @@ class McaInferenceService(
     @Volatile
     private var lastQairtExecutionAdmission: QairtExecutionAdmission? = null
     private var qairtDryRunWitness: QairtDryRunWitness? = null
+    @Volatile
+    private var persistentPrefixCacheEnabled = true
     // A failed or cancelled MNN turn can leave native state unsafe to reuse.
     // Most successful text turns are reset in native beginCompletion(); the
     // narrow Gemma 4 text-isolation exception is selected by
     // MnnSessionLifecyclePolicy after a successful turn.
     private var mnnSessionNeedsReloadBeforeNextRequest = false
+    private var isolatedWorkerSessionNeedsReload = false
 
     val stats = _stats.asStateFlow()
 
     /**
-     * Latest QAIRT admission decision. Unknown bundle/device/runtime combinations
-     * stay runnable, but must be promoted only after their isolated dry-run.
+     * Latest QAIRT diagnostic recommendation. Unknown bundle/device/runtime
+     * combinations remain runnable; this value never admits or rejects a load.
      */
     val qairtExecutionAdmission: QairtExecutionAdmission?
         get() = lastQairtExecutionAdmission
+
+    /**
+     * Lists only aggregate usage of the app-private llama.cpp prefix cache.
+     * Cache keys and persisted KV content intentionally stay private to the engine.
+     */
+    fun persistentPrefixCacheSummary(): PersistentPrefixCacheSummary =
+        runCatching { persistentPrefixCacheStore.summary() }
+            .getOrDefault(PersistentPrefixCacheSummary(entryCount = 0, totalBytes = 0L))
+
+    /**
+     * Enables or disables future persisted llama.cpp prefix state. Disabling
+     * also prevents an already-running prefill from publishing its staging file.
+     */
+    fun setPersistentPrefixCacheEnabled(enabled: Boolean) {
+        persistentPrefixCacheEnabled = enabled
+    }
+
+    /** Clears persisted fixed-prefix state. The caller owns any live-context invalidation. */
+    suspend fun clearPersistentPrefixCache(): Boolean = withContext(io) {
+        runCatching { persistentPrefixCacheStore.clear() }.getOrDefault(false)
+    }
 
     /**
      * Debug/validation tooling calls this only after an isolated QAIRT smoke has
@@ -368,8 +460,6 @@ class McaInferenceService(
             requireQairtExecutionPurpose(
                 runtime = runtime,
                 purpose = qairtExecutionPurpose,
-                bundleSha256 = qairtBundleSha256,
-                admission = admission
             )
             // Selecting an already healthy MNN model is an idempotent UI action.
             // Avoiding a pointless native unload/load is essential for Gemma,
@@ -456,13 +546,6 @@ class McaInferenceService(
                 ) {
                     val identity = qairtIdentityProvider(qairtBundleSha256)
                         ?.takeIf(QairtBundleRuntimeIdentity::isComplete)
-                        ?: run {
-                            runCatching { runner.requestStop() }
-                            runCatching { runner.unloadModel() }
-                            parameterCoordinator.markUnloaded()
-                            activeLoadSession = null
-                            error("QAIRT 隔离安全启动缺少完整模型包哈希、芯片或运行时身份。")
-                        }
                     val nativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
                     if (nativeStats == null || !hasQairtNpuExecutionEvidence(nativeStats)) {
                         runCatching { runner.requestStop() }
@@ -480,11 +563,16 @@ class McaInferenceService(
                         )
                         error("QAIRT 隔离安全启动未取得 NPU 执行证据。")
                     }
-                    qairtDryRunWitness = QairtDryRunWitness(
-                        identity = identity,
-                        sawNpuExecution = true,
-                        npuEvidence = nativeStats.opt("backendDevices")?.toString().orEmpty()
-                    )
+                    // A missing diagnostic identity must not stop a concrete
+                    // native smoke. It only means this result cannot be cached
+                    // as reusable verification evidence.
+                    qairtDryRunWitness = identity?.let {
+                        QairtDryRunWitness(
+                            identity = it,
+                            sawNpuExecution = true,
+                            npuEvidence = nativeStats.opt("backendDevices")?.toString().orEmpty()
+                        )
+                    }
                 }
                 if (runtime.usesCoordinatedParameters()) {
                     runCatching {
@@ -511,6 +599,7 @@ class McaInferenceService(
                     nativeLoadParamsJson = nativeLoadParamsJson
                 )
                 mnnSessionNeedsReloadBeforeNextRequest = false
+                isolatedWorkerSessionNeedsReload = false
                 _stats.value = stats
                 stats
             }
@@ -532,8 +621,26 @@ class McaInferenceService(
             }
             activeLoadSession = null
             mnnSessionNeedsReloadBeforeNextRequest = false
+            isolatedWorkerSessionNeedsReload = false
             lastQairtExecutionAdmission = null
             _stats.value = RuntimeStats(loaded = false, backend = activeRuntime.backendId)
+        }
+    }
+
+    /**
+     * Discards text KV/checkpoint state after a user edits, removes, or switches
+     * a conversation. The operation is serialized with generation so a later
+     * request can never continue from the removed history.
+     */
+    suspend fun invalidateConversationContext() = withContext(io) {
+        mutex.withLock {
+            if (!_stats.value.loaded) return@withLock
+            runnerFor(activeRuntime).invalidateConversationContext()
+            // MNN does not expose a compatible token-level KV rollback API.
+            // Its next text turn therefore reloads through the existing safe path.
+            if (activeRuntime == LocalChatRuntime.MNN_CPU) {
+                mnnSessionNeedsReloadBeforeNextRequest = true
+            }
         }
     }
 
@@ -547,6 +654,21 @@ class McaInferenceService(
         try {
             withLifecycleLock(executionContext.lifecycleLease) lifecycle@ {
             var current = _stats.value
+            if (activeLoadSession != null &&
+                (isolatedWorkerSessionNeedsReload || isolatedWorkerSessionLostLocked())
+            ) {
+                emit(GenerateEvent.Phase(GenerationPhase.LOAD, current))
+                val reloadError = reloadActiveSessionForNextRequestLocked(
+                    SessionReloadReason.WORKER_SESSION_LOST
+                )
+                if (reloadError != null) {
+                    val errorStats = _stats.value.copy(lastError = reloadError)
+                    _stats.value = errorStats
+                    emit(GenerateEvent.Error(reloadError, errorStats))
+                    return@lifecycle
+                }
+                current = _stats.value
+            }
             if (!current.loaded) {
                 val errorStats = current.copy(lastError = "No local chat model is loaded.")
                 emit(GenerateEvent.Error("请先在模型页加载一个本地推理模型。", errorStats))
@@ -593,7 +715,10 @@ class McaInferenceService(
 
             val incomingHasImageAttachments = contextSafeRequest.hasImageAttachments()
             if (activeRuntime == LocalChatRuntime.MNN_CPU && mnnSessionNeedsReloadBeforeNextRequest) {
-                val reloadError = reloadActiveMnnSessionForNextRequestLocked()
+                emit(GenerateEvent.Phase(GenerationPhase.LOAD, _stats.value))
+                val reloadError = reloadActiveSessionForNextRequestLocked(
+                    SessionReloadReason.MNN_CONTEXT_RESET
+                )
                 if (reloadError != null) {
                     val errorStats = _stats.value.copy(lastError = reloadError)
                     _stats.value = errorStats
@@ -639,6 +764,7 @@ class McaInferenceService(
                     )
                     val reloadError = when (decision) {
                         is MismatchRecoveryDecision.ReloadAuthorizedPending -> {
+                            emit(GenerateEvent.Phase(GenerationPhase.LOAD, _stats.value))
                             pendingRollbackContext = pendingRollbackContext ?: PendingRollbackContext(
                                 baseSession = session,
                                 authorization = decision.transaction.authorization
@@ -650,8 +776,10 @@ class McaInferenceService(
                                 commitAfterLoad = false
                             )
                         }
-                        is MismatchRecoveryDecision.ReloadCommittedForDrift ->
+                        is MismatchRecoveryDecision.ReloadCommittedForDrift -> {
+                            emit(GenerateEvent.Phase(GenerationPhase.LOAD, _stats.value))
                             reloadCoordinatedProfileLocked(session, decision.profile, null, false)
+                        }
                         is MismatchRecoveryDecision.Fail -> decision.message
                     }
                     if (reloadError != null) {
@@ -739,21 +867,127 @@ class McaInferenceService(
             val started = System.currentTimeMillis()
             val hasImageAttachments = activeRequest.hasImageAttachments()
             val shouldRefreshMnnAfterRequest = activeRuntime == LocalChatRuntime.MNN_CPU
-            suspend fun beginNative(paramsJson: String): Result<Int> = runCatching {
-                withContext(io) {
-                    runner.beginCompletion(
-                        activeRequest.messagesJson(
-                            multimodal = hasImageAttachments,
-                            contentEncoding = if (activeRuntime == LocalChatRuntime.MNN_CPU) {
-                                MultimodalContentEncoding.MNN_IMAGE_TAGS_FIRST
-                            } else {
-                                MultimodalContentEncoding.OPENAI_PARTS
-                            }
-                        ),
-                        paramsJson
+            var activePersistentPrefix: PreparedPersistentPrefix? = null
+            var managedPersistentPrefixFailure: ManagedPersistentPrefixFailure? = null
+            var exactPrefillPhaseEmitted = false
+            suspend fun emitTokenizePhase() {
+                emit(GenerateEvent.Phase(GenerationPhase.TOKENIZE, _stats.value))
+            }
+            suspend fun beginNative(paramsJson: String): Result<Int> {
+                var downstreamPrefillEmissionFailed = false
+                return try {
+                    activePersistentPrefix?.let { previous ->
+                        withContext(NonCancellable + io) {
+                            discardPersistentPrefix(previous)
+                            if (activePersistentPrefix === previous) activePersistentPrefix = null
+                        }
+                    }
+                    val persistentPrefix = withContext(NonCancellable + io) {
+                        preparePersistentPrefix(
+                            request = activeRequest,
+                            preparedParameters = preparedParameters,
+                            paramsJson = paramsJson,
+                            hasImageAttachments = hasImageAttachments
+                        ).also { activePersistentPrefix = it }
+                    }
+                    val messagesJson = activeRequest.messagesJson(
+                        multimodal = hasImageAttachments,
+                        contentEncoding = if (activeRuntime == LocalChatRuntime.MNN_CPU) {
+                            MultimodalContentEncoding.MNN_IMAGE_TAGS_FIRST
+                        } else {
+                            MultimodalContentEncoding.OPENAI_PARTS
+                        }
                     )
+                    exactPrefillPhaseEmitted = false
+                    var lastPrefillProgress: TokenProgress? = null
+                    suspend fun emitExactPrefillProgress(progress: TokenProgress) {
+                        try {
+                            emit(
+                                GenerateEvent.Phase(
+                                    phase = GenerationPhase.PREFILL,
+                                    stats = _stats.value,
+                                    tokenProgress = progress
+                                )
+                            )
+                        } catch (error: Throwable) {
+                            downstreamPrefillEmissionFailed = true
+                            throw error
+                        }
+                        exactPrefillPhaseEmitted = true
+                        lastPrefillProgress = progress
+                    }
+                    val resultCode =
+                        coroutineScope {
+                            // A previous request leaves its final 100% snapshot
+                            // available for diagnostics. Clear it before this
+                            // request starts so polling can never attribute that
+                            // completed work to a new prompt.
+                            runCatching {
+                                withContext(io) { runner.resetPrefillProgress() }
+                            }
+                            val nativeBegin = async(io) {
+                                if (persistentPrefix == null) {
+                                    runner.beginCompletion(messagesJson, paramsJson)
+                                } else {
+                                    runner.beginCompletionWithPrefixCache(
+                                        messagesJson = messagesJson,
+                                        paramsJson = paramsJson,
+                                        prefixCache = persistentPrefix.request
+                                    )
+                                }
+                            }
+                            var nativeResult: Int? = null
+                            while (nativeResult == null) {
+                                // Isolated text runners obtain this snapshot through Binder.
+                                // Keep that IPC off the caller/UI dispatcher while
+                                // native prefill runs in the worker process.
+                                val progress = withContext(io) { runner.prefillProgress() }
+                                if (progress != null && progress != lastPrefillProgress) {
+                                    emitExactPrefillProgress(progress)
+                                }
+                                // Do not impose one polling interval of TTFT
+                                // latency on short prompts: return immediately
+                                // as soon as native begin completes, otherwise
+                                // wake only to publish a newer exact batch count.
+                                nativeResult = withTimeoutOrNull(prefillProgressPollIntervalMs) {
+                                    nativeBegin.await()
+                                }
+                            }
+                            // The final native batch can finish between the last
+                            // poll and completion. Publish that exact terminal
+                            // snapshot before decode starts.
+                            val finalProgress = withContext(io) { runner.prefillProgress() }
+                            if (finalProgress != null && finalProgress != lastPrefillProgress) {
+                                emitExactPrefillProgress(finalProgress)
+                            }
+                            checkNotNull(nativeResult)
+                        }
+                    withContext(NonCancellable + io) {
+                        finishPersistentPrefix(persistentPrefix, resultCode, runner)?.let { failure ->
+                            managedPersistentPrefixFailure = failure
+                            _stats.value = _stats.value.copy(
+                                persistentPrefixCacheHit = false,
+                                persistentPrefixCacheTokens = failure.tokens,
+                                persistentPrefixCacheReason = failure.reason
+                            )
+                        }
+                        if (persistentPrefix != null && activePersistentPrefix === persistentPrefix) {
+                            activePersistentPrefix = null
+                        }
+                    }
+                    Result.success(resultCode)
+                } catch (error: Throwable) {
+                    withContext(NonCancellable + io) {
+                        activePersistentPrefix?.let(::discardPersistentPrefix)
+                        if (activePersistentPrefix != null) {
+                            activePersistentPrefix = null
+                        }
+                    }
+                    if (downstreamPrefillEmissionFailed) throw error
+                    Result.failure(error)
                 }
             }
+            emitTokenizePhase()
             var beginResult = beginNative(
                 preparedParameters?.nativeParamsJson ?: activeRequest.params.toJson()
             )
@@ -788,6 +1022,7 @@ class McaInferenceService(
                     )
                     val reloadError = when (decision) {
                         is MismatchRecoveryDecision.ReloadAuthorizedPending -> {
+                            emit(GenerateEvent.Phase(GenerationPhase.LOAD, _stats.value))
                             pendingRollbackContext = pendingRollbackContext ?: PendingRollbackContext(
                                 baseSession = session,
                                 authorization = decision.transaction.authorization
@@ -799,8 +1034,10 @@ class McaInferenceService(
                                 false
                             )
                         }
-                        is MismatchRecoveryDecision.ReloadCommittedForDrift ->
+                        is MismatchRecoveryDecision.ReloadCommittedForDrift -> {
+                            emit(GenerateEvent.Phase(GenerationPhase.LOAD, _stats.value))
                             reloadCoordinatedProfileLocked(session, decision.profile, null, false)
+                        }
                         is MismatchRecoveryDecision.Fail -> decision.message
                     }
                     if (reloadError == null) {
@@ -816,6 +1053,8 @@ class McaInferenceService(
                             )
                         }
                         if (retryPreflight is CompletionPreflight.Ready) {
+                            preparedParameters = retryPreflight
+                            emitTokenizePhase()
                             beginResult = beginNative(retryPreflight.nativeParamsJson)
                             beginResult.exceptionOrNull()?.let { error ->
                                 if (shouldRefreshMnnAfterRequest) mnnSessionNeedsReloadBeforeNextRequest = true
@@ -852,6 +1091,13 @@ class McaInferenceService(
                 return@lifecycle
             }
 
+            // Runtimes that expose exact batch progress already emitted PREFILL
+            // while native work was in flight. Others remain intentionally
+            // indeterminate, but only after a successful final begin.
+            if (!exactPrefillPhaseEmitted) {
+                emit(GenerateEvent.Phase(GenerationPhase.PREFILL, _stats.value))
+            }
+
             var firstTokenAt = 0L
             var lastTokenAt = started
             var generatedChunks = 0
@@ -882,8 +1128,16 @@ class McaInferenceService(
                     throw error
                 }
             }
+            var persistPhaseEmitted = false
+            suspend fun emitPersistPhase(stats: RuntimeStats) {
+                if (!persistPhaseEmitted) {
+                    emitGenerated(GenerateEvent.Phase(GenerationPhase.PERSIST, stats))
+                    persistPhaseEmitted = true
+                }
+            }
 
             try {
+                emitGenerated(GenerateEvent.Phase(GenerationPhase.DECODE, _stats.value))
                 while (true) {
                     val chunk = withContext(io) { runner.generateNextChunk() } ?: break
                     if (chunk.isBlank()) continue
@@ -924,15 +1178,22 @@ class McaInferenceService(
                         latestMemory = telemetry.memorySnapshotDetailed()
                         lastMemorySampleAt = now
                     }
+                    val promptTokens = nativePromptTokens ?: estimatePromptTokens(activeRequest)
+                    val prefillMs = if (shouldSampleStats) {
+                        nativeStats?.optLong("prefillMs") ?: _stats.value.prefillMs
+                    } else {
+                        _stats.value.prefillMs
+                    }
+                    val cacheReuse = nativeStats?.optJSONObject("cacheReuse")
+                    val gpuEvidence = nativeGpuOffloadEvidence(nativeStats, _stats.value)
                     finalStats = _stats.value.copy(
-                        promptTokens = nativePromptTokens ?: estimatePromptTokens(activeRequest),
+                        promptTokens = promptTokens,
                         completionTokens = generatedTokens,
                         ttftMs = ttft,
-                        prefillMs = if (shouldSampleStats) {
-                            nativeStats?.optLong("prefillMs") ?: _stats.value.prefillMs
-                        } else {
-                            _stats.value.prefillMs
-                        },
+                        prefillMs = prefillMs,
+                        prefillTps = nativeStats?.optDouble("prefillTps")
+                            ?.takeIf { it.isFinite() && it >= 0.0 }
+                            ?: if (prefillMs > 0L) promptTokens * 1000.0 / prefillMs else 0.0,
                         decodeMs = decodeMs,
                         decodeTps = if (shouldSampleStats) {
                             nativeStats?.optDouble("decodeTps")?.takeIf { it > 0.0 }
@@ -949,6 +1210,25 @@ class McaInferenceService(
                         maxAllTokens = nativeStats?.optInt("maxAllTokens")?.takeIf { it > 0 } ?: _stats.value.maxAllTokens,
                         maxNewTokens = nativeStats?.optInt("maxNewTokens")?.takeIf { it > 0 } ?: _stats.value.maxNewTokens,
                         backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: _stats.value.backendDevices,
+                        gpuOffloadActive = gpuEvidence.active,
+                        gpuOffloadAllocationObserved = gpuEvidence.allocationObserved,
+                        gpuOffloadExecutionObserved = gpuEvidence.executionObserved,
+                        gpuOffloadBytes = gpuEvidence.bytes,
+                        gpuOffloadLayers = gpuEvidence.layers,
+                        gpuOffloadLayersKnown = gpuEvidence.layersKnown,
+                        gpuAutoFallbackApplied = gpuEvidence.autoFallbackApplied,
+                        gpuAutoFallbackReason = gpuEvidence.autoFallbackReason,
+                        cacheReuseHit = cacheReuse?.optBoolean("hit", _stats.value.cacheReuseHit)
+                            ?: _stats.value.cacheReuseHit,
+                        cacheReusedTokens = cacheReuse?.optInt("reusedTokens", _stats.value.cacheReusedTokens)
+                            ?: _stats.value.cacheReusedTokens,
+                        cacheReuseReason = cacheReuse?.optString("reason")
+                            ?.takeIf { it.isNotBlank() }
+                            ?: _stats.value.cacheReuseReason,
+                        cacheReuseHits = cacheReuse?.optLong("hits", _stats.value.cacheReuseHits)
+                            ?: _stats.value.cacheReuseHits,
+                        cacheReuseMisses = cacheReuse?.optLong("misses", _stats.value.cacheReuseMisses)
+                            ?: _stats.value.cacheReuseMisses,
                         lastError = null
                     ).withMemory(latestMemory)
                     if (shouldSampleStats) {
@@ -960,6 +1240,7 @@ class McaInferenceService(
                         runner.requestStop()
                         val errorStats = finalStats.copy(lastError = message)
                         _stats.value = errorStats
+                        emitPersistPhase(errorStats)
                         writeLog(errorStats, activeRequest.params, error = message)
                         emitGenerated(GenerateEvent.Error(message, errorStats))
                         return@lifecycle
@@ -1005,7 +1286,8 @@ class McaInferenceService(
                     memory = telemetry.memorySnapshotDetailed(),
                     started = started,
                     lastTokenAt = lastTokenAt,
-                    request = activeRequest
+                    request = activeRequest,
+                    managedPrefixFailure = managedPersistentPrefixFailure
                 )
                 _stats.value = finalStats
                 if (shouldRefreshMnnAfterRequest) {
@@ -1039,10 +1321,12 @@ class McaInferenceService(
                     val message = "本地模型本轮没有生成可见正文。请重试；若持续发生，请降低上下文或更换模型。"
                     val errorStats = finalStats.copy(lastError = message)
                     _stats.value = errorStats
+                    emitPersistPhase(errorStats)
                     writeLog(errorStats, activeRequest.params, error = message)
                     emitGenerated(GenerateEvent.Error(message, errorStats))
                     return@lifecycle
                 }
+                emitPersistPhase(finalStats)
                 writeLog(finalStats, activeRequest.params, error = null)
                 if (activeRuntime == LocalChatRuntime.GENIEX_QAIRT) {
                     qairtDryRunWitness?.sawVisibleCompletion = true
@@ -1077,9 +1361,16 @@ class McaInferenceService(
                 if (t is CancellationException || downstreamEmissionFailed) throw t
                 val errorStats = _stats.value.copy(lastError = t.message)
                 _stats.value = errorStats
+                emitPersistPhase(errorStats)
                 writeLog(errorStats, activeRequest.params, error = t.message)
                 emit(GenerateEvent.Error(t.message ?: "Generation failed.", errorStats))
             } finally {
+                activePersistentPrefix?.let { pending ->
+                    withContext(NonCancellable + io) {
+                        discardPersistentPrefix(pending)
+                        if (activePersistentPrefix === pending) activePersistentPrefix = null
+                    }
+                }
                 // Native beginCompletion() calls reset() for every request. That reset only
                 // covers the base LLM context, however; MNN Omni keeps visual state in its
                 // subclass. Recreate an MNN session before the next request after every
@@ -1344,15 +1635,36 @@ class McaInferenceService(
         runCatching { File(first).canonicalPath == File(second).canonicalPath }
             .getOrDefault(first == second)
 
-    private suspend fun reloadActiveMnnSessionForNextRequestLocked(): String? {
+    private suspend fun isolatedWorkerSessionLostLocked(): Boolean = withContext(io) {
+        if (activeRuntime != LocalChatRuntime.LLAMA_CPP &&
+            activeRuntime != LocalChatRuntime.MNN_CPU &&
+            activeRuntime != LocalChatRuntime.GENIEX_QAIRT
+        ) return@withContext false
+        runCatching {
+            JSONObject(runnerFor(activeRuntime).getRuntimeStatsJson())
+                .optBoolean(ISOLATED_WORKER_SESSION_LOST_FIELD, false)
+        }.getOrDefault(false)
+    }
+
+    private suspend fun reloadActiveSessionForNextRequestLocked(
+        reason: SessionReloadReason
+    ): String? {
         val session = activeLoadSession
-            ?: return "MNN 会话需要刷新，但没有可恢复的模型加载记录。请重新加载本地模型后再试。"
+            ?: return reason.missingSessionMessage
+        if (session.runtime != LocalChatRuntime.LLAMA_CPP &&
+            session.runtime != LocalChatRuntime.MNN_CPU &&
+            session.runtime != LocalChatRuntime.GENIEX_QAIRT
+        ) {
+            return "当前运行时不支持隔离文本 worker 会话恢复，请重新加载模型。"
+        }
         val runner = runnerFor(session.runtime)
         if (!runner.isAvailable) {
             return unavailableStats(session.runtime, runner.loadError).optString("lastError")
         }
-        runCatching { runner.requestStop() }
-        runCatching { runner.unloadModel() }
+        withContext(io) {
+            runCatching { runner.requestStop() }
+            runCatching { runner.unloadModel() }
+        }
         parameterCoordinator.markUnloaded()
         _stats.value = RuntimeStats(
             loaded = false,
@@ -1361,22 +1673,62 @@ class McaInferenceService(
             nThreads = session.params.nThreads,
             nCtx = session.params.nCtx,
             maxAllTokens = session.params.nCtx,
-            lastError = "Refreshing MNN session before next request."
+            lastError = reason.reloadingStatus
         )
-        val started = System.currentTimeMillis()
-        val rc = withContext(io) { runner.loadModel(session.modelPath, session.nativeLoadParamsJson) }
-        if (rc != 0) {
-            val nativeError = runCatching {
-                JSONObject(nativeStatsJson()).optString("lastError").takeIf { it.isNotBlank() }
-            }.getOrNull()
+        suspend fun finishThrownReload(error: Throwable): String {
+            withContext(NonCancellable + io) {
+                runCatching { runner.requestStop() }
+                runCatching { runner.unloadModel() }
+            }
+            parameterCoordinator.markUnloaded()
+            if (reason != SessionReloadReason.WORKER_SESSION_LOST) {
+                activeLoadSession = null
+            }
+            isolatedWorkerSessionNeedsReload = reason == SessionReloadReason.WORKER_SESSION_LOST
+            mnnSessionNeedsReloadBeforeNextRequest = false
             val message = buildString {
-                append("MNN 会话刷新失败：").append(rc)
+                append(reason.loadFailurePrefix)
+                append(error.message?.takeIf { it.isNotBlank() } ?: error::class.java.simpleName)
+            }
+            _stats.value = RuntimeStats(
+                loaded = false,
+                modelPath = session.modelPath,
+                backend = session.runtime.backendId,
+                nThreads = session.params.nThreads,
+                nCtx = session.params.nCtx,
+                maxAllTokens = session.params.nCtx,
+                lastError = message
+            )
+            return message
+        }
+
+        val started = System.currentTimeMillis()
+        val rc = try {
+            withContext(io) { runner.loadModel(session.modelPath, session.nativeLoadParamsJson) }
+        } catch (error: Throwable) {
+            val message = finishThrownReload(error)
+            if (error is CancellationException) throw error
+            return message
+        }
+        if (rc != 0) {
+            val nativeError = withContext(io) {
+                runCatching {
+                    JSONObject(runner.getRuntimeStatsJson())
+                        .optString("lastError")
+                        .takeIf { it.isNotBlank() }
+                }.getOrNull()
+            }
+            val message = buildString {
+                append(reason.loadFailurePrefix).append(rc)
                 if (!nativeError.isNullOrBlank()) append("；").append(nativeError.trim())
             }
             activeLoadSession = null
             mnnSessionNeedsReloadBeforeNextRequest = false
-            runCatching { runner.requestStop() }
-            runCatching { runner.unloadModel() }
+            isolatedWorkerSessionNeedsReload = false
+            withContext(NonCancellable + io) {
+                runCatching { runner.requestStop() }
+                runCatching { runner.unloadModel() }
+            }
             _stats.value = RuntimeStats(
                 loaded = false,
                 modelPath = session.modelPath,
@@ -1389,21 +1741,33 @@ class McaInferenceService(
             return message
         }
         mnnSessionNeedsReloadBeforeNextRequest = false
+        isolatedWorkerSessionNeedsReload = false
+        val nativeStats = try {
+            withContext(io) { runner.getRuntimeStatsJson() }
+        } catch (error: Throwable) {
+            val message = finishThrownReload(error)
+            if (error is CancellationException) throw error
+            return message
+        }
         runCatching {
-            parameterCoordinator.publishLoaded(session.executionProfile, nativeStatsJson())
+            parameterCoordinator.publishLoaded(session.executionProfile, nativeStats)
         }.getOrElse { signatureError ->
             activeLoadSession = null
-            runCatching { runner.requestStop() }
-            runCatching { runner.unloadModel() }
+            withContext(NonCancellable + io) {
+                runCatching { runner.requestStop() }
+                runCatching { runner.unloadModel() }
+            }
             parameterCoordinator.markUnloaded()
-            return "MNN 会话刷新后的参数回读不一致：${signatureError.message}"
+            return "${reason.signatureFailurePrefix}${signatureError.message}"
         }
-        _stats.value = loadedStatsFromNative(
-            modelPath = session.modelPath,
-            runtime = session.runtime,
-            params = session.params,
-            loadMs = System.currentTimeMillis() - started
-        )
+        _stats.value = withContext(io) {
+            loadedStatsFromNative(
+                modelPath = session.modelPath,
+                runtime = session.runtime,
+                params = session.params,
+                loadMs = System.currentTimeMillis() - started
+            )
+        }
         return null
     }
 
@@ -1534,6 +1898,8 @@ class McaInferenceService(
     ): RuntimeStats {
         val memory = telemetry.memorySnapshotDetailed()
         val nativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
+        val cacheReuse = nativeStats?.optJSONObject("cacheReuse")
+        val gpuEvidence = nativeGpuOffloadEvidence(nativeStats, RuntimeStats())
         return RuntimeStats(
             loaded = true,
             modelPath = modelPath,
@@ -1546,7 +1912,31 @@ class McaInferenceService(
             nCtx = nativeStats?.optInt("nCtx")?.takeIf { it > 0 } ?: params.nCtx,
             maxAllTokens = nativeStats?.optInt("maxAllTokens")?.takeIf { it > 0 } ?: params.nCtx,
             maxNewTokens = nativeStats?.optInt("maxNewTokens")?.takeIf { it > 0 } ?: 0,
-            backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: "[]"
+            backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: "[]",
+            gpuOffloadActive = gpuEvidence.active,
+            gpuOffloadAllocationObserved = gpuEvidence.allocationObserved,
+            gpuOffloadExecutionObserved = gpuEvidence.executionObserved,
+            gpuOffloadBytes = gpuEvidence.bytes,
+            gpuOffloadLayers = gpuEvidence.layers,
+            gpuOffloadLayersKnown = gpuEvidence.layersKnown,
+            gpuAutoFallbackApplied = gpuEvidence.autoFallbackApplied,
+            gpuAutoFallbackReason = gpuEvidence.autoFallbackReason,
+            cacheReuseHit = cacheReuse?.optBoolean("hit", false) ?: false,
+            cacheReusedTokens = cacheReuse?.optInt("reusedTokens", 0) ?: 0,
+            cacheReuseReason = cacheReuse?.optString("reason")?.takeIf { it.isNotBlank() },
+            cacheReuseHits = cacheReuse?.optLong("hits", 0L) ?: 0L,
+            cacheReuseMisses = cacheReuse?.optLong("misses", 0L) ?: 0L,
+            persistentPrefixCacheHit = nativeStats
+                ?.optJSONObject("persistentPrefixCache")
+                ?.optBoolean("hit", false) == true,
+            persistentPrefixCacheTokens = nativeStats
+                ?.optJSONObject("persistentPrefixCache")
+                ?.optInt("tokens", 0)
+                ?: 0,
+            persistentPrefixCacheReason = nativeStats
+                ?.optJSONObject("persistentPrefixCache")
+                ?.optString("reason")
+                ?.takeIf { it.isNotBlank() }
         ).withMemory(memory)
     }
 
@@ -1573,17 +1963,13 @@ class McaInferenceService(
     }
 
     /**
-     * This is process isolation, not a device allowlist. Unknown QAIRT native
-     * contexts must execute once in the isolated worker before the product
-     * process creates them. The app launches that canary automatically from
-     * the normal Load action; concrete create/generate/destroy results are the
-     * only authority.
+     * Isolated QAIRT smoke is diagnostic-only. Normal QAIRT loads use the
+     * generic isolated text worker, so device verification never gates a
+     * user-facing load or run attempt.
      */
     private fun requireQairtExecutionPurpose(
         runtime: LocalChatRuntime,
-        purpose: QairtExecutionPurpose,
-        bundleSha256: String?,
-        admission: QairtExecutionAdmission?
+        purpose: QairtExecutionPurpose
     ) {
         if (runtime != LocalChatRuntime.GENIEX_QAIRT) {
             require(purpose == QairtExecutionPurpose.NORMAL) {
@@ -1595,13 +1981,6 @@ class McaInferenceService(
             check(qairtDryRunProcessVerifier()) {
                 "QAIRT 隔离安全启动只能在 :qairt_smoke 独立进程中运行。"
             }
-            check(qairtIdentityProvider(bundleSha256)?.isComplete == true) {
-                "QAIRT 隔离安全启动需要已注册且完整的模型包哈希、芯片和运行时身份。"
-            }
-            return
-        }
-        if (admission?.requiresIsolatedDryRun == true) {
-            throw QairtIsolatedDryRunRequiredException(admission)
         }
     }
 
@@ -1621,21 +2000,29 @@ class McaInferenceService(
         memory: MemorySnapshot,
         started: Long,
         lastTokenAt: Long,
-        request: ChatRequest
+        request: ChatRequest,
+        managedPrefixFailure: ManagedPersistentPrefixFailure? = null
     ): RuntimeStats {
         val completionTokens = nativeStats?.optInt("completionTokens")?.takeIf { it > 0 }
             ?: base.completionTokens
         val decodeMs = nativeStats?.optLong("decodeMs")?.takeIf { it > 0L }
             ?: base.decodeMs.takeIf { it > 0L }
             ?: max(1L, lastTokenAt - started)
+        val promptTokens = nativeStats?.optInt("promptTokens")?.takeIf { it > 0 }
+            ?: base.promptTokens.takeIf { it > 0 }
+            ?: estimatePromptTokens(request)
+        val prefillMs = nativeStats?.optLong("prefillMs") ?: base.prefillMs
+        val cacheReuse = nativeStats?.optJSONObject("cacheReuse")
+        val gpuEvidence = nativeGpuOffloadEvidence(nativeStats, base)
         val totalMs = max(1L, lastTokenAt - started)
         return base.copy(
             backend = nativeStats?.optString("backend")?.takeIf { it.isNotBlank() } ?: base.backend,
-            promptTokens = nativeStats?.optInt("promptTokens")?.takeIf { it > 0 }
-                ?: base.promptTokens.takeIf { it > 0 }
-                ?: estimatePromptTokens(request),
+            promptTokens = promptTokens,
             completionTokens = completionTokens,
-            prefillMs = nativeStats?.optLong("prefillMs") ?: base.prefillMs,
+            prefillMs = prefillMs,
+            prefillTps = nativeStats?.optDouble("prefillTps")
+                ?.takeIf { it.isFinite() && it >= 0.0 }
+                ?: if (prefillMs > 0L) promptTokens * 1000.0 / prefillMs else 0.0,
             decodeMs = decodeMs,
             decodeTps = nativeStats?.optDouble("decodeTps")?.takeIf { it > 0.0 }
                 ?: (completionTokens * 1000.0 / decodeMs),
@@ -1648,6 +2035,41 @@ class McaInferenceService(
             maxAllTokens = nativeStats?.optInt("maxAllTokens")?.takeIf { it > 0 } ?: base.maxAllTokens,
             maxNewTokens = nativeStats?.optInt("maxNewTokens")?.takeIf { it > 0 } ?: base.maxNewTokens,
             backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: base.backendDevices,
+            gpuOffloadActive = gpuEvidence.active,
+            gpuOffloadAllocationObserved = gpuEvidence.allocationObserved,
+            gpuOffloadExecutionObserved = gpuEvidence.executionObserved,
+            gpuOffloadBytes = gpuEvidence.bytes,
+            gpuOffloadLayers = gpuEvidence.layers,
+            gpuOffloadLayersKnown = gpuEvidence.layersKnown,
+            gpuAutoFallbackApplied = gpuEvidence.autoFallbackApplied,
+            gpuAutoFallbackReason = gpuEvidence.autoFallbackReason,
+            cacheReuseHit = cacheReuse?.optBoolean("hit", base.cacheReuseHit) ?: base.cacheReuseHit,
+            cacheReusedTokens = cacheReuse?.optInt("reusedTokens", base.cacheReusedTokens)
+                ?: base.cacheReusedTokens,
+            cacheReuseReason = cacheReuse?.optString("reason")?.takeIf { it.isNotBlank() }
+                ?: base.cacheReuseReason,
+            cacheReuseHits = cacheReuse?.optLong("hits", base.cacheReuseHits) ?: base.cacheReuseHits,
+            cacheReuseMisses = cacheReuse?.optLong("misses", base.cacheReuseMisses)
+                ?: base.cacheReuseMisses,
+            persistentPrefixCacheHit = if (managedPrefixFailure != null) {
+                false
+            } else {
+                nativeStats
+                    ?.optJSONObject("persistentPrefixCache")
+                    ?.optBoolean("hit", false)
+                    ?: base.persistentPrefixCacheHit
+            },
+            persistentPrefixCacheTokens = managedPrefixFailure?.tokens
+                ?: nativeStats
+                    ?.optJSONObject("persistentPrefixCache")
+                    ?.optInt("tokens", 0)
+                ?: base.persistentPrefixCacheTokens,
+            persistentPrefixCacheReason = managedPrefixFailure?.reason
+                ?: nativeStats
+                    ?.optJSONObject("persistentPrefixCache")
+                    ?.optString("reason")
+                    ?.takeIf { it.isNotBlank() }
+                ?: base.persistentPrefixCacheReason,
             lastError = null
         ).withMemory(memory)
     }
@@ -1720,6 +2142,38 @@ class McaInferenceService(
         val nativeLoadParamsJson: String
     )
 
+    private enum class SessionReloadReason(
+        val missingSessionMessage: String,
+        val reloadingStatus: String,
+        val loadFailurePrefix: String,
+        val signatureFailurePrefix: String
+    ) {
+        MNN_CONTEXT_RESET(
+            missingSessionMessage = "MNN 会话需要刷新，但没有可恢复的模型加载记录。请重新加载本地模型后再试。",
+            reloadingStatus = "Refreshing MNN session before next request.",
+            loadFailurePrefix = "MNN 会话刷新失败：",
+            signatureFailurePrefix = "MNN 会话刷新后的参数回读不一致："
+        ),
+        WORKER_SESSION_LOST(
+            missingSessionMessage = "隔离文本 worker 已退出，且没有可恢复的模型加载记录。请重新加载本地模型后再试。",
+            reloadingStatus = "Restoring model after isolated text worker loss.",
+            loadFailurePrefix = "隔离文本 worker 会话恢复失败：",
+            signatureFailurePrefix = "隔离文本 worker 会话恢复后的参数回读不一致："
+        )
+    }
+
+    private data class PreparedPersistentPrefix(
+        val key: PrefixCacheKey,
+        val request: PersistentPrefixCacheRequest,
+        val pending: PersistentPrefixCacheStore.PendingWrite,
+        val existing: PersistentPrefixCacheEntry?
+    )
+
+    private data class ManagedPersistentPrefixFailure(
+        val reason: String,
+        val tokens: Int
+    )
+
     private data class PendingRollbackContext(
         val baseSession: LoadedModelSession,
         val authorization: LoadAuthorization
@@ -1732,6 +2186,186 @@ class McaInferenceService(
         var sawVisibleCompletion: Boolean = false,
         var destroyedCleanly: Boolean = false
     )
+
+    /**
+     * Prepares a disk entry only for a stable llama.cpp text prefix. Dynamic
+     * retrieval/world-book/clock context remains in the request and is never
+     * included in the key or state file.
+     */
+    private fun preparePersistentPrefix(
+        request: ChatRequest,
+        preparedParameters: CompletionPreflight.Ready?,
+        paramsJson: String,
+        hasImageAttachments: Boolean
+    ): PreparedPersistentPrefix? {
+        if (!persistentPrefixCacheEnabled ||
+            activeRuntime != LocalChatRuntime.LLAMA_CPP ||
+            hasImageAttachments ||
+            preparedParameters == null
+        ) return null
+        val session = activeLoadSession ?: return null
+        val identity = session.runtimeIdentity
+        if (!session.params.visionProjectorPath.isNullOrBlank() ||
+            identity.capabilities.any { capability ->
+                capability.equals("vision", ignoreCase = true) ||
+                    capability.equals("multimodal", ignoreCase = true)
+            }
+        ) return null
+        // A process-local identity is deliberately advisory-only for runtime
+        // admission, but it is not stable enough for a cross-process cache.
+        if (identity.installationScopeId.startsWith("process-local:", ignoreCase = true)) return null
+
+        val fixedSystemPrompt = request.fixedSystemPromptForPrefixCache()
+        if (fixedSystemPrompt.isBlank()) return null
+        // Prefix-cache metadata crosses the isolated worker boundary. A cache
+        // optimization must never reject an otherwise admissible chat request.
+        if (fixedSystemPrompt.toByteArray(Charsets.UTF_8).size >
+            MAX_PERSISTENT_PREFIX_CACHE_PROMPT_BYTES
+        ) return null
+
+        val root = runCatching { JSONObject(paramsJson) }.getOrNull() ?: return null
+        val advanced = when (val raw = root.opt("advanced_json")) {
+            is JSONObject -> raw
+            is String -> runCatching { JSONObject(raw) }.getOrNull()
+            else -> null
+        }
+        fun value(name: String): Any? = when {
+            root.has(name) && !root.isNull(name) -> root.opt(name)
+            advanced?.has(name) == true && !advanced.isNull(name) -> advanced.opt(name)
+            else -> null
+        }
+        val profile = session.executionProfile
+        val nParallel = (profile.resolvedLoadBoundValues.value("n_parallel") as? Number)?.toInt()
+            ?: (value("n_parallel") as? Number)?.toInt()
+            ?: 1
+        val specType = profile.resolvedLoadBoundValues.value("spec_type")
+            ?.toString()
+            ?.trim()
+            ?.lowercase()
+            ?: value("spec_type")?.toString()?.trim()?.lowercase()
+            ?: "none"
+        val cacheReuse = (value("cache_reuse") as? Number)?.toInt()
+            ?: (profile.hotExecutionValues.value("cache_reuse") as? Number)?.toInt()
+            ?: -1
+        if (nParallel != 1 || specType != "none" || cacheReuse == 0) return null
+
+        val signatures = preparedParameters.signatures
+        val key = persistentPrefixCacheKey(
+            identity = identity,
+            signatures = signatures,
+            nativeParams = root,
+            request = request,
+            fixedSystemPrompt = fixedSystemPrompt
+        )
+        val store = persistentPrefixCacheStore
+        val existing = runCatching { store.load(key) }.getOrNull()
+        val pending = runCatching { store.prepareWrite(key) }.getOrNull() ?: return null
+        return PreparedPersistentPrefix(
+            key = key,
+            request = PersistentPrefixCacheRequest(
+                restoreStatePath = existing?.stateFile?.absolutePath,
+                writeStatePath = pending.stateFile.absolutePath,
+                fixedSystemPrompt = fixedSystemPrompt
+            ),
+            pending = pending,
+            existing = existing
+        )
+    }
+
+    private fun finishPersistentPrefix(
+        prepared: PreparedPersistentPrefix?,
+        resultCode: Int,
+        runner: LocalChatRunner
+    ): ManagedPersistentPrefixFailure? {
+        if (prepared == null) return null
+        if (!persistentPrefixCacheEnabled) {
+            runCatching { persistentPrefixCacheStore.discard(prepared.pending) }
+            return null
+        }
+        val stats = runCatching { JSONObject(runner.getRuntimeStatsJson()) }.getOrNull()
+        val persistent = stats?.optJSONObject("persistentPrefixCache")
+        val saved = resultCode == 0 && persistent?.optBoolean("saved", false) == true
+        if (saved) {
+            val committed = runCatching { persistentPrefixCacheStore.commit(prepared.pending) }
+                .getOrNull()
+            if (committed == null) {
+                // Native export succeeded, but the managed atomic publication did
+                // not. Keep generation successful while making the cache miss
+                // explicit so diagnostics never claim state_saved.
+                return ManagedPersistentPrefixFailure(
+                    reason = MANAGED_PREFIX_COMMIT_FAILED_REASON,
+                    tokens = persistent.optInt("tokens", 0)
+                )
+            }
+        } else {
+            runCatching { persistentPrefixCacheStore.discard(prepared.pending) }
+            val reason = persistent?.optString("reason").orEmpty()
+            if (prepared.existing != null && reason in setOf(
+                    "state_load_failed",
+                    "state_restore_failed",
+                    "state_token_mismatch",
+                    "state_prefix_mismatch"
+                )
+            ) {
+                runCatching { persistentPrefixCacheStore.clear(prepared.key) }
+            }
+        }
+        return null
+    }
+
+    private fun discardPersistentPrefix(prepared: PreparedPersistentPrefix?) {
+        prepared ?: return
+        runCatching { persistentPrefixCacheStore.discard(prepared.pending) }
+    }
+
+    private fun persistentPrefixCacheKey(
+        identity: ModelRuntimeIdentity,
+        signatures: ParameterSignatureSnapshot,
+        nativeParams: JSONObject,
+        request: ChatRequest,
+        fixedSystemPrompt: String
+    ): PrefixCacheKey {
+        fun digest(value: String): String = PrefixCacheKey.sha256Utf8(value)
+        val advanced = when (val raw = nativeParams.opt("advanced_json")) {
+            is JSONObject -> raw
+            is String -> runCatching { JSONObject(raw) }.getOrNull()
+            else -> null
+        }
+        fun stringValue(name: String, fallback: String = ""): String = when {
+            nativeParams.has(name) && !nativeParams.isNull(name) -> nativeParams.optString(name, fallback)
+            advanced?.has(name) == true && !advanced.isNull(name) -> advanced.optString(name, fallback)
+            else -> fallback
+        }
+        val templateBinding = listOf(
+            identity.templateFingerprint,
+            request.params.chatTemplateMode,
+            stringValue("use_jinja", "true"),
+            stringValue("enable_thinking", "false"),
+            stringValue("thinking_budget", "0")
+        ).joinToString("\n")
+        val runtimeBinding = listOf(
+            PERSISTENT_PREFIX_CACHE_FORMAT,
+            LLAMA_SEQUENCE_STATE_FORMAT,
+            identity.runtimeVersion,
+            identity.nativeLibrarySha256,
+            identity.abi,
+            identity.backendFingerprint,
+            signatures.resolved.digest,
+            signatures.committed.digest,
+            stringValue("n_ctx", "0"),
+            stringValue("cache_type_k", "f16"),
+            stringValue("cache_type_v", "f16"),
+            stringValue("n_parallel", "1")
+        ).joinToString("\n")
+        return PrefixCacheKey(
+            modelFingerprint = digest("model\n${identity.identityHash}"),
+            tokenizerFingerprint = digest("tokenizer\n${identity.tokenizerFingerprint}"),
+            templateFingerprint = digest("template\n$templateBinding"),
+            systemPromptFingerprint = digest(fixedSystemPrompt),
+            runtimeFingerprint = digest("runtime\n$runtimeBinding"),
+            prefixFingerprint = digest("fixed-system-prefix\n$fixedSystemPrompt")
+        )
+    }
 
     private fun LocalChatRuntime.usesCoordinatedParameters(): Boolean =
         true
@@ -1814,6 +2448,12 @@ class McaInferenceService(
         .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private companion object {
+        private const val PERSISTENT_PREFIX_CACHE_FORMAT = "mca-prefix-cache-v1"
+        private const val MAX_PERSISTENT_PREFIX_CACHE_PROMPT_BYTES = 128 * 1024
+        private const val LLAMA_SEQUENCE_STATE_FORMAT = "llama-state-seq-v1"
+        private const val MANAGED_PREFIX_COMMIT_FAILED_REASON = "managed_commit_failed"
+        private const val PREFILL_PROGRESS_POLL_INTERVAL_MS = 50L
+        private const val ISOLATED_WORKER_SESSION_LOST_FIELD = "workerSessionLost"
         private const val CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
         private const val REASONING_INSTRUCTION_ESTIMATE_TOKENS = 96
         private const val LOW_MEMORY_START_GUARD_KB = 384L * 1024L

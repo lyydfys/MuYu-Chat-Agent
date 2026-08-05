@@ -59,9 +59,12 @@ internal fun discoverModelTuningCapabilities(
         supportsBatchTuning = llama && known,
         supportsQuantizedKv = llama && known,
         supportsFlashAttention = llama && known,
-        supportsGpuOffload = llama && known && "gpu_offload" in capabilities,
+        // These are user-selectable candidates.  Unknown metadata/device
+        // profiles remain advisory; the native load and smoke path decide
+        // whether a particular model can actually use them.
+        supportsGpuOffload = llama && "gpu_offload" in capabilities,
         supportsCpuMoeTuning = llama && known && "cpu_moe" in capabilities,
-        supportsSpeculativeMtp = llama && known && "draft_mtp" in capabilities,
+        supportsSpeculativeMtp = llama && "draft_mtp" in capabilities,
         qairtAdmissionPassed = qairtAdmissionPassed
     )
 }

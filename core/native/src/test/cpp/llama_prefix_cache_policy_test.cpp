@@ -81,6 +81,18 @@ int main() {
     assert(mca::llama::canPersistPrefixCacheAfterPrefill(0));
     assert(!mca::llama::canPersistPrefixCacheAfterPrefill(1));
 
+    assert(mca::llama::canAttemptPersistentPrefixCache(true, false, false, 1));
+    assert(!mca::llama::canAttemptPersistentPrefixCache(false, false, false, 1));
+    assert(!mca::llama::canAttemptPersistentPrefixCache(true, true, false, 1));
+    assert(!mca::llama::canAttemptPersistentPrefixCache(true, false, true, 1));
+    assert(!mca::llama::canAttemptPersistentPrefixCache(true, false, false, 2));
+
+    assert(mca::llama::canRestorePersistentPrefixState(128, 128, true, true));
+    assert(!mca::llama::canRestorePersistentPrefixState(0, 0, true, true));
+    assert(!mca::llama::canRestorePersistentPrefixState(128, 127, true, true));
+    assert(!mca::llama::canRestorePersistentPrefixState(128, 128, false, true));
+    assert(!mca::llama::canRestorePersistentPrefixState(128, 128, true, false));
+
     assert(std::string_view(mca::llama::prefixCacheStrategyName(PrefixCacheStrategy::Disabled)) ==
            "disabled");
     assert(std::string_view(mca::llama::prefixCacheStrategyName(PrefixCacheStrategy::DirectTrim)) ==

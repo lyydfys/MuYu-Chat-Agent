@@ -29,7 +29,8 @@ class ChatContextComposer(
         params: GenerationParams,
         assistantId: String,
         chatSessionId: String?,
-        knowledgeBaseIds: Set<String>
+        knowledgeBaseIds: Set<String>,
+        fileContextEnabled: Boolean = true
     ): ChatRuntimeContextPlan {
         val promptBudget = localContextWindowBudget(params.nCtx).promptBudgetTokens
         if (promptBudget <= 0) return ChatRuntimeContextPlan()
@@ -47,17 +48,23 @@ class ChatContextComposer(
             chatSessionId = chatSessionId,
             tokenBudget = loreBudget
         )
-        val query = messages.asReversed()
-            .firstOrNull { it.role == Role.USER && it.content.isNotBlank() }
-            ?.content
-            ?.takeLast(MAX_QUERY_CHARS)
-            .orEmpty()
-        val knowledge = knowledgeBaseStore.retrieve(
-            knowledgeBaseIds = knowledgeBaseIds,
-            query = query,
-            maxChunks = MAX_KNOWLEDGE_CHUNKS,
-            tokenBudget = retrievalBudget
-        )
+        val knowledge = if (fileContextEnabled) {
+            val query = messages.asReversed()
+                .firstOrNull { it.role == Role.USER && it.content.isNotBlank() }
+                ?.content
+                ?.takeLast(MAX_QUERY_CHARS)
+                .orEmpty()
+            knowledgeBaseStore.retrieve(
+                knowledgeBaseIds = knowledgeBaseIds,
+                query = query,
+                maxChunks = MAX_KNOWLEDGE_CHUNKS,
+                tokenBudget = retrievalBudget
+            )
+        } else {
+            // The role setting disables only document retrieval. World Book is
+            // persona lore, so its scope and matching behavior stay unchanged.
+            KnowledgeRetrieval()
+        }
         val context = listOf(lore.context, knowledge.context)
             .filter { it.isNotBlank() }
             .joinToString("\n\n")

@@ -57,6 +57,25 @@ inline constexpr bool canPersistPrefixCacheAfterPrefill(
     return contextShifts == 0;
 }
 
+inline constexpr bool canAttemptPersistentPrefixCache(
+        bool requested,
+        bool hasImages,
+        bool speculative,
+        std::size_t parallelSequences) noexcept {
+    return requested && !hasImages && !speculative && parallelSequences == 1;
+}
+
+inline constexpr bool canRestorePersistentPrefixState(
+        std::size_t expectedTokens,
+        std::size_t restoredTokens,
+        bool restoredTokensMatch,
+        bool fullPromptPrefixMatches) noexcept {
+    return expectedTokens > 0 &&
+           restoredTokens == expectedTokens &&
+           restoredTokensMatch &&
+           fullPromptPrefixMatches;
+}
+
 inline constexpr bool canReusePartialStateCheckpoint(
         PrefixCacheStrategy strategy,
         bool contextStateValid,

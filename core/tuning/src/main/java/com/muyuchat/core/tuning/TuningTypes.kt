@@ -204,7 +204,8 @@ class TuningEngine {
             preference = preference,
             lastDecodeTps = lastDecodeTps
         )
-        return stablePlan.toAdaptive(
+        val adaptivePlan = stablePlan.withVerifiedSpeculativeMtp(capabilities)
+        return adaptivePlan.toAdaptive(
             runtimeIdentity = runtimeIdentity,
             capabilities = capabilities.copy(knowledgeLevel = modelKnowledge),
             profileKind = preference.mode.toExecutionProfileKind(),
@@ -320,6 +321,12 @@ class TuningEngine {
             frequencyPenalty = sampling.frequencyPenalty,
             mmap = true,
             mlock = false,
+            // The legacy recommendation API has no parsed GGUF metadata or
+            // per-request draft/accept witness. Keep its conservative cache
+            // tuning, but never turn an MTP-looking filename into a
+            // speculative-decoding request. The adaptive path receives a
+            // metadata-backed capability and validates it in the isolated
+            // canary before an MTP profile can be committed.
             advancedJson = if (qwen36A3bMtp) qwen36A3bMtpAdvancedJson() else "{}",
             backend = "cpu",
             reason = reason
@@ -342,12 +349,29 @@ class TuningEngine {
             cacheTypeV = "q4_0",
             flashAttn = "on",
             cacheReuse = 256,
-            specType = "draft-mtp",
-            specDraftNMax = 2,
+            specType = "none",
+            specDraftNMax = 0,
             nParallel = 1,
             perf = true,
             useJinja = true
         ).toJsonString()
+
+        fun TuningPlan.withVerifiedSpeculativeMtp(
+            capabilities: ModelTuningCapabilities
+        ): TuningPlan {
+            if (!capabilities.supportsSpeculativeMtp) return this
+            val advanced = LlamaAdvancedParams.parse(advancedJson).params ?: return this
+            if (advanced.specType != "none" || advanced.specDraftNMax != 0) return this
+            return copy(
+                advancedJson = LlamaAdvancedParams.merge(
+                    advancedJson,
+                    JSONObject()
+                        .put(LlamaAdvancedParams.KEY_SPEC_TYPE, "draft-mtp")
+                        .put(LlamaAdvancedParams.KEY_SPEC_DRAFT_N_MAX, 2)
+                        .toString()
+                ).json
+            )
+        }
     }
 }
 

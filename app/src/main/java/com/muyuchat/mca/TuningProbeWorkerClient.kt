@@ -12,11 +12,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 
-/** Main-process client for the disposable load-bound tuning process. */
+/** Main-process client for the disposable persisted-profile probe process. */
 internal class TuningProbeWorkerClient(context: Context) {
     private val appContext = context.applicationContext
 
     suspend fun probe(
+        probeKind: TuningProbeWorkerProtocol.ProbeKind,
         transactionId: String,
         identityKey: String,
         modelId: String,
@@ -27,6 +28,7 @@ internal class TuningProbeWorkerClient(context: Context) {
     ): TuningProbeWorkerProtocol.Result {
         val request = TuningProbeWorkerProtocol.Request(
             requestId = UUID.randomUUID().toString(),
+            probeKind = probeKind,
             transactionId = transactionId,
             identityKey = identityKey,
             modelId = modelId,
@@ -102,6 +104,7 @@ internal class TuningProbeWorkerClient(context: Context) {
                         return
                     }
                 val exactIdentity = result.requestId == request.requestId &&
+                    result.probeKind == request.probeKind &&
                     result.transactionId == request.transactionId &&
                     result.identityKey == request.identityKey &&
                     result.modelId == request.modelId &&

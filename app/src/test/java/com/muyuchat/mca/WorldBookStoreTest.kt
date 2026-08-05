@@ -7,8 +7,62 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.nio.file.Files
 
 class WorldBookStoreTest {
+    @Test
+    fun recoversACompletedPendingSnapshotWhenThePrimaryFileIsMissing() {
+        val root = Files.createTempDirectory("world-book-store-recovery").toFile()
+        try {
+            val target = File(root, "world_books.json")
+            val store = WorldBookStore(target, testing = true)
+            val expected = WorldBookRecord(
+                id = "recovered",
+                name = "Recovered",
+                entries = listOf(WorldBookEntry(id = "entry", content = "persistent context", constant = true))
+            )
+            store.save(listOf(expected))
+            val stagedPayload = target.readText(Charsets.UTF_8)
+            assertTrue(target.delete())
+            store.pendingFileForTesting().writeText(stagedPayload, Charsets.UTF_8)
+
+            assertEquals(listOf(expected), store.load())
+            assertTrue(target.isFile)
+            assertFalse(store.pendingFileForTesting().exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun stalePendingSnapshotNeverOverridesAReadableCommittedFile() {
+        val root = Files.createTempDirectory("world-book-store-stale-pending").toFile()
+        try {
+            val target = File(root, "world_books.json")
+            val store = WorldBookStore(target, testing = true)
+            val old = WorldBookRecord(
+                id = "old",
+                name = "Old",
+                entries = listOf(WorldBookEntry(id = "old-entry", content = "old", constant = true))
+            )
+            val current = WorldBookRecord(
+                id = "current",
+                name = "Current",
+                entries = listOf(WorldBookEntry(id = "current-entry", content = "current", constant = true))
+            )
+            store.save(listOf(old))
+            val stalePayload = target.readText(Charsets.UTF_8)
+            store.save(listOf(current))
+            store.pendingFileForTesting().writeText(stalePayload, Charsets.UTF_8)
+
+            assertEquals(listOf(current), store.load())
+            assertFalse(store.pendingFileForTesting().exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     @Test
     fun parsesObjectEntriesFromNestedCharacterBook() {
         val root = JSONObject(
@@ -200,6 +254,51 @@ class WorldBookStoreTest {
     }
 
     @Test
+    fun scopedOwnerCleanupPreservesGlobalAndUnrelatedBooks() {
+        val books = listOf(
+            worldBook(name = "global", entries = listOf(entry("global", emptyList(), "global", constant = true))),
+            worldBook(
+                name = "assistant-a",
+                scope = WorldBookScope.ASSISTANT,
+                assistantId = "assistant-a",
+                entries = listOf(entry("assistant-a", emptyList(), "a", constant = true))
+            ),
+            worldBook(
+                name = "assistant-b",
+                scope = WorldBookScope.ASSISTANT,
+                assistantId = "assistant-b",
+                entries = listOf(entry("assistant-b", emptyList(), "b", constant = true))
+            ),
+            worldBook(
+                name = "chat-a",
+                scope = WorldBookScope.CHAT,
+                chatSessionId = "chat-a",
+                entries = listOf(entry("chat-a", emptyList(), "chat a", constant = true))
+            ),
+            worldBook(
+                name = "chat-b",
+                scope = WorldBookScope.CHAT,
+                chatSessionId = "chat-b",
+                entries = listOf(entry("chat-b", emptyList(), "chat b", constant = true))
+            )
+        )
+
+        val afterAssistantDelete = books.withoutScopedOwner(WorldBookScope.ASSISTANT, "assistant-a")
+        assertEquals(listOf("global", "assistant-b", "chat-a", "chat-b"), afterAssistantDelete.map { it.id })
+
+        val afterChatHistoryClear = afterAssistantDelete.withoutScopedOwner(WorldBookScope.CHAT)
+        assertEquals(listOf("global", "assistant-b"), afterChatHistoryClear.map { it.id })
+        assertEquals(books, books.withoutScopedOwner(WorldBookScope.GLOBAL))
+
+        val afterCommittedOwnerCleanup = books.withoutScopedOwners(
+            scope = WorldBookScope.CHAT,
+            ownerIds = setOf("chat-a", "chat-b")
+        )
+        assertEquals(listOf("global", "assistant-a", "assistant-b"), afterCommittedOwnerCleanup.map { it.id })
+        assertEquals(books, books.withoutScopedOwners(WorldBookScope.CHAT, emptySet()))
+    }
+
+    @Test
     fun tokenBudgetSkipsOversizedPriorityEntryAndStillFitsLaterEntries() {
         val book = worldBook(
             name = "budget",
@@ -247,6 +346,23 @@ class WorldBookStoreTest {
         )
 
         assertEquals(WorldBookSelection(), selection)
+    }
+
+    @Test
+    fun persistPhaseLabelDescribesRuntimeFinalizationNotDatabaseSave() {
+        val source = sequenceOf(
+            File("../feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt"),
+            File("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+        ).firstOrNull(File::isFile)?.readText()
+            ?: error("Unable to locate ChatScreen.kt")
+        val persistLabel = Regex("""GenerationPhase\.PERSIST\s*->\s*\"([^\"]+)\"""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: error("Missing PERSIST label")
+
+        assertFalse(persistLabel.contains("\\u4fdd\\u5b58\\u5bf9\\u8bdd"))
+        assertTrue(persistLabel.contains("\\u63a8\\u7406\\u6536\\u5c3e"))
     }
 
     private fun entry(

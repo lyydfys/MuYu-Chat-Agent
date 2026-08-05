@@ -12,7 +12,7 @@ class ImagePromptTagAutocompleteIntegrationTest {
             "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt"
         )
 
-        assertTrue(source.contains("ImagePromptTagAutocompleteProvider {"))
+        assertTrue(source.countOccurrences("ImagePromptTagAutocompleteProvider(") == 1)
         assertTrue(source.contains("private fun ImageNegativePromptTagField("))
         assertTrue(source.countOccurrences("ImagePromptTagAssistPanel(") >= 2)
         assertTrue(source.countOccurrences("TextFieldValue(") >= 4)

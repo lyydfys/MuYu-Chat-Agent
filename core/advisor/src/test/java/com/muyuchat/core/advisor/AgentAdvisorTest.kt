@@ -98,7 +98,7 @@ class AgentAdvisorTest {
         assertEquals(RiskLevel.High, result.recommended!!.risk)
         assertTrue(result.recommended!!.reason.contains("总 35.0B / 激活 3.0B"))
         assertEquals(4096, result.tuningPlan.nCtx)
-        assertEquals("draft-mtp", JSONObject(result.tuningPlan.advancedJson).getString("spec_type"))
+        assertEquals("none", JSONObject(result.tuningPlan.advancedJson).optString("spec_type", "none"))
     }
 
     @Test

@@ -501,6 +501,7 @@ class ImageGenerationApiContractTest {
                     .put("mime_type", "image/png")
                     .put("width", 512)
                     .put("height", 512)
+                    .put("seed", 7 + index)
             )
         }
         execution.put("responseOutputEvidence", responseOutputEvidence(data))
@@ -511,7 +512,9 @@ class ImageGenerationApiContractTest {
             languageCapability = "ENGLISH_DOMINANT"
         )
         val body = JSONObject()
+            .put("created", 1_750_000_000L)
             .put("request_id", "img-batch")
+            .put("model", "fixture-image-model")
             .put("prompt_processing", directPromptProcessing(request))
             .put("execution", execution)
             .put("data", data)
@@ -897,7 +900,7 @@ class ImageGenerationApiContractTest {
     }
 
     @Test
-    fun `authenticated response accepts native multilingual passthrough and strict local translation`() {
+    fun `authenticated response accepts native multilingual and rejects legacy local translation`() {
         val nativeRequest = ImageGenerationApiContract.parseRequest(
             """{"prompt":"一只红色杯子","negative_prompt":"不要文字"}"""
         )
@@ -941,55 +944,17 @@ class ImageGenerationApiContractTest {
                 languageCapability = "ENGLISH_DOMINANT"
             )
         ).put("prompt_processing", translatedEvidence)
-        val parsed = ImageGenerationApiContract.parseResponse(
-            "img-prompt-translated",
-            translatedRequest,
-            translatedResponse.toString()
-        ).promptProcessing
-
-        assertEquals("LOCAL_LLM_ZH_TO_EN", parsed?.method)
-        assertEquals(
-            "one red cup on a blue table, two green apples to the left of the cup",
-            parsed?.effectivePrompt
-        )
-        assertEquals("people, text, extra fruit", parsed?.effectiveNegativePrompt)
-        assertEquals(4, parsed?.translationContractVersion)
-
-        listOf(
-            JSONObject(translatedEvidence.toString()).apply { remove("translatorModelSha256") } to
-                "invalid_prompt_processing_evidence",
-            JSONObject(translatedEvidence.toString()).put("translationContractVersion", 3) to
-                "invalid_prompt_processing_evidence",
-            JSONObject(translatedEvidence.toString()).put("effectivePrompt", sourcePrompt) to
-                "prompt_processing_execution_mismatch",
-            JSONObject(translatedEvidence.toString()).put("imageProfileBindingFingerprint", "invalid") to
-                "invalid_prompt_processing_evidence",
-            JSONObject(translatedEvidence.toString()).put("translatorModelId", " ") to
-                "invalid_prompt_processing_evidence"
-        ).forEachIndexed { index, (invalidEvidence, expectedCode) ->
-            val requestId = "img-prompt-translated-invalid-$index"
-            val body = responseBody(
-                requestId,
-                strictExecution("STABLE_DIFFUSION_CPP").bindPromptExecution(
-                    request = translatedRequest,
-                    effectivePrompt = translatedEvidence.getString("effectivePrompt"),
-                    effectiveNegativePrompt = translatedEvidence.getString("effectiveNegativePrompt"),
-                    languageCapability = "ENGLISH_DOMINANT"
-                )
+        assertRejected("unsupported_legacy_prompt_processing_method") {
+            ImageGenerationApiContract.parseResponse(
+                "img-prompt-translated",
+                translatedRequest,
+                translatedResponse.toString()
             )
-                .put("prompt_processing", invalidEvidence)
-            assertRejected(expectedCode) {
-                ImageGenerationApiContract.parseResponse(
-                    requestId,
-                    translatedRequest,
-                    body.toString()
-                )
-            }
         }
     }
 
     @Test
-    fun `translated prompt processing rejects tampering of every proof hash`() {
+    fun `legacy translated prompt proofs cannot re-admit the retired method`() {
         val request = ImageGenerationApiContract.parseRequest(
             JSONObject()
                 .put("prompt", "一只红色杯子放在蓝色桌子上，杯子左侧有两个绿色苹果")
@@ -1017,7 +982,7 @@ class ImageGenerationApiContractTest {
                 languageCapability = "ENGLISH_DOMINANT"
             )
 
-            assertRejected("invalid_prompt_processing_evidence") {
+            assertRejected("unsupported_legacy_prompt_processing_method") {
                 ImageGenerationApiContract.parseResponse(
                     requestId,
                     request,
@@ -1045,7 +1010,7 @@ class ImageGenerationApiContractTest {
             effectiveNegativePrompt = "people",
             languageCapability = "ENGLISH_DOMINANT"
         )
-        assertRejected("invalid_prompt_processing_evidence") {
+        assertRejected("unsupported_legacy_prompt_processing_method") {
             ImageGenerationApiContract.parseResponse(
                 "img-prompt-field-rewrite",
                 mixedRequest,
@@ -1232,6 +1197,7 @@ class ImageGenerationApiContractTest {
         )
         val sha = "a".repeat(64)
         val execution = strictExecution("STABLE_DIFFUSION_CPP")
+            .put("taskMode", "img2img")
         execution.getJSONObject("nativeEffective")
             .put("taskMode", "img2img")
             .put("batchCount", 1)
@@ -1297,6 +1263,7 @@ class ImageGenerationApiContractTest {
 
         fun controlExecution(): JSONObject {
             val execution = strictExecution("QNN_HTP")
+                .put("taskMode", "control")
             execution.getJSONObject("nativeEffective")
                 .put("taskMode", "control")
                 .put("batchCount", 1)
@@ -1683,6 +1650,7 @@ class ImageGenerationApiContractTest {
             .put("profileRevision", 1)
             .put("modelFingerprint", "b".repeat(64))
             .put("runtime", runtime)
+            .put("taskMode", "text_to_image")
             .put("scheduler", "EULER")
             .put("predictionType", "EPSILON")
             .put("steps", 20)
@@ -1718,6 +1686,7 @@ class ImageGenerationApiContractTest {
         }
         return JSONObject(native.toString())
             .put("nativeEffective", native)
+            .put("taskMode", "text_to_image")
             .put("nativeExecution", true)
             .put("nativeGenerationSequence", 9L)
             .put("batchCount", 1)
@@ -1891,7 +1860,9 @@ class ImageGenerationApiContractTest {
         request: ImageGenerationApiRequest? = null
     ): JSONObject =
         JSONObject()
+            .put("created", 1_750_000_000L)
             .put("request_id", requestId)
+            .put("model", request?.model ?: "fixture-image-model")
             .apply {
                 request?.let {
                     execution.bindPromptExecution(
@@ -2000,10 +1971,12 @@ class ImageGenerationApiContractTest {
     private fun strictImageData(): org.json.JSONArray =
         org.json.JSONArray().put(
             JSONObject()
+                .put("index", 0)
                 .put("b64_json", "iVBORw0KGgo=")
                 .put("mime_type", "image/png")
                 .put("width", 512)
                 .put("height", 512)
+                .put("seed", 7)
         )
 
     private fun responseOutputEvidence(data: JSONArray): JSONArray = JSONArray().apply {
@@ -2191,10 +2164,12 @@ class ImageGenerationApiContractTest {
         val options = requireNotNull(request.ultraFix)
         return JSONArray().put(
             JSONObject()
+                .put("index", 0)
                 .put("b64_json", Base64.getEncoder().encodeToString(png))
                 .put("mime_type", "image/png")
                 .put("width", options.targetWidth)
                 .put("height", options.targetHeight)
+                .put("seed", 7)
         )
     }
 

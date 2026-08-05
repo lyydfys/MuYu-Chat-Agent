@@ -1,6 +1,5 @@
 package com.muyuchat.mca
 
-import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.QairtBundleRuntimeIdentity
 import java.io.File
 import java.nio.file.Files
@@ -138,28 +137,4 @@ class ManagedRuntimeReadinessTest {
         )
     }
 
-    @Test
-    fun unknownQairtModelUsesAutomaticCanaryWithoutHidingTheLoadAction() {
-        assertTrue(
-            shouldRunAutomaticQairtCanary(
-                runtime = ChatModelRuntime.GENIEX_QAIRT,
-                modelId = "qairt-model",
-                verifiedModelIds = emptySet()
-            )
-        )
-        assertFalse(
-            shouldRunAutomaticQairtCanary(
-                runtime = ChatModelRuntime.GENIEX_QAIRT,
-                modelId = "qairt-model",
-                verifiedModelIds = setOf("qairt-model")
-            )
-        )
-        assertFalse(
-            shouldRunAutomaticQairtCanary(
-                runtime = ChatModelRuntime.LLAMA_CPP,
-                modelId = "gguf-model",
-                verifiedModelIds = emptySet()
-            )
-        )
-    }
 }

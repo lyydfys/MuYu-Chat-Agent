@@ -285,8 +285,27 @@ data class ChatRequest(
     val messages: List<ChatMessage>,
     val params: GenerationParams = GenerationParams(),
     /** Request-scoped authoritative context; never persisted into assistants or chat history. */
-    val runtimeSystemContext: String = ""
+    val runtimeSystemContext: String = "",
+    /**
+     * Explicit opt-in for the disk-backed llama.cpp prefix cache. This must be
+     * a stable persona/system prefix; request-scoped retrieval, web-search, and
+     * clock text must stay null so they can never be persisted as KV state.
+     */
+    val persistentPrefixSystemPrompt: String? = null
 ) {
+    /**
+     * Returns only the stable configured persona prefix. Request-scoped system
+     * context (world books, retrieval, clock text, and caller additions) is
+     * deliberately excluded so it can never be persisted in a prefix state.
+     */
+    fun fixedSystemPromptForPrefixCache(): String {
+        val stablePrompt = persistentPrefixSystemPrompt?.trim().orEmpty()
+        if (stablePrompt.isBlank()) return ""
+        return listOf(stablePrompt, params.reasoningInstruction())
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+    }
+
     fun messagesJson(
         multimodal: Boolean = false,
         contentEncoding: MultimodalContentEncoding = MultimodalContentEncoding.OPENAI_PARTS
@@ -343,29 +362,35 @@ data class ChatRequest(
     }
 
     private fun withSystemPrompt(input: List<ChatMessage>): List<ChatMessage> {
-        val prompt = params.effectiveSystemPrompt().trim()
-        val runtimeContext = runtimeSystemContext.trim()
-        if (prompt.isBlank() && runtimeContext.isBlank()) return input
-        val firstSystem = input.indexOfFirst { it.role == Role.SYSTEM }
-        if (firstSystem < 0) {
-            val systemContent = listOf(prompt, runtimeContext)
-                .filter { it.isNotBlank() }
-                .joinToString("\n\n")
-            return listOf(ChatMessage(Role.SYSTEM, systemContent)) + input
+        val systemParts = linkedSetOf<String>()
+        fun addSystemPart(value: String) {
+            value.trim().takeIf { it.isNotBlank() }?.let(systemParts::add)
         }
-        return input.mapIndexed { index, message ->
-            if (index == firstSystem) {
-                message.copy(content = listOf(
-                    message.content,
-                    runtimeContext,
-                    params.reasoningInstruction()
-                )
-                    .filter { it.isNotBlank() }
-                    .joinToString("\n\n"))
-            } else {
-                message
-            }
+
+        val inputSystemMessages = input.filter { it.role == Role.SYSTEM }
+        // An explicit system message from an API client is its character card
+        // and therefore replaces the app's default persona, as it did before
+        // role snapshots were introduced. Runtime context and the requested
+        // reasoning instruction still apply to either form of system prompt.
+        if (inputSystemMessages.isEmpty()) {
+            addSystemPart(params.effectiveSystemPrompt())
+        } else {
+            inputSystemMessages.forEach { addSystemPart(it.content) }
+            addSystemPart(params.reasoningInstruction())
         }
+        addSystemPart(runtimeSystemContext)
+
+        val nonSystemMessages = input.filter { it.role != Role.SYSTEM }
+        if (systemParts.isEmpty()) return nonSystemMessages
+        val systemCreatedAt = inputSystemMessages.firstOrNull()?.createdAt
+            ?: System.currentTimeMillis()
+        return listOf(
+            ChatMessage(
+                role = Role.SYSTEM,
+                content = systemParts.joinToString("\n\n"),
+                createdAt = systemCreatedAt
+            )
+        ) + nonSystemMessages
     }
 
     private fun GenerationParams.effectiveSystemPrompt(): String =
@@ -389,6 +414,8 @@ data class RuntimeStats(
     val completionTokens: Int = 0,
     val ttftMs: Long = 0,
     val prefillMs: Long = 0,
+    /** Prompt tokens processed per second, calculated from native prefill evidence. */
+    val prefillTps: Double = 0.0,
     val decodeMs: Long = 0,
     val decodeTps: Double = 0.0,
     val e2eTps: Double = 0.0,
@@ -415,10 +442,121 @@ data class RuntimeStats(
     val maxAllTokens: Int = 0,
     val maxNewTokens: Int = 0,
     val backendDevices: String = "[]",
+    /** True only after native allocation and successful decode evidence agree. */
+    val gpuOffloadActive: Boolean = false,
+    /** Native read-back saw non-CPU model and context/compute allocations. */
+    val gpuOffloadAllocationObserved: Boolean = false,
+    /** At least one llama_decode completed after the allocation evidence. */
+    val gpuOffloadExecutionObserved: Boolean = false,
+    val gpuOffloadBytes: Long = 0,
+    /** -1 means the backend did not expose an exact actual layer count. */
+    val gpuOffloadLayers: Int = 0,
+    val gpuOffloadLayersKnown: Boolean = false,
+    /** `n_gpu_layers=auto` retried the current load using CPU. */
+    val gpuAutoFallbackApplied: Boolean = false,
+    val gpuAutoFallbackReason: String? = null,
+    /** In-memory longest-common-prefix KV reuse for the current request. */
+    val cacheReuseHit: Boolean = false,
+    val cacheReusedTokens: Int = 0,
+    val cacheReuseReason: String? = null,
+    val cacheReuseHits: Long = 0,
+    val cacheReuseMisses: Long = 0,
+    /** Disk-backed fixed-system-prefix cache remains separately attributable. */
+    val persistentPrefixCacheHit: Boolean = false,
+    val persistentPrefixCacheTokens: Int = 0,
+    val persistentPrefixCacheReason: String? = null,
     val lastError: String? = null
-)
+) {
+    /** A single predicate shared by UI and API projections of runtime stats. */
+    val hasVerifiedGpuExecution: Boolean
+        get() = gpuOffloadActive &&
+            gpuOffloadAllocationObserved &&
+            gpuOffloadExecutionObserved
+}
+
+/** Execution boundaries reported by [GenerateEvent.Phase]. */
+enum class GenerationPhase {
+    LOAD,
+    TOKENIZE,
+    PREFILL,
+    DECODE,
+    PERSIST
+}
+
+/**
+ * Exact token progress reported by a native runtime.
+ *
+ * A missing [TokenProgress] means the phase is indeterminate. Callers must not
+ * derive a percentage from estimates or configured token limits.
+ */
+data class TokenProgress(
+    val completedTokens: Int,
+    val totalTokens: Int
+) {
+    init {
+        require(completedTokens >= 0) { "completedTokens must not be negative" }
+        require(totalTokens > 0) { "totalTokens must be positive" }
+        require(completedTokens <= totalTokens) { "completedTokens must not exceed totalTokens" }
+    }
+}
+
+/** Original message position and deterministic retention decision for one prompt. */
+data class PromptMessageRetention(
+    val originalIndex: Int,
+    val role: Role,
+    val retained: Boolean
+) {
+    init {
+        require(originalIndex >= 0) { "originalIndex must not be negative" }
+    }
+}
+
+/** Deterministic prompt accounting exposed to the chat UI and diagnostics. */
+data class PromptContextUsage(
+    val retainedMessageCount: Int,
+    val trimmedMessageCount: Int,
+    val roleTokens: Int,
+    val worldBookTokens: Int,
+    val knowledgeTokens: Int,
+    val totalEstimatedTokens: Long,
+    val messageRetention: List<PromptMessageRetention> = emptyList(),
+    val selectedWorldBookEntryIds: List<String> = emptyList(),
+    val skippedWorldBookEntryIds: List<String> = emptyList(),
+    val selectedKnowledgeChunkIds: List<String> = emptyList(),
+    val skippedKnowledgeChunkIds: List<String> = emptyList()
+) {
+    init {
+        require(retainedMessageCount >= 0) { "retainedMessageCount must not be negative" }
+        require(trimmedMessageCount >= 0) { "trimmedMessageCount must not be negative" }
+        require(roleTokens >= 0) { "roleTokens must not be negative" }
+        require(worldBookTokens >= 0) { "worldBookTokens must not be negative" }
+        require(knowledgeTokens >= 0) { "knowledgeTokens must not be negative" }
+        require(totalEstimatedTokens >= 0L) { "totalEstimatedTokens must not be negative" }
+        require(messageRetention.map { it.originalIndex }.distinct().size == messageRetention.size) {
+            "messageRetention must contain each original index at most once"
+        }
+        if (messageRetention.isNotEmpty()) {
+            require(retainedMessageCount == messageRetention.count { it.retained }) {
+                "retainedMessageCount must match messageRetention"
+            }
+            require(trimmedMessageCount == messageRetention.count { !it.retained }) {
+                "trimmedMessageCount must match messageRetention"
+            }
+        }
+    }
+}
 
 sealed interface GenerateEvent {
+    /**
+     * A non-token lifecycle transition. In particular, prefill stays
+     * indeterminate until native code supplies an exact token total.
+     */
+    data class Phase(
+        val phase: GenerationPhase,
+        val stats: RuntimeStats,
+        val tokenProgress: TokenProgress? = null
+    ) : GenerateEvent
+
     data class Chunk(
         val text: String,
         val stats: RuntimeStats,

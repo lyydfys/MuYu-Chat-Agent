@@ -549,7 +549,7 @@ class LlamaCppRuntimeParameterAdapter(
             "spec_draft_n_max" to 0,
             "mmap" to true,
             "mlock" to false
-        ) to mapOf("n_threads" to 1, "n_threads_batch" to 1, "cache_reuse" to 0)
+        ) to mapOf("n_threads" to 1, "n_threads_batch" to 1, "cache_reuse" to 256)
 
     override fun normalize(
         identity: ModelRuntimeIdentity,
@@ -666,7 +666,13 @@ class LlamaCppRuntimeParameterAdapter(
         val observedSafe = signatureSafeValues(identity, observed)
         if (observedSafe.fields != expected.values.fields) return null
         val differences = observedSafe.differences(expected.values)
-        if (differences.any { it != "n_ctx" }) return null
+        val nativeCpuFallback = isNativeAutoGpuFallback(expected.values, observedSafe)
+        val allowedDifferences = if (nativeCpuFallback) {
+            setOf("n_ctx", "n_gpu_layers", "split_mode")
+        } else {
+            setOf("n_ctx")
+        }
+        if (differences.any { it !in allowedDifferences }) return null
         if ("n_ctx" in differences) {
             val requestedCtx = (expected.values.value("n_ctx") as? Number)?.toInt() ?: return null
             val nativeCtx = (observedSafe.value("n_ctx") as? Number)?.toInt() ?: return null
@@ -681,6 +687,14 @@ class LlamaCppRuntimeParameterAdapter(
 
     private companion object {
         const val LLAMA_CONTEXT_ALIGNMENT = 256
+
+        fun isNativeAutoGpuFallback(
+            expected: CanonicalParameterSet,
+            observed: CanonicalParameterSet
+        ): Boolean =
+            (expected.value("n_gpu_layers") as? Number)?.toInt() == -1 &&
+                (observed.value("n_gpu_layers") as? Number)?.toInt() == 0 &&
+                observed.value("split_mode")?.toString() == "none"
 
         fun nativeAlignedContext(nCtx: Int): Int {
             if (nCtx <= 0 || nCtx % LLAMA_CONTEXT_ALIGNMENT == 0) return nCtx

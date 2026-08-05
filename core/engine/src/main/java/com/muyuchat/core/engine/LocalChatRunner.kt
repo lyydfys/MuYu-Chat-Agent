@@ -404,6 +404,28 @@ private fun JSONArray.genieXTextContent(): String = buildString {
     }
 }
 
+/** Native-facing paths for one fixed, non-conversational prefix state. */
+data class PersistentPrefixCacheRequest(
+    val restoreStatePath: String? = null,
+    val writeStatePath: String? = null,
+    val fixedSystemPrompt: String
+) {
+    init {
+        require(restoreStatePath?.isNotBlank() != false) {
+            "restoreStatePath must be blank or a non-blank path."
+        }
+        require(writeStatePath?.isNotBlank() != false) {
+            "writeStatePath must be blank or a non-blank path."
+        }
+        require(fixedSystemPrompt.isNotBlank()) {
+            "fixedSystemPrompt must not be blank."
+        }
+        require(restoreStatePath != null || writeStatePath != null) {
+            "A persistent prefix request needs a restore or write path."
+        }
+    }
+}
+
 interface LocalChatRunner {
     val runtime: LocalChatRuntime
     val isAvailable: Boolean
@@ -413,7 +435,29 @@ interface LocalChatRunner {
     fun loadModel(modelPath: String, paramsJson: String): Int
     fun unloadModel()
     fun beginCompletion(messagesJson: String, paramsJson: String): Int
+    /**
+     * Starts a text completion with an optional persistent fixed-prefix state.
+     * Non-llama runtimes intentionally fall back to their ordinary begin path.
+     */
+    fun beginCompletionWithPrefixCache(
+        messagesJson: String,
+        paramsJson: String,
+        prefixCache: PersistentPrefixCacheRequest?
+    ): Int = beginCompletion(messagesJson, paramsJson)
+    /**
+     * Exact native prompt-prefill snapshot when the runtime can report one.
+     * `null` deliberately means indeterminate rather than an estimated value.
+     */
+    fun prefillProgress(): TokenProgress? = null
+    /**
+     * Clears the previous request's prefill snapshot before a new native begin.
+     * This prevents a completed prior request from being presented as progress
+     * for the request that is about to start.
+     */
+    fun resetPrefillProgress() = Unit
     fun generateNextChunk(): String?
+    /** Clears any runtime state derived from editable conversation history. */
+    fun invalidateConversationContext() = Unit
     fun requestStop()
     fun requestStopIfActive(): Boolean = false
     fun getRuntimeStatsJson(): String
@@ -445,7 +489,34 @@ internal class LlamaCppChatRunner(
     override fun unloadModel() = bridge.unloadModel()
     override fun beginCompletion(messagesJson: String, paramsJson: String): Int =
         bridge.beginCompletion(messagesJson, paramsJson)
+    override fun beginCompletionWithPrefixCache(
+        messagesJson: String,
+        paramsJson: String,
+        prefixCache: PersistentPrefixCacheRequest?
+    ): Int = if (prefixCache == null) {
+        bridge.beginCompletion(messagesJson, paramsJson)
+    } else {
+        bridge.beginCompletionWithPrefixCache(
+            messagesJson = messagesJson,
+            paramsJson = paramsJson,
+            restoreStatePath = prefixCache.restoreStatePath,
+            writeStatePath = prefixCache.writeStatePath,
+            fixedSystemPrompt = prefixCache.fixedSystemPrompt
+        )
+    }
+    override fun prefillProgress(): TokenProgress? = runCatching {
+        val root = JSONObject(bridge.getPrefillProgressJson())
+        val total = root.optInt("totalTokens", 0)
+        val completed = root.optInt("completedTokens", -1)
+        if (total > 0 && completed in 0..total) {
+            TokenProgress(completedTokens = completed, totalTokens = total)
+        } else {
+            null
+        }
+    }.getOrNull()
+    override fun resetPrefillProgress() = bridge.resetPrefillProgress()
     override fun generateNextChunk(): String? = bridge.generateNextChunk()
+    override fun invalidateConversationContext() = bridge.invalidateTextContext()
     override fun requestStop() = bridge.requestStop()
     override fun requestStopIfActive(): Boolean = bridge.requestStopIfActive()
     override fun getRuntimeStatsJson(): String = bridge.getRuntimeStatsJson()
@@ -1367,24 +1438,34 @@ internal class GenieXChatRunner(
     }
 }
 
-fun defaultLocalChatRunners(context: Context? = null): Map<LocalChatRuntime, LocalChatRunner> = mapOf(
-    LocalChatRuntime.MNN_CPU to MnnCpuChatRunner(),
-    LocalChatRuntime.LLAMA_CPP to LlamaCppChatRunner(),
-    LocalChatRuntime.GENIEX_LLAMA_CPP to GenieXChatRunner(
+/**
+ * Creates exactly one runner. Callers that isolate ordinary native runners can
+ * therefore avoid loading unrelated JNI libraries in the product process.
+ */
+fun defaultLocalChatRunner(
+    runtime: LocalChatRuntime,
+    context: Context? = null
+): LocalChatRunner = when (runtime) {
+    LocalChatRuntime.MNN_CPU -> MnnCpuChatRunner()
+    LocalChatRuntime.LLAMA_CPP -> LlamaCppChatRunner()
+    LocalChatRuntime.GENIEX_LLAMA_CPP -> GenieXChatRunner(
         runtime = LocalChatRuntime.GENIEX_LLAMA_CPP,
         requestedRuntimeId = RuntimeIdValue.LLAMA_CPP.value.orEmpty(),
         defaultComputeUnit = ComputeUnitValue.HYBRID.value.orEmpty(),
         defaultBackendDevices = "骁龙 HTP + CPU / GenieX llama.cpp",
         appContext = context
-    ),
-    LocalChatRuntime.GENIEX_QAIRT to GenieXChatRunner(
+    )
+    LocalChatRuntime.GENIEX_QAIRT -> GenieXChatRunner(
         runtime = LocalChatRuntime.GENIEX_QAIRT,
         requestedRuntimeId = RuntimeIdValue.QAIRT.value.orEmpty(),
         defaultComputeUnit = ComputeUnitValue.NPU.value.orEmpty(),
         defaultBackendDevices = "QAIRT NPU",
         appContext = context
     )
-)
+}
+
+fun defaultLocalChatRunners(context: Context? = null): Map<LocalChatRuntime, LocalChatRunner> =
+    LocalChatRuntime.entries.associateWith { runtime -> defaultLocalChatRunner(runtime, context) }
 
 internal fun unavailableStats(runtime: LocalChatRuntime, error: Throwable?): JSONObject =
     JSONObject()

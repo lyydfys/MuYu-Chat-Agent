@@ -6,6 +6,7 @@ import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.engine.LocalChatRuntime
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 import com.muyuchat.core.engine.ParameterFieldPolicyRegistry
+import com.muyuchat.core.modelstore.GgufMetadataReader
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.modelstore.QairtExecutionAdmission
 import com.muyuchat.core.modelstore.QairtExecutionAdmissionMode
@@ -452,22 +453,28 @@ internal object RuntimeIdentityFactory {
         when (runtime) {
             LocalChatRuntime.LLAMA_CPP -> {
                 add("llama_cpp_cpu")
+                // GPU is a runtime candidate. Native backend registration and
+                // actual non-CPU allocation evidence decide whether it is on.
+                add("gpu_offload")
+                // MTP is different: a filename is not evidence of an MTP
+                // head. Only a positive GGUF nextn_predict_layers declaration
+                // can make draft-MTP selectable; native load/smoke still owns
+                // final acceptance and commit.
+                if (model.declaresMtpHead()) add("draft_mtp")
                 if (sparseMoe.isSparseMoe) {
                     add("sparse_moe")
-                    val verifiedQwen36 = model.sha256.equals(
-                        VERIFIED_QWEN36_MTP_SHA256,
-                        ignoreCase = true
-                    )
-                    if (verifiedQwen36) {
-                        add("draft_mtp")
-                    }
                     val physicalRam = device.totalRamBytes.takeIf { it > 0L }
                         ?: device.advertisedRamBytes
                     val conservativeMemoryTier = physicalRam <= 0L ||
                         physicalRam <= MAX_SPARSE_MOE_16_GIB_TIER_BYTES
                     if (conservativeMemoryTier) {
                         add("sparse_moe_16gb_tier")
-                        if (verifiedQwen36) add("verified_q4_kv_cache")
+                        // This remains a narrowly scoped tuning profile, not
+                        // an admission decision.  Native load still validates
+                        // the actual quantization and graph.
+                        if (model.sha256.equals(VERIFIED_QWEN36_MTP_SHA256, ignoreCase = true)) {
+                            add("verified_q4_kv_cache")
+                        }
                     }
                 }
             }
@@ -491,6 +498,16 @@ internal object RuntimeIdentityFactory {
     private fun hasVisionSignal(files: List<File>): Boolean = files.any { file ->
         val lower = file.name.lowercase(Locale.US)
         "vision" in lower || "visual" in lower || "processor" in lower || "mmproj" in lower
+    }
+
+    private fun ModelManifest.declaresMtpHead(): Boolean {
+        val modelFile = File(path)
+        if (!modelFile.isFile) return false
+        return runCatching { GgufMetadataReader.read(modelFile) }
+            .getOrNull()
+            ?.nextnPredictLayers
+            ?.let { it > 0 }
+            ?: false
     }
 
     private const val GIB = 1024L * 1024L * 1024L

@@ -60,6 +60,18 @@ class GgufMetadataReaderTest {
     }
 
     @Test
+    fun readsMtpEligibilityFromGgufMetadataInsteadOfTheFileName() {
+        val metadata = GgufMetadataReader.read(
+            ByteArrayInputStream(ggufWithMtp("qwen35moe", 2)),
+            "renamed-generic-model.gguf"
+        )
+
+        assertTrue(metadata.isGguf)
+        assertEquals("qwen35moe", metadata.architecture)
+        assertEquals(2, metadata.nextnPredictLayers)
+    }
+
+    @Test
     fun mapsCurrentLlamaFileTypesToTheirActualQuantizations() {
         val expected = mapOf(
             7 to "Q8_0",
@@ -110,6 +122,20 @@ class GgufMetadataReaderTest {
             writeGgufString("general.file_type")
             write(uint32Le(4))
             write(uint32Le(fileType.toLong()))
+        }.toByteArray()
+
+    private fun ggufWithMtp(architecture: String, nextnPredictLayers: Int): ByteArray =
+        ByteArrayOutputStream().apply {
+            write("GGUF".toByteArray())
+            write(uint32Le(3L))
+            write(uint64Le(0L))
+            write(uint64Le(2L))
+            writeGgufString("general.architecture")
+            write(uint32Le(8))
+            writeGgufString(architecture)
+            writeGgufString("$architecture.nextn_predict_layers")
+            write(uint32Le(4))
+            write(uint32Le(nextnPredictLayers.toLong()))
         }.toByteArray()
 
     private fun ByteArrayOutputStream.writeGgufString(value: String) {

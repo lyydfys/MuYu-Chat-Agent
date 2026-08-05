@@ -166,6 +166,25 @@ class AdaptiveTuningContractsTest {
     }
 
     @Test
+    fun missingQairtDiagnosticEvidenceDoesNotBlockTheSafeBaseline() {
+        val profile = SafeBaselineFactory.create(
+            runtimeIdentity = identity(
+                modelId = "unverified-qairt",
+                runtime = LocalChatRuntime.GENIEX_QAIRT
+            ),
+            device = device(),
+            capabilities = ModelTuningCapabilities(
+                runtime = TuningRuntime.QAIRT,
+                qairtAdmissionPassed = false
+            )
+        )
+
+        assertEquals(ProfileEligibility.ELIGIBLE, profile.eligibility)
+        assertNull(profile.blockedAction)
+        assertEquals("qairt", profile.loadBound.backend)
+    }
+
+    @Test
     fun thermalThreadOverrideNeverMutatesCommittedProfileOrSignature() {
         val engine = TuningEngine()
         val recommendation = engine.recommendAdaptive(
@@ -241,11 +260,12 @@ class AdaptiveTuningContractsTest {
 
     private fun identity(
         modelId: String,
-        capabilities: Set<String> = emptySet()
+        capabilities: Set<String> = emptySet(),
+        runtime: LocalChatRuntime = LocalChatRuntime.LLAMA_CPP
     ): ModelRuntimeIdentity = ModelRuntimeIdentity(
         modelId = modelId,
         artifactFingerprint = "artifact-$modelId",
-        runtime = LocalChatRuntime.LLAMA_CPP,
+        runtime = runtime,
         runtimeVersion = "test",
         nativeLibrarySha256 = "native-test",
         capabilities = capabilities

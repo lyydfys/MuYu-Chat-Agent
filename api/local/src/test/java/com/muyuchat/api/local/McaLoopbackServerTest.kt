@@ -60,6 +60,44 @@ class McaLoopbackServerTest {
     }
 
     @Test
+    fun chatRequestBodyUsesItsOwnBoundBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServerInstance(apiKey = "secret") { server, port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val limit = server.requestBodyLimitFor("POST", "/v1/chat/completions")
+            val request = "POST /v1/chat/completions HTTP/1.1\r\n" +
+                "Host: 127.0.0.1\r\n" +
+                "Authorization: Bearer secret\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: ${limit + 1}\r\n\r\n"
+
+            val response = rawHttp(port, request)
+
+            assertTrue(response.startsWith("HTTP/1.1 413 Payload Too Large"))
+            assertTrue(response.contains("request_body_too_large"))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun imageGenerationKeepsTheOriginalLargerRequestLimit() {
+        val server = McaLoopbackServer(port = freePort(), apiKey = "secret")
+        try {
+            val chatLimit = server.requestBodyLimitFor("POST", "/v1/chat/completions")
+            val imageLimit = server.requestBodyLimitFor("POST", "/v1/images/generations")
+
+            assertEquals(64 * 1024 * 1024, imageLimit)
+            assertTrue(chatLimit < imageLimit)
+            assertTrue(server.requestBodyLimitFor("POST", "/v1/mca/benchmark") < chatLimit)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun unauthenticatedLargeBodyIsRejectedBeforeContentLengthAllocation() {
         withServer(apiKey = "secret") { port ->
             val request = "POST /v1/images/generations HTTP/1.1\r\n" +
@@ -132,7 +170,9 @@ class McaLoopbackServerTest {
                 capturedRequestId.set(requestId)
                 capturedBody.set(requestBody)
                 JSONObject()
+                    .put("created", 1_750_000_000L)
                     .put("request_id", requestId)
+                    .put("model", "fixture-image-model")
                     .put("prompt_processing", directPromptProcessing(requestBody))
                     .put(
                         "execution",
@@ -152,6 +192,8 @@ class McaLoopbackServerTest {
             assertTrue(response.startsWith("HTTP/1.1 200 OK"))
             assertTrue(capturedRequestId.get().startsWith("img-"))
             assertEquals(capturedRequestId.get(), responseBody.getString("request_id"))
+            assertEquals("fixture-image-model", responseBody.getString("model"))
+            assertTrue(responseBody.getLong("created") > 0L)
             assertEquals(body, capturedBody.get())
         }
     }
@@ -173,7 +215,9 @@ class McaLoopbackServerTest {
                     }
                 }
                 JSONObject()
+                    .put("created", 1_750_000_000L)
                     .put("request_id", requestId)
+                    .put("model", "fixture-image-model")
                     .put("prompt_processing", directPromptProcessing(requestBody))
                     .put(
                         "execution",
@@ -290,7 +334,7 @@ class McaLoopbackServerTest {
     }
 
     @Test
-    fun authenticatedImagesApiPreservesAppVerifiedPromptProcessingEvidence() {
+    fun authenticatedImagesApiRejectsRetiredLocalTranslationEvidence() {
         val sourcePrompt = "一只红色杯子放在蓝色桌子上，杯子左侧有两个绿色苹果"
         val effectivePrompt =
             "one red cup on a blue table, two green apples to the left of the cup"
@@ -319,7 +363,9 @@ class McaLoopbackServerTest {
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
                 JSONObject()
+                    .put("created", 1_750_000_000L)
                     .put("request_id", requestId)
+                    .put("model", "fixture-image-model")
                     .put(
                         "prompt_processing",
                         JSONObject()
@@ -372,17 +418,8 @@ class McaLoopbackServerTest {
                     body = JSONObject().put("prompt", sourcePrompt).toString()
                 )
             )
-            val processing = responseJson(response).getJSONObject("prompt_processing")
-
-            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
-            assertEquals(sourcePrompt, processing.getString("originalPrompt"))
-            assertEquals(effectivePrompt, processing.getString("effectivePrompt"))
-            assertEquals("LOCAL_LLM_ZH_TO_EN", processing.getString("method"))
-            assertEquals(4, processing.getInt("translationContractVersion"))
-            assertEquals(
-                translationProofFingerprint,
-                processing.getString("translationProofFingerprint")
-            )
+            assertTrue(response, response.startsWith("HTTP/1.1 502 Bad Gateway"))
+            assertTrue(response, response.contains("unsupported_legacy_prompt_processing_method"))
         }
     }
 
@@ -406,6 +443,7 @@ class McaLoopbackServerTest {
             LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
                 capturedBodies += JSONObject(requestBody)
                 JSONObject()
+                    .put("created", 1_750_000_000L)
                     .put("request_id", requestId)
                     .put("model", "image-model")
                     .put("prompt_processing", directPromptProcessing(requestBody))
@@ -453,7 +491,9 @@ class McaLoopbackServerTest {
             LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
                 captured.set(JSONObject(requestBody))
                 JSONObject()
+                    .put("created", 1_750_000_000L)
                     .put("request_id", requestId)
+                    .put("model", "fixture-image-model")
                     .put("prompt_processing", directPromptProcessing(requestBody))
                     .put(
                         "execution",
@@ -507,7 +547,9 @@ class McaLoopbackServerTest {
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
                 JSONObject()
+                    .put("created", 1_750_000_000L)
                     .put("request_id", requestId)
+                    .put("model", "fixture-image-model")
                     .put("prompt_processing", directPromptProcessing(requestBody))
                     .put("execution", strictControlImageExecution().bindPromptExecution(requestBody))
                     .put("data", imageData())
@@ -1146,7 +1188,7 @@ class McaLoopbackServerTest {
     fun metricsExposeCanonicalCoordinatorSignaturesWithoutProfileInternals() {
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.nativeStatsJsonProvider = {
-                """{"backend":"llama_cpp","loaded":true,"modelFileSizeBytes":11686646144,"mmapFallbackAllowed":false,"mmapPrefetchEnabled":false,"mmap":true,"mlock":false,"generationSequence":17,"decodeTps":9.5,"modelPath":"D:\\private\\model.gguf","mnnDebugPrompt":"prompt-private","mnnDebugRawOutput":"output-private","loadedConfigJson":"{\"modelPath\":\"/data/private/model.gguf\"}","authToken":"token-private"}"""
+                """{"backend":"llama_cpp","loaded":true,"modelFileSizeBytes":11686646144,"mmapFallbackAllowed":false,"mmapPrefetchEnabled":false,"mmap":true,"mlock":false,"generationSequence":17,"decodeTps":9.5,"persistentPrefixCache":{"attempted":true,"hit":true,"saved":false,"tokens":384,"reason":"state_loaded"},"modelPath":"D:\\private\\model.gguf","mnnDebugPrompt":"prompt-private","mnnDebugRawOutput":"output-private","loadedConfigJson":"{\"modelPath\":\"/data/private/model.gguf\"}","authToken":"token-private"}"""
             }
             LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
                 override fun profileJson(): String =
@@ -1171,6 +1213,11 @@ class McaLoopbackServerTest {
             assertFalse(metrics.getBoolean("mlock"))
             assertEquals(17L, metrics.getLong("generationSequence"))
             assertEquals(9.5, metrics.getDouble("decodeTps"), 0.0)
+            assertTrue(metrics.getBoolean("persistentPrefixCacheAttempted"))
+            assertTrue(metrics.getBoolean("persistentPrefixCacheHit"))
+            assertFalse(metrics.getBoolean("persistentPrefixCacheSaved"))
+            assertEquals(384, metrics.getInt("persistentPrefixCacheTokens"))
+            assertEquals("state_loaded", metrics.getString("persistentPrefixCacheReason"))
             assertFalse(response.contains("D:\\private"))
             assertFalse(response.contains("profile-1"))
             assertFalse(response.contains("prompt-private"))
@@ -2274,6 +2321,7 @@ class McaLoopbackServerTest {
             .put("profileRevision", 3)
             .put("modelFingerprint", "sha256:abc")
             .put("runtime", runtime)
+            .put("taskMode", "text_to_image")
             .put("scheduler", "dpmpp_2m")
             .put("predictionType", "epsilon")
             .put("steps", 20)
@@ -2309,6 +2357,7 @@ class McaLoopbackServerTest {
         }
         return JSONObject(nativeEffective.toString())
             .put("nativeEffective", nativeEffective)
+            .put("taskMode", "text_to_image")
             .put("backend", if (runtime == "QNN_HTP") "qnn_htp" else "native")
             .put("nativeGenerationSequence", 44L)
             .put("workerPid", 4321)
@@ -2331,6 +2380,7 @@ class McaLoopbackServerTest {
     private fun strictControlImageExecution(): JSONObject {
         val sha = "b".repeat(64)
         val execution = strictImageExecution("QNN_HTP")
+            .put("taskMode", "control")
         execution.getJSONObject("nativeEffective")
             .put("taskMode", "control")
             .put("batchCount", 1)
@@ -2356,10 +2406,12 @@ class McaLoopbackServerTest {
     private fun imageData(): org.json.JSONArray =
         org.json.JSONArray().put(
             JSONObject()
+                .put("index", 0)
                 .put("b64_json", "iVBORw0KGgo=")
                 .put("mime_type", "image/png")
                 .put("width", 512)
                 .put("height", 512)
+                .put("seed", 20260717)
         )
 
     private fun responseOutputEvidence(data: JSONArray): JSONArray = JSONArray().apply {

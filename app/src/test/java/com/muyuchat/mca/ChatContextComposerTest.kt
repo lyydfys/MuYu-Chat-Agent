@@ -23,6 +23,9 @@ class ChatContextComposerTest {
         assertTrue(compose.contains("books = worldBookStore.load()"))
         assertTrue(compose.contains("tokenBudget = loreBudget"))
         assertTrue(compose.contains("knowledgeBaseStore.retrieve("))
+        assertTrue(compose.contains("fileContextEnabled: Boolean = true"))
+        assertTrue(compose.contains("if (fileContextEnabled)"))
+        assertTrue(compose.contains("KnowledgeRetrieval()"))
         assertTrue(compose.contains("tokenBudget = retrievalBudget"))
         assertTrue(compose.contains("listOf(lore.context, knowledge.context)"))
         assertTrue(compose.contains(".filter { it.isNotBlank() }"))
@@ -31,7 +34,7 @@ class ChatContextComposerTest {
         assertTrue(compose.contains("tokenBudget = dynamicBudget"))
 
         val loreSelection = compose.indexOf("val lore = WorldBookResolver.select(")
-        val knowledgeRetrieval = compose.indexOf("val knowledge = knowledgeBaseStore.retrieve(")
+        val knowledgeRetrieval = compose.indexOf("knowledgeBaseStore.retrieve(")
         val contextAssembly = compose.indexOf("listOf(lore.context, knowledge.context)")
         assertTrue(loreSelection >= 0)
         assertTrue(knowledgeRetrieval > loreSelection)
@@ -94,6 +97,16 @@ class ChatContextComposerTest {
     fun runtimeContextPlanReportsWhetherAnyDynamicContextWasComposed() {
         assertFalse(ChatRuntimeContextPlan().hasContext)
         assertTrue(ChatRuntimeContextPlan(runtimeSystemContext = "[World book]\nentry").hasContext)
+    }
+
+    @Test
+    fun assistantFileContextSettingIsPassedToPreflightAndGenerationComposition() {
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+
+        listOf("sendMessage", "startGeneration").forEach { function ->
+            val body = functionBody(source, "fun $function")
+            assertTrue(body.contains("fileContextEnabled = assistantSnapshot?.fileContextEnabled"))
+        }
     }
 
     private fun sourceFile(relativePath: String): String {

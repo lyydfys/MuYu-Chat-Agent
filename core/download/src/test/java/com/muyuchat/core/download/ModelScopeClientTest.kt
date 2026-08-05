@@ -106,8 +106,14 @@ class ModelScopeClientTest {
     fun includesDefaultRecommendedModels() {
         val recommendations = client.recommendedModels()
 
-        assertEquals(35, recommendations.size)
+        assertEquals(45, recommendations.size)
         assertEquals(ModelScopeRecommendedGroup.LIGHT_CHAT, recommendations[0].group)
+        val qwen35ExperimentalMnn = recommendations.first { it.id == "qwen35_08b_uncensored_mnn" }
+        assertEquals(RecommendedChatRuntime.MNN, qwen35ExperimentalMnn.chatRuntime)
+        assertEquals(ModelRepositoryProvider.HUGGING_FACE, qwen35ExperimentalMnn.provider)
+        assertEquals(RecommendedModelStatus.EXPERIMENTAL, qwen35ExperimentalMnn.status)
+        assertEquals("config.json", qwen35ExperimentalMnn.recommendedFileName)
+        assertNotNull(qwen35ExperimentalMnn.mnnModelBundle)
         val qairtVisionChat = recommendations.first { it.id == "qwen3_vl_4b_qairt_w4a16" }
         assertEquals(RecommendedChatRuntime.GENIEX_QAIRT, qairtVisionChat.chatRuntime)
         assertEquals(ModelRepositoryProvider.HUGGING_FACE, qairtVisionChat.provider)
@@ -153,11 +159,12 @@ class ModelScopeClientTest {
         })
         assertFalse(qairtRecommendations.any { it.repoId.contains("Qwen3.5") })
         assertFalse(qairtRecommendations.any { it.repoId.contains("Gemma") })
-        assertEquals("MNN/Qwen3.5-4B-MNN", recommendations.first { it.id == "qwen35_4b_q4" }.repoId)
-        assertEquals("config.json", recommendations.first { it.id == "qwen35_4b_q4" }.recommendedFileName)
-        assertEquals(RecommendedChatRuntime.MNN, recommendations.first { it.id == "qwen35_4b_q4" }.chatRuntime)
-        assertNotNull(recommendations.first { it.id == "qwen35_4b_q4" }.mnnModelBundle)
-        assertEquals(RecommendedChatRuntime.MNN, recommendations.first { it.id == "qwen35_08b_q4" }.chatRuntime)
+        val qwen35FourB = recommendations.first { it.id == "qwen35_4b_uncensored_mnn" }
+        assertEquals("darkmaniac7/Qwen3.5-4B-uncensored-MNN", qwen35FourB.repoId)
+        assertEquals("config.json", qwen35FourB.recommendedFileName)
+        assertEquals(RecommendedChatRuntime.MNN, qwen35FourB.chatRuntime)
+        assertNotNull(qwen35FourB.mnnModelBundle)
+        assertEquals(RecommendedChatRuntime.MNN, qwen35ExperimentalMnn.chatRuntime)
         val qwen35TwoB = recommendations.first { it.id == "qwen35_2b_q4" }
         assertEquals("MNN/Qwen3.5-2B-MNN", qwen35TwoB.repoId)
         assertEquals("config.json", qwen35TwoB.recommendedFileName)
@@ -169,7 +176,10 @@ class ModelScopeClientTest {
         assertNotNull(qwen35TwoB.mnnModelBundle)
         assertTrue(qwen35TwoB.mnnModelBundle!!.components.any { it.fileName == "visual.mnn" })
         assertTrue(qwen35TwoB.mnnModelBundle!!.components.any { it.fileName == "visual.mnn.weight" })
-        assertEquals(RecommendedChatRuntime.MNN, recommendations.first { it.id == "qwen35_9b_q4" }.chatRuntime)
+        assertEquals(
+            RecommendedChatRuntime.MNN,
+            recommendations.first { it.id == "qwen35_9b_uncensored_mnn" }.chatRuntime
+        )
         assertEquals(RecommendedChatRuntime.MNN, recommendations.first { it.id == "gemma4_e2b_iq4" }.chatRuntime)
         assertEquals(RecommendedChatRuntime.MNN, recommendations.first { it.id == "gemma4_e4b_iq4" }.chatRuntime)
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "qwen35_35b_a3b_iq2_xxs" }.chatRuntime)
@@ -217,15 +227,13 @@ class ModelScopeClientTest {
         }
         assertTrue(
             recommendations.filter { it.kind != ModelScopeRecommendedKind.IMAGE }.all {
-                it.provider == ModelRepositoryProvider.MODELSCOPE ||
-                    it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT ||
-                    it.id == "google_gemma4_26b_a4b_iq2_xxs"
+                it.provider in setOf(ModelRepositoryProvider.MODELSCOPE, ModelRepositoryProvider.HUGGING_FACE)
             }
         )
         assertTrue(recommendations.any { it.provider == ModelRepositoryProvider.HUGGING_FACE && it.imageEngineBundle?.accelerator == ImageEngineAccelerator.QNN_HTP })
         assertEquals(ModelScopeRecommendedKind.IMAGE, recommendations.last().kind)
         assertTrue(recommendations.any { it.repoId == "qualcomm/Qwen2.5-VL-7B-Instruct" })
-        val visionRecommendation = recommendations.first { it.id == "minicpm_v46_q4" }
+        val visionRecommendation = recommendations.first { it.id == "minicpm_v46_abliterated_gguf" }
         assertEquals(ModelScopeRecommendedKind.CHAT, visionRecommendation.kind)
         assertEquals(ModelScopeRecommendedGroup.MAIN_CHAT, visionRecommendation.group)
         assertNotNull(visionRecommendation.visionModelBundle)
@@ -240,12 +248,18 @@ class ModelScopeClientTest {
         assertNotNull(
             visionRecommendation.visionModelBundle
                 .components
-                .firstOrNull { it.role == VisionModelBundleComponentRole.MAIN_MODEL && it.fileName == "MiniCPM-V-4_6-Q4_K_M.gguf" }
+                .firstOrNull {
+                    it.role == VisionModelBundleComponentRole.MAIN_MODEL &&
+                        it.fileName == "Huihui-MiniCPM-V-4.6-abliterated.Q4_K_M.gguf"
+                }
         )
         assertNotNull(
             visionRecommendation.visionModelBundle
                 .components
-                .firstOrNull { it.role == VisionModelBundleComponentRole.PROJECTOR && it.fileName == "mmproj-model-f16.gguf" }
+                .firstOrNull {
+                    it.role == VisionModelBundleComponentRole.PROJECTOR &&
+                        it.fileName == "Huihui-MiniCPM-V-4.6-abliterated.mmproj-f16.gguf"
+                }
         )
         assertTrue(recommendations.none { it.id == "fastvlm_05b_sm8750_litert_qnn" })
         assertTrue(recommendations.none { it.kind == ModelScopeRecommendedKind.VISION })
@@ -618,8 +632,9 @@ class ModelScopeClientTest {
             .filter { it.kind == ModelScopeRecommendedKind.CHAT }
 
         assertEquals(13, userFacingChat.size)
-        assertTrue(userFacingChat.any { it.status == RecommendedModelStatus.RECOMMENDED })
-        assertTrue(userFacingChat.any { it.status == RecommendedModelStatus.EXPERIMENTAL })
+        // No chat package has production device evidence yet. Keep each visible package
+        // downloadable, but do not overstate its runtime status as recommended.
+        assertTrue(userFacingChat.all { it.status == RecommendedModelStatus.EXPERIMENTAL })
         assertTrue(userFacingChat.all { it.downloadable })
         assertTrue(
             userFacingChat.all { model ->
@@ -1045,8 +1060,8 @@ class ModelScopeClientTest {
                 it.imageEngineBundle?.accelerator == ImageEngineAccelerator.QNN_HTP
         }
 
-        assertEquals(9, cpuChat.size)
-        assertEquals(4, npuChat.size)
+        assertEquals(13, cpuChat.size)
+        assertEquals(0, npuChat.size)
         assertEquals(7, cpuImage.size)
         assertEquals(11, npuImage.size)
 
@@ -1056,24 +1071,35 @@ class ModelScopeClientTest {
             .map { it.id }
 
         assertEquals(
-            listOf("qwen35_08b_q4", "qwen35_2b_q4", "gemma4_e2b_iq4"),
+            listOf(
+                "qwen35_08b_uncensored_mnn",
+                "qwen35_2b_abliterated_gguf",
+                "gemma4_e2b_uncensored_gguf"
+            ),
             cpuChatIds(ModelScopeRecommendedGroup.LIGHT_CHAT)
         )
         assertEquals(
-            listOf("qwen35_4b_q4", "minicpm_v46_q4", "gemma4_e4b_iq4"),
+            listOf(
+                "qwen35_4b_uncensored_mnn",
+                "qwen3_vl_4b_abliterated_gguf",
+                "qwen3_4b_2507_abliterated_gguf",
+                "minicpm_v46_abliterated_gguf",
+                "gemma4_e4b_uncensored_gguf"
+            ),
             cpuChatIds(ModelScopeRecommendedGroup.MAIN_CHAT)
         )
         assertEquals(
-            listOf("qwen35_9b_q4", "qwen35_35b_a3b_iq2_xxs", "google_gemma4_26b_a4b_iq2_xxs"),
+            listOf(
+                "qwen35_9b_uncensored_mnn",
+                "qwen3_8b_abliterated_gguf",
+                "qwen36_35b_a3b_abliterated_mnn",
+                "qwen25_vl_7b_abliterated_gguf",
+                "gemma4_26b_a4b_abliterated_gguf"
+            ),
             cpuChatIds(ModelScopeRecommendedGroup.QUALITY_CHAT)
         )
         assertEquals(
-            listOf(
-                "qwen3_vl_4b_qairt_w4a16",
-                "qwen3_4b_2507_qairt_w4a16",
-                "qwen3_8b_qairt_w4a16",
-                "qwen25_vl_7b_qairt_w4a16"
-            ),
+            emptyList<String>(),
             npuChat.sortedBy { it.priority }.map { it.id }
         )
 
@@ -1112,7 +1138,17 @@ class ModelScopeClientTest {
                 "bitcpm4_cann_1b_tq2",
                 "bitcpm4_cann_3b_tq2",
                 "bitcpm4_cann_8b_tq2",
-                "glm47_flash_tq1"
+                "gemma4_e2b_iq4",
+                "gemma4_e4b_iq4",
+                "glm47_flash_tq1",
+                "google_gemma4_26b_a4b_iq2_xxs",
+                "minicpm_v46_q4",
+                "qwen25_vl_7b_qairt_w4a16",
+                "qwen35_2b_q4",
+                "qwen35_35b_a3b_iq2_xxs",
+                "qwen3_4b_2507_qairt_w4a16",
+                "qwen3_8b_qairt_w4a16",
+                "qwen3_vl_4b_qairt_w4a16"
             ),
             hiddenIds
         )
@@ -1306,25 +1342,28 @@ class ModelScopeClientTest {
         val recommendations = client.userFacingRecommendedModels()
         val byId = recommendations.associateBy { it.id }
         val mnnChatIds = listOf(
-            "qwen35_08b_q4",
-            "qwen35_2b_q4",
-            "qwen35_4b_q4",
-            "qwen35_9b_q4",
-            "gemma4_e2b_iq4",
-            "gemma4_e4b_iq4"
+            "qwen35_08b_uncensored_mnn",
+            "qwen35_4b_uncensored_mnn",
+            "qwen35_9b_uncensored_mnn",
+            "qwen36_35b_a3b_abliterated_mnn"
         )
         val ggufFallbackIds = listOf(
-            "minicpm_v46_q4",
-            "qwen35_35b_a3b_iq2_xxs",
-            "google_gemma4_26b_a4b_iq2_xxs"
+            "qwen35_2b_abliterated_gguf",
+            "qwen3_vl_4b_abliterated_gguf",
+            "qwen3_4b_2507_abliterated_gguf",
+            "minicpm_v46_abliterated_gguf",
+            "gemma4_e2b_uncensored_gguf",
+            "gemma4_e4b_uncensored_gguf",
+            "qwen3_8b_abliterated_gguf",
+            "qwen25_vl_7b_abliterated_gguf",
+            "gemma4_26b_a4b_abliterated_gguf"
         )
 
         mnnChatIds.forEach { id ->
             val model = byId.getValue(id)
             assertEquals(RecommendedChatRuntime.MNN, model.chatRuntime)
-            assertTrue(model.repoId.startsWith("MNN/"))
             assertEquals("config.json", model.recommendedFileName)
-            assertNotNull(model.mnnModelBundle)
+            assertEquals(model.provider, requireNotNull(model.mnnModelBundle).provider)
         }
         ggufFallbackIds.forEach { id ->
             val model = byId.getValue(id)
@@ -1344,10 +1383,11 @@ class ModelScopeClientTest {
         assertTrue(mnnRecommendations.isNotEmpty())
         assertTrue(ggufRecommendations.isNotEmpty())
         mnnRecommendations.forEach { model ->
-            assertTrue(model.repoId.startsWith("MNN/"))
             assertEquals("config.json", model.recommendedFileName)
-            assertEquals("MNN", model.quant)
-            val requiredComponents = requireNotNull(model.mnnModelBundle).requiredComponents
+            assertTrue(model.quant.contains("MNN"))
+            val bundle = requireNotNull(model.mnnModelBundle)
+            val requiredComponents = bundle.requiredComponents
+            assertEquals(model.provider, bundle.provider)
             assertTrue(model.tags.contains("MNN"))
             assertNotNull(requiredComponents.firstOrNull {
                 it.role == MnnModelBundleComponentRole.CONFIG && it.fileName == "config.json"
@@ -1375,7 +1415,7 @@ class ModelScopeClientTest {
 
     @Test
     fun gemmaMnnBundlesRequireTheirPleEmbeddingSidecar() {
-        val recommendations = client.userFacingRecommendedModels()
+        val recommendations = client.recommendedModels()
         val expectedTextOnlyFiles = listOf(
             "config.json",
             "llm_config.json",
@@ -1660,10 +1700,14 @@ class ModelScopeClientTest {
 
     @Test
     fun userFacingRecommendationsUseFormalReleaseNames() {
-        val recommendations = client.userFacingRecommendedModels()
+        val recommendations = client.recommendedModels()
         val informalMarkers = listOf("实验版", "观察版", "备用实验", "链路验证包", "官方实验包", " NPU")
 
-        assertTrue(recommendations.all { model -> informalMarkers.none(model.title::contains) })
+        assertTrue(
+            recommendations
+                .filter { it.status == RecommendedModelStatus.RECOMMENDED }
+                .all { model -> informalMarkers.none(model.title::contains) }
+        )
         assertEquals("Qwen3-VL-4B-Instruct", recommendations.single { it.id == "qwen3_vl_4b_qairt_w4a16" }.title)
         assertEquals("Qwen3-4B-Instruct-2507", recommendations.single { it.id == "qwen3_4b_2507_qairt_w4a16" }.title)
         assertEquals("Qwen2.5-VL-7B-Instruct", recommendations.single { it.id == "qwen25_vl_7b_qairt_w4a16" }.title)

@@ -72,6 +72,29 @@ class KnowledgeRetrievalTest {
         assertEquals(listOf("a1", "a2", "b"), ranked.map { it.chunk.id })
     }
 
+    @Test
+    fun pagedRankingRetainsARelevantLaterPageAndUsesIdAsFinalTieBreaker() {
+        val firstPage = KnowledgeLexicalRetriever.rank(
+            query = "alpha beta",
+            chunks = listOf(chunk("early", "doc-a", content = "alpha"))
+        )
+        val laterPage = KnowledgeLexicalRetriever.rank(
+            query = "alpha beta",
+            chunks = listOf(
+                chunk("z", "doc-b", content = "alpha beta"),
+                chunk("a", "doc-b", content = "alpha beta")
+            )
+        )
+
+        val merged = KnowledgeLexicalRetriever.mergeTopRanked(
+            existing = firstPage,
+            incoming = laterPage,
+            limit = 3
+        )
+
+        assertEquals(listOf("a", "z", "early"), merged.map { it.chunk.id })
+    }
+
     private fun chunk(
         id: String,
         documentId: String,
