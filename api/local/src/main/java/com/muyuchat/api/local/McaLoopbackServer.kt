@@ -19,6 +19,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
@@ -41,6 +42,24 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.UUID
 
+/**
+ * OpenAI-compatible clients commonly render only the model `id`. Keep that id readable while
+ * retaining the manifest id as a deterministic suffix, so duplicate display names stay unique.
+ */
+fun localApiPublicModelId(displayName: String?, internalId: String): String {
+    val stableId = internalId.trim()
+    val readableName = displayName
+        .orEmpty()
+        .trim()
+        .replace(Regex("\\s+"), " ")
+    return when {
+        readableName.isBlank() -> stableId
+        stableId.isBlank() || readableName == stableId -> readableName
+        readableName.endsWith("[$stableId]") -> readableName
+        else -> "$readableName [$stableId]"
+    }
+}
+
 class McaLoopbackServer(
     private val port: Int = 11435,
     private val bindHost: String = "127.0.0.1",
@@ -50,6 +69,12 @@ class McaLoopbackServer(
     private var scope = CoroutineScope(SupervisorJob() + dispatcher)
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
+    private val clientSocketLock = Any()
+    private val activeClientSockets = linkedSetOf<Socket>()
+    private var clientAdmissionOpen = false
+    private val generationLeaseLock = Any()
+    private var generationAdmissionOpen = false
+    private var activeGenerationLease: GenerationLease? = null
     private val imageRequestLock = Any()
     private val activeImageRequestJobs = linkedMapOf<String, Job>()
     private var imageRequestCancellationEpoch: Long = 0L
@@ -73,6 +98,8 @@ class McaLoopbackServer(
         socket.reuseAddress = true
         socket.bind(InetSocketAddress(bindAddress, port), SERVER_BACKLOG)
         synchronized(imageRequestLock) { imageRequestAdmissionPauseCount = 0 }
+        synchronized(generationLeaseLock) { generationAdmissionOpen = true }
+        synchronized(clientSocketLock) { clientAdmissionOpen = true }
         serverSocket = socket
         logInfo("Local API listening on $bindHost:$port")
         acceptJob = scope.launch {
@@ -81,28 +108,53 @@ class McaLoopbackServer(
                     val client = socket.accept()
                     client.soTimeout = CLIENT_READ_TIMEOUT_MS
                     client.tcpNoDelay = true
+                    val admitted = synchronized(clientSocketLock) {
+                        if (clientAdmissionOpen && activeClientSockets.size < MAX_ACTIVE_CLIENTS) {
+                            activeClientSockets += client
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    if (!admitted) {
+                        runCatching {
+                            writeError(
+                                client,
+                                "503 Service Unavailable",
+                                "server_busy",
+                                "The Local API connection limit has been reached."
+                            )
+                        }
+                        runCatching { client.close() }
+                        continue
+                    }
                     logDebug("Accepted ${client.inetAddress?.hostAddress}:${client.port}")
                     launch {
-                        runCatching { handle(client) }
-                            .onFailure { error ->
-                                val rejection = error as? HttpRequestRejected
-                                if (rejection == null) {
-                                    logWarning("Request failed: ${error.message}", error)
-                                } else {
-                                    logDebug("Request rejected: ${rejection.code}")
-                                }
-                                runCatching {
-                                    if (!client.isClosed) {
-                                        writeError(
-                                            client,
-                                            rejection?.status ?: "500 Internal Server Error",
-                                            rejection?.code ?: "request_failed",
-                                            error.message ?: "Local API request failed."
-                                        )
-                                    }
-                                }
-                                runCatching { client.close() }
+                        try {
+                            handle(client)
+                        } catch (error: Throwable) {
+                            val rejection = error as? HttpRequestRejected
+                            if (rejection == null) {
+                                logWarning("Request failed: ${error.message}", error)
+                            } else {
+                                logDebug("Request rejected: ${rejection.code}")
                             }
+                            runCatching {
+                                if (!client.isClosed) {
+                                    writeError(
+                                        client,
+                                        rejection?.status ?: "500 Internal Server Error",
+                                        rejection?.code ?: "request_failed",
+                                        error.message ?: "Local API request failed."
+                                    )
+                                }
+                            }
+                        } finally {
+                            runCatching { client.close() }
+                            synchronized(clientSocketLock) {
+                                activeClientSockets.remove(client)
+                            }
+                        }
                     }
                 } catch (error: SocketException) {
                     if (!socket.isClosed) logWarning("Accept failed: ${error.message}", error)
@@ -114,13 +166,26 @@ class McaLoopbackServer(
     }
 
     fun stop() {
+        val generationLease = synchronized(generationLeaseLock) {
+            generationAdmissionOpen = false
+            activeGenerationLease
+        }
+        generationLease?.job?.cancel(CancellationException("Local API server stopped."))
+        generationLease?.requestId?.takeIf(String::isNotBlank)?.let { requestId ->
+            scope.launch { LocalApiRuntime.stopGenerationIfRequestActive(requestId) }
+        }
         cancelActiveImageRequests(
             "Local API server stopped during image generation."
         )
+        val clients = synchronized(clientSocketLock) {
+            clientAdmissionOpen = false
+            activeClientSockets.toList().also { activeClientSockets.clear() }
+        }
         acceptJob?.cancel()
         acceptJob = null
         runCatching { serverSocket?.close() }
         serverSocket = null
+        clients.forEach { client -> runCatching { client.close() } }
         logInfo("Local API stopped")
     }
 
@@ -132,6 +197,10 @@ class McaLoopbackServer(
 
     internal fun clearProcessIdempotencyCacheForTests() {
         synchronized(idempotencyLock) { idempotencyRecords.clear() }
+    }
+
+    internal fun activeClientCountForTests(): Int = synchronized(clientSocketLock) {
+        activeClientSockets.size
     }
 
     private suspend fun handle(socket: Socket) {
@@ -205,10 +274,14 @@ class McaLoopbackServer(
                     val streaming = body.isStreamingRequest(headers)
                     when (val prepared = prepareGenerationRequest(path, body, streaming)) {
                         is PreparedGenerationRequest.Ready -> {
-                            if (streaming) {
-                                streamChat(client, prepared.request)
-                            } else {
-                                completeChat(client, prepared.request)
+                            try {
+                                if (streaming) {
+                                    streamChat(client, prepared.request, prepared.lease)
+                                } else {
+                                    completeChat(client, prepared.request, prepared.lease)
+                                }
+                            } finally {
+                                releaseGenerationLease(prepared.lease)
                             }
                         }
                         is PreparedGenerationRequest.Rejected -> writePreflightRejection(client, prepared)
@@ -805,8 +878,14 @@ class McaLoopbackServer(
     private fun isValidTuningJobId(jobId: String): Boolean =
         jobId.length in 1..128 && TUNING_JOB_ID_PATTERN.matches(jobId)
 
-    private suspend fun streamChat(socket: Socket, request: ChatRequest) {
+    private suspend fun streamChat(
+        socket: Socket,
+        request: ChatRequest,
+        lease: GenerationLease
+    ) = coroutineScope {
+        lease.job = currentCoroutineContext()[Job]
         val requestId = "chatcmpl-${UUID.randomUUID().toString().replace("-", "")}"
+        lease.requestId = requestId
         val sequenceBefore = LocalApiRuntime.generationSequence()
         val stream = LocalApiRuntime.streamChat(
             request,
@@ -820,7 +899,7 @@ class McaLoopbackServer(
                 "MCA engine is not attached.",
                 generationTraceJson(requestId, null).toString()
             )
-            return
+            return@coroutineScope
         }
         val created = System.currentTimeMillis() / 1000
         val output = socket.getOutputStream().bufferedWriter(Charsets.UTF_8)
@@ -858,45 +937,68 @@ class McaLoopbackServer(
         output.write("Connection: close\r\n\r\n")
         output.write("data: ${roleSseJson(requestId, created)}\n\n")
         output.flush()
-        stream.collect { event ->
-            captureGenerationSequence()
-            when (event) {
-                is GenerateEvent.Phase -> finalStats = event.stats
-                is GenerateEvent.Chunk -> {
-                    finalStats = event.stats
-                    if (event.reasoning.isNotBlank()) {
-                        output.write(
-                            "data: ${event.reasoning.toSseJson(requestId, created, generationSequence, reasoning = true)}\n\n"
-                        )
-                    }
-                    if (event.text.isNotBlank()) {
-                        hasVisibleContent = true
-                        output.write("data: ${event.text.toSseJson(requestId, created, generationSequence)}\n\n")
-                    }
-                }
-                is GenerateEvent.Done -> {
-                    finalStats = event.stats
-                    writeTerminalFrame()
-                }
-                is GenerateEvent.Error -> {
-                    output.write(
-                        "data: ${errorJson(
-                            generationErrorCode(event),
-                            event.message,
-                            generationErrorDetails(event, requestId, generationSequence).toString()
-                        )}\n\n"
-                    )
-                    writeTerminalFrame(includeEmptyVisibleError = false)
+        val heartbeat = launch {
+            while (isActive) {
+                delay(SSE_HEARTBEAT_INTERVAL_MS)
+                synchronized(output) {
+                    output.write(": mca-prefill\n\n")
+                    output.flush()
                 }
             }
+        }
+        try {
+            stream.collect { event ->
+                captureGenerationSequence()
+                synchronized(output) {
+                    when (event) {
+                        is GenerateEvent.Phase -> finalStats = event.stats
+                        is GenerateEvent.Chunk -> {
+                            finalStats = event.stats
+                            if (event.reasoning.isNotBlank()) {
+                                output.write(
+                                    "data: ${event.reasoning.toSseJson(requestId, created, generationSequence, reasoning = true)}\n\n"
+                                )
+                            }
+                            if (event.text.isNotBlank()) {
+                                hasVisibleContent = true
+                                output.write("data: ${event.text.toSseJson(requestId, created, generationSequence)}\n\n")
+                            }
+                        }
+                        is GenerateEvent.Done -> {
+                            finalStats = event.stats
+                            writeTerminalFrame()
+                        }
+                        is GenerateEvent.Error -> {
+                            output.write(
+                                "data: ${errorJson(
+                                    generationErrorCode(event),
+                                    event.message,
+                                    generationErrorDetails(event, requestId, generationSequence).toString()
+                                )}\n\n"
+                            )
+                            writeTerminalFrame(includeEmptyVisibleError = false)
+                        }
+                    }
+                    output.flush()
+                }
+            }
+        } finally {
+            heartbeat.cancelAndJoin()
+        }
+        synchronized(output) {
+            writeTerminalFrame()
             output.flush()
         }
-        writeTerminalFrame()
-        output.flush()
     }
 
-    private suspend fun completeChat(socket: Socket, request: ChatRequest) {
+    private suspend fun completeChat(
+        socket: Socket,
+        request: ChatRequest,
+        lease: GenerationLease
+    ) {
+        lease.job = currentCoroutineContext()[Job]
         val requestId = "chatcmpl-${UUID.randomUUID().toString().replace("-", "")}"
+        lease.requestId = requestId
         val sequenceBefore = LocalApiRuntime.generationSequence()
         val stream = LocalApiRuntime.streamChat(
             request,
@@ -1132,34 +1234,62 @@ class McaLoopbackServer(
                 message = rejection.message
             )
         }
-        val coordinatorResult = runCatching {
-            LocalApiRuntime.preflight(
-                LocalApiPreflightRequest(
-                    route = route,
-                    streaming = streaming,
-                    requestedModel = OpenAiApiCompat.requestedModel(body),
-                    chatRequest = request
+        request.contextLengthRejection()?.let { return it }
+        val preflightRequest = LocalApiPreflightRequest(
+            route = route,
+            streaming = streaming,
+            requestedModel = OpenAiApiCompat.requestedModel(body),
+            chatRequest = request
+        )
+        return synchronized(generationLeaseLock) {
+            if (!generationAdmissionOpen) {
+                return@synchronized PreparedGenerationRequest.Rejected(
+                    httpStatus = 503,
+                    code = "server_stopping",
+                    message = "The Local API server is stopping and is not accepting generation requests."
                 )
-            )
-        }.getOrElse { error ->
-            return PreparedGenerationRequest.Rejected(
-                httpStatus = 503,
-                code = "coordinator_preflight_failed",
-                message = error.message ?: "The runtime coordinator could not complete preflight."
-            )
+            }
+            if (activeGenerationLease != null) {
+                return@synchronized PreparedGenerationRequest.Rejected(
+                    httpStatus = 409,
+                    code = "generation_in_progress",
+                    message = "Another Local API generation request is already active.",
+                    retryAfterMs = 1_000L
+                )
+            }
+            val coordinatorResult = runCatching {
+                LocalApiRuntime.preflight(preflightRequest)
+            }.getOrElse { error ->
+                return@synchronized PreparedGenerationRequest.Rejected(
+                    httpStatus = 503,
+                    code = "coordinator_preflight_failed",
+                    message = error.message ?: "The runtime coordinator could not complete preflight."
+                )
+            }
+            when (coordinatorResult) {
+                LocalApiPreflightResult.Ready -> {
+                    val lease = GenerationLease()
+                    activeGenerationLease = lease
+                    PreparedGenerationRequest.Ready(request, lease)
+                }
+                is LocalApiPreflightResult.Rejected -> {
+                    val contextExceeded = coordinatorResult.isContextLengthExceeded()
+                    PreparedGenerationRequest.Rejected(
+                        httpStatus = if (contextExceeded) 413 else coordinatorResult.httpStatus.coerceIn(400, 599),
+                        code = if (contextExceeded) CONTEXT_LENGTH_EXCEEDED_CODE else coordinatorResult.code,
+                        message = coordinatorResult.message,
+                        retryAfterMs = coordinatorResult.retryAfterMs,
+                        detailsJson = coordinatorResult.detailsJson
+                    )
+                }
+            }
         }
-        return when (coordinatorResult) {
-            LocalApiPreflightResult.Ready ->
-                request.contextLengthRejection() ?: PreparedGenerationRequest.Ready(request)
-            is LocalApiPreflightResult.Rejected -> {
-                val contextExceeded = coordinatorResult.isContextLengthExceeded()
-                PreparedGenerationRequest.Rejected(
-                    httpStatus = if (contextExceeded) 413 else coordinatorResult.httpStatus.coerceIn(400, 599),
-                    code = if (contextExceeded) CONTEXT_LENGTH_EXCEEDED_CODE else coordinatorResult.code,
-                    message = coordinatorResult.message,
-                    retryAfterMs = coordinatorResult.retryAfterMs,
-                    detailsJson = coordinatorResult.detailsJson
-                )
+    }
+
+    private fun releaseGenerationLease(lease: GenerationLease) {
+        synchronized(generationLeaseLock) {
+            if (activeGenerationLease === lease) {
+                activeGenerationLease = null
             }
         }
     }
@@ -1364,8 +1494,10 @@ class McaLoopbackServer(
     private fun currentModelName(): String =
         runCatching {
             val json = JSONObject(LocalApiRuntime.loadedModelJsonProvider())
-            json.optString("displayName")
-                .ifBlank { json.optString("id") }
+            val internalId = json.optString("id").trim()
+            val displayName = json.optString("displayName")
+                .ifBlank { json.optString("name") }
+            localApiPublicModelId(displayName, internalId)
                 .ifBlank { "mca-local-model" }
         }.getOrDefault("mca-local-model")
 
@@ -1689,7 +1821,10 @@ class McaLoopbackServer(
     }
 
     private sealed interface PreparedGenerationRequest {
-        data class Ready(val request: ChatRequest) : PreparedGenerationRequest
+        data class Ready(
+            val request: ChatRequest,
+            val lease: GenerationLease
+        ) : PreparedGenerationRequest
 
         data class Rejected(
             val httpStatus: Int,
@@ -1698,6 +1833,14 @@ class McaLoopbackServer(
             val retryAfterMs: Long = 0L,
             val detailsJson: String = "{}"
         ) : PreparedGenerationRequest
+    }
+
+    private class GenerationLease {
+        @Volatile
+        var job: Job? = null
+
+        @Volatile
+        var requestId: String = ""
     }
 
     private data class HttpRequest(
@@ -1745,6 +1888,8 @@ class McaLoopbackServer(
         private const val REQUEST_BODY_READ_BUFFER_BYTES = 16 * 1024
         private const val CLIENT_READ_TIMEOUT_MS = 15_000
         private const val SERVER_BACKLOG = 128
+        private const val MAX_ACTIVE_CLIENTS = 16
+        private const val SSE_HEARTBEAT_INTERVAL_MS = 5_000L
         private const val TAG = "McaLoopbackServer"
         private const val TUNING_JOB_PATH_PREFIX = "/v1/tuning/jobs/"
         private const val MAX_TUNING_MODEL_ID_LENGTH = 512
@@ -1764,7 +1909,7 @@ class McaLoopbackServer(
         private val threadIds = AtomicInteger(1)
 
         private fun newDispatcher(): ExecutorCoroutineDispatcher =
-            Executors.newCachedThreadPool { runnable ->
+            Executors.newFixedThreadPool(MAX_ACTIVE_CLIENTS + 1) { runnable ->
                 Thread(runnable, "MCA-Local-API-${threadIds.getAndIncrement()}").apply {
                     isDaemon = true
                 }

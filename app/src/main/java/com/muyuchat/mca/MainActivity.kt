@@ -38,8 +38,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.muyuchat.feature.agent.AgentScreen
 import com.muyuchat.feature.agent.AgentDecisionItem
@@ -115,15 +113,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        pendingWorldBookImportScope = WorldBookScope.fromWireName(
-            savedInstanceState?.getString(PENDING_WORLD_BOOK_SCOPE_KEY)
-        )
-        lifecycle.addObserver(
-            LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_STOP) {
-                    viewModel.onAppBackgrounded()
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    moveTaskToBack(true)
                 }
             }
+        )
+        pendingWorldBookImportScope = WorldBookScope.fromWireName(
+            savedInstanceState?.getString(PENDING_WORLD_BOOK_SCOPE_KEY)
         )
         val importLauncher = registerForActivityResult(OpenModelDocumentsContract()) { uris ->
             if (uris.isNotEmpty()) viewModel.importModel(uris)
@@ -232,6 +231,7 @@ class MainActivity : ComponentActivity() {
         outState.putString(PENDING_WORLD_BOOK_SCOPE_KEY, pendingWorldBookImportScope.wireName)
         super.onSaveInstanceState(outState)
     }
+
 }
 @Composable
 private fun McaApp(
@@ -297,7 +297,7 @@ private fun McaApp(
                                 .map { model ->
                                 ChatModelChoice(
                                     id = MainViewModel.CLOUD_MODEL_CHOICE_PREFIX + model.id,
-                                    displayName = model.modelName,
+                                    displayName = model.displayName.ifBlank { model.modelName },
                                     quant = "云端推理",
                                     loaded = state.selectedChatBackend == ChatBackend.CLOUD && model.id == state.selectedCloudChatModelId,
                                     subtitle = model.apiFormat.label,
@@ -401,7 +401,7 @@ private fun McaApp(
                                 .map { model ->
                                     ChatModelChoice(
                                         id = MainViewModel.CLOUD_IMAGE_MODEL_CHOICE_PREFIX + model.id,
-                                        displayName = model.modelName,
+                                        displayName = model.displayName.ifBlank { model.modelName },
                                         quant = "云端生图",
                                         loaded = state.selectedImageBackend == ImageBackend.CLOUD && model.id == state.selectedCloudImageModelId,
                                         subtitle = model.protocolLabel,
@@ -478,9 +478,12 @@ private fun McaApp(
                                 KnowledgeIndexState.EMBEDDING_READY -> "向量索引已就绪"
                                 KnowledgeIndexState.REINDEX_REQUIRED -> "需要重建索引"
                                 KnowledgeIndexState.FAILED -> "索引失败"
-                            }
+                            },
+                            documentCount = state.knowledgeDocumentCounts[knowledgeBase.id] ?: 0,
+                            importing = knowledgeBase.id in state.knowledgeBaseImportingIds
                         )
                     },
+                    statusMessage = state.statusMessage,
                     selectedAssistantId = state.selectedAssistantId,
                     generationHistoryInputUris = generationHistoryInputUris,
                     images = state.images.map { image ->
@@ -656,6 +659,7 @@ private fun McaApp(
                     isGenerating = state.isGenerating,
                     generationPhase = state.generationPhase,
                     generationTokenProgress = state.generationTokenProgress,
+                    generationStats = state.generationStats,
                     promptContextUsage = state.promptContextUsage,
                     selectedModelId = if (state.selectedChatBackend == ChatBackend.CLOUD) {
                         state.selectedCloudChatModelId?.let { MainViewModel.CLOUD_MODEL_CHOICE_PREFIX + it }
@@ -717,6 +721,7 @@ private fun McaApp(
                     visionCapabilityReady = chatVisionCapability.ready
                 ),
                 onInputChange = viewModel::onInputChange,
+                onDismissStatusMessage = viewModel::clearStatusMessage,
                 onSend = viewModel::sendMessage,
                 onStop = viewModel::stopGeneration,
                 onNewConversation = viewModel::newChat,

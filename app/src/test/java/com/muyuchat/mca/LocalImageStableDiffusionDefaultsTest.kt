@@ -54,6 +54,28 @@ class LocalImageStableDiffusionDefaultsTest {
     }
 
     @Test
+    fun `local image output directory is canonical before native handoff`() {
+        val root = Files.createTempDirectory("local-image-output-root").toFile()
+        try {
+            val cache = File(root, "cache").apply { assertTrue(mkdirs()) }
+            val lexicalCache = File(root, "cache${File.separator}..${File.separator}cache")
+            val outputDirectory = canonicalLocalImageOutputDirectory(
+                lexicalCache,
+                "local_image_outputs"
+            )
+            val outputFile = File(outputDirectory, "sdcpp-request.png").canonicalFile
+
+            assertTrue(lexicalCache.path.contains(".."))
+            assertEquals(File(cache, "local_image_outputs").canonicalFile, outputDirectory)
+            assertEquals(outputDirectory.canonicalPath, outputDirectory.path)
+            assertEquals(outputFile.canonicalPath, outputFile.path)
+            assertTrue(outputDirectory.isDirectory)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `stable diffusion flow defaults preserve model math`() {
         fun profile(id: String, family: LocalImageModelFamily) =
             ImageExecutionProfileResolver.resolve(

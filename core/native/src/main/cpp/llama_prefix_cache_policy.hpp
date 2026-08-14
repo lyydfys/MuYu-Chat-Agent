@@ -65,6 +65,18 @@ inline constexpr bool canAttemptPersistentPrefixCache(
     return requested && !hasImages && !speculative && parallelSequences == 1;
 }
 
+/**
+ * A live session KV state contains more of the current conversation than the
+ * disk-backed fixed-system-prefix checkpoint. Keep it authoritative whenever
+ * its token-prefix validation succeeded; the persistent checkpoint is a cold
+ * start fallback, not a per-turn replacement for session state.
+ */
+inline constexpr bool shouldAttemptPersistentPrefixFallback(
+        bool persistentPrefixEligible,
+        bool sessionCacheHit) noexcept {
+    return persistentPrefixEligible && !sessionCacheHit;
+}
+
 inline constexpr bool canRestorePersistentPrefixState(
         std::size_t expectedTokens,
         std::size_t restoredTokens,
@@ -99,6 +111,22 @@ inline bool tokenPrefixMatches(
         const TokenContainer &checkpointPrefix) {
     return checkpointPrefix.size() <= prompt.size() &&
            std::equal(checkpointPrefix.begin(), checkpointPrefix.end(), prompt.begin());
+}
+
+/**
+ * Returns only the tokenizer-stable portion shared by two rendered prompts.
+ * This is needed when a fixed textual prefix ends at a BPE merge boundary:
+ * independently tokenizing the substring can otherwise produce a different
+ * final token than tokenizing the full prompt.
+ */
+template <typename FirstTokenContainer, typename SecondTokenContainer>
+inline std::size_t longestCommonTokenPrefix(
+        const FirstTokenContainer &first,
+        const SecondTokenContainer &second) {
+    const std::size_t limit = std::min(first.size(), second.size());
+    std::size_t matched = 0;
+    while (matched < limit && first[matched] == second[matched]) ++matched;
+    return matched;
 }
 
 }  // namespace mca::llama

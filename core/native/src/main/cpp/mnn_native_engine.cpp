@@ -6731,9 +6731,30 @@ bool mnn_chat_messages_prefix(
         const std::vector<MNN::Transformer::ChatMessage>& prefix,
         const std::vector<MNN::Transformer::ChatMessage>& messages) {
     if (prefix.size() > messages.size()) return false;
+    const auto normalize = [](std::string text) {
+        // Stream filtering and Compose persistence may disagree only on invisible formatting
+        // characters emitted around protocol boundaries. Treat those as presentation details;
+        // the vendor token-LCP below remains the authority for how much KV is actually reusable.
+        static const std::vector<std::string> invisible = {
+                "\xE2\x80\x8B", // U+200B ZERO WIDTH SPACE
+                "\xE2\x80\x8C", // U+200C ZERO WIDTH NON-JOINER
+                "\xE2\x80\x8D", // U+200D ZERO WIDTH JOINER
+                "\xEF\xBB\xBF"  // U+FEFF ZERO WIDTH NO-BREAK SPACE / BOM
+        };
+        for (const auto& marker : invisible) {
+            size_t position = 0;
+            while ((position = text.find(marker, position)) != std::string::npos) {
+                text.erase(position, marker.size());
+            }
+        }
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+            text.pop_back();
+        }
+        return text;
+    };
     for (size_t index = 0; index < prefix.size(); ++index) {
         if (prefix[index].first != messages[index].first ||
-                prefix[index].second != messages[index].second) {
+                normalize(prefix[index].second) != normalize(messages[index].second)) {
             return false;
         }
     }
@@ -6837,6 +6858,12 @@ void prepare_mnn_text_prompt_cache_locked(
     g_mnn_prompt_cache.last_request_multimodal = false;
     g_mnn_prompt_cache.state = extendsCommittedTranscript ? "pending_hit" : "pending_miss";
     g_mnn_prompt_cache.reason = extendsCommittedTranscript ? "prefix_candidate" : "cold_or_prefix_changed";
+    if (extendsCommittedTranscript && g_llm != nullptr) {
+        // Align the vendor's rendered-text eligibility guard with the persisted transcript.
+        // Its live token LCP still trims at the first real token mismatch, so this cannot reuse
+        // stale KV when normalization removed a presentation-only character.
+        g_llm->syncPromptCache(messages);
+    }
 }
 
 bool capture_mnn_text_prefill_locked(std::string& error) {
@@ -7431,11 +7458,13 @@ void filter_mnn_stop_markers_locked(bool flush) {
 
 std::string stats_json_locked() {
     int prompt_tokens = 0;
+    int prefill_tokens = 0;
     int completion_tokens = 0;
     int64_t prefill_ms = 0;
     int64_t decode_ms = 0;
     int64_t ttft_ms = 0;
     double prefill_tps = 0.0;
+    double effective_prompt_tps = 0.0;
     double decode_tps = 0.0;
 #if MCA_WITH_MNN_LLM
     if (g_llm != nullptr && g_llm->getContext() != nullptr) {
@@ -7443,11 +7472,18 @@ std::string stats_json_locked() {
         prompt_tokens = g_mnn_prompt_cache.enabled
                 ? g_mnn_prompt_cache.reused_tokens + g_mnn_prompt_cache.prefilled_tokens
                 : context->prompt_len;
+        const int computed_prefill_tokens = g_mnn_prompt_cache.enabled
+                ? g_mnn_prompt_cache.prefilled_tokens
+                : context->prompt_len;
+        prefill_tokens = computed_prefill_tokens;
         completion_tokens = context->gen_seq_len;
         prefill_ms = context->prefill_us / 1000;
         decode_ms = context->decode_us / 1000;
+        if (prefill_ms > 0 && computed_prefill_tokens > 0) {
+            prefill_tps = computed_prefill_tokens * 1000.0 / prefill_ms;
+        }
         if (prefill_ms > 0 && prompt_tokens > 0) {
-            prefill_tps = prompt_tokens * 1000.0 / prefill_ms;
+            effective_prompt_tps = prompt_tokens * 1000.0 / prefill_ms;
         }
         if (decode_ms > 0 && completion_tokens > 0) {
             decode_tps = completion_tokens * 1000.0 / decode_ms;
@@ -7477,6 +7513,7 @@ std::string stats_json_locked() {
         << "\"visionReady\":" << (g_vision_ready ? "true" : "false") << ","
         << "\"visualModelPath\":\"" << escape_json(g_visual_model_path) << "\","
         << "\"promptTokens\":" << prompt_tokens << ","
+        << "\"prefillTokens\":" << prefill_tokens << ","
         << "\"completionTokens\":" << completion_tokens << ","
 #if MCA_WITH_MNN_LLM
         << "\"promptCache\":{"
@@ -7520,6 +7557,7 @@ std::string stats_json_locked() {
         << "\"ttftMs\":" << ttft_ms << ","
         << "\"prefillMs\":" << prefill_ms << ","
         << "\"prefillTps\":" << prefill_tps << ","
+        << "\"effectivePromptTps\":" << effective_prompt_tps << ","
         << "\"decodeMs\":" << decode_ms << ","
         << "\"decodeTps\":" << decode_tps << ","
         << "\"generationActive\":" << (g_generation_active ? "true" : "false") << ","

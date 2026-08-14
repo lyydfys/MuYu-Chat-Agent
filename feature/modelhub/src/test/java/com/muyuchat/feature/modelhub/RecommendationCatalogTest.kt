@@ -176,7 +176,10 @@ class RecommendationCatalogTest {
             listOf("qwen35_9b_uncensored_mnn"),
             collapsedRecommendationModels(catalog.qualityChat).map { it.id }
         )
-        assertEquals(emptyList<String>(), collapsedRecommendationModels(catalog.npuChat).map { it.id })
+        assertEquals(
+            listOf("qwen3_vl_4b_qairt_w4a16"),
+            collapsedRecommendationModels(catalog.npuChat).map { it.id }
+        )
         assertEquals(listOf(catalog.cpuImage.first().id), collapsedRecommendationModels(catalog.cpuImage).map { it.id })
         assertEquals(listOf("cyberrealistic_sd15_qnn228"), collapsedRecommendationModels(catalog.npuImageSd15).map { it.id })
         assertEquals(listOf("sdxl_base_qnn228"), collapsedRecommendationModels(catalog.npuImageSdxl).map { it.id })
@@ -299,10 +302,10 @@ class RecommendationCatalogTest {
 
     private fun assertCpuCatalog(catalog: RecommendationCatalog) {
         assertEquals(3, catalog.lightChat.size)
-        assertEquals(5, catalog.mainChat.size)
-        assertEquals(5, catalog.qualityChat.size)
-        assertEquals(13, catalog.lightChat.size + catalog.mainChat.size + catalog.qualityChat.size)
-        assertEquals(0, catalog.npuChat.size)
+        assertEquals(2, catalog.mainChat.size)
+        assertEquals(3, catalog.qualityChat.size)
+        assertEquals(8, catalog.lightChat.size + catalog.mainChat.size + catalog.qualityChat.size)
+        assertEquals(4, catalog.npuChat.size)
         assertEquals(
             listOf(
                 "qwen35_08b_uncensored_mnn",
@@ -314,9 +317,6 @@ class RecommendationCatalogTest {
         assertEquals(
             listOf(
                 "qwen35_4b_uncensored_mnn",
-                "qwen3_vl_4b_abliterated_gguf",
-                "qwen3_4b_2507_abliterated_gguf",
-                "minicpm_v46_abliterated_gguf",
                 "gemma4_e4b_uncensored_gguf"
             ),
             catalog.mainChat.map { it.id }
@@ -324,12 +324,19 @@ class RecommendationCatalogTest {
         assertEquals(
             listOf(
                 "qwen35_9b_uncensored_mnn",
-                "qwen3_8b_abliterated_gguf",
-                "qwen36_35b_a3b_abliterated_mnn",
-                "qwen25_vl_7b_abliterated_gguf",
+                "qwen35_35b_a3b_iq2_xxs",
                 "gemma4_26b_a4b_abliterated_gguf"
             ),
             catalog.qualityChat.map { it.id }
+        )
+        assertEquals(
+            listOf(
+                "qwen3_vl_4b_qairt_w4a16",
+                "qwen3_4b_2507_qairt_w4a16",
+                "qwen3_8b_qairt_w4a16",
+                "qwen25_vl_7b_qairt_w4a16"
+            ),
+            catalog.npuChat.map { it.id }
         )
 
         assertEquals(7, catalog.cpuImage.size)

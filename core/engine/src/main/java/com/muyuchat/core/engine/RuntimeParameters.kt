@@ -517,6 +517,16 @@ interface RuntimeParameterAdapter {
         expected: ResolvedLoadSignature
     ): ActiveLoadedSignature?
 
+    /**
+     * A path-redacted comparison used only to explain a rejected native
+     * readback. It does not alter admission or relax the active signature.
+     */
+    fun loadSignatureDiagnostic(
+        identity: ModelRuntimeIdentity,
+        nativeStatsJson: String,
+        expected: ResolvedLoadSignature
+    ): JSONObject
+
     fun nativeCompletionJson(
         partition: RuntimeParameterPartition,
         profile: ModelExecutionProfile,
@@ -531,6 +541,9 @@ interface RuntimeParameterAdapter {
 class LlamaCppRuntimeParameterAdapter(
     registry: ParameterFieldPolicyRegistry = ParameterFieldPolicyRegistry()
 ) : BaseRuntimeParameterAdapter(LocalChatRuntime.LLAMA_CPP, registry) {
+    // A 256-token floor skipped cache reuse for ordinary short chats. Sixteen
+    // common tokens avoid a trivial BOS-only reuse while preserving the full
+    // validated prefix for a typical multi-turn prompt.
     override fun runtimeDefaults(identity: ModelRuntimeIdentity): Pair<Map<String, Any?>, Map<String, Any?>> =
         mapOf(
             "n_ctx" to 4096,
@@ -549,7 +562,7 @@ class LlamaCppRuntimeParameterAdapter(
             "spec_draft_n_max" to 0,
             "mmap" to true,
             "mlock" to false
-        ) to mapOf("n_threads" to 1, "n_threads_batch" to 1, "cache_reuse" to 256)
+        ) to mapOf("n_threads" to 1, "n_threads_batch" to 1, "cache_reuse" to 16)
 
     override fun normalize(
         identity: ModelRuntimeIdentity,
@@ -579,6 +592,28 @@ class LlamaCppRuntimeParameterAdapter(
                 requestedLoad[field] = safeValue
                 sourceByField[field] = "runtime-safety"
             }
+        }
+
+        // llama.cpp routes prompt prefill through n_threads_batch. A profile
+        // that only specifies n_threads previously inherited the one-thread
+        // runtime default here, making prefill dramatically slower than decode.
+        // Preserve an explicit batch-thread choice, but align the implicit
+        // default with the selected decode worker count.
+        if (sourceByField["n_threads_batch"] == "runtime-default") {
+            val threads = (requestedHot["n_threads"] as? Number)?.toInt()?.coerceAtLeast(1) ?: 1
+            if (requestedHot["n_threads_batch"] != threads) {
+                requestedHot["n_threads_batch"] = threads
+                sourceByField["n_threads_batch"] = "runtime-default:aligned-with-n_threads"
+                warnings += "n_threads_batch aligned to n_threads=$threads for prompt prefill"
+            }
+        }
+
+        if ((requestedLoad["n_gpu_layers"] as? Number)?.toInt() == 0) {
+            normalizeLoad(
+                "split_mode",
+                "none",
+                "n_gpu_layers=0 disables GPU layer splitting"
+            )
         }
 
         if ("sparse_moe" in identity.capabilities) {
@@ -668,7 +703,7 @@ class LlamaCppRuntimeParameterAdapter(
         val differences = observedSafe.differences(expected.values)
         val nativeCpuFallback = isNativeAutoGpuFallback(expected.values, observedSafe)
         val allowedDifferences = if (nativeCpuFallback) {
-            setOf("n_ctx", "n_gpu_layers", "split_mode")
+            setOf("n_ctx", "n_gpu_layers", "split_mode", "n_cpu_moe")
         } else {
             setOf("n_ctx")
         }
@@ -694,7 +729,9 @@ class LlamaCppRuntimeParameterAdapter(
         ): Boolean =
             (expected.value("n_gpu_layers") as? Number)?.toInt() == -1 &&
                 (observed.value("n_gpu_layers") as? Number)?.toInt() == 0 &&
-                observed.value("split_mode")?.toString() == "none"
+                observed.value("split_mode")?.toString() == "none" &&
+                (expected.value("n_cpu_moe") as? Number)?.toInt()?.let { it >= 0 } == true &&
+                (observed.value("n_cpu_moe") as? Number)?.toInt() == 0
 
         fun nativeAlignedContext(nCtx: Int): Int {
             if (nCtx <= 0 || nCtx % LLAMA_CONTEXT_ALIGNMENT == 0) return nCtx
@@ -1004,6 +1041,40 @@ abstract class BaseRuntimeParameterAdapter(
         return ActiveLoadedSignature.of(identity, observed)
     }
 
+    override fun loadSignatureDiagnostic(
+        identity: ModelRuntimeIdentity,
+        nativeStatsJson: String,
+        expected: ResolvedLoadSignature
+    ): JSONObject {
+        val root = runCatching { JSONObject(nativeStatsJson) }.getOrNull()
+        val expectedValues = expected.values
+        val effective = root
+            ?.let(::activeValuesFromStats)
+            ?.let { raw ->
+                partition(identity, raw.toString()).loadBound.only(expectedValues.fields)
+            }
+            ?.let { observed -> signatureSafeValues(identity, observed) }
+        return JSONObject().apply {
+            put("nativeLoaded", root?.optBoolean("loaded", false) ?: false)
+            put("expectedLoad", expectedValues.toJsonObject())
+            if (effective == null) {
+                put("nativeEffectiveLoad", JSONObject.NULL)
+                put("missingFields", JSONArray(expectedValues.fields.sorted()))
+                put("differentFields", JSONArray(expectedValues.fields.sorted()))
+            } else {
+                put("nativeEffectiveLoad", effective.toJsonObject())
+                put(
+                    "missingFields",
+                    JSONArray((expectedValues.fields - effective.fields).sorted())
+                )
+                put(
+                    "differentFields",
+                    JSONArray(effective.differences(expectedValues).sorted())
+                )
+            }
+        }
+    }
+
     override fun nativeCompletionJson(
         partition: RuntimeParameterPartition,
         profile: ModelExecutionProfile,
@@ -1165,6 +1236,16 @@ class ParameterCoordinator(
     @Synchronized
     fun nativeLoadJson(profile: ModelExecutionProfile): String =
         adapter(profile.runtimeIdentity.runtime).nativeLoadJson(profile)
+
+    @Synchronized
+    fun loadSignatureDiagnostic(
+        profile: ModelExecutionProfile,
+        nativeStatsJson: String
+    ): JSONObject = adapter(profile.runtimeIdentity.runtime).loadSignatureDiagnostic(
+        identity = profile.runtimeIdentity,
+        nativeStatsJson = nativeStatsJson,
+        expected = profile.resolvedLoadSignature
+    )
 
     @Synchronized
     fun isLoadSignatureMismatch(

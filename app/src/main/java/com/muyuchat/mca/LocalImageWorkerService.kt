@@ -1,11 +1,18 @@
 package com.muyuchat.mca
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.IBinder
 import android.os.Process
 import android.os.RemoteException
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -205,6 +212,17 @@ class LocalImageWorkerService : Service() {
                     requestId = request.requestId,
                     code = "worker_busy",
                     message = "Another local image generation is already running."
+                )
+                return false
+            }
+            if (!promoteActiveOperationToForeground("IMAGE_GENERATION")) {
+                runCatching { provider.cancel() }
+                finish(active)
+                sendError(
+                    callback = callback,
+                    requestId = request.requestId,
+                    code = "foreground_start_failed",
+                    message = "Android did not allow the local image worker to enter foreground execution."
                 )
                 return false
             }
@@ -447,6 +465,17 @@ class LocalImageWorkerService : Service() {
             )
             return false
         }
+        if (!promoteActiveOperationToForeground("ESRGAN_UPSCALE")) {
+            runCatching { provider.cancel() }
+            finish(active)
+            sendError(
+                callback = callback,
+                requestId = request.requestId,
+                code = "foreground_start_failed",
+                message = "Android did not allow the local image worker to enter foreground execution."
+            )
+            return false
+        }
         active.deathRecipient = IBinder.DeathRecipient { cancelForDeadClient(active) }
         try {
             callback.asBinder().linkToDeath(requireNotNull(active.deathRecipient), 0)
@@ -667,6 +696,7 @@ class LocalImageWorkerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        ensureForegroundChannel()
         if (PROCESS_RETIREMENT.isRetiring) {
             rejectedRetiringProcess = true
             return
@@ -700,6 +730,7 @@ class LocalImageWorkerService : Service() {
         binder.takeUnless { rejectedRetiringProcess || PROCESS_RETIREMENT.isRetiring }
 
     override fun onDestroy() {
+        leaveActiveOperationForeground()
         if (rejectedRetiringProcess) {
             scope.cancel()
             super.onDestroy()
@@ -799,9 +830,63 @@ class LocalImageWorkerService : Service() {
 
     private fun finish(active: ActiveGeneration) {
         synchronized(stateLock) {
-            if (activeGeneration === active) activeGeneration = null
+            if (activeGeneration === active) {
+                activeGeneration = null
+                leaveActiveOperationForeground()
+            }
         }
         unlinkDeathRecipient(active)
+    }
+
+    private fun promoteActiveOperationToForeground(operation: String): Boolean {
+        val openApp = PendingIntent.getActivity(
+            this,
+            1,
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, FOREGROUND_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_mca_api)
+            .setContentTitle("MCA 本地图像任务")
+            .setContentText("正在执行 $operation，返回应用可查看进度")
+            .setContentIntent(openApp)
+            .setOngoing(true)
+            .setSilent(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+        return runCatching {
+            ServiceCompat.startForeground(
+                this,
+                FOREGROUND_NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+            true
+        }.onFailure { error ->
+            logLocalImageWorkerInternalFailure("start_foreground", error)
+        }.getOrDefault(false)
+    }
+
+    private fun leaveActiveOperationForeground() {
+        runCatching {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        }
+    }
+
+    private fun ensureForegroundChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(
+            NotificationChannel(
+                FOREGROUND_CHANNEL_ID,
+                "本地图像任务",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "本地生图和超分任务状态"
+            }
+        )
     }
 
     private fun unlinkDeathRecipient(active: ActiveGeneration) {
@@ -1329,6 +1414,8 @@ class LocalImageWorkerService : Service() {
         private val PROCESS_RETIREMENT = LocalImageWorkerProcessRetirementGate()
         internal const val RESULT_DIRECTORY = "local_image_worker_results"
         internal const val IMAGE_EXECUTION_JOURNAL_DIRECTORY = "image_execution_journal"
+        private const val FOREGROUND_CHANNEL_ID = "mca_local_image"
+        private const val FOREGROUND_NOTIFICATION_ID = 11437
         private const val SELF_EXIT_GRACE_MS = 250L
         private const val RESULT_PUBLICATION_EXIT_TIMEOUT_MS = 5_000L
         private const val RESULT_MAX_AGE_MS = 24 * 60 * 60 * 1000L

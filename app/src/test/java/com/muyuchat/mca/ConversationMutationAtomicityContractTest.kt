@@ -37,7 +37,17 @@ class ConversationMutationAtomicityContractTest {
     @Test
     fun regenerationStartsOnlyFromTheCommittedMutationCallback() {
         val body = functionBody(mainViewModelSource(), "regenerateLastResponse")
-        assertTrue(body.contains("onCommitted = { startGeneration(kept.dropLast(1)) }"))
+        assertTrue(body.contains("val generationReservation = reserveUiGenerationStart() ?: return"))
+        assertTrue(
+            body.contains(
+                "onCommitted = { startGeneration(kept.dropLast(1), generationReservation) }"
+            )
+        )
+        assertTrue(
+            body.contains(
+                "onCommitFailed = { uiGenerationOwnership.cancelPending(generationReservation) }"
+            )
+        )
         assertFalse(body.contains("persistChatSessions("))
     }
 

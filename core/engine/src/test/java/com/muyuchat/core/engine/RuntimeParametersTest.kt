@@ -12,14 +12,61 @@ import org.junit.Test
 
 class RuntimeParametersTest {
     @Test
-    fun llamaCacheReuseUsesConservativeDefaultButHonorsExplicitOverrides() {
+    fun llamaImplicitBatchThreadsFollowTheSelectedDecodeThreadCount() {
+        val identity = identity(LocalChatRuntime.LLAMA_CPP)
+        val resolution = LlamaCppRuntimeParameterAdapter().resolveLoadProfile(
+            identity,
+            """{"n_threads":6}"""
+        )
+
+        assertEquals(6, resolution.profile.hotExecutionValues.value("n_threads"))
+        assertEquals(6, resolution.profile.hotExecutionValues.value("n_threads_batch"))
+        assertEquals(
+            "runtime-default:aligned-with-n_threads",
+            resolution.sourceByField["n_threads_batch"]
+        )
+
+        val explicit = LlamaCppRuntimeParameterAdapter().resolveLoadProfile(
+            identity,
+            """{"n_threads":6,"n_threads_batch":2}"""
+        )
+        assertEquals(2, explicit.profile.hotExecutionValues.value("n_threads_batch"))
+        assertEquals("requested-profile", explicit.sourceByField["n_threads_batch"])
+    }
+
+    @Test
+    fun llamaLoadSignatureDiagnosticReportsOnlyRedactedReadbackDifferences() {
+        val identity = identity(LocalChatRuntime.LLAMA_CPP)
+        val adapter = LlamaCppRuntimeParameterAdapter()
+        val profile = adapter.resolveLoadProfile(identity, "{}").profile
+        val nativeConfig = profile.resolvedLoadBoundValues.toJsonObject()
+            .put("n_batch", 256)
+
+        val diagnostic = adapter.loadSignatureDiagnostic(
+            identity = identity,
+            nativeStatsJson = JSONObject()
+                .put("loaded", true)
+                .put("effectiveConfig", nativeConfig)
+                .toString(),
+            expected = profile.resolvedLoadSignature
+        )
+
+        assertTrue(diagnostic.getBoolean("nativeLoaded"))
+        assertEquals(256, diagnostic.getJSONObject("nativeEffectiveLoad").getInt("n_batch"))
+        assertEquals(1, diagnostic.getJSONArray("differentFields").length())
+        assertEquals("n_batch", diagnostic.getJSONArray("differentFields").getString(0))
+        assertEquals(0, diagnostic.getJSONArray("missingFields").length())
+    }
+
+    @Test
+    fun llamaCacheReuseUsesShortConversationDefaultButHonorsExplicitOverrides() {
         val adapter = LlamaCppRuntimeParameterAdapter()
         val baseIdentity = identity(LocalChatRuntime.LLAMA_CPP)
 
         val defaults = adapter.resolveLoadProfile(baseIdentity, "{}")
-        assertEquals(256, defaults.profile.hotExecutionValues.value("cache_reuse"))
+        assertEquals(16, defaults.profile.hotExecutionValues.value("cache_reuse"))
         assertEquals("runtime-default", defaults.sourceByField["cache_reuse"])
-        assertEquals(256, JSONObject(adapter.nativeLoadJson(defaults.profile)).getInt("cache_reuse"))
+        assertEquals(16, JSONObject(adapter.nativeLoadJson(defaults.profile)).getInt("cache_reuse"))
 
         val explicitDisabled = adapter.resolveLoadProfile(baseIdentity, "{\"cache_reuse\":0}")
         assertEquals(0, explicitDisabled.profile.hotExecutionValues.value("cache_reuse"))
@@ -274,6 +321,23 @@ class RuntimeParametersTest {
                 resolution.profile.resolvedLoadSignature
             )
         )
+    }
+
+    @Test
+    fun llamaExplicitCpuRequestUsesNativeCpuSplitModeEvenOnGpuCapableRuntime() {
+        val identity = identity(
+            LocalChatRuntime.LLAMA_CPP,
+            capabilities = setOf("gpu_offload")
+        )
+        val resolution = LlamaCppRuntimeParameterAdapter().resolveLoadProfile(
+            identity,
+            """{"advanced_json":{"n_gpu_layers":0}}"""
+        )
+
+        assertEquals(0, resolution.profile.resolvedLoadBoundValues.value("n_gpu_layers"))
+        assertEquals("none", resolution.profile.resolvedLoadBoundValues.value("split_mode"))
+        assertEquals("runtime-safety", resolution.sourceByField["split_mode"])
+        assertTrue(resolution.warnings.any { it.contains("n_gpu_layers=0 disables GPU layer splitting") })
     }
 
     @Test

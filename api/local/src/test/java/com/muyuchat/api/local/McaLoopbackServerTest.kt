@@ -7,6 +7,7 @@ import com.muyuchat.core.engine.LocalChatExecutionContext
 import com.muyuchat.core.engine.RuntimeStats
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import org.json.JSONArray
 import org.json.JSONObject
@@ -24,6 +25,81 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class McaLoopbackServerTest {
+    @Test
+    fun publicModelIdIsReadableStableAndUniqueByInternalId() {
+        assertEquals(
+            "Qwen 3 4B GGUF [model-42]",
+            localApiPublicModelId("  Qwen   3 4B GGUF  ", "model-42")
+        )
+        assertEquals("model-42", localApiPublicModelId(null, "model-42"))
+        assertEquals("Qwen 3 4B", localApiPublicModelId("Qwen 3 4B", "Qwen 3 4B"))
+        assertFalse(
+            localApiPublicModelId("Shared name", "model-a") ==
+                localApiPublicModelId("Shared name", "model-b")
+        )
+    }
+
+    @Test
+    fun staleRuntimeOwnerCannotDetachReplacementProviders() {
+        val firstOwner = Any()
+        val replacementOwner = Any()
+        val replacementCleanupCalls = AtomicInteger(0)
+        try {
+            LocalApiRuntime.claimOwner(firstOwner) {
+                replacementCleanupCalls.incrementAndGet()
+            }
+            LocalApiRuntime.loadedModelJsonProvider = { """{"id":"first"}""" }
+
+            LocalApiRuntime.claimOwner(replacementOwner) {
+                replacementCleanupCalls.incrementAndGet()
+            }
+            LocalApiRuntime.loadedModelJsonProvider = { """{"id":"replacement"}""" }
+
+            assertEquals(1, replacementCleanupCalls.get())
+            assertFalse(LocalApiRuntime.releaseOwner(firstOwner))
+            assertEquals(
+                "replacement",
+                JSONObject(LocalApiRuntime.loadedModelJsonProvider()).getString("id")
+            )
+            assertTrue(LocalApiRuntime.releaseOwner(replacementOwner))
+            assertEquals("{}", LocalApiRuntime.loadedModelJsonProvider())
+        } finally {
+            LocalApiRuntime.releaseOwner(firstOwner)
+            LocalApiRuntime.releaseOwner(replacementOwner)
+            resetLocalApiRuntimeForTests()
+        }
+    }
+
+    @Test
+    fun shutdownClosesAcceptedClientBlockedOnAnIncompleteRequest() {
+        val port = freePort()
+        val server = McaLoopbackServer(port = port, apiKey = "secret")
+        val client = Socket()
+        try {
+            server.start()
+            client.connect(java.net.InetSocketAddress("127.0.0.1", port))
+            client.soTimeout = 2_000
+            client.getOutputStream().write(
+                "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n".toByteArray()
+            )
+            client.getOutputStream().flush()
+
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (server.activeClientCountForTests() == 0 && System.nanoTime() < deadline) {
+                Thread.sleep(5L)
+            }
+            assertEquals(1, server.activeClientCountForTests())
+
+            server.shutdown()
+
+            val read = runCatching { client.getInputStream().read() }
+            assertTrue(read.isFailure || read.getOrNull() == -1)
+        } finally {
+            runCatching { client.close() }
+            server.shutdown()
+        }
+    }
+
     @Test
     fun nonLoopbackListenerRequiresAuthenticationKey() {
         val server = McaLoopbackServer(port = freePort(), bindHost = "0.0.0.0", apiKey = "")
@@ -994,6 +1070,91 @@ class McaLoopbackServerTest {
             assertTrue(response.contains("\"object\":\"list\""))
             assertTrue(response.contains("\"vision_ready\":true"))
             assertTrue(response.contains("\"vision_projector\":\"mmproj-local-vl.gguf\""))
+        }
+    }
+
+    @Test
+    fun modelsRoutePublishesCompatibleNameAliasesFromProviderDisplayName() {
+        withServer(apiKey = "secret") { port ->
+            // MainViewModel publishes display_name from ModelManifest.displayName. Exercise the
+            // complete loopback boundary to ensure aliases survive publicCopy sanitization.
+            LocalApiRuntime.modelsJsonProvider = {
+                """{"object":"list","data":[
+                    {"id":"model-42","display_name":"Qwen 3 4B GGUF","runtime":"llama_cpp"},
+                    {"id":"model-43","displayName":"通义千问 3 4B MNN","runtime":"mnn"},
+                    {"id":"opaque-44","runtime":"llama_cpp"}
+                ]}"""
+            }
+
+            val response = rawHttp(port, authenticatedGet("/v1/models"))
+            val data = responseJson(response).getJSONArray("data")
+            val first = data.getJSONObject(0)
+            val second = data.getJSONObject(1)
+            val unnamed = data.getJSONObject(2)
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals("Qwen 3 4B GGUF [model-42]", first.getString("id"))
+            assertEquals("model-42", first.getString("internal_id"))
+            assertTrue(first.getJSONArray("aliases").toString().contains("model-42"))
+            assertEquals("Qwen 3 4B GGUF", first.getString("name"))
+            assertEquals("Qwen 3 4B GGUF", first.getString("display_name"))
+            assertEquals("Qwen 3 4B GGUF", first.getString("displayName"))
+            assertEquals("通义千问 3 4B MNN [model-43]", second.getString("id"))
+            assertEquals("model-43", second.getString("internal_id"))
+            assertEquals("通义千问 3 4B MNN", second.getString("name"))
+            assertEquals("通义千问 3 4B MNN", second.getString("display_name"))
+            assertEquals("通义千问 3 4B MNN", second.getString("displayName"))
+            // An opaque id is never presented as a fabricated human-readable model name.
+            assertEquals("opaque-44", unnamed.getString("id"))
+            assertEquals("opaque-44", unnamed.getString("internal_id"))
+            assertFalse(unnamed.has("name"))
+            assertFalse(unnamed.has("display_name"))
+            assertFalse(unnamed.has("displayName"))
+        }
+    }
+
+    @Test
+    fun concurrentChatRequestsUseOneExactGenerationLease() {
+        val firstStarted = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val providerCalls = AtomicInteger(0)
+        val firstResponse = AtomicReference<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                val call = providerCalls.incrementAndGet()
+                flow {
+                    if (call == 1) {
+                        firstStarted.countDown()
+                        check(releaseFirst.await(5, TimeUnit.SECONDS))
+                    }
+                    emit(GenerateEvent.Chunk("answer-$call", RuntimeStats(completionTokens = 1)))
+                    emit(GenerateEvent.Done(RuntimeStats(completionTokens = 1)))
+                }
+            }
+            val request = chatRequest(
+                """{"messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            )
+            val firstClient = Thread {
+                firstResponse.set(rawHttp(port, request))
+            }.apply { start() }
+
+            assertTrue(firstStarted.await(2, TimeUnit.SECONDS))
+            val rejected = rawHttp(port, request)
+            assertTrue(rejected.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(rejected.contains("\"code\":\"generation_in_progress\""))
+            assertFalse(rejected.contains("Content-Type: text/event-stream"))
+            assertEquals(1, providerCalls.get())
+
+            releaseFirst.countDown()
+            firstClient.join(3_000L)
+            assertFalse(firstClient.isAlive)
+            assertTrue(firstResponse.get().startsWith("HTTP/1.1 200 OK"))
+            assertTrue(firstResponse.get().contains("data: [DONE]"))
+
+            val afterRelease = rawHttp(port, request)
+            assertTrue(afterRelease.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(afterRelease.contains("answer-2"))
+            assertEquals(2, providerCalls.get())
         }
     }
 
@@ -2241,10 +2402,14 @@ class McaLoopbackServerTest {
         LocalApiRuntime.controlPlane = null
         LocalApiRuntime.clearRequestTrace()
         LocalApiRuntime.loadedModelJsonProvider = { "{}" }
+        LocalApiRuntime.paramsJsonProvider = { "{}" }
         LocalApiRuntime.generationParamsProvider = { GenerationParams() }
         LocalApiRuntime.modelsJsonProvider = { """{"object":"list","data":[]}""" }
         LocalApiRuntime.imageTextualInversionsJsonProvider = { "[]" }
         LocalApiRuntime.modelRuntimeStatesJsonProvider = { "{}" }
+        LocalApiRuntime.deviceProfileJsonProvider = { "{}" }
+        LocalApiRuntime.agentRecommendationJsonProvider = { "{}" }
+        LocalApiRuntime.benchmarkJsonProvider = { "{}" }
     }
 
     private fun chatRequest(body: String): String =

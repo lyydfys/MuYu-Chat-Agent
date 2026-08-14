@@ -19,7 +19,13 @@ class LocalChatWorkerIsolationContractTest {
 
         assertTrue(manifest.contains("android:name=\".LocalChatWorkerService\""))
         assertTrue(manifest.contains("android:process=\":local_chat\""))
+        assertTrue(manifest.contains("android:foregroundServiceType=\"specialUse\""))
+        assertTrue(manifest.contains("android:value=\"resident_local_ai_model\""))
         assertTrue(service.contains("Process.killProcess(Process.myPid())"))
+        assertTrue(service.contains("promoteLoadedModelToForeground()"))
+        assertTrue(service.contains("ServiceCompat.startForeground("))
+        assertTrue(service.contains("leaveLoadedModelForeground()"))
+        assertTrue(service.contains("ServiceCompat.stopForeground("))
         assertTrue(runners.contains("put(LocalChatRuntime.LLAMA_CPP, llama)"))
         assertTrue(runners.contains("put(LocalChatRuntime.MNN_CPU, mnn)"))
         assertTrue(runners.contains("RemoteLocalChatRunner(context, LocalChatRuntime.GENIEX_QAIRT)"))

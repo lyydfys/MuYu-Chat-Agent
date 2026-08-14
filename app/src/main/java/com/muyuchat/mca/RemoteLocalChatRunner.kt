@@ -8,6 +8,8 @@ import android.os.DeadObjectException
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
+import android.util.Log
+import androidx.core.content.ContextCompat
 import com.muyuchat.core.engine.LocalChatRuntime
 import com.muyuchat.core.engine.LocalChatRunner
 import com.muyuchat.core.engine.PersistentPrefixCacheRequest
@@ -32,6 +34,8 @@ internal class RemoteLocalChatRunner(
     private var nativeLibDir: String = ""
     private var modelLoadedInWorker = false
     private var workerSessionLost = false
+    /** Changes whenever a load attempt or Binder identity invalidates an in-flight readback. */
+    private var workerSessionEpoch = 0L
     private var closed = false
 
     @Volatile
@@ -52,23 +56,65 @@ internal class RemoteLocalChatRunner(
         // non-blocking on the main process.
     }
 
-    override fun loadModel(modelPath: String, paramsJson: String): Int =
-        invoke { service ->
+    override fun loadModel(modelPath: String, paramsJson: String): Int {
+        return invoke { service ->
+            // Bind first so a failed connection cannot leave a notification-only
+            // started service behind. A restricted FGS start still falls back to
+            // the already-established generic bound-service path.
+            startResidentService()
             service.initRuntime(runtime.name, nativeLibDir)
+            val loadEpoch = synchronized(stateLock) {
+                check(remote === service) { "The isolated local text worker changed before model load." }
+                workerSessionEpoch += 1L
+                workerSessionEpoch
+            }
             val result = service.loadModel(runtime.name, modelPath, paramsJson)
-            synchronized(stateLock) {
-                if (remote === service) {
-                    modelLoadedInWorker = result == 0
-                    workerSessionLost = false
-                    if (result == 0) failure = null
+            val disposition = synchronized(stateLock) {
+                classifyWorkerLoadResult(
+                    nativeResult = result,
+                    endpointStillCurrent = remote === service,
+                    epochStillCurrent = workerSessionEpoch == loadEpoch
+                ).also { outcome ->
+                    when (outcome) {
+                        WorkerLoadResultDisposition.COMMITTED -> {
+                            modelLoadedInWorker = true
+                            workerSessionLost = false
+                            failure = null
+                        }
+                        WorkerLoadResultDisposition.FAILED -> {
+                            modelLoadedInWorker = false
+                            workerSessionLost = false
+                        }
+                        WorkerLoadResultDisposition.LOST_AFTER_SUCCESS -> {
+                            modelLoadedInWorker = false
+                            workerSessionLost = true
+                        }
+                        WorkerLoadResultDisposition.STALE -> Unit
+                    }
                 }
+            }
+            when (disposition) {
+                WorkerLoadResultDisposition.COMMITTED,
+                WorkerLoadResultDisposition.FAILED -> Unit
+                WorkerLoadResultDisposition.LOST_AFTER_SUCCESS -> throw workerFailure(
+                    "finished loading a model after its Binder connection was already lost."
+                ).also { error ->
+                    synchronized(stateLock) {
+                        if (workerSessionEpoch != loadEpoch || remote !== service) failure = error
+                    }
+                }
+                WorkerLoadResultDisposition.STALE -> throw workerFailure(
+                    "returned a stale model-load result after its session epoch changed."
+                )
             }
             result
         }
+    }
 
     override fun unloadModel() {
-        runCatching { invoke { service -> service.unloadModel(); Unit } }
+        invoke { service -> service.unloadModel(); Unit }
         synchronized(stateLock) {
+            workerSessionEpoch += 1L
             modelLoadedInWorker = false
             workerSessionLost = false
         }
@@ -169,70 +215,105 @@ internal class RemoteLocalChatRunner(
         }
     }
 
-    override fun getRuntimeStatsJson(): String {
-        val service = synchronized(stateLock) {
-            if (workerSessionLost) return workerUnavailableStatsLocked()
-            remote
-        } ?: return synchronized(stateLock) {
-            if (modelLoadedInWorker) {
-                markWorkerSessionLostLocked(
-                    workerFailure("lost its loaded model connection.")
-                )
-            }
-            workerUnavailableStatsLocked()
-        }
+    override fun isSessionKnownLost(): Boolean = synchronized(stateLock) {
+        workerSessionLost || (modelLoadedInWorker && remote == null)
+    }
 
-        return try {
-            val stats = service.getRuntimeStatsJson()
-            val reportsLoaded = runCatching {
-                JSONObject(stats).optBoolean("loaded", false)
-            }.getOrDefault(false)
-            val expectedLoaded = synchronized(stateLock) {
-                remote === service && modelLoadedInWorker
+    override fun getRuntimeStatsJson(): String {
+        repeat(MAX_STATS_READ_ATTEMPTS) {
+            val snapshot = synchronized(stateLock) {
+                if (workerSessionLost) return workerUnavailableStatsLocked()
+                remote?.let { RemoteStatsReadSnapshot(it, workerSessionEpoch) }
+            } ?: return synchronized(stateLock) {
+                if (modelLoadedInWorker) {
+                    markWorkerSessionLostLocked(
+                        workerFailure("lost its loaded model connection.")
+                    )
+                }
+                workerUnavailableStatsLocked()
             }
-            if (expectedLoaded && !reportsLoaded) {
-                val error = workerFailure("no longer has the loaded model.")
-                handleRemoteFailure(service, error)
-                synchronized(stateLock) { workerUnavailableStatsLocked() }
-            } else {
-                runCatching {
+
+            try {
+                val stats = snapshot.service.getRuntimeStatsJson()
+                val reportsLoaded = runCatching {
+                    JSONObject(stats).optBoolean("loaded", false)
+                }.getOrDefault(false)
+                val expectedLoaded = synchronized(stateLock) {
+                    if (remote !== snapshot.service || workerSessionEpoch != snapshot.epoch) {
+                        null
+                    } else {
+                        modelLoadedInWorker
+                    }
+                }
+                if (expectedLoaded == null) return@repeat
+                Log.i(
+                    REMOTE_LOG_TAG,
+                    "worker stats received; expectedLoaded=$expectedLoaded " +
+                        "reportsLoaded=$reportsLoaded"
+                )
+                if (expectedLoaded && !reportsLoaded) {
+                    val error = workerFailure("no longer has the loaded model.")
+                    handleRemoteFailure(snapshot.service, error)
+                    return synchronized(stateLock) { workerUnavailableStatsLocked() }
+                }
+                return runCatching {
                     JSONObject(stats)
                         .put(WORKER_SESSION_LOST_FIELD, false)
                         .toString()
                 }.getOrDefault(stats)
+            } catch (error: DeadObjectException) {
+                handleRemoteFailure(
+                    snapshot.service,
+                    disconnectedFailure("crashed or was reclaimed", error)
+                )
+                return synchronized(stateLock) { workerUnavailableStatsLocked() }
+            } catch (error: RemoteException) {
+                handleRemoteFailure(snapshot.service, disconnectedFailure("disconnected", error))
+                return synchronized(stateLock) { workerUnavailableStatsLocked() }
             }
-        } catch (error: DeadObjectException) {
-            handleRemoteFailure(service, disconnectedFailure("crashed or was reclaimed", error))
-            synchronized(stateLock) { workerUnavailableStatsLocked() }
-        } catch (error: RemoteException) {
-            handleRemoteFailure(service, disconnectedFailure("disconnected", error))
-            synchronized(stateLock) { workerUnavailableStatsLocked() }
         }
+        throw workerFailure("changed session epoch repeatedly while runtime stats were read.")
     }
 
-    override fun shutdown() = close()
+    override fun shutdown() {
+        val endpoint = synchronized(stateLock) { remote }
+        if (endpoint != null) {
+            try {
+                endpoint.shutdown()
+            } catch (error: DeadObjectException) {
+                handleRemoteFailure(endpoint, disconnectedFailure("crashed during shutdown", error))
+            } catch (error: RemoteException) {
+                handleRemoteFailure(endpoint, disconnectedFailure("disconnected during shutdown", error))
+            }
+        }
+        detach()
+    }
 
-    override fun close() {
-        val snapshot = synchronized(stateLock) {
+    /** Detaches this client without unloading the process-wide resident model. */
+    override fun close() = detach()
+
+    private fun detach() {
+        // Deliberately no Binder shutdown here: ViewModel.onCleared() calls
+        // close() on the main thread, and another owner may already be bound.
+        val attempt = synchronized(stateLock) {
             if (closed) return
             closed = true
-            val endpoint = remote
-            val attempt = activeBinding
+            val currentAttempt = activeBinding
             activeBinding = null
             connection = null
             bound = false
             remote = null
+            workerSessionEpoch += 1L
             modelLoadedInWorker = false
             workerSessionLost = false
-            attempt?.error?.compareAndSet(
+            currentAttempt?.error?.compareAndSet(
                 null,
                 RemoteLocalChatRunnerException("The isolated local chat runner is closed.")
             )
-            endpoint to attempt
+            currentAttempt
         }
-        snapshot.second?.connected?.countDown()
-        runCatching { snapshot.first?.shutdown() }
-        snapshot.second?.let(::releaseBinding)
+        attempt?.connected?.countDown()
+        attempt?.let(::releaseBinding)
     }
 
     private fun remoteIfBound(): ILocalChatWorker? = synchronized(stateLock) { remote }
@@ -313,6 +394,7 @@ internal class RemoteLocalChatRunner(
                         attempt.binder = service
                         attempt.deathRecipient = deathRecipient
                         remote = endpoint
+                        workerSessionEpoch += 1L
                         if (!workerSessionLost) failure = null
                         true
                     } else {
@@ -356,9 +438,10 @@ internal class RemoteLocalChatRunner(
     }
 
     private fun startBinding(attempt: BindingAttempt) {
+        val serviceIntent = Intent(appContext, LocalChatWorkerService::class.java)
         val didBind = try {
             appContext.bindService(
-                Intent(appContext, LocalChatWorkerService::class.java),
+                serviceIntent,
                 attempt.connection,
                 Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT
             )
@@ -388,6 +471,17 @@ internal class RemoteLocalChatRunner(
         if (unbindStale) unbindQuietly(attempt.connection)
     }
 
+    private fun startResidentService() {
+        val serviceIntent = Intent(appContext, LocalChatWorkerService::class.java)
+        runCatching {
+            ContextCompat.startForegroundService(appContext, serviceIntent)
+        }.onFailure { error ->
+            // Background-start restrictions are advisory here. Binding keeps
+            // the generic compatible execution path available.
+            Log.w(REMOTE_LOG_TAG, "Could not start the resident text worker; binding only.", error)
+        }
+    }
+
     private fun handleRemoteFailure(service: ILocalChatWorker, error: Throwable) {
         val attempt = synchronized(stateLock) {
             activeBinding?.takeIf { remote === service }
@@ -404,6 +498,7 @@ internal class RemoteLocalChatRunner(
             if (isCurrent) {
                 markWorkerSessionLostLocked(error)
                 remote = null
+                workerSessionEpoch += 1L
                 activeBinding = null
                 connection = null
                 bound = false
@@ -516,12 +611,37 @@ internal class RemoteLocalChatRunner(
         var deathRecipient: IBinder.DeathRecipient? = null
     }
 
+    private data class RemoteStatsReadSnapshot(
+        val service: ILocalChatWorker,
+        val epoch: Long
+    )
+
     private companion object {
+        private const val REMOTE_LOG_TAG = "McaRemoteLocalChat"
         private const val CONNECTION_TIMEOUT_MS = 15_000L
+        private const val MAX_STATS_READ_ATTEMPTS = 2
         private const val NO_MODEL_LOADED_MESSAGE = "No local text model is loaded"
         internal const val WORKER_SESSION_LOST_FIELD = "workerSessionLost"
         internal const val WORKER_STAGE_JOURNAL_FIELD = "workerStageJournal"
     }
+}
+
+internal enum class WorkerLoadResultDisposition {
+    COMMITTED,
+    FAILED,
+    LOST_AFTER_SUCCESS,
+    STALE
+}
+
+internal fun classifyWorkerLoadResult(
+    nativeResult: Int,
+    endpointStillCurrent: Boolean,
+    epochStillCurrent: Boolean
+): WorkerLoadResultDisposition = when {
+    nativeResult != 0 -> WorkerLoadResultDisposition.FAILED
+    !endpointStillCurrent -> WorkerLoadResultDisposition.LOST_AFTER_SUCCESS
+    !epochStillCurrent -> WorkerLoadResultDisposition.STALE
+    else -> WorkerLoadResultDisposition.COMMITTED
 }
 
 internal class RemoteLocalChatRunnerException(

@@ -6,6 +6,11 @@ import android.content.pm.ApplicationInfo
 import java.io.File
 import java.util.ArrayDeque
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
@@ -102,6 +107,32 @@ class McaInferenceServicePhaseEventTest {
     }
 
     @Test
+    fun decodePhaseCarriesTerminalPrefillStatsBeforeFirstChunk() = runBlocking {
+        val runner = PhaseRunner().apply {
+            enqueue("answer")
+            terminalPrefillTokens = 80
+            terminalPrefillMs = 400L
+        }
+        val service = loadedService(runner, prefillProgressPollIntervalMs = 5L)
+
+        val events = service.streamChat(request()).toList()
+        val decode = events.filterIsInstance<GenerateEvent.Phase>()
+            .single { it.phase == GenerationPhase.DECODE }
+        val decodeIndex = events.indexOf(decode)
+        val firstChunkIndex = events.indexOfFirst { it is GenerateEvent.Chunk }
+
+        assertEquals(80, decode.stats.promptTokens)
+        assertEquals(80, decode.stats.prefillTokens)
+        assertEquals(400L, decode.stats.prefillMs)
+        assertEquals(200.0, decode.stats.prefillTps, 0.001)
+        assertEquals(0, decode.stats.completionTokens)
+        assertEquals(0.0, decode.stats.decodeTps, 0.001)
+        assertTrue(decodeIndex in 0 until firstChunkIndex)
+        val firstChunk = events.filterIsInstance<GenerateEvent.Chunk>().first()
+        assertEquals(80, firstChunk.stats.prefillTokens)
+    }
+
+    @Test
     fun streamClearsCompletedPrefillSnapshotBeforeStartingNextNativeRequest() = runBlocking {
         val runner = PhaseRunner().apply {
             enqueue("answer")
@@ -171,8 +202,88 @@ class McaInferenceServicePhaseEventTest {
         val service = loadedService(runner)
 
         service.invalidateConversationContext()
+        runner.enqueue("fresh")
+        val events = service.streamChat(request()).toList()
 
         assertEquals(1, runner.contextInvalidationCalls)
+        assertFalse(
+            events.any { it is GenerateEvent.Phase && it.phase == GenerationPhase.LOAD }
+        )
+        assertTrue(events.last() is GenerateEvent.Done)
+    }
+
+    @Test
+    fun foregroundHealthSnapshotSkipsAnOwnedLifecycleAndReadsAfterRelease() = runBlocking {
+        val runner = PhaseRunner()
+        val service = loadedService(runner)
+        val lease = service.acquireExclusiveLifecycleLease(stopActiveGeneration = false)
+
+        try {
+            assertNull(service.tryRuntimeHealthSnapshot())
+        } finally {
+            lease.release()
+        }
+
+        val snapshot = requireNotNull(service.tryRuntimeHealthSnapshot())
+        assertEquals(service.stats.value, snapshot.runtimeStats)
+        assertFalse(snapshot.workerSessionLost)
+    }
+
+    @Test
+    fun lostWorkerHealthIsProjectedAsUnloadedWhileKeepingRecoveryPossible() = runBlocking {
+        val runner = PhaseRunner()
+        val service = loadedService(runner)
+        runner.sessionKnownLost = true
+
+        val snapshot = requireNotNull(service.tryRuntimeHealthSnapshot())
+
+        assertTrue(snapshot.workerSessionLost)
+        assertFalse(snapshot.runtimeStats.loaded)
+        assertFalse(service.stats.value.loaded)
+    }
+
+    @Test
+    fun beginFailureFromLostWorkerImmediatelyClearsLoadedProjection() = runBlocking {
+        val runner = PhaseRunner().apply {
+            beginFailure = IllegalStateException("worker binder died")
+            sessionKnownLost = true
+        }
+        val service = loadedService(runner)
+
+        val events = service.streamChat(request()).toList()
+
+        val error = events.last() as GenerateEvent.Error
+        assertFalse(error.stats.loaded)
+        assertFalse(service.stats.value.loaded)
+    }
+
+    @Test
+    fun staleGenerationStopTokenCannotStopAReplacementRequest() = runBlocking {
+        val runner = PhaseRunner()
+        val service = loadedService(runner)
+        val firstEntered = CountDownLatch(1)
+        val firstRelease = CountDownLatch(1)
+        runner.blockNextGenerate(firstEntered, firstRelease, "first")
+        val first = async(Dispatchers.Default) { service.streamChat(request()).toList() }
+
+        assertTrue(firstEntered.await(5, TimeUnit.SECONDS))
+        val firstToken = requireNotNull(service.activeGenerationStopToken())
+        firstRelease.countDown()
+        assertTrue(first.await().last() is GenerateEvent.Done)
+
+        val secondEntered = CountDownLatch(1)
+        val secondRelease = CountDownLatch(1)
+        runner.blockNextGenerate(secondEntered, secondRelease, "second")
+        val second = async(Dispatchers.Default) { service.streamChat(request()).toList() }
+        assertTrue(secondEntered.await(5, TimeUnit.SECONDS))
+        val secondToken = requireNotNull(service.activeGenerationStopToken())
+        val stopsBeforeConditionalStop = runner.requestStopCalls.get()
+
+        assertFalse(service.stopGenerationIfActive(firstToken))
+        assertEquals(stopsBeforeConditionalStop, runner.requestStopCalls.get())
+        assertTrue(service.stopGenerationIfActive(secondToken))
+        assertEquals(stopsBeforeConditionalStop + 1, runner.requestStopCalls.get())
+        assertTrue(second.await().last() is GenerateEvent.Error)
     }
 
     private suspend fun loadedService(
@@ -212,6 +323,9 @@ class McaInferenceServicePhaseEventTest {
         @Volatile
         var prefillProgress: TokenProgress? = null
         var prefillStepsDuringBegin: List<TokenProgress> = emptyList()
+        var terminalPrefillTokens: Int = 0
+        var terminalPrefillMs: Long = 0L
+        var sessionKnownLost: Boolean = false
         val timeline = Collections.synchronizedList(mutableListOf<String>())
         var generateCalls = 0
             private set
@@ -219,6 +333,15 @@ class McaInferenceServicePhaseEventTest {
             private set
         var resetPrefillProgressCalls = 0
             private set
+        val requestStopCalls = AtomicInteger(0)
+        @Volatile
+        private var blockedGenerateEntered: CountDownLatch? = null
+        @Volatile
+        private var blockedGenerateRelease: CountDownLatch? = null
+        @Volatile
+        private var blockedGenerateChunk: String? = null
+        @Volatile
+        private var stopRequested = false
 
         override val runtime: LocalChatRuntime = LocalChatRuntime.MNN_CPU
         override val isAvailable: Boolean = true
@@ -235,10 +358,18 @@ class McaInferenceServicePhaseEventTest {
 
         override fun beginCompletion(messagesJson: String, paramsJson: String): Int {
             timeline += "begin"
+            stopRequested = false
             beginFailure?.let { throw it }
             prefillStepsDuringBegin.forEach { progress ->
                 prefillProgress = progress
                 Thread.sleep(PREFILL_STEP_PAUSE_MS)
+            }
+            if (terminalPrefillTokens > 0 && terminalPrefillMs > 0L) {
+                statsJson = JSONObject(statsJson)
+                    .put("promptTokens", terminalPrefillTokens)
+                    .put("prefillMs", terminalPrefillMs)
+                    .put("prefillTps", terminalPrefillTokens * 1000.0 / terminalPrefillMs)
+                    .toString()
             }
             timeline += "begin:return"
             return beginReturnCode
@@ -253,6 +384,18 @@ class McaInferenceServicePhaseEventTest {
 
         override fun generateNextChunk(): String? {
             generateCalls += 1
+            val entered = blockedGenerateEntered
+            val release = blockedGenerateRelease
+            if (entered != null && release != null) {
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS)) { "timed out waiting to release test generation" }
+                blockedGenerateEntered = null
+                blockedGenerateRelease = null
+                val chunk = blockedGenerateChunk
+                blockedGenerateChunk = null
+                if (stopRequested) return null
+                return chunk
+            }
             return if (chunks.isEmpty()) null else chunks.removeFirst()
         }
 
@@ -260,13 +403,28 @@ class McaInferenceServicePhaseEventTest {
             contextInvalidationCalls += 1
         }
 
-        override fun requestStop() = Unit
+        override fun requestStop() {
+            requestStopCalls.incrementAndGet()
+            stopRequested = true
+            blockedGenerateRelease?.countDown()
+        }
+        override fun isSessionKnownLost(): Boolean = sessionKnownLost
         override fun getRuntimeStatsJson(): String = statsJson
         override fun shutdown() = Unit
 
         fun enqueue(vararg values: String) {
             chunks.clear()
             values.forEach(chunks::addLast)
+        }
+
+        fun blockNextGenerate(
+            entered: CountDownLatch,
+            release: CountDownLatch,
+            chunk: String
+        ) {
+            blockedGenerateEntered = entered
+            blockedGenerateRelease = release
+            blockedGenerateChunk = chunk
         }
 
         private companion object {

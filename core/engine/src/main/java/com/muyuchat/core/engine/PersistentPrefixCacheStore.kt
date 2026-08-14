@@ -12,6 +12,7 @@ import java.nio.channels.FileLock
 import java.nio.channels.OverlappingFileLockException
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
@@ -58,6 +59,23 @@ private object FileDescriptorPrefixCacheStateFileSyncer : PrefixCacheStateFileSy
             output.fd.sync()
         }
     }
+}
+
+/**
+ * Android exposes app storage below a system-owned per-user directory alias.
+ * That alias precedes the app-controlled cache root, so accepting exactly this
+ * path does not allow a cache entry to follow a caller-controlled link.
+ */
+internal fun isFrameworkManagedAndroidUserAlias(path: Path): Boolean {
+    val segments = path.toString()
+        .replace('\\', '/')
+        .split('/')
+        .filter(String::isNotBlank)
+    return segments.size == 3 &&
+        segments[0] == "data" &&
+        segments[1] in setOf("user", "user_de") &&
+        segments[2].isNotEmpty() &&
+        segments[2].all(Char::isDigit)
 }
 
 /**
@@ -678,7 +696,12 @@ class PersistentPrefixCacheStore private constructor(
         path.forEach { segment ->
             current = current.resolve(segment)
             if (Files.exists(current, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(current)) {
-                return true
+                // Android exposes each app's credential/device-encrypted
+                // directory through this system-owned per-user alias. It is
+                // outside the app-controlled root; every component from the
+                // package directory downward remains subject to the strict
+                // no-link check below.
+                if (!isFrameworkManagedAndroidUserAlias(current)) return true
             }
         }
         return false

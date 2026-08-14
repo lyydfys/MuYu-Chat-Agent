@@ -891,15 +891,9 @@ class ModelScopeClient(
         private const val QWEN35_4B_UNCENSORED_MNN_REVISION = "cfa553d6b42bd9ed86f17e02da3b78e7093736ed"
         private const val QWEN35_9B_UNCENSORED_MNN_REVISION = "9eadc756519bf42e6b8aed8a6ade5b124c79e564"
         private const val QWEN35_2B_ABLITERATED_GGUF_REVISION = "f36848fead3fdda244cf60195c46993d23183d4c"
-        private const val QWEN3_VL_4B_ABLITERATED_GGUF_REVISION = "d6630953b1fe29a678c69f95e02d1f5d17b53b11"
-        private const val MINICPM_V46_ABLITERATED_GGUF_REVISION = "df9281a41ec46766218fc1b54d070b2a52668866"
-        private const val QWEN25_VL_7B_ABLITERATED_GGUF_REVISION = "dbf78ed7f2020ee497ddaec61b88f153790eedb3"
         private const val GEMMA4_26B_A4B_ABLITERATED_GGUF_REVISION = "5e35628c3cd1f39fdde4d7a16ee6653d42df0e95"
-        private const val QWEN36_35B_A3B_ABLITERATED_MNN_REVISION = "bb83b12d83ad64aaaa98f9fab3e86af3806a6e40"
         private const val GEMMA4_E2B_UNCENSORED_GGUF_REVISION = "4345c0c77cde7da43084c94b1deac23c09bccfc1"
         private const val GEMMA4_E4B_UNCENSORED_GGUF_REVISION = "771f130d4c49735ace331f68a80f7ae31387e51c"
-        private const val QWEN3_4B_2507_ABLITERATED_GGUF_REVISION = "c9e90669eeb205d5af35c28a3e9983fc9293c2ec"
-        private const val QWEN3_8B_ABLITERATED_GGUF_REVISION = "64c8e52a68276ef181b7695813c5883070b783a0"
         private const val QWEN35_35B_A3B_MNN_REVISION = "5e21a599fd2e01d2f1f6ccedac48912439ba22f5"
         private const val GEMMA4_E2B_MNN_REVISION = "ad38122704d7a0cfd207abb75a815a2436ab92e6"
         private const val GEMMA4_E4B_MNN_REVISION = "69a938a0f52bedcffc7e42215932f03de15bfe86"
@@ -2324,38 +2318,11 @@ class ModelScopeClient(
                 minRamGb = 12,
                 tags = listOf("图文聊天", "QNN", "QAIRT", "骁龙 NPU", "Qualcomm"),
                 priority = 0,
-                visibleInRecommendations = false,
                 status = RecommendedModelStatus.RECOMMENDED,
                 supportedChipsetCodes = QAIRT_MOBILE_CHIPSETS,
                 group = ModelScopeRecommendedGroup.MAIN_CHAT,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 chatRuntime = RecommendedChatRuntime.GENIEX_QAIRT
-            ),
-            ModelScopeRecommendedModel(
-                id = "qwen3_vl_4b_abliterated_gguf",
-                title = "Qwen3-VL-4B-Instruct 低拒答实验版 · GGUF + mmproj",
-                repoId = "mradermacher/Huihui-Qwen3-VL-4B-Instruct-abliterated-GGUF",
-                revision = QWEN3_VL_4B_ABLITERATED_GGUF_REVISION,
-                description = "社区 abliterated GGUF 图文实验包；发布者标记为 uncensored。主模型与匹配 mmproj-f16 会一起安装，不依赖 QAIRT 或设备白名单，实际图文兼容性以本机 native load 与 smoke 为准。",
-                recommendedFileName = "Huihui-Qwen3-VL-4B-Instruct-abliterated.Q4_K_M.gguf",
-                parameterScale = "4B",
-                quant = "Q4_K_M",
-                minRamGb = 8,
-                tags = listOf("低拒答实验", "图文聊天", "Qwen3-VL", "GGUF", "Hugging Face"),
-                priority = 1,
-                status = RecommendedModelStatus.EXPERIMENTAL,
-                group = ModelScopeRecommendedGroup.MAIN_CHAT,
-                provider = ModelRepositoryProvider.HUGGING_FACE,
-                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
-                chatRuntime = RecommendedChatRuntime.GGUF,
-                visionModelBundle = communityLowRefusalGgufVisionBundle(
-                    id = "qwen3_vl_4b_abliterated_gguf_vision_bundle",
-                    title = "Qwen3-VL 4B 低拒答实验图文包",
-                    repoId = "mradermacher/Huihui-Qwen3-VL-4B-Instruct-abliterated-GGUF",
-                    revision = QWEN3_VL_4B_ABLITERATED_GGUF_REVISION,
-                    mainFileName = "Huihui-Qwen3-VL-4B-Instruct-abliterated.Q4_K_M.gguf",
-                    projectorFileName = "Huihui-Qwen3-VL-4B-Instruct-abliterated.mmproj-f16.gguf"
-                )
             ),
             ModelScopeRecommendedModel(
                 id = "qwen3_4b_2507_qairt_w4a16",
@@ -2369,30 +2336,11 @@ class ModelScopeClient(
                 minRamGb = 16,
                 tags = listOf("纯文本", "中文", "QNN", "QAIRT", "骁龙 NPU", "Qualcomm"),
                 priority = 1,
-                visibleInRecommendations = false,
                 status = RecommendedModelStatus.RECOMMENDED,
                 supportedChipsetCodes = QAIRT_MOBILE_CHIPSETS,
                 group = ModelScopeRecommendedGroup.MAIN_CHAT,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 chatRuntime = RecommendedChatRuntime.GENIEX_QAIRT
-            ),
-            ModelScopeRecommendedModel(
-                id = "qwen3_4b_2507_abliterated_gguf",
-                title = "Qwen3-4B-Instruct-2507 低拒答实验版 · GGUF",
-                repoId = "mradermacher/Huihui-Qwen3-4B-Instruct-2507-abliterated-GGUF",
-                revision = QWEN3_4B_2507_ABLITERATED_GGUF_REVISION,
-                description = "社区 abliterated GGUF 文本实验包；发布者标记为 uncensored。该包不含视觉投影器，不进入 QAIRT 路径，实际加载与生成以本机 llama.cpp runtime 为准。",
-                recommendedFileName = "Huihui-Qwen3-4B-Instruct-2507-abliterated.Q4_K_M.gguf",
-                parameterScale = "4B",
-                quant = "Q4_K_M",
-                minRamGb = 6,
-                tags = listOf("低拒答实验", "文本聊天", "Qwen3", "GGUF", "Hugging Face"),
-                priority = 2,
-                status = RecommendedModelStatus.EXPERIMENTAL,
-                group = ModelScopeRecommendedGroup.MAIN_CHAT,
-                provider = ModelRepositoryProvider.HUGGING_FACE,
-                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
-                chatRuntime = RecommendedChatRuntime.GGUF
             ),
             ModelScopeRecommendedModel(
                 id = "qwen35_4b_uncensored_mnn",
@@ -2483,33 +2431,6 @@ class ModelScopeClient(
                 )
             ),
             ModelScopeRecommendedModel(
-                id = "minicpm_v46_abliterated_gguf",
-                title = "MiniCPM-V 4.6 低拒答实验版 · GGUF + mmproj",
-                repoId = "mradermacher/Huihui-MiniCPM-V-4.6-abliterated-GGUF",
-                revision = MINICPM_V46_ABLITERATED_GGUF_REVISION,
-                description = "社区 abliterated GGUF 图文实验包；发布者标记为 uncensored。主模型与匹配 mmproj-f16 会作为同一闭包下载，实际图文兼容性以本机 native load 与 smoke 为准。",
-                recommendedFileName = "Huihui-MiniCPM-V-4.6-abliterated.Q4_K_M.gguf",
-                parameterScale = "V-4.6",
-                quant = "Q4_K_M",
-                minRamGb = 8,
-                tags = listOf("低拒答实验", "图文聊天", "MiniCPM-V", "GGUF", "Hugging Face"),
-                priority = 3,
-                kind = ModelScopeRecommendedKind.CHAT,
-                status = RecommendedModelStatus.EXPERIMENTAL,
-                group = ModelScopeRecommendedGroup.MAIN_CHAT,
-                provider = ModelRepositoryProvider.HUGGING_FACE,
-                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
-                chatRuntime = RecommendedChatRuntime.GGUF,
-                visionModelBundle = communityLowRefusalGgufVisionBundle(
-                    id = "minicpm_v46_abliterated_gguf_vision_bundle",
-                    title = "MiniCPM-V 4.6 低拒答实验图文包",
-                    repoId = "mradermacher/Huihui-MiniCPM-V-4.6-abliterated-GGUF",
-                    revision = MINICPM_V46_ABLITERATED_GGUF_REVISION,
-                    mainFileName = "Huihui-MiniCPM-V-4.6-abliterated.Q4_K_M.gguf",
-                    projectorFileName = "Huihui-MiniCPM-V-4.6-abliterated.mmproj-f16.gguf"
-                )
-            ),
-            ModelScopeRecommendedModel(
                 id = "gemma4_e4b_iq4",
                 title = "Gemma 4 E4B IT MNN",
                 repoId = "MNN/gemma-4-E4B-it-MNN",
@@ -2594,32 +2515,12 @@ class ModelScopeClient(
                 minRamGb = 24,
                 tags = listOf("纯文本", "高质量", "中文", "QNN", "QAIRT", "骁龙 NPU", "Qualcomm"),
                 priority = 2,
-                visibleInRecommendations = false,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 supportedChipsetCodes = QAIRT_MOBILE_CHIPSETS,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 chatRuntime = RecommendedChatRuntime.GENIEX_QAIRT
             ),
-            ModelScopeRecommendedModel(
-                id = "qwen3_8b_abliterated_gguf",
-                title = "Qwen3-8B 低拒答实验版 · GGUF",
-                repoId = "mradermacher/Huihui-Qwen3-8B-abliterated-v2-GGUF",
-                revision = QWEN3_8B_ABLITERATED_GGUF_REVISION,
-                description = "社区 abliterated v2 GGUF 文本实验包；发布者标记为 uncensored。该包不含视觉投影器，不进入 QAIRT 路径，实际加载与生成以本机 llama.cpp runtime 为准。",
-                recommendedFileName = "Huihui-Qwen3-8B-abliterated-v2.Q4_K_M.gguf",
-                parameterScale = "8B",
-                quant = "Q4_K_M",
-                minRamGb = 8,
-                tags = listOf("低拒答实验", "高质量", "文本聊天", "Qwen3", "GGUF", "Hugging Face"),
-                priority = 1,
-                status = RecommendedModelStatus.EXPERIMENTAL,
-                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
-                provider = ModelRepositoryProvider.HUGGING_FACE,
-                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
-                chatRuntime = RecommendedChatRuntime.GGUF
-            ),
-
             ModelScopeRecommendedModel(
                 id = "qwen25_vl_7b_qairt_w4a16",
                 title = "Qwen2.5-VL-7B-Instruct",
@@ -2632,41 +2533,12 @@ class ModelScopeClient(
                 minRamGb = 24,
                 tags = listOf("图文聊天", "高内存", "QNN", "QAIRT", "Qualcomm"),
                 priority = 3,
-                visibleInRecommendations = false,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 supportedChipsetCodes = QAIRT_MOBILE_CHIPSETS,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
                 provider = ModelRepositoryProvider.HUGGING_FACE,
                 chatRuntime = RecommendedChatRuntime.GENIEX_QAIRT
             ),
-            ModelScopeRecommendedModel(
-                id = "qwen25_vl_7b_abliterated_gguf",
-                title = "Qwen2.5-VL-7B-Instruct 低拒答实验版 · GGUF + mmproj",
-                repoId = "mradermacher/Qwen2.5-VL-7B-Instruct-abliterated-GGUF",
-                revision = QWEN25_VL_7B_ABLITERATED_GGUF_REVISION,
-                description = "社区 abliterated GGUF 图文实验包；发布者标记为 uncensored。主模型与匹配 mmproj-f16 会一起安装，不依赖 QAIRT 或设备白名单，实际图文兼容性以本机 native load 与 smoke 为准。",
-                recommendedFileName = "Qwen2.5-VL-7B-Instruct-abliterated.Q4_K_M.gguf",
-                parameterScale = "7B",
-                quant = "Q4_K_M",
-                minRamGb = 12,
-                tags = listOf("低拒答实验", "图文聊天", "Qwen2.5-VL", "GGUF", "Hugging Face"),
-                priority = 3,
-                status = RecommendedModelStatus.EXPERIMENTAL,
-                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
-                provider = ModelRepositoryProvider.HUGGING_FACE,
-                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
-                chatRuntime = RecommendedChatRuntime.GGUF,
-                visionModelBundle = communityLowRefusalGgufVisionBundle(
-                    id = "qwen25_vl_7b_abliterated_gguf_vision_bundle",
-                    title = "Qwen2.5-VL 7B 低拒答实验图文包",
-                    repoId = "mradermacher/Qwen2.5-VL-7B-Instruct-abliterated-GGUF",
-                    revision = QWEN25_VL_7B_ABLITERATED_GGUF_REVISION,
-                    mainFileName = "Qwen2.5-VL-7B-Instruct-abliterated.Q4_K_M.gguf",
-                    projectorFileName = "Qwen2.5-VL-7B-Instruct-abliterated.mmproj-f16.gguf",
-                    smokeTimeoutSeconds = 240
-                )
-            ),
-
             ModelScopeRecommendedModel(
                 id = "glm47_flash_tq1",
                 title = "GLM-4.7-Flash TQ1",
@@ -2693,41 +2565,11 @@ class ModelScopeClient(
                 minRamGb = 12,
                 tags = listOf("MoE", "推理蒸馏", "GGUF", "APEX MTP", "第三方"),
                 priority = 1,
-                visibleInRecommendations = false,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
                 provider = ModelRepositoryProvider.MODELSCOPE,
-                chatRuntime = RecommendedChatRuntime.GGUF
-            ),
-            ModelScopeRecommendedModel(
-                id = "qwen36_35b_a3b_abliterated_mnn",
-                title = "Qwen3.6-35B-A3B 低拒答实验版 · MNN",
-                repoId = "darkmaniac7/Qwen3.6-35B-A3B-abliterated-MNN",
-                revision = QWEN36_35B_A3B_ABLITERATED_MNN_REVISION,
-                description = "社区 abliterated 4-bit HQQ MNN 图文实验包；发布者标记为 uncensored，完整包包含视觉塔与 embedding。该大模型仅作实验下载，实际图文兼容性以本机 native load 与 smoke 为准。",
-                recommendedFileName = "config.json",
-                parameterScale = "35B-A3B",
-                quant = "4-bit HQQ MNN",
-                minRamGb = 32,
-                tags = listOf("低拒答实验", "MoE", "图文聊天", "MNN", "Hugging Face"),
-                priority = 2,
-                status = RecommendedModelStatus.EXPERIMENTAL,
-                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
-                provider = ModelRepositoryProvider.HUGGING_FACE,
                 downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
-                chatRuntime = RecommendedChatRuntime.MNN,
-                mnnModelBundle = MnnModelBundleSpec(
-                    id = "qwen36_35b_a3b_abliterated_mnn_bundle",
-                    title = "Qwen3.6 35B-A3B 低拒答实验 MNN 图文包",
-                    repoId = "darkmaniac7/Qwen3.6-35B-A3B-abliterated-MNN",
-                    revision = QWEN36_35B_A3B_ABLITERATED_MNN_REVISION,
-                    provider = ModelRepositoryProvider.HUGGING_FACE,
-                    components = qwen35CommunityMnnComponents(
-                        tokenizerFileName = "tokenizer.mtok",
-                        requiresEmbeddingFile = true,
-                        requiresVision = true
-                    )
-                )
+                chatRuntime = RecommendedChatRuntime.GGUF
             ),
             ModelScopeRecommendedModel(
                 id = "google_gemma4_26b_a4b_iq2_xxs",

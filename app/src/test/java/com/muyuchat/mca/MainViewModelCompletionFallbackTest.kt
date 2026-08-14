@@ -1,8 +1,10 @@
 package com.muyuchat.mca
 
 import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.GenerationPhase
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
+import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.feature.agent.AgentCandidateProgress
 import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.feature.agent.AgentPendingProfile
@@ -92,6 +94,95 @@ class MainViewModelCompletionFallbackTest {
     }
 
     @Test
+    fun terminalGenerationStateReleasesTheInputBeforeAnyOptionalBookkeeping() {
+        val terminated = MainUiState(
+            isGenerating = true,
+            generationPhase = GenerationPhase.DECODE,
+            generationTokenProgress = TokenProgress(3, 7),
+            engineLifecycle = AgentEngineLifecycle.GENERATING
+        ).afterGenerationTerminated(
+            stats = RuntimeStats(loaded = true, completionTokens = 3),
+            statusMessage = "stream ended"
+        )
+
+        assertFalse(terminated.isGenerating)
+        assertNull(terminated.generationPhase)
+        assertNull(terminated.generationTokenProgress)
+        assertEquals(AgentEngineLifecycle.READY, terminated.engineLifecycle)
+        assertEquals("stream ended", terminated.statusMessage)
+    }
+
+    @Test
+    fun terminalEventsReleaseUiBeforeBinderAndPersistenceWorkAndHaveFallback() {
+        val body = functionBody(mainViewModelSource(), "private fun startGeneration(")
+        val doneStart = body.indexOf("is GenerateEvent.Done ->")
+        val errorStart = body.indexOf("is GenerateEvent.Error ->")
+        val done = body.substring(doneStart, errorStart)
+        val error = body.substring(errorStart)
+
+        val doneRelease = done.indexOf("settleGenerationUi(event.stats)")
+        assertTrue(doneStart >= 0)
+        assertTrue(errorStart > doneStart)
+        assertTrue(doneRelease >= 0)
+        assertTrue(done.indexOf("flushPendingAssistantOutput(generationRunId)") > doneRelease)
+        assertTrue(done.indexOf("LocalApiRuntime.generationSequence()") > doneRelease)
+        assertTrue(done.indexOf("applyWebSearchAnswerGuardsToLastAssistant(generationRunId)") > doneRelease)
+        assertTrue(done.indexOf("engine.recentLogs()") > doneRelease)
+        assertTrue(done.contains("withContext(Dispatchers.IO) { engine.recentLogs() }"))
+
+        val errorRelease = error.indexOf("settleGenerationUi(event.stats, event.message)")
+        assertTrue(errorRelease >= 0)
+        assertTrue(error.indexOf("flushPendingAssistantOutput(generationRunId)") > errorRelease)
+        assertTrue(error.indexOf("LocalApiRuntime.generationSequence()") > errorRelease)
+        assertTrue(body.contains("catch (error: Throwable)"))
+        assertTrue(body.contains("!terminalEventSeen && generationStillOwnsUi()"))
+        assertTrue(body.contains("生成流已结束，但运行时未返回完成状态，请重试。"))
+    }
+
+    @Test
+    fun staleGenerationEventsCannotWriteIntoANewerUiRun() {
+        val source = mainViewModelSource()
+        val body = functionBody(source, "private fun startGeneration(")
+        val collect = body.indexOf("stream.collect { event ->")
+        val phase = body.indexOf("is GenerateEvent.Phase ->", collect)
+        val chunk = body.indexOf("is GenerateEvent.Chunk ->", phase)
+        val done = body.indexOf("is GenerateEvent.Done ->", chunk)
+        val error = body.indexOf("is GenerateEvent.Error ->", done)
+        val eventOwnershipCheck = body.indexOf("if (!generationStillOwnsUi()) return@collect", collect)
+
+        assertTrue(collect >= 0)
+        assertTrue(phase > collect)
+        assertTrue(chunk > phase)
+        assertTrue(done > chunk)
+        assertTrue(error > done)
+        assertTrue(eventOwnershipCheck in (collect + 1) until phase)
+
+        val phaseBody = body.substring(phase, chunk)
+        val chunkBody = body.substring(chunk, done)
+        val doneBody = body.substring(done, error)
+        val errorBody = body.substring(error)
+        assertTrue(phaseBody.contains("if (!generationStillOwnsUi())"))
+        assertTrue(chunkBody.contains("if (!generationStillOwnsUi())"))
+        assertTrue(chunkBody.contains("generationRunId = generationRunId"))
+        assertTrue(doneBody.contains("flushPendingAssistantOutput(generationRunId)"))
+        assertTrue(doneBody.contains("persistChatSessions(generationRunId = generationRunId)"))
+        assertTrue(errorBody.contains("flushPendingAssistantOutput(generationRunId)"))
+
+        val append = functionBody(source, "private fun appendAssistant(")
+        val flush = functionBody(source, "private fun flushPendingAssistantOutput(")
+        assertTrue(append.contains("assistantOutputBufferGenerationId"))
+        assertTrue(append.contains("generationRunSequence.get() != generationRunId"))
+        assertTrue(flush.contains("generationRunSequence.get() != generationRunId"))
+
+        val provider = source.substring(
+            source.indexOf("LocalApiRuntime.streamChatWithContextProvider ="),
+            source.indexOf("LocalApiRuntime.stopGenerationProvider =")
+        )
+        assertTrue(provider.contains("substringBefore('-')"))
+        assertTrue(source.contains("ui-\$generationRunId-"))
+    }
+
+    @Test
     fun clearChatStopPathReturnsLoadedRuntimeToReady() {
         val stopped = MainUiState(
             messages = listOf(ChatMessage(Role.USER, "hello")),
@@ -129,27 +220,86 @@ class MainViewModelCompletionFallbackTest {
     }
 
     @Test
-    fun clearChatInvokesLifecycleClosureAfterStopAndCancel() {
-        val body = functionBody(mainViewModelSource(), "fun clearChat()")
-        val stop = body.indexOf("engine.stopGeneration()")
-        val cancel = body.indexOf("generationJob?.cancel()")
-        val close = body.indexOf("afterClearChatGenerationStopped(engine.stats.value)")
+    fun backgroundCancellationRemovesAnUntouchedAssistantPlaceholder() {
+        val messages = listOf(
+            ChatMessage(Role.USER, "hello"),
+            ChatMessage(Role.ASSISTANT, "")
+        )
 
-        assertTrue(stop >= 0)
-        assertTrue(cancel > stop)
-        assertTrue(close > cancel)
+        val updated = messages.withBackgroundCancellationFinalized(null)
+
+        assertEquals(1, updated.size)
+        assertSame(messages.first(), updated.first())
     }
 
     @Test
-    fun backgroundStopInvokesLifecycleClosureAfterStopAndCancel() {
-        val body = functionBody(mainViewModelSource(), "fun onAppBackgrounded()")
-        val stop = body.indexOf("engine.stopGeneration()")
-        val cancel = body.indexOf("generationJob?.cancel()")
-        val close = body.indexOf("afterBackgroundGenerationStopped(engine.stats.value)")
+    fun backgroundCancellationCommitsTheLastBufferedAssistantOutput() {
+        val messages = listOf(
+            ChatMessage(Role.USER, "hello"),
+            ChatMessage(Role.ASSISTANT, "visible")
+        )
 
-        assertTrue(stop >= 0)
-        assertTrue(cancel > stop)
-        assertTrue(close > cancel)
+        val updated = messages.withBackgroundCancellationFinalized(
+            BackgroundCancelledAssistantOutput(
+                content = " tail",
+                reasoning = "reasoning",
+                reasoningDurationMs = 17L
+            )
+        )
+
+        assertEquals("visible tail", updated.last().content)
+        assertEquals("reasoning", updated.last().reasoningContent)
+        assertEquals(17L, updated.last().reasoningDurationMs)
+    }
+
+    @Test
+    fun clearChatInvokesLifecycleClosureAfterStopAndCancel() {
+        val body = functionBody(mainViewModelSource(), "fun clearChat()")
+        val cancel = body.indexOf("cancelGenerationJob()")
+        val stop = body.indexOf("engine.stopGeneration()")
+        val close = body.indexOf("afterClearChatGenerationStopped(engine.stats.value)")
+
+        assertTrue(cancel >= 0)
+        assertTrue(stop > cancel)
+        assertTrue(close > stop)
+    }
+
+    @Test
+    fun backgroundStopClosesOnlyTheCapturedGenerationAndNewRunsJoinIt() {
+        val source = mainViewModelSource()
+        val body = functionBody(source, "fun onAppBackgrounded()")
+        val ownership = body.indexOf("val cancellation = uiGenerationOwnership.background()")
+        val capture = body.indexOf("val backgroundedJob = cancellation.owner as? Job")
+        val token = body.indexOf("engine.activeGenerationStopToken()")
+        val stop = body.indexOf("engine.stopGenerationIfActive(expectedStopToken)")
+        val cancel = body.indexOf("backgroundedJob.cancel()")
+        val nullOwnerEpochGuard = body.indexOf(
+            "generationRunSequence.get() != cancellation.invalidatedRunId"
+        )
+        val epochGuard = body.indexOf(
+            "generationRunSequence.get() != cancellation.invalidatedRunId",
+            stop
+        )
+        val close = body.indexOf(
+            "afterBackgroundGenerationStopped(engine.stats.value, nativeStopIssued)",
+            epochGuard
+        )
+
+        assertTrue(ownership >= 0)
+        assertTrue(capture > ownership)
+        assertTrue(token >= 0)
+        assertTrue(token < ownership)
+        assertTrue(cancel > capture)
+        assertTrue(stop > cancel)
+        assertTrue(nullOwnerEpochGuard > capture)
+        assertTrue(nullOwnerEpochGuard < cancel)
+        assertTrue(epochGuard > stop)
+        assertTrue(close > epochGuard)
+        assertFalse(body.contains("generationJob?.cancel()"))
+        assertTrue(
+            functionBody(source, "private fun startGeneration(")
+                .contains("pendingBackgroundStop?.join()")
+        )
     }
 
     @Test
@@ -270,6 +420,42 @@ class MainViewModelCompletionFallbackTest {
     }
 
     @Test
+    fun failedLoadReleasesCancelledGenerationBeforeReadingDiagnostics() {
+        val body = functionBody(mainViewModelSource(), "fun loadModel(")
+        val failStart = body.indexOf("fun failBeforeNativeReplacement")
+        val cancel = body.indexOf("cancelGenerationJob()", failStart)
+        val fail = body.substring(failStart, cancel)
+        val release = fail.indexOf("afterGenerationTerminated(")
+        val uiUpdate = fail.indexOf("_uiState.update")
+        val nativeStats = fail.indexOf("currentNativeStatsJson()")
+
+        assertTrue(failStart >= 0)
+        assertTrue(release >= 0)
+        assertTrue(uiUpdate >= 0)
+        assertTrue(nativeStats > uiUpdate)
+        assertTrue(nativeStats > release)
+    }
+
+    @Test
+    fun failedLifecycleOperationsReleaseCancelledGeneration() {
+        val source = mainViewModelSource()
+        val unload = functionBody(source, "fun unloadModel(")
+        val delete = functionBody(source, "fun deleteModel(")
+
+        val unloadCancel = unload.indexOf("cancelGenerationJob()")
+        val unloadRelease = unload.indexOf("afterGenerationTerminated(")
+        assertTrue(unloadCancel >= 0)
+        assertTrue(unloadRelease > unloadCancel)
+
+        val deleteCancel = delete.indexOf("cancelGenerationJob()")
+        val deleteFailure = delete.indexOf("wasLoaded && !nativeReleased")
+        val deleteRelease = delete.indexOf("afterGenerationTerminated(", deleteFailure)
+        assertTrue(deleteCancel >= 0)
+        assertTrue(deleteFailure > deleteCancel)
+        assertTrue(deleteRelease > deleteFailure)
+    }
+
+    @Test
     fun localApiActiveProfileProjectionRequiresARealLoadedRuntime() {
         val source = mainViewModelSource()
         val profileBody = functionBody(source, "private fun runtimeProfileJson()")
@@ -323,6 +509,17 @@ class MainViewModelCompletionFallbackTest {
         assertTrue(deleteNative >= 0)
         assertTrue(deleteProjection > deleteNative)
         assertTrue(deletePending > deleteProjection)
+    }
+
+    @Test
+    fun localSendWaitsForForegroundWorkerReconciliation() {
+        val body = functionBody(mainViewModelSource(), "private fun startGeneration(")
+        val wait = body.indexOf("foregroundRecoveryJob?.takeUnless")
+        val invalidate = body.indexOf("ensureLocalConversationContextInvalidated()")
+
+        assertTrue(wait >= 0)
+        assertTrue(invalidate > wait)
+        assertTrue(body.contains("initialState.selectedChatBackend == ChatBackend.LOCAL"))
     }
 
     private fun mainViewModelSource(): String {

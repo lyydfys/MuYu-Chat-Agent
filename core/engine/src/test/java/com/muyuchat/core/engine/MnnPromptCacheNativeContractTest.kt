@@ -50,6 +50,8 @@ class MnnPromptCacheNativeContractTest {
         assertTrue(native.contains("\\\"promptCache\\\""))
         assertTrue(native.contains("\\\"reusedTokens\\\""))
         assertTrue(native.contains("\\\"prefillTokens\\\""))
+        assertTrue(native.contains("computed_prefill_tokens * 1000.0 / prefill_ms"))
+        assertTrue(native.contains("\\\"effectivePromptTps\\\""))
         assertTrue(native.contains("\\\"promptCacheHit\\\""))
     }
 
@@ -78,6 +80,18 @@ class MnnPromptCacheNativeContractTest {
         assertTrue(vendor.contains("promptCacheReusableTokenPrefix("))
         assertTrue(vendor.contains("effective_kv_tokens"))
         assertFalse(vendor.contains("size_t prefix_count = tokenizer_encode(\"\").size();"))
+    }
+
+    @Test
+    fun persistedTranscriptNormalizationStillDefersReuseAmountToTokenLcp() {
+        val native = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
+        val prefix = functionBody(native, "bool mnn_chat_messages_prefix(")
+        val prepare = functionBody(native, "void prepare_mnn_text_prompt_cache_locked(")
+
+        assertTrue(prefix.contains("ZERO WIDTH SPACE"))
+        assertTrue(prefix.contains("normalize(prefix[index].second)"))
+        assertTrue(prepare.contains("g_llm->syncPromptCache(messages)"))
+        assertTrue(prepare.contains("extendsCommittedTranscript"))
     }
 
     private fun functionBody(source: String, signature: String): String {

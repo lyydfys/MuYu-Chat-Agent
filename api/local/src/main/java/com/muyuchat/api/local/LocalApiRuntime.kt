@@ -9,6 +9,62 @@ import kotlinx.coroutines.flow.Flow
 import org.json.JSONObject
 
 object LocalApiRuntime {
+    private val ownerLock = Any()
+    private var ownerToken: Any? = null
+    private var ownerReplacementCleanup: (() -> Unit)? = null
+
+    /**
+     * Installs a process-global runtime owner. Replacing an owner first retires its listener so
+     * the new owner can bind the stable port without the old ViewModel later clearing new fields.
+     */
+    fun claimOwner(token: Any, onReplaced: () -> Unit) {
+        val previousCleanup = synchronized(ownerLock) {
+            if (ownerToken === token) {
+                ownerReplacementCleanup = onReplaced
+                null
+            } else {
+                ownerReplacementCleanup.also {
+                    ownerToken = token
+                    ownerReplacementCleanup = onReplaced
+                }
+            }
+        }
+        previousCleanup?.let { cleanup -> runCatching(cleanup) }
+    }
+
+    /**
+     * Clears every callback only when [token] still owns this singleton. A stale ViewModel cannot
+     * detach providers installed by its replacement.
+     */
+    fun releaseOwner(token: Any): Boolean = synchronized(ownerLock) {
+        if (ownerToken !== token) return@synchronized false
+        engine = null
+        nativeStatsJsonProvider = null
+        streamChatProvider = null
+        streamChatWithContextProvider = null
+        stopGenerationProvider = null
+        stopGenerationIfRequestActiveProvider = null
+        loadedModelJsonProvider = { "{}" }
+        paramsJsonProvider = { "{}" }
+        generationParamsProvider = { GenerationParams() }
+        modelsJsonProvider = { "[]" }
+        imageTextualInversionsJsonProvider = { "[]" }
+        modelRuntimeStatesJsonProvider = { "{}" }
+        deviceProfileJsonProvider = { "{}" }
+        agentRecommendationJsonProvider = { "{}" }
+        benchmarkJsonProvider = { "{}" }
+        imageGenerationProvider = null
+        controlPlane = null
+        clearRequestTrace()
+        ownerToken = null
+        ownerReplacementCleanup = null
+        true
+    }
+
+    fun isOwner(token: Any): Boolean = synchronized(ownerLock) {
+        ownerToken === token
+    }
+
     @Volatile
     var engine: McaInferenceService? = null
 
@@ -28,6 +84,9 @@ object LocalApiRuntime {
 
     @Volatile
     var stopGenerationProvider: (suspend () -> Unit)? = null
+
+    @Volatile
+    var stopGenerationIfRequestActiveProvider: (suspend (String) -> Boolean)? = null
 
     @Volatile
     var loadedModelJsonProvider: () -> String = { "{}" }
@@ -116,6 +175,17 @@ object LocalApiRuntime {
         } else {
             engine?.stopGeneration()
         }
+    }
+
+    suspend fun stopGenerationIfRequestActive(requestId: String): Boolean {
+        if (requestId.isBlank()) return false
+        val conditional = stopGenerationIfRequestActiveProvider
+        if (conditional != null) return conditional(requestId)
+        val attached = engine ?: return false
+        val token = attached.activeGenerationStopToken()
+            ?.takeIf { it.requestId == requestId }
+            ?: return false
+        return attached.stopGenerationIfActive(token)
     }
 
     fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult {
@@ -321,8 +391,24 @@ object LocalApiRuntime {
 
         for (index in 0 until source.length()) {
             val raw = source.optJSONObject(index) ?: continue
-            val item = raw.publicCopy(stripExecutionState = true)
+            val item = raw
+                .publicCopy(stripExecutionState = true)
+                .withPublicModelNameAliases()
             val modelId = item.firstString("id", "modelId").orEmpty()
+            val displayName = item.firstString("displayName", "display_name", "name")
+            val publicModelId = localApiPublicModelId(displayName, modelId)
+            if (publicModelId.isNotBlank()) item.put("id", publicModelId)
+            if (modelId.isNotBlank()) item.put("internal_id", modelId)
+            item.put(
+                "aliases",
+                org.json.JSONArray().apply {
+                    listOf(modelId, displayName.orEmpty(), publicModelId)
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() }
+                        .distinct()
+                        .forEach(::put)
+                }
+            )
             if (item.isImageGenerationCatalogEntry()) {
                 // Image packages have their own worker lifecycle and execution evidence. Do not
                 // synthesize chat profile/tuning/loaded fields onto them; retain only the producer's
@@ -765,6 +851,14 @@ object LocalApiRuntime {
         optString("type").equals("image_generation", ignoreCase = true) ||
             optJSONObject("capabilities")?.optBoolean("image_generation", false) == true
 
+    private fun JSONObject.withPublicModelNameAliases(): JSONObject {
+        val displayName = firstString("displayName", "display_name", "name") ?: return this
+        put("name", displayName)
+        put("display_name", displayName)
+        put("displayName", displayName)
+        return this
+    }
+
     private fun JSONObject.firstString(vararg keys: String): String? =
         keys.asSequence()
             .filter { has(it) && !isNull(it) }
@@ -921,6 +1015,7 @@ object LocalApiRuntime {
         "multimodalSystemPromptSuppressed",
         "multimodalHistorySuppressed",
         "promptTokens",
+        "prefillTokens",
         "completionTokens",
         "generationSequence",
         "generationActive",
@@ -929,6 +1024,7 @@ object LocalApiRuntime {
         "ttftMs",
         "prefillMs",
         "prefillTps",
+        "effectivePromptTps",
         "decodeMs",
         "decodeTps",
         "generatedSteps",

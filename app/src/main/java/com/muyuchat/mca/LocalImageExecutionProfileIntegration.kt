@@ -77,7 +77,7 @@ internal fun resolveLocalImageExecutionProfile(
         negativePromptSpecified = options.negativePrompt != null
     )
     val resolverInput = ImageExecutionProfileResolverInput(
-        modelFingerprint = modelExecutionFingerprint(model),
+        modelFingerprint = modelExecutionFingerprint(model, manifestProfile),
         runtime = model.runtime,
         family = effectiveFamily,
         recommendationId = recommendationId,
@@ -1079,12 +1079,28 @@ private fun File.findExecutionArtifact(vararg names: String): File? {
     return walkTopDown().firstOrNull { file -> file.isFile && file.name.lowercase() in expected }
 }
 
-private fun modelExecutionFingerprint(model: LocalImageModelRecord): String {
+private fun modelExecutionFingerprint(
+    model: LocalImageModelRecord,
+    manifestProfile: ImageExecutionProfile?
+): String {
     val stored = model.sha256.trim().lowercase()
     if (stored.matches(Regex("^[0-9a-f]{64}$"))) return stored
-    val primary = File(model.path)
-    require(primary.isFile) { "Image model fingerprint is unavailable." }
-    return primary.sha256ForProfile()
+    // Older records did not persist a content SHA. Resolve their real content
+    // identity at the execution boundary; trusting a manifest value as both
+    // expected and actual would let a replaced/corrupt model self-attest.
+    val manifestFingerprint = manifestProfile?.modelFingerprint
+        ?.trim()
+        ?.lowercase()
+        ?.takeIf { it.matches(Regex("^[0-9a-f]{64}$")) }
+    val file = File(model.path)
+    require(file.isFile && file.length() > 0L) {
+        "Image model file is missing or empty: ${file.path}"
+    }
+    val actual = file.sha256ForProfile()
+    require(manifestFingerprint == null || manifestFingerprint == actual) {
+        "Image model content does not match the execution profile fingerprint."
+    }
+    return actual
 }
 
 internal fun File.sha256ForProfile(): String {

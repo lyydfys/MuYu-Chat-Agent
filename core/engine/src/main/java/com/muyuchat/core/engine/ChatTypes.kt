@@ -414,8 +414,12 @@ data class RuntimeStats(
     val completionTokens: Int = 0,
     val ttftMs: Long = 0,
     val prefillMs: Long = 0,
-    /** Prompt tokens processed per second, calculated from native prefill evidence. */
+    /** Tokens actually evaluated by the native prefill pass per second. */
     val prefillTps: Double = 0.0,
+    /** Tokens/s if the full logical prompt (including reused KV) were counted. */
+    val effectivePromptTps: Double = 0.0,
+    /** Number of prompt tokens that were actually evaluated this request. */
+    val prefillTokens: Int = 0,
     val decodeMs: Long = 0,
     val decodeTps: Double = 0.0,
     val e2eTps: Double = 0.0,

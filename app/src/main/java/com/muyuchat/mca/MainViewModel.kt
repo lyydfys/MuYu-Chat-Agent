@@ -13,6 +13,7 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import android.os.Build
 import android.util.Base64
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.muyuchat.api.local.LocalApiRuntime
@@ -24,6 +25,7 @@ import com.muyuchat.api.local.ImageGenerationApiContract
 import com.muyuchat.api.local.ImageGenerationProviderException
 import com.muyuchat.api.local.McaLoopbackServer
 import com.muyuchat.api.local.imagePromptTranslationProofFingerprint
+import com.muyuchat.api.local.localApiPublicModelId
 import com.muyuchat.core.advisor.AgentAdvisor
 import com.muyuchat.core.advisor.AgentDecisionLog
 import com.muyuchat.core.advisor.AgentDecisionLogger
@@ -751,7 +753,10 @@ internal fun resolveLocalImageApiModel(
     val requested = requestedModelId.trim()
     if (requested.isEmpty()) return null
     localImageApiCatalogEntries(chatModelIds, imageModels)
-        .firstOrNull { entry -> entry.apiId == requested }
+        .firstOrNull { entry ->
+            entry.apiId == requested ||
+                localApiPublicModelId(entry.model.displayName, entry.apiId) == requested
+        }
         ?.let { return it.model }
     // Preserve the pre-discovery Images API contract for callers that already persisted a raw id.
     return imageModels.firstOrNull { model -> model.id == requested }
@@ -1090,32 +1095,90 @@ internal fun MainUiState.afterClearChatGenerationStopped(stats: RuntimeStats): M
     isGenerating = false,
     generationPhase = null,
     generationTokenProgress = null,
+    generationStats = null,
     promptContextUsage = null,
     engineLifecycle = stats.lifecycleAfterGeneration(),
     statusMessage = "已清空对话，上下文已重置"
 )
 
-internal fun MainUiState.afterBackgroundGenerationStopped(stats: RuntimeStats): MainUiState = copy(
+internal fun MainUiState.afterBackgroundGenerationStopped(
+    stats: RuntimeStats,
+    nativeStopIssued: Boolean = true
+): MainUiState = copy(
     isGenerating = false,
     generationPhase = null,
     generationTokenProgress = null,
+    generationStats = null,
     engineLifecycle = stats.lifecycleAfterGeneration(),
-    statusMessage = "应用进入后台，已停止生成以降低发热和耗电。"
+    statusMessage = if (nativeStopIssued) {
+        "应用进入后台，已停止生成以降低发热和耗电。"
+    } else {
+        "应用进入后台，当前生成已结束或取消。"
+    }
+)
+
+/**
+ * Commits the last bounded stream batch, or removes the untouched assistant placeholder when a
+ * UI generation is cancelled by process backgrounding.
+ */
+internal fun List<ChatMessage>.withBackgroundCancellationFinalized(
+    pending: BackgroundCancelledAssistantOutput?
+): List<ChatMessage> {
+    val assistantIndex = indexOfLast { it.role == Role.ASSISTANT }
+    if (assistantIndex < 0) return this
+    val updated = toMutableList()
+    val assistant = updated[assistantIndex]
+    val pendingContent = pending?.content.orEmpty()
+    val pendingReasoning = pending?.reasoning.orEmpty()
+    val merged = assistant.copy(
+        content = assistant.content + pendingContent,
+        reasoningContent = assistant.reasoningContent + pendingReasoning,
+        reasoningDurationMs = maxOf(
+            assistant.reasoningDurationMs,
+            pending?.reasoningDurationMs ?: 0L
+        )
+    )
+    if (merged.content.isBlank() && merged.reasoningContent.isBlank()) {
+        updated.removeAt(assistantIndex)
+    } else {
+        updated[assistantIndex] = merged
+    }
+    return updated
+}
+
+internal data class BackgroundCancelledAssistantOutput(
+    val content: String,
+    val reasoning: String,
+    val reasoningDurationMs: Long
 )
 
 internal fun MainUiState.afterGenerationStarted(): MainUiState = copy(
     isGenerating = true,
     generationPhase = null,
     generationTokenProgress = null,
+    generationStats = null,
     engineLifecycle = AgentEngineLifecycle.GENERATING
 )
 
-internal fun MainUiState.afterGenerationCompleted(stats: RuntimeStats): MainUiState = copy(
+internal fun MainUiState.afterGenerationCompleted(stats: RuntimeStats): MainUiState =
+    afterGenerationTerminated(stats)
+
+/**
+ * Clears the user-facing generation lock independently of any completion
+ * bookkeeping.  Completion bookkeeping can cross a Binder or persistence
+ * boundary, so the input must be released before those operations run.
+ */
+internal fun MainUiState.afterGenerationTerminated(
+    stats: RuntimeStats,
+    statusMessage: String? = null
+): MainUiState = copy(
     isGenerating = false,
     generationPhase = null,
     generationTokenProgress = null,
+    generationStats = null,
     stats = stats,
-    engineLifecycle = stats.lifecycleAfterGeneration()
+    engineLifecycle = stats.lifecycleAfterGeneration(),
+    statusMessage = statusMessage ?: this.statusMessage
 )
 
 /**
@@ -1135,6 +1198,7 @@ internal fun MainUiState.afterNativeRuntimeReleased(
     isGenerating = false,
     generationPhase = null,
     generationTokenProgress = null,
+    generationStats = null,
     stats = stats,
     autoTuningInProgress = false,
     rollbackParams = null,
@@ -1181,8 +1245,149 @@ private data class LocalApiPreferences(
     val restEnabled: Boolean
 )
 
+private data class LocalApiApplyResult(
+    val running: Boolean,
+    val restEnabled: Boolean,
+    val failure: Throwable? = null
+)
+
+internal enum class UiGenerationRuntimePhase {
+    PENDING,
+    LOCAL_ACTIVE,
+    CLOUD_ACTIVE,
+    TERMINAL
+}
+
+internal data class UiGenerationReservation(
+    val runId: Long,
+    val supersededOwner: Any?
+)
+
+internal data class UiGenerationCancellation(
+    val owner: Any?,
+    val pendingCancelled: Boolean,
+    val stopLocalRuntime: Boolean,
+    val invalidatedRunId: Long
+) {
+    val cancelled: Boolean
+        get() = owner != null || pendingCancelled
+}
+
+/**
+ * Separates UI generation ownership from the shared engine projection used by Local API calls.
+ * Every transition is atomic with the generation epoch, so a delayed Room callback or lifecycle
+ * stop can only act on the exact UI request that created it.
+ */
+internal class UiGenerationOwnership(
+    private val sequence: AtomicLong
+) {
+    private data class ActiveOwner(
+        val runId: Long,
+        val owner: Any,
+        var phase: UiGenerationRuntimePhase
+    )
+
+    private val lock = Any()
+    private var foreground = true
+    private var pendingRunId: Long? = null
+    private var activeOwner: ActiveOwner? = null
+
+    fun reserveStart(): UiGenerationReservation? = synchronized(lock) {
+        if (!foreground) return@synchronized null
+        val supersededOwner = activeOwner?.owner
+        val runId = sequence.incrementAndGet()
+        activeOwner = null
+        pendingRunId = runId
+        UiGenerationReservation(runId, supersededOwner)
+    }
+
+    fun activate(reservation: UiGenerationReservation, owner: Any): Boolean = synchronized(lock) {
+        if (!foreground || pendingRunId != reservation.runId || sequence.get() != reservation.runId) {
+            return@synchronized false
+        }
+        pendingRunId = null
+        activeOwner = ActiveOwner(
+            runId = reservation.runId,
+            owner = owner,
+            phase = UiGenerationRuntimePhase.PENDING
+        )
+        true
+    }
+
+    fun markPhase(
+        runId: Long,
+        owner: Any,
+        phase: UiGenerationRuntimePhase
+    ): Boolean = synchronized(lock) {
+        val active = activeOwner
+        if (active?.runId != runId || active.owner !== owner || sequence.get() != runId) {
+            return@synchronized false
+        }
+        active.phase = phase
+        true
+    }
+
+    fun finish(runId: Long, owner: Any) = synchronized(lock) {
+        val active = activeOwner
+        if (active?.runId == runId && active.owner === owner) {
+            activeOwner = null
+        }
+    }
+
+    fun cancelPending(reservation: UiGenerationReservation): Boolean = synchronized(lock) {
+        if (pendingRunId != reservation.runId || sequence.get() != reservation.runId) {
+            return@synchronized false
+        }
+        pendingRunId = null
+        sequence.incrementAndGet()
+        true
+    }
+
+    fun cancelCurrent(): UiGenerationCancellation = synchronized(lock) {
+        val active = activeOwner
+        val pendingCancelled = pendingRunId != null
+        pendingRunId = null
+        activeOwner = null
+        val invalidatedRunId = sequence.incrementAndGet()
+        UiGenerationCancellation(
+            owner = active?.owner,
+            pendingCancelled = pendingCancelled,
+            stopLocalRuntime = active?.phase == UiGenerationRuntimePhase.LOCAL_ACTIVE,
+            invalidatedRunId = invalidatedRunId
+        )
+    }
+
+    fun background(): UiGenerationCancellation = synchronized(lock) {
+        foreground = false
+        val active = activeOwner?.takeUnless { it.phase == UiGenerationRuntimePhase.TERMINAL }
+        val pendingCancelled = pendingRunId != null
+        if (active == null && !pendingCancelled) {
+            return@synchronized UiGenerationCancellation(
+                owner = null,
+                pendingCancelled = false,
+                stopLocalRuntime = false,
+                invalidatedRunId = sequence.get()
+            )
+        }
+        pendingRunId = null
+        if (active != null) activeOwner = null
+        val invalidatedRunId = sequence.incrementAndGet()
+        UiGenerationCancellation(
+            owner = active?.owner,
+            pendingCancelled = pendingCancelled,
+            stopLocalRuntime = active?.phase == UiGenerationRuntimePhase.LOCAL_ACTIVE,
+            invalidatedRunId = invalidatedRunId
+        )
+    }
+
+    fun foreground() = synchronized(lock) {
+        foreground = true
+    }
+}
+
 private val imageAttachmentRegex = Regex("""\u3010上传图片：([^\u3011]+)\u3011(?:\s*\n描述：[^\n]+)?\s*\n(\S+)""")
 private val oldImagePlaceholderRegex = Regex("""\s*（当前文本模型会收到图片占位信息；完整识图能力后续接入多模态模型。）""")
+private const val FILE_ATTACHMENT_MARKER = "\u3010\u4e0a\u4f20\u6587\u4ef6\uff1a"
 private const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
 private const val MAX_VISION_IMAGE_EDGE = 1280
 
@@ -1316,12 +1521,16 @@ data class MainUiState(
     val selectedAssistantId: String = AssistantRecord.DEFAULT_ID,
     val worldBooks: List<WorldBookRecord> = emptyList(),
     val knowledgeBases: List<KnowledgeBaseRecord> = emptyList(),
+    val knowledgeDocumentCounts: Map<String, Int> = emptyMap(),
+    val knowledgeBaseImportingIds: Set<String> = emptySet(),
     val selectedKnowledgeBaseIds: Set<String> = emptySet(),
     val input: String = "",
     val isGenerating: Boolean = false,
     /** Exact runtime stage; a missing token progress remains intentionally indeterminate. */
     val generationPhase: GenerationPhase? = null,
     val generationTokenProgress: TokenProgress? = null,
+    /** Statistics emitted by the active request only; never reuse a prior turn's rates. */
+    val generationStats: RuntimeStats? = null,
     val promptContextUsage: PromptContextUsage? = null,
     val persistentPrefixCacheEnabled: Boolean = true,
     val persistentPrefixCacheEntryCount: Int = 0,
@@ -1753,6 +1962,8 @@ internal fun localImageExtensionResolutionFailure(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
+        private val localApiProcessLifecycleLock = Any()
+        private var localApiProcessOwnerToken: Any? = null
         private const val REST_PORT = 11435
         private const val CLOUD_REASONING_LOCKED_MESSAGE = "云端模型的思考模式由服务商和具体模型决定，MCA 会默认按开启处理；如需关闭或调整，请在云端模型配置中设置相关参数。"
         private const val LOCAL_IMAGE_GENERATION_WATCHDOG_MS = 8 * 60 * 1000L
@@ -1788,9 +1999,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         installationScopeId = installationScopeId
     )
     private val apiKey = loadOrCreateApiKey(application)
+    private val localApiRuntimeOwner = Any()
     private val initialApiPreferences = loadApiPreferences(application)
+    @Volatile
     private var apiServer: McaLoopbackServer? = null
+    @Volatile
     private var activeApiBindHost: String? = null
+    /** Listener, notification, persisted intent, and UI state share this single lifecycle gate. */
+    private val apiLifecycleMutex = Mutex()
+    /** Serializes direct listener retirement with an in-flight bind/rebind operation. */
+    private val apiServerLifecycleLock = Any()
+    private val apiLifecycleSequence = AtomicLong(0L)
+    private val apiLifecycleClosed = AtomicBoolean(false)
+    private var apiLifecycleRequestJob: Job? = null
+    /** Deduplicates repeated process-foreground callbacks and their worker health probes. */
+    private var foregroundRecoveryJob: Job? = null
+    private val foregroundRecoverySequence = AtomicLong(0L)
     private val chatSessionStore = ChatSessionStore(application)
     private val worldBookStore = WorldBookStore(application)
     private val knowledgeBaseStore = KnowledgeBaseStore(application)
@@ -1836,6 +2060,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     private val initialWorldBooks = worldBookStore.load()
     private val initialKnowledgeBases = knowledgeBaseStore.loadBases()
+    private val initialKnowledgeDocumentCounts = initialKnowledgeBases.associate { knowledgeBase ->
+        knowledgeBase.id to knowledgeBaseStore.documents(knowledgeBase.id).size
+    }
     private val initialKnowledgeBaseIds = initialChatSessions.firstOrNull()
         ?.id
         ?.let(knowledgeBaseStore::selectedKnowledgeBaseIds)
@@ -1893,12 +2120,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ?.toChatBackendOrNull()
         ?: cloudApiStore.loadSelectedBackend()
     private val initialSelectedImageBackend = localImageModelStore.loadSelectedBackend()
+    @Volatile
     private var generationJob: Job? = null
+    /** New UI generations join this job before entering the engine, preventing a stale stop. */
+    private var backgroundGenerationStopJob: Job? = null
+    /** Invalidates late cleanup from a cancelled generation before another lifecycle operation. */
+    private val generationRunSequence = AtomicLong(0L)
+    private val uiGenerationOwnership = UiGenerationOwnership(generationRunSequence)
     // Streaming often arrives one token at a time. Publish bounded batches so
     // immutable ChatMessage copies do not repeatedly duplicate the full reply.
     private val assistantOutputBufferLock = Any()
     private val pendingAssistantOutput = StringBuilder()
     private val pendingAssistantReasoning = StringBuilder()
+    /** Generation epoch that currently owns the pending stream batch. */
+    private var assistantOutputBufferGenerationId: Long? = null
     private var pendingAssistantReasoningDurationMs = 0L
     private var assistantOutputLastPublishedAtMs = 0L
     private data class AssistantOutputBatch(
@@ -2043,6 +2278,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selectedAssistantId = initialSelectedAssistantId,
             worldBooks = initialWorldBooks,
             knowledgeBases = initialKnowledgeBases,
+            knowledgeDocumentCounts = initialKnowledgeDocumentCounts,
             selectedKnowledgeBaseIds = initialKnowledgeBaseIds,
             selectedChatBackend = if (initialSelectedBackend == ChatBackend.CLOUD && initialCloudConfig.configured) {
                 ChatBackend.CLOUD
@@ -2061,8 +2297,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             agentLogs = agentLogger.recent(),
             benchmarkHistory = benchmarkHistoryLogger.recent(),
             deviceProfile = initialDeviceProfile,
-            apiEnabled = initialApiPreferences.apiEnabled,
-            restEnabled = initialApiPreferences.restEnabled,
+            // These fields report the actual listener, not the persisted desired state. Startup
+            // restoration publishes RUNNING only after both the socket and foreground service work.
+            apiEnabled = false,
+            restEnabled = false,
             apiKey = apiKey,
             localApiAddress = apiUrl("127.0.0.1"),
             openApiAddress = currentOpenApiAddress(),
@@ -2169,6 +2407,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
+        viewModelScope.launch {
+            ProcessUiLifecycleEvents.events.collect { event ->
+                when (event) {
+                    ProcessUiLifecycleEvent.FOREGROUNDED -> onAppForegrounded()
+                    ProcessUiLifecycleEvent.BACKGROUNDED -> onAppBackgrounded()
+                }
+            }
+        }
         engine.setPersistentPrefixCacheEnabled(initialPersistentPrefixCacheEnabled)
         if (initialPersistentPrefixCacheEnabled) {
             refreshPersistentPrefixCacheSummary()
@@ -2198,8 +2444,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        claimLocalApiProcessOwnership()
+        LocalApiRuntime.claimOwner(localApiRuntimeOwner) {
+            // The replacement already owns the process-global notification service. Retire only
+            // this ViewModel's listener; owner-checked service cleanup below becomes a no-op.
+            retireLocalApiListener(stopForegroundService = true)
+        }
         LocalApiRuntime.engine = engine
         LocalApiRuntime.streamChatWithContextProvider = { request, executionContext ->
+            val uiRequestId = executionContext.requestId.takeIf { it.startsWith("ui-") }
+            // UI requests encode the epoch that created them. Capturing the
+            // current value here would let an old coroutine that reaches this
+            // provider late claim a newer generation's lifecycle callbacks.
+            val uiLifecycleRunId = uiRequestId
+                ?.removePrefix("ui-")
+                ?.substringBefore('-')
+                ?.toLongOrNull()
+                ?: uiRequestId?.let { generationRunSequence.get() }
+
+            fun ownsUiLifecycle(): Boolean = uiLifecycleRunId == null ||
+                generationRunSequence.get() == uiLifecycleRunId
+
             val effectiveRequest = if (
                 executionContext.loadAuthorization == null &&
                 executionContext.requestId.startsWith("ui-")
@@ -2212,17 +2477,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             engine.streamChat(effectiveRequest, executionContext)
                 .onStart {
-                    _uiState.update(MainUiState::afterGenerationStarted)
+                    if (ownsUiLifecycle()) {
+                        _uiState.update { state ->
+                            if (ownsUiLifecycle()) state.afterGenerationStarted() else state
+                        }
+                    }
                 }
                 .onCompletion {
-                    _uiState.update { state ->
-                        state.afterGenerationCompleted(engine.stats.value)
+                    if (ownsUiLifecycle()) {
+                        _uiState.update { state ->
+                            if (ownsUiLifecycle()) {
+                                state.afterGenerationCompleted(engine.stats.value)
+                            } else {
+                                state
+                            }
+                        }
                     }
                 }
         }
         LocalApiRuntime.stopGenerationProvider = {
             cancelActiveLocalApiImageGeneration("Local API generation was stopped by the client.")
             engine.stopGeneration()
+        }
+        LocalApiRuntime.stopGenerationIfRequestActiveProvider = { requestId ->
+            val token = engine.activeGenerationStopToken()
+                ?.takeIf { it.requestId == requestId }
+            engine.stopGenerationIfActive(token)
         }
         LocalApiRuntime.loadedModelJsonProvider = { loadedModelJson() }
         LocalApiRuntime.paramsJsonProvider = { apiGenerationParams().toJson() }
@@ -2284,7 +2564,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val matches = requestedModel == state.loadedModelId ||
                         requestedModel == state.loadedModelName ||
                         state.models.firstOrNull { it.id == state.loadedModelId }?.let { model ->
-                            requestedModel == model.fileName || requestedModel == model.displayName
+                            requestedModel == model.fileName ||
+                                requestedModel == model.displayName ||
+                                requestedModel == localApiPublicModelId(model.displayName, model.id)
                         } == true
                     if (!matches) {
                         return LocalApiPreflightResult.Rejected(
@@ -2721,19 +3003,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (initialApiPreferences.apiEnabled) {
-            runCatching {
-                startApiServer(if (initialApiPreferences.restEnabled) "0.0.0.0" else "127.0.0.1")
-                updateLocalApiForegroundService(true, initialApiPreferences.restEnabled)
-            }.onFailure { error ->
-                persistApiPreferences(apiEnabled = false, restEnabled = false)
-                _uiState.update {
-                    it.copy(
-                        apiEnabled = false,
-                        restEnabled = false,
-                        statusMessage = "本机 API 自动恢复失败：${error.message}"
-                    )
-                }
-            }
+            requestLocalApiState(
+                enabled = true,
+                restEnabled = initialApiPreferences.restEnabled,
+                failurePrefix = "本机 API 自动恢复失败"
+            )
         }
 
         viewModelScope.launch {
@@ -3001,6 +3275,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             )
         }
+    }
+
+    fun clearStatusMessage() {
+        _uiState.update { it.copy(statusMessage = null) }
     }
 
     fun attachFile(uriString: String) {
@@ -7144,6 +7422,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             state.copy(
                 knowledgeBases = (state.knowledgeBases.filterNot { it.id == created.id } + created)
                     .sortedBy { it.name.lowercase() },
+                knowledgeDocumentCounts = state.knowledgeDocumentCounts + (created.id to 0),
                 statusMessage = "已创建知识库：${created.name}"
             )
         }
@@ -7154,10 +7433,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(statusMessage = "请先停止当前生成，再导入知识库文件") }
             return
         }
+        if (knowledgeBaseId in _uiState.value.knowledgeBaseImportingIds) {
+            _uiState.update { it.copy(statusMessage = "该知识库正在导入文件，请稍候") }
+            return
+        }
         val known = _uiState.value.knowledgeBases.any { it.id == knowledgeBaseId }
         if (!known) {
             _uiState.update { it.copy(statusMessage = "未找到要导入的知识库") }
             return
+        }
+        _uiState.update { state ->
+            state.copy(
+                knowledgeBaseImportingIds = state.knowledgeBaseImportingIds + knowledgeBaseId,
+                statusMessage = "正在导入知识库文档…"
+            )
         }
         viewModelScope.launch(Dispatchers.IO) {
             val result = runCatching {
@@ -7174,14 +7463,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             result.onSuccess { document ->
+                val refreshedBases = knowledgeBaseStore.loadBases()
+                val documentCount = knowledgeBaseStore.documents(knowledgeBaseId).size
+                var activeSessionId: String? = null
+                var selectedKnowledgeBaseIds = emptySet<String>()
                 _uiState.update { state ->
+                    activeSessionId = state.activeChatSessionId
+                    selectedKnowledgeBaseIds = state.selectedKnowledgeBaseIds + knowledgeBaseId
                     state.copy(
-                        statusMessage = "已导入知识库文档：${document.title}（${document.chunkCount} 段）"
+                        knowledgeBases = refreshedBases,
+                        knowledgeDocumentCounts = state.knowledgeDocumentCounts +
+                            (knowledgeBaseId to documentCount),
+                        knowledgeBaseImportingIds = state.knowledgeBaseImportingIds - knowledgeBaseId,
+                        selectedKnowledgeBaseIds = selectedKnowledgeBaseIds,
+                        statusMessage = "已导入知识库文档：${document.title}（${document.chunkCount} 段），已启用"
                     )
+                }
+                activeSessionId?.let { sessionId ->
+                    persistKnowledgeBaseBindings(sessionId, selectedKnowledgeBaseIds)
                 }
             }.onFailure { error ->
                 _uiState.update {
-                    it.copy(statusMessage = "知识库导入失败：${error.message ?: "无法读取文件"}")
+                    it.copy(
+                        knowledgeBaseImportingIds = it.knowledgeBaseImportingIds - knowledgeBaseId,
+                        statusMessage = "知识库导入失败：${error.message ?: "无法读取文件"}"
+                    )
                 }
             }
         }
@@ -7207,6 +7513,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.update { state ->
                         state.copy(
                             knowledgeBases = state.knowledgeBases.filterNot { it.id == knowledgeBaseId },
+                            knowledgeDocumentCounts = state.knowledgeDocumentCounts - knowledgeBaseId,
+                            knowledgeBaseImportingIds = state.knowledgeBaseImportingIds - knowledgeBaseId,
                             selectedKnowledgeBaseIds = state.selectedKnowledgeBaseIds - knowledgeBaseId,
                             statusMessage = "已删除知识库：${removed.name}"
                         )
@@ -8427,23 +8735,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val runtimeBeforeLoad = captureLoadedRuntimeSnapshot()
             fun failBeforeNativeReplacement(message: String) {
+                // Release the input lock before diagnostics. Native/Binder reads can
+                // be slow or fail, and a preflight failure must not leave a cancelled
+                // generation projected as active in the UI.
+                val stats = engine.stats.value
+                _uiState.update {
+                    it.afterGenerationTerminated(
+                        stats = stats,
+                        statusMessage = message
+                    ).copy(
+                        busy = false,
+                        engineLifecycle = if (stats.loaded) {
+                            AgentEngineLifecycle.READY
+                        } else {
+                            AgentEngineLifecycle.ERROR
+                        }
+                    )
+                }
                 val nativeStats = currentNativeStatsJson()
                 val recentLogs = currentEngineLogs()
                 _uiState.update {
                     it.copy(
-                        busy = false,
-                        engineLifecycle = if (engine.stats.value.loaded) {
-                            AgentEngineLifecycle.READY
-                        } else {
-                            AgentEngineLifecycle.ERROR
-                        },
                         nativeStatsJson = nativeStats,
                         logs = recentLogs,
-                        statusMessage = message
                     )
                 }
             }
-            generationJob?.cancel()
+            cancelGenerationJob()
             engine.stopGeneration()
             _uiState.update {
                 it.copy(
@@ -8599,6 +8917,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     authoritativeFields = runtimeUserOverrideFields
                 )
             }
+            // Older persisted llama profiles left prompt batching at one thread
+            // while decode used the tuned worker count. Upgrade that implicit
+            // default once so GGUF prefill does not run effectively single-
+            // threaded. Explicit n_threads_batch selections are preserved.
+            bootstrapProfile = bootstrapProfile.migrateLegacyLlamaBatchThreads(
+                profileId = "${bootstrapProfile.profileId}-prefill-${UUID.randomUUID().toString().take(8)}",
+                revision = nextExecutionProfileRevision(bootstrapProfile.revision, persistedRevisions)
+            )
+            // Snapshots written before desired hot/behavior values were persisted
+            // cannot reproduce their original desired digest after normalization.
+            // Keep the effective settings, but write a complete successor after
+            // this formal native load rather than reusing the incomplete record.
+            val persistedBootstrapSnapshot = persistedProfile
+                ?.takeIf { it.profileId == bootstrapProfile.profileId }
+                ?.let { runtimeProfileStore.profile(it.profileId) }
+            if (persistedBootstrapSnapshot?.requiresDesiredExecutionSnapshotMigration() == true) {
+                bootstrapProfile = bootstrapProfile.copy(
+                    profileId = "${bootstrapProfile.profileId}-snapshot-${UUID.randomUUID().toString().take(8)}",
+                    revision = nextExecutionProfileRevision(bootstrapProfile.revision, persistedRevisions)
+                )
+            }
             if (persistedProfile == null && runtimeProfileStore.profile(bootstrapProfile.profileId)
                     ?.recordState == PersistedProfileRecordState.REJECTED.name
             ) {
@@ -8620,8 +8959,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 activeProfile.committedExecutionSignature ==
                     bootstrapProfile.committedExecutionSignature.digest
             val needsBootstrapCommit = !reusableBootstrapProof
-            val ordinaryBootstrapRuntime = model.runtime == ChatModelRuntime.MNN ||
-                model.runtime == ChatModelRuntime.LLAMA_CPP
+            // The formal MainActivity load is the real native admission path.
+            // Running a full isolated load + canary here and then loading the
+            // same multi-gigabyte GGUF again doubles cold-start latency and
+            // gives no additional capability to the user-facing action.
+            val ordinaryBootstrapRuntime = false
             if (needsBootstrapCommit && ordinaryBootstrapRuntime) {
                 val transactionId = "bootstrap-load-${UUID.randomUUID()}"
                 stagedBootstrapTransactionId = transactionId
@@ -8800,6 +9142,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         models = modelStore.listModels(),
                         chatSessions = sessionsToPersist,
                         busy = false,
+                        stats = engine.stats.value,
+                        engineLifecycle = AgentEngineLifecycle.READY,
                         autoTuningInProgress = false,
                         deviceProfile = device,
                         agentRecommendation = recommendation ?: state.agentRecommendation,
@@ -8865,6 +9209,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 throw error
             } catch (error: Throwable) {
+                Log.e(
+                    "McaMainViewModel",
+                    "formal model load failed after native handoff: ${error.message.orEmpty()}",
+                    error
+                )
                 if (runtimeBeforeLoad != null &&
                     nativeRuntimeReleaseObservedNow()
                 ) {
@@ -9057,7 +9406,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             if (_uiState.value.loadedModelId != model.id) return@launch
             directParameterStageJob?.cancel()
-            generationJob?.cancel()
+            cancelGenerationJob()
             val releasedIdentity = activeRuntimeIdentity
             _uiState.update {
                 it.copy(
@@ -9074,12 +9423,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 !nativeRuntimeReleaseObservedNow()
             ) {
                 val error = nativeRelease.exceptionOrNull()
+                val message = "卸载失败：${error?.message ?: "未知错误"}"
+                val stats = engine.stats.value
                 _uiState.update {
-                    it.copy(
-                        busy = false,
-                        engineLifecycle = AgentEngineLifecycle.READY,
-                        statusMessage = "卸载失败：${error?.message ?: "未知错误"}"
-                    )
+                    it.afterGenerationTerminated(
+                        stats = stats,
+                        statusMessage = message
+                    ).copy(busy = false)
                 }
                 return@launch
             }
@@ -9123,7 +9473,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(busy = true, statusMessage = "正在删除 ${model.displayName}…") }
             runCatching {
                 if (wasLoaded) {
-                    generationJob?.cancel()
+                    cancelGenerationJob()
                     engine.stopGeneration()
                     val release = runCatching { engine.unloadModel() }
                     if (release.isFailure &&
@@ -9185,26 +9535,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { error ->
                 val currentModels = modelStore.listModels()
                 val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(currentModels)
+                val failureMessage = if (nativeReleased) {
+                    buildString {
+                        append("删除失败，但模型已安全卸载：")
+                        append(error.message ?: "请检查文件权限或存储状态")
+                        lifecycleWarning?.let { append("；").append(it) }
+                    }
+                } else {
+                    "删除失败：${error.message ?: "请检查文件权限或存储状态"}"
+                }
+                val stats = engine.stats.value
                 managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update {
-                    it.copy(
+                _uiState.update { state ->
+                    val releasedGeneration = if (wasLoaded && !nativeReleased) {
+                        state.afterGenerationTerminated(
+                            stats = stats,
+                            statusMessage = failureMessage
+                        )
+                    } else {
+                        state
+                    }
+                    releasedGeneration.copy(
                         models = currentModels,
                         qairtVerifiedLocalModelIds = qairtVerifiedIds,
                         qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
                             models = currentModels,
                             verifiedLocalModelIds = qairtVerifiedIds,
-                            recommendations = it.recommendedRemoteModels
+                            recommendations = releasedGeneration.recommendedRemoteModels
                         ),
                         busy = false,
-                        statusMessage = if (nativeReleased) {
-                            buildString {
-                                append("删除失败，但模型已安全卸载：")
-                                append(error.message ?: "请检查文件权限或存储状态")
-                                lifecycleWarning?.let { append("；").append(it) }
-                            }
-                        } else {
-                            "删除失败：${error.message ?: "请检查文件权限或存储状态"}"
-                        }
+                        statusMessage = failureMessage
                     )
                 }
             }
@@ -9268,8 +9628,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!admission.isAccepted) {
             _uiState.update {
                 it.copy(
-                    statusMessage = admission.userMessage
-                        ?: "当前输入无法放入本机安全上下文，请缩短后重试。"
+                    statusMessage = if (state.input.contains(FILE_ATTACHMENT_MARKER)) {
+                        "当前文件内容超过模型上下文，消息未发送。请将长文件导入知识库后再提问。"
+                    } else {
+                        admission.userMessage
+                            ?: "当前输入无法放入本机安全上下文，请缩短后重试。"
+                    }
                 )
             }
             return
@@ -9300,6 +9664,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isGenerating = true,
                 generationPhase = null,
                 generationTokenProgress = null,
+                generationStats = null,
                 promptContextUsage = promptContextUsageFor(
                     plan = preflightContext,
                     admission = admission,
@@ -9329,6 +9694,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val rollback = state.conversationMutationRollbackState()
         discardPendingAssistantOutput()
         val kept = state.messages.take(lastAssistant) + ChatMessage(Role.ASSISTANT, "")
+        val generationReservation = reserveUiGenerationStart() ?: return
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         _uiState.update {
             val sessionId = it.activeChatSessionId ?: UUID.randomUUID().toString()
@@ -9346,6 +9712,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isGenerating = true,
                 generationPhase = null,
                 generationTokenProgress = null,
+                generationStats = null,
                 promptContextUsage = null,
                 statusMessage = "正在重新生成上一条回答..."
             )
@@ -9353,7 +9720,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         persistConversationMutation(
             sessions = sessionsToPersist,
             rollback = rollback,
-            onCommitted = { startGeneration(kept.dropLast(1)) }
+            onCommitted = { startGeneration(kept.dropLast(1), generationReservation) },
+            onCommitFailed = { uiGenerationOwnership.cancelPending(generationReservation) }
         )
     }
 
@@ -9435,13 +9803,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         emptiedActiveSessionId?.let { ownerId ->
             queueWorldBookCleanup(WorldBookScope.CHAT, setOf(ownerId))
         }
-        persistConversationMutation(updatedSessions, rollback)
+        persistConversationMutation(
+            sessions = updatedSessions,
+            rollback = rollback,
+            preserveReusableNativePrefix = true
+        )
     }
 
-    private fun startGeneration(requestMessages: List<ChatMessage>) {
-        generationJob?.cancel()
-        generationJob = viewModelScope.launch {
+    private fun reserveUiGenerationStart(): UiGenerationReservation? =
+        uiGenerationOwnership.reserveStart()?.also { reservation ->
+            (reservation.supersededOwner as? Job)?.cancel()
+        }
+
+    private fun cancelGenerationJob(): Job? {
+        // A cancelled flow still runs finally blocks. The ownership gate advances the epoch
+        // before exposing the captured Job, so late cleanup cannot claim a replacement request.
+        val cancellation = uiGenerationOwnership.cancelCurrent()
+        val captured = cancellation.owner as? Job
+        captured?.cancel()
+        return captured
+    }
+
+    private fun startGeneration(
+        requestMessages: List<ChatMessage>,
+        reservation: UiGenerationReservation? = null
+    ) {
+        val pendingBackgroundStop = backgroundGenerationStopJob
+        val admittedReservation = reservation ?: reserveUiGenerationStart() ?: return
+        val generationRunId = admittedReservation.runId
+        lateinit var ownedGenerationJob: Job
+        ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            var terminalEventSeen = false
+            fun generationStillOwnsUi(): Boolean =
+                generationRunSequence.get() == generationRunId
+
+            fun settleGenerationUi(
+                stats: RuntimeStats,
+                statusMessage: String? = null
+            ) {
+                if (!generationStillOwnsUi()) return
+                _uiState.update { state ->
+                    if (!generationStillOwnsUi()) {
+                        state
+                    } else {
+                        state.afterGenerationTerminated(stats, statusMessage)
+                    }
+                }
+            }
+
+            fun updateGenerationUi(transform: (MainUiState) -> MainUiState) {
+                if (!generationStillOwnsUi()) return
+                _uiState.update { state ->
+                    if (generationStillOwnsUi()) transform(state) else state
+                }
+            }
+
+            try {
+            pendingBackgroundStop?.join()
+            if (!generationStillOwnsUi()) return@launch
             val initialState = _uiState.value
+            if (initialState.selectedChatBackend == ChatBackend.LOCAL) {
+                // Foreground reconciliation probes the isolated worker on IO. A send issued
+                // immediately after returning to the app must not overtake that probe and
+                // observe the transient unloaded projection before worker-loss recovery is armed.
+                foregroundRecoveryJob?.takeUnless { it === generationJob }?.join()
+                if (!generationStillOwnsUi()) return@launch
+            }
             val assistantSnapshot = initialState.activeAssistantSnapshot()
                 ?: initialState.selectedAssistant()?.toConversationSnapshot()
             if (initialState.selectedChatBackend == ChatBackend.LOCAL &&
@@ -9519,9 +9946,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         trace = plan.toPendingChatWebSearchTrace(
                             config = webSearchConfigForTurn,
                             triggerReasons = triggerReasons
-                        )
+                        ),
+                        generationRunId = generationRunId
                     )
-                    _uiState.update {
+                    updateGenerationUi {
                         it.copy(
                             webSearchStatusMessage = "正在联网检索：${plan.displayQuery.take(42)}",
                             statusMessage = "正在联网检索..."
@@ -9538,7 +9966,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .joinToString("\n\n")
             attachWebSearchEvidenceToPendingAssistant(
                 sources = webSearchTurn.sourceReferences,
-                trace = webSearchTurn.diagnostic?.toChatWebSearchTrace()
+                trace = webSearchTurn.diagnostic?.toChatWebSearchTrace(),
+                generationRunId = generationRunId
             )
             if (webSearchTurn.requested) {
                 val diagnostics = webSearchTurn.diagnostic?.let(::appendWebSearchDiagnostic)
@@ -9558,7 +9987,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             )
             if (contextAdmission.isAccepted) {
-                _uiState.update {
+                updateGenerationUi {
                     it.copy(
                         promptContextUsage = promptContextUsageFor(
                             plan = runtimeContextPlan,
@@ -9574,8 +10003,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val stream = if (state.selectedChatBackend == ChatBackend.CLOUD) {
                 val cloudConfig = state.selectedChatCloudConfig()?.normalized()
                 if (cloudConfig == null) {
-                    appendAssistant("\n请先在模型管理 > 云端 加载一个对话推理模型。")
-                    _uiState.update {
+                    appendAssistant(
+                        "\n请先在模型管理 > 云端 加载一个对话推理模型。",
+                        generationRunId = generationRunId
+                    )
+                    updateGenerationUi {
                         it.copy(
                             isGenerating = false,
                             generationPhase = null,
@@ -9583,12 +10015,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             statusMessage = "未加载云端推理模型"
                         )
                     }
-                    persistChatSessions()
+                    persistChatSessions(generationRunId = generationRunId)
                     return@launch
                 }
                 if (hasImageAttachments && !cloudConfig.supportsVision) {
-                    appendAssistant("\n当前云端推理引擎未开启图片输入。请在模型管理中编辑该云端推理引擎，打开“支持图片输入”后再发送图片。")
-                    _uiState.update {
+                    appendAssistant(
+                        "\n当前云端推理引擎未开启图片输入。请在模型管理中编辑该云端推理引擎，打开“支持图片输入”后再发送图片。",
+                        generationRunId = generationRunId
+                    )
+                    updateGenerationUi {
                         it.copy(
                             isGenerating = false,
                             generationPhase = null,
@@ -9596,14 +10031,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             statusMessage = "云端识图未启用"
                         )
                     }
-                    persistChatSessions()
+                    persistChatSessions(generationRunId = generationRunId)
                     return@launch
                 }
                 val cloudMessages = runCatching {
                     requestMessages.withInlineImageDataForCloud()
                 }.getOrElse { error ->
-                    appendAssistant("\n图片读取失败：无法读取或压缩这张图片。请换一张本地图片，或检查文件权限。${error.message?.let { "\n原因：$it" } ?: ""}")
-                    _uiState.update {
+                    appendAssistant(
+                        "\n图片读取失败：无法读取或压缩这张图片。请换一张本地图片，或检查文件权限。${error.message?.let { "\n原因：$it" } ?: ""}",
+                        generationRunId = generationRunId
+                    )
+                    updateGenerationUi {
                         it.copy(
                             isGenerating = false,
                             generationPhase = null,
@@ -9611,7 +10049,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             statusMessage = "图片读取失败"
                         )
                     }
-                    persistChatSessions()
+                    persistChatSessions(generationRunId = generationRunId)
                     return@launch
                 }
                 cloudChatProvider.streamChat(
@@ -9624,8 +10062,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             } else {
                 if (hasImageAttachments && !localVisionRunnerAvailable()) {
-                    appendAssistant("\n${state.localVisionUnavailableMessage()}")
-                    _uiState.update {
+                    appendAssistant(
+                        "\n${state.localVisionUnavailableMessage()}",
+                        generationRunId = generationRunId
+                    )
+                    updateGenerationUi {
                         it.copy(
                             isGenerating = false,
                             generationPhase = null,
@@ -9633,14 +10074,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             statusMessage = "本地视觉 runner 未启用"
                         )
                     }
-                    persistChatSessions()
+                    persistChatSessions(generationRunId = generationRunId)
                     return@launch
                 }
                 val localMessages = if (hasImageAttachments) {
                     runCatching { requestMessages.withLocalImageFilesForVision() }
                         .getOrElse { error ->
-                            appendAssistant("\n本地图片预处理失败：图片压缩或缓存失败，请换一张本地图片后重试。${error.message?.let { "\n原因：$it" } ?: ""}")
-                            _uiState.update {
+                            appendAssistant(
+                                "\n本地图片预处理失败：图片压缩或缓存失败，请换一张本地图片后重试。${error.message?.let { "\n原因：$it" } ?: ""}",
+                                generationRunId = generationRunId
+                            )
+                            updateGenerationUi {
                                 it.copy(
                                     isGenerating = false,
                                     generationPhase = null,
@@ -9648,13 +10092,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     statusMessage = "本地图片预处理失败"
                                 )
                             }
-                            persistChatSessions()
+                            persistChatSessions(generationRunId = generationRunId)
                             return@launch
                         }
                 } else {
                     requestMessages
                 }
-                val uiRequestId = "ui-${UUID.randomUUID().toString().replace("-", "")}"
+                val uiRequestId = "ui-$generationRunId-${UUID.randomUUID().toString().replace("-", "")}"
                 localUiRequestId = uiRequestId
                 val executionContext = LocalChatExecutionContext(requestId = uiRequestId)
                 // The editor may contain a not-yet-applied load-bound value.
@@ -9681,92 +10125,253 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     executionContext
                 )
             }
+            val runtimePhase = if (state.selectedChatBackend == ChatBackend.LOCAL) {
+                UiGenerationRuntimePhase.LOCAL_ACTIVE
+            } else {
+                UiGenerationRuntimePhase.CLOUD_ACTIVE
+            }
+            if (!uiGenerationOwnership.markPhase(
+                    generationRunId,
+                    ownedGenerationJob,
+                    runtimePhase
+                )
+            ) {
+                return@launch
+            }
             stream.collect { event ->
+                // Flow cancellation is cooperative. A transport can therefore
+                // deliver a late event after a newer generation has claimed the
+                // UI; never let that event overwrite the newer projection.
+                if (!generationStillOwnsUi()) return@collect
+                if (terminalEventSeen) return@collect
                 when (event) {
                     is GenerateEvent.Phase -> {
                         _uiState.update {
-                            it.copy(
-                                stats = event.stats,
-                                generationPhase = event.phase,
-                                generationTokenProgress = event.tokenProgress
-                            )
+                            if (!generationStillOwnsUi()) {
+                                it
+                            } else {
+                                it.copy(
+                                    stats = event.stats,
+                                    generationPhase = event.phase,
+                                    generationTokenProgress = event.tokenProgress,
+                                    generationStats = event.stats
+                                )
+                            }
                         }
                     }
                     is GenerateEvent.Chunk -> {
+                        if (!generationStillOwnsUi()) return@collect
                         appendAssistant(
                             delta = event.text,
                             reasoningDelta = event.reasoning,
-                            reasoningDurationMs = event.reasoningDurationMs
+                            reasoningDurationMs = event.reasoningDurationMs,
+                            generationRunId = generationRunId
                         )
                         _uiState.update {
-                            it.copy(
-                                stats = event.stats,
-                                generationPhase = GenerationPhase.DECODE,
-                                generationTokenProgress = null
-                            )
+                            if (!generationStillOwnsUi()) {
+                                it
+                            } else {
+                                it.copy(
+                                    stats = event.stats,
+                                    generationPhase = GenerationPhase.DECODE,
+                                    generationTokenProgress = null,
+                                    generationStats = event.stats
+                                )
+                            }
                         }
                     }
                     is GenerateEvent.Done -> {
-                        flushPendingAssistantOutput()
-                        val requestId = localUiRequestId
-                        if (requestId != null) LocalApiRuntime.generationSequence()?.let { sequence ->
-                            // Pair the UI-owned request id with the native
-                            // sequence for the redacted acceptance trace.
-                            // The context id is also the one registered by
-                            // LocalApiRuntime.streamChat above.
-                            LocalApiRuntime.recordGenerationSequence(requestId, sequence)
-                        }
-                        val citationAudit = applyWebSearchAnswerGuardsToLastAssistant()
-                        if (citationAudit != null) {
-                            recordWebSearchCitationAudit(webSearchTurn.diagnostic?.id, citationAudit)
-                        }
-                        ensureVisibleAssistantReplyAfterCompletion()
-                        _uiState.update {
-                            it.copy(
-                                isGenerating = false,
-                                generationPhase = null,
-                                generationTokenProgress = null,
-                                stats = event.stats,
-                                engineLifecycle = event.stats.lifecycleAfterGeneration(),
-                                logs = if (state.selectedChatBackend == ChatBackend.LOCAL) engine.recentLogs() else it.logs
+                        if (!generationStillOwnsUi()) return@collect
+                        uiGenerationOwnership.markPhase(
+                            generationRunId,
+                            ownedGenerationJob,
+                            UiGenerationRuntimePhase.TERMINAL
+                        )
+                        terminalEventSeen = true
+                        // This must happen before diagnostics, persistence, or
+                        // any Binder-backed reads. Those operations can be slow
+                        // or fail after native generation has already completed.
+                        settleGenerationUi(event.stats)
+                        if (!generationStillOwnsUi()) return@collect
+                        try {
+                            flushPendingAssistantOutput(generationRunId)
+                            if (!generationStillOwnsUi()) return@collect
+                            val requestId = localUiRequestId
+                            val sequence = if (requestId == null) {
+                                null
+                            } else {
+                                withContext(Dispatchers.IO) {
+                                    LocalApiRuntime.generationSequence()
+                                }
+                            }
+                            if (!generationStillOwnsUi()) return@collect
+                            if (requestId != null && sequence != null) {
+                                // Pair the UI-owned request id with the native
+                                // sequence for the redacted acceptance trace.
+                                // The context id is also the one registered by
+                                // LocalApiRuntime.streamChat above.
+                                LocalApiRuntime.recordGenerationSequence(requestId, sequence)
+                            }
+                            if (!generationStillOwnsUi()) return@collect
+                            val citationAudit = applyWebSearchAnswerGuardsToLastAssistant(generationRunId)
+                            if (citationAudit != null) {
+                                recordWebSearchCitationAudit(
+                                    webSearchTurn.diagnostic?.id,
+                                    citationAudit,
+                                    generationRunId
+                                )
+                            }
+                            if (!generationStillOwnsUi()) return@collect
+                            ensureVisibleAssistantReplyAfterCompletion(generationRunId)
+                            val logs = if (state.selectedChatBackend == ChatBackend.LOCAL) {
+                                withContext(Dispatchers.IO) { engine.recentLogs() }
+                            } else {
+                                null
+                            }
+                            if (!generationStillOwnsUi()) return@collect
+                            if (logs != null && generationStillOwnsUi()) {
+                                _uiState.update { current ->
+                                    if (generationStillOwnsUi()) current.copy(logs = logs) else current
+                                }
+                            }
+                            if (!generationStillOwnsUi()) return@collect
+                            persistChatSessions(generationRunId = generationRunId)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            settleGenerationUi(
+                                event.stats,
+                                "生成已完成，但收尾处理失败：${error.message ?: "未知错误"}"
                             )
                         }
-                        persistChatSessions()
                     }
                     is GenerateEvent.Error -> {
-                        flushPendingAssistantOutput()
-                        val requestId = localUiRequestId
-                        if (requestId != null) LocalApiRuntime.generationSequence()?.let { sequence ->
-                            LocalApiRuntime.recordGenerationSequence(requestId, sequence)
-                        }
-                        if (event.isConfigurationActionError()) {
-                            removePendingAssistantPlaceholder()
-                        } else {
-                            appendAssistant("\n${event.message}")
-                        }
-                        _uiState.update {
-                            it.copy(
-                                isGenerating = false,
-                                generationPhase = null,
-                                generationTokenProgress = null,
-                                stats = event.stats,
-                                engineLifecycle = event.stats.lifecycleAfterGeneration(),
-                                statusMessage = event.message
+                        if (!generationStillOwnsUi()) return@collect
+                        uiGenerationOwnership.markPhase(
+                            generationRunId,
+                            ownedGenerationJob,
+                            UiGenerationRuntimePhase.TERMINAL
+                        )
+                        terminalEventSeen = true
+                        settleGenerationUi(event.stats, event.message)
+                        if (!generationStillOwnsUi()) return@collect
+                        try {
+                            flushPendingAssistantOutput(generationRunId)
+                            if (!generationStillOwnsUi()) return@collect
+                            val requestId = localUiRequestId
+                            val sequence = if (requestId == null) {
+                                null
+                            } else {
+                                withContext(Dispatchers.IO) {
+                                    LocalApiRuntime.generationSequence()
+                                }
+                            }
+                            if (!generationStillOwnsUi()) return@collect
+                            if (requestId != null && sequence != null) {
+                                LocalApiRuntime.recordGenerationSequence(requestId, sequence)
+                            }
+                            if (!generationStillOwnsUi()) return@collect
+                            if (event.isConfigurationActionError()) {
+                                removePendingAssistantPlaceholder(generationRunId)
+                            } else {
+                                appendAssistant(
+                                    "\n${event.message}",
+                                    generationRunId = generationRunId
+                                )
+                            }
+                            if (!generationStillOwnsUi()) return@collect
+                            persistChatSessions(generationRunId = generationRunId)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            settleGenerationUi(
+                                event.stats,
+                                "${event.message}；生成收尾失败：${error.message ?: "未知错误"}"
                             )
                         }
-                        persistChatSessions()
+                    }
+                }
+            }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                uiGenerationOwnership.markPhase(
+                    generationRunId,
+                    ownedGenerationJob,
+                    UiGenerationRuntimePhase.TERMINAL
+                )
+                terminalEventSeen = true
+                val message = error.message?.takeIf { it.isNotBlank() }
+                    ?: error::class.java.simpleName
+                val stats = engine.stats.value.copy(lastError = message)
+                settleGenerationUi(stats, "生成失败：$message")
+                if (!generationStillOwnsUi()) return@launch
+                try {
+                    flushPendingAssistantOutput(generationRunId)
+                    if (!generationStillOwnsUi()) return@launch
+                    appendAssistant(
+                        "\n生成失败：$message",
+                        forcePublish = true,
+                        generationRunId = generationRunId
+                    )
+                    if (!generationStillOwnsUi()) return@launch
+                    persistChatSessions(generationRunId = generationRunId)
+                } catch (finalizationError: CancellationException) {
+                    throw finalizationError
+                } catch (_: Throwable) {
+                    // The UI has already been released; do not let a secondary
+                    // persistence failure leave the generation lock behind.
+                }
+            } finally {
+                uiGenerationOwnership.markPhase(
+                    generationRunId,
+                    ownedGenerationJob,
+                    UiGenerationRuntimePhase.TERMINAL
+                )
+                if (!terminalEventSeen && generationStillOwnsUi()) {
+                    val fallbackStats = engine.stats.value
+                    _uiState.update { state ->
+                        if (generationStillOwnsUi() && state.isGenerating) {
+                            state.afterGenerationTerminated(
+                                fallbackStats,
+                                "生成流已结束，但运行时未返回完成状态，请重试。"
+                            )
+                        } else {
+                            state
+                        }
+                    }
+                    try {
+                        flushPendingAssistantOutput(generationRunId)
+                        if (generationStillOwnsUi()) {
+                            persistChatSessions(generationRunId = generationRunId)
+                        }
+                    } catch (_: Throwable) {
+                        // The terminal UI state above is intentionally independent
+                        // from best-effort output persistence.
                     }
                 }
             }
         }
+        if (!uiGenerationOwnership.activate(admittedReservation, ownedGenerationJob)) {
+            ownedGenerationJob.cancel()
+            return
+        }
+        generationJob = ownedGenerationJob
+        ownedGenerationJob.invokeOnCompletion {
+            uiGenerationOwnership.finish(generationRunId, ownedGenerationJob)
+            if (generationJob === ownedGenerationJob) {
+                generationJob = null
+            }
+        }
+        ownedGenerationJob.start()
     }
 
     fun stopGeneration() {
         if (rejectWhileConversationMutationInProgress()) return
         viewModelScope.launch {
+            val stoppedJob = cancelGenerationJob()
             engine.stopGeneration()
-            generationJob?.cancel()
-            generationJob?.join()
+            stoppedJob?.join()
             flushPendingAssistantOutput()
             val rollback = _uiState.value.conversationMutationRollbackState()
             var sessionsToPersist: List<ChatSessionRecord> = emptyList()
@@ -10046,8 +10651,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearChat() {
         viewModelScope.launch {
+            cancelGenerationJob()
             engine.stopGeneration()
-            generationJob?.cancel()
             discardPendingAssistantOutput()
             markLocalConversationContextInvalid()
             _uiState.update { it.afterClearChatGenerationStopped(engine.stats.value) }
@@ -10056,16 +10661,133 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onAppBackgrounded() {
+        val uiRunId = generationRunSequence.get()
+        val expectedStopToken = engine.activeGenerationStopToken()?.takeIf { token ->
+            token.requestId.startsWith("ui-$uiRunId-")
+        }
+        val cancellation = uiGenerationOwnership.background()
         if (adaptiveTuningJob?.isActive == true) {
             pauseAgentTuning()
         }
-        if (!_uiState.value.isGenerating) return
-        viewModelScope.launch {
-            engine.stopGeneration()
-            generationJob?.cancel()
-            markLocalConversationContextInvalid()
-            _uiState.update { it.afterBackgroundGenerationStopped(engine.stats.value) }
-            persistChatSessions()
+        if (!cancellation.cancelled) return
+        val backgroundedJob = cancellation.owner as? Job
+        if (backgroundedJob == null) {
+            if (generationRunSequence.get() == cancellation.invalidatedRunId) {
+                val pendingOutput = drainCancelledAssistantOutput(
+                    uiRunId,
+                    cancellation.invalidatedRunId
+                )
+                _uiState.update { state ->
+                    if (generationRunSequence.get() != cancellation.invalidatedRunId) {
+                        state
+                    } else {
+                        state.finalizeBackgroundCancelledAssistant(pendingOutput)
+                            .afterBackgroundGenerationStopped(
+                                engine.stats.value,
+                                nativeStopIssued = false
+                            )
+                    }
+                }
+                persistChatSessions(generationRunId = cancellation.invalidatedRunId)
+            }
+            return
+        }
+        // Cancellation is synchronous and prevents pre-native preparation from advancing while
+        // the conditional stop is dispatched. A blocked native request retains its captured token.
+        backgroundedJob.cancel()
+        backgroundGenerationStopJob = viewModelScope.launch {
+            val nativeStopIssued = if (cancellation.stopLocalRuntime) {
+                // The token is captured before invalidating UI ownership. If another transport
+                // claims the engine before this coroutine runs, the engine rejects this stale stop.
+                engine.stopGenerationIfActive(expectedStopToken)
+            } else {
+                false
+            }
+            if (generationRunSequence.get() != cancellation.invalidatedRunId) return@launch
+            if (cancellation.stopLocalRuntime) markLocalConversationContextInvalid()
+            val pendingOutput = drainCancelledAssistantOutput(
+                uiRunId,
+                cancellation.invalidatedRunId
+            )
+            _uiState.update { state ->
+                if (generationRunSequence.get() != cancellation.invalidatedRunId) {
+                    state
+                } else {
+                    state.finalizeBackgroundCancelledAssistant(pendingOutput)
+                        .afterBackgroundGenerationStopped(engine.stats.value, nativeStopIssued)
+                }
+            }
+            persistChatSessions(generationRunId = cancellation.invalidatedRunId)
+        }
+    }
+
+    /**
+     * Reconciles process-local services after Android has stopped and resumed the process UI.
+     * Worker loss is detected here, while the existing request path owns any expensive model
+     * reload so returning to the UI cannot create a surprise memory spike.
+     */
+    fun onAppForegrounded() {
+        uiGenerationOwnership.foreground()
+        val recovery = foregroundRecoverySequence.incrementAndGet()
+        foregroundRecoveryJob?.cancel()
+        apiLifecycleRequestJob?.cancel()
+        val apiOperation = apiLifecycleSequence.incrementAndGet()
+        foregroundRecoveryJob = viewModelScope.launch(Dispatchers.IO) {
+            val preferences = loadApiPreferences(getApplication<Application>())
+            val apiResult = applyLocalApiState(
+                operation = apiOperation,
+                enabled = preferences.apiEnabled,
+                restEnabled = preferences.restEnabled,
+                failurePrefix = "本机 API 恢复失败"
+            ) ?: return@launch
+            if (recovery != foregroundRecoverySequence.get()) return@launch
+
+            val stateBeforeProbe = _uiState.value
+            val canProbeWorker = stateBeforeProbe.loadedModelId != null &&
+                !stateBeforeProbe.busy &&
+                !stateBeforeProbe.isGenerating &&
+                stateBeforeProbe.engineLifecycle !in setOf(
+                    AgentEngineLifecycle.LOADING,
+                    AgentEngineLifecycle.RELOADING,
+                    AgentEngineLifecycle.ROLLING_BACK,
+                    AgentEngineLifecycle.STOPPING
+                )
+            val health = if (canProbeWorker) {
+                engine.tryRuntimeHealthSnapshot()
+            } else {
+                null
+            }
+            if (recovery != foregroundRecoverySequence.get()) return@launch
+
+            _uiState.update { state ->
+                if (recovery != foregroundRecoverySequence.get()) {
+                    state
+                } else {
+                    val healthStillCurrent = health != null &&
+                        state.loadedModelId == stateBeforeProbe.loadedModelId &&
+                        !state.busy &&
+                        !state.isGenerating &&
+                        engine.stats.value == health.runtimeStats
+                    val workerSessionLost = healthStillCurrent &&
+                        health.workerSessionLost
+                    val status = when {
+                        apiResult.failure != null -> state.statusMessage
+                        workerSessionLost && state.loadedModelId != null ->
+                            "本地推理进程已被系统回收，将在下一次发送时自动恢复模型。"
+                        else -> state.statusMessage
+                    }
+                    state.copy(
+                        apiEnabled = apiResult.running,
+                        restEnabled = apiResult.restEnabled,
+                        engineLifecycle = if (workerSessionLost && state.loadedModelId != null) {
+                            AgentEngineLifecycle.UNLOADED
+                        } else {
+                            state.engineLifecycle
+                        },
+                        statusMessage = status
+                    )
+                }
+            }
         }
     }
 
@@ -10280,7 +11002,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             busy("正在运行稳定性自检...")
             runCatching {
-                generationJob?.cancel()
+                cancelGenerationJob()
                 engine.stopGeneration()
                 val preflight = modelStore.validateForLoad(requestedModel.id)
                 val validatedCatalog = publishManagedChatCatalogAfterValidation()
@@ -11495,101 +12217,208 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleApi(enabled: Boolean) {
         val restEnabled = if (enabled) _uiState.value.restEnabled else false
-        runCatching {
-            if (enabled) {
-                startApiServer(if (restEnabled) "0.0.0.0" else "127.0.0.1")
-            } else {
-                stopApiServer()
-            }
-        }.onSuccess {
-            persistApiPreferences(apiEnabled = enabled, restEnabled = restEnabled)
-            _uiState.update {
-                it.copy(
-                    apiEnabled = enabled,
-                    restEnabled = restEnabled,
-                    localApiAddress = apiUrl("127.0.0.1"),
-                    openApiAddress = currentOpenApiAddress()
-                )
-            }
-            updateLocalApiForegroundService(enabled, restEnabled)
-        }.onFailure { error ->
-            fail("本机 API 启动失败：${error.message}")
+        persistApiPreferences(apiEnabled = enabled, restEnabled = restEnabled)
+        _uiState.update {
+            it.copy(
+                statusMessage = if (enabled) {
+                    "正在启动本机 API..."
+                } else {
+                    "正在停止本机 API..."
+                }
+            )
         }
+        requestLocalApiState(
+            enabled = enabled,
+            restEnabled = restEnabled,
+            failurePrefix = "本机 API 启动失败"
+        )
     }
 
     fun toggleRest(enabled: Boolean) {
         val apiEnabled = enabled || _uiState.value.apiEnabled
-        runCatching {
-            if (enabled) {
-                startApiServer("0.0.0.0")
-            } else if (_uiState.value.apiEnabled) {
-                startApiServer("127.0.0.1")
-            } else {
-                stopApiServer()
-            }
-        }.onSuccess {
-            persistApiPreferences(apiEnabled = apiEnabled, restEnabled = enabled)
-            _uiState.update {
-                it.copy(
-                    apiEnabled = apiEnabled,
-                    restEnabled = enabled,
-                    localApiAddress = apiUrl("127.0.0.1"),
-                    openApiAddress = currentOpenApiAddress()
-                )
-            }
-            updateLocalApiForegroundService(apiEnabled, enabled)
-        }.onFailure { error ->
-            fail("REST 启动失败：${error.message}")
+        persistApiPreferences(apiEnabled = apiEnabled, restEnabled = enabled)
+        _uiState.update {
+            it.copy(
+                statusMessage = if (enabled) {
+                    "正在开放局域网 REST..."
+                } else {
+                    "正在关闭局域网 REST..."
+                }
+            )
         }
+        requestLocalApiState(
+            enabled = apiEnabled,
+            restEnabled = enabled,
+            failurePrefix = "REST 启动失败"
+        )
     }
 
     override fun onCleared() {
-        stopApiServer()
-        LocalApiForegroundService.stop(getApplication())
-        LocalApiRuntime.engine = null
-        LocalApiRuntime.streamChatWithContextProvider = null
-        LocalApiRuntime.stopGenerationProvider = null
-        LocalApiRuntime.imageGenerationProvider = null
-        LocalApiRuntime.imageTextualInversionsJsonProvider = { "[]" }
-        LocalApiRuntime.controlPlane = null
+        val releasedRuntimeOwner = LocalApiRuntime.releaseOwner(localApiRuntimeOwner)
+        retireLocalApiListener(stopForegroundService = releasedRuntimeOwner)
         localImageWorkerClient.close()
         isolatedLocalChatRunners.close()
         super.onCleared()
     }
 
-    private fun updateLocalApiForegroundService(enabled: Boolean, restEnabled: Boolean) {
-        runCatching {
+    private fun retireLocalApiListener(stopForegroundService: Boolean) {
+        apiLifecycleClosed.set(true)
+        apiLifecycleSequence.incrementAndGet()
+        foregroundRecoverySequence.incrementAndGet()
+        foregroundRecoveryJob?.cancel()
+        apiLifecycleRequestJob?.cancel()
+        stopApiServer()
+        if (stopForegroundService) {
+            releaseLocalApiProcessOwnership()
+        }
+    }
+
+    private fun requestLocalApiState(
+        enabled: Boolean,
+        restEnabled: Boolean,
+        failurePrefix: String
+    ) {
+        if (apiLifecycleClosed.get()) return
+        foregroundRecoverySequence.incrementAndGet()
+        foregroundRecoveryJob?.cancel()
+        val operation = apiLifecycleSequence.incrementAndGet()
+        apiLifecycleRequestJob?.cancel()
+        apiLifecycleRequestJob = viewModelScope.launch(Dispatchers.IO) {
+            applyLocalApiState(operation, enabled, restEnabled, failurePrefix)
+        }
+    }
+
+    private suspend fun applyLocalApiState(
+        operation: Long,
+        enabled: Boolean,
+        restEnabled: Boolean,
+        failurePrefix: String
+    ): LocalApiApplyResult? = apiLifecycleMutex.withLock {
+        fun operationIsCurrent(): Boolean =
+            !apiLifecycleClosed.get() && apiLifecycleSequence.get() == operation
+
+        if (!operationIsCurrent()) return@withLock null
+        var committed = false
+        try {
+            if (enabled) {
+                startApiServer(if (restEnabled) "0.0.0.0" else "127.0.0.1")
+            } else {
+                stopApiServer()
+            }
+            currentCoroutineContext().ensureActive()
+            if (!operationIsCurrent()) return@withLock null
+
+            setLocalApiForegroundService(enabled, restEnabled)
+            currentCoroutineContext().ensureActive()
+            if (!operationIsCurrent()) return@withLock null
+
+            persistApiPreferences(apiEnabled = enabled, restEnabled = restEnabled)
+            _uiState.update { state ->
+                if (!operationIsCurrent()) {
+                    state
+                } else {
+                    state.copy(
+                        apiEnabled = enabled,
+                        restEnabled = enabled && restEnabled,
+                        localApiAddress = apiUrl("127.0.0.1"),
+                        openApiAddress = currentOpenApiAddress()
+                    )
+                }
+            }
+            if (!operationIsCurrent()) return@withLock null
+            committed = true
+            LocalApiApplyResult(
+                running = enabled,
+                restEnabled = enabled && restEnabled
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            stopApiServer()
+            runCatching { setLocalApiForegroundService(false, false) }
+            if (!operationIsCurrent()) return@withLock null
+            _uiState.update { state ->
+                if (!operationIsCurrent()) {
+                    state
+                } else {
+                    state.copy(
+                        apiEnabled = false,
+                        restEnabled = false,
+                        statusMessage = "${failurePrefix}：${error.message ?: "端口不可用"}"
+                    )
+                }
+            }
+            committed = true
+            LocalApiApplyResult(running = false, restEnabled = false, failure = error)
+        } finally {
+            if (!committed || !operationIsCurrent()) {
+                stopApiServer()
+                runCatching { setLocalApiForegroundService(false, false) }
+            }
+        }
+    }
+
+    private fun setLocalApiForegroundService(enabled: Boolean, restEnabled: Boolean) {
+        synchronized(localApiProcessLifecycleLock) {
+            // A cancelled operation from a replaced ViewModel may reach its finally block late.
+            // Only the current process owner may mutate the shared notification service.
+            if (localApiProcessOwnerToken !== localApiRuntimeOwner || apiLifecycleClosed.get()) return
             if (enabled) {
                 LocalApiForegroundService.start(getApplication(), restEnabled)
             } else {
                 LocalApiForegroundService.stop(getApplication())
             }
-        }.onFailure { error ->
-            _uiState.update { it.copy(statusMessage = "本地 API 前台通知服务启动失败：${error.message}") }
         }
     }
 
-    private fun startApiServer(bindHost: String) {
-        val current = apiServer
-        if (current?.isRunning == true && activeApiBindHost == bindHost) return
-        cancelActiveLocalApiImageGeneration("Local API server is restarting.")
-        current?.shutdown()
-        val next = McaLoopbackServer(port = REST_PORT, bindHost = bindHost, apiKey = apiKey)
-        next.start()
-        apiServer = next
-        activeApiBindHost = bindHost
+    private fun claimLocalApiProcessOwnership() {
+        synchronized(localApiProcessLifecycleLock) {
+            localApiProcessOwnerToken = localApiRuntimeOwner
+        }
     }
 
-    private fun stopApiServer() {
+    private fun releaseLocalApiProcessOwnership() {
+        synchronized(localApiProcessLifecycleLock) {
+            if (localApiProcessOwnerToken !== localApiRuntimeOwner) return
+            localApiProcessOwnerToken = null
+            LocalApiForegroundService.stop(getApplication())
+        }
+    }
+
+    private fun startApiServer(bindHost: String) = synchronized(apiServerLifecycleLock) serverLock@{
+        synchronized(localApiProcessLifecycleLock) {
+            if (localApiProcessOwnerToken !== localApiRuntimeOwner || apiLifecycleClosed.get()) {
+                throw CancellationException("Local API process ownership changed before server start")
+            }
+            val current = apiServer
+            if (current?.isRunning == true && activeApiBindHost == bindHost) {
+                return@serverLock
+            }
+            cancelActiveLocalApiImageGeneration("Local API server is restarting.")
+            current?.shutdown()
+            val next = McaLoopbackServer(port = REST_PORT, bindHost = bindHost, apiKey = apiKey)
+            next.start()
+            apiServer = next
+            activeApiBindHost = bindHost
+        }
+    }
+
+    private fun stopApiServer() = synchronized(apiServerLifecycleLock) {
         cancelActiveLocalApiImageGeneration("Local API server stopped.")
         runCatching { apiServer?.shutdown() }
         apiServer = null
         activeApiBindHost = null
     }
 
-    private fun applyWebSearchAnswerGuardsToLastAssistant(): WebSearchCitationAudit? {
+    private fun applyWebSearchAnswerGuardsToLastAssistant(
+        generationRunId: Long? = null
+    ): WebSearchCitationAudit? {
+        if (generationRunId != null && generationRunSequence.get() != generationRunId) return null
         var citationAudit: WebSearchCitationAudit? = null
         _uiState.update { state ->
+            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                return@update state
+            }
             val updated = state.messages.toMutableList()
             val index = updated.indexOfLast { it.role == Role.ASSISTANT }
             if (index < 0) return@update state
@@ -11616,8 +12445,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return citationAudit
     }
 
-    private fun ensureVisibleAssistantReplyAfterCompletion() {
+    private fun ensureVisibleAssistantReplyAfterCompletion(generationRunId: Long? = null) {
+        if (generationRunId != null && generationRunSequence.get() != generationRunId) return
         _uiState.update { state ->
+            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                return@update state
+            }
             val updated = state.messages.withVisibleAssistantCompletionFallback()
             if (updated === state.messages) return@update state
             val sessionId = state.activeChatSessionId
@@ -11638,8 +12471,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun recordWebSearchCitationAudit(recordId: String?, audit: WebSearchCitationAudit) {
+    private fun recordWebSearchCitationAudit(
+        recordId: String?,
+        audit: WebSearchCitationAudit,
+        generationRunId: Long? = null
+    ) {
         if (recordId.isNullOrBlank()) return
+        if (generationRunId != null && generationRunSequence.get() != generationRunId) return
         val current = _uiState.value.webSearchDiagnostics.firstOrNull { it.id == recordId } ?: return
         val updatedRecord = current.copy(
             message = current.message + if (audit.repaired) " · 引用已修正" else " · 引用已审计",
@@ -11648,11 +12486,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         val records = webSearchDiagnosticStore.replace(updatedRecord)
         _uiState.update {
-            it.copy(
-                webSearchDiagnostics = records,
-                webSearchStatusMessage = audit.statusMessage,
-                statusMessage = audit.statusMessage
-            )
+            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                it
+            } else {
+                it.copy(
+                    webSearchDiagnostics = records,
+                    webSearchStatusMessage = audit.statusMessage,
+                    statusMessage = audit.statusMessage
+                )
+            }
         }
     }
 
@@ -11660,10 +12502,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         delta: String,
         reasoningDelta: String = "",
         reasoningDurationMs: Long = 0L,
-        forcePublish: Boolean = false
+        forcePublish: Boolean = false,
+        generationRunId: Long? = null
     ) {
         val now = System.currentTimeMillis()
         val shouldPublish = synchronized(assistantOutputBufferLock) {
+            // Re-check while holding the buffer lock. A cancelled producer can
+            // race a new send between the caller's check and this append.
+            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                return@synchronized false
+            }
+            if (generationRunId != null &&
+                assistantOutputBufferGenerationId != null &&
+                assistantOutputBufferGenerationId != generationRunId
+            ) {
+                pendingAssistantOutput.setLength(0)
+                pendingAssistantReasoning.setLength(0)
+                pendingAssistantReasoningDurationMs = 0L
+            }
+            if (generationRunId != null) {
+                assistantOutputBufferGenerationId = generationRunId
+            }
             pendingAssistantOutput.append(delta)
             pendingAssistantReasoning.append(reasoningDelta)
             pendingAssistantReasoningDurationMs = maxOf(
@@ -11675,30 +12534,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ASSISTANT_STREAM_PUBLISH_CHARS ||
                 now - assistantOutputLastPublishedAtMs >= ASSISTANT_STREAM_PUBLISH_INTERVAL_MS
         }
-        if (shouldPublish) flushPendingAssistantOutput()
+        if (shouldPublish) flushPendingAssistantOutput(generationRunId)
     }
 
     /** Publishes accumulated stream text once, preserving message metadata. */
-    private fun flushPendingAssistantOutput(): Boolean {
+    private fun flushPendingAssistantOutput(generationRunId: Long? = null): Boolean {
         val pending = synchronized(assistantOutputBufferLock) {
-            if (pendingAssistantOutput.isEmpty() && pendingAssistantReasoning.isEmpty() &&
+            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                null
+            } else if (generationRunId != null &&
+                assistantOutputBufferGenerationId != null &&
+                assistantOutputBufferGenerationId != generationRunId
+            ) {
+                null
+            } else if (pendingAssistantOutput.isEmpty() && pendingAssistantReasoning.isEmpty() &&
                 pendingAssistantReasoningDurationMs <= 0L
             ) {
-                return false
+                null
+            } else {
+                AssistantOutputBatch(
+                    content = pendingAssistantOutput.toString(),
+                    reasoning = pendingAssistantReasoning.toString(),
+                    reasoningDurationMs = pendingAssistantReasoningDurationMs
+                ).also {
+                    pendingAssistantOutput.setLength(0)
+                    pendingAssistantReasoning.setLength(0)
+                    pendingAssistantReasoningDurationMs = 0L
+                    assistantOutputBufferGenerationId = null
+                    assistantOutputLastPublishedAtMs = System.currentTimeMillis()
+                }
             }
-            AssistantOutputBatch(
-                content = pendingAssistantOutput.toString(),
-                reasoning = pendingAssistantReasoning.toString(),
-                reasoningDurationMs = pendingAssistantReasoningDurationMs
-            ).also {
-                pendingAssistantOutput.setLength(0)
-                pendingAssistantReasoning.setLength(0)
-                pendingAssistantReasoningDurationMs = 0L
-                assistantOutputLastPublishedAtMs = System.currentTimeMillis()
-            }
+        } ?: return false
+        // Do not append a drained batch to a newer assistant message if the
+        // generation changed while the buffer was being published.
+        if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+            return false
         }
         if (_uiState.value.messages.none { it.role == Role.ASSISTANT }) return false
         _uiState.update { state ->
+            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                return@update state
+            }
             val updated = state.messages.toMutableList()
             val index = updated.indexOfLast { it.role == Role.ASSISTANT }
             if (index >= 0) {
@@ -11728,18 +12604,78 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return true
     }
 
-    private fun discardPendingAssistantOutput() {
+    private fun discardPendingAssistantOutput(generationRunId: Long? = null) {
+        if (generationRunId != null && generationRunSequence.get() != generationRunId) return
         synchronized(assistantOutputBufferLock) {
+            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                return@synchronized
+            }
             pendingAssistantOutput.setLength(0)
             pendingAssistantReasoning.setLength(0)
             pendingAssistantReasoningDurationMs = 0L
+            assistantOutputBufferGenerationId = null
             assistantOutputLastPublishedAtMs = System.currentTimeMillis()
         }
     }
 
-    private fun removePendingAssistantPlaceholder() {
-        discardPendingAssistantOutput()
+    /**
+     * Drains only the output owned by the UI run that process backgrounding invalidated. A newer
+     * foreground request advances the sequence and leaves its buffer untouched.
+     */
+    private fun drainCancelledAssistantOutput(
+        cancelledRunId: Long,
+        invalidatedRunId: Long
+    ): BackgroundCancelledAssistantOutput? {
+        if (generationRunSequence.get() != invalidatedRunId) return null
+        return synchronized(assistantOutputBufferLock) {
+            if (generationRunSequence.get() != invalidatedRunId ||
+                assistantOutputBufferGenerationId != cancelledRunId
+            ) {
+                null
+            } else {
+                BackgroundCancelledAssistantOutput(
+                    content = pendingAssistantOutput.toString(),
+                    reasoning = pendingAssistantReasoning.toString(),
+                    reasoningDurationMs = pendingAssistantReasoningDurationMs
+                ).also {
+                    pendingAssistantOutput.setLength(0)
+                    pendingAssistantReasoning.setLength(0)
+                    pendingAssistantReasoningDurationMs = 0L
+                    assistantOutputBufferGenerationId = null
+                    assistantOutputLastPublishedAtMs = System.currentTimeMillis()
+                }
+            }
+        }
+    }
+
+    private fun MainUiState.finalizeBackgroundCancelledAssistant(
+        pending: BackgroundCancelledAssistantOutput?
+    ): MainUiState {
+        val updated = messages.withBackgroundCancellationFinalized(pending)
+        if (updated === messages) return this
+        val sessionId = activeChatSessionId
+        return copy(
+            messages = updated,
+            chatSessions = if (sessionId == null) {
+                chatSessions
+            } else {
+                chatSessions.upsertSession(
+                    sessionId = sessionId,
+                    messages = updated,
+                    assistantId = selectedAssistantId,
+                    modelMode = selectedChatBackend.bindingValue(),
+                    modelId = currentChatModelId()
+                )
+            }
+        )
+    }
+
+    private fun removePendingAssistantPlaceholder(generationRunId: Long? = null) {
+        discardPendingAssistantOutput(generationRunId)
         _uiState.update { state ->
+            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                return@update state
+            }
             val index = state.messages.indexOfLast { it.role == Role.ASSISTANT }
             if (index < 0) return@update state
             val pending = state.messages[index]
@@ -11774,10 +12710,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun attachWebSearchEvidenceToPendingAssistant(
         sources: List<ChatSourceReference>,
-        trace: ChatWebSearchTrace?
+        trace: ChatWebSearchTrace?,
+        generationRunId: Long? = null
     ) {
         if (sources.isEmpty() && trace?.hasContent != true) return
+        if (generationRunId != null && generationRunSequence.get() != generationRunId) return
         _uiState.update { state ->
+            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                return@update state
+            }
             val updated = state.messages.toMutableList()
             val index = updated.indexOfLast { it.role == Role.ASSISTANT }
             if (index >= 0) {
@@ -11922,11 +12863,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun persistChatSessions(
         sessions: List<ChatSessionRecord>? = null,
-        knowledgeBinding: Pair<String, Set<String>>? = null
+        knowledgeBinding: Pair<String, Set<String>>? = null,
+        generationRunId: Long? = null
     ) {
+        if (generationRunId != null && generationRunSequence.get() != generationRunId) return
         // A completion can end between chunks. Materialize its final bounded
         // buffer before taking the Room snapshot.
-        flushPendingAssistantOutput()
+        flushPendingAssistantOutput(generationRunId)
+        if (generationRunId != null && generationRunSequence.get() != generationRunId) return
         val snapshot = (sessions ?: _uiState.value.chatSessions).map { session ->
             session.copy(messages = session.messages.toList())
         }
@@ -11937,7 +12881,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val sequence = chatSessionPersistenceSequence.incrementAndGet()
         viewModelScope.launch(Dispatchers.IO) {
+            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                return@launch
+            }
             chatSessionPersistenceMutex.withLock {
+                if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                    return@withLock
+                }
                 // A newer snapshot supersedes this one before it reaches the
                 // database; skipping it prevents an old delete/rename snapshot
                 // from landing after a newer conversation state.
@@ -11992,7 +12942,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun persistConversationMutation(
         sessions: List<ChatSessionRecord>,
         rollback: ConversationMutationRollbackState,
-        onCommitted: (() -> Unit)? = null
+        preserveReusableNativePrefix: Boolean = false,
+        onCommitted: (() -> Unit)? = null,
+        onCommitFailed: (() -> Unit)? = null
     ) {
         val snapshot = sessions.map { session ->
             session.copy(messages = session.messages.toList())
@@ -12000,7 +12952,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val removedChatOwners = rollback.chatSessions
             .mapTo(linkedSetOf()) { it.id }
             .minus(snapshot.mapTo(hashSetOf()) { it.id })
-        localConversationContextNeedsInvalidation = true
+        localConversationContextNeedsInvalidation = !preserveReusableNativePrefix
         val invalidationSequence = localConversationContextInvalidationSequence.incrementAndGet()
         chatSessionPersistenceSequence.incrementAndGet()
         val mutation = viewModelScope.launch(Dispatchers.IO) {
@@ -12031,23 +12983,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         scope = WorldBookScope.CHAT,
                         retainedOwnerIds = liveSessionIds
                     )
-                    runCatching { engine.invalidateConversationContext() }
-                        .onSuccess {
-                            if (localConversationContextInvalidationSequence.get() == invalidationSequence) {
-                                localConversationContextNeedsInvalidation = false
-                            }
+                    if (preserveReusableNativePrefix) {
+                        // Tail pruning keeps the prior request's token/KV checkpoint. The next
+                        // begin performs an exact token-prefix comparison and trims the native
+                        // suffix to that proven boundary. A mismatch still falls back to a full
+                        // prefill inside the runtime, so preservation cannot change semantics.
+                        if (localConversationContextInvalidationSequence.get() == invalidationSequence) {
+                            localConversationContextNeedsInvalidation = false
                         }
-                        .onFailure { error ->
-                            if (localConversationContextInvalidationSequence.get() == invalidationSequence) {
-                                _uiState.update {
-                                    it.copy(
-                                        statusMessage = "聊天已保存；上下文重置失败，下次本地生成前将重试：${error.message ?: "native runtime error"}"
-                                    )
+                    } else {
+                        runCatching { engine.invalidateConversationContext() }
+                            .onSuccess {
+                                if (localConversationContextInvalidationSequence.get() == invalidationSequence) {
+                                    localConversationContextNeedsInvalidation = false
                                 }
                             }
-                        }
+                            .onFailure { error ->
+                                if (localConversationContextInvalidationSequence.get() == invalidationSequence) {
+                                    _uiState.update {
+                                        it.copy(
+                                            statusMessage = "聊天已保存；上下文重置失败，下次本地生成前将重试：${error.message ?: "native runtime error"}"
+                                        )
+                                    }
+                                }
+                            }
+                    }
                     onCommitted?.invoke()
                 }.onFailure { error ->
+                    onCommitFailed?.invoke()
                     // Do not invalidate KV after a failed durable write. Room
                     // rolls the transaction back; restore managed state to the
                     // last snapshot known to have committed to that database.
@@ -14312,6 +15275,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             completionTokens = statsRoot.optInt("completionTokens").coerceAtLeast(0),
             ttftMs = statsRoot.optLong("ttftMs").coerceAtLeast(0L),
             prefillMs = statsRoot.optLong("prefillMs").coerceAtLeast(0L),
+            prefillTokens = statsRoot.optInt("prefillTokens", -1)
+                .takeIf { it >= 0 }
+                ?: 0,
+            prefillTps = statsRoot.optionalFiniteDouble("prefillTps"),
+            effectivePromptTps = statsRoot.optionalFiniteDouble("effectivePromptTps"),
             decodeMs = statsRoot.optLong("decodeMs").coerceAtLeast(0L),
             decodeTps = statsRoot.optionalFiniteDouble("decodeTps"),
             e2eTps = statsRoot.optionalFiniteDouble("e2eTps"),
@@ -14709,7 +15677,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 requested == state.loadedModelName ||
                 requested == model.id ||
                 requested == model.fileName ||
-                requested == model.displayName
+                requested == model.displayName ||
+                requested == localApiPublicModelId(model.displayName, model.id)
             )
     }
 
@@ -15051,7 +16020,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .put("id", model.id)
                     .put("object", "model")
                     .put("owned_by", "local")
+                    // OpenAI-compatible clients do not agree on the display-name key. Keep
+                    // the stable manifest id while publishing aliases from the real manifest
+                    // display name; never derive a user-facing name from the id.
+                    .put("name", model.displayName)
                     .put("display_name", model.displayName)
+                    .put("displayName", model.displayName)
                     .put("runtime", model.runtime.storageValue)
                     .put("vision_projector", model.visionProjectorFileName)
                     .put("vision_ready", visionReady)

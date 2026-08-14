@@ -460,6 +460,8 @@ interface LocalChatRunner {
     fun invalidateConversationContext() = Unit
     fun requestStop()
     fun requestStopIfActive(): Boolean = false
+    /** Non-blocking process/session loss evidence; implementations must not perform Binder or JNI IO. */
+    fun isSessionKnownLost(): Boolean = false
     fun getRuntimeStatsJson(): String
     fun shutdown()
 }

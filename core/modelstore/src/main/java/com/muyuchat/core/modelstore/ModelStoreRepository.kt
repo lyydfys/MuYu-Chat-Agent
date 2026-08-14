@@ -22,7 +22,7 @@ class ModelStoreRepository(private val context: Context) {
         runCatching { cleanupStaleAtomicImports(managedModelDir) }
     }
 
-    fun listModels(): List<ModelManifest> {
+    fun listModels(): List<ModelManifest> = synchronized(MODEL_IMPORT_LOCK) {
         val persisted = readPersistedModels()
         val normalized = persisted.map { normalizeManifest(it) }
         val loadablePersisted = normalized.filter { model ->
@@ -32,24 +32,25 @@ class ModelStoreRepository(private val context: Context) {
                 ChatModelRuntime.LLAMA_CPP -> true
             }
         }
-        val recovered = recoverManagedMnnBundles(loadablePersisted)
-        val merged = (loadablePersisted + recovered).distinctByPathKeepingNewest()
-        if (normalized != persisted || loadablePersisted != normalized || recovered.isNotEmpty()) {
+        val recoveredMnn = recoverManagedMnnBundles(loadablePersisted)
+        val recoveredGguf = recoverManagedGgufModels(loadablePersisted + recoveredMnn)
+        val merged = (loadablePersisted + recoveredMnn + recoveredGguf).distinctByPathKeepingNewest()
+        if (
+            normalized != persisted ||
+            loadablePersisted != normalized ||
+            recoveredMnn.isNotEmpty() ||
+            recoveredGguf.isNotEmpty()
+        ) {
             save(merged)
         }
-        return merged.sortedByDescending { it.createdAt }
+        merged.sortedByDescending { it.createdAt }
     }
 
     private fun readPersistedModels(): List<ModelManifest> {
         recoverManifestCommitIfNeeded()
         if (!manifestFile.exists()) return emptyList()
         return runCatching {
-            val array = JSONArray(manifestFile.readText(Charsets.UTF_8))
-            buildList {
-                for (index in 0 until array.length()) {
-                    add(ModelManifest.fromJson(array.getJSONObject(index)))
-                }
-            }
+            parsePersistedModelManifest(manifestFile.readText(Charsets.UTF_8))
         }.getOrDefault(emptyList())
     }
 
@@ -494,10 +495,34 @@ class ModelStoreRepository(private val context: Context) {
         val model = getModel(id) ?: return false
         val file = File(model.path)
         return when (model.runtime) {
-            ChatModelRuntime.MNN -> validateMnnBundle(model, file).canLoad
+            ChatModelRuntime.MNN -> validateMnnBundle(model, file, fullHash = true).canLoad
             ChatModelRuntime.GENIEX_QAIRT -> validateQairtBundle(model, file).canLoad
-            ChatModelRuntime.LLAMA_CPP ->
-                file.exists() && file.length() == model.sizeBytes && sha256(file).equals(model.sha256, ignoreCase = true)
+            ChatModelRuntime.LLAMA_CPP -> {
+                if (!file.isFile || file.length() != model.sizeBytes) return false
+                val actualSha256 = runCatching { sha256(file) }.getOrNull() ?: return false
+                val mainVerified = isFastRecoveryFingerprint(model.sha256) ||
+                    actualSha256.equals(model.sha256, ignoreCase = true)
+                if (!mainVerified) return false
+
+                val projector = model.visionProjectorPath?.let(::File)
+                val actualProjectorSha256 = projector?.let { candidate ->
+                    if (!candidate.isFile || candidate.length() != model.visionProjectorSizeBytes) return false
+                    runCatching { sha256(candidate) }.getOrNull() ?: return false
+                }
+                val projectorVerified = actualProjectorSha256 == null ||
+                    model.visionProjectorSha256.isNullOrBlank() ||
+                    actualProjectorSha256.equals(model.visionProjectorSha256, ignoreCase = true)
+                if (!projectorVerified) return false
+
+                val migrated = model.copy(
+                    sha256 = if (isFastRecoveryFingerprint(model.sha256)) actualSha256 else model.sha256,
+                    visionProjectorSha256 = actualProjectorSha256 ?: model.visionProjectorSha256
+                )
+                if (migrated != model) {
+                    updateModel(migrated)
+                }
+                true
+            }
         }
     }
 
@@ -509,45 +534,20 @@ class ModelStoreRepository(private val context: Context) {
         )
         val file = File(model.path)
         if (model.runtime == ChatModelRuntime.MNN) {
-            return validateMnnBundle(model, file)
+            return validateMnnBundle(model, file, fullHash = false)
         }
         if (model.runtime == ChatModelRuntime.GENIEX_QAIRT) {
             return validateQairtBundle(model, file)
         }
-        val compatibility = runCatching { ModelCompatibility.check(file) }.getOrElse { error ->
-            ModelCompatibilityResult(
-                canLoad = false,
-                title = "模型预检失败",
-                details = error.message.orEmpty()
-            )
-        }
+        val compatibility = validateGgufLoadPreflight(file, model.sizeBytes)
         if (!compatibility.canLoad) return compatibility
-        val hashOk = runCatching {
-            file.length() == model.sizeBytes && sha256(file).equals(model.sha256, ignoreCase = true)
-        }.getOrDefault(false)
-        val projectorOk = model.visionProjectorPath?.let { path ->
-            val projector = File(path)
-            projector.exists() &&
-                projector.length() == model.visionProjectorSizeBytes &&
-                model.visionProjectorSha256?.let { sha256(projector).equals(it, ignoreCase = true) } != false
-        } ?: true
-        return if (hashOk) {
-            if (projectorOk) {
-                compatibility
-            } else {
-                ModelCompatibilityResult(
-                    canLoad = false,
-                    title = "视觉投影器校验失败",
-                    details = "绑定的 mmproj 文件不存在、大小变化或 SHA-256 不一致，请重新绑定视觉文件"
-                )
-            }
-        } else {
-            ModelCompatibilityResult(
-                canLoad = false,
-                title = "模型文件校验失败",
-                details = "文件大小或 SHA-256 与导入/下载时不一致，建议删除后重新下载"
+        val projectorCompatibility = model.visionProjectorPath?.let { path ->
+            validateGgufProjectorLoadPreflight(
+                file = File(path),
+                expectedSizeBytes = model.visionProjectorSizeBytes
             )
         }
+        return projectorCompatibility?.takeUnless { it.canLoad } ?: compatibility
     }
 
     fun managedFileFor(fileName: String): File {
@@ -571,8 +571,7 @@ class ModelStoreRepository(private val context: Context) {
         save(without + model)
     }
 
-    @Synchronized
-    private fun save(models: List<ModelManifest>) {
+    private fun save(models: List<ModelManifest>) = synchronized(MODEL_IMPORT_LOCK) {
         val array = JSONArray()
         models.sortedByDescending { it.createdAt }.forEach { array.put(it.toJson()) }
         val parent = requireNotNull(manifestFile.parentFile) { "模型清单目录不存在。" }
@@ -701,14 +700,17 @@ class ModelStoreRepository(private val context: Context) {
         val existingPaths = existing.map { File(it.path).absolutePath }.toSet()
         return managedModelDir.listFiles()
             ?.filter { candidate ->
-                isCompleteMnnBundleDirectory(candidate) &&
-                    File(candidate.absolutePath).absolutePath !in existingPaths
+                File(candidate.absolutePath).absolutePath !in existingPaths &&
+                    isCompleteMnnBundleDirectory(candidate)
             }
             ?.mapNotNull { bundleDir ->
                 runCatching {
                     val requiredFiles = requiredMnnFilesForDirectory(bundleDir)
                     val coreSizeBytes = mnnBundleSize(bundleDir, requiredFiles)
-                    val coreSha256 = sha256MnnBundle(bundleDir, requiredFiles)
+                    val coreSha256 = fastManagedRecoveryFingerprint(
+                        managedRoot = managedModelDir,
+                        files = requiredFiles.map { File(bundleDir, it) }
+                    )
                     ModelManifest(
                         id = UUID.nameUUIDFromBytes("mnn:${bundleDir.absolutePath}".toByteArray()).toString(),
                         displayName = inferMnnDisplayName(bundleDir.name),
@@ -728,6 +730,30 @@ class ModelStoreRepository(private val context: Context) {
             }
             .orEmpty()
     }
+
+    private fun recoverManagedGgufModels(existing: List<ModelManifest>): List<ModelManifest> =
+        findRecoverableManagedGgufFiles(managedModelDir, existing).mapNotNull { candidate ->
+            runCatching {
+                val file = candidate.file
+                ModelManifest(
+                    id = UUID.nameUUIDFromBytes(
+                        "gguf:${file.canonicalPath}".toByteArray(Charsets.UTF_8)
+                    ).toString(),
+                    displayName = stripKnownExtension(file.name, ".gguf"),
+                    path = file.absolutePath,
+                    runtime = ChatModelRuntime.LLAMA_CPP,
+                    source = ModelSource.LOCAL,
+                    repoId = null,
+                    revision = null,
+                    fileName = file.name,
+                    sizeBytes = file.length(),
+                    sha256 = fastManagedRecoveryFingerprint(managedModelDir, listOf(file)),
+                    quant = candidate.metadata.quant,
+                    architecture = candidate.metadata.architecture,
+                    createdAt = file.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
+                )
+            }.getOrNull()
+        }
 
     /**
      * GenieX keeps an installed copy under internal app storage after its SDK
@@ -809,7 +835,11 @@ class ModelStoreRepository(private val context: Context) {
     private fun stripKnownExtension(value: String, extension: String): String =
         if (value.endsWith(extension, ignoreCase = true)) value.dropLast(extension.length) else value
 
-    private fun validateMnnBundle(model: ModelManifest, bundleDir: File): ModelCompatibilityResult {
+    private fun validateMnnBundle(
+        model: ModelManifest,
+        bundleDir: File,
+        fullHash: Boolean
+    ): ModelCompatibilityResult {
         val readiness = MnnBundleReadinessAnalyzer.analyze(bundleDir)
         if (!readiness.canLoad) {
             return ModelCompatibilityResult(
@@ -820,12 +850,51 @@ class ModelStoreRepository(private val context: Context) {
         }
         val requiredFiles = readiness.requiredComponentPaths
         val coreSize = mnnBundleSize(bundleDir, requiredFiles)
+        val hasReadableCore = requiredFiles.all { File(bundleDir, it).let { file ->
+            file.isFile && file.canRead() && file.length() > 0L
+        } }
+        if (!fullHash && isFastRecoveryFingerprint(model.sha256)) {
+            val currentFingerprint = runCatching {
+                fastManagedRecoveryFingerprint(
+                    managedRoot = managedModelDir,
+                    files = requiredFiles.map { File(bundleDir, it) }
+                )
+            }.getOrNull()
+            return if (
+                hasReadableCore &&
+                coreSize == model.sizeBytes &&
+                currentFingerprint.equals(model.sha256, ignoreCase = true)
+            ) {
+                ModelCompatibilityResult(
+                    canLoad = true,
+                    title = "MNN 模型包校验通过",
+                    details = "runtime=${model.runtime.storageValue}, core=${formatBytes(coreSize)}"
+                )
+            } else {
+                ModelCompatibilityResult(
+                    canLoad = false,
+                    title = "MNN 模型包校验失败",
+                    details = "恢复后的核心组件已变化，请重新扫描或主动执行完整校验"
+                )
+            }
+        }
+        if (!fullHash && hasReadableCore && coreSize == model.sizeBytes && model.sha256.isNotBlank()) {
+            // Import/download and the explicit "verify" action own full content hashing.
+            // Re-hashing a 6-10 GB MNN bundle before every native load added tens of seconds
+            // while the old path accepted any readable core even after a digest mismatch.
+            // Stable component membership, non-empty files, and the persisted aggregate size
+            // are the fast load-time integrity check; the real native load remains authoritative.
+            return ModelCompatibilityResult(
+                canLoad = true,
+                title = "MNN 模型包校验通过",
+                details = "runtime=${model.runtime.storageValue}, core=${formatBytes(coreSize)}"
+            )
+        }
         val coreHash = runCatching { sha256MnnBundle(bundleDir, requiredFiles) }.getOrNull()
-        val hasReadableCore = coreHash != null && requiredFiles.all { File(bundleDir, it).length() > 0L }
-        val coreFingerprintOk = hasReadableCore &&
+        val coreFingerprintOk = coreHash != null && hasReadableCore &&
             coreSize == model.sizeBytes &&
             coreHash.equals(model.sha256, ignoreCase = true)
-        val legacyDirectoryFingerprintOk = runCatching {
+        val legacyDirectoryFingerprintOk = !isFastRecoveryFingerprint(model.sha256) && runCatching {
             directorySize(bundleDir) == model.sizeBytes &&
                 sha256Directory(bundleDir).equals(model.sha256, ignoreCase = true)
         }.getOrDefault(false)
@@ -880,15 +949,6 @@ class ModelStoreRepository(private val context: Context) {
         runCatching {
             updateModel(model.withMigratedMnnFingerprint(coreSize, coreHash))
         }
-    }
-
-    private fun isVisionProjectorCandidate(fileName: String, metadata: GgufMetadata): Boolean {
-        val lower = fileName.lowercase()
-        val architecture = metadata.architecture?.lowercase().orEmpty()
-        return "mmproj" in lower ||
-            "projector" in lower ||
-            lower.startsWith("clip") ||
-            architecture == "clip"
     }
 
     private fun sha256(file: File): String {
@@ -1026,6 +1086,281 @@ class ModelStoreRepository(private val context: Context) {
         private val WINDOWS_DRIVE_PREFIX = Regex("^[A-Za-z]:($|/)")
     }
 
+}
+
+internal fun validateGgufLoadPreflight(
+    file: File,
+    expectedSizeBytes: Long,
+    metadataReader: (File) -> GgufMetadata = ::readBoundedGgufMetadata
+): ModelCompatibilityResult {
+    ggufLoadShapeFailure(file, expectedSizeBytes, "模型文件")?.let { return it }
+    val metadata = runCatching { metadataReader(file) }.getOrElse { error ->
+        return ModelCompatibilityResult(
+            canLoad = false,
+            title = "模型预检失败",
+            details = error.message.orEmpty()
+        )
+    }
+    return ModelCompatibility.check(file, metadata)
+}
+
+internal fun validateGgufProjectorLoadPreflight(
+    file: File,
+    expectedSizeBytes: Long,
+    metadataReader: (File) -> GgufMetadata = ::readBoundedGgufMetadata
+): ModelCompatibilityResult {
+    ggufLoadShapeFailure(file, expectedSizeBytes, "视觉投影器")?.let { return it }
+    if (!file.name.endsWith(".gguf", ignoreCase = true)) {
+        return ModelCompatibilityResult(false, "视觉投影器格式错误", "请选择 .gguf 投影器文件")
+    }
+    val metadata = runCatching { metadataReader(file) }.getOrElse { error ->
+        return ModelCompatibilityResult(false, "视觉投影器预检失败", error.message.orEmpty())
+    }
+    if (!metadata.isGguf) {
+        return ModelCompatibilityResult(false, "视觉投影器格式错误", "文件头不是 GGUF")
+    }
+    if (!isVisionProjectorCandidate(file.name, metadata)) {
+        return ModelCompatibilityResult(false, "视觉投影器类型错误", "metadata 与文件名均不表示视觉投影器")
+    }
+    return ModelCompatibilityResult(
+        canLoad = true,
+        title = "视觉投影器预检通过",
+        details = "architecture=${metadata.architecture ?: "unknown"}, size=${file.length()}"
+    )
+}
+
+private fun ggufLoadShapeFailure(
+    file: File,
+    expectedSizeBytes: Long,
+    label: String
+): ModelCompatibilityResult? = when {
+    !file.exists() -> ModelCompatibilityResult(false, "${label}不存在", file.absolutePath)
+    !file.isFile -> ModelCompatibilityResult(false, "${label}不是普通文件", file.absolutePath)
+    !file.canRead() -> ModelCompatibilityResult(false, "${label}不可读", file.absolutePath)
+    file.length() <= 0L -> ModelCompatibilityResult(false, "${label}为空", file.absolutePath)
+    expectedSizeBytes <= 0L || file.length() != expectedSizeBytes -> ModelCompatibilityResult(
+        false,
+        "${label}大小不一致",
+        "expected=$expectedSizeBytes, actual=${file.length()}"
+    )
+    else -> null
+}
+
+internal fun readBoundedGgufMetadata(file: File): GgufMetadata =
+    file.inputStream().use { input ->
+        readBoundedGgufMetadata(input, file.name)
+    }
+
+internal fun readBoundedGgufMetadata(
+    input: InputStream,
+    fileName: String,
+    byteLimit: Long = MAX_GGUF_LOAD_PREFLIGHT_BYTES
+): GgufMetadata {
+    require(byteLimit > 0L) { "GGUF preflight byte limit must be positive." }
+    return GgufMetadataReader.read(ReadLimitInputStream(input, byteLimit), fileName)
+}
+
+private class ReadLimitInputStream(
+    private val delegate: InputStream,
+    byteLimit: Long
+) : InputStream() {
+    private var remaining = byteLimit
+
+    override fun read(): Int {
+        if (remaining <= 0L) return -1
+        val value = delegate.read()
+        if (value >= 0) remaining -= 1L
+        return value
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (remaining <= 0L) return -1
+        val allowed = minOf(length.toLong(), remaining).toInt()
+        val read = delegate.read(buffer, offset, allowed)
+        if (read > 0) remaining -= read.toLong()
+        return read
+    }
+
+    override fun skip(byteCount: Long): Long {
+        if (remaining <= 0L) return 0L
+        val skipped = delegate.skip(minOf(byteCount, remaining))
+        if (skipped > 0L) remaining -= skipped
+        return skipped
+    }
+
+    override fun available(): Int = minOf(delegate.available().toLong(), remaining).toInt()
+}
+
+internal fun isVisionProjectorCandidate(fileName: String, metadata: GgufMetadata): Boolean {
+    val lower = fileName.lowercase()
+    val architecture = metadata.architecture?.lowercase().orEmpty()
+    return "mmproj" in lower ||
+        "projector" in lower ||
+        lower.startsWith("clip") ||
+        architecture == "clip"
+}
+
+/**
+ * A damaged legacy entry must not hide every otherwise valid model. A malformed
+ * top-level document still fails so repository recovery can rebuild it from the
+ * managed model directory.
+ */
+internal fun parsePersistedModelManifest(contents: String): List<ModelManifest> {
+    val array = JSONArray(contents)
+    return buildList {
+        for (index in 0 until array.length()) {
+            runCatching { ModelManifest.fromJson(array.getJSONObject(index)) }
+                .getOrNull()
+                ?.let(::add)
+        }
+    }
+}
+
+internal data class RecoverableManagedGgufFile(
+    val file: File,
+    val metadata: GgufMetadata
+)
+
+/**
+ * Produces a stable, bounded-I/O identity for assets rediscovered after their
+ * product manifest was lost. Large tensor/weight payloads contribute path,
+ * size, and mtime without being read. GGUF headers and small metadata/config
+ * files additionally contribute a bounded prefix hash.
+ */
+internal fun fastManagedRecoveryFingerprint(
+    managedRoot: File,
+    files: List<File>
+): String {
+    val root = managedRoot.canonicalFile
+    require(root.isDirectory) { "Managed model root is not a directory: ${root.absolutePath}" }
+    val rootPrefix = root.path + File.separator
+    val entries = files
+        .map { it.canonicalFile }
+        .onEach { file ->
+            require(file.isFile && file.canRead() && file.path.startsWith(rootPrefix)) {
+                "Recovery fingerprint file is not readable managed content: ${file.absolutePath}"
+            }
+        }
+        .distinctBy(File::getPath)
+        .sortedBy { it.relativeTo(root).invariantSeparatorsPath }
+    require(entries.isNotEmpty()) { "Recovery fingerprint requires at least one managed file." }
+
+    val digest = MessageDigest.getInstance("SHA-256")
+    digest.update(FAST_RECOVERY_FINGERPRINT_SCHEMA.toByteArray(Charsets.UTF_8))
+    digest.update(byteArrayOf(0))
+    entries.forEach { file ->
+        val relativePath = file.relativeTo(root).invariantSeparatorsPath
+        digest.update(relativePath.toByteArray(Charsets.UTF_8))
+        digest.update(byteArrayOf(0))
+        digest.update(file.length().toString().toByteArray(Charsets.US_ASCII))
+        digest.update(byteArrayOf(0))
+        digest.update(file.lastModified().toString().toByteArray(Charsets.US_ASCII))
+        digest.update(byteArrayOf(0))
+        if (file.hasBoundedRecoveryMetadata()) {
+            digest.update(boundedFilePrefixSha256(file).toByteArray(Charsets.US_ASCII))
+        }
+        digest.update(byteArrayOf(0))
+    }
+    val hashed = digest.digest().joinToString("") { "%02x".format(it) }
+    return FAST_RECOVERY_FINGERPRINT_PREFIX + hashed.drop(FAST_RECOVERY_FINGERPRINT_PREFIX.length)
+}
+
+internal fun isFastRecoveryFingerprint(value: String): Boolean =
+    value.length == 64 && value.startsWith(FAST_RECOVERY_FINGERPRINT_PREFIX, ignoreCase = true)
+
+private fun File.hasBoundedRecoveryMetadata(): Boolean {
+    val lowerName = name.lowercase()
+    val extension = extension.lowercase()
+    return extension == "gguf" ||
+        extension in RECOVERY_METADATA_EXTENSIONS ||
+        "config" in lowerName ||
+        "tokenizer" in lowerName ||
+        "manifest" in lowerName ||
+        "metadata" in lowerName ||
+        "vocab" in lowerName
+}
+
+private fun boundedFilePrefixSha256(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { input ->
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var remaining = MAX_RECOVERY_METADATA_HASH_BYTES
+        while (remaining > 0) {
+            val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+            if (read < 0) break
+            if (read == 0) continue
+            digest.update(buffer, 0, read)
+            remaining -= read
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+/**
+ * Finds compatible GGUF main models anywhere below the app-owned model root.
+ * Download/profiling tools historically placed GGUFs one directory below that
+ * root, so a top-level-only scan silently omitted those otherwise loadable
+ * models. Canonical containment prevents a linked directory from expanding the
+ * recovery scope beyond app-owned storage.
+ */
+internal fun findRecoverableManagedGgufFiles(
+    managedRoot: File,
+    existing: List<ModelManifest>
+): List<RecoverableManagedGgufFile> {
+    val root = runCatching { managedRoot.canonicalFile }
+        .getOrNull()
+        ?.takeIf { it.isDirectory }
+        ?: return emptyList()
+    val rootPrefix = root.path + File.separator
+    val representedPaths = buildSet {
+        existing.asSequence()
+            .filter { it.runtime == ChatModelRuntime.LLAMA_CPP }
+            .mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }
+            .forEach(::add)
+        existing.asSequence()
+            .mapNotNull(ModelManifest::visionProjectorPath)
+            .mapNotNull { runCatching { File(it).canonicalPath }.getOrNull() }
+            .forEach(::add)
+    }
+    val pending = ArrayDeque<File>().apply { add(root) }
+    val visitedDirectories = mutableSetOf(root.path)
+    val recovered = mutableListOf<RecoverableManagedGgufFile>()
+
+    while (pending.isNotEmpty()) {
+        val directory = pending.removeFirst()
+        directory.listFiles().orEmpty().forEach { entry ->
+            val candidate = runCatching { entry.canonicalFile }.getOrNull() ?: return@forEach
+            if (!candidate.path.startsWith(rootPrefix)) return@forEach
+            when {
+                candidate.isDirectory -> {
+                    if (candidate.isManagedImportStagingDirectory()) return@forEach
+                    if (visitedDirectories.add(candidate.path)) pending += candidate
+                }
+                candidate.isFile &&
+                    candidate.canRead() &&
+                    candidate.length() > 0L &&
+                    candidate.name.endsWith(".gguf", ignoreCase = true) &&
+                    candidate.path !in representedPaths &&
+                    candidate.isPrimaryGgufShard() -> {
+                    val metadata = runCatching { GgufMetadataReader.read(candidate) }.getOrNull()
+                        ?: return@forEach
+                    if (!ModelCompatibility.check(candidate, metadata).canLoad) return@forEach
+                    recovered += RecoverableManagedGgufFile(candidate, metadata)
+                }
+            }
+        }
+    }
+    return recovered
+        .distinctBy { it.file.path }
+        .sortedBy { it.file.relativeTo(root).invariantSeparatorsPath.lowercase() }
+}
+
+private fun File.isManagedImportStagingDirectory(): Boolean =
+    CURRENT_IMPORT_DIRECTORY.matches(name) || LEGACY_NAMED_IMPORT_ARTIFACT.matches(name)
+
+private fun File.isPrimaryGgufShard(): Boolean {
+    val match = GGUF_SHARD_FILE.matchEntire(name) ?: return true
+    return match.groupValues[1].toIntOrNull() == 1
 }
 
 /**
@@ -1333,4 +1668,19 @@ private val SAFE_IMPORT_TRANSACTION_ID = Regex("[A-Za-z0-9._-]{1,128}")
 private const val UUID_PATTERN = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 private val CURRENT_IMPORT_DIRECTORY = Regex("^\\.importing-$UUID_PATTERN$")
 private val LEGACY_NAMED_IMPORT_ARTIFACT = Regex("^\\..+\\.importing-$UUID_PATTERN$")
+private val GGUF_SHARD_FILE = Regex("^.+-(\\d{5})-of-(\\d{5})\\.gguf$", RegexOption.IGNORE_CASE)
+private const val MAX_GGUF_LOAD_PREFLIGHT_BYTES = 4L * 1024L * 1024L
+private const val FAST_RECOVERY_FINGERPRINT_SCHEMA = "mca-managed-recovery-v1"
+private const val FAST_RECOVERY_FINGERPRINT_PREFIX = "6d63612d72656331"
+private const val MAX_RECOVERY_METADATA_HASH_BYTES = 1024L * 1024L
+private val RECOVERY_METADATA_EXTENSIONS = setOf(
+    "json",
+    "txt",
+    "model",
+    "jinja",
+    "jinja2",
+    "tmpl",
+    "yaml",
+    "yml"
+)
 

@@ -23,6 +23,7 @@
 
 #include "llama_load_failure_policy.hpp"
 #include "llama_model_memory_policy.hpp"
+#include "jni_utf8_codec.hpp"
 
 #if MCA_WITH_LLAMA_CPP
 #include <unistd.h>
@@ -48,6 +49,7 @@ namespace {
 
 std::mutex g_mutex;
 std::atomic_bool g_stop_requested{false};
+std::atomic<std::uint64_t> g_stop_epoch{0};
 std::atomic_bool g_generation_active{false};
 
 enum class GenerationStopReason : int {
@@ -67,10 +69,16 @@ enum class GenerationStopReason : int {
     SHUTDOWN,
 };
 
+constexpr int COMPLETION_STOPPED = 3;
+
 std::atomic<GenerationStopReason> g_generation_stop_reason{GenerationStopReason::IDLE};
 bool g_loaded = false;
 long long g_load_ms = 0;
 long long g_prompt_tokens = 0;
+// Logical prompt length includes tokens restored from the session KV. Keep a
+// separate counter for tokens that actually went through llama_decode so the
+// displayed prefill rate is not inflated after a cache hit.
+long long g_prefill_computed_tokens = 0;
 long long g_completion_tokens = 0;
 long long g_context_shifts = 0;
 long long g_prefill_started_ms = 0;
@@ -222,6 +230,10 @@ std::string g_persistent_prefix_cache_reason = "not_requested";
 bool g_cache_checkpoint_valid = false;
 size_t g_cache_checkpoint_tokens = 0;
 size_t g_cache_checkpoint_bytes = 0;
+size_t g_turn_cache_checkpoint_count = 0;
+size_t g_turn_cache_checkpoint_bytes = 0;
+long long g_turn_cache_checkpoint_hits = 0;
+long long g_turn_cache_checkpoint_misses = 0;
 bool g_model_hybrid = false;
 bool g_model_recurrent = false;
 bool g_spec_requested = false;
@@ -311,16 +323,53 @@ bool finish_generation_if_active(GenerationStopReason reason) {
     return true;
 }
 
+bool mark_generation_running_unless_stopped() {
+    if (g_stop_requested.load(std::memory_order_acquire)) {
+        mark_generation_inactive(GenerationStopReason::STOP_REQUESTED);
+        return false;
+    }
+
+    // requestStop() publishes the stop flag before waiting for g_mutex. The
+    // second check closes the window in which that publication can land after
+    // the first check but before this request becomes observable as active.
+    mark_generation_running();
+    if (!g_stop_requested.load(std::memory_order_acquire)) {
+        return true;
+    }
+    finish_generation_if_active(GenerationStopReason::STOP_REQUESTED);
+    return false;
+}
+
 std::string jstring_to_string(JNIEnv *env, jstring value) {
     if (value == nullptr) return "";
-    const char *chars = env->GetStringUTFChars(value, nullptr);
-    std::string result(chars == nullptr ? "" : chars);
-    if (chars != nullptr) env->ReleaseStringUTFChars(value, chars);
+    const jsize length = env->GetStringLength(value);
+    const jchar *chars = env->GetStringChars(value, nullptr);
+    if (chars == nullptr) return "";
+    static_assert(sizeof(jchar) == sizeof(uint16_t), "JNI jchar must be a UTF-16 code unit");
+    std::string result;
+    try {
+        result = mca::utf8::encode_from_utf16(
+                reinterpret_cast<const uint16_t *>(chars),
+                static_cast<size_t>(length));
+    } catch (...) {
+        env->ReleaseStringChars(value, chars);
+        throw;
+    }
+    env->ReleaseStringChars(value, chars);
     return result;
 }
 
 jstring string_to_jstring(JNIEnv *env, const std::string &value) {
-    return env->NewStringUTF(value.c_str());
+    const auto decoded = mca::utf8::decode_to_utf16(value, false);
+    if (decoded.utf16.size() > static_cast<size_t>(std::numeric_limits<jsize>::max())) {
+        throw std::length_error("Native UTF-8 output is too large for a Java string.");
+    }
+    static_assert(sizeof(jchar) == sizeof(uint16_t), "JNI jchar must be a UTF-16 code unit");
+    static constexpr jchar kEmptyStringData = 0;
+    const auto *data = decoded.utf16.empty()
+            ? &kEmptyStringData
+            : reinterpret_cast<const jchar *>(decoded.utf16.data());
+    return env->NewString(data, static_cast<jsize>(decoded.utf16.size()));
 }
 
 void throw_java_illegal_state(JNIEnv *env, const std::string &message) {
@@ -671,6 +720,8 @@ std::string stats_json(const char *backend) {
                                 ? g_decode_finished_ms - g_decode_started_ms : 0;
     const double tps = decode_ms > 0 ? (double) g_completion_tokens * 1000.0 / (double) decode_ms : 0.0;
     const double prefill_tps = prefill_ms > 0
+                               ? (double) g_prefill_computed_tokens * 1000.0 / (double) prefill_ms : 0.0;
+    const double effective_prompt_tps = prefill_ms > 0
                                ? (double) g_prompt_tokens * 1000.0 / (double) prefill_ms : 0.0;
     std::ostringstream out;
     out << "{"
@@ -684,6 +735,7 @@ std::string stats_json(const char *backend) {
         << "\"mlock\":" << (g_effective_config.mlock ? "true" : "false") << ","
         << "\"loadMs\":" << g_load_ms << ","
         << "\"promptTokens\":" << g_prompt_tokens << ","
+        << "\"prefillTokens\":" << g_prefill_computed_tokens << ","
         << "\"completionTokens\":" << g_completion_tokens << ","
         << "\"generationSequence\":" << g_generation_sequence << ","
         << "\"generationActive\":"
@@ -696,6 +748,7 @@ std::string stats_json(const char *backend) {
         << "\"contextShifts\":" << g_context_shifts << ","
         << "\"prefillMs\":" << prefill_ms << ","
         << "\"prefillTps\":" << prefill_tps << ","
+        << "\"effectivePromptTps\":" << effective_prompt_tps << ","
         << "\"decodeMs\":" << decode_ms << ","
         << "\"decodeTps\":" << tps << ","
         << "\"nThreads\":" << g_n_threads << ","
@@ -779,6 +832,10 @@ std::string stats_json(const char *backend) {
         << "\"checkpointValid\":" << (g_cache_checkpoint_valid ? "true" : "false") << ","
         << "\"checkpointTokens\":" << g_cache_checkpoint_tokens << ","
         << "\"checkpointBytes\":" << g_cache_checkpoint_bytes << ","
+        << "\"turnCheckpoints\":" << g_turn_cache_checkpoint_count << ","
+        << "\"turnCheckpointBytes\":" << g_turn_cache_checkpoint_bytes << ","
+        << "\"turnCheckpointHits\":" << g_turn_cache_checkpoint_hits << ","
+        << "\"turnCheckpointMisses\":" << g_turn_cache_checkpoint_misses << ","
         << "\"modelHybrid\":" << (g_model_hybrid ? "true" : "false") << ","
         << "\"modelRecurrent\":" << (g_model_recurrent ? "true" : "false")
         << "},"
@@ -856,6 +913,35 @@ llama_tokens g_context_tokens;
 llama_tokens g_cache_checkpoint_prefix;
 std::vector<uint8_t> g_cache_checkpoint_data;
 size_t g_cache_checkpoint_threshold = 0;
+struct TurnCacheCheckpoint {
+    llama_tokens prefix;
+    std::vector<uint8_t> data;
+    size_t position = 0;
+};
+// Partial-only snapshots contain recurrent state (not the full attention KV),
+// so keeping a small rolling window is inexpensive and lets a tail-pruned
+// conversation restore the exact prior turn boundary.
+std::vector<TurnCacheCheckpoint> g_turn_cache_checkpoints;
+constexpr size_t MAX_TURN_CACHE_CHECKPOINTS = 4;
+constexpr size_t MAX_TURN_CACHE_CHECKPOINT_BYTES = 96U * 1024U * 1024U;
+
+size_t turn_cache_checkpoint_bytes(const TurnCacheCheckpoint &checkpoint) {
+    constexpr size_t token_bytes = sizeof(llama_tokens::value_type);
+    if (checkpoint.prefix.size() >
+            (std::numeric_limits<size_t>::max() - checkpoint.data.size()) / token_bytes) {
+        return std::numeric_limits<size_t>::max();
+    }
+    return checkpoint.data.size() + checkpoint.prefix.size() * token_bytes;
+}
+
+size_t turn_cache_checkpoint_bytes(size_t data_bytes, size_t prefix_tokens) {
+    constexpr size_t token_bytes = sizeof(llama_tokens::value_type);
+    if (prefix_tokens >
+            (std::numeric_limits<size_t>::max() - data_bytes) / token_bytes) {
+        return std::numeric_limits<size_t>::max();
+    }
+    return data_bytes + prefix_tokens * token_bytes;
+}
 llama_tokens g_spec_prompt_tokens;
 llama_tokens g_spec_draft_tokens;
 llama_token g_spec_pending_token = LLAMA_TOKEN_NULL;
@@ -971,6 +1057,12 @@ void invalidate_prefix_cache_checkpoint_locked() {
     g_cache_checkpoint_valid = false;
     g_cache_checkpoint_tokens = 0;
     g_cache_checkpoint_bytes = 0;
+}
+
+void invalidate_turn_cache_checkpoints_locked() {
+    g_turn_cache_checkpoints.clear();
+    g_turn_cache_checkpoint_count = 0;
+    g_turn_cache_checkpoint_bytes = 0;
 }
 
 std::string take_last_error_suffix_locked(size_t start) {
@@ -1142,9 +1234,6 @@ bool validate_runtime_config(const RuntimeConfig &config, std::string &error) {
     }
     if (config.spec_type == "draft-mtp" && config.n_batch < config.spec_draft_n_max + 1) {
         return fail("n_batch must be at least spec_draft_n_max + 1 for draft-mtp verification.");
-    }
-    if (config.n_cpu_moe > 0 && config.n_gpu_layers == 0) {
-        return fail("n_cpu_moe requires GPU offload; n_gpu_layers is 0.");
     }
     const bool quantized_k = config.cache_type_k != "f32" && config.cache_type_k != "f16" && config.cache_type_k != "bf16";
     const bool quantized_v = config.cache_type_v != "f32" && config.cache_type_v != "f16" && config.cache_type_v != "bf16";
@@ -1541,8 +1630,14 @@ bool resolve_backend_config(const RuntimeConfig &requested,
         error = "n_gpu_layers requests GPU offload, but this APK has no usable non-CPU llama.cpp backend.";
         return false;
     }
+    // A CPU-only build can still run a sparse-MoE GGUF. CPU MoE placement is
+    // an optional acceleration request, so clear it when no non-CPU backend is
+    // registered and continue through the generic CPU path. Explicit GPU
+    // layer requests remain a concrete incompatibility and are rejected above.
     if (requested.n_cpu_moe > 0 && !g_gpu_offload_supported) {
-        error = "n_cpu_moe requires a usable GPU offload backend, but none is registered.";
+        effective.n_cpu_moe = 0;
+    } else if (requested.n_cpu_moe > 0 && requested.n_gpu_layers == 0) {
+        error = "n_cpu_moe requires GPU offload; n_gpu_layers is 0.";
         return false;
     }
     if (g_backend_gpu_device_count > 0 && requested.main_gpu >= (int) g_backend_gpu_device_count &&
@@ -1551,7 +1646,7 @@ bool resolve_backend_config(const RuntimeConfig &requested,
         return false;
     }
     if (!g_gpu_offload_supported) {
-        if (requested.main_gpu != 0) {
+        if (requested.main_gpu != 0 && force_gpu) {
             error = "main_gpu must be 0 when no GPU backend is registered.";
             return false;
         }
@@ -1586,6 +1681,7 @@ void free_llama_locked() {
     g_spec_request_active = false;
     clear_gpu_offload_evidence_locked();
     invalidate_prefix_cache_checkpoint_locked();
+    invalidate_turn_cache_checkpoints_locked();
     if (g_mtp_context != nullptr) {
         llama_free(g_mtp_context);
         g_mtp_context = nullptr;
@@ -1677,6 +1773,7 @@ bool shift_context_locked() {
     g_current_position -= n_discard;
     g_context_shifts++;
     invalidate_prefix_cache_checkpoint_locked();
+    invalidate_turn_cache_checkpoints_locked();
     g_cache_state_valid = false;
     g_context_tokens.clear();
     g_cache_reuse_reason = "invalidated_by_context_shift";
@@ -1696,7 +1793,7 @@ int decode_tokens(const llama_tokens &tokens, bool logits_last) {
         return 5;
     }
     for (int i = 0; i < (int) tokens.size(); i += g_n_batch) {
-        if (g_stop_requested.load(std::memory_order_relaxed)) return 3;
+        if (g_stop_requested.load(std::memory_order_acquire)) return COMPLETION_STOPPED;
         const int batch_size = std::min((int) tokens.size() - i, g_n_batch);
         common_batch_clear(g_batch);
         if (g_current_position + batch_size >= g_n_ctx - OVERFLOW_HEADROOM) {
@@ -1714,7 +1811,14 @@ int decode_tokens(const llama_tokens &tokens, bool logits_last) {
             return 6;
         }
         g_current_position += batch_size;
+        g_prefill_computed_tokens += batch_size;
         advance_prefill_progress((size_t) batch_size);
+        // A stop can arrive while llama_decode() owns the current batch. Keep
+        // the position/progress accounting truthful, then terminate before a
+        // completed final batch can be promoted to a running generation.
+        if (g_stop_requested.load(std::memory_order_acquire)) {
+            return COMPLETION_STOPPED;
+        }
     }
     return 0;
 }
@@ -1854,18 +1958,26 @@ PersistentPrefixPreparation prepare_persistent_prefix_locked(
         return result;
     }
 
-    const std::string prefix_text = probe_formatted.substr(0, marker_position);
-    llama_tokens prefix_tokens;
+    // Tokenize the complete probe instead of the prefix substring. A BPE token
+    // can span the textual boundary, so the substring's final token is not
+    // necessarily a prefix of the full prompt. The common token prefix is the
+    // largest portion proven to be both stable and exactly reusable.
+    llama_tokens probe_tokens;
     try {
-        prefix_tokens = common_tokenize(g_context, prefix_text, true, true);
+        probe_tokens = common_tokenize(g_context, probe_formatted, true, true);
     } catch (...) {
-        prefix_tokens.clear();
+        probe_tokens.clear();
     }
-    if (prefix_tokens.empty() || prefix_tokens.size() >= full_tokens.size() ||
-        !mca::llama::tokenPrefixMatches(full_tokens, prefix_tokens)) {
+    const size_t stable_prefix_tokens = mca::llama::longestCommonTokenPrefix(
+            full_tokens,
+            probe_tokens);
+    if (stable_prefix_tokens == 0 || stable_prefix_tokens >= full_tokens.size()) {
         g_persistent_prefix_cache_reason = "token_prefix_mismatch";
         return result;
     }
+    llama_tokens prefix_tokens(
+            full_tokens.begin(),
+            full_tokens.begin() + static_cast<llama_tokens::difference_type>(stable_prefix_tokens));
 
     // A sequence state file contains the complete attention/recurrent state;
     // it must be loaded into a clean sequence and validated against the exact
@@ -2054,6 +2166,7 @@ int prefill_multimodal_locked(
         return -8;
     }
     g_current_position = new_position;
+    g_prefill_computed_tokens = (long long) multimodal_prompt_tokens;
     report_reused_prefill_tokens(multimodal_prompt_tokens);
     return 0;
 }
@@ -2063,6 +2176,7 @@ void clear_target_context_locked(const std::string &reason) {
         llama_memory_clear(llama_get_memory(g_context), false);
     }
     invalidate_prefix_cache_checkpoint_locked();
+    invalidate_turn_cache_checkpoints_locked();
     g_current_position = 0;
     g_context_tokens.clear();
     g_cache_state_valid = false;
@@ -2079,6 +2193,193 @@ bool trim_context_locked(llama_context *ctx, llama_pos position, const char *lab
         return false;
     }
     return true;
+}
+
+bool save_turn_cache_checkpoint_locked() {
+    if (g_context == nullptr || !g_cache_state_valid ||
+        active_prefix_cache_strategy_locked() !=
+                mca::llama::PrefixCacheStrategy::PartialStateCheckpoint ||
+        g_context_tokens.empty() ||
+        g_current_position != (llama_pos) g_context_tokens.size() ||
+        g_stop_requested.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    constexpr llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+    const size_t checkpoint_size = llama_state_seq_get_size_ext(g_context, 0, flags);
+    const size_t incoming_bytes = turn_cache_checkpoint_bytes(
+            checkpoint_size,
+            g_context_tokens.size());
+    if (checkpoint_size == 0 || incoming_bytes > MAX_TURN_CACHE_CHECKPOINT_BYTES) {
+        return false;
+    }
+
+    // Reconcile and evict before allocating the new state or token prefix. The
+    // budget therefore bounds the save-time peak as well as the retained set.
+    g_turn_cache_checkpoint_bytes = 0;
+    for (const auto &checkpoint : g_turn_cache_checkpoints) {
+        const size_t checkpoint_bytes = turn_cache_checkpoint_bytes(checkpoint);
+        if (checkpoint_bytes >
+                std::numeric_limits<size_t>::max() - g_turn_cache_checkpoint_bytes) {
+            invalidate_turn_cache_checkpoints_locked();
+            break;
+        }
+        g_turn_cache_checkpoint_bytes += checkpoint_bytes;
+    }
+    g_turn_cache_checkpoint_count = g_turn_cache_checkpoints.size();
+
+    try {
+        auto existing = std::find_if(
+                g_turn_cache_checkpoints.begin(),
+                g_turn_cache_checkpoints.end(),
+                [&](const TurnCacheCheckpoint &checkpoint) {
+                    return checkpoint.prefix == g_context_tokens;
+                });
+        if (existing != g_turn_cache_checkpoints.end()) {
+            g_turn_cache_checkpoint_bytes -= turn_cache_checkpoint_bytes(*existing);
+            g_turn_cache_checkpoints.erase(existing);
+        }
+
+        while ((!g_turn_cache_checkpoints.empty() &&
+                g_turn_cache_checkpoints.size() >= MAX_TURN_CACHE_CHECKPOINTS) ||
+               g_turn_cache_checkpoint_bytes >
+                       MAX_TURN_CACHE_CHECKPOINT_BYTES - incoming_bytes) {
+            g_turn_cache_checkpoint_bytes -=
+                    turn_cache_checkpoint_bytes(g_turn_cache_checkpoints.front());
+            g_turn_cache_checkpoints.erase(g_turn_cache_checkpoints.begin());
+        }
+        g_turn_cache_checkpoint_count = g_turn_cache_checkpoints.size();
+
+        std::vector<uint8_t> checkpoint_data(checkpoint_size);
+        const size_t written = llama_state_seq_get_data_ext(
+                g_context,
+                checkpoint_data.data(),
+                checkpoint_data.size(),
+                0,
+                flags);
+        if (written != checkpoint_data.size() ||
+            g_stop_requested.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        llama_tokens checkpoint_prefix = g_context_tokens;
+        const size_t checkpoint_position = checkpoint_prefix.size();
+        g_turn_cache_checkpoints.push_back(TurnCacheCheckpoint{
+                std::move(checkpoint_prefix),
+                std::move(checkpoint_data),
+                checkpoint_position});
+        // Account only after push_back succeeds. If the vector allocation
+        // throws, the catch path below can safely recompute the snapshot.
+        g_turn_cache_checkpoint_bytes +=
+                turn_cache_checkpoint_bytes(g_turn_cache_checkpoints.back());
+        g_turn_cache_checkpoint_count = g_turn_cache_checkpoints.size();
+        if (g_stop_requested.load(std::memory_order_acquire)) {
+            g_turn_cache_checkpoint_bytes -=
+                    turn_cache_checkpoint_bytes(g_turn_cache_checkpoints.back());
+            g_turn_cache_checkpoints.pop_back();
+            g_turn_cache_checkpoint_count = g_turn_cache_checkpoints.size();
+            return false;
+        }
+        return true;
+    } catch (const std::exception &) {
+        g_turn_cache_checkpoint_bytes = 0;
+        for (const auto &checkpoint : g_turn_cache_checkpoints) {
+            const size_t checkpoint_bytes = turn_cache_checkpoint_bytes(checkpoint);
+            if (checkpoint_bytes >
+                    std::numeric_limits<size_t>::max() - g_turn_cache_checkpoint_bytes) {
+                invalidate_turn_cache_checkpoints_locked();
+                return false;
+            }
+            g_turn_cache_checkpoint_bytes += checkpoint_bytes;
+        }
+        g_turn_cache_checkpoint_count = g_turn_cache_checkpoints.size();
+        return false;
+    }
+}
+
+bool restore_turn_cache_checkpoint_locked(
+        const llama_tokens &tokens,
+        size_t &reused_tokens) {
+    if (g_context == nullptr || !g_cache_state_valid ||
+        g_context_tokens.empty() || g_turn_cache_checkpoints.empty() ||
+        g_current_position != (llama_pos) g_context_tokens.size()) {
+        return false;
+    }
+
+    // Prefer the deepest checkpoint that is a prefix of both the new prompt
+    // and the currently live context. The second check is essential because a
+    // checkpoint from a different conversation branch contains recurrent state
+    // that cannot reconstruct a missing attention prefix by itself.
+    const TurnCacheCheckpoint *candidate = nullptr;
+    for (auto it = g_turn_cache_checkpoints.rbegin();
+         it != g_turn_cache_checkpoints.rend(); ++it) {
+        if (it->position == 0 || it->position >= tokens.size() ||
+            it->position > g_context_tokens.size() ||
+            !mca::llama::tokenPrefixMatches(tokens, it->prefix) ||
+            !mca::llama::tokenPrefixMatches(g_context_tokens, it->prefix)) {
+            continue;
+        }
+        if (candidate == nullptr || it->position > candidate->position) {
+            candidate = &*it;
+        }
+    }
+    if (candidate == nullptr) return false;
+
+    constexpr llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+    const size_t restored = llama_state_seq_set_data_ext(
+            g_context,
+            candidate->data.data(),
+            candidate->data.size(),
+            0,
+            flags);
+    if (restored != candidate->data.size()) {
+        // A failed state read may already have mutated recurrent memory. Do
+        // not attempt another cache path on a context whose state is unknown.
+        clear_target_context_locked("turn_checkpoint_restore_failed");
+        return false;
+    }
+
+    if (g_current_position > (llama_pos) candidate->position &&
+        !trim_context_locked(
+                g_context,
+                (llama_pos) candidate->position,
+                "target turn-checkpoint cache-reuse")) {
+        const std::string trim_error = g_last_error;
+        g_last_error.clear();
+        clear_target_context_locked("turn_checkpoint_suffix_trim_failed");
+        if (!trim_error.empty()) {
+            __android_log_print(ANDROID_LOG_WARN, "MCA", "%s", trim_error.c_str());
+        }
+        return false;
+    }
+    g_current_position = (llama_pos) candidate->position;
+    g_context_tokens = candidate->prefix;
+    g_cache_state_valid = true;
+    g_cache_reuse_hit = true;
+    g_cache_reused_tokens = (int) std::min<size_t>(
+            candidate->position,
+            static_cast<size_t>(std::numeric_limits<int>::max()));
+    g_cache_reuse_hits++;
+    g_turn_cache_checkpoint_hits++;
+    g_cache_reuse_reason = "turn_checkpoint_hit";
+    reused_tokens = candidate->position;
+    return true;
+}
+
+void save_completed_turn_checkpoint_locked(GenerationStopReason reason) {
+    if (g_spec_request_active || !g_cached_token_chars.empty() ||
+        g_stop_requested.load(std::memory_order_acquire)) {
+        return;
+    }
+    switch (reason) {
+        case GenerationStopReason::STOP_TOKEN:
+        case GenerationStopReason::MAX_NEW_TOKENS:
+        case GenerationStopReason::NORMAL_FINISHED:
+            (void) save_turn_cache_checkpoint_locked();
+            return;
+        default:
+            return;
+    }
 }
 
 void invalidate_speculative_contexts_locked(const std::string &reason) {
@@ -2117,13 +2418,6 @@ bool trim_speculative_contexts_locked(llama_pos position, const char *label) {
     return true;
 }
 
-size_t longest_common_token_prefix(const llama_tokens &first, const llama_tokens &second) {
-    const size_t limit = std::min(first.size(), second.size());
-    size_t matched = 0;
-    while (matched < limit && first[matched] == second[matched]) matched++;
-    return matched;
-}
-
 size_t prepare_text_prefix_locked(const llama_tokens &tokens) {
     g_cache_reuse_hit = false;
     g_cache_reused_tokens = 0;
@@ -2137,6 +2431,31 @@ size_t prepare_text_prefix_locked(const llama_tokens &tokens) {
     }
 
     if (strategy == mca::llama::PrefixCacheStrategy::PartialStateCheckpoint) {
+        const size_t live_matched = g_cache_state_valid
+                ? mca::llama::longestCommonTokenPrefix(tokens, g_context_tokens)
+                : 0;
+        if (live_matched >= threshold &&
+            live_matched == g_context_tokens.size() &&
+            live_matched < tokens.size() &&
+            g_current_position == (llama_pos) live_matched) {
+            g_cache_reuse_hit = true;
+            g_cache_reused_tokens = (int) std::min<size_t>(
+                    live_matched,
+                    static_cast<size_t>(std::numeric_limits<int>::max()));
+            g_cache_reuse_hits++;
+            g_cache_reuse_reason = "live_turn_prefix_hit";
+            return live_matched;
+        }
+
+        const bool had_turn_checkpoints = !g_turn_cache_checkpoints.empty();
+        size_t turn_checkpoint_reuse = 0;
+        if (restore_turn_cache_checkpoint_locked(tokens, turn_checkpoint_reuse)) {
+            return turn_checkpoint_reuse;
+        }
+        if (had_turn_checkpoints) {
+            g_turn_cache_checkpoint_misses++;
+        }
+
         const bool checkpoint_shape_valid =
                 g_cache_checkpoint_valid &&
                 !g_cache_checkpoint_data.empty() &&
@@ -2232,7 +2551,7 @@ size_t prepare_text_prefix_locked(const llama_tokens &tokens) {
         return 0;
     }
 
-    const size_t matched = longest_common_token_prefix(tokens, g_context_tokens);
+    const size_t matched = mca::llama::longestCommonTokenPrefix(tokens, g_context_tokens);
     if (matched < (size_t) g_effective_config.cache_reuse) {
         g_cache_reuse_misses++;
         clear_target_context_locked("common_prefix_below_threshold");
@@ -2292,6 +2611,7 @@ int decode_text_prompt_locked(const llama_tokens &tokens, size_t reused) {
         const int prefix_rc = decode_tokens(checkpoint_prefix, false);
         if (prefix_rc != 0) {
             invalidate_prefix_cache_checkpoint_locked();
+            invalidate_turn_cache_checkpoints_locked();
             return prefix_rc;
         }
 
@@ -2629,6 +2949,8 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         jstring modelPath,
         jstring paramsJson
 ) {
+    g_stop_requested.store(true, std::memory_order_release);
+    g_stop_epoch.fetch_add(1, std::memory_order_acq_rel);
     try {
     std::lock_guard<std::mutex> lock(g_mutex);
     const std::string path = jstring_to_string(env, modelPath);
@@ -2641,6 +2963,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     g_model_architecture.clear();
     g_model_mtp_layers = 0;
     g_prompt_tokens = 0;
+    g_prefill_computed_tokens = 0;
     g_completion_tokens = 0;
     g_prefill_started_ms = 0;
     g_prefill_finished_ms = 0;
@@ -2699,6 +3022,8 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     g_spec_request_reason = g_spec_requested ? "awaiting_text_request" : "disabled";
     g_cache_reuse_hits = 0;
     g_cache_reuse_misses = 0;
+    g_turn_cache_checkpoint_hits = 0;
+    g_turn_cache_checkpoint_misses = 0;
     g_cache_reuse_hit = false;
     g_cache_reused_tokens = 0;
     g_cache_reuse_reason = requested.spec_type == "draft-mtp" && requested.cache_reuse > 0
@@ -3075,8 +3400,9 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_unloadModel(JNIEnv *, jobject) {
+    g_stop_requested.store(true, std::memory_order_release);
+    g_stop_epoch.fetch_add(1, std::memory_order_acq_rel);
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_stop_requested.store(true, std::memory_order_relaxed);
     mark_generation_inactive(GenerationStopReason::UNLOADED);
 #if MCA_WITH_LLAMA_CPP
     free_llama_locked();
@@ -3089,8 +3415,9 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_unloadModel(JNIEnv *, jobj
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_invalidateTextContext(JNIEnv *, jobject) {
-    std::lock_guard<std::mutex> lock(g_mutex);
     g_stop_requested.store(true, std::memory_order_release);
+    g_stop_epoch.fetch_add(1, std::memory_order_acq_rel);
+    std::lock_guard<std::mutex> lock(g_mutex);
     mark_generation_inactive(GenerationStopReason::STOP_REQUESTED);
 #if MCA_WITH_LLAMA_CPP
     // A user-visible conversation mutation must not be serviced from the old
@@ -3117,12 +3444,17 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         jstring messagesJson,
         jstring paramsJson
 ) {
+    // Capture before waiting for g_mutex. A stop accepted after JNI entry must
+    // cancel this request even if requestStop() wins the mutex and returns
+    // before beginCompletion() reaches its ordinary stale-stop reset.
+    const std::uint64_t stop_epoch_at_entry =
+            g_stop_epoch.load(std::memory_order_acquire);
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_cache_reuse_hit = false;
         g_cache_reused_tokens = 0;
         g_cache_reuse_reason = "not_attempted";
-        g_persistent_prefix_cache_attempted = g_thread_prefix_cache_request.requested;
+        g_persistent_prefix_cache_attempted = false;
         g_persistent_prefix_cache_hit = false;
         g_persistent_prefix_cache_saved = false;
         g_persistent_prefix_cache_tokens = 0;
@@ -3138,9 +3470,15 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         const std::string messages_json = jstring_to_string(env, messagesJson);
         const std::string params_json = jstring_to_string(env, paramsJson);
         mark_generation_inactive(GenerationStopReason::BEGIN_FAILED);
-        g_stop_requested.store(false, std::memory_order_relaxed);
+        g_stop_requested.store(false, std::memory_order_release);
+        if (g_stop_epoch.load(std::memory_order_acquire) != stop_epoch_at_entry) {
+            g_stop_requested.store(true, std::memory_order_release);
+            mark_generation_inactive(GenerationStopReason::STOP_REQUESTED);
+            return COMPLETION_STOPPED;
+        }
         g_last_error.clear();
         g_prompt_tokens = 0;
+        g_prefill_computed_tokens = 0;
         g_completion_tokens = 0;
         g_prefill_started_ms = now_ms();
         g_prefill_finished_ms = g_prefill_started_ms;
@@ -3179,6 +3517,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         refresh_prefix_cache_strategy_locked();
         if (previous_effective_cache_reuse != g_effective_config.cache_reuse) {
             invalidate_prefix_cache_checkpoint_locked();
+            invalidate_turn_cache_checkpoints_locked();
             g_cache_reuse_reason = "cache_reuse_threshold_changed";
         }
         if (g_spec_requested && request_config.cache_reuse > 0) {
@@ -3249,20 +3588,30 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
                 if (g_mtp_context != nullptr) {
                     llama_memory_clear(llama_get_memory(g_mtp_context), false);
                 }
-                if (mca::llama::canAttemptPersistentPrefixCache(
-                        persistent_prefix_request.requested,
-                        false,
-                        false,
-                        (size_t) request_config.n_parallel)) {
+                const bool persistent_prefix_eligible =
+                        mca::llama::canAttemptPersistentPrefixCache(
+                                persistent_prefix_request.requested,
+                                false,
+                                false,
+                                (size_t) request_config.n_parallel);
+
+                // The live token-prefix state includes the complete append-only
+                // conversation. A persistent state file contains only the
+                // fixed persona prefix, so restoring it before this check
+                // would discard the much more valuable session KV every turn.
+                reused = prepare_text_prefix_locked(tokens);
+                if (mca::llama::shouldAttemptPersistentPrefixFallback(
+                        persistent_prefix_eligible,
+                        g_cache_reuse_hit)) {
                     persistent_prefix = prepare_persistent_prefix_locked(
                             messages,
                             chat_options,
                             tokens,
                             persistent_prefix_request);
+                    reused = persistent_prefix.handled
+                            ? persistent_prefix.reused_tokens
+                            : 0;
                 }
-                reused = persistent_prefix.handled
-                        ? persistent_prefix.reused_tokens
-                        : prepare_text_prefix_locked(tokens);
             }
             report_reused_prefill_tokens(reused);
             rc = decode_text_prompt_locked(tokens, reused);
@@ -3298,10 +3647,16 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
                 std::max(64, (int) (g_prompt_tokens / 4)),
                 std::max(64, g_n_ctx / 2));
         g_prefill_finished_ms = now_ms();
+        if (rc == COMPLETION_STOPPED &&
+            g_stop_requested.load(std::memory_order_acquire)) {
+            mark_generation_inactive(GenerationStopReason::STOP_REQUESTED);
+        }
         if (rc == 0) {
             // Failed begin paths (including load-signature mismatch -11) return above.
+            if (!mark_generation_running_unless_stopped()) {
+                return COMPLETION_STOPPED;
+            }
             ++g_generation_sequence;
-            mark_generation_running();
         }
         return rc;
 #else
@@ -3314,8 +3669,10 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
                 " 接入 llama.cpp 后，",
                 "这里会替换为真实 GGUF 模型在骁龙/天玑 ARM CPU 上的本地推理结果。"
         };
+        if (!mark_generation_running_unless_stopped()) {
+            return COMPLETION_STOPPED;
+        }
         ++g_generation_sequence;
-        mark_generation_running();
         return 0;
 #endif
     } catch (const std::exception &e) {
@@ -3428,6 +3785,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *
         if (step.output.empty()) {
             if (step.done) {
                 g_decode_finished_ms = now_ms();
+                save_completed_turn_checkpoint_locked(GenerationStopReason::NORMAL_FINISHED);
                 finish_generation_if_active(GenerationStopReason::NORMAL_FINISHED);
             }
             return step.done ? nullptr : string_to_jstring(env, "");
@@ -3436,23 +3794,44 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *
         for (const llama_token token: step.output) {
             g_cached_token_chars += common_token_to_piece(g_context, token);
         }
+        const bool output_boundary_valid = is_valid_utf8(g_cached_token_chars.c_str());
+        std::string ready_output;
+        if (output_boundary_valid) {
+            ready_output = g_cached_token_chars;
+            g_cached_token_chars.clear();
+        }
         g_decode_finished_ms = now_ms();
         if (step.done) {
+            if (output_boundary_valid) {
+                save_completed_turn_checkpoint_locked(GenerationStopReason::NORMAL_FINISHED);
+            }
             finish_generation_if_active(GenerationStopReason::NORMAL_FINISHED);
         } else if (g_n_predict > 0 && g_completion_tokens >= g_n_predict) {
+            if (output_boundary_valid) {
+                save_completed_turn_checkpoint_locked(GenerationStopReason::MAX_NEW_TOKENS);
+            }
             finish_generation_if_active(GenerationStopReason::MAX_NEW_TOKENS);
         }
-        if (is_valid_utf8(g_cached_token_chars.c_str())) {
-            const std::string out = g_cached_token_chars;
-            g_cached_token_chars.clear();
-            return string_to_jstring(env, out);
+        if (output_boundary_valid) {
+            return string_to_jstring(env, ready_output);
         }
         return string_to_jstring(env, "");
     }
 
     const llama_token token = common_sampler_sample(g_sampler, g_context, -1);
+    if (g_stop_requested.load(std::memory_order_acquire)) {
+        finish_generation_if_active(GenerationStopReason::STOP_REQUESTED);
+        return nullptr;
+    }
     common_sampler_accept(g_sampler, token, true);
+    if (g_stop_requested.load(std::memory_order_acquire)) {
+        finish_generation_if_active(GenerationStopReason::STOP_REQUESTED);
+        return nullptr;
+    }
     if (llama_vocab_is_eog(llama_model_get_vocab(g_model), token)) {
+        // The terminal token itself is not decoded into KV. Only promote the
+        // preceding state when no partial UTF-8 bytes remain undisclosed.
+        save_completed_turn_checkpoint_locked(GenerationStopReason::STOP_TOKEN);
         finish_generation_if_active(GenerationStopReason::STOP_TOKEN);
         return nullptr;
     }
@@ -3470,6 +3849,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *
     if (decode_rc != 0) {
         g_last_error = "llama_decode failed during token generation: " + std::to_string(decode_rc);
         invalidate_prefix_cache_checkpoint_locked();
+        invalidate_turn_cache_checkpoints_locked();
         g_cache_state_valid = false;
         g_context_tokens.clear();
         g_cache_reuse_reason = "invalidated_by_decode_failure";
@@ -3483,15 +3863,33 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *
         g_context_tokens.push_back(token);
     }
     g_decode_finished_ms = now_ms();
+    g_cached_token_chars += common_token_to_piece(g_context, token);
+    const bool output_boundary_valid = is_valid_utf8(g_cached_token_chars.c_str());
+    if (g_stop_requested.load(std::memory_order_acquire)) {
+        // llama_decode already committed this token, so keep position/token
+        // bookkeeping aligned with the real KV. Cancellation owns output
+        // visibility, however: no byte sampled by this JNI call is published.
+        g_cached_token_chars.clear();
+        finish_generation_if_active(GenerationStopReason::STOP_REQUESTED);
+        return nullptr;
+    }
+    std::string ready_output;
+    if (output_boundary_valid) {
+        ready_output = g_cached_token_chars;
+        g_cached_token_chars.clear();
+    }
     if (g_n_predict > 0 && g_completion_tokens >= g_n_predict) {
+        // A checkpoint is reusable only when every committed output byte was
+        // publishable to Java. An incomplete UTF-8 tail stays live in memory,
+        // but is deliberately not promoted to a durable turn boundary.
+        if (output_boundary_valid) {
+            save_completed_turn_checkpoint_locked(GenerationStopReason::MAX_NEW_TOKENS);
+        }
         finish_generation_if_active(GenerationStopReason::MAX_NEW_TOKENS);
     }
 
-    g_cached_token_chars += common_token_to_piece(g_context, token);
-    if (is_valid_utf8(g_cached_token_chars.c_str())) {
-        const std::string out = g_cached_token_chars;
-        g_cached_token_chars.clear();
-        return string_to_jstring(env, out);
+    if (output_boundary_valid) {
+        return string_to_jstring(env, ready_output);
     }
     return string_to_jstring(env, "");
 #else
@@ -3516,7 +3914,12 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_requestStop(JNIEnv *, jobject) {
+    // Publish cancellation before waiting for native work. Once this function
+    // returns, the mutex handshake guarantees that no in-flight JNI call can
+    // subsequently commit output for the stopped request.
     g_stop_requested.store(true, std::memory_order_release);
+    g_stop_epoch.fetch_add(1, std::memory_order_acq_rel);
+    std::lock_guard<std::mutex> lock(g_mutex);
     finish_generation_if_active(GenerationStopReason::STOP_REQUESTED);
 }
 
@@ -3531,6 +3934,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_requestStopIfActive(JNIEnv
         return JNI_FALSE;
     }
     g_stop_requested.store(true, std::memory_order_release);
+    g_stop_epoch.fetch_add(1, std::memory_order_acq_rel);
     return JNI_TRUE;
 }
 
@@ -3549,8 +3953,9 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getRuntimeStatsJson(JNIEnv
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_shutdown(JNIEnv *, jobject) {
+    g_stop_requested.store(true, std::memory_order_release);
+    g_stop_epoch.fetch_add(1, std::memory_order_acq_rel);
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_stop_requested.store(true, std::memory_order_relaxed);
     mark_generation_inactive(GenerationStopReason::SHUTDOWN);
 #if MCA_WITH_LLAMA_CPP
     free_llama_locked();

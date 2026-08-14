@@ -10,6 +10,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.json.JSONObject
 
 class ModelRuntimeProfileStorePolicyTest {
     @Test
@@ -53,6 +54,81 @@ class ModelRuntimeProfileStorePolicyTest {
         assertTrue(snapshot.profile.profileJson.contains("@resource-binding:"))
         assertEquals(profile, restored)
         assertEquals(2, snapshot.resourceBindings.size)
+    }
+
+    @Test
+    fun profileSnapshotPreservesDesiredExecutionValuesAfterRuntimeNormalization() {
+        val identity = identity()
+        val load = CanonicalParameterSet.of(mapOf("n_ctx" to 4096))
+        val desiredHot = CanonicalParameterSet.of(
+            mapOf("n_threads" to 8, "n_threads_batch" to 1)
+        )
+        val resolvedHot = CanonicalParameterSet.of(
+            mapOf("n_threads" to 6, "n_threads_batch" to 6)
+        )
+        val desiredBehavior = CanonicalParameterSet.of(
+            mapOf("template_policy_ref" to "requested-template")
+        )
+        val resolvedBehavior = CanonicalParameterSet.of(
+            mapOf("template_policy_ref" to "resolved-template")
+        )
+        val profile = ModelExecutionProfile(
+            modelId = identity.modelId,
+            runtimeIdentity = identity,
+            desiredLoadBoundValues = load,
+            resolvedLoadBoundValues = load,
+            hotExecutionValues = resolvedHot,
+            desiredHotExecutionValues = desiredHot,
+            modelBehaviorValues = resolvedBehavior,
+            desiredModelBehaviorValues = desiredBehavior,
+            profileId = "profile-normalized",
+            revision = 4
+        )
+
+        val snapshot = profile.toPersistedExecutionProfileSnapshot(now = 200L, createdAt = 100L)
+        val restored = snapshot.profile.toModelExecutionProfile(identity, snapshot.resourceBindings)
+
+        assertEquals(profile, restored)
+        assertEquals(desiredHot, restored.desiredHotExecutionValues)
+        assertEquals(desiredBehavior, restored.desiredModelBehaviorValues)
+        assertFalse(snapshot.profile.requiresDesiredExecutionSnapshotMigration())
+    }
+
+    @Test
+    fun legacyProfileWithoutDesiredExecutionValuesUsesEffectiveValuesUntilUpgraded() {
+        val identity = identity()
+        val load = CanonicalParameterSet.of(mapOf("n_ctx" to 4096))
+        val profile = ModelExecutionProfile(
+            modelId = identity.modelId,
+            runtimeIdentity = identity,
+            desiredLoadBoundValues = load,
+            resolvedLoadBoundValues = load,
+            hotExecutionValues = CanonicalParameterSet.of(mapOf("n_threads" to 6)),
+            desiredHotExecutionValues = CanonicalParameterSet.of(mapOf("n_threads" to 8)),
+            modelBehaviorValues = CanonicalParameterSet.of(
+                mapOf("template_policy_ref" to "resolved-template")
+            ),
+            desiredModelBehaviorValues = CanonicalParameterSet.of(
+                mapOf("template_policy_ref" to "requested-template")
+            ),
+            profileId = "profile-legacy",
+            revision = 5
+        )
+        val currentSnapshot = profile.toPersistedExecutionProfileSnapshot(now = 200L, createdAt = 100L)
+        val legacySnapshot = currentSnapshot.profile.copy(
+            profileJson = JSONObject(currentSnapshot.profile.profileJson).apply {
+                remove("desiredHotExecutionValues")
+                remove("desiredModelBehaviorValues")
+            }.toString()
+        )
+
+        val restored = legacySnapshot.toModelExecutionProfile(identity, currentSnapshot.resourceBindings)
+
+        assertTrue(legacySnapshot.requiresDesiredExecutionSnapshotMigration())
+        assertEquals(profile.hotExecutionValues, restored.desiredHotExecutionValues)
+        assertEquals(profile.modelBehaviorValues, restored.desiredModelBehaviorValues)
+        assertEquals(profile.resolvedLoadSignature, restored.resolvedLoadSignature)
+        assertEquals(profile.committedExecutionSignature, restored.committedExecutionSignature)
     }
 
     @Test

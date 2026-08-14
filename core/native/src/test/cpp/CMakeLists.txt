@@ -34,6 +34,29 @@ add_test(
 )
 
 add_executable(
+    mca_llama_prefix_cache_policy_test
+    llama_prefix_cache_policy_test.cpp
+)
+target_compile_features(mca_llama_prefix_cache_policy_test PRIVATE cxx_std_17)
+
+add_test(
+    NAME mca_llama_prefix_cache_policy
+    COMMAND mca_llama_prefix_cache_policy_test
+)
+
+add_executable(
+    mca_native_generation_cache_contract_test
+    native_generation_cache_contract_test.cpp
+)
+target_compile_features(mca_native_generation_cache_contract_test PRIVATE cxx_std_17)
+
+add_test(
+    NAME mca_native_generation_cache_contract
+    COMMAND mca_native_generation_cache_contract_test
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/native_engine.cpp"
+)
+
+add_executable(
     mca_persistent_prefix_cache_equivalence_test
     persistent_prefix_cache_equivalence_test.cpp
 )

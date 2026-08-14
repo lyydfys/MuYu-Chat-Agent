@@ -1560,7 +1560,7 @@ private fun RemoteFilesSection(
                     singleLine = true,
                     label = { Text("模型 ID 或链接") }
                 )
-                IconButton(onClick = onFetchRemoteFiles, enabled = !state.isBusy) {
+                IconButton(onClick = onImportClick, enabled = !state.isBusy) {
                     Icon(Icons.Default.Search, contentDescription = "查找本地推理文件")
                 }
             }

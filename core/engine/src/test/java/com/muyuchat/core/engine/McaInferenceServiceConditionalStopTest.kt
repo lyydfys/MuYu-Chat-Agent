@@ -7,21 +7,21 @@ import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class McaInferenceServiceConditionalStopTest {
     @Test
-    fun serviceReturnsTheRunnerAtomicStopDecision() = runBlocking {
+    fun runnerActiveFlagCannotAuthorizeAStopWithoutAnEngineRequestToken() = runBlocking {
         val runner = ConditionalStopRunner(accepted = true)
         val service = serviceWith(runner)
 
-        assertTrue(service.stopGenerationIfActive())
-        assertEquals(1, runner.conditionalStopCalls)
+        assertFalse(service.stopGenerationIfActive())
+        assertEquals(0, runner.conditionalStopCalls)
+        assertEquals(0, runner.unconditionalStopCalls)
     }
 
     @Test
-    fun unsupportedRunnerFailsClosedInsteadOfClaimingCancellation() = runBlocking {
+    fun idleServiceFailsClosedInsteadOfIssuingAnUnconditionalStop() = runBlocking {
         val runner = UnsupportedConditionalStopRunner()
         val service = serviceWith(runner)
 

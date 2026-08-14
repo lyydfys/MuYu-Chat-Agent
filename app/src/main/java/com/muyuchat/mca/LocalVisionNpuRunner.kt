@@ -105,7 +105,7 @@ internal class LiteRtQnnVisionRunner(
             return LocalVisionNpuReport(
                 state = LocalVisionNpuState.RUNNER_NOT_PACKAGED,
                 backend = backendLabel,
-                message = "LiteRT/QNN vision bridge is not packaged yet; NPU vision remains inactive."
+                message = "QNN typed graph bindings are unavailable in this APK; rebuild with the QAIRT/QNN SDK headers."
             )
         }
         val smokeValidation = manifest.qnnSmokeSpec.validation

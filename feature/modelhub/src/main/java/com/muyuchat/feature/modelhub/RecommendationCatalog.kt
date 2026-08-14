@@ -176,15 +176,9 @@ private val COMMUNITY_LOW_REFUSAL_MODEL_IDS = setOf(
     "qwen35_08b_uncensored_mnn",
     "qwen35_2b_abliterated_gguf",
     "gemma4_e2b_uncensored_gguf",
-    "qwen3_vl_4b_abliterated_gguf",
-    "qwen3_4b_2507_abliterated_gguf",
     "qwen35_4b_uncensored_mnn",
-    "minicpm_v46_abliterated_gguf",
     "gemma4_e4b_uncensored_gguf",
     "qwen35_9b_uncensored_mnn",
-    "qwen3_8b_abliterated_gguf",
-    "qwen25_vl_7b_abliterated_gguf",
-    "qwen36_35b_a3b_abliterated_mnn",
     "gemma4_26b_a4b_abliterated_gguf"
 )
 

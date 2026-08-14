@@ -463,7 +463,13 @@ object SafeBaselineFactory {
                 mlock = false,
                 backend = backend
             ),
-            hotExecution = HotExecutionParams(nThreads = threads),
+            // Prompt prefill uses llama.cpp's batch thread pool. Leaving this
+            // unset falls back to the runtime default of one thread even when
+            // decode is correctly tuned to the device's worker count.
+            hotExecution = HotExecutionParams(
+                nThreads = threads,
+                nThreadsBatch = threads
+            ),
             verificationLevel = ProfileVerificationLevel.UNVERIFIED,
             eligibility = if (blockedAction == null) ProfileEligibility.ELIGIBLE else ProfileEligibility.BLOCKED_WITH_ACTION,
             blockedAction = blockedAction,

@@ -554,8 +554,22 @@ internal fun ModelExecutionProfile.toPersistedExecutionProfileSnapshot(
     val desired = desiredLoadBoundValues.bindResources("desired", this, bindings, now)
     val resolved = resolvedLoadBoundValues.bindResources("resolved", this, bindings, now)
     val hot = hotExecutionValues.bindResources("hot", this, bindings, now)
+    val desiredHot = desiredHotExecutionValues.bindResources("desired-hot", this, bindings, now)
     val behavior = modelBehaviorValues.bindResources("behavior", this, bindings, now)
-    val profileJson = canonicalProfileJson(desired, resolved, hot, behavior)
+    val desiredBehavior = desiredModelBehaviorValues.bindResources(
+        "desired-behavior",
+        this,
+        bindings,
+        now
+    )
+    val profileJson = canonicalProfileJson(
+        desired = desired,
+        resolved = resolved,
+        hot = hot,
+        desiredHot = desiredHot,
+        behavior = behavior,
+        desiredBehavior = desiredBehavior
+    )
     RuntimeProfilePersistencePolicy.requireSafeProfileJson(profileJson)
     val entity = ExecutionProfileEntity(
         profileId = profileId,
@@ -606,6 +620,14 @@ internal fun ExecutionProfileEntity.toModelExecutionProfile(
         root.getJSONObject(jsonSlot), bindingSlot, identity, profileId, bindingsById, consumedBindings
     )
 
+    val hot = restore("hotExecutionValues", "hot")
+    val behavior = restore("modelBehaviorValues", "behavior")
+    val hasDesiredHot = root.has("desiredHotExecutionValues")
+    val hasDesiredBehavior = root.has("desiredModelBehaviorValues")
+    require(hasDesiredHot == hasDesiredBehavior) {
+        "Profile has an incomplete desired execution snapshot."
+    }
+    val hasCompleteDesiredExecutionSnapshot = hasDesiredHot
     val profile = ModelExecutionProfile(
         schemaVersion = root.getInt("schemaVersion"),
         modelId = root.getString("modelId"),
@@ -617,8 +639,18 @@ internal fun ExecutionProfileEntity.toModelExecutionProfile(
         // was written and remains compatible with existing snapshots.
         desiredLoadBoundValues = restore("desiredLoadBoundValues", "desired"),
         resolvedLoadBoundValues = restore("resolvedLoadBoundValues", "resolved"),
-        hotExecutionValues = restore("hotExecutionValues", "hot"),
-        modelBehaviorValues = restore("modelBehaviorValues", "behavior"),
+        hotExecutionValues = hot,
+        desiredHotExecutionValues = if (hasCompleteDesiredExecutionSnapshot) {
+            restore("desiredHotExecutionValues", "desired-hot")
+        } else {
+            hot
+        },
+        modelBehaviorValues = behavior,
+        desiredModelBehaviorValues = if (hasCompleteDesiredExecutionSnapshot) {
+            restore("desiredModelBehaviorValues", "desired-behavior")
+        } else {
+            behavior
+        },
         profileId = profileId,
         revision = revision,
         userOverrides = root.getJSONArray("userOverrides").let { array ->
@@ -628,7 +660,11 @@ internal fun ExecutionProfileEntity.toModelExecutionProfile(
         resolvedAt = root.getLong("resolvedAt")
     )
     require(consumedBindings == bindingsById.keys) { "Profile has unreferenced runtime resource bindings." }
-    require(profile.desiredSignature.digest == desiredProfileSignature) { "Desired profile signature mismatch." }
+    if (hasCompleteDesiredExecutionSnapshot) {
+        require(profile.desiredSignature.digest == desiredProfileSignature) {
+            "Desired profile signature mismatch."
+        }
+    }
     require(profile.resolvedLoadSignature.digest == resolvedLoadSignature) { "Resolved load signature mismatch." }
     require(profile.committedExecutionSignature.digest == committedExecutionSignature) {
         "Committed execution signature mismatch."
@@ -694,7 +730,9 @@ private fun ModelExecutionProfile.canonicalProfileJson(
     desired: CanonicalParameterSet,
     resolved: CanonicalParameterSet,
     hot: CanonicalParameterSet,
-    behavior: CanonicalParameterSet
+    desiredHot: CanonicalParameterSet,
+    behavior: CanonicalParameterSet,
+    desiredBehavior: CanonicalParameterSet
 ): String = JSONObject().apply {
     put("formatVersion", PROFILE_SNAPSHOT_FORMAT_VERSION)
     put("schemaVersion", schemaVersion)
@@ -706,10 +744,28 @@ private fun ModelExecutionProfile.canonicalProfileJson(
     put("desiredLoadBoundValues", desired.toEncodedJsonObject())
     put("resolvedLoadBoundValues", resolved.toEncodedJsonObject())
     put("hotExecutionValues", hot.toEncodedJsonObject())
+    put("desiredHotExecutionValues", desiredHot.toEncodedJsonObject())
     put("modelBehaviorValues", behavior.toEncodedJsonObject())
+    put("desiredModelBehaviorValues", desiredBehavior.toEncodedJsonObject())
     put("userOverrides", JSONArray().also { array -> userOverrides.toSortedSet().forEach { array.put(it) } })
     put("resolvedAt", resolvedAt)
 }.toString()
+
+/**
+ * Older snapshots did not preserve desired hot/behavior values. Their original
+ * desired digest cannot be reconstructed after a runtime normalization, so the
+ * next formal load must write a complete snapshot under a fresh profile id.
+ */
+internal fun ExecutionProfileEntity.requiresDesiredExecutionSnapshotMigration(): Boolean {
+    RuntimeProfilePersistencePolicy.requireSafeProfileJson(profileJson)
+    val root = JSONObject(profileJson)
+    val hasDesiredHot = root.has("desiredHotExecutionValues")
+    val hasDesiredBehavior = root.has("desiredModelBehaviorValues")
+    require(hasDesiredHot == hasDesiredBehavior) {
+        "Profile has an incomplete desired execution snapshot."
+    }
+    return !hasDesiredHot
+}
 
 private fun CanonicalParameterSet.bindResources(
     slot: String,

@@ -32,7 +32,12 @@
         <service
             android:name=".LocalImageWorkerService"
             android:exported="false"
-            android:process=":local_image" />
+            android:foregroundServiceType="specialUse"
+            android:process=":local_image">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="local_image_generation" />
+        </service>
 
         <!-- SDXL V75 archive contexts are split into disposable processes.
              Physical HTP transport is selected dynamically; encoder, UNet,
@@ -73,8 +78,13 @@
         <service
             android:name=".LocalChatWorkerService"
             android:exported="false"
+            android:foregroundServiceType="specialUse"
             android:process=":local_chat"
-            android:stopWithTask="true" />
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="resident_local_ai_model" />
+        </service>
 
         <service
             android:name=".LocalApiForegroundService"

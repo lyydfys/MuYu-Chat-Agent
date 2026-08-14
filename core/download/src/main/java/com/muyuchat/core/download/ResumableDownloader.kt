@@ -91,7 +91,10 @@ class ResumableDownloader(
                 "模型下载失败：HTTP ${response.code}"
             }
 
-            val append = downloaded > 0L && response.code == 206
+            // Append only when the server explicitly honored the requested range.
+            // A 200 response is a fresh full body; appending to stale bytes corrupts it.
+            val append = downloaded > 0L && response.code == 206 &&
+                response.header("Content-Range")?.startsWith("bytes $downloaded-") == true
             if (!append) {
                 downloaded = 0L
                 if (tempFile.exists()) tempFile.delete()

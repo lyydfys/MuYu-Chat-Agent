@@ -2811,7 +2811,9 @@ class LocalImageProvider(context: Context) {
             }
             require(NativeQnnBridge.runnerReady) {
                 JSONObject(qnnBridge.getRuntimeStatsJson()).optString("lastError")
-                    .ifBlank { "Snapdragon NPU image runner is not packaged in this APK." }
+                    .ifBlank {
+                        "QNN typed graph bindings are unavailable in this APK; rebuild with the QAIRT/QNN SDK headers."
+                    }
             }
             require(NativeMnnDiffusionBridge.isAvailable) {
                 val reason = NativeMnnDiffusionBridge.loadError?.message.orEmpty()
@@ -2960,17 +2962,17 @@ class LocalImageProvider(context: Context) {
                 }
                 else -> bundleRoot
             }
-            val outputDir = File(
+            val outputDir = canonicalLocalImageOutputDirectory(
                 appContext.cacheDir,
                 if (usesSplitQnnWorkers) SDXL_TWO_PHASE_DIRECTORY else "local_image_outputs"
-            ).apply { mkdirs() }
+            )
             if (!usesSplitQnnWorkers) {
                 runCatching { QnnImageStageJournal.sweepStalePreviewDirectories(outputDir) }
                 runCatching { QnnInputImageArtifact.cleanupStaleSharedArtifacts(appContext.cacheDir) }
                 runCatching { QnnInpaintInputArtifact.cleanupStaleArtifacts(appContext.cacheDir) }
             }
             val requestToken = "qnn-htp-${System.currentTimeMillis()}-${UUID.randomUUID()}"
-            val outputFile = File(outputDir, "$requestToken.png")
+            val outputFile = File(outputDir, "$requestToken.png").canonicalFile
             val embeddingFile = File(
                 outputDir,
                 if (isSdxlQnn) {
@@ -3465,8 +3467,8 @@ class LocalImageProvider(context: Context) {
                             bundleRoot.absolutePath,
                             qnnRuntimeDirsJson(bundleRoot),
                             params.toString(),
-                            embeddingFile.absolutePath,
-                            outputFile.absolutePath
+                            embeddingFile.canonicalPath,
+                            outputFile.canonicalPath
                         ).also { qnnRawResult = it }
                     } finally {
                         // The parent provider coroutine may already be cancelled here. Join in a
@@ -3795,9 +3797,15 @@ class LocalImageProvider(context: Context) {
                 ?: error("MNN-Diffusion requires a complete model bundle directory.")
             prepareMnnDiffusionTokenizerIfPossible(bundleRoot)
             model.localImageStructuralReadinessMessage()?.let { message -> error(message) }
-            val outputDir = File(appContext.cacheDir, "local_image_outputs").apply { mkdirs() }
+            val outputDir = canonicalLocalImageOutputDirectory(
+                appContext.cacheDir,
+                "local_image_outputs"
+            )
             pruneStaleMnnDiffusionOutputs(outputDir)
-            val outputFile = File(outputDir, "mnn-diffusion-${UUID.randomUUID()}.png")
+            val outputFile = File(
+                outputDir,
+                "mnn-diffusion-${UUID.randomUUID()}.png"
+            ).canonicalFile
             try {
             val fallbackSeed = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
             val effectiveOptions = if (options.seed == null) options.copy(seed = fallbackSeed) else options
@@ -3931,7 +3939,7 @@ class LocalImageProvider(context: Context) {
                 mnnDiffusionBridge.generate(
                     bundleRoot.absolutePath,
                     params.toString(),
-                    outputFile.absolutePath
+                    outputFile.canonicalPath
                 )
             } finally {
                 progressPoller.cancelAndJoin()
@@ -4085,9 +4093,15 @@ class LocalImageProvider(context: Context) {
             }
         val resolved = profileResolution.layers.resolved
 
-        val outputDir = File(appContext.cacheDir, "local_image_outputs").apply { mkdirs() }
+        val outputDir = canonicalLocalImageOutputDirectory(
+            appContext.cacheDir,
+            "local_image_outputs"
+        )
         pruneStaleStableDiffusionOutputs(outputDir)
-        val outputFile = File(outputDir, "sdcpp-${UUID.randomUUID()}.png")
+        val outputFile = File(
+            outputDir,
+            "sdcpp-${UUID.randomUUID()}.png"
+        ).canonicalFile
         try {
         val (width, height) = resolveStableDiffusionDimensions(
             defaultWidth = resolved.width,
@@ -4172,7 +4186,7 @@ class LocalImageProvider(context: Context) {
                 componentSelection.primaryPath,
                 componentSelection.bundleRoot,
                 params.toString(),
-                outputFile.absolutePath
+                outputFile.canonicalPath
             )
         } finally {
             progressPoller.cancelAndJoin()
@@ -7723,6 +7737,30 @@ internal fun resolveStableDiffusionBackendMode(requestedBackendMode: String?): S
         "stable-diffusion.cpp Android backend currently supports only backendMode=cpu."
     }
     return backend
+}
+
+/**
+ * Creates a private local-image output directory and returns the exact path that native code must
+ * receive. Android may expose an app directory through a symlinked alias, while the native
+ * validator intentionally accepts only the canonical spelling.
+ */
+internal fun canonicalLocalImageOutputDirectory(cacheDirectory: File, name: String): File {
+    require(name.isNotBlank() && File(name).name == name) {
+        "Local image output directory name must be a single child of the app cache directory."
+    }
+    val canonicalCacheDirectory = cacheDirectory.canonicalFile
+    require(canonicalCacheDirectory.isDirectory) {
+        "App cache directory is unavailable."
+    }
+    val directory = File(canonicalCacheDirectory, name)
+    check(directory.isDirectory || directory.mkdirs()) {
+        "Unable to create the local image output directory."
+    }
+    val canonicalDirectory = directory.canonicalFile
+    require(canonicalDirectory.parentFile == canonicalCacheDirectory) {
+        "Local image output directory escaped the app cache directory."
+    }
+    return canonicalDirectory
 }
 
 internal fun stableDiffusionPreviewCandidates(outputFile: File): List<File> = buildList {

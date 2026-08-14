@@ -14301,7 +14301,24 @@ Java_com_muyuchat_core_nativebridge_NativeQnnBridge_getRuntimeStatsJson(
         JNIEnv* env,
         jobject) noexcept {
     return qnn_jni_json_guard(env, "getRuntimeStatsJson", []() {
-        return std::string("{\"backend\":\"qnn_htp\",\"bridgeReady\":true,\"graphRunnerReady\":true,\"pipelineProbeReady\":true,\"npuActive\":false,\"compile\":") +
-            compile_capability_json() + "}";
+        std::ostringstream out;
+        out << "{"
+            << "\"backend\":\"qnn_htp\","
+            << "\"bridgeReady\":true,"
+            // The JNI bridge can load without the typed SDK headers, but no
+            // graph runner or pipeline probe exists in that build. Keep the
+            // diagnostic in sync with isRunnerReady() so callers do not claim
+            // that an inactive QNN stub is packaged and usable.
+            << "\"graphRunnerReady\":"
+            << (MCA_WITH_QNN_SDK_HEADERS ? "true" : "false") << ","
+            << "\"pipelineProbeReady\":"
+            << (MCA_WITH_QNN_SDK_HEADERS ? "true" : "false") << ","
+            << "\"npuActive\":false,"
+            << "\"compile\":" << compile_capability_json();
+#if !MCA_WITH_QNN_SDK_HEADERS
+        out << ",\"lastError\":\"QNN typed graph bindings are unavailable in this APK; rebuild with the QAIRT/QNN SDK headers.\"";
+#endif
+        out << "}";
+        return out.str();
     });
 }

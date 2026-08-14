@@ -1,6 +1,7 @@
 ﻿package com.muyuchat.core.engine
 
 import android.content.Context
+import android.util.Log
 import com.muyuchat.core.modelstore.QairtExecutionAdmission
 import com.muyuchat.core.modelstore.QairtBundleRiskAnalyzer
 import com.muyuchat.core.modelstore.QairtBundleRuntimeIdentity
@@ -44,6 +45,22 @@ data class LocalChatExecutionContext(
      * callers cannot mutate the existing debug diagnostic or another request's evidence.
      */
     val visionDiagnosticSink: ((String, JSONObject) -> Unit)? = null
+)
+
+data class RuntimeHealthSnapshot(
+    val runtimeStats: RuntimeStats,
+    val workerSessionLost: Boolean
+)
+
+/** Opaque identity for exactly one request while it owns the native runner. */
+class GenerationStopToken internal constructor(
+    val epoch: Long,
+    val requestId: String
+)
+
+private data class ActiveGenerationStopTarget(
+    val token: GenerationStopToken,
+    val runner: LocalChatRunner
 )
 
 private data class NativeGpuOffloadEvidence(
@@ -144,6 +161,9 @@ class McaInferenceService(
     private val runners: Map<LocalChatRuntime, LocalChatRunner> =
         runners ?: defaultLocalChatRunners(context.applicationContext)
     private val mutex = Mutex()
+    private val generationStopGate = Any()
+    private var generationStopEpoch = 0L
+    private var activeGenerationStopTarget: ActiveGenerationStopTarget? = null
     private val telemetry = TelemetryLogger(context.applicationContext)
     private val socInfo = SocDetector.detect()
     private val appContext = context.applicationContext
@@ -575,12 +595,28 @@ class McaInferenceService(
                     }
                 }
                 if (runtime.usesCoordinatedParameters()) {
+                    val nativeStatsBeforeSignaturePublish = nativeStatsJson()
                     runCatching {
                         // QAIRT publish/commit is intentionally after both static
                         // admission and native NPU evidence validation above.
-                        parameterCoordinator.publishLoaded(resolvedExecutionProfile, nativeStatsJson())
+                        parameterCoordinator.publishLoaded(
+                            resolvedExecutionProfile,
+                            nativeStatsBeforeSignaturePublish
+                        )
                         parameterCoordinator.commit(resolvedExecutionProfile)
                     }.getOrElse { signatureError ->
+                        val diagnostic = parameterCoordinator.loadSignatureDiagnostic(
+                            profile = resolvedExecutionProfile,
+                            nativeStatsJson = nativeStatsBeforeSignaturePublish
+                        ).put("error", signatureError.message.orEmpty())
+                        Log.e(
+                            "McaInferenceService",
+                            "native load signature mismatch: $diagnostic"
+                        )
+                        LocalChatRunnerDebug.emit(
+                            "native_load_signature_mismatch",
+                            diagnostic
+                        )
                         runCatching { runner.requestStop() }
                         runCatching { runner.unloadModel() }
                         parameterCoordinator.markUnloaded()
@@ -636,11 +672,10 @@ class McaInferenceService(
         mutex.withLock {
             if (!_stats.value.loaded) return@withLock
             runnerFor(activeRuntime).invalidateConversationContext()
-            // MNN does not expose a compatible token-level KV rollback API.
-            // Its next text turn therefore reloads through the existing safe path.
-            if (activeRuntime == LocalChatRuntime.MNN_CPU) {
-                mnnSessionNeedsReloadBeforeNextRequest = true
-            }
+            // Current MNN runtimes clear their live prompt/KV state here and perform an
+            // exact token-prefix check on the next begin. Reloading multi-gigabyte weights
+            // after a new chat or edit is unnecessary; begin still falls back to a cold
+            // prefill whenever the retained prefix does not match.
         }
     }
 
@@ -863,6 +898,8 @@ class McaInferenceService(
             }
             val activeRequest = requestWithVisionFiles
             val runner = runnerFor(activeRuntime)
+            val generationStopToken = activateGenerationStopTarget(executionContext.requestId, runner)
+            try {
 
             val started = System.currentTimeMillis()
             val hasImageAttachments = activeRequest.hasImageAttachments()
@@ -998,7 +1035,7 @@ class McaInferenceService(
                 runCatching { runner.requestStop() }
                 if (error is CancellationException) throw error
                 val message = "Native beginCompletion failed: ${error.message ?: error::class.java.simpleName}"
-                val errorStats = _stats.value.copy(lastError = message)
+                val errorStats = errorStatsForRunnerFailure(runner, message)
                 _stats.value = errorStats
                 emit(GenerateEvent.Error(message, errorStats))
                 return@lifecycle
@@ -1061,7 +1098,7 @@ class McaInferenceService(
                                 runCatching { runner.requestStop() }
                                 if (error is CancellationException) throw error
                                 val message = "Native beginCompletion recovery failed: ${error.message ?: error::class.java.simpleName}"
-                                val errorStats = _stats.value.copy(lastError = message)
+                                val errorStats = errorStatsForRunnerFailure(runner, message)
                                 _stats.value = errorStats
                                 emit(GenerateEvent.Error(message, errorStats))
                                 return@lifecycle
@@ -1085,10 +1122,34 @@ class McaInferenceService(
                     append("Native beginCompletion failed: ").append(beginRc)
                     if (!nativeError.isNullOrBlank()) append("；").append(nativeError.trim())
                 }
-                val errorStats = _stats.value.copy(lastError = message)
+                val errorStats = errorStatsForRunnerFailure(runner, message)
                 _stats.value = errorStats
                 emit(GenerateEvent.Error(message, errorStats))
                 return@lifecycle
+            }
+
+            // Native beginCompletion finishes the complete prompt prefill before
+            // decode starts. Publish that terminal prefill evidence immediately;
+            // otherwise the UI cannot show prefillMs/prefillTps until the first
+            // generated token arrives, which is especially misleading for large
+            // GGUF models with a long first-token latency.
+            runCatching { JSONObject(nativeStatsJson()) }.getOrNull()?.let { nativeStats ->
+                val prefillStats = mergeNativeStats(
+                    base = _stats.value,
+                    nativeStats = nativeStats,
+                    memory = memoryBeforeGenerate,
+                    started = started,
+                    lastTokenAt = started,
+                    request = activeRequest,
+                    managedPrefixFailure = managedPersistentPrefixFailure
+                ).copy(
+                    completionTokens = 0,
+                    ttftMs = 0,
+                    decodeMs = 0,
+                    decodeTps = 0.0,
+                    e2eTps = 0.0
+                )
+                _stats.value = prefillStats
             }
 
             // Runtimes that expose exact batch progress already emitted PREFILL
@@ -1186,12 +1247,24 @@ class McaInferenceService(
                     }
                     val cacheReuse = nativeStats?.optJSONObject("cacheReuse")
                     val gpuEvidence = nativeGpuOffloadEvidence(nativeStats, _stats.value)
+                    val prefillTokens = if (shouldSampleStats) {
+                        nativeStats?.optInt("prefillTokens", -1)?.takeIf { it >= 0 }
+                    } else {
+                        null
+                    } ?: _stats.value.prefillTokens.takeIf { it > 0 }
+                        ?: promptTokens
                     finalStats = _stats.value.copy(
                         promptTokens = promptTokens,
                         completionTokens = generatedTokens,
                         ttftMs = ttft,
                         prefillMs = prefillMs,
+                        prefillTokens = prefillTokens,
                         prefillTps = nativeStats?.optDouble("prefillTps")
+                            ?.takeIf { it.isFinite() && it >= 0.0 }
+                            ?: if (prefillMs > 0L) {
+                                prefillTokens * 1000.0 / prefillMs
+                            } else 0.0,
+                        effectivePromptTps = nativeStats?.optDouble("effectivePromptTps")
                             ?.takeIf { it.isFinite() && it >= 0.0 }
                             ?: if (prefillMs > 0L) promptTokens * 1000.0 / prefillMs else 0.0,
                         decodeMs = decodeMs,
@@ -1359,11 +1432,12 @@ class McaInferenceService(
                 // Never let cleanup hide a downstream/cancellation exception.
                 runCatching { runner.requestStop() }
                 if (t is CancellationException || downstreamEmissionFailed) throw t
-                val errorStats = _stats.value.copy(lastError = t.message)
+                val message = t.message ?: "Generation failed."
+                val errorStats = errorStatsForRunnerFailure(runner, message)
                 _stats.value = errorStats
                 emitPersistPhase(errorStats)
-                writeLog(errorStats, activeRequest.params, error = t.message)
-                emit(GenerateEvent.Error(t.message ?: "Generation failed.", errorStats))
+                writeLog(errorStats, activeRequest.params, error = message)
+                emit(GenerateEvent.Error(message, errorStats))
             } finally {
                 activePersistentPrefix?.let { pending ->
                     withContext(NonCancellable + io) {
@@ -1395,6 +1469,9 @@ class McaInferenceService(
                     mnnSessionNeedsReloadBeforeNextRequest = true
                 }
             }
+            } finally {
+                clearGenerationStopTarget(generationStopToken)
+            }
             }
         } finally {
             try {
@@ -1425,14 +1502,36 @@ class McaInferenceService(
         runCatching { runnerFor(activeRuntime).requestStop() }
     }
 
+    /** Returns the exact request currently owning native prefill/decode, if any. */
+    fun activeGenerationStopToken(): GenerationStopToken? = synchronized(generationStopGate) {
+        activeGenerationStopTarget?.token
+    }
+
     /**
-     * Requests cancellation only when the active runner can atomically prove
-     * that generation is still in progress. A false result is deliberately
-     * inconclusive and must not be treated as cancellation evidence.
+     * Stops only [expected]. The default token is evaluated by the caller before dispatcher
+     * suspension, so a delayed background stop can never target a replacement request. The
+     * engine-level ownership proof also covers native prefill, where runner-level active flags
+     * may not become visible until beginCompletion returns.
      */
-    suspend fun stopGenerationIfActive(): Boolean = withContext(io) {
-        runCatching { runnerFor(activeRuntime).requestStopIfActive() }
-            .getOrDefault(false)
+    suspend fun stopGenerationIfActive(
+        expected: GenerationStopToken? = activeGenerationStopToken()
+    ): Boolean {
+        // A missing captured owner is a definitive no-op. Avoiding dispatcher suspension here
+        // lets lifecycle callers cancel pre-native work immediately.
+        if (expected == null) return false
+        return withContext(io) {
+            synchronized(generationStopGate) {
+                val target = activeGenerationStopTarget
+                if (target?.token != expected) {
+                    false
+                } else {
+                    runCatching {
+                        target.runner.requestStop()
+                        true
+                    }.getOrDefault(false)
+                }
+            }
+        }
     }
 
     /** Releases every configured native runner, including inactive QAIRT sessions retained by callers. */
@@ -1450,6 +1549,35 @@ class McaInferenceService(
             lastQairtExecutionAdmission = null
             mnnSessionNeedsReloadBeforeNextRequest = false
             _stats.value = RuntimeStats(loaded = false, backend = activeRuntime.backendId)
+        }
+    }
+
+    /**
+     * Reads only process-local runner state when no load, unload, generation, or tuning lease owns
+     * the lifecycle. This must never make a Binder/JNI call: a damaged native stats path cannot be
+     * allowed to retain the engine lifecycle mutex.
+     */
+    suspend fun tryRuntimeHealthSnapshot(): RuntimeHealthSnapshot? = withContext(io) {
+        if (!mutex.tryLock()) return@withContext null
+        try {
+            var runtimeStats = _stats.value
+            val workerSessionLost = runnerFor(activeRuntime).isSessionKnownLost()
+            if (workerSessionLost) {
+                isolatedWorkerSessionNeedsReload = activeLoadSession != null
+                parameterCoordinator.markUnloaded()
+                runtimeStats = runtimeStats.copy(
+                    loaded = false,
+                    lastError = runtimeStats.lastError
+                        ?: "The isolated local text worker session was lost; the model will reload on the next request."
+                )
+                _stats.value = runtimeStats
+            }
+            RuntimeHealthSnapshot(
+                runtimeStats = runtimeStats,
+                workerSessionLost = workerSessionLost
+            )
+        } finally {
+            mutex.unlock()
         }
     }
 
@@ -1542,6 +1670,27 @@ class McaInferenceService(
 
     private fun runnerFor(runtime: LocalChatRuntime): LocalChatRunner =
         runners[runtime] ?: error("本地推理后端未注册：${runtime.label}")
+
+    private fun activateGenerationStopTarget(
+        requestId: String,
+        runner: LocalChatRunner
+    ): GenerationStopToken = synchronized(generationStopGate) {
+        check(activeGenerationStopTarget == null) {
+            "another native generation already owns the stop target"
+        }
+        generationStopEpoch += 1L
+        GenerationStopToken(generationStopEpoch, requestId).also { token ->
+            activeGenerationStopTarget = ActiveGenerationStopTarget(token, runner)
+        }
+    }
+
+    private fun clearGenerationStopTarget(token: GenerationStopToken) {
+        synchronized(generationStopGate) {
+            if (activeGenerationStopTarget?.token == token) {
+                activeGenerationStopTarget = null
+            }
+        }
+    }
 
     private suspend fun <T> withLifecycleLock(
         lease: EngineLifecycleLease?,
@@ -1644,6 +1793,17 @@ class McaInferenceService(
             JSONObject(runnerFor(activeRuntime).getRuntimeStatsJson())
                 .optBoolean(ISOLATED_WORKER_SESSION_LOST_FIELD, false)
         }.getOrDefault(false)
+    }
+
+    /** Keeps the load descriptor for recovery while removing stale READY state. */
+    private fun errorStatsForRunnerFailure(
+        runner: LocalChatRunner,
+        message: String
+    ): RuntimeStats {
+        if (!runner.isSessionKnownLost()) return _stats.value.copy(lastError = message)
+        isolatedWorkerSessionNeedsReload = activeLoadSession != null
+        parameterCoordinator.markUnloaded()
+        return _stats.value.copy(loaded = false, lastError = message)
     }
 
     private suspend fun reloadActiveSessionForNextRequestLocked(
@@ -1905,6 +2065,18 @@ class McaInferenceService(
             modelPath = modelPath,
             backend = nativeStats?.optString("backend")?.takeIf { it.isNotBlank() } ?: runtime.backendId,
             loadMs = loadMs,
+            promptTokens = nativeStats?.optInt("promptTokens") ?: 0,
+            // Older workers do not publish prefillTokens. Keep that absence
+            // distinguishable from a real zero-token prefill so the caller
+            // can fall back to its prompt estimate.
+            prefillTokens = nativeStats?.optInt("prefillTokens", -1)
+                ?.takeIf { it >= 0 }
+                ?: 0,
+            prefillMs = nativeStats?.optLong("prefillMs") ?: 0L,
+            prefillTps = nativeStats?.optDouble("prefillTps")
+                ?.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0,
+            effectivePromptTps = nativeStats?.optDouble("effectivePromptTps")
+                ?.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0,
             nThreads = nativeStats?.optInt("nThreads") ?: params.nThreads,
             nThreadsBatch = nativeStats?.optInt("nThreadsBatch") ?: params.nThreads,
             nBatch = nativeStats?.optInt("nBatch") ?: 0,
@@ -2011,6 +2183,9 @@ class McaInferenceService(
         val promptTokens = nativeStats?.optInt("promptTokens")?.takeIf { it > 0 }
             ?: base.promptTokens.takeIf { it > 0 }
             ?: estimatePromptTokens(request)
+        val prefillTokens = nativeStats?.optInt("prefillTokens", -1)?.takeIf { it >= 0 }
+            ?: base.prefillTokens.takeIf { it > 0 }
+            ?: promptTokens
         val prefillMs = nativeStats?.optLong("prefillMs") ?: base.prefillMs
         val cacheReuse = nativeStats?.optJSONObject("cacheReuse")
         val gpuEvidence = nativeGpuOffloadEvidence(nativeStats, base)
@@ -2020,7 +2195,11 @@ class McaInferenceService(
             promptTokens = promptTokens,
             completionTokens = completionTokens,
             prefillMs = prefillMs,
+            prefillTokens = prefillTokens,
             prefillTps = nativeStats?.optDouble("prefillTps")
+                ?.takeIf { it.isFinite() && it >= 0.0 }
+                ?: if (prefillMs > 0L) prefillTokens * 1000.0 / prefillMs else 0.0,
+            effectivePromptTps = nativeStats?.optDouble("effectivePromptTps")
                 ?.takeIf { it.isFinite() && it >= 0.0 }
                 ?: if (prefillMs > 0L) promptTokens * 1000.0 / prefillMs else 0.0,
             decodeMs = decodeMs,

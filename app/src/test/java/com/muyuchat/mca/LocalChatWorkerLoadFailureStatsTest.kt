@@ -88,16 +88,22 @@ class LocalChatWorkerLoadFailureStatsTest {
     fun workerCapturesFailureBeforeUnloadAndPublishesItWithoutAnActiveRunner() {
         val service = sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerService.kt")
         val capture = service.indexOf("LocalChatWorkerLoadFailureStats.capture(")
+        val reset = service.lastIndexOf("retainedLoadFailureStatsJson = null", capture)
         val unload = service.indexOf("runCatching { runner.unloadModel() }", capture)
         val detach = service.indexOf("activeRunner = null", unload)
         val publish = service.indexOf("retainedLoadFailureStatsJson = failureStatsJson", detach)
 
+        assertTrue(reset >= 0)
+        assertTrue(capture > reset)
         assertTrue(capture >= 0)
         assertTrue(unload > capture)
         assertTrue(detach > unload)
         assertTrue(publish > detach)
-        assertTrue(service.contains("?: retainedLoadFailureStatsJson"))
-        assertTrue(service.contains("retainedLoadFailureStatsJson = null\n            prepareLoadDiagnostic"))
+        assertTrue(
+            service.contains(
+                "fallback = retainedLoadFailureStatsJson ?: lastStableRuntimeStatsJson"
+            )
+        )
     }
 
     private fun sourceFile(relativePath: String): String {

@@ -3,6 +3,7 @@ package com.muyuchat.core.engine
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.Paths
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,6 +15,15 @@ import org.junit.Assume.assumeNoException
 import org.junit.Test
 
 class PersistentPrefixCacheStoreTest {
+    @Test
+    fun androidFrameworkUserAliasRecognitionIsNarrow() {
+        assertTrue(isFrameworkManagedAndroidUserAlias(Paths.get("/data/user/0")))
+        assertTrue(isFrameworkManagedAndroidUserAlias(Paths.get("/data/user_de/10")))
+        assertFalse(isFrameworkManagedAndroidUserAlias(Paths.get("/data/user/not-a-user")))
+        assertFalse(isFrameworkManagedAndroidUserAlias(Paths.get("/data/user/0/com.example.app")))
+        assertFalse(isFrameworkManagedAndroidUserAlias(Paths.get("/tmp/data/user/0")))
+    }
+
     @Test
     fun keyUsesOnlyStrictLowercaseSha256ComponentsAndChangesWithEveryBinding() {
         val key = key("first")

@@ -114,6 +114,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DateRangePicker
 import androidx.compose.material3.DrawerValue
@@ -246,6 +247,7 @@ data class ChatUiState(
     val selectedAssistantId: String = "default",
     val worldBooks: List<WorldBookUiItem> = emptyList(),
     val knowledgeBases: List<KnowledgeBaseUiItem> = emptyList(),
+    val statusMessage: String? = null,
     val images: List<ImageAssetUiItem> = emptyList(),
     val generationHistoryInputUris: Set<String> = emptySet(),
     val imageLibraryBackup: ImageLibraryBackupUiState = ImageLibraryBackupUiState(),
@@ -268,6 +270,7 @@ data class ChatUiState(
     val isGenerating: Boolean = false,
     val generationPhase: GenerationPhase? = null,
     val generationTokenProgress: TokenProgress? = null,
+    val generationStats: RuntimeStats? = null,
     val promptContextUsage: PromptContextUsage? = null,
     val selectedModelId: String? = null,
     val selectedModelName: String? = null,
@@ -482,7 +485,9 @@ data class KnowledgeBaseUiItem(
     val name: String,
     val description: String,
     val selected: Boolean,
-    val indexStateLabel: String
+    val indexStateLabel: String,
+    val documentCount: Int = 0,
+    val importing: Boolean = false
 )
 
 internal fun imageAssetBadgeText(image: ImageAssetUiItem): String = when {
@@ -1740,6 +1745,7 @@ data class ChatHistoryItem(
 fun ChatScreen(
     state: ChatUiState,
     onInputChange: (String) -> Unit,
+    onDismissStatusMessage: () -> Unit = {},
     onSend: () -> Unit,
     onStop: () -> Unit,
     onNewConversation: () -> Unit,
@@ -2871,6 +2877,11 @@ fun ChatScreen(
                             } else {
                                 null
                             },
+                            generationStats = if (state.isGenerating && index == lastAssistantIndex) {
+                                state.generationStats
+                            } else {
+                                null
+                            },
                             onRegenerate = onRegenerate,
                             onDelete = { onDeleteMessage(index) },
                             onDeleteLastTurn = onDeleteLastTurn
@@ -2882,7 +2893,9 @@ fun ChatScreen(
             ChatInputBar(
                 input = state.input,
                 isGenerating = state.isGenerating,
+                statusMessage = state.statusMessage,
                 onInputChange = onInputChange,
+                onDismissStatusMessage = onDismissStatusMessage,
                 onSend = onSend,
                 onStop = onStop,
                 onOpenCamera = {
@@ -4342,15 +4355,29 @@ private fun ContextLibraryPage(
                                 fontWeight = FontWeight.SemiBold
                             )
                             Text(
-                                knowledgeBase.description.ifBlank { knowledgeBase.indexStateLabel },
+                                buildList {
+                                    knowledgeBase.description.takeIf { it.isNotBlank() }?.let(::add)
+                                    add("${knowledgeBase.documentCount} 个文件")
+                                    add(if (knowledgeBase.importing) "导入中" else knowledgeBase.indexStateLabel)
+                                }.joinToString(" · "),
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        IconButton(onClick = { onImportKnowledgeDocument(knowledgeBase.id) }) {
-                            Icon(Icons.Default.Folder, contentDescription = "导入知识库文档")
+                        IconButton(
+                            onClick = { onImportKnowledgeDocument(knowledgeBase.id) },
+                            enabled = !knowledgeBase.importing
+                        ) {
+                            if (knowledgeBase.importing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(Icons.Default.Folder, contentDescription = "导入知识库文档")
+                            }
                         }
                         IconButton(onClick = { onDeleteKnowledgeBase(knowledgeBase.id) }) {
                             Icon(Icons.Default.Delete, contentDescription = "删除知识库")
@@ -10558,6 +10585,41 @@ private fun generationPhaseLabel(phase: GenerationPhase?): String = when (phase)
     null -> "\u6b63\u5728\u601d\u8003"
 }
 
+internal fun generationPerformanceSummary(stats: RuntimeStats?): String? {
+    val activeStats = stats ?: return null
+    return buildList {
+        activeStats.prefillTps.takeIf { it.isFinite() && it > 0.0 }?.let { rate ->
+            add("预填充 ${formatGenerationRate(rate)} token/s")
+        }
+        activeStats.effectivePromptTps
+            .takeIf {
+                it.isFinite() && it > 0.0 &&
+                    activeStats.cacheReusedTokens > 0 &&
+                    it > activeStats.prefillTps * 1.05
+            }
+            ?.let { rate ->
+                add("缓存有效 ${formatGenerationRate(rate)} token/s")
+            }
+        activeStats.decodeTps.takeIf { it.isFinite() && it > 0.0 }?.let { rate ->
+            add("输出 ${formatGenerationRate(rate)} token/s")
+        }
+    }.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+}
+
+private fun formatGenerationRate(rate: Double): String =
+    "%.1f".format(java.util.Locale.US, rate)
+
+@Composable
+private fun GenerationPerformanceLine(stats: RuntimeStats?) {
+    val summary = generationPerformanceSummary(stats) ?: return
+    Text(
+        text = summary,
+        modifier = Modifier.padding(top = 1.dp),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
+    )
+}
+
 private fun cacheEvidenceLabel(stats: RuntimeStats): String? {
     val persistentReason = stats.persistentPrefixCacheReason
         ?.takeUnless { it in setOf("not_requested", "not_attempted", "model_unloaded") }
@@ -10589,12 +10651,13 @@ private fun ChatStatusBar(
     var modelMenuExpanded by rememberSaveable { mutableStateOf(false) }
     val modelRuntimeLabel = state.selectedModelRuntimeLabel?.takeIf { it.isNotBlank() }
     val cacheEvidence = cacheEvidenceLabel(state.stats)
+    val performanceSummary = generationPerformanceSummary(state.stats)
     val modelSubtitle = if (state.selectedModelName == null) {
         modelRuntimeLabel ?: "未加载本地或云端推理引擎"
     } else {
         listOfNotNull(
             modelRuntimeLabel,
-            "${"%.1f".format(state.stats.decodeTps)} token/s".takeIf { state.stats.decodeTps > 0.0 }
+            performanceSummary
         ).joinToString(" · ")
     }
     Row(
@@ -11901,7 +11964,9 @@ private fun extractAttachmentMeta(input: String): String? {
 private fun ChatInputBar(
     input: String,
     isGenerating: Boolean,
+    statusMessage: String?,
     onInputChange: (String) -> Unit,
+    onDismissStatusMessage: () -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
     onOpenCamera: () -> Unit,
@@ -12014,6 +12079,13 @@ private fun ChatInputBar(
                 .padding(7.dp)
                 .navigationBarsPadding()
         ) {
+            statusMessage?.takeIf { it.isNotBlank() }?.let { message ->
+                ComposerStatusMessage(
+                    message = message,
+                    onDismiss = onDismissStatusMessage,
+                    modifier = Modifier.padding(start = 4.dp, end = 2.dp, bottom = 6.dp)
+                )
+            }
             if (!webSearchStatusMessage.isNullOrBlank()) {
                 WebSearchStatusChip(
                     message = webSearchStatusMessage,
@@ -12095,6 +12167,53 @@ private fun ChatInputBar(
                     )
                 }
             }
+        }
+    }
+}
+
+internal fun composerStatusIsError(message: String): Boolean =
+    listOf("失败", "无法", "未发送", "未加载", "请先", "超过").any(message::contains)
+
+@Composable
+private fun ComposerStatusMessage(
+    message: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isError = composerStatusIsError(message)
+    val contentColor = if (isError) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .semantics { liveRegion = LiveRegionMode.Polite },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Default.Info,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = contentColor
+        )
+        Spacer(modifier = Modifier.width(7.dp))
+        Text(
+            text = message,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.labelSmall,
+            color = contentColor,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "关闭提示",
+                modifier = Modifier.size(16.dp),
+                tint = contentColor
+            )
         }
     }
 }
@@ -12701,6 +12820,7 @@ private fun MessageBubble(
     isGenerating: Boolean,
     generationPhase: GenerationPhase?,
     generationTokenProgress: TokenProgress?,
+    generationStats: RuntimeStats?,
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
     onDeleteLastTurn: () -> Unit
@@ -12724,6 +12844,7 @@ private fun MessageBubble(
                 isGenerating = isGenerating,
                 generationPhase = generationPhase,
                 generationTokenProgress = generationTokenProgress,
+                generationStats = generationStats,
                 onRegenerate = onRegenerate,
                 onDelete = onDelete,
                 onDeleteLastTurn = onDeleteLastTurn,
@@ -12815,6 +12936,7 @@ private fun AssistantMessageBlock(
     isGenerating: Boolean,
     generationPhase: GenerationPhase?,
     generationTokenProgress: TokenProgress?,
+    generationStats: RuntimeStats?,
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
     onDeleteLastTurn: () -> Unit,
@@ -12877,6 +12999,9 @@ private fun AssistantMessageBlock(
                 SelectionContainer {
                     PagedAssistantRichText(message.content)
                 }
+            }
+            if (isGenerating) {
+                GenerationPerformanceLine(generationStats)
             }
             if (message.sourceReferences.isNotEmpty() || message.webSearchTrace?.hasContent == true) {
                 WebSearchSourcesRow(

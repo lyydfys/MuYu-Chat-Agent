@@ -30,6 +30,10 @@ int main() {
     repeatedPrompt[threshold - 1] = 8;
     assert(!mca::llama::tokenPrefixMatches(repeatedPrompt, checkpointPrefix));
 
+    const std::vector<int> fullPrompt = {1, 2, 3, 4, 5};
+    const std::vector<int> probePrompt = {1, 2, 9, 10};
+    assert(mca::llama::longestCommonTokenPrefix(fullPrompt, probePrompt) == 2);
+
     assert(mca::llama::canReusePartialStateCheckpoint(
             PrefixCacheStrategy::PartialStateCheckpoint,
             true,
@@ -86,6 +90,10 @@ int main() {
     assert(!mca::llama::canAttemptPersistentPrefixCache(true, true, false, 1));
     assert(!mca::llama::canAttemptPersistentPrefixCache(true, false, true, 1));
     assert(!mca::llama::canAttemptPersistentPrefixCache(true, false, false, 2));
+
+    assert(mca::llama::shouldAttemptPersistentPrefixFallback(true, false));
+    assert(!mca::llama::shouldAttemptPersistentPrefixFallback(true, true));
+    assert(!mca::llama::shouldAttemptPersistentPrefixFallback(false, false));
 
     assert(mca::llama::canRestorePersistentPrefixState(128, 128, true, true));
     assert(!mca::llama::canRestorePersistentPrefixState(0, 0, true, true));

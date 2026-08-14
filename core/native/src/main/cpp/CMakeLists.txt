@@ -138,6 +138,10 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
     endif()
     set_property(TARGET llama PROPERTY SOURCES ${MCA_LLAMA_TARGET_SOURCES_WITHOUT_MODEL})
     target_sources(llama PRIVATE ${CMAKE_CURRENT_LIST_DIR}/llama_model_mmap_prefetch_override.cpp)
+    # GenieX 0.3.x ships a llama.cpp plugin built against the pre-n_ctx
+    # common_sampler_init ABI. Keep the current API and export a two-argument
+    # forwarding symbol from llama-common for that binary plugin.
+    target_sources(llama-common PRIVATE ${CMAKE_CURRENT_LIST_DIR}/llama_common_legacy_compat.cpp)
     find_package(Threads REQUIRED)
     set(MTMD_SRC ${LLAMA_SRC}/tools/mtmd)
     add_library(mca_mtmd STATIC

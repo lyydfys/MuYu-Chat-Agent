@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import com.muyuchat.core.engine.ActiveLoadedSignature
+import com.muyuchat.core.engine.CanonicalParameterSet
 import com.muyuchat.core.engine.EffectiveExecutionSignature
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LoadParams
@@ -8,6 +9,7 @@ import com.muyuchat.core.engine.ModelExecutionProfile
 import com.muyuchat.core.engine.ParameterSignatureSnapshot
 import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.RuntimeOverrideSignature
+import com.muyuchat.core.engine.LocalChatRuntime
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
 import java.io.File
@@ -47,6 +49,36 @@ internal fun ModelExecutionProfile.bootstrapCanaryGenerationParams(): Generation
         reasoningMode = ReasoningMode.OFF,
         hideReasoning = true,
         systemPrompt = ""
+    )
+}
+
+/**
+ * Profiles written before batch-thread tuning was added contain the implicit
+ * llama.cpp default `n_threads_batch=1`. Migrate only that implicit value;
+ * an explicit user override remains untouched.
+ */
+internal fun ModelExecutionProfile.migrateLegacyLlamaBatchThreads(
+    profileId: String,
+    revision: Long
+): ModelExecutionProfile {
+    if (runtimeIdentity.runtime != LocalChatRuntime.LLAMA_CPP ||
+        "n_threads_batch" in userOverrides ||
+        (hotExecutionValues.value("n_threads_batch") as? Number)?.toInt() != 1
+    ) return this
+    val threads = (hotExecutionValues.value("n_threads") as? Number)?.toInt()
+        ?.takeIf { it > 1 } ?: return this
+    fun aligned(values: CanonicalParameterSet): CanonicalParameterSet =
+        CanonicalParameterSet.of(values.toJsonObject().let { json ->
+            buildMap {
+                json.keys().forEach { key -> put(key, json.opt(key)) }
+                put("n_threads_batch", threads)
+            }
+        })
+    return copy(
+        hotExecutionValues = aligned(hotExecutionValues),
+        desiredHotExecutionValues = aligned(desiredHotExecutionValues),
+        profileId = profileId,
+        revision = revision
     )
 }
 

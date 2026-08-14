@@ -1986,7 +1986,9 @@ open class LocalChatSmokeActivity : Activity() {
                 .put("reasoning_mode", "off")
                 .put("system_prompt", systemPrompt)
                 .put("max_tokens", maxTokens)
-                .put("n_ctx", nCtx)
+                // n_ctx is load-bound. The local API must use the context of
+                // the already-loaded model; sending it here is intentionally
+                // rejected as a parameter_scope_conflict.
                 .put("temperature", sampling.temperature)
                 .put("top_k", sampling.topK)
                 .put("top_p", sampling.topP)
@@ -1995,7 +1997,8 @@ open class LocalChatSmokeActivity : Activity() {
                 .put("presence_penalty", sampling.presencePenalty)
                 .put("frequency_penalty", sampling.frequencyPenalty)
                 .put("seed", sampling.seed)
-                .put("advanced_json", JSONObject(advancedJson))
+                // Native advanced_json belongs to the authorized runtime
+                // profile and is intentionally rejected on the chat route.
                 .put(
                     "messages",
                     JSONArray().put(

@@ -58,6 +58,32 @@ class PersistentPrefixNativeContractTest {
         assertTrue(policy.contains("fullPromptPrefixMatches;"))
     }
 
+    @Test
+    fun persistentPrefixDerivesAStableTokenBoundaryFromTheCompleteProbePrompt() {
+        val body = persistentPrefixPreparationBody()
+
+        assertTrue(body.contains("common_tokenize(g_context, probe_formatted, true, true)"))
+        assertTrue(body.contains("mca::llama::longestCommonTokenPrefix("))
+        assertTrue(body.contains("full_tokens,"))
+        assertTrue(body.contains("probe_tokens"))
+    }
+
+    @Test
+    fun liveConversationKvIsTriedBeforePersistentPrefixFallback() {
+        val beginBody = functionBody(
+            source = sourceFile("core/native/src/main/cpp/native_engine.cpp"),
+            signature = "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion("
+        )
+        val sessionAttempt = beginBody.indexOf("reused = prepare_text_prefix_locked(tokens);")
+        val persistentFallback = beginBody.indexOf("shouldAttemptPersistentPrefixFallback(")
+
+        assertTrue("The native request must try the live session KV state.", sessionAttempt >= 0)
+        assertTrue(
+            "The disk-backed fixed prefix must run only after a session-cache miss.",
+            persistentFallback > sessionAttempt
+        )
+    }
+
     private fun persistentPrefixPreparationBody(): String = functionBody(
         source = sourceFile("core/native/src/main/cpp/native_engine.cpp"),
         signature = "PersistentPrefixPreparation prepare_persistent_prefix_locked("

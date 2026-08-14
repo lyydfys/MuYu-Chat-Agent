@@ -12,6 +12,77 @@ import org.junit.Test
 
 class LocalImageExecutionProfileIntegrationTest {
     @Test
+    fun `legacy model without stored sha reaches generic runtime resolution`() {
+        val root = Files.createTempDirectory("image-profile-legacy-fingerprint").toFile()
+        try {
+            val primary = root.resolve("legacy.safetensors").apply {
+                writeBytes(byteArrayOf(1, 2, 3, 4))
+            }
+            val profile = resolveLocalImageExecutionProfile(
+                model = LocalImageModelRecord(
+                    id = "legacy-no-sha",
+                    displayName = "Legacy model",
+                    path = primary.absolutePath,
+                    fileName = primary.name,
+                    sizeBytes = primary.length(),
+                    sha256 = "",
+                    runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                    family = LocalImageModelFamily.SD15
+                ),
+                options = LocalImageGenerationOptions(),
+                bundleRoot = null
+            ).profile
+
+            assertEquals(primary.sha256ForProfile(), profile.modelFingerprint)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `legacy manifest fingerprint cannot self attest replaced model content`() {
+        val root = Files.createTempDirectory("image-profile-legacy-mismatch").toFile()
+        try {
+            val primary = root.resolve("legacy.safetensors").apply {
+                writeBytes(byteArrayOf(1, 2, 3, 4))
+            }
+            val declared = "0".repeat(64)
+            val model = LocalImageModelRecord(
+                id = "legacy-mismatch",
+                displayName = "Legacy mismatch",
+                path = primary.absolutePath,
+                fileName = primary.name,
+                sizeBytes = primary.length(),
+                sha256 = "",
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.SD15
+            )
+            val manifest = resolveLocalImageExecutionProfile(
+                model = model,
+                options = LocalImageGenerationOptions(),
+                bundleRoot = null
+            ).profile.copy(modelFingerprint = declared)
+            root.resolve("manifest.json").writeText(
+                JSONObject()
+                    .put("id", "legacy-mismatch")
+                    .put("executionProfile", ImageExecutionProfileJson.toJson(manifest))
+                    .toString(),
+                Charsets.UTF_8
+            )
+            val error = assertThrows(IllegalArgumentException::class.java) {
+                resolveLocalImageExecutionProfile(
+                    model = model,
+                    options = LocalImageGenerationOptions(),
+                    bundleRoot = root
+                )
+            }
+            assertTrue(error.message.orEmpty().contains("does not match"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `stable fallback uses native utf8 ordering for last matching component`() {
         val root = Files.createTempDirectory("image-profile-stable-utf8-order").toFile()
         try {

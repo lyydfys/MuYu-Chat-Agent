@@ -1003,7 +1003,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
  
      } // namespace DIFFUSION
 diff --git a/transformers/llm/engine/src/llm.cpp b/transformers/llm/engine/src/llm.cpp
-index 2f163a4906932667b501cd830bab0b6355b41478..d575d7cb7ad4e629ab99634a57a2377d2ad61bf2 100644
+index 2f163a4906932667b501cd830bab0b6355b41478..626754524db47f1d0880b5266d5b23e555064374 100644
 --- a/transformers/llm/engine/src/llm.cpp
 +++ b/transformers/llm/engine/src/llm.cpp
 @@ -10,6 +10,7 @@
@@ -1113,12 +1113,35 @@ index 2f163a4906932667b501cd830bab0b6355b41478..d575d7cb7ad4e629ab99634a57a2377d
          mContext->status = LlmStatus::INTERNAL_ERROR;
          return {};
      }
-@@ -1123,30 +1166,34 @@ void Llm::response(const ChatMessages& chat_prompts, std::ostream* os, const cha
-             return;
-         }
- 
+@@ -1105,48 +1148,39 @@ void Llm::response(const ChatMessages& chat_prompts, std::ostream* os, const cha
+         size_t text_max = std::min(mCachedPromptText.size(), prompt_for_compare.size());
+         while (text_common < text_max && mCachedPromptText[text_common] == prompt_for_compare[text_common])
+             text_common++;
+-
+-        // If history was trimmed (text_common < cached), fall back to full
+-        // re-prefill rather than conditioning on stale KV entries.
+-        if (text_common < mCachedPromptText.size()) {
+-            // History was trimmed — clear all stale state and do full re-prefill.
+-            mCachedPromptText.clear();
+-            mContext->all_seq_len = 0;
+-            mContext->history_tokens.clear();
+-            mMeta->remove = mMeta->previous;
+-            std::vector<int> input_ids = tokenizer_encode(prompt);
+-            size_t history_before = input_ids.size(); // generate() pushes these first
+-            response(input_ids, os, end_with, max_new_tokens);
+-            if (mConfig->prompt_cache()) {
+-                updateCachedPromptText(chat_prompts, history_before);
+-            }
+-            return;
+-        }
+-
 -        // Tokenize the full prompt and split at a token boundary rather than
 -        // tokenizing a text substring (which can land mid-token for BPE/UTF-8).
++        // A shorter prompt is a normal tail-prune operation (for example
++        // deleting the last conversation turn). Do not discard the whole KV
++        // sequence here: the token-level LCP below validates the live state,
++        // erases only the stale suffix, and pre-fills the new tail.
++
 +        // Tokenize the complete desired prompt, then compare token ids against
 +        // the sequence that is actually present in live KV. Rendered text is
 +        // only an eligibility check: sampled EOS tokens, protocol truncation,
@@ -1169,7 +1192,7 @@ index 2f163a4906932667b501cd830bab0b6355b41478..d575d7cb7ad4e629ab99634a57a2377d
  
          // Save/restore KV state across generate_init — only the delta path
          // should preserve KV; other response() overloads clear as normal.
-@@ -1617,4 +1664,4 @@ bool Llm::is_stop(int token_id) {
+@@ -1617,4 +1651,4 @@ bool Llm::is_stop(int token_id) {
      return stop;
  }
  } // namespace Transformer

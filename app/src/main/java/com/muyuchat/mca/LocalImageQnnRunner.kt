@@ -197,7 +197,7 @@ internal class QnnHtpImageRunner(
             return manifest.report(
                 state = LocalImageQnnState.RUNNER_NOT_PACKAGED,
                 backend = backendLabel,
-                message = "QNN image bridge is not packaged yet; NPU image generation remains inactive."
+                message = "QNN typed graph bindings are unavailable in this APK; rebuild with the QAIRT/QNN SDK headers."
             )
         }
         if (usesSemanticGraphDiscovery) {

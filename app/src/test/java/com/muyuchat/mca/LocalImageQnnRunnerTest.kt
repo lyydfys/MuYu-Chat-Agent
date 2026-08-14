@@ -129,6 +129,7 @@ class LocalImageQnnRunnerTest {
 
         assertEquals(LocalImageQnnState.RUNNER_NOT_PACKAGED, report.state)
         assertFalse(report.npuActive)
+        assertTrue(report.message.contains("typed graph bindings"))
     }
 
     @Test
