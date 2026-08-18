@@ -22,7 +22,8 @@ class NativeLlamaBridge {
         paramsJson: String,
         restoreStatePath: String?,
         writeStatePath: String?,
-        fixedSystemPrompt: String
+        fixedSystemPrompt: String,
+        fullSessionState: Boolean
     ): Int
     /**
      * Lock-free snapshot updated by native prompt batches while beginCompletion

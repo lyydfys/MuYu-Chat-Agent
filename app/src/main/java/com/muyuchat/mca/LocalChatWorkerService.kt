@@ -232,7 +232,8 @@ class LocalChatWorkerService : Service() {
                         writeStatePath = request.writeStatePath,
                         fixedSystemPrompt = requireNotNull(request.fixedSystemPrompt) {
                             "A prefix-cache request must contain its fixed system prompt."
-                        }
+                        },
+                        fullSessionState = request.fullSessionState
                     )
                 )
             }

@@ -37,6 +37,25 @@ class LocalChatWorkerRequestTransportTest {
     }
 
     @Test
+    fun fullSessionStateFlagRoundTripsThroughWorkerPayload() {
+        val request = LocalChatWorkerRequestTransport.BeginRequest(
+            messagesJson = "[{\"role\":\"user\",\"content\":\"继续\"}]",
+            paramsJson = "{}",
+            restoreStatePath = "/private/cache/session-read.state",
+            writeStatePath = "/private/cache/session-write.state",
+            fixedSystemPrompt = "MCA_SESSION_STATE",
+            fullSessionState = true
+        )
+
+        val decoded = LocalChatWorkerRequestTransport.read(
+            DataInputStream(ByteArrayInputStream(encode(request)))
+        )
+
+        assertEquals(request, decoded)
+        assertTrue(decoded.fullSessionState)
+    }
+
+    @Test
     fun jsonExpansionBeyondEightMiBRoundTrips() {
         val expandedMessages = LocalChatWorkerRequestTransport.BeginRequest(
             messagesJson = "x".repeat(8 * 1024 * 1024 + 1),

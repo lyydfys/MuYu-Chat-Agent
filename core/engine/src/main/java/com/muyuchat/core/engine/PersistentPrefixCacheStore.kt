@@ -900,7 +900,10 @@ class PersistentPrefixCacheStore private constructor(
     }
 
     companion object {
-        const val DEFAULT_MAX_BYTES: Long = 256L * 1024L * 1024L
+        // Full-session KV states for 7B–12B models can exceed 256 MiB even
+        // with quantized KV. Keep enough room for a few role sessions while
+        // retaining the store's LRU eviction and app-private boundary.
+        const val DEFAULT_MAX_BYTES: Long = 1024L * 1024L * 1024L
         const val FORMAT_VERSION: Int = 1
 
         internal fun createForTest(

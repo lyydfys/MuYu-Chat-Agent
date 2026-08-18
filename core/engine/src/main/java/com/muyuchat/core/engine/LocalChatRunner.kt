@@ -408,7 +408,8 @@ private fun JSONArray.genieXTextContent(): String = buildString {
 data class PersistentPrefixCacheRequest(
     val restoreStatePath: String? = null,
     val writeStatePath: String? = null,
-    val fixedSystemPrompt: String
+    val fixedSystemPrompt: String,
+    val fullSessionState: Boolean = false
 ) {
     init {
         require(restoreStatePath?.isNotBlank() != false) {
@@ -417,8 +418,8 @@ data class PersistentPrefixCacheRequest(
         require(writeStatePath?.isNotBlank() != false) {
             "writeStatePath must be blank or a non-blank path."
         }
-        require(fixedSystemPrompt.isNotBlank()) {
-            "fixedSystemPrompt must not be blank."
+        require(fullSessionState || fixedSystemPrompt.isNotBlank()) {
+            "fixedSystemPrompt must not be blank for a fixed-prefix request."
         }
         require(restoreStatePath != null || writeStatePath != null) {
             "A persistent prefix request needs a restore or write path."
@@ -503,7 +504,8 @@ internal class LlamaCppChatRunner(
             paramsJson = paramsJson,
             restoreStatePath = prefixCache.restoreStatePath,
             writeStatePath = prefixCache.writeStatePath,
-            fixedSystemPrompt = prefixCache.fixedSystemPrompt
+            fixedSystemPrompt = prefixCache.fixedSystemPrompt,
+            fullSessionState = prefixCache.fullSessionState
         )
     }
     override fun prefillProgress(): TokenProgress? = runCatching {

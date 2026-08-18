@@ -257,7 +257,10 @@ struct PersistentPrefixCacheNativeRequest {
     std::string restore_state_path;
     std::string write_state_path;
     std::string fixed_system_prompt;
+    bool full_session_state = false;
 };
+
+std::string g_pending_full_session_write_path;
 
 thread_local PersistentPrefixCacheNativeRequest g_thread_prefix_cache_request;
 
@@ -1918,6 +1921,59 @@ PersistentPrefixPreparation prepare_persistent_prefix_locked(
     if (!request.requested) return result;
     g_persistent_prefix_cache_attempted = true;
 
+    if (request.full_session_state) {
+        if (full_tokens.empty()) {
+            g_persistent_prefix_cache_reason = "empty_session_prompt";
+            return result;
+        }
+        clear_target_context_locked("persistent_session_prepare");
+        if (!request.restore_state_path.empty()) {
+            try {
+                llama_tokens restored(full_tokens.size());
+                size_t restored_count = 0;
+                const size_t loaded = llama_state_seq_load_file(
+                        g_context,
+                        request.restore_state_path.c_str(),
+                        0,
+                        restored.data(),
+                        restored.size(),
+                        &restored_count);
+                const bool valid = loaded > 0 && restored_count > 0 &&
+                        restored_count <= full_tokens.size() &&
+                        mca::llama::tokenPrefixMatches(
+                                full_tokens,
+                                llama_tokens(restored.begin(),
+                                             restored.begin() + restored_count));
+                if (valid) {
+                    restored.resize(restored_count);
+                    g_current_position = (llama_pos) restored_count;
+                    g_context_tokens = restored;
+                    g_cache_state_valid = true;
+                    g_cache_reuse_hit = true;
+                    g_cache_reused_tokens = (int) restored_count;
+                    g_cache_reuse_hits++;
+                    g_cache_reuse_reason = "persistent_session_hit";
+                    g_persistent_prefix_cache_hit = true;
+                    g_persistent_prefix_cache_tokens = (int) restored_count;
+                    g_persistent_prefix_cache_reason = "session_state_loaded";
+                    g_pending_full_session_write_path = request.write_state_path;
+                    result.handled = true;
+                    result.reused_tokens = restored_count;
+                    return result;
+                }
+                g_persistent_prefix_cache_reason = "session_state_token_mismatch";
+            } catch (...) {
+                g_persistent_prefix_cache_reason = "session_state_load_failed";
+            }
+        } else {
+            g_persistent_prefix_cache_reason = "session_state_cold_start";
+        }
+        g_pending_full_session_write_path = request.write_state_path;
+        result.handled = true;
+        result.reused_tokens = 0;
+        return result;
+    }
+
     if (request.fixed_system_prompt.empty() || messages.empty() ||
         lower_ascii(messages.front().role) != "system" ||
         messages.front().content.rfind(request.fixed_system_prompt, 0) != 0) {
@@ -3461,6 +3517,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         g_persistent_prefix_cache_reason = g_thread_prefix_cache_request.requested
                                             ? "not_attempted"
                                             : "not_requested";
+        g_pending_full_session_write_path.clear();
         const PersistentPrefixCacheNativeRequest persistent_prefix_request = g_thread_prefix_cache_request;
         g_thread_prefix_cache_request = PersistentPrefixCacheNativeRequest{};
         if (!g_loaded) {
@@ -3629,6 +3686,28 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
                     g_cache_state_valid = false;
                     g_cache_reuse_reason = "invalidated_by_context_shift";
                 }
+                if (!g_pending_full_session_write_path.empty() &&
+                    g_context_shifts == 0 &&
+                    !g_stop_requested.load(std::memory_order_acquire)) {
+                    try {
+                        const size_t saved = llama_state_seq_save_file(
+                                g_context,
+                                g_pending_full_session_write_path.c_str(),
+                                0,
+                                tokens.data(),
+                                tokens.size());
+                        if (saved > 0) {
+                            g_persistent_prefix_cache_saved = true;
+                            g_persistent_prefix_cache_tokens = (int) tokens.size();
+                            g_persistent_prefix_cache_reason = "session_state_saved";
+                        } else {
+                            g_persistent_prefix_cache_reason = "session_state_save_failed";
+                        }
+                    } catch (...) {
+                        g_persistent_prefix_cache_reason = "session_state_save_failed";
+                    }
+                    g_pending_full_session_write_path.clear();
+                }
                 if (g_spec_request_active) {
                     g_spec_prompt_tokens = tokens;
                     common_speculative_begin(g_speculative.get(), 0, g_spec_prompt_tokens);
@@ -3698,13 +3777,15 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletionWithPrefixC
         jstring paramsJson,
         jstring restoreStatePath,
         jstring writeStatePath,
-        jstring fixedSystemPrompt
+        jstring fixedSystemPrompt,
+        jboolean fullSessionState
 ) {
     g_thread_prefix_cache_request = PersistentPrefixCacheNativeRequest{};
     g_thread_prefix_cache_request.requested = true;
     g_thread_prefix_cache_request.restore_state_path = jstring_to_string(env, restoreStatePath);
     g_thread_prefix_cache_request.write_state_path = jstring_to_string(env, writeStatePath);
     g_thread_prefix_cache_request.fixed_system_prompt = jstring_to_string(env, fixedSystemPrompt);
+    g_thread_prefix_cache_request.full_session_state = fullSessionState == JNI_TRUE;
     return Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
             env,
             obj,

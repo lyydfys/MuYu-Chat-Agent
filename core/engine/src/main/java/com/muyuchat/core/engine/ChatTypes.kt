@@ -287,11 +287,15 @@ data class ChatRequest(
     /** Request-scoped authoritative context; never persisted into assistants or chat history. */
     val runtimeSystemContext: String = "",
     /**
-     * Explicit opt-in for the disk-backed llama.cpp prefix cache. This must be
-     * a stable persona/system prefix; request-scoped retrieval, web-search, and
-     * clock text must stay null so they can never be persisted as KV state.
+     * Stable persona/system prefix for the role cache. Request-scoped
+     * retrieval, web-search, and clock text are excluded from this field.
+     * When [persistentSessionId] is present, the exact rendered conversation
+     * state is additionally checkpointed under that session identity and is
+     * accepted only after native token-prefix validation.
      */
-    val persistentPrefixSystemPrompt: String? = null
+    val persistentPrefixSystemPrompt: String? = null,
+    /** Stable conversation identity for disk-backed full-session KV reuse. */
+    val persistentSessionId: String? = null
 ) {
     /**
      * Returns only the stable configured persona prefix. Request-scoped system

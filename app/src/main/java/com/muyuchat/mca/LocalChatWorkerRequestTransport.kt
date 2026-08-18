@@ -34,7 +34,8 @@ internal object LocalChatWorkerRequestTransport {
         val paramsJson: String,
         val restoreStatePath: String?,
         val writeStatePath: String?,
-        val fixedSystemPrompt: String?
+        val fixedSystemPrompt: String?,
+        val fullSessionState: Boolean = false
     ) {
         val hasPrefixCache: Boolean
             get() = restoreStatePath != null || writeStatePath != null || fixedSystemPrompt != null
@@ -84,6 +85,7 @@ internal object LocalChatWorkerRequestTransport {
             MAX_FIXED_SYSTEM_PROMPT_BYTES,
             "fixedSystemPrompt"
         )
+        output.writeBoolean(request.fullSessionState)
     }
 
     internal fun read(input: DataInputStream): BeginRequest {
@@ -98,13 +100,15 @@ internal object LocalChatWorkerRequestTransport {
             MAX_FIXED_SYSTEM_PROMPT_BYTES,
             "fixedSystemPrompt"
         )
+        val fullSessionState = input.readBoolean()
         if (input.read() != -1) throw IOException("Trailing data in isolated text request payload.")
         return BeginRequest(
             messagesJson = messagesJson,
             paramsJson = paramsJson,
             restoreStatePath = restoreStatePath,
             writeStatePath = writeStatePath,
-            fixedSystemPrompt = fixedSystemPrompt
+            fixedSystemPrompt = fixedSystemPrompt,
+            fullSessionState = fullSessionState
         )
     }
 

@@ -10112,7 +10112,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         messages = localMessages,
                         params = activeRequestParams,
                         runtimeSystemContext = runtimeSystemContextForTurn,
-                        persistentPrefixSystemPrompt = persistentLlamaPrefix
+                        persistentPrefixSystemPrompt = persistentLlamaPrefix,
+                        persistentSessionId = initialState.activeChatSessionId
                     ),
                     executionContext
                 ) ?: engine.streamChat(
@@ -10120,7 +10121,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         messages = localMessages,
                         params = activeRequestParams,
                         runtimeSystemContext = runtimeSystemContextForTurn,
-                        persistentPrefixSystemPrompt = persistentLlamaPrefix
+                        persistentPrefixSystemPrompt = persistentLlamaPrefix,
+                        persistentSessionId = initialState.activeChatSessionId
                     ),
                     executionContext
                 )

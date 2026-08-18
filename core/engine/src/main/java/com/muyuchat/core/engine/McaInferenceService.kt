@@ -2367,9 +2367,10 @@ class McaInferenceService(
     )
 
     /**
-     * Prepares a disk entry only for a stable llama.cpp text prefix. Dynamic
-     * retrieval/world-book/clock context remains in the request and is never
-     * included in the key or state file.
+     * Prepares either a stable role prefix entry or a session-scoped llama.cpp
+     * state entry. Session state is accepted only after native token-prefix
+     * validation, so dynamic world-book/retrieval text cannot be misapplied to
+     * a changed conversation.
      */
     private fun preparePersistentPrefix(
         request: ChatRequest,
@@ -2395,7 +2396,8 @@ class McaInferenceService(
         if (identity.installationScopeId.startsWith("process-local:", ignoreCase = true)) return null
 
         val fixedSystemPrompt = request.fixedSystemPromptForPrefixCache()
-        if (fixedSystemPrompt.isBlank()) return null
+        val sessionId = request.persistentSessionId?.trim()?.takeIf { it.isNotBlank() }
+        if (fixedSystemPrompt.isBlank() && sessionId == null) return null
         // Prefix-cache metadata crosses the isolated worker boundary. A cache
         // optimization must never reject an otherwise admissible chat request.
         if (fixedSystemPrompt.toByteArray(Charsets.UTF_8).size >
@@ -2434,7 +2436,8 @@ class McaInferenceService(
             signatures = signatures,
             nativeParams = root,
             request = request,
-            fixedSystemPrompt = fixedSystemPrompt
+            fixedSystemPrompt = fixedSystemPrompt,
+            sessionId = sessionId
         )
         val store = persistentPrefixCacheStore
         val existing = runCatching { store.load(key) }.getOrNull()
@@ -2444,7 +2447,8 @@ class McaInferenceService(
             request = PersistentPrefixCacheRequest(
                 restoreStatePath = existing?.stateFile?.absolutePath,
                 writeStatePath = pending.stateFile.absolutePath,
-                fixedSystemPrompt = fixedSystemPrompt
+                fixedSystemPrompt = fixedSystemPrompt.ifBlank { "MCA_SESSION_STATE" },
+                fullSessionState = sessionId != null
             ),
             pending = pending,
             existing = existing
@@ -2502,7 +2506,8 @@ class McaInferenceService(
         signatures: ParameterSignatureSnapshot,
         nativeParams: JSONObject,
         request: ChatRequest,
-        fixedSystemPrompt: String
+        fixedSystemPrompt: String,
+        sessionId: String?
     ): PrefixCacheKey {
         fun digest(value: String): String = PrefixCacheKey.sha256Utf8(value)
         val advanced = when (val raw = nativeParams.opt("advanced_json")) {
@@ -2542,7 +2547,13 @@ class McaInferenceService(
             templateFingerprint = digest("template\n$templateBinding"),
             systemPromptFingerprint = digest(fixedSystemPrompt),
             runtimeFingerprint = digest("runtime\n$runtimeBinding"),
-            prefixFingerprint = digest("fixed-system-prefix\n$fixedSystemPrompt")
+            prefixFingerprint = digest(
+                if (sessionId != null) {
+                    "full-session-prefix-v1\n$sessionId"
+                } else {
+                    "fixed-system-prefix\n$fixedSystemPrompt"
+                }
+            )
         )
     }
 

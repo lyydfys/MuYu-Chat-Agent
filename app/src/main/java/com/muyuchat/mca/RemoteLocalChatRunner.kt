@@ -148,7 +148,8 @@ internal class RemoteLocalChatRunner(
                     paramsJson = paramsJson,
                     restoreStatePath = prefixCache.restoreStatePath,
                     writeStatePath = prefixCache.writeStatePath,
-                    fixedSystemPrompt = prefixCache.fixedSystemPrompt
+                    fixedSystemPrompt = prefixCache.fixedSystemPrompt,
+                    fullSessionState = prefixCache.fullSessionState
                 )
             ) { descriptor ->
                 service.beginCompletionWithPrefixCache(descriptor)
