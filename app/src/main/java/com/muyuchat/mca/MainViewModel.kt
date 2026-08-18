@@ -273,8 +273,16 @@ data class ChatSessionRecord(
     /** Immutable persona contract captured when this conversation chose an assistant. */
     val assistantSnapshot: AssistantConversationSnapshot? = null,
     val modelMode: String? = null,
-    val modelId: String? = null
+    val modelId: String? = null,
+    /** Optional per-conversation override. Null inherits the role/global appearance. */
+    val appearanceOverride: ChatAppearance? = null
 )
+
+enum class ChatAppearanceScope {
+    GLOBAL,
+    ASSISTANT,
+    SESSION
+}
 
 internal data class ConversationTailPrune(
     val messages: List<ChatMessage>,
@@ -1519,6 +1527,8 @@ data class MainUiState(
     val selectedChatBackend: ChatBackend = ChatBackend.LOCAL,
     val assistants: List<AssistantRecord> = emptyList(),
     val selectedAssistantId: String = AssistantRecord.DEFAULT_ID,
+    val globalChatAppearance: ChatAppearance = ChatAppearance(),
+    val chatBackgroundImporting: Boolean = false,
     val worldBooks: List<WorldBookRecord> = emptyList(),
     val knowledgeBases: List<KnowledgeBaseRecord> = emptyList(),
     val knowledgeDocumentCounts: Map<String, Int> = emptyMap(),
@@ -2022,6 +2032,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val imageLibraryBackup = ImageLibraryBackup(application, chatSessionStore)
     private val imageAssetDirectory = canonicalImageAssetDirectory(application.filesDir)
     private val assistantStore = AssistantStore(application)
+    private val globalChatAppearanceStore = GlobalChatAppearanceStore(application)
+    private val backgroundImageStore = BackgroundImageStore(application)
+    private val chatAppearanceMutex = Mutex()
     private val cloudApiStore = CloudApiStore(application)
     private val cloudChatProvider = OpenAiCompatibleChatProvider()
     private val cloudImageProvider = CloudImageProvider()
@@ -2050,6 +2063,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val initialPersistentPrefixCacheEnabled = loadPersistentPrefixCacheEnabled(application)
     private val runtimeUserOverrideFields = loadRuntimeUserOverrideFields(application).toMutableSet()
     private val initialAssistants = assistantStore.loadAssistants(initialParams)
+    private val initialGlobalChatAppearance = globalChatAppearanceStore.load()
     private val loadedChatSessions = chatSessionStore.load()
     private val initialChatSessions = loadedChatSessions
         .withBackfilledAssistantSnapshots(initialAssistants)
@@ -2276,6 +2290,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selectedCloudImageModelId = initialSelectedCloudImageModelId,
             assistants = initialAssistants,
             selectedAssistantId = initialSelectedAssistantId,
+            globalChatAppearance = initialGlobalChatAppearance,
             worldBooks = initialWorldBooks,
             knowledgeBases = initialKnowledgeBases,
             knowledgeDocumentCounts = initialKnowledgeDocumentCounts,
@@ -7096,6 +7111,162 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         applyAssistantDefaultModel(assistant)
     }
 
+    fun importChatBackground(scope: ChatAppearanceScope, uriString: String) {
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull()
+        if (uri == null || uri.scheme.isNullOrBlank()) {
+            _uiState.update { it.copy(statusMessage = "无法读取所选背景图片") }
+            return
+        }
+        val target = captureChatAppearanceTarget(scope) ?: return
+        _uiState.update { it.copy(chatBackgroundImporting = true, statusMessage = "正在处理背景图片…") }
+        viewModelScope.launch {
+            chatAppearanceMutex.withLock {
+                runCatching {
+                    val stored = withContext(Dispatchers.IO) { backgroundImageStore.import(uri) }
+                    val current = currentAppearanceForTarget(target) ?: target.appearance
+                    val appearance = current.copy(backgroundImagePath = stored.path)
+                    withContext(Dispatchers.IO) { persistChatAppearanceTarget(target, appearance) }
+                    applyPersistedChatAppearance(target, appearance)
+                    cleanupUnusedChatBackgrounds()
+                }.onSuccess {
+                    _uiState.update {
+                        it.copy(chatBackgroundImporting = false, statusMessage = "聊天背景已更新")
+                    }
+                }.onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            chatBackgroundImporting = false,
+                            statusMessage = "背景图片设置失败：${error.message ?: "无法处理图片"}"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun setChatAppearance(scope: ChatAppearanceScope, appearance: ChatAppearance?) {
+        val target = captureChatAppearanceTarget(scope) ?: return
+        val normalized = when (scope) {
+            ChatAppearanceScope.GLOBAL -> appearance ?: ChatAppearance()
+            ChatAppearanceScope.ASSISTANT,
+            ChatAppearanceScope.SESSION -> appearance
+        }
+        if (normalized?.backgroundImagePath != null &&
+            backgroundImageStore.resolve(normalized.backgroundImagePath) == null
+        ) {
+            _uiState.update { it.copy(statusMessage = "背景图片已失效，请重新选择") }
+            return
+        }
+        viewModelScope.launch {
+            chatAppearanceMutex.withLock {
+                runCatching {
+                    withContext(Dispatchers.IO) { persistChatAppearanceTarget(target, normalized) }
+                    applyPersistedChatAppearance(target, normalized)
+                    cleanupUnusedChatBackgrounds()
+                }.onFailure { error ->
+                    _uiState.update {
+                        it.copy(statusMessage = "保存聊天外观失败：${error.message ?: "存储错误"}")
+                    }
+                }
+            }
+        }
+    }
+
+    private data class ChatAppearanceTarget(
+        val scope: ChatAppearanceScope,
+        val ownerId: String?,
+        val appearance: ChatAppearance
+    )
+
+    private fun captureChatAppearanceTarget(scope: ChatAppearanceScope): ChatAppearanceTarget? {
+        val state = _uiState.value
+        return when (scope) {
+            ChatAppearanceScope.GLOBAL -> ChatAppearanceTarget(scope, null, state.globalChatAppearance)
+            ChatAppearanceScope.ASSISTANT -> {
+                val assistant = state.assistants.firstOrNull { it.id == state.selectedAssistantId }
+                if (assistant == null) {
+                    _uiState.update { it.copy(statusMessage = "当前角色不可用") }
+                    null
+                } else {
+                    ChatAppearanceTarget(scope, assistant.id, assistant.appearance)
+                }
+            }
+            ChatAppearanceScope.SESSION -> {
+                val session = state.chatSessions.firstOrNull { it.id == state.activeChatSessionId }
+                if (session == null) {
+                    _uiState.update { it.copy(statusMessage = "请先发送一条消息，再设置当前会话背景") }
+                    null
+                } else {
+                    ChatAppearanceTarget(scope, session.id, session.appearanceOverride ?: ChatAppearance())
+                }
+            }
+        }
+    }
+
+    private fun currentAppearanceForTarget(target: ChatAppearanceTarget): ChatAppearance? {
+        val state = _uiState.value
+        return when (target.scope) {
+            ChatAppearanceScope.GLOBAL -> state.globalChatAppearance
+            ChatAppearanceScope.ASSISTANT -> state.assistants
+                .firstOrNull { it.id == target.ownerId }
+                ?.appearance
+            ChatAppearanceScope.SESSION -> state.chatSessions
+                .firstOrNull { it.id == target.ownerId }
+                ?.appearanceOverride
+        }
+    }
+
+    private fun persistChatAppearanceTarget(target: ChatAppearanceTarget, appearance: ChatAppearance?) {
+        when (target.scope) {
+            ChatAppearanceScope.GLOBAL -> {
+                val value = appearance ?: ChatAppearance()
+                if (value.isDefault) globalChatAppearanceStore.clear() else globalChatAppearanceStore.save(value)
+            }
+            ChatAppearanceScope.ASSISTANT -> {
+                val ownerId = requireNotNull(target.ownerId)
+                checkNotNull(assistantStore.updateAppearance(ownerId, appearance ?: ChatAppearance())) {
+                    "角色已不存在"
+                }
+            }
+            ChatAppearanceScope.SESSION -> {
+                val ownerId = requireNotNull(target.ownerId)
+                chatSessionStore.updateAppearance(ownerId, appearance)
+            }
+        }
+    }
+
+    private fun applyPersistedChatAppearance(target: ChatAppearanceTarget, appearance: ChatAppearance?) {
+        _uiState.update { state ->
+            when (target.scope) {
+                ChatAppearanceScope.GLOBAL -> state.copy(globalChatAppearance = appearance ?: ChatAppearance())
+                ChatAppearanceScope.ASSISTANT -> state.copy(
+                    assistants = state.assistants.map { assistant ->
+                        if (assistant.id == target.ownerId) {
+                            assistant.copy(appearance = appearance ?: ChatAppearance())
+                        } else {
+                            assistant
+                        }
+                    }
+                )
+                ChatAppearanceScope.SESSION -> state.copy(
+                    chatSessions = state.chatSessions.map { session ->
+                        if (session.id == target.ownerId) session.copy(appearanceOverride = appearance) else session
+                    }
+                )
+            }
+        }
+    }
+
+    private suspend fun cleanupUnusedChatBackgrounds() {
+        val state = _uiState.value
+        val referenced = buildSet {
+            state.globalChatAppearance.backgroundImagePath?.let(::add)
+            state.assistants.mapNotNullTo(this) { it.appearance.backgroundImagePath }
+            state.chatSessions.mapNotNullTo(this) { it.appearanceOverride?.backgroundImagePath }
+        }
+        withContext(Dispatchers.IO) { backgroundImageStore.cleanup(referenced) }
+    }
+
     private fun queueWorldBookCleanup(scope: WorldBookScope, ownerIds: Set<String>) {
         require(scope != WorldBookScope.GLOBAL) { "Global world books are not owner-scoped." }
         val normalizedOwnerIds = ownerIds.asSequence()
@@ -7213,6 +7384,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         persistChatSessions(updatedSessions)
         applyAssistantDefaultModel(next)
+        viewModelScope.launch { chatAppearanceMutex.withLock { cleanupUnusedChatBackgrounds() } }
     }
 
     fun importAssistantCard(rawJson: String) {
@@ -10499,6 +10671,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         queueWorldBookCleanup(WorldBookScope.CHAT, setOf(sessionId))
         persistConversationMutation(remaining, rollback)
+        viewModelScope.launch { chatAppearanceMutex.withLock { cleanupUnusedChatBackgrounds() } }
     }
 
     fun renameChatSession(sessionId: String, title: String) {
@@ -13159,7 +13332,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 assistantSnapshot ?: existing?.assistantSnapshot
             },
             modelMode = modelMode ?: existing?.modelMode,
-            modelId = if (modelMode != null) modelId else existing?.modelId
+            modelId = if (modelMode != null) modelId else existing?.modelId,
+            appearanceOverride = existing?.appearanceOverride
         )
         return (listOf(record) + filterNot { it.id == sessionId }).sortedForHistory()
     }

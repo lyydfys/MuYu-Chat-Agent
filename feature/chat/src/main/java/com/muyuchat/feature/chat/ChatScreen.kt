@@ -134,6 +134,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDateRangePickerState
@@ -143,6 +144,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -151,6 +153,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.zIndex
@@ -230,6 +233,7 @@ import kotlin.math.roundToInt
 
 private const val CLOUD_REASONING_LOCKED_TIP = "云端思考由模型服务商控制，MCA 已默认启用，暂不支持切换。"
 private const val MAX_ASSISTANT_SYSTEM_PROMPT_CHARS = 12_000
+private const val CHAT_BACKGROUND_MAX_DECODE_EDGE = 2048
 private val McaPrimaryBlue = Color(0xFF3F7DE8)
 private val McaInputShell = Color(0xFFFEFEFF)
 private val McaInputField = Color(0xFFF3F7FF)
@@ -296,6 +300,18 @@ data class ChatUiState(
     val visionCapabilityDetail: String = "请加载云端多模态模型，或绑定本地 mmproj 视觉投影器。",
     val visionCapabilityReady: Boolean = false
 )
+
+/** Visual preferences for the conversation canvas. URI is copied to app-private storage by the host. */
+data class ChatBackgroundState(
+    val imageUri: String? = null,
+    val scrimAlpha: Float = 0.22f,
+    val blurRadius: Float = 0f,
+    val scaleMode: ChatBackgroundScaleMode = ChatBackgroundScaleMode.CROP
+)
+
+enum class ChatBackgroundScaleMode { CROP, FIT, CENTER }
+
+enum class ChatBackgroundScope { GLOBAL, ASSISTANT, SESSION }
 
 data class ImageLibraryBackupUiState(
     val running: Boolean = false,
@@ -1810,6 +1826,14 @@ fun ChatScreen(
         modelId: String,
         prompt: String,
     ) -> ImagePromptTokenMeasurement?)? = null,
+    chatBackground: ChatBackgroundState = ChatBackgroundState(),
+    globalChatBackground: ChatBackgroundState = ChatBackgroundState(),
+    assistantChatBackground: ChatBackgroundState? = null,
+    sessionChatBackground: ChatBackgroundState? = null,
+    hasActiveChatSession: Boolean = false,
+    chatBackgroundImporting: Boolean = false,
+    onChatBackgroundChange: (ChatBackgroundScope, ChatBackgroundState?) -> Unit = { _, _ -> },
+    onChatBackgroundImageSelected: (ChatBackgroundScope, String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
@@ -1826,6 +1850,8 @@ fun ChatScreen(
     var showImages by rememberSaveable { mutableStateOf(false) }
     var showAssistants by rememberSaveable { mutableStateOf(false) }
     var showFileLibrary by rememberSaveable { mutableStateOf(false) }
+    var showBackgroundSettings by rememberSaveable { mutableStateOf(false) }
+    var pendingBackgroundScope by rememberSaveable { mutableStateOf(ChatBackgroundScope.ASSISTANT) }
     var imagePrompt by rememberSaveable { mutableStateOf("") }
     var imageTaskModeName by rememberSaveable {
         mutableStateOf(ImageGenerationUiTaskMode.TEXT_TO_IMAGE.name)
@@ -2769,6 +2795,13 @@ fun ChatScreen(
     ) { uri ->
         uri?.let { selectedUri -> onImportImageUpscaler(selectedUri.toString()) }
     }
+    val chatBackgroundPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { selectedUri ->
+            onChatBackgroundImageSelected(pendingBackgroundScope, selectedUri.toString())
+        }
+    }
     val cameraPicker = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
         bitmap?.let { onUploadFile(saveCameraPreview(context, it).toString()) }
     }
@@ -2829,6 +2862,10 @@ fun ChatScreen(
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
         ) {
+            ChatBackground(
+                state = chatBackground,
+                modifier = Modifier.fillMaxSize()
+            )
             Column(modifier = Modifier.fillMaxSize()) {
                 ChatStatusBar(
                     state = state,
@@ -2838,6 +2875,7 @@ fun ChatScreen(
                     onOpenModels = onOpenModels,
                     onReasoningModeChange = onReasoningModeChange,
                     onCloudReasoningModeLocked = onCloudReasoningModeLocked,
+                    onOpenBackgroundSettings = { showBackgroundSettings = true },
                     onOpenAppMenu = { onAppMenuOpenChange(true) }
                 )
 
@@ -2929,6 +2967,24 @@ fun ChatScreen(
                 onOpenWebSearchSettings = onOpenWebSearchSettings,
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
+
+            if (showBackgroundSettings) {
+                ChatBackgroundSettingsDialog(
+                    effectiveState = chatBackground,
+                    globalState = globalChatBackground,
+                    assistantState = assistantChatBackground,
+                    sessionState = sessionChatBackground,
+                    hasActiveSession = hasActiveChatSession,
+                    importing = chatBackgroundImporting,
+                    onDismiss = { showBackgroundSettings = false },
+                    onChooseImage = { scope ->
+                        pendingBackgroundScope = scope
+                        chatBackgroundPicker.launch(arrayOf("image/*"))
+                    },
+                    onChange = onChatBackgroundChange,
+                    onReset = { scope -> onChatBackgroundChange(scope, null) }
+                )
+            }
 
             SmoothRightToLeftPage(
                 visible = showAssistants,
@@ -10645,6 +10701,7 @@ private fun ChatStatusBar(
     onOpenModels: () -> Unit,
     onReasoningModeChange: (ReasoningMode) -> Unit,
     onCloudReasoningModeLocked: () -> Unit,
+    onOpenBackgroundSettings: () -> Unit,
     onOpenAppMenu: () -> Unit
 ) {
     val apiActive = state.selectedModelIsCloud || state.apiEnabled || state.restEnabled
@@ -10773,12 +10830,199 @@ private fun ChatStatusBar(
                 IconButton(onClick = onNewConversation, modifier = Modifier.size(38.dp)) {
                     Icon(Icons.Default.Edit, contentDescription = "新建聊天", modifier = Modifier.size(22.dp))
                 }
+                IconButton(onClick = onOpenBackgroundSettings, modifier = Modifier.size(38.dp)) {
+                    Icon(Icons.Default.Image, contentDescription = "聊天背景", modifier = Modifier.size(21.dp))
+                }
                 IconButton(onClick = onOpenAppMenu, modifier = Modifier.size(38.dp)) {
                     McaLogoMark(size = 28.dp, cornerRadius = 10.dp)
                 }
             }
         }
     }
+}
+
+@Composable
+private fun ChatBackground(
+    state: ChatBackgroundState,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = state.imageUri) {
+        value = withContext(Dispatchers.IO) {
+            val raw = state.imageUri?.trim().orEmpty()
+            if (raw.isBlank()) return@withContext null
+            decodeChatBackgroundBitmap(context, raw)
+        }
+    }
+    Box(modifier = modifier) {
+        bitmap?.let { image ->
+            Image(
+                bitmap = image.asImageBitmap(),
+                contentDescription = null,
+                contentScale = when (state.scaleMode) {
+                    ChatBackgroundScaleMode.CROP -> ContentScale.Crop
+                    ChatBackgroundScaleMode.FIT -> ContentScale.Fit
+                    ChatBackgroundScaleMode.CENTER -> ContentScale.None
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(if (state.blurRadius > 0f) Modifier.blur(state.blurRadius.dp) else Modifier)
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background.copy(alpha = state.scrimAlpha.coerceIn(0f, 0.9f)))
+            )
+        }
+    }
+}
+
+private fun decodeChatBackgroundBitmap(context: Context, rawUri: String): Bitmap? = runCatching {
+    fun openStream(): InputStream? = when {
+        rawUri.startsWith("content://") || rawUri.startsWith("android.resource://") || rawUri.startsWith("file://") ->
+            context.contentResolver.openInputStream(Uri.parse(rawUri))
+        else -> File(rawUri).inputStream()
+    }
+
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    openStream()?.use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+
+    var sampleSize = 1
+    while (bounds.outWidth / sampleSize > CHAT_BACKGROUND_MAX_DECODE_EDGE ||
+        bounds.outHeight / sampleSize > CHAT_BACKGROUND_MAX_DECODE_EDGE
+    ) {
+        sampleSize *= 2
+    }
+    val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    openStream()?.use { BitmapFactory.decodeStream(it, null, options) }
+}.getOrNull()
+
+@Composable
+private fun ChatBackgroundSettingsDialog(
+    effectiveState: ChatBackgroundState,
+    globalState: ChatBackgroundState,
+    assistantState: ChatBackgroundState?,
+    sessionState: ChatBackgroundState?,
+    hasActiveSession: Boolean,
+    importing: Boolean,
+    onDismiss: () -> Unit,
+    onChooseImage: (ChatBackgroundScope) -> Unit,
+    onChange: (ChatBackgroundScope, ChatBackgroundState?) -> Unit,
+    onReset: (ChatBackgroundScope) -> Unit
+) {
+    var scope by rememberSaveable(hasActiveSession) {
+        mutableStateOf(if (hasActiveSession) ChatBackgroundScope.SESSION else ChatBackgroundScope.ASSISTANT)
+    }
+    val explicitState = when (scope) {
+        ChatBackgroundScope.GLOBAL -> globalState
+        ChatBackgroundScope.ASSISTANT -> assistantState
+        ChatBackgroundScope.SESSION -> sessionState
+    }
+    val inheritedState = when (scope) {
+        ChatBackgroundScope.GLOBAL -> ChatBackgroundState()
+        ChatBackgroundScope.ASSISTANT -> globalState
+        ChatBackgroundScope.SESSION -> assistantState ?: globalState
+    }
+    val state = explicitState ?: inheritedState
+    val hasOverride = when (scope) {
+        ChatBackgroundScope.GLOBAL -> globalState != ChatBackgroundState()
+        ChatBackgroundScope.ASSISTANT -> assistantState != null
+        ChatBackgroundScope.SESSION -> sessionState != null
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("聊天背景") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("应用范围", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
+                    FilterChip(
+                        selected = scope == ChatBackgroundScope.GLOBAL,
+                        onClick = { scope = ChatBackgroundScope.GLOBAL },
+                        label = { Text("全局") }
+                    )
+                    FilterChip(
+                        selected = scope == ChatBackgroundScope.ASSISTANT,
+                        onClick = { scope = ChatBackgroundScope.ASSISTANT },
+                        label = { Text("当前角色") }
+                    )
+                    FilterChip(
+                        selected = scope == ChatBackgroundScope.SESSION,
+                        onClick = { scope = ChatBackgroundScope.SESSION },
+                        enabled = hasActiveSession,
+                        label = { Text("当前会话") }
+                    )
+                }
+                Text(
+                    text = when {
+                        importing -> "正在复制并优化背景图片…"
+                        state.imageUri.isNullOrBlank() -> "使用默认主题背景"
+                        explicitState == null -> "正在继承上一级背景"
+                        else -> "已为此范围设置自定义背景"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
+                    Button(onClick = { onChooseImage(scope) }, enabled = !importing) { Text("选择图片") }
+                    TextButton(
+                        onClick = { onReset(scope) },
+                        enabled = hasOverride && !importing
+                    ) { Text(if (scope == ChatBackgroundScope.GLOBAL) "恢复默认" else "改为继承") }
+                }
+                Text("遮罩 ${((state.scrimAlpha.coerceIn(0f, 1f)) * 100).roundToInt()}%", style = MaterialTheme.typography.labelLarge)
+                Slider(
+                    value = state.scrimAlpha.coerceIn(0f, 0.9f),
+                    onValueChange = { onChange(scope, state.copy(scrimAlpha = it)) },
+                    enabled = !importing,
+                    valueRange = 0f..0.9f
+                )
+                Text("模糊 ${state.blurRadius.roundToInt()} dp", style = MaterialTheme.typography.labelLarge)
+                Slider(
+                    value = state.blurRadius.coerceIn(0f, 24f),
+                    onValueChange = { onChange(scope, state.copy(blurRadius = it)) },
+                    enabled = !importing,
+                    valueRange = 0f..24f
+                )
+                Text("缩放方式", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = state.scaleMode == ChatBackgroundScaleMode.CROP,
+                        onClick = { onChange(scope, state.copy(scaleMode = ChatBackgroundScaleMode.CROP)) },
+                        label = { Text("裁剪填充") }
+                    )
+                    FilterChip(
+                        selected = state.scaleMode == ChatBackgroundScaleMode.FIT,
+                        onClick = { onChange(scope, state.copy(scaleMode = ChatBackgroundScaleMode.FIT)) },
+                        label = { Text("完整显示") }
+                    )
+                    FilterChip(
+                        selected = state.scaleMode == ChatBackgroundScaleMode.CENTER,
+                        onClick = { onChange(scope, state.copy(scaleMode = ChatBackgroundScaleMode.CENTER)) },
+                        label = { Text("居中") }
+                    )
+                }
+                if (effectiveState.imageUri != state.imageUri) {
+                    Text(
+                        "当前画布由更高优先级的设置覆盖",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
+    )
 }
 
 @Composable

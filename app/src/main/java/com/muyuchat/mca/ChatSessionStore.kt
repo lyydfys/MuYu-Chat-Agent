@@ -140,6 +140,11 @@ class ChatSessionStore(context: Context) {
         database.chatSessionDao().replaceAll(ChatHistoryPersistenceBounds.bound(sessions))
     }
 
+    /** Updates only the persisted appearance override for an existing session. */
+    fun updateAppearance(sessionId: String, appearance: ChatAppearance?) = runBlocking(Dispatchers.IO) {
+        database.chatSessionDao().setSessionAppearance(sessionId, appearance?.toJsonString())
+    }
+
     /**
      * Replaces the session snapshot and any newly-created knowledge bindings in
      * one Room transaction.  A first message can create both rows at once;
@@ -255,7 +260,11 @@ class ChatSessionStore(context: Context) {
                     ?: optJSONObject("assistantSnapshot")?.toString()
             ),
             modelMode = optString("modelMode").takeIf { it.isNotBlank() },
-            modelId = optString("modelId").takeIf { it.isNotBlank() }
+            modelId = optString("modelId").takeIf { it.isNotBlank() },
+            appearanceOverride = ChatAppearance.fromJsonOrNull(
+                optJSONObject("appearanceOverride")?.toString()
+                    ?: optString("appearanceOverrideJson").takeIf { it.isNotBlank() }
+            )
         )
 
     private fun JSONArray?.toChatMessages(): List<ChatMessage> {
@@ -294,7 +303,7 @@ class ChatSessionStore(context: Context) {
         KnowledgeChunkEntity::class,
         ChatKnowledgeBaseBindingEntity::class
     ],
-    version = 20,
+    version = 21,
     exportSchema = false
 )
 abstract class McaRoomDatabase : RoomDatabase() {
@@ -323,7 +332,8 @@ abstract class McaRoomDatabase : RoomDatabase() {
                         MIGRATION_16_17,
                         MIGRATION_17_18,
                         MIGRATION_18_19,
-                        MIGRATION_19_20
+                        MIGRATION_19_20,
+                        MIGRATION_20_21
                     )
                     .build()
                     .also { instance = it }
@@ -463,6 +473,12 @@ abstract class McaRoomDatabase : RoomDatabase() {
         private val MIGRATION_19_20 = object : Migration(19, 20) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 rebuildKnowledgeTablesWithForeignKeys(db)
+            }
+        }
+
+        private val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addChatAppearanceColumnsIfMissing(db)
             }
         }
 
@@ -775,6 +791,15 @@ abstract class McaRoomDatabase : RoomDatabase() {
         private fun addChatSessionAssistantSnapshotColumnIfMissing(db: SupportSQLiteDatabase) {
             if ("assistantSnapshotJson" !in tableColumns(db, "chat_sessions")) {
                 db.execSQL("ALTER TABLE chat_sessions ADD COLUMN assistantSnapshotJson TEXT")
+            }
+        }
+
+        private fun addChatAppearanceColumnsIfMissing(db: SupportSQLiteDatabase) {
+            if ("appearanceJson" !in tableColumns(db, "chat_sessions")) {
+                db.execSQL("ALTER TABLE chat_sessions ADD COLUMN appearanceJson TEXT")
+            }
+            if ("appearanceJson" !in tableColumns(db, "assistants")) {
+                db.execSQL("ALTER TABLE assistants ADD COLUMN appearanceJson TEXT")
             }
         }
 
@@ -1164,6 +1189,9 @@ interface ChatSessionDao {
     @Query("SELECT * FROM assistants ORDER BY updatedAt DESC")
     suspend fun assistants(): List<AssistantEntity>
 
+    @Query("UPDATE chat_sessions SET appearanceJson = :appearanceJson WHERE id = :sessionId")
+    suspend fun setSessionAppearance(sessionId: String, appearanceJson: String?): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAssistants(assistants: List<AssistantEntity>)
 
@@ -1312,7 +1340,8 @@ interface ChatSessionDao {
                     session.assistantSnapshotJson
                 ),
                 modelMode = session.modelMode,
-                modelId = session.modelId
+                modelId = session.modelId,
+                appearanceOverride = ChatAppearance.fromJsonOrNull(session.appearanceJson)
             )
         }
 
@@ -1555,7 +1584,8 @@ data class ChatSessionEntity(
     val assistantId: String? = null,
     val assistantSnapshotJson: String? = null,
     val modelMode: String? = null,
-    val modelId: String? = null
+    val modelId: String? = null,
+    val appearanceJson: String? = null
 )
 
 @Entity(
@@ -1629,6 +1659,7 @@ data class AssistantEntity(
     val memoryEnabled: Boolean,
     val webSearchEnabled: Boolean,
     val fileContextEnabled: Boolean,
+    val appearanceJson: String? = null,
     val createdAt: Long,
     val updatedAt: Long
 )
@@ -1768,6 +1799,7 @@ private fun ChatSessionEntity.serializedByteCount(): Long =
         .saturatingAdd(assistantSnapshotJson.nullableSerializedFieldByteCount())
         .saturatingAdd(modelMode.nullableSerializedFieldByteCount())
         .saturatingAdd(modelId.nullableSerializedFieldByteCount())
+        .saturatingAdd(appearanceJson.nullableSerializedFieldByteCount())
 
 private fun ChatMessageEntity.serializedByteCount(): Long =
     SERIALIZED_ROW_OVERHEAD_BYTES
@@ -1827,7 +1859,8 @@ private fun ChatSessionRecord.toEntity(): ChatSessionEntity =
         assistantId = assistantId,
         assistantSnapshotJson = assistantSnapshot?.toJsonString(),
         modelMode = modelMode,
-        modelId = modelId
+        modelId = modelId,
+        appearanceJson = appearanceOverride?.toJsonString()
     )
 
 private fun ImageAssetRecord.toEntity(): ImageAssetEntity =
@@ -1886,6 +1919,7 @@ private fun AssistantRecord.toEntity(): AssistantEntity =
         memoryEnabled = memoryEnabled,
         webSearchEnabled = webSearchEnabled,
         fileContextEnabled = fileContextEnabled,
+        appearanceJson = appearance.takeUnless { it.isDefault }?.toJsonString(),
         createdAt = createdAt,
         updatedAt = updatedAt
     )
@@ -1974,6 +2008,7 @@ private fun AssistantEntity.toAssistantRecord(): AssistantRecord =
         memoryEnabled = memoryEnabled,
         webSearchEnabled = webSearchEnabled,
         fileContextEnabled = fileContextEnabled,
+        appearance = ChatAppearance.fromJsonOrNull(appearanceJson) ?: ChatAppearance(),
         createdAt = createdAt,
         updatedAt = updatedAt
     )

@@ -22,6 +22,8 @@ data class AssistantRecord(
     val memoryEnabled: Boolean = false,
     val webSearchEnabled: Boolean = false,
     val fileContextEnabled: Boolean = true,
+    /** Optional role-card background; copied into app-private storage by the UI. */
+    val appearance: ChatAppearance = ChatAppearance(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 ) {
@@ -40,6 +42,7 @@ data class AssistantRecord(
         .put("memoryEnabled", memoryEnabled)
         .put("webSearchEnabled", webSearchEnabled)
         .put("fileContextEnabled", fileContextEnabled)
+        .put("appearance", appearance.toJson())
         .put("createdAt", createdAt)
         .put("updatedAt", updatedAt)
 
@@ -106,6 +109,12 @@ data class AssistantRecord(
                 memoryEnabled = json.optBoolean("memoryEnabled", defaults.memoryEnabled),
                 webSearchEnabled = json.optBoolean("webSearchEnabled", defaults.webSearchEnabled),
                 fileContextEnabled = json.optBoolean("fileContextEnabled", defaults.fileContextEnabled),
+                appearance = ChatAppearance.fromJsonOrNull(
+                    json.optJSONObject("appearance")?.toString()
+                        ?: json.optString("appearanceJson").takeIf { it.isNotBlank() }
+                        ?: source.optJSONObject("appearance")?.toString()
+                        ?: source.optString("appearanceJson").takeIf { it.isNotBlank() }
+                ) ?: defaults.appearance,
                 createdAt = json.optLong("createdAt", System.currentTimeMillis()),
                 updatedAt = json.optLong("updatedAt", System.currentTimeMillis())
             )
@@ -341,6 +350,21 @@ class AssistantStore(context: Context) {
         database.chatSessionDao().replaceAssistants(normalized)
         saveLegacyAssistants(normalized)
     }
+
+    /** Persists one role's default appearance while keeping the legacy JSON mirror in sync. */
+    fun updateAppearance(assistantId: String, appearance: ChatAppearance): AssistantRecord? =
+        runBlocking(Dispatchers.IO) {
+            val current = database.chatSessionDao().assistantRecords()
+            val existing = current.firstOrNull { it.id == assistantId } ?: return@runBlocking null
+            val updatedRecord = existing.copy(
+                appearance = appearance,
+                updatedAt = System.currentTimeMillis()
+            )
+            val updated = current.map { if (it.id == assistantId) updatedRecord else it }
+            database.chatSessionDao().replaceAssistants(updated)
+            saveLegacyAssistants(updated)
+            updatedRecord
+        }
 
     private fun loadLegacyAssistants(fallback: AssistantRecord): List<AssistantRecord> {
         val raw = prefs.getString("assistants_json", null) ?: return listOf(fallback)

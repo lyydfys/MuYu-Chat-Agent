@@ -48,6 +48,9 @@ import com.muyuchat.feature.chat.ChatScreen
 import com.muyuchat.feature.chat.AssistantEditorDraft
 import com.muyuchat.feature.chat.AssistantUiItem
 import com.muyuchat.feature.chat.ChatHistoryItem
+import com.muyuchat.feature.chat.ChatBackgroundScope
+import com.muyuchat.feature.chat.ChatBackgroundState
+import com.muyuchat.feature.chat.ChatBackgroundScaleMode as UiChatBackgroundScaleMode
 import com.muyuchat.feature.chat.FileAssetUiItem
 import com.muyuchat.feature.chat.ImageAssetUiItem
 import com.muyuchat.feature.chat.ImageGenerationUiJob
@@ -91,6 +94,34 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 private const val PENDING_WORLD_BOOK_SCOPE_KEY = "pending_world_book_scope"
+
+private fun ChatAppearance.toUiState(): ChatBackgroundState = ChatBackgroundState(
+    imageUri = backgroundImagePath,
+    scrimAlpha = backgroundAlpha,
+    blurRadius = backgroundBlur,
+    scaleMode = when (backgroundScaleMode) {
+        ChatBackgroundScaleMode.CROP -> UiChatBackgroundScaleMode.CROP
+        ChatBackgroundScaleMode.FIT -> UiChatBackgroundScaleMode.FIT
+        ChatBackgroundScaleMode.CENTER -> UiChatBackgroundScaleMode.CENTER
+    }
+)
+
+private fun ChatBackgroundState.toAppearance(): ChatAppearance = ChatAppearance(
+    backgroundImagePath = imageUri,
+    backgroundAlpha = scrimAlpha.coerceIn(0f, 1f),
+    backgroundBlur = blurRadius.coerceIn(0f, ChatAppearance.MAX_BLUR),
+    backgroundScaleMode = when (scaleMode) {
+        UiChatBackgroundScaleMode.CROP -> ChatBackgroundScaleMode.CROP
+        UiChatBackgroundScaleMode.FIT -> ChatBackgroundScaleMode.FIT
+        UiChatBackgroundScaleMode.CENTER -> ChatBackgroundScaleMode.CENTER
+    }
+)
+
+private fun ChatBackgroundScope.toAppearanceScope(): ChatAppearanceScope = when (this) {
+    ChatBackgroundScope.GLOBAL -> ChatAppearanceScope.GLOBAL
+    ChatBackgroundScope.ASSISTANT -> ChatAppearanceScope.ASSISTANT
+    ChatBackgroundScope.SESSION -> ChatAppearanceScope.SESSION
+}
 
 internal fun existingImageModelChoiceIds(
     localModelIds: Iterable<String>,
@@ -266,6 +297,15 @@ private fun McaApp(
         .filterNotNull()
             .flatMapTo(mutableSetOf()) { history -> history.requiredContentInputReferences() },
         jobInputDrafts = state.imageJobs.mapNotNull { job -> job.spec?.inputDraft }
+    )
+    val activeChatSession = state.chatSessions.firstOrNull { it.id == state.activeChatSessionId }
+    val selectedAssistant = state.assistants.firstOrNull { it.id == state.selectedAssistantId }
+    val assistantAppearance = selectedAssistant?.appearance?.takeUnless { it.isDefault }
+    val sessionAppearance = activeChatSession?.appearanceOverride
+    val effectiveChatAppearance = resolveChatAppearance(
+        sessionOverride = sessionAppearance,
+        assistantAppearance = assistantAppearance,
+        globalAppearance = state.globalChatAppearance
     )
 
     Scaffold { padding ->
@@ -720,6 +760,18 @@ private fun McaApp(
                     visionCapabilityDetail = chatVisionCapability.detail,
                     visionCapabilityReady = chatVisionCapability.ready
                 ),
+                chatBackground = effectiveChatAppearance.toUiState(),
+                globalChatBackground = state.globalChatAppearance.toUiState(),
+                assistantChatBackground = assistantAppearance?.toUiState(),
+                sessionChatBackground = sessionAppearance?.toUiState(),
+                hasActiveChatSession = activeChatSession != null,
+                chatBackgroundImporting = state.chatBackgroundImporting,
+                onChatBackgroundChange = { scope, appearance ->
+                    viewModel.setChatAppearance(scope.toAppearanceScope(), appearance?.toAppearance())
+                },
+                onChatBackgroundImageSelected = { scope, uri ->
+                    viewModel.importChatBackground(scope.toAppearanceScope(), uri)
+                },
                 onInputChange = viewModel::onInputChange,
                 onDismissStatusMessage = viewModel::clearStatusMessage,
                 onSend = viewModel::sendMessage,
