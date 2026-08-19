@@ -699,6 +699,7 @@ private fun McaApp(
                     isGenerating = state.isGenerating,
                     generationPhase = state.generationPhase,
                     generationTokenProgress = state.generationTokenProgress,
+                    generationPersistProgress = state.generationPersistProgress,
                     generationStats = state.generationStats,
                     promptContextUsage = state.promptContextUsage,
                     selectedModelId = if (state.selectedChatBackend == ChatBackend.CLOUD) {

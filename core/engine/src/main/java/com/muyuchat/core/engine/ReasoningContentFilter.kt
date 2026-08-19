@@ -6,15 +6,45 @@ internal data class ReasoningFilterOutput(
 )
 
 /**
+ * Prompt-side reasoning openers, mirrored by the native
+ * prompt_ends_inside_reasoning() detectors in the llama.cpp and MNN engines.
+ */
+internal val REASONING_PROMPT_OPENERS = listOf(
+    "<think>",
+    "<|think|>",
+    "<|channel>thought",
+    "<|channel|>thought",
+    "<|channel>analysis",
+    "<|channel|>analysis"
+)
+
+/**
+ * True when a rendered chat prompt ends inside an unclosed reasoning opener
+ * (DeepSeek-style templates pre-fill "<think>\n"), so the generated stream
+ * starts mid-thinking and only the close marker will appear. An empty
+ * pre-filled block ending in "</think>" matches none of the openers.
+ */
+internal fun promptEndsInsideReasoning(prompt: String): Boolean {
+    val trimmed = prompt.trimEnd()
+    return REASONING_PROMPT_OPENERS.any { trimmed.endsWith(it) }
+}
+
+/**
  * Splits model output into visible content and reasoning_content.
  *
  * The main path follows llama-server style structured markers such as
  * <think>...</think> and channel thought/analysis blocks. A narrow fallback also
  * handles models that start the whole answer with a plain "Thinking Process:"
  * style heading, but only before any visible answer text has been emitted.
+ *
+ * [startsInsideReasoning] covers templates (DeepSeek-style) that pre-fill the
+ * reasoning opener into the prompt: the generated stream then begins
+ * mid-thinking and only carries the close marker.
  */
-internal class ReasoningContentFilter {
-    private var insideReasoning = false
+internal class ReasoningContentFilter(
+    startsInsideReasoning: Boolean = false
+) {
+    private var insideReasoning = startsInsideReasoning
     private var insidePlainReasoning = false
     private var buffer = ""
     private var trimNextVisiblePrefix = false
@@ -169,14 +199,7 @@ internal class ReasoningContentFilter {
         const val PLAIN_REASONING_LOOKAHEAD = 96
         const val PLAIN_FINAL_MARKER_LOOKAHEAD = 64
 
-        val REASONING_OPEN_MARKERS = listOf(
-            "<think>",
-            "<|think|>",
-            "<|channel>thought",
-            "<|channel|>thought",
-            "<|channel>analysis",
-            "<|channel|>analysis"
-        )
+        val REASONING_OPEN_MARKERS = REASONING_PROMPT_OPENERS
 
         val REASONING_CLOSE_MARKERS = listOf(
             "</think>",

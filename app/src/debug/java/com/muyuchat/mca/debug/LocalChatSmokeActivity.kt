@@ -1648,6 +1648,7 @@ open class LocalChatSmokeActivity : Activity() {
             ).collect { event ->
                 when (event) {
                     is GenerateEvent.Phase -> Unit
+                    is GenerateEvent.Persist -> Unit
                     is GenerateEvent.Chunk -> text.append(event.text)
                     is GenerateEvent.Done -> doneSeen = true
                     is GenerateEvent.Error -> error(event.message)
@@ -1801,6 +1802,7 @@ open class LocalChatSmokeActivity : Activity() {
                             ).collect { event ->
                                 when (event) {
                                     is GenerateEvent.Phase -> Unit
+                                    is GenerateEvent.Persist -> Unit
                                     is GenerateEvent.Chunk -> synchronized(stateLock) {
                                         text.append(event.text)
                                     }

@@ -31,6 +31,8 @@ class NativeLlamaBridge {
      * exact prefill total for the current request.
      */
     external fun getPrefillProgressJson(): String
+    /** Lock-free KV cache serialization progress while a state file is written. */
+    external fun getPersistProgressJson(): String
     /** Clears the prior request's lock-free prefill snapshot before a new begin. */
     external fun resetPrefillProgress()
     external fun generateNextChunk(): String?

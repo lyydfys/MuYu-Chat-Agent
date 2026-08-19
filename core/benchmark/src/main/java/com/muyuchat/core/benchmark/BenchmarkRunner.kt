@@ -310,6 +310,7 @@ class BenchmarkRunner(
         engine.streamChat(request).collect { event ->
             when (event) {
                 is GenerateEvent.Phase -> Unit
+                is GenerateEvent.Persist -> Unit
                 is GenerateEvent.Chunk -> {
                     val stats = event.stats
                     result = BenchmarkResult(

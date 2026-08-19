@@ -953,6 +953,14 @@ class McaInferenceService(
                         exactPrefillPhaseEmitted = true
                         lastPrefillProgress = progress
                     }
+                    suspend fun emitPersistProgress(progress: PersistProgress) {
+                        try {
+                            emit(GenerateEvent.Persist(progress))
+                        } catch (error: Throwable) {
+                            downstreamPrefillEmissionFailed = true
+                            throw error
+                        }
+                    }
                     val resultCode =
                         coroutineScope {
                             // A previous request leaves its final 100% snapshot
@@ -974,6 +982,7 @@ class McaInferenceService(
                                 }
                             }
                             var nativeResult: Int? = null
+                            var lastPersist: PersistProgress? = null
                             while (nativeResult == null) {
                                 // Isolated text runners obtain this snapshot through Binder.
                                 // Keep that IPC off the caller/UI dispatcher while
@@ -981,6 +990,11 @@ class McaInferenceService(
                                 val progress = withContext(io) { runner.prefillProgress() }
                                 if (progress != null && progress != lastPrefillProgress) {
                                     emitExactPrefillProgress(progress)
+                                }
+                                val persist = withContext(io) { runner.persistProgress() }
+                                if (persist != null && persist != lastPersist) {
+                                    lastPersist = persist
+                                    emitPersistProgress(persist)
                                 }
                                 // Do not impose one polling interval of TTFT
                                 // latency on short prompts: return immediately
@@ -996,6 +1010,10 @@ class McaInferenceService(
                             val finalProgress = withContext(io) { runner.prefillProgress() }
                             if (finalProgress != null && finalProgress != lastPrefillProgress) {
                                 emitExactPrefillProgress(finalProgress)
+                            }
+                            val finalPersist = withContext(io) { runner.persistProgress() }
+                            if (finalPersist != null && finalPersist != lastPersist && finalPersist.isActive) {
+                                emitPersistProgress(finalPersist)
                             }
                             checkNotNull(nativeResult)
                         }
@@ -1133,7 +1151,9 @@ class McaInferenceService(
             // otherwise the UI cannot show prefillMs/prefillTps until the first
             // generated token arrives, which is especially misleading for large
             // GGUF models with a long first-token latency.
+            var promptEndsInsideReasoning = false
             runCatching { JSONObject(nativeStatsJson()) }.getOrNull()?.let { nativeStats ->
+                promptEndsInsideReasoning = nativeStats.optBoolean("promptEndsInsideReasoning", false)
                 val prefillStats = mergeNativeStats(
                     base = _stats.value,
                     nativeStats = nativeStats,
@@ -1168,7 +1188,7 @@ class McaInferenceService(
             var lastStatsSampleAt = 0L
             var lastMemorySampleAt = started
             var cachedNativeStats: JSONObject? = null
-            val reasoningFilter = ReasoningContentFilter()
+            val reasoningFilter = ReasoningContentFilter(startsInsideReasoning = promptEndsInsideReasoning)
             val reasoningLoopGuard = ReasoningLoopGuard()
             val hideReasoning = request.params.hideReasoning || request.params.reasoningMode == ReasoningMode.OFF
             var reasoningStartedAt = 0L

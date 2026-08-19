@@ -491,6 +491,27 @@ enum class GenerationPhase {
     PERSIST
 }
 
+/** Lifecycle of KV cache serialization/write reported by the native runtime. */
+enum class PersistStage {
+    IDLE,
+    ENCODING,
+    WRITING,
+    DONE
+}
+
+/**
+ * Byte-level serialization progress for the KV state file written while
+ * beginCompletion runs. A missing [PersistProgress] means no write is in flight.
+ */
+data class PersistProgress(
+    val stage: PersistStage,
+    val writtenBytes: Long,
+    val totalBytes: Long
+) {
+    val isActive: Boolean
+        get() = stage == PersistStage.ENCODING || stage == PersistStage.WRITING
+}
+
 /**
  * Exact token progress reported by a native runtime.
  *
@@ -572,6 +593,9 @@ sealed interface GenerateEvent {
         val reasoningDurationMs: Long = 0L,
         val hiddenReasoning: Boolean = false
     ) : GenerateEvent
+
+    /** Byte-level KV serialization progress while native persists a state file. */
+    data class Persist(val progress: PersistProgress) : GenerateEvent
     data class Done(val stats: RuntimeStats) : GenerateEvent
     data class Error(
         val message: String,

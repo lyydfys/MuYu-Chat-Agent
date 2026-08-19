@@ -952,6 +952,7 @@ class McaLoopbackServer(
                 synchronized(output) {
                     when (event) {
                         is GenerateEvent.Phase -> finalStats = event.stats
+                        is GenerateEvent.Persist -> Unit
                         is GenerateEvent.Chunk -> {
                             finalStats = event.stats
                             if (event.reasoning.isNotBlank()) {
@@ -1028,6 +1029,7 @@ class McaLoopbackServer(
             generationSequence?.let { LocalApiRuntime.recordGenerationSequence(requestId, it) }
             when (event) {
                 is GenerateEvent.Phase -> finalStats = event.stats
+                is GenerateEvent.Persist -> Unit
                 is GenerateEvent.Chunk -> {
                     finalStats = event.stats
                     if (event.text.isNotBlank()) builder.append(event.text)

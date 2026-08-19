@@ -206,6 +206,7 @@ import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
+import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.core.engine.PromptContextUsage
 import com.muyuchat.core.engine.PromptMessageRetention
@@ -274,6 +275,7 @@ data class ChatUiState(
     val isGenerating: Boolean = false,
     val generationPhase: GenerationPhase? = null,
     val generationTokenProgress: TokenProgress? = null,
+    val generationPersistProgress: PersistProgress? = null,
     val generationStats: RuntimeStats? = null,
     val promptContextUsage: PromptContextUsage? = null,
     val selectedModelId: String? = null,
@@ -2912,6 +2914,11 @@ fun ChatScreen(
                             },
                             generationTokenProgress = if (state.isGenerating && index == lastAssistantIndex) {
                                 state.generationTokenProgress
+                            } else {
+                                null
+                            },
+                            generationPersistProgress = if (state.isGenerating && index == lastAssistantIndex) {
+                                state.generationPersistProgress
                             } else {
                                 null
                             },
@@ -10476,6 +10483,7 @@ private fun PendingReasoningPanel(
     startedAt: Long,
     phase: GenerationPhase?,
     tokenProgress: TokenProgress?,
+    persistProgress: PersistProgress?,
     modifier: Modifier = Modifier
 ) {
     var elapsedMs by remember(startedAt) { mutableStateOf(0L) }
@@ -10487,9 +10495,28 @@ private fun PendingReasoningPanel(
     }
     val seconds = elapsedMs.div(1000).coerceAtLeast(0)
     val phaseTitle = generationPhaseLabel(phase)
-    val displayTitle = if (seconds > 0) "$phaseTitle (\u5df2\u7528\u65f6 ${seconds} \u79d2)" else phaseTitle
     val progressText = tokenProgress?.let { progress ->
         "\u5df2\u5904\u7406 ${progress.completedTokens}/${progress.totalTokens} tokens"
+    }
+    val persist = persistProgress?.takeIf { it.isActive }
+    val persistTitle = persist?.let {
+        when (it.stage) {
+            com.muyuchat.core.engine.PersistStage.ENCODING -> "\u7f13\u5b58\u7f16\u7801\u4e2d"
+            com.muyuchat.core.engine.PersistStage.WRITING -> "\u7f13\u5b58\u5e8f\u5217\u5316"
+            else -> phaseTitle
+        }
+    }
+    val displayTitle = if (persistTitle != null) {
+        if (seconds > 0) "$persistTitle (\u5df2\u7528\u65f6 ${seconds} \u79d2)" else persistTitle
+    } else if (seconds > 0) {
+        "$phaseTitle (\u5df2\u7528\u65f6 ${seconds} \u79d2)"
+    } else {
+        phaseTitle
+    }
+    val persistText = persist?.let { p ->
+        val writtenMb = p.writtenBytes / 1048576.0
+        val totalMb = p.totalBytes / 1048576.0
+        "\u5df2\u5199\u5165 ${"%.1f".format(writtenMb)}/${"%.1f".format(totalMb)} MB"
     }
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
 
@@ -10517,7 +10544,18 @@ private fun PendingReasoningPanel(
             )
         }
         if (phase != null) {
-            if (tokenProgress != null) {
+            if (persist != null && persist.totalBytes > 0L) {
+                LinearProgressIndicator(
+                    progress = {
+                        (persist.writtenBytes.toFloat() / persist.totalBytes.toFloat()).coerceIn(0f, 1f)
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp)
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(99.dp))
+                )
+            } else if (tokenProgress != null) {
                 LinearProgressIndicator(
                     progress = {
                         tokenProgress.completedTokens.toFloat() / tokenProgress.totalTokens.toFloat()
@@ -10537,7 +10575,7 @@ private fun PendingReasoningPanel(
                         .clip(RoundedCornerShape(99.dp))
                 )
             }
-            progressText?.let { text ->
+            (persistText ?: progressText)?.let { text ->
                 Text(
                     text = text,
                     modifier = Modifier.padding(top = 5.dp),
@@ -13064,6 +13102,7 @@ private fun MessageBubble(
     isGenerating: Boolean,
     generationPhase: GenerationPhase?,
     generationTokenProgress: TokenProgress?,
+    generationPersistProgress: PersistProgress?,
     generationStats: RuntimeStats?,
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
@@ -13088,6 +13127,7 @@ private fun MessageBubble(
                 isGenerating = isGenerating,
                 generationPhase = generationPhase,
                 generationTokenProgress = generationTokenProgress,
+                generationPersistProgress = generationPersistProgress,
                 generationStats = generationStats,
                 onRegenerate = onRegenerate,
                 onDelete = onDelete,
@@ -13180,6 +13220,7 @@ private fun AssistantMessageBlock(
     isGenerating: Boolean,
     generationPhase: GenerationPhase?,
     generationTokenProgress: TokenProgress?,
+    generationPersistProgress: PersistProgress?,
     generationStats: RuntimeStats?,
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
@@ -13233,6 +13274,7 @@ private fun AssistantMessageBlock(
                             startedAt = message.createdAt,
                             phase = generationPhase,
                             tokenProgress = generationTokenProgress,
+                            persistProgress = generationPersistProgress,
                             modifier = Modifier.weight(1f)
                         )
                     }

@@ -654,6 +654,7 @@ class TuningProbeWorkerService : Service() {
             ).collect { event ->
                 when (event) {
                     is GenerateEvent.Phase -> stats = event.stats
+                    is GenerateEvent.Persist -> Unit
                     is GenerateEvent.Chunk -> {
                         output.append(event.text)
                         stats = event.stats

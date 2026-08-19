@@ -121,6 +121,7 @@ class LocalLlmService : Service() {
                         }
                         when (event) {
                             is GenerateEvent.Phase -> Unit
+                            is GenerateEvent.Persist -> Unit
                             is GenerateEvent.Chunk -> callback.onChunk(sessionId, event.text)
                             is GenerateEvent.Done -> callback.onDone(sessionId)
                             is GenerateEvent.Error -> callback.onError(sessionId, event.message)

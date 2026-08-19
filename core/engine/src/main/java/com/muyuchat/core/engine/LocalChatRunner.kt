@@ -451,6 +451,11 @@ interface LocalChatRunner {
      */
     fun prefillProgress(): TokenProgress? = null
     /**
+     * KB/KV cache serialization progress while a state file is written.
+     * `null` means no write is currently in flight (or the runtime reports none).
+     */
+    fun persistProgress(): PersistProgress? = null
+    /**
      * Clears the previous request's prefill snapshot before a new native begin.
      * This prevents a completed prior request from being presented as progress
      * for the request that is about to start.
@@ -519,6 +524,15 @@ internal class LlamaCppChatRunner(
         }
     }.getOrNull()
     override fun resetPrefillProgress() = bridge.resetPrefillProgress()
+    override fun persistProgress(): PersistProgress? = runCatching {
+        val root = JSONObject(bridge.getPersistProgressJson())
+        val stageRaw = root.optInt("stage", 0)
+        val stage = PersistStage.entries.getOrNull(stageRaw) ?: return@runCatching null
+        val written = root.optLong("writtenBytes", 0L)
+        val total = root.optLong("totalBytes", 0L)
+        if (stage == PersistStage.IDLE || total <= 0L) return@runCatching null
+        PersistProgress(stage = stage, writtenBytes = written.coerceAtLeast(0L), totalBytes = total)
+    }.getOrNull()
     override fun generateNextChunk(): String? = bridge.generateNextChunk()
     override fun invalidateConversationContext() = bridge.invalidateTextContext()
     override fun requestStop() = bridge.requestStop()
@@ -564,6 +578,21 @@ internal class MnnCpuChatRunner(
 
     override fun requestStopIfActive(): Boolean =
         isAvailable && bridge.requestStopIfActive()
+
+    override fun prefillProgress(): TokenProgress? = runCatching {
+        val root = JSONObject(bridge.getPrefillProgressJson())
+        val total = root.optInt("totalTokens", 0)
+        val completed = root.optInt("completedTokens", -1)
+        if (total > 0 && completed in 0..total) {
+            TokenProgress(completedTokens = completed, totalTokens = total)
+        } else {
+            null
+        }
+    }.getOrNull()
+
+    override fun resetPrefillProgress() {
+        if (isAvailable) bridge.resetPrefillProgress()
+    }
 
     override fun getRuntimeStatsJson(): String =
         if (isAvailable) {
@@ -617,6 +646,7 @@ internal class GenieXChatRunner(
     @Volatile private var activeMmprojPath: String? = null
     @Volatile private var activeVlmCapabilities: VlmCapabilities? = null
     @Volatile private var generateThread: Thread? = null
+    @Volatile private var lastPromptEndsInsideReasoning = false
     private val lifecycleLock = Any()
     private val stopRequested = AtomicBoolean(false)
     private val queue = LinkedBlockingQueue<String>()
@@ -624,6 +654,7 @@ internal class GenieXChatRunner(
     private var loadParams: LoadParams = LoadParams()
     private var completionTokens = 0
     private var promptTokens = 0
+    @Volatile private var prefillTotalTokens = 0
     private var loadMs = 0L
     private var startedAt = 0L
     private var firstTokenAt = 0L
@@ -1149,6 +1180,7 @@ internal class GenieXChatRunner(
         startedAt = System.currentTimeMillis()
         firstTokenAt = 0L
         completedAt = 0L
+        lastPromptEndsInsideReasoning = false
 
         val generationConfig = params.toGenieXGenerationConfig()
         val prompt = if (activeModelType == ModelType.VLM) {
@@ -1222,6 +1254,8 @@ internal class GenieXChatRunner(
             }
         }
         promptTokens = estimateTokens(prompt)
+        prefillTotalTokens = promptTokens
+        lastPromptEndsInsideReasoning = promptEndsInsideReasoning(prompt)
 
         generateThread = thread(
             start = true,
@@ -1315,6 +1349,16 @@ internal class GenieXChatRunner(
         }
     }
 
+    override fun prefillProgress(): TokenProgress? {
+        // GenieX is a closed SDK whose prefill produces no intermediate events.
+        // Report the estimated total once the run starts; completed jumps to
+        // total when the first generated token arrives.
+        val total = prefillTotalTokens
+        if (total <= 0) return null
+        val completed = if (firstTokenAt > 0L) total else 0
+        return TokenProgress(completedTokens = completed, totalTokens = total)
+    }
+
     override fun getRuntimeStatsJson(): String = JSONObject()
         .put("backend", runtime.backendId)
         .put("loaded", loaded)
@@ -1322,6 +1366,7 @@ internal class GenieXChatRunner(
         .put("modelPath", modelPath)
         .put("modelName", modelName)
         .put("modelType", activeModelType.name.lowercase())
+        .put("promptEndsInsideReasoning", lastPromptEndsInsideReasoning)
         .put("mmprojPath", activeMmprojPath)
         .put("visionReady", loaded && activeModelType == ModelType.VLM && activeVlmCapabilities?.supportsVision != false)
         .put(

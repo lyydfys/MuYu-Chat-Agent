@@ -91,6 +91,7 @@ import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.engine.TokenProgress
+import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.QairtExecutionVerificationStore
 import com.muyuchat.core.engine.localContextWindowAdmission
 import com.muyuchat.core.engine.estimateLocalPromptTokens
@@ -1103,6 +1104,7 @@ internal fun MainUiState.afterClearChatGenerationStopped(stats: RuntimeStats): M
     isGenerating = false,
     generationPhase = null,
     generationTokenProgress = null,
+    generationPersistProgress = null,
     generationStats = null,
     promptContextUsage = null,
     engineLifecycle = stats.lifecycleAfterGeneration(),
@@ -1116,6 +1118,7 @@ internal fun MainUiState.afterBackgroundGenerationStopped(
     isGenerating = false,
     generationPhase = null,
     generationTokenProgress = null,
+    generationPersistProgress = null,
     generationStats = null,
     engineLifecycle = stats.lifecycleAfterGeneration(),
     statusMessage = if (nativeStopIssued) {
@@ -1164,6 +1167,7 @@ internal fun MainUiState.afterGenerationStarted(): MainUiState = copy(
     isGenerating = true,
     generationPhase = null,
     generationTokenProgress = null,
+    generationPersistProgress = null,
     generationStats = null,
     engineLifecycle = AgentEngineLifecycle.GENERATING
 )
@@ -1183,6 +1187,7 @@ internal fun MainUiState.afterGenerationTerminated(
     isGenerating = false,
     generationPhase = null,
     generationTokenProgress = null,
+    generationPersistProgress = null,
     generationStats = null,
     stats = stats,
     engineLifecycle = stats.lifecycleAfterGeneration(),
@@ -1206,6 +1211,7 @@ internal fun MainUiState.afterNativeRuntimeReleased(
     isGenerating = false,
     generationPhase = null,
     generationTokenProgress = null,
+    generationPersistProgress = null,
     generationStats = null,
     stats = stats,
     autoTuningInProgress = false,
@@ -1539,6 +1545,8 @@ data class MainUiState(
     /** Exact runtime stage; a missing token progress remains intentionally indeterminate. */
     val generationPhase: GenerationPhase? = null,
     val generationTokenProgress: TokenProgress? = null,
+    /** Byte-level KV serialization progress while native persists a state file. */
+    val generationPersistProgress: PersistProgress? = null,
     /** Statistics emitted by the active request only; never reuse a prior turn's rates. */
     val generationStats: RuntimeStats? = null,
     val promptContextUsage: PromptContextUsage? = null,
@@ -9836,6 +9844,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isGenerating = true,
                 generationPhase = null,
                 generationTokenProgress = null,
+                generationPersistProgress = null,
                 generationStats = null,
                 promptContextUsage = promptContextUsageFor(
                     plan = preflightContext,
@@ -10184,6 +10193,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             isGenerating = false,
                             generationPhase = null,
                             generationTokenProgress = null,
+                    generationPersistProgress = null,
                             statusMessage = "未加载云端推理模型"
                         )
                     }
@@ -10200,6 +10210,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             isGenerating = false,
                             generationPhase = null,
                             generationTokenProgress = null,
+                    generationPersistProgress = null,
                             statusMessage = "云端识图未启用"
                         )
                     }
@@ -10218,6 +10229,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             isGenerating = false,
                             generationPhase = null,
                             generationTokenProgress = null,
+                    generationPersistProgress = null,
                             statusMessage = "图片读取失败"
                         )
                     }
@@ -10243,6 +10255,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             isGenerating = false,
                             generationPhase = null,
                             generationTokenProgress = null,
+                    generationPersistProgress = null,
                             statusMessage = "本地视觉 runner 未启用"
                         )
                     }
@@ -10261,6 +10274,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     isGenerating = false,
                                     generationPhase = null,
                                     generationTokenProgress = null,
+                    generationPersistProgress = null,
                                     statusMessage = "本地图片预处理失败"
                                 )
                             }
@@ -10349,8 +10363,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     stats = event.stats,
                                     generationPhase = GenerationPhase.DECODE,
                                     generationTokenProgress = null,
+                                    generationPersistProgress = null,
                                     generationStats = event.stats
                                 )
+                            }
+                        }
+                    }
+                    is GenerateEvent.Persist -> {
+                        if (!generationStillOwnsUi() || !event.progress.isActive) return@collect
+                        _uiState.update { current ->
+                            if (!generationStillOwnsUi()) {
+                                current
+                            } else {
+                                current.copy(generationPersistProgress = event.progress)
                             }
                         }
                     }
@@ -10555,6 +10580,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     isGenerating = false,
                     generationPhase = null,
                     generationTokenProgress = null,
+                    generationPersistProgress = null,
                     engineLifecycle = engine.stats.value.lifecycleAfterGeneration(),
                     statusMessage = "已停止生成"
                 )
@@ -13007,6 +13033,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             isGenerating = false,
                             generationPhase = null,
                             generationTokenProgress = null,
+                    generationPersistProgress = null,
                             statusMessage = "无法重置本地上下文，已取消本轮生成：${error.message ?: "native runtime error"}"
                         )
                     }
@@ -13197,6 +13224,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 isGenerating = false,
                                 generationPhase = null,
                                 generationTokenProgress = null,
+                    generationPersistProgress = null,
                                 statusMessage = "对话修改未保存，内存状态已发生后续变化；请重新打开该会话：${error.message ?: "Room transaction failed"}"
                             )
                         } else {
@@ -14827,6 +14855,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ).collect { event ->
                 when (event) {
                     is GenerateEvent.Phase -> finalStats = event.stats
+                    is GenerateEvent.Persist -> Unit
                     is GenerateEvent.Chunk -> {
                         text.append(event.text)
                         finalStats = event.stats
@@ -15586,6 +15615,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ).collect { event ->
                 when (event) {
                     is GenerateEvent.Phase -> stats = event.stats
+                    is GenerateEvent.Persist -> Unit
                     is GenerateEvent.Chunk -> {
                         output.append(event.text)
                         stats = event.stats

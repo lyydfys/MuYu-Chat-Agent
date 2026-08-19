@@ -88,6 +88,35 @@ long long g_prefill_finished_ms = 0;
 // from another JVM thread. Do not use them to infer cache state or timing.
 std::atomic<int> g_prefill_progress_completed_tokens{0};
 std::atomic<int> g_prefill_progress_total_tokens{0};
+
+// KV cache serialization progress reported to the UI. Plain atomics so the
+// poll getter observes intermediate values without taking g_mutex (which the
+// serializing thread holds). Stage values use PersistStage below.
+enum class PersistStage {
+    Idle = 0,
+    Encoding = 1,
+    Writing = 2,
+    Done = 3,
+};
+std::atomic<int> g_persist_stage{static_cast<int>(PersistStage::Idle)};
+std::atomic<uint64_t> g_persist_written_bytes{0};
+std::atomic<uint64_t> g_persist_total_bytes{0};
+
+void reset_persist_progress() {
+    g_persist_stage.store(static_cast<int>(PersistStage::Idle), std::memory_order_release);
+    g_persist_written_bytes.store(0, std::memory_order_release);
+    g_persist_total_bytes.store(0, std::memory_order_release);
+}
+
+// Defined with the other save helpers; declared here because the persistent
+// prefix write path precedes it and must not be duplicated.
+size_t save_llama_state_with_progress_locked(
+        llama_context *ctx,
+        const char *path,
+        llama_seq_id seq_id,
+        const llama_token *tokens,
+        size_t n_token_count,
+        llama_state_seq_flags flags);
 long long g_decode_started_ms = 0;
 long long g_decode_finished_ms = 0;
 // Process-lifetime acceptance trace. Model unload/reload must not reset it.
@@ -116,6 +145,10 @@ float g_sampling_frequency_penalty = 0.2f;
 int g_sampling_repeat_last_n = 0;
 bool g_last_use_jinja = true;
 bool g_last_enable_thinking = true;
+// True when the rendered prompt ends inside an unclosed reasoning opener
+// (e.g. DeepSeek-style templates pre-fill "<think>\n"), so the generated
+// stream starts mid-thinking and only the close marker will appear.
+bool g_prompt_ends_inside_reasoning = false;
 bool g_vision_ready = false;
 std::string g_mmproj_path;
 
@@ -799,6 +832,8 @@ std::string stats_json(const char *backend) {
         << "\"repeatLastN\":" << g_sampling_repeat_last_n << ","
         << "\"useJinja\":" << (g_last_use_jinja ? "true" : "false") << ","
         << "\"enableThinking\":" << (g_last_enable_thinking ? "true" : "false") << ","
+        << "\"promptEndsInsideReasoning\":"
+        << (g_prompt_ends_inside_reasoning ? "true" : "false") << ","
         << "\"visionReady\":" << (g_vision_ready ? "true" : "false") << ","
         << "\"mmprojPath\":\"" << json_escape(g_mmproj_path) << "\","
         << "\"backendReady\":" << (g_backend_device_count > 0 ? "true" : "false") << ","
@@ -1864,6 +1899,32 @@ struct ChatTemplateOptions {
     int thinking_budget = 1024;
 };
 
+// Openers mirror REASONING_OPEN_MARKERS in the Kotlin ReasoningContentFilter.
+// Trailing whitespace (templates usually append "\n" after the opener) is
+// ignored; an empty pre-filled block ending in "</think>" matches none of them.
+// Only the real prompt renders may set g_prompt_ends_inside_reasoning; the
+// prefix-cache probe render in prepare_persistent_prefix_locked uses a
+// truncated probe message list and must not disturb the flag.
+bool prompt_ends_inside_reasoning(const std::string &prompt) {
+    static const std::vector<std::string> reasoning_openers = {
+            "<think>",
+            "<|think|>",
+            "<|channel>thought",
+            "<|channel|>thought",
+            "<|channel>analysis",
+            "<|channel|>analysis",
+    };
+    size_t end = prompt.size();
+    while (end > 0 && std::isspace((unsigned char) prompt[end - 1])) end--;
+    for (const auto &opener: reasoning_openers) {
+        const size_t n = opener.size();
+        if (end >= n && prompt.compare(end - n, n, opener) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void clear_target_context_locked(const std::string &reason);
 
 std::string format_messages(const std::vector<ParsedMessage> &messages, const ChatTemplateOptions &options) {
@@ -1890,7 +1951,8 @@ std::string format_messages(const std::vector<ParsedMessage> &messages, const Ch
             inputs.messages.push_back(msg);
         }
 
-        return common_chat_templates_apply(g_chat_templates.get(), inputs).prompt;
+        const std::string prompt = common_chat_templates_apply(g_chat_templates.get(), inputs).prompt;
+        return prompt;
     }
 
     std::string formatted;
@@ -2092,12 +2154,13 @@ PersistentPrefixPreparation prepare_persistent_prefix_locked(
     g_persistent_prefix_cache_tokens = (int) prefix_tokens.size();
     if (!request.write_state_path.empty()) {
         try {
-            const size_t saved = llama_state_seq_save_file(
+            const size_t saved = save_llama_state_with_progress_locked(
                     g_context,
                     request.write_state_path.c_str(),
                     0,
                     prefix_tokens.data(),
-                    prefix_tokens.size());
+                    prefix_tokens.size(),
+                    LLAMA_STATE_SEQ_FLAGS_NONE);
             if (saved > 0) {
                 g_persistent_prefix_cache_saved = true;
                 g_persistent_prefix_cache_reason = "state_saved";
@@ -2183,6 +2246,7 @@ int prefill_multimodal_locked(
 
     const auto marked_messages = with_media_markers(messages);
     const auto formatted = format_messages(marked_messages, chat_options);
+    g_prompt_ends_inside_reasoning = prompt_ends_inside_reasoning(formatted);
     mtmd_input_text text{};
     text.text = formatted.c_str();
     text.text_len = formatted.size();
@@ -2249,6 +2313,63 @@ bool trim_context_locked(llama_context *ctx, llama_pos position, const char *lab
         return false;
     }
     return true;
+}
+
+// Serializes the seq_id KV state to `path` in two phases so the UI can report
+// real-time progress. The in-memory encode is a single atomic llama.cpp call
+// (no incremental interface exists), but the file write is chunked so bytes
+// written/total are updated per chunk. The on-disk layout is identical to
+// llama_state_seq_save_file(). Returns bytes written, or 0 on failure.
+// Must be called with g_mutex held; the progress atomics stay lock-free readable.
+size_t save_llama_state_with_progress_locked(
+        llama_context *ctx,
+        const char *path,
+        llama_seq_id seq_id,
+        const llama_token *tokens,
+        size_t n_token_count,
+        llama_state_seq_flags flags) {
+    g_persist_stage.store(static_cast<int>(PersistStage::Idle), std::memory_order_release);
+    g_persist_written_bytes.store(0, std::memory_order_release);
+    const size_t total = llama_state_seq_get_size_ext(ctx, seq_id, flags);
+    if (total == 0) {
+        g_persist_total_bytes.store(0, std::memory_order_release);
+        return 0;
+    }
+    g_persist_total_bytes.store(total, std::memory_order_release);
+    try {
+        std::vector<uint8_t> buf(total);
+        g_persist_stage.store(static_cast<int>(PersistStage::Encoding), std::memory_order_release);
+        const size_t encoded = llama_state_seq_get_data_ext(ctx, buf.data(), buf.size(), seq_id, flags);
+        if (encoded != total) {
+            reset_persist_progress();
+            return 0;
+        }
+        g_persist_stage.store(static_cast<int>(PersistStage::Writing), std::memory_order_release);
+        std::ofstream out(path, std::ios::binary);
+        if (!out) {
+            reset_persist_progress();
+            return 0;
+        }
+        constexpr size_t kWriteChunk = 1 << 20; // 1 MiB
+        size_t written_total = 0;
+        for (size_t offset = 0; offset < total; offset += kWriteChunk) {
+            const size_t n = std::min(kWriteChunk, total - offset);
+            out.write(reinterpret_cast<const char *>(buf.data() + offset), static_cast<std::streamsize>(n));
+            if (!out) {
+                reset_persist_progress();
+                return 0;
+            }
+            written_total += n;
+            g_persist_written_bytes.store(written_total, std::memory_order_release);
+        }
+        out.flush();
+        out.close();
+        g_persist_stage.store(static_cast<int>(PersistStage::Done), std::memory_order_release);
+        return written_total;
+    } catch (const std::exception &) {
+        reset_persist_progress();
+        return 0;
+    }
 }
 
 bool save_turn_cache_checkpoint_locked() {
@@ -3593,6 +3714,8 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         g_chat_messages.clear();
         g_cached_token_chars.clear();
         g_context_shifts = 0;
+        g_prompt_ends_inside_reasoning = false;
+        reset_persist_progress();
         g_n_predict = parse_int(params_json, "n_predict", 8192);
         if (g_n_predict < 1 || g_n_predict > 1048576) {
             g_last_error = "n_predict must be in [1, 1048576].";
@@ -3626,6 +3749,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
             g_cache_reuse_reason = "disabled_for_multimodal";
         } else {
             const auto formatted = format_messages(messages, chat_options);
+            g_prompt_ends_inside_reasoning = prompt_ends_inside_reasoning(formatted);
             auto tokens = common_tokenize(g_context, formatted, true, true);
             if (tokens.empty()) {
                 g_last_error = "The rendered text prompt tokenized to an empty sequence.";
@@ -3690,12 +3814,13 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
                     g_context_shifts == 0 &&
                     !g_stop_requested.load(std::memory_order_acquire)) {
                     try {
-                        const size_t saved = llama_state_seq_save_file(
+                        const size_t saved = save_llama_state_with_progress_locked(
                                 g_context,
                                 g_pending_full_session_write_path.c_str(),
                                 0,
                                 tokens.data(),
-                                tokens.size());
+                                tokens.size(),
+                                LLAMA_STATE_SEQ_FLAGS_NONE);
                         if (saved > 0) {
                             g_persistent_prefix_cache_saved = true;
                             g_persistent_prefix_cache_tokens = (int) tokens.size();
@@ -3805,6 +3930,17 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getPrefillProgressJson(JNI
     std::ostringstream out;
     out << "{\"completedTokens\":" << completed
         << ",\"totalTokens\":" << total << "}";
+    return string_to_jstring(env, out.str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getPersistProgressJson(JNIEnv *env, jobject) {
+    // Deliberately lock-free: beginCompletion() holds g_mutex while serializing,
+    // and the poll getter must observe the intermediate stages/byte counts.
+    std::ostringstream out;
+    out << "{\"stage\":" << g_persist_stage.load(std::memory_order_acquire) << ","
+        << "\"writtenBytes\":" << g_persist_written_bytes.load(std::memory_order_acquire) << ","
+        << "\"totalBytes\":" << g_persist_total_bytes.load(std::memory_order_acquire) << "}";
     return string_to_jstring(env, out.str());
 }
 

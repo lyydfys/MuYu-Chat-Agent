@@ -36,7 +36,7 @@ class PersistentPrefixNativeContractTest {
         assertTrue(
             "Save must persist sequence zero together with its complete prefix token list.",
             Regex(
-                """llama_state_seq_save_file\s*\(\s*g_context\s*,\s*request\.write_state_path\.c_str\(\)\s*,\s*0\s*,\s*prefix_tokens\.data\(\)\s*,\s*prefix_tokens\.size\(\)\s*\)"""
+                """save_llama_state_with_progress_locked\s*\(\s*g_context\s*,\s*request\.write_state_path\.c_str\(\)\s*,\s*0\s*,\s*prefix_tokens\.data\(\)\s*,\s*prefix_tokens\.size\(\)\s*,"""
             ).containsMatchIn(body)
         )
     }

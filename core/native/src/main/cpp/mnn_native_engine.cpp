@@ -163,6 +163,17 @@ bool g_multimodal_history_suppressed = false;
 bool g_sync_stepping = true;
 size_t g_streamed_bytes = 0;
 std::string g_generation_stop_reason = "idle";
+// True when the rendered chat prompt ends inside an unclosed reasoning opener
+// (e.g. a DeepSeek-style template pre-fills "<think>\n"), so the generated
+// stream starts mid-thinking and only the close marker will appear.
+bool g_prompt_ends_inside_reasoning = false;
+
+// Prompt-prefill progress snapshots for the UI. MNN is a prebuilt imported
+// runtime, so no intermediate per-batch events are available: the total is set
+// once the prompt total is known and completed jumps to total when prefill
+// finishes. Zero total means "cannot report an exact prefill".
+std::atomic<int> g_mnn_prefill_completed_tokens{0};
+std::atomic<int> g_mnn_prefill_total_tokens{0};
 
 #if MCA_WITH_MNN_LLM
 MNN::Transformer::Llm* g_llm = nullptr;
@@ -202,6 +213,29 @@ void append_mnn_debug_raw_output(const char* data, size_t size) {
     const size_t accepted = std::min(size, kMaxDebugRawOutputBytes - g_mnn_debug_raw_output.size());
     g_mnn_debug_raw_output.append(data, accepted);
     if (accepted < size) g_mnn_debug_trace_truncated = true;
+}
+
+// Openers mirror REASONING_OPEN_MARKERS in the Kotlin ReasoningContentFilter.
+// Trailing whitespace (templates usually append "\n" after the opener) is
+// ignored; an empty pre-filled block ending in "</think>" matches none of them.
+bool prompt_ends_inside_reasoning(const std::string& prompt) {
+    static const std::vector<std::string> reasoning_openers = {
+            "<think>",
+            "<|think|>",
+            "<|channel>thought",
+            "<|channel|>thought",
+            "<|channel>analysis",
+            "<|channel|>analysis",
+    };
+    size_t end = prompt.size();
+    while (end > 0 && std::isspace((unsigned char) prompt[end - 1])) end--;
+    for (const auto& opener: reasoning_openers) {
+        const size_t n = opener.size();
+        if (end >= n && prompt.compare(end - n, n, opener) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void capture_mnn_debug_prompt(const std::string& prompt) {
@@ -6891,6 +6925,13 @@ bool capture_mnn_text_prefill_locked(std::string& error) {
     g_mnn_prompt_cache.reused_tokens = static_cast<int>(std::min<size_t>(
             retained, static_cast<size_t>(std::numeric_limits<int>::max())));
     g_mnn_prompt_cache.hit = g_mnn_prompt_cache.reused_tokens > 0;
+    // Report the effective prompt total (reused + freshly prefilled) once it is
+    // known; completed jumps to total because MNN exposes no intermediate batches.
+    const int mnn_prompt_total = g_mnn_prompt_cache.prefilled_tokens + g_mnn_prompt_cache.reused_tokens;
+    if (mnn_prompt_total > 0) {
+        g_mnn_prefill_total_tokens.store(mnn_prompt_total, std::memory_order_release);
+        g_mnn_prefill_completed_tokens.store(mnn_prompt_total, std::memory_order_release);
+    }
     g_mnn_prompt_cache.state = g_mnn_prompt_cache.hit ? "hit" : "miss";
     g_mnn_prompt_cache.reason = g_mnn_prompt_cache.hit
             ? "native_history_retained"
@@ -7025,7 +7066,9 @@ bool begin_mnn_response(const ParsedMnnChatMessages& parsed) {
     if (!parsed.hasMediaInputs()) {
         g_multimodal_system_prompt_suppressed = false;
         g_multimodal_history_suppressed = false;
-        capture_mnn_debug_prompt(g_llm->apply_chat_template(parsed.messages));
+        const auto formatted_prompt = g_llm->apply_chat_template(parsed.messages);
+        capture_mnn_debug_prompt(formatted_prompt);
+        g_prompt_ends_inside_reasoning = prompt_ends_inside_reasoning(formatted_prompt);
         g_llm->response(parsed.messages, g_output_stream.get(), "<eop>", 0);
         return false;
     }
@@ -7145,7 +7188,9 @@ bool begin_mnn_response(const ParsedMnnChatMessages& parsed) {
     // without splitting MNN's generation lifecycle again.
     g_multimodal_history_suppressed = promptMessages.size() != 1;
     const auto& imageUserContent = latestUserMessage->second;
-    capture_mnn_debug_prompt(g_llm->apply_chat_template(imageUserContent));
+    const auto formatted_prompt = g_llm->apply_chat_template(imageUserContent);
+    capture_mnn_debug_prompt(formatted_prompt);
+    g_prompt_ends_inside_reasoning = prompt_ends_inside_reasoning(formatted_prompt);
     g_llm->response(
             imageUserContent,
             g_output_stream.get(),
@@ -7507,6 +7552,8 @@ std::string stats_json_locked() {
         << (g_multimodal_system_prompt_suppressed ? "true" : "false") << ","
         << "\"multimodalHistorySuppressed\":"
         << (g_multimodal_history_suppressed ? "true" : "false") << ","
+        << "\"promptEndsInsideReasoning\":"
+        << (g_prompt_ends_inside_reasoning ? "true" : "false") << ","
         << "\"modelPath\":\"" << escape_json(g_model_path) << "\","
         << "\"originalModelPath\":\"" << escape_json(g_original_model_path) << "\","
         << "\"nativeLibDir\":\"" << escape_json(g_native_lib_dir) << "\","
@@ -7783,6 +7830,9 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
     // fails before MNN starts producing tokens.
     g_pending_chunk.clear();
     g_pending_utf8_tail.clear();
+    g_prompt_ends_inside_reasoning = false;
+    g_mnn_prefill_completed_tokens.store(0, std::memory_order_release);
+    g_mnn_prefill_total_tokens.store(0, std::memory_order_release);
 #if MCA_WITH_MNN_LLM
     if (!g_loaded || g_llm == nullptr) {
         set_error("MNN beginCompletion requested before a model is loaded.");
@@ -8045,6 +8095,29 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getRuntimeStatsJson(JNIEnv* 
     std::lock_guard<std::mutex> lock(g_mnn_mutex);
     const auto stats = stats_json_locked();
     return utf8_to_jstring(env, stats);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getPrefillProgressJson(JNIEnv* env, jobject) {
+    // Deliberately lock-free: MNN beginCompletion holds g_mnn_mutex while
+    // prefill runs, and the poll getter must observe the atomics independently.
+    const int total = std::max(0, g_mnn_prefill_total_tokens.load(std::memory_order_acquire));
+    const int completed = std::clamp(
+            g_mnn_prefill_completed_tokens.load(std::memory_order_acquire),
+            0,
+            total);
+    nlohmann::json out = {
+            {"completedTokens", completed},
+            {"totalTokens", total},
+    };
+    return utf8_to_jstring(env, out.dump());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_muyuchat_core_nativebridge_NativeMnnBridge_resetPrefillProgress(JNIEnv*, jobject) {
+    // Deliberately lock-free; same reasoning as the getter.
+    g_mnn_prefill_completed_tokens.store(0, std::memory_order_release);
+    g_mnn_prefill_total_tokens.store(0, std::memory_order_release);
 }
 
 extern "C" JNIEXPORT void JNICALL

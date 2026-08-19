@@ -271,6 +271,7 @@ class QairtDryRunWorkerService : Service() {
             ).collect { event ->
                 when (event) {
                     is GenerateEvent.Phase -> Unit
+                    is GenerateEvent.Persist -> Unit
                     is GenerateEvent.Chunk -> output.append(event.text)
                     is GenerateEvent.Error -> error(event.message)
                     is GenerateEvent.Done -> Unit

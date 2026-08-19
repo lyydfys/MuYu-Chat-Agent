@@ -145,6 +145,50 @@ class ReasoningContentFilterTest {
     }
 
     @Test
+    fun separatesTemplatePrefilledThinkStream() {
+        val filter = ReasoningContentFilter(startsInsideReasoning = true)
+
+        val first = filter.filter("\n先分析用户的问题。\n")
+        val second = filter.filter("</think>\n我是 MCA。")
+        val tail = filter.finish()
+
+        assertEquals("先分析用户的问题。", (first.reasoning + second.reasoning + tail.reasoning).trim())
+        assertEquals("我是 MCA。", (first.visible + second.visible + tail.visible).trim())
+    }
+
+    @Test
+    fun separatesTemplatePrefilledThinkStreamAcrossChunks() {
+        val filter = ReasoningContentFilter(startsInsideReasoning = true)
+
+        val first = filter.filter("规划回复要点。</thi")
+        val second = filter.filter("nk>最终答案在这里")
+        val tail = filter.finish()
+
+        assertEquals("规划回复要点。", (first.reasoning + second.reasoning + tail.reasoning).trim())
+        assertEquals("最终答案在这里", (first.visible + second.visible + tail.visible).trim())
+    }
+
+    @Test
+    fun keepsUnfinishedPrefilledThinkingInReasoningContent() {
+        val filter = ReasoningContentFilter(startsInsideReasoning = true)
+
+        val first = filter.filter("一直在思考，从未闭合标记。")
+        val tail = filter.finish()
+
+        assertEquals("", first.visible + tail.visible)
+        assertTrue((first.reasoning + tail.reasoning).contains("从未闭合标记"))
+    }
+
+    @Test
+    fun promptEndsInsideReasoningDetectsPrefilledThinkTemplate() {
+        assertTrue(promptEndsInsideReasoning("<|im_start|>assistant\n<think>\n"))
+        assertTrue(promptEndsInsideReasoning("...\n<|channel>thought"))
+        assertFalse(promptEndsInsideReasoning("<|im_start|>assistant\n<think>\n\n</think>\n\n"))
+        assertFalse(promptEndsInsideReasoning("普通 prompt，以正文结尾。"))
+        assertFalse(promptEndsInsideReasoning(""))
+    }
+
+    @Test
     fun chatRequestDoesNotSendReasoningBackIntoContext() {
         val request = ChatRequest(
             messages = listOf(

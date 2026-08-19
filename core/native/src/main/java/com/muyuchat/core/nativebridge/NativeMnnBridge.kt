@@ -23,6 +23,8 @@ class NativeMnnBridge {
     external fun generateNextChunk(): String?
     external fun requestStop()
     external fun requestStopIfActive(): Boolean
+    external fun getPrefillProgressJson(): String
+    external fun resetPrefillProgress()
     external fun getRuntimeStatsJson(): String
     external fun shutdown()
 }
