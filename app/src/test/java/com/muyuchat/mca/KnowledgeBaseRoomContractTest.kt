@@ -269,10 +269,10 @@ class KnowledgeBaseRoomContractTest {
     }
 
     @Test
-    fun migrationChainFrom16To20CreatesKnowledgeTablesWithoutReplacingExistingData() {
+    fun migrationChainFrom16To21CreatesKnowledgeTablesWithoutReplacingExistingData() {
         val source = chatSessionStoreSource()
 
-        assertTrue(Regex("""version\s*=\s*20""").containsMatchIn(source))
+        assertTrue(Regex("""version\s*=\s*21""").containsMatchIn(source))
         val builder = source.substring(
             source.indexOf("Room.databaseBuilder"),
             source.indexOf(".build()", source.indexOf("Room.databaseBuilder"))
@@ -281,6 +281,7 @@ class KnowledgeBaseRoomContractTest {
         assertTrue(builder.contains("MIGRATION_17_18"))
         assertTrue(builder.contains("MIGRATION_18_19"))
         assertTrue(builder.contains("MIGRATION_19_20"))
+        assertTrue(builder.contains("MIGRATION_20_21"))
 
         val migration16To17 = region(source, "private val MIGRATION_16_17", "private val MIGRATION_17_18")
         assertTrue(migration16To17.contains("createKnowledgeBaseTablesIfMissing(db)"))
@@ -314,7 +315,7 @@ class KnowledgeBaseRoomContractTest {
         assertTrue(snapshotUpgrade.contains("ALTER TABLE chat_sessions ADD COLUMN assistantSnapshotJson TEXT"))
         assertNonDestructive(snapshotUpgrade)
 
-        val migration19To20 = region(source, "private val MIGRATION_19_20", "private fun addProjectIdColumnIfMissing")
+        val migration19To20 = region(source, "private val MIGRATION_19_20", "private val MIGRATION_20_21")
         assertTrue(migration19To20.contains("rebuildKnowledgeTablesWithForeignKeys(db)"))
 
         val foreignKeyRebuild = functionBody(source, "rebuildKnowledgeTablesWithForeignKeys")
@@ -332,6 +333,15 @@ class KnowledgeBaseRoomContractTest {
         ).forEach { functionName ->
             assertTrue(functionBody(source, functionName).contains("ON DELETE CASCADE"))
         }
+
+        val migration20To21 = region(source, "private val MIGRATION_20_21", "private fun addProjectIdColumnIfMissing")
+        assertTrue(migration20To21.contains("addChatAppearanceColumnsIfMissing(db)"))
+        assertNonDestructive(migration20To21)
+
+        val appearanceUpgrade = functionBody(source, "addChatAppearanceColumnsIfMissing")
+        assertTrue(appearanceUpgrade.contains("ALTER TABLE chat_sessions ADD COLUMN appearanceJson TEXT"))
+        assertTrue(appearanceUpgrade.contains("ALTER TABLE assistants ADD COLUMN appearanceJson TEXT"))
+        assertNonDestructive(appearanceUpgrade)
     }
 
     private fun transactionalFunctionBody(source: String, functionName: String): String {
