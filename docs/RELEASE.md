@@ -46,6 +46,18 @@ capabilities.
 For an alpha release, keep the prerelease suffix in `versionName` and create
 the GitHub Release with its prerelease flag enabled.
 
+To refresh an already-published release without a new version, rebuild the
+signed APK, verify its signature and SHA-256, then replace the existing assets
+using the same filenames:
+
+```powershell
+gh release upload v<version> .\MCA-v<version>-arm64-v8a.apk .\MCA-v<version>-arm64-v8a.apk.sha256 --clobber
+```
+
+Do not add a differently named APK for the same version. Update
+`docs/releases/v<version>.md` and the GitHub Release body with the new SHA-256
+and the exact source commit used for the replacement.
+
 ## In-app update contract
 
 The app checks the official `lyydfys/MuYu-Chat-Agent` GitHub Release from the
