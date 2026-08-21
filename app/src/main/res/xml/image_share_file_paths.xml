@@ -6,4 +6,7 @@
     <files-path
         name="generation_inputs"
         path="image_generation_inputs/" />
+    <files-path
+        name="app_updates"
+        path="updates/" />
 </paths>

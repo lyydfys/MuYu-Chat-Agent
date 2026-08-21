@@ -22,7 +22,10 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -76,6 +79,7 @@ import com.muyuchat.feature.modelhub.LocalImageModelUiItem
 import com.muyuchat.feature.modelhub.ModelHubUiState
 import com.muyuchat.feature.settings.LocalApiToolScreen
 import com.muyuchat.feature.settings.SettingsHubScreen
+import com.muyuchat.feature.settings.AppUpdateSettingsUiState
 import com.muyuchat.feature.settings.SettingsUiState
 import com.muyuchat.feature.settings.WebSearchBackupProviderDraft
 import com.muyuchat.feature.settings.WebSearchBackupProviderUiState
@@ -280,6 +284,10 @@ private fun McaApp(
 ) {
     var appMenuOpen by rememberSaveable { mutableStateOf(false) }
     var startSettingsInWebSearch by rememberSaveable { mutableStateOf(false) }
+    var dismissedUpdateVersion by rememberSaveable { mutableStateOf<String?>(null) }
+    val availableAppUpdate = state.appUpdate.takeIf { update ->
+        update.status == AppUpdateStatus.AVAILABLE && update.canDownload
+    }
     fun preparePageReturn() {
         if (appMenuOpen) {
             appMenuOpen = true
@@ -307,6 +315,39 @@ private fun McaApp(
         assistantAppearance = assistantAppearance,
         globalAppearance = state.globalChatAppearance
     )
+
+    if (availableAppUpdate != null &&
+        state.tab != AppTab.SETTINGS &&
+        dismissedUpdateVersion != availableAppUpdate.latestVersionName
+    ) {
+        AlertDialog(
+            onDismissRequest = {
+                dismissedUpdateVersion = availableAppUpdate.latestVersionName
+            },
+            title = { Text("发现新版本") },
+            text = {
+                Text(
+                    "MCA ${availableAppUpdate.latestVersionName} 已在官方 GitHub Release 发布。" +
+                        "下载后会校验 SHA-256、包名和版本号，再交由系统安装。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    dismissedUpdateVersion = availableAppUpdate.latestVersionName
+                    onTab(AppTab.SETTINGS)
+                }) {
+                    Text("查看更新")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    dismissedUpdateVersion = availableAppUpdate.latestVersionName
+                }) {
+                    Text("稍后")
+                }
+            }
+        )
+    }
 
     Scaffold { padding ->
         val modifier = Modifier
@@ -1219,6 +1260,11 @@ private fun McaApp(
                     )
                 },
                 onClearWebSearchDiagnostics = viewModel::clearWebSearchDiagnostics,
+                onCheckUpdate = viewModel::checkForAppUpdate,
+                onDownloadUpdate = viewModel::downloadAppUpdate,
+                onInstallUpdate = viewModel::installAppUpdate,
+                onOpenRelease = viewModel::openAppUpdateRelease,
+                onAutoCheckChanged = viewModel::setAppUpdateAutoCheckEnabled,
                 onBack = closePage,
                 startInWebSearch = startSettingsInWebSearch,
                 modifier = pageModifier
@@ -1417,6 +1463,24 @@ private fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
     persistentPrefixCacheEntryCount = persistentPrefixCacheEntryCount,
     persistentPrefixCacheBytes = persistentPrefixCacheBytes,
     statusMessage = statusMessage,
+    appUpdate = AppUpdateSettingsUiState(
+        autoCheckEnabled = appUpdate.autoCheckEnabled,
+        status = appUpdate.status.name,
+        currentVersionName = appUpdate.currentVersionName,
+        latestVersionName = appUpdate.latestVersionName,
+        latestTitle = appUpdate.latestTitle,
+        releaseNotes = appUpdate.releaseNotes,
+        releaseUrl = appUpdate.releaseUrl,
+        apkSizeText = appUpdate.apkSizeBytes.takeIf { it > 0L }?.let(::formatAppUpdateBytes).orEmpty(),
+        canDownload = appUpdate.canDownload,
+        downloadedBytes = appUpdate.downloadedBytes,
+        downloadTotalBytes = appUpdate.downloadTotalBytes,
+        lastCheckedText = appUpdate.lastCheckedAtMillis.takeIf { it > 0L }?.let {
+            java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date(it))
+        }.orEmpty(),
+        message = appUpdate.message
+    ),
     webSearch = WebSearchSettingsUiState(
         enabled = webSearchConfig.enabled,
         provider = webSearchConfig.provider.name,
@@ -1487,6 +1551,18 @@ private fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
         }
     )
 )
+
+private fun formatAppUpdateBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val units = listOf("B", "KB", "MB", "GB")
+    var value = bytes.toDouble()
+    var index = 0
+    while (value >= 1024.0 && index < units.lastIndex) {
+        value /= 1024.0
+        index++
+    }
+    return if (index == 0) "${value.toLong()} ${units[index]}" else "%.1f %s".format(value, units[index])
+}
 
 private fun List<WebSearchBackupProviderDraft>.toWebSearchBackupConfigs(): List<WebSearchBackupProviderConfig> =
     take(3).map { draft ->

@@ -45,3 +45,31 @@ capabilities.
 
 For an alpha release, keep the prerelease suffix in `versionName` and create
 the GitHub Release with its prerelease flag enabled.
+
+## In-app update contract
+
+The app checks the official `lyydfys/MuYu-Chat-Agent` GitHub Release from the
+Runtime settings screen (automatically at most once per 24 hours, or manually).
+This is client-side polling; it does not require FCM or a separate update
+server. Only a non-draft, non-prerelease Release with a valid stable SemVer
+tag is offered.
+
+For the updater to recognize an asset, publish the signed APK and a checksum
+alongside the Release:
+
+```text
+MCA-v<version>-arm64-v8a.apk
+MCA-v<version>-arm64-v8a.apk.sha256
+```
+
+The current build also supports `x86_64` and a single ABI-neutral APK whose
+filename has no ABI marker. ABI-specific assets must use the corresponding
+marker; the updater never silently installs another architecture. The APK
+must keep the same package name and release signing certificate, use a
+`versionName` matching the tag (for example, tag `v0.3.0` and version name
+`0.3.0`), and increment `versionCode`.
+
+Before opening the Android installer, MCA validates the GitHub HTTPS asset,
+SHA-256 (API digest or the `.sha256` sidecar), package name, version name, and
+version code. Keep the Release body focused on user-facing update notes; it is
+shown in the in-app update card.

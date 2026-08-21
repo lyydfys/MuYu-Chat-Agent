@@ -20,10 +20,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.InstallMobile
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
@@ -34,6 +38,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -90,7 +95,24 @@ data class SettingsUiState(
     val persistentPrefixCacheEntryCount: Int = 0,
     val persistentPrefixCacheBytes: Long = 0L,
     val statusMessage: String? = null,
+    val appUpdate: AppUpdateSettingsUiState = AppUpdateSettingsUiState(),
     val webSearch: WebSearchSettingsUiState = WebSearchSettingsUiState()
+)
+
+data class AppUpdateSettingsUiState(
+    val autoCheckEnabled: Boolean = true,
+    val status: String = "IDLE",
+    val currentVersionName: String = "",
+    val latestVersionName: String? = null,
+    val latestTitle: String? = null,
+    val releaseNotes: String = "",
+    val releaseUrl: String = "",
+    val apkSizeText: String = "",
+    val canDownload: Boolean = false,
+    val downloadedBytes: Long = 0L,
+    val downloadTotalBytes: Long = 0L,
+    val lastCheckedText: String = "",
+    val message: String? = null
 )
 
 data class WebSearchSettingsUiState(
@@ -206,7 +228,12 @@ fun SettingsHubScreen(
     onClearWebSearchDiagnostics: () -> Unit,
     onBack: () -> Unit,
     startInWebSearch: Boolean = false,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onCheckUpdate: () -> Unit = {},
+    onDownloadUpdate: () -> Unit = {},
+    onInstallUpdate: () -> Unit = {},
+    onOpenRelease: () -> Unit = {},
+    onAutoCheckChanged: (Boolean) -> Unit = {}
 ) {
     val startSection = if (startInWebSearch) SettingsSection.SEARCH else SettingsSection.RUNTIME
     var section by rememberSaveable(startInWebSearch) { mutableStateOf(startSection) }
@@ -253,6 +280,11 @@ fun SettingsHubScreen(
         when (section) {
             SettingsSection.RUNTIME -> RuntimeScreen(
                 state = state,
+                onCheckUpdate = onCheckUpdate,
+                onDownloadUpdate = onDownloadUpdate,
+                onInstallUpdate = onInstallUpdate,
+                onOpenRelease = onOpenRelease,
+                onAutoCheckChanged = onAutoCheckChanged,
                 modifier = Modifier.weight(1f)
             )
             SettingsSection.LOGS -> LogsApiScreen(
@@ -291,7 +323,12 @@ fun SettingsHubScreen(
 @Composable
 fun RuntimeScreen(
     state: SettingsUiState,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onCheckUpdate: () -> Unit = {},
+    onDownloadUpdate: () -> Unit = {},
+    onInstallUpdate: () -> Unit = {},
+    onOpenRelease: () -> Unit = {},
+    onAutoCheckChanged: (Boolean) -> Unit = {}
 ) {
     LazyColumn(
         modifier = modifier
@@ -301,6 +338,16 @@ fun RuntimeScreen(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item { Text("运行状态", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
+        item {
+            AppUpdateCard(
+                state = state.appUpdate,
+                onCheckUpdate = onCheckUpdate,
+                onDownloadUpdate = onDownloadUpdate,
+                onInstallUpdate = onInstallUpdate,
+                onOpenRelease = onOpenRelease,
+                onAutoCheckChanged = onAutoCheckChanged
+            )
+        }
         item {
             InfoCard(
                 "当前模型",
@@ -330,6 +377,160 @@ fun RuntimeScreen(
                 primary = if (error.isNullOrBlank()) "运行正常" else friendlyError(error),
                 secondary = if (error.isNullOrBlank()) "需要排错时，可到“日志与接口”导出完整诊断。" else "完整信息已保留在诊断报告中。"
             )
+        }
+    }
+}
+
+@Composable
+private fun AppUpdateCard(
+    state: AppUpdateSettingsUiState,
+    onCheckUpdate: () -> Unit,
+    onDownloadUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit,
+    onOpenRelease: () -> Unit,
+    onAutoCheckChanged: (Boolean) -> Unit
+) {
+    val normalizedStatus = state.status.trim().uppercase()
+    val checking = normalizedStatus == "CHECKING" || normalizedStatus.contains("检查")
+    val downloading = normalizedStatus == "DOWNLOADING" || normalizedStatus.contains("下载")
+    val verifying = normalizedStatus == "VERIFYING" || normalizedStatus.contains("校验")
+    val readyToInstall = normalizedStatus == "READY_TO_INSTALL" ||
+        normalizedStatus == "READY" ||
+        normalizedStatus.contains("可安装")
+    val updateAvailable = normalizedStatus == "AVAILABLE" || normalizedStatus.contains("可更新")
+    val retryableDownload = state.canDownload && normalizedStatus == "ERROR"
+    val hasUpdate = (updateAvailable && state.canDownload) || retryableDownload || downloading || verifying || readyToInstall
+    val statusLabel = when (normalizedStatus) {
+        "IDLE" -> "未检查"
+        "CHECKING" -> "检查中"
+        "UP_TO_DATE" -> "已是最新稳定版"
+        "AVAILABLE" -> "有可用更新"
+        "DOWNLOADING" -> "下载中"
+        "VERIFYING" -> "校验中"
+        "READY_TO_INSTALL" -> "可安装"
+        "ERROR" -> "失败"
+        else -> state.status.ifBlank { "未检查" }
+    }
+    val notes = state.releaseNotes.trim().let { value ->
+        if (value.length > 1200) value.take(1197).trimEnd() + "..." else value
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("应用更新", fontWeight = FontWeight.Bold)
+                    Text(
+                        "从官方 GitHub Releases 检查并安装稳定版更新。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = state.autoCheckEnabled,
+                    onCheckedChange = onAutoCheckChanged
+                )
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                InfoLine(
+                    label = "当前版本",
+                    value = state.currentVersionName.ifBlank { "未知" },
+                )
+                InfoLine(
+                    label = "最新版本",
+                    value = state.latestVersionName ?: "尚未检查",
+                )
+            }
+            if (!state.latestTitle.isNullOrBlank()) {
+                Text(state.latestTitle.orEmpty(), fontWeight = FontWeight.SemiBold)
+            }
+            Text(
+                "状态：$statusLabel",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (state.lastCheckedText.isNotBlank()) {
+                Text(
+                    "上次检查：${state.lastCheckedText}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (state.apkSizeText.isNotBlank()) {
+                Text(
+                    if (state.downloadTotalBytes > 0L && state.downloadedBytes > 0L) {
+                        "安装包：${state.apkSizeText} · 已下载 ${formatBytes(state.downloadedBytes)} / ${formatBytes(state.downloadTotalBytes)}"
+                    } else {
+                        "安装包：${state.apkSizeText}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            state.message?.takeIf { it.isNotBlank() }?.let { message ->
+                Text(
+                    message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (normalizedStatus == "ERROR" || normalizedStatus.contains("失败")) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+            }
+            if (notes.isNotBlank()) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("更新说明", fontWeight = FontWeight.SemiBold)
+                    Text(notes, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onCheckUpdate,
+                    enabled = !checking && !downloading && !verifying && !readyToInstall,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null)
+                    Text("检查", modifier = Modifier.padding(start = 6.dp))
+                }
+                Button(
+                    onClick = onDownloadUpdate,
+                    enabled = hasUpdate && !checking && !downloading && !verifying && !readyToInstall,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null)
+                    Text("下载", modifier = Modifier.padding(start = 6.dp))
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onInstallUpdate,
+                    enabled = readyToInstall && !verifying,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.InstallMobile, contentDescription = null)
+                    Text("安装", modifier = Modifier.padding(start = 6.dp))
+                }
+                OutlinedButton(
+                    onClick = onOpenRelease,
+                    enabled = state.releaseUrl.isNotBlank(),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
+                    Text("打开 Release", modifier = Modifier.padding(start = 6.dp))
+                }
+            }
         }
     }
 }
