@@ -47,7 +47,7 @@ android {
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 5
-        versionName = "0.2.1-alpha"
+        versionName = "0.2.1"
 
         ndk {
             abiFilters += mcaAbiFilters

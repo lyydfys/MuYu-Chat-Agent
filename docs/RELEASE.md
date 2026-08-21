@@ -33,5 +33,15 @@ app/build/outputs/apk/release/
 
 ## Publish
 
-Publish the APK and a SHA-256 checksum as a GitHub pre-release for alpha builds.
-Do not upload debug APKs as public installer packages.
+Do not upload debug APKs as public installer packages. Publish the signed
+arm64 release APK and its SHA-256 checksum as GitHub Release assets.
+
+For a stable release, first set a non-prerelease `versionName`, increment
+`versionCode`, run the full JVM test matrix, build the signed arm64 release
+with the QAIRT SDK configured, verify its APK v2 signature, and create a tag
+named `v<version>` at the verified source commit. The release notes must state
+the package version, ABI, checksum, validation commands, and experimental
+capabilities.
+
+For an alpha release, keep the prerelease suffix in `versionName` and create
+the GitHub Release with its prerelease flag enabled.

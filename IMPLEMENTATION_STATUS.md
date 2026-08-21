@@ -7,7 +7,7 @@ machine-specific paths and credentials so the project can be shared safely.
 
 - Android multi-module Gradle project with Compose UI for chat, images, model management, Agent diagnostics, tuning, and settings.
 - Local chat runtimes: `llama.cpp`, MNN CPU, and separately admitted GenieX/QAIRT bundles.
-- Local image runtimes: `stable-diffusion.cpp`, experimental MNN-Diffusion, and exact-bundle/SoC-gated QNN/HTP.
+- Local image runtimes: `stable-diffusion.cpp`, experimental MNN-Diffusion, and QNN/HTP bundles. Device information ranks recommendations and selects a runtime transport; package integrity and real native load/graph execution determine compatibility.
 - Cloud chat/image integrations for OpenAI-compatible, Anthropic Messages, DashScope, and custom endpoints.
 - ModelScope recommendations, resumable downloads, local import, manifests, SHA-256 validation, and atomic MNN component/ZIP installation.
 - Authenticated OpenAI-compatible Local API with model/runtime/profile/tuning control surfaces and redacted request/media trace evidence.
@@ -30,18 +30,17 @@ machine-specific paths and credentials so the project can be shared safely.
 - MNN multimodal input is open by default on compatible `arm64-v8a` devices after one representative device passes both production surfaces. It is not gated by chipset names or per-device `visionValidated` metadata.
 - The representative-device result opens the feature contract only. Every device still derives its own execution profile; thread, batch, KV, context, and tuning values are never copied from the representative device.
 - MNN-Diffusion image generation is a separate experimental capability and must not be confused with MNN multimodal chat.
-- QNN/QAIRT admission remains exact-bundle, chipset, runtime, memory, and real-execution gated. MNN default-open policy does not weaken those constraints.
+- QNN/QAIRT uses device information for advisory package ranking and runtime transport selection. It never removes a user-facing action solely for an unlisted device; corrupt packages, missing required binaries, failed native loads, and failed graph execution remain concrete rejection conditions.
 - Local GGUF remains supported through the updated `llama.cpp` path, including CPU-safe parameter filtering and load-signature recovery.
 - Sparse MoE admission is based on GGUF architecture metadata rather than a `35B-A3B` filename. On devices with up to 16 GiB physical RAM, sparse MoE uses reclaimable file-backed mmap pages, disables mlock and whole-file prefetch, forbids a large-model non-mmap fallback, keeps one sequence, and caps context/batch/ubatch at `4096/2048/256`.
 - Exact verified Qwen3.6 35B-A3B artifacts receive Q4 KV, Flash Attention, and `draft-mtp/2`. Adaptive tuning is now generated for the model being loaded, and the rule-set fingerprint invalidates an earlier profile that accidentally borrowed another model's `spec_type=none` plan. SHA-derived MTP capability still works if the user renames the model.
 
 ## Current Verification
 
-- Full JVM unit-test matrix: 675 tests, 0 failures, 0 errors, 7 skipped.
-- `arm64-v8a :app:assembleDebug`: passed with MNN vendor/runtime provenance and typed QAIRT/QNN header verification.
-- Final debug APK: 196,981,949 bytes; SHA-256 `44AD5A320B47CEE0AAA1E8DF6D8C1C2EE81C85ACF8343B6BBE533954978CE428`.
+- Full JVM `testDebugUnitTest` matrix: passed on JDK 17.
+- Signed `arm64-v8a :app:assembleRelease`: passed with MNN vendor/runtime provenance and typed QAIRT/QNN header verification.
+- Release packaging is v0.2.1 (`versionCode` 5). The GitHub Release contains the signed arm64 APK and its SHA-256 checksum.
 - APK Signature Scheme v2: verified; certificate SHA-256 `2619AC4CE0AD8397B84C77DF6BA165801FD4FAB1460470F22F1EB7B3E4F9A9CF`.
-- The same APK hash was verified from the installed Elite `base.apk`.
 - Formal Elite MainActivity + authenticated Local API MNN vision acceptance passed with distinct request IDs, native sequences 2 then 3, different image hashes, stable model/profile/signatures, `RuntimeOverride=NONE`, `engineLifecycle=ready`, and `generationActive=false`.
 - Formal Elite MainActivity + authenticated Local API Qwen3.6 35B-A3B acceptance also passed on the 12 GB-class device. Effective settings were mmap on, mlock off, no mmap fallback or prefetch, `4096/2048/256`, Q4 KV, Flash Attention, and `draft-mtp/2`; UI request `ui-0bd6319ae25f4bc4a2f68804118fbffc` used native sequence 2 and returned `ELITE_UI_35B_OK`, while API request `chatcmpl-51173d5c49ec4181b78ed446d1e10e8b` used sequence 3 and returned `ELITE_API_35B_OK`.
 - The bounded log window had no App FATAL, ANR, SIGSEGV, SIGABRT, OOM, crash-buffer entry, or process death.
@@ -58,7 +57,7 @@ Use JDK 17, an Android SDK, the configured native dependencies, and run:
 $env:JAVA_HOME='<path-to-jdk-17>'
 $env:ANDROID_HOME='<path-to-android-sdk>'
 .\gradlew.bat testDebugUnitTest
-.\gradlew.bat :app:assembleDebug -Pmca.abis=arm64-v8a
+.\gradlew.bat :app:assembleRelease "-Pmca.abis=arm64-v8a" "-PmcaQnnSdkRoot=<path-to-qairt-sdk>"
 ```
 
 ## Runtime Validation Policy
