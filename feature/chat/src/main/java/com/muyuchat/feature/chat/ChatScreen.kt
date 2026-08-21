@@ -5834,7 +5834,11 @@ private fun ImageGalleryHome(
                         ImageTemplateCard(
                             template = template,
                             cardWidth = cardWidth,
-                            onClick = { onPromptChange(template.prompt) }
+                            onClick = {
+                                onPromptChange(template.prompt)
+                                onNegativePromptChange(template.negativePrompt)
+                                onDisableModelNegativePromptChange(false)
+                            }
                         )
                     }
                 }
@@ -8345,6 +8349,7 @@ private fun ImageGenerationTerminalCard(job: ImageGenerationUiJob, onRetry: () -
 private data class ImagePromptTemplate(
     val title: String,
     val prompt: String,
+    val negativePrompt: String,
     val imageRes: Int,
     val accent: Color
 )
@@ -8352,49 +8357,57 @@ private data class ImagePromptTemplate(
 private val imagePromptTemplates = listOf(
     ImagePromptTemplate(
         "液态金属花园",
-        "蓝白金属花园，柔光，精致 3D",
+        "luminous blue-white liquid metal garden, flowing chrome blossoms, polished silver petals, soft studio lighting, delicate cinematic 3D render, shallow depth of field, pristine reflective surfaces, elegant futuristic atmosphere",
+        "blurry, low quality, distorted geometry, warped metal, misshapen flowers, oversaturated colors, harsh shadows, watermark, text, logo, jpeg artifacts",
         R.drawable.template_liquid_garden,
         Color(0xFF7EA9F5)
     ),
     ImagePromptTemplate(
         "晨光工作岛",
-        "晨光工作岛，蓝白桌面，干净未来感",
+        "morning light island desk, blue-white minimalist workspace, clean futuristic office setup, soft sunrise glow through large windows, tidy surfaces, gentle reflections, professional 3D product render, inviting calm atmosphere",
+        "clutter, messy cables, low quality, blurry, dim lighting, warped perspective, reflected glare, watermark, text, logo, oversaturated colors",
         R.drawable.template_work_island,
         Color(0xFF74A2E8)
     ),
     ImagePromptTemplate(
         "山海便签",
-        "山海便签拼贴，雾蓝水墨，压花",
+        "mountain and sea sticky-note collage, misty blue ink-wash painting style, embossed paper texture, layered memo cards, tranquil distant landscape, soft fog, delicate brushwork, harmonious balanced composition",
+        "sharp harsh edges, overly bright, low contrast, smudged notes, illegible handwriting, cluttered layout, blurry, watermark, text, logo, jpeg artifacts",
         R.drawable.template_mountain_memo,
         Color(0xFF8BAFA9)
     ),
     ImagePromptTemplate(
         "纸雕分身",
-        "纸雕角色，浅蓝背景，发光铅笔",
+        "paper-cut character portrait, layered pale blue background, glowing blue pencil accent, delicate cut-paper shadows, crisp clean silhouette, dreamy studio lighting, minimal elegant illustration, subtle paper grain",
+        "low resolution, blurry edges, torn paper fragments, distorted face, harsh shadows, oversaturated colors, text, watermark, logo, messy composition",
         R.drawable.template_paper_avatar,
         Color(0xFF8BB7F0)
     ),
     ImagePromptTemplate(
         "旅行手帐",
-        "旅行手帐拼贴，山海远景，暖色胶片",
+        "travel journal collage, mountain and sea vista, warm analog film tones, vintage paper ticket and map layers, sunlit horizon, nostalgic handmade texture, rich layered composition, gentle photographic grain",
+        "cold blue cast, washed-out colors, cluttered layout, unreadable text, low quality, blurry, watermark, logo, oversaturated highlights, harsh contrast",
         R.drawable.template_travel_journal,
         Color(0xFFD4A36D)
     ),
     ImagePromptTemplate(
         "黑白漫画感",
-        "黑白漫画角色，绘制小机器人，无文字",
+        "black and white comic illustration, small hand-drawn robot character, bold clean ink lines, white background, expressive pose, retro manga style, strong visual hierarchy, no text, crisp monochrome artwork",
+        "color, text, speech bubbles, sound effects, watermark, noise, blurry, awkward anatomy, broken linework, low quality, gray gradient",
         R.drawable.template_mono_comic,
         Color(0xFF7F8795)
     ),
     ImagePromptTemplate(
         "未来城市",
-        "玻璃穹顶未来城市，蓝白柔光，绿植",
+        "glass-domed futuristic city, blue-white soft lighting, lush green plants along clean boulevards, soaring transparent architecture, morning mist, optimistic sci-fi atmosphere, detailed wide cinematic 3D render",
+        "dark grungy dystopia, neon overload, smog, low quality, blurry, warped buildings, text, watermark, logo, overcrowded scene, harsh shadows",
         R.drawable.template_future_city,
         Color(0xFF79B6E8)
     ),
     ImagePromptTemplate(
         "陶瓷甜点",
-        "浅蓝陶瓷甜点，清晨柔光，静物摄影",
+        "delicate pale blue ceramic dessert, pastel glaze, soft morning window light, minimalist still life photography, gentle shadows, smooth porcelain texture, airy elegant styling, high-end food photography",
+        "harsh shadows, overexposed, dull colors, cracked ceramic, messy background, text, watermark, logo, low quality, blurry, plasticky texture",
         R.drawable.template_ceramic_dessert,
         Color(0xFFB7D9A7)
     )
