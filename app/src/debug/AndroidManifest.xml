@@ -1,4 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <application>
         <activity
             android:name=".debug.LocalImageSmokeActivity"
@@ -6,6 +7,10 @@
             android:theme="@style/Theme.MuYuChatAgent" />
         <activity
             android:name=".debug.LocalChatSmokeActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MuYuChatAgent" />
+        <activity
+            android:name=".debug.LlamaGpuBenchActivity"
             android:exported="true"
             android:theme="@style/Theme.MuYuChatAgent" />
         <activity

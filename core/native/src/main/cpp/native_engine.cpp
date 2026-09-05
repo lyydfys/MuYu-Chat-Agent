@@ -1182,7 +1182,12 @@ std::string load_failure_code_from_llama_error(const std::string &detail) {
 }
 
 bool load_mode_uses_mmap(llama_load_mode mode) {
-    return mode == LLAMA_LOAD_MODE_MMAP || mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
+    // llama.cpp b10590 defaults to AUTO. AUTO starts with mmap and only
+    // disables it when a selected backend cannot map the model, so preserve
+    // the MCA default mmap policy when deriving the runtime profile.
+    return mode == LLAMA_LOAD_MODE_AUTO ||
+           mode == LLAMA_LOAD_MODE_MMAP ||
+           mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
 }
 
 bool load_mode_uses_mlock(llama_load_mode mode) {
@@ -3590,6 +3595,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_unloadModel(JNIEnv *, jobj
     g_loaded = false;
 }
 
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_invalidateTextContext(JNIEnv *, jobject) {
     g_stop_requested.store(true, std::memory_order_release);
@@ -4187,4 +4193,3 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_shutdown(JNIEnv *, jobject
 #endif
     g_loaded = false;
 }
-

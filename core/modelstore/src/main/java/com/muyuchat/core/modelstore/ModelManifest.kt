@@ -106,13 +106,15 @@ enum class ModelSource {
 enum class ChatModelRuntime(val storageValue: String, val label: String) {
     MNN("mnn", "MNN 高速引擎"),
     LLAMA_CPP("llama_cpp", "GGUF 兼容引擎"),
-    GENIEX_QAIRT("geniex_qairt", "GenieX QAIRT NPU");
+    GENIEX_QAIRT("geniex_qairt", "GenieX QAIRT NPU"),
+    LITERT_LM("litert_lm", "LiteRT-LM 引擎");
 
     companion object {
         fun from(value: String?): ChatModelRuntime = when (value?.lowercase()) {
             "mnn", "mnn_llm", "mnn-llm" -> MNN
             "llama", "llama_cpp", "llama.cpp", "gguf" -> LLAMA_CPP
             "geniex", "geniex_qairt", "qairt", "qnn", "qnn_htp" -> GENIEX_QAIRT
+            "litertlm", "litert_lm", "litert-lm", "litert" -> LITERT_LM
             else -> LLAMA_CPP
         }
     }

@@ -5,13 +5,16 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ModelPath,
     [string]$DisplayName = '',
+    [ValidateSet('cpu', 'opencl')]
+    [string]$MnnBackendType = 'cpu',
+    [string]$AdvancedJson = '{}',
     [string]$Prompt = 'Reply with the exact words: MNN smoke passed.',
     [string]$PromptFile = '',
     [string]$ImagePath = '',
     [string]$SecondImagePath = '',
     [string]$TextPreludePrompt = 'Reply with only 42. What is 6 multiplied by 7?',
     [string]$SystemPrompt = 'You are MCA smoke test. Answer briefly in Chinese.',
-    [ValidateSet('full', 'api_only', 'direct_twice', 'api_twice', 'direct_counterfactual', 'text_then_image')]
+    [ValidateSet('full', 'api_only', 'direct_twice', 'api_twice', 'direct_counterfactual', 'text_then_image', 'mnn_cache_ab')]
     [string]$SmokeMode = 'full',
     [ValidateRange(1, 2147483647)]
     [int]$Runs = 1,
@@ -23,10 +26,12 @@ param(
     [int]$MaxTokens = 32,
     [ValidateRange(0.0, 2.0)]
     [double]$Temperature = 0.0,
-    [ValidateRange(1, 256)]
+    [ValidateRange(0, 256)]
     [int]$TopK = 1,
     [ValidateRange(0.0, 1.0)]
     [double]$TopP = 1.0,
+    [ValidateRange(0.0, 1.0)]
+    [double]$MinP = 0.0,
     [int]$Seed = 0,
     [ValidateRange(1, 64)]
     [int]$ContinuousTurns = 1,
@@ -428,7 +433,9 @@ function Assert-MnnChatSmokeDirectCounterfactualContract {
 function Assert-MnnChatSmokeModeContract {
     param(
         [object]$Json,
-        [string]$Mode
+        [string]$Mode,
+        [ValidateSet('mnn_cpu', 'mnn_opencl')]
+        [string]$ExpectedBackend
     )
 
     $rootStatus = Get-MnnChatSmokeEventValue -Object $Json -Path @('status')
@@ -436,13 +443,14 @@ function Assert-MnnChatSmokeModeContract {
         throw "Activity result root status must be completed; found '$rootStatus'."
     }
     $nativeStats = Get-DeviceSmokeLatestNativeStats -Json $Json
-    if ((Get-MnnChatSmokeEventValue -Object $nativeStats -Path @('backend')) -cne 'mnn_cpu' -or
+    $backend = Get-MnnChatSmokeEventValue -Object $nativeStats -Path @('backend')
+    if ($backend -cne $ExpectedBackend -or
         (Get-MnnChatSmokeEventValue -Object $nativeStats -Path @('loaded')) -ne $true -or
         (Get-MnnChatSmokeEventValue -Object $nativeStats -Path @('runnerReady')) -ne $true) {
-        throw 'MNN smoke terminal nativeStats must report backend=mnn_cpu, loaded=true, and runnerReady=true.'
+        throw "MNN smoke terminal nativeStats must report backend=$ExpectedBackend, loaded=true, and runnerReady=true."
     }
     if ($Mode -eq 'full') {
-        Assert-DeviceSmokeMnnChatContract -Json $Json
+        Assert-DeviceSmokeMnnChatContract -Json $Json -ExpectedBackend $ExpectedBackend
         return
     }
 
@@ -452,6 +460,7 @@ function Assert-MnnChatSmokeModeContract {
         'direct_counterfactual' { @('generation_first_ok', 'generation_second_ok') }
         'text_then_image' { @('generation_text_ok', 'generation_image_ok') }
         'api_twice' { @('api_engine_first_ok', 'api_engine_second_ok') }
+        'mnn_cache_ab' { @('mnn_cache_ab_first_ok', 'mnn_cache_ab_second_ok', 'mnn_cache_ab_ok') }
         default { throw "Unsupported MNN smoke mode contract: $Mode" }
     }
     foreach ($status in $requiredStatuses) {
@@ -460,6 +469,31 @@ function Assert-MnnChatSmokeModeContract {
         })
         if ($events.Count -ne 1) {
             throw "MNN $Mode contract requires exactly one $status event; found $($events.Count)."
+        }
+        if ($status -ceq 'mnn_cache_ab_ok') {
+            # The activity writes the compact cache result directly on the
+            # mnn_cache_ab_ok event. Keep the nested fallback for older
+            # evidence files, whose terminal event carried mnnCacheAb.
+            $cache = Get-MnnChatSmokeEventValue -Object $events[0] -Path @('mnnCacheAb')
+            if ($null -eq $cache) { $cache = $events[0] }
+            if ($null -eq $cache -or
+                (Get-MnnChatSmokeEventValue -Object $cache -Path @('cacheHit')) -ne $true -or
+                [int](Get-MnnChatSmokeEventValue -Object $cache -Path @('reusedTokens')) -le 0 -or
+                (Get-MnnChatSmokeEventValue -Object $cache -Path @('secondGenerationSucceeded')) -ne $true) {
+                throw 'MNN mnn_cache_ab_ok requires a successful cache hit with reused tokens.'
+            }
+            $cold = Get-MnnChatSmokeEventValue -Object $cache -Path @('coldControl')
+            if ($null -eq $cold -or
+                (Get-MnnChatSmokeEventValue -Object $cold -Path @('generationSucceeded')) -ne $true -or
+                (Get-MnnChatSmokeEventValue -Object $cold -Path @('noReuse')) -ne $true -or
+                (Get-MnnChatSmokeEventValue -Object $cold -Path @('sameRequestTranscript')) -ne $true -or
+                (Get-MnnChatSmokeEventValue -Object $cold -Path @('stats', 'promptCacheHit')) -ne $false -or
+                (Get-MnnChatSmokeEventValue -Object $cold -Path @('stats', 'reusedTokens')) -ne 0 -or
+                (Get-MnnChatSmokeEventValue -Object $cold -Path @('generation', 'doneSeen')) -ne $true) {
+                throw 'MNN cache A/B requires a successful fresh-model control using the same transcript.'
+            }
+            Assert-DeviceSmokeMnnGenerationQuality -Generation (Get-MnnChatSmokeEventValue -Object $cold -Path @('generation'))
+            continue
         }
         $payloadName = if ($status.StartsWith('api_engine_', [System.StringComparison]::Ordinal)) {
             'apiEngine'
@@ -534,6 +568,8 @@ if ([string]::IsNullOrWhiteSpace($DisplayName)) {
 if ([string]::IsNullOrWhiteSpace($DisplayName)) { $DisplayName = 'MNN chat bundle' }
 if ([string]::IsNullOrWhiteSpace($SessionId)) { $SessionId = New-DeviceSmokeSessionId -Prefix 'mnn-chat' }
 $SessionId = Get-DeviceSmokeSafeName -Value $SessionId
+$expectedBackend = if ($MnnBackendType -ceq 'opencl') { 'mnn_opencl' } else { 'mnn_cpu' }
+$computeUnit = if ($MnnBackendType -ceq 'opencl') { 'gpu' } else { 'cpu' }
 
 $component = "$Package/.debug.LocalChatSmokeActivity"
 $serial = Initialize-DeviceSmokeDevice -Adb $Adb -Serial $Serial
@@ -585,7 +621,9 @@ if ($SmokeMode -eq 'direct_counterfactual') {
     $bundleConfigEvidence = New-MnnChatSmokeManifestEvidence `
         -Entries $bundleConfigEntries -Path $ModelPath -Kind 'mnn_bundle_config'
     $requestConfig = [pscustomobject][ordered]@{
-        runtime = 'mnn_cpu'
+        runtime = $expectedBackend
+        computeUnit = $computeUnit
+        mnnBackendType = $MnnBackendType
         modelPath = $ModelPath
         smokeMode = $SmokeMode
         prompt = $Prompt
@@ -599,6 +637,7 @@ if ($SmokeMode -eq 'direct_counterfactual') {
         temperature = $Temperature
         topK = $TopK
         topP = $TopP
+        minP = $MinP
         seed = $Seed
         lifecycle = $Lifecycle
         firstImageExpectedTextFragments = @($FirstImageExpectedTextFragments)
@@ -620,7 +659,7 @@ $summaries = @()
 
 Write-Host "Device: $serial"
 Write-Host "Model: $ModelPath"
-Write-Host "Sampling: temperature=$Temperature topK=$TopK topP=$TopP seed=$Seed"
+Write-Host "Sampling: temperature=$Temperature topK=$TopK topP=$TopP minP=$MinP seed=$Seed"
 Write-Host "Output: $runOutputDir"
 
 for ($run = 1; $run -le $Runs; $run++) {
@@ -636,18 +675,21 @@ for ($run = 1; $run -le $Runs; $run++) {
         $activityArguments = @(
             'am', 'start', '-W', '-n', $component,
             '--es', 'runtime', 'mnn_cpu',
+            '--es', 'mnnBackendType', $MnnBackendType,
+            '--es', 'advancedJson', $AdvancedJson,
             '--es', 'modelPath', $ModelPath,
             '--es', 'displayName', $DisplayName,
             '--es', 'runId', $runId,
             '--es', 'smokeMode', $SmokeMode,
             '--es', 'systemPrompt', $SystemPrompt,
-            '--es', 'computeUnit', 'cpu',
+            '--es', 'computeUnit', $computeUnit,
             '--ei', 'nCtx', [string]$ContextTokens,
             '--ei', 'nThreads', [string]$Threads,
             '--ei', 'maxTokens', [string]$MaxTokens,
             '--ef', 'temperature', ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.########}', $Temperature)),
             '--ei', 'topK', [string]$TopK,
             '--ef', 'topP', ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.########}', $TopP)),
+            '--ef', 'minP', ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.########}', $MinP)),
             '--ei', 'seed', [string]$Seed,
             '--ei', 'continuousTurns', [string]$ContinuousTurns
         )
@@ -673,7 +715,14 @@ for ($run = 1; $run -le $Runs; $run++) {
             -ActivityArguments $activityArguments -RemoteJson $remoteJson -LocalJson $localJson `
             -ExpectedRunId $runId -TimeoutSeconds $TimeoutSeconds -PollMilliseconds $PollMilliseconds
         if ($result.status -eq 'completed') {
-            Assert-MnnChatSmokeModeContract -Json $result.json -Mode $SmokeMode
+            foreach ($event in @(Get-DeviceSmokeEvents -Json $result.json)) {
+                foreach ($key in @('generation', 'apiEngine')) {
+                    $generated = Get-MnnChatSmokeEventValue -Object $event -Path @($key)
+                    if ($null -ne $generated) { Assert-DeviceSmokeMnnGenerationQuality -Generation $generated }
+                }
+            }
+            Assert-MnnChatSmokeModeContract `
+                -Json $result.json -Mode $SmokeMode -ExpectedBackend $expectedBackend
             if ($SmokeMode -eq 'direct_counterfactual') {
                 $completedNativeStats = Get-DeviceSmokeLatestNativeStats -Json $result.json
                 $nativeLibDir = Get-MnnChatSmokeEventValue -Object $completedNativeStats -Path @('nativeLibDir')
@@ -718,6 +767,27 @@ for ($run = 1; $run -le $Runs; $run++) {
                 })
                 if ($turnEvents.Count -ne $ContinuousTurns) {
                     throw "MNN continuous-turn contract expected $ContinuousTurns generation_turn_ok events, found $($turnEvents.Count)."
+                }
+                # Each turn must carry the accumulated system/user/assistant
+                # transcript into the next native request.  The debug activity
+                # records this count before every generation: 2 for the first
+                # system+user request, then +2 for assistant+user per turn.
+                for ($turnIndex = 0; $turnIndex -lt $turnEvents.Count; $turnIndex++) {
+                    $messageCount = Get-MnnChatSmokeEventValue `
+                        -Object $turnEvents[$turnIndex] -Path @('requestMessageCount')
+                    $expectedMessageCount = 2 + ($turnIndex * 2)
+                    if ($messageCount -isnot [int] -and $messageCount -isnot [long]) {
+                        throw "MNN continuous-turn event $($turnIndex + 1) is missing requestMessageCount."
+                    }
+                    if ([int]$messageCount -ne $expectedMessageCount) {
+                        throw "MNN continuous-turn event $($turnIndex + 1) expected requestMessageCount=$expectedMessageCount, found $messageCount."
+                    }
+                    $transcriptHash = Get-MnnChatSmokeEventValue `
+                        -Object $turnEvents[$turnIndex] -Path @('requestTranscriptSha256')
+                    if ($transcriptHash -isnot [string] -or
+                        $transcriptHash -notmatch '^[0-9a-fA-F]{64}$') {
+                        throw "MNN continuous-turn event $($turnIndex + 1) is missing a valid requestTranscriptSha256."
+                    }
                 }
             }
             if ($SmokeMode -eq 'full' -and @($ExpectedTextFragments).Count -gt 0) {
@@ -772,6 +842,26 @@ for ($run = 1; $run -le $Runs; $run++) {
         localJson = $result.localJson
         rawResultPreserved = [bool]$result.rawResultPreserved
         nativeStats = $nativeStats
+        generationEvidence = @(if ($null -ne $result.json) {
+            foreach ($event in @(Get-DeviceSmokeEvents -Json $result.json)) {
+                $generated = Get-MnnChatSmokeEventValue -Object $event -Path @('generation')
+                if ($null -ne $generated) {
+                    [pscustomobject]@{
+                        event = Get-MnnChatSmokeEventValue -Object $event -Path @('status')
+                        turn = Get-MnnChatSmokeEventValue -Object $event -Path @('turn')
+                        text = Get-MnnChatSmokeEventValue -Object $generated -Path @('text')
+                        error = Get-MnnChatSmokeEventValue -Object $generated -Path @('error')
+                        nativeStats = Get-MnnChatSmokeEventValue -Object $generated -Path @('nativeStats')
+                    }
+                }
+            }
+        })
+        coldControl = if ($null -ne $result.json) {
+            $coldEvent = @(Get-DeviceSmokeEvents -Json $result.json | Where-Object {
+                (Get-MnnChatSmokeEventValue -Object $_ -Path @('status')) -in @('mnn_cache_cold_ok', 'mnn_cache_cold_failed')
+            }) | Select-Object -Last 1
+            Get-MnnChatSmokeEventValue -Object $coldEvent -Path @('coldControl')
+        } else { $null }
         unicodeEvidence = $unicodeEvidence
         counterfactualEvidence = $counterfactualEvidence
         artifactEvidence = $runArtifactEvidence
@@ -784,7 +874,7 @@ $summary = [pscustomobject][ordered]@{
     serial = $serial
     package = $Package
     component = $component
-    runtime = 'mnn_cpu'
+    runtime = $expectedBackend
     modelPath = $ModelPath
     displayName = $DisplayName
     prompt = $Prompt
@@ -793,13 +883,15 @@ $summary = [pscustomobject][ordered]@{
     textPreludePrompt = $TextPreludePrompt
     systemPrompt = $SystemPrompt
     smokeMode = $SmokeMode
-    computeUnit = 'cpu'
+    computeUnit = $computeUnit
+    mnnBackendType = $MnnBackendType
     contextTokens = $ContextTokens
     threads = $Threads
     maxTokens = $MaxTokens
     temperature = $Temperature
     topK = $TopK
     topP = $TopP
+    minP = $MinP
     seed = $Seed
     continuousTurns = $ContinuousTurns
     lifecycle = $Lifecycle

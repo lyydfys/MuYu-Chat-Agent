@@ -61,6 +61,10 @@ class LocalImageMnnDiffusionDefaultsTest {
 
     @Test
     fun `MNN validates backend runner and thread options without silent fallback`() {
+        // Defaults to CPU: MNN 3.6.0 OpenCL can hang a blocking UNet call on
+        // some Adreno devices, so we do not serve an unstable GPU default.
+        assertEquals("cpu", resolveMnnDiffusionBackendMode(null))
+        assertEquals("cpu", resolveMnnDiffusionBackendMode(" auto "))
         assertEquals("opencl", resolveMnnDiffusionBackendMode("GPU"))
         assertEquals("cpu", resolveMnnDiffusionBackendMode(" cpu "))
         assertTrue(mnnDiffusionBackendMatches("opencl", "gpu"))

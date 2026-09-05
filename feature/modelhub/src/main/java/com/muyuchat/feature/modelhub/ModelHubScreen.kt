@@ -90,6 +90,7 @@ import com.muyuchat.core.download.RemoteModelFileKind
 import com.muyuchat.core.download.fileKind
 import com.muyuchat.core.download.isChatModelCandidate
 import com.muyuchat.core.download.isImageModelCandidate
+import com.muyuchat.core.download.isLiteRtLmModelCandidate
 import com.muyuchat.core.download.isVisionModelCandidate
 import com.muyuchat.core.download.kindLabel
 import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
@@ -585,11 +586,11 @@ private fun LocalModelsSection(
                 ) {
                     Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("+ 导入 GGUF / MNN 本地模型", fontWeight = FontWeight.Bold)
+                    Text("+ 导入 GGUF / LiteRT-LM / MNN 本地模型", fontWeight = FontWeight.Bold)
                 }
                 if (state.localModels.isEmpty()) {
                     Text("还没有本地推理引擎", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                    Text("可以导入 GGUF 兼容模型，也可以导入完整 MNN 组件包；推荐列表会优先下载 MNN。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("可以导入 GGUF 或 LiteRT-LM 模型，也可以导入完整 MNN 组件包；不同格式会交给对应运行时加载。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                     state.localModels.forEach { model ->
                         LocalModelCard(
@@ -1263,8 +1264,14 @@ private fun RecommendedModelsSection(
         Triple("npu-image-sdxl", "SDXL QNN", catalog.npuImageSdxl),
         Triple("npu-image-gen5", "骁龙 8 Elite Gen 5 官方模型", catalog.npuImageGen5)
     )
+    val litertGroups = listOf(
+        Triple("litert-cpu", "CPU", catalog.litertCpu),
+        Triple("litert-gpu", "GPU", catalog.litertGpu),
+        Triple("litert-npu", "Qualcomm NPU", catalog.litertNpu)
+    )
     val hasRecommendations = cpuChatGroups.any { it.third.isNotEmpty() } ||
         catalog.npuChat.isNotEmpty() ||
+        litertGroups.any { it.third.isNotEmpty() } ||
         catalog.cpuImage.isNotEmpty() ||
         catalog.npuImage.isNotEmpty()
 
@@ -1359,6 +1366,36 @@ private fun RecommendedModelsSection(
                             hiddenCount = catalog.npuChat.size - 1,
                             onClick = { expandedGroups = expandedGroups.toggle(key, expanded) }
                         )
+                    }
+                }
+            }
+
+            if (litertGroups.any { it.third.isNotEmpty() }) {
+                item(key = "litert-lm-header") {
+                    RecommendationSectionHeader(
+                        title = "LiteRT-LM",
+                        body = "LiteRT-LM 大类；下面按 CPU、GPU、Qualcomm NPU 分组，每组包含 E2B、E4B、12B。"
+                    )
+                }
+                litertGroups.forEach { (key, title, models) ->
+                    if (models.isNotEmpty()) {
+                        item(key = "$key-header") {
+                            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        }
+                        items(models, key = { "$key-${it.id}" }) { model ->
+                            RecommendedModelCard(
+                                model = model,
+                                deviceTotalRamBytes = state.deviceTotalRamBytes,
+                                deviceAvailableRamBytes = state.deviceAvailableRamBytes,
+                                deviceChipsetCode = state.deviceChipsetCode,
+                                deviceIsSnapdragon = state.deviceIsSnapdragon,
+                                qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                                enabled = !state.isBusy,
+                                onShowFiles = { onShowFiles(model) },
+                                onDownload = { onDownload(model) },
+                                onOpenPage = { onOpenPage(model.modelPageUrl) }
+                            )
+                        }
                     }
                 }
             }
@@ -1549,7 +1586,7 @@ private fun RemoteFilesSection(
             }
         }
         item {
-            Text("支持单个 GGUF 兼容模型，也支持多选完整 MNN 组件或导入 MNN zip 包。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("支持单个 GGUF / LiteRT-LM 模型，也支持多选完整 MNN 组件或导入 MNN zip 包。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1632,6 +1669,7 @@ private fun RecommendedModelCard(
     val downloadAccess = recommendationDownloadAccess(model, deviceChipsetCode, deviceIsSnapdragon)
     val fitLabel = deviceFitLabel(model, deviceTotalRamBytes, deviceAvailableRamBytes)
     val hardwareLine = recommendationHardwareLine(model, fitLabel)
+    val devicePathLine = recommendationDeviceFitLine(downloadAccess)
     val verificationLine = recommendationVerificationLine(model, qairtVerified)
     val shortDescription = model.recommendationShortDescription()
     val experimentalDownload = model.status == RecommendedModelStatus.EXPERIMENTAL &&
@@ -1671,6 +1709,13 @@ private fun RecommendedModelCard(
             hardwareLine,
             style = MaterialTheme.typography.bodySmall,
             color = fitColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            devicePathLine,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -1888,6 +1933,7 @@ private fun LocalModelCard(
                     isMnnRuntime -> "MNN CPU 高速路径"
                     isQairtRuntime && qairtVerified -> "已有当前设备 QAIRT 隔离运行诊断证据"
                     isQairtRuntime -> "QAIRT 使用隔离 native worker；实际加载结果决定兼容性"
+                    model.runtime == ChatModelRuntime.LITERT_LM -> "LiteRT-LM 独立运行时；CPU/GPU/NPU 由实际 native load 决定"
                     else -> "GGUF / llama.cpp 兼容路径"
                 },
                 style = MaterialTheme.typography.bodySmall,
@@ -2191,6 +2237,7 @@ private fun localImageExecutionLabel(runtimeLabel: String): String {
 private fun RemoteFileCard(file: RemoteModelFile, enabled: Boolean, onDownload: () -> Unit) {
     val kind = file.fileKind()
     val isProjector = kind == RemoteModelFileKind.PROJECTOR
+    val isLiteRtLm = file.isLiteRtLmModelCandidate()
     val isDownloadableModel =
         file.isChatModelCandidate() || file.isVisionModelCandidate() || file.isImageModelCandidate() || isProjector
     CardBox {
@@ -2201,6 +2248,8 @@ private fun RemoteFileCard(file: RemoteModelFile, enabled: Boolean, onDownload: 
             Text("这是辅助文件，不适合作为推理引擎加载。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         } else if (isProjector) {
             Text("下载后会绑定到当前已加载的本地多模态主模型。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else if (isLiteRtLm) {
+            Text("这是独立 LiteRT-LM 容器，不是 GGUF；下载后会按 LiteRT-LM 运行时注册。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Button(onClick = onDownload, enabled = enabled && isDownloadableModel, shape = RoundedCornerShape(999.dp)) {
             Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))

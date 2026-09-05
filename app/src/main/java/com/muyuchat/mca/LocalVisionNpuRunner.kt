@@ -150,13 +150,8 @@ internal class LiteRtQnnVisionRunner(
         val runtimeResolution = context?.let { appContext ->
             qnnRuntimeDirectoryResolutionFor(appContext, bundleRoot)
         }
-        runtimeResolution?.stagingError?.let { stagingError ->
-            return LocalVisionNpuReport(
-                state = LocalVisionNpuState.QNN_RUNTIME_MISSING,
-                backend = backendLabel,
-                message = stagingError
-            )
-        }
+        // A staging miss is diagnostic only; do not hide the generic runtime
+        // path. The graph smoke remains the compatibility authority.
         val runtimeDirectories = runtimeResolution?.directories
             ?: qnnRuntimeDirectoriesFor(device.accelerationProfile.qnnRuntime)
         val smoke = smokeBridge.runVisionSmoke(

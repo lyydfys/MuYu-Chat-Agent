@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -136,6 +137,72 @@ class LocalImageWorkerProtocolTest {
         assertEquals(false, parsed.options.useCfg)
         assertEquals("direct", parsed.options.runner)
         assertEquals("", parsed.options.negativePrompt)
+    }
+
+    @Test
+    fun `internal low-step smoke marker round trips outside public worker options`() {
+        val model = LocalImageModelRecord(
+            id = "mnn-low-step-smoke",
+            displayName = "MNN low-step smoke",
+            path = "/data/user/0/com.muyuchat.mca/files/unet.mnn",
+            fileName = "unet.mnn",
+            sizeBytes = 123L,
+            sha256 = "abc",
+            runtime = LocalImageRuntime.MNN_DIFFUSION,
+            family = LocalImageModelFamily.SD15,
+            bundleRoot = "/data/user/0/com.muyuchat.mca/files/mnn-bundle"
+        )
+        val smokeOptions = LocalImageGenerationOptions(
+            steps = 1,
+            allowLowStepSmoke = true,
+            sampleMethod = "euler"
+        )
+
+        val payload = LocalImageWorkerProtocol.generateRequest(
+            requestId = "mnn-low-step-smoke",
+            model = model,
+            prompt = "smoke",
+            options = smokeOptions
+        )
+        val payloadJson = JSONObject(payload)
+        val parsed = LocalImageWorkerProtocol.parseGenerateRequest(payload)
+        val defaultPayload = LocalImageWorkerProtocol.generateRequest(
+            requestId = "mnn-default",
+            model = model,
+            prompt = "quality"
+        )
+
+        assertFalse(smokeOptions.toJson().has("allowLowStepSmoke"))
+        assertFalse(payloadJson.getJSONObject("options").has("allowLowStepSmoke"))
+        assertTrue(payloadJson.getBoolean("allowLowStepSmoke"))
+        assertTrue(parsed.options.allowLowStepSmoke)
+        assertFalse(JSONObject(defaultPayload).has("allowLowStepSmoke"))
+        assertFalse(
+            LocalImageWorkerProtocol.parseGenerateRequest(defaultPayload).options.allowLowStepSmoke
+        )
+    }
+
+    @Test
+    fun `internal low-step smoke marker rejects non-boolean worker payload`() {
+        val payload = JSONObject(
+            LocalImageWorkerProtocol.generateRequest(
+                requestId = "invalid-low-step-smoke",
+                model = LocalImageModelRecord(
+                    displayName = "MNN",
+                    path = "/data/user/0/com.muyuchat.mca/files/unet.mnn",
+                    fileName = "unet.mnn",
+                    sizeBytes = 123L,
+                    sha256 = "abc",
+                    runtime = LocalImageRuntime.MNN_DIFFUSION,
+                    family = LocalImageModelFamily.SD15
+                ),
+                prompt = "smoke"
+            )
+        ).put("allowLowStepSmoke", "true")
+
+        assertThrows(IllegalArgumentException::class.java) {
+            LocalImageWorkerProtocol.parseGenerateRequest(payload.toString())
+        }
     }
 
     @Test

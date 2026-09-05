@@ -328,6 +328,38 @@ class LocalImageModelReadinessTest {
     }
 
     @Test
+    fun qnnRuntimeDirectoriesDoNotMixDiscoveredAppProfilesAfterPrivateStage() {
+        val staged = Files.createTempDirectory("qnn-runtime-stage").toFile()
+        val stale = Files.createTempDirectory("qnn-runtime-stale").toFile()
+        val packaged = Files.createTempDirectory("qnn-runtime-packaged").toFile()
+        try {
+            val directories = qnnRuntimeDirectoriesForResolvedRuntime(
+                privateRuntimeDirectory = staged.absolutePath,
+                packagedNativeDirectory = packaged.absolutePath,
+                fallbackDirectories = listOf(
+                    stale.absolutePath,
+                    "/vendor/lib64",
+                    "/system/lib64"
+                ),
+                detectedSearchDirectories = listOf(
+                    stale.absolutePath,
+                    packaged.absolutePath
+                )
+            )
+
+            assertEquals(staged.canonicalPath, directories.first())
+            assertFalse(directories.contains(stale.canonicalPath))
+            assertFalse(directories.contains(packaged.canonicalPath))
+            assertTrue(directories.contains("/vendor/lib64"))
+            assertTrue(directories.contains("/system/lib64"))
+        } finally {
+            staged.deleteRecursively()
+            stale.deleteRecursively()
+            packaged.deleteRecursively()
+        }
+    }
+
+    @Test
     fun qnnRuntimeDirectoriesPrioritizeDeviceSelectedCoherentHost() {
         val generic = Files.createTempDirectory("qnn-generic-runtime").toFile()
         val gen2 = Files.createTempDirectory("qnn-gen2-runtime").toFile()
@@ -1060,6 +1092,64 @@ class LocalImageModelReadinessTest {
     }
 
     @Test
+    fun qnnManifestKeepsGraphOnlyExecutionProfileSdk() {
+        val root = Files.createTempDirectory("qnn-manifest-graph-sdk").toFile()
+        try {
+            File(root, "manifest.json").writeText(
+                """
+                {
+                  "schema": "mca.image_engine.bundle.v1",
+                  "runtime": "QNN_HTP",
+                  "executionProfile": {
+                    "graph": {"qnnSdk": "2.47.0.260601114230"}
+                  }
+                }
+                """.trimIndent()
+            )
+
+            val manifest = localImageBundleManifestFromRoot(root)
+
+            assertEquals("2.47.0.260601114230", manifest?.executionProfileQnnSdk)
+            assertEquals("2.47.0.260601114230", qnnSdkForPackagedImageRuntime(manifest))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun qnnManifestRejectsConflictingRuntimeAndGraphSdk() {
+        val root = Files.createTempDirectory("qnn-manifest-conflicting-sdk").toFile()
+        try {
+            File(root, "manifest.json").writeText(
+                """
+                {
+                  "schema": "mca.image_engine.bundle.v1",
+                  "runtime": "QNN_HTP",
+                  "requiredRuntimeProfile": {
+                    "qnnSdk": "2.45.0.260326154327",
+                    "htpArch": 79
+                  },
+                  "executionProfile": {
+                    "graph": {"qnnSdk": "2.47.0.260601114230"}
+                  }
+                }
+                """.trimIndent()
+            )
+
+            val inspection = inspectLocalImageBundleManifestFromRoot(root)
+
+            assertTrue(inspection is LocalImageBundleManifestInspection.Invalid)
+            assertTrue(
+                (inspection as LocalImageBundleManifestInspection.Invalid)
+                    .message
+                    .contains("does not match executionProfile.graph.qnnSdk")
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun mnnManifestUsesSmokeSpecWithoutRequiringRuntimeCertification() {
         val root = Files.createTempDirectory("mnn-manifest-sd15").toFile()
         val primary = root.touch("unet.mnn")
@@ -1532,6 +1622,36 @@ class LocalImageModelReadinessTest {
             assertEquals("graphs/unet.bin", qnnFirstContextPath(root, "unet.bin"))
             assertEquals("graphs/text_encoder.bin", qnnNativeTextEncoderContextPath(root))
             assertEquals("graphs/vae.bin", qnnFirstContextPath(root, "vae.bin", "vae_decoder.bin"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun staleQnnManifestGraphPathsRebindToUniqueNestedArchiveArtifacts() {
+        val root = Files.createTempDirectory("stale-gen5-qnn-profile").toFile()
+        try {
+            val prefix = "stable_diffusion_v2_1-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy"
+            root.touch("$prefix/text_encoder.bin")
+            root.touch("$prefix/unet.bin")
+            root.touch("$prefix/vae.bin")
+
+            assertEquals("$prefix/text_encoder.bin", resolveInstalledImageBundleArtifactPath(root, "text_encoder.bin"))
+            assertEquals("$prefix/unet.bin", resolveInstalledImageBundleArtifactPath(root, "unet.bin"))
+            assertEquals("$prefix/vae.bin", resolveInstalledImageBundleArtifactPath(root, "vae.bin"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun staleQnnManifestGraphPathDoesNotGuessBetweenDuplicateArtifacts() {
+        val root = Files.createTempDirectory("ambiguous-gen5-qnn-profile").toFile()
+        try {
+            root.touch("first/text_encoder.bin")
+            root.touch("second/text_encoder.bin")
+
+            assertEquals("text_encoder.bin", resolveInstalledImageBundleArtifactPath(root, "text_encoder.bin"))
         } finally {
             root.deleteRecursively()
         }

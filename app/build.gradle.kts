@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.gradle.api.tasks.Sync
 
 plugins {
     alias(libs.plugins.android.application)
@@ -37,6 +38,79 @@ val mcaQnnRuntimeOverrideGenieX = providers.gradleProperty("mcaQnnRuntimeOverrid
     .orNull
     ?.trim()
     ?.equals("true", ignoreCase = true) == true
+
+// LiteRT Qualcomm assets are staged into an app-private directory at runtime.
+// Keeping them out of jniLibs avoids a SONAME collision with GenieX's QAIRT
+// runtime, while shipping the Edge Gallery-compatible SM8550/V73, SM8650/V75,
+// SM8750/V79, and SM8850/V81 transport profiles.
+val vendoredLiteRtQualcommRuntimeAssets =
+    rootProject.file("vendor/litert/qualcomm/runtime-assets")
+val generatedLiteRtQualcommAssets =
+    layout.buildDirectory.dir("generated/litert-qualcomm-assets")
+val syncLiteRtQualcommAssets = tasks.register<Sync>("syncLiteRtQualcommAssets") {
+    from(vendoredLiteRtQualcommRuntimeAssets) {
+        into("litert-qualcomm")
+        // Edge Gallery's Qualcomm APK ships the precompiled-runtime sets only:
+        // dispatch + QNN host/system + the matching HTP transport pair. Do not
+        // put the JIT compiler plugin into this directory because it is a
+        // separate QAIRT-facing path and can make a precompiled model resolve
+        // a second, incompatible plugin set.
+        exclude("**/libLiteRtCompilerPlugin_Qualcomm.so")
+    }
+    into(generatedLiteRtQualcommAssets)
+    doFirst {
+        check(vendoredLiteRtQualcommRuntimeAssets.resolve("arm64-v8a").isDirectory) {
+            "Missing LiteRT Qualcomm runtime assets: ${vendoredLiteRtQualcommRuntimeAssets.absolutePath}"
+        }
+    }
+    doLast {
+        val generatedRoot = generatedLiteRtQualcommAssets.get().asFile
+        val stagedRoot = generatedRoot.resolve("litert-qualcomm/arm64-v8a")
+        val v81Names = stagedRoot.listFiles().orEmpty().filter { it.isFile }.map { it.name }.toSet()
+        val v79Root = generatedRoot.resolve("litert-qualcomm/v79/arm64-v8a")
+        val v79Names = v79Root.listFiles().orEmpty().filter { it.isFile }.map { it.name }.toSet()
+        val v73Root = generatedRoot.resolve("litert-qualcomm/v73/arm64-v8a")
+        val v73Names = v73Root.listFiles().orEmpty().filter { it.isFile }.map { it.name }.toSet()
+        val v75Root = generatedRoot.resolve("litert-qualcomm/v75/arm64-v8a")
+        val v75Names = v75Root.listFiles().orEmpty().filter { it.isFile }.map { it.name }.toSet()
+        check(v81Names == setOf(
+            "libLiteRtDispatch_Qualcomm.so",
+            "libQnnHtp.so",
+            "libQnnHtpV81Skel.so",
+            "libQnnHtpV81Stub.so",
+            "libQnnSystem.so"
+        )) {
+            "Unexpected LiteRT Qualcomm V81 staged asset set: ${v81Names.sorted()}"
+        }
+        check(v79Names == setOf(
+            "libLiteRtDispatch_Qualcomm.so",
+            "libQnnHtp.so",
+            "libQnnHtpV79Skel.so",
+            "libQnnHtpV79Stub.so",
+            "libQnnSystem.so"
+        )) {
+            "Unexpected LiteRT Qualcomm V79 staged asset set: ${v79Names.sorted()}"
+        }
+        check(v73Names == setOf(
+            "libLiteRtDispatch_Qualcomm.so",
+            "libQnnHtp.so",
+            "libQnnHtpV73Skel.so",
+            "libQnnHtpV73Stub.so",
+            "libQnnSystem.so"
+        )) {
+            "Unexpected LiteRT Qualcomm V73 staged asset set: ${v73Names.sorted()}"
+        }
+        check(v75Names == setOf(
+            "libLiteRtDispatch_Qualcomm.so",
+            "libQnnHtp.so",
+            "libQnnHtpV75Skel.so",
+            "libQnnHtpV75Stub.so",
+            "libQnnSystem.so"
+        )) {
+            "Unexpected LiteRT Qualcomm V75 staged asset set: ${v75Names.sorted()}"
+        }
+    }
+}
 
 android {
     namespace = "com.muyuchat.mca"
@@ -85,6 +159,12 @@ android {
         compose = true
     }
 
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(generatedLiteRtQualcommAssets)
+        }
+    }
+
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -127,6 +207,15 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+// AGP creates variant-specific merge tasks lazily. Make the generated asset
+// tree an explicit input so the APK always contains the expected
+// assets/litert-qualcomm/arm64-v8a layout before packaging.
+tasks.configureEach {
+    if (name.startsWith("merge") && name.endsWith("Assets")) {
+        dependsOn(syncLiteRtQualcommAssets)
     }
 }
 
@@ -195,6 +284,10 @@ androidComponents {
 }
 
 dependencies {
+    // The engine library exposes GenieX-backed runners but cannot embed a
+    // local AAR in its own AAR. Package the vendored, hash-verified artifact
+    // directly in the final application instead.
+    implementation(files(rootProject.file("vendor/geniex/geniex-android-0.3.12-mca1.aar")))
     if (mcaQnnRuntimeOverrideGenieX) {
         implementation(project(":core:native"))
     }

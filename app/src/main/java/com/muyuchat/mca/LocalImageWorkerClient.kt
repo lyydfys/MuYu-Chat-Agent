@@ -143,6 +143,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             runtime = model.runtime,
             requestedSteps = options.steps,
             requestedUseCfg = options.useCfg,
+            requestedBackendMode = options.backendMode,
             onProgress = onProgress
         )
         synchronized(stateLock) {
@@ -235,6 +236,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
             requestedSteps = 1,
             requestedUseCfg = false,
+            requestedBackendMode = null,
             onProgress = onProgress
         )
         synchronized(stateLock) {
@@ -742,7 +744,8 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             runtime = model.runtime,
             family = model.family,
             steps = request.requestedSteps,
-            useCfg = request.requestedUseCfg
+            useCfg = request.requestedUseCfg,
+            backendMode = request.requestedBackendMode
         ) ?: return
         request.watchdogJob = scope.launch {
             while (!request.completion.isCompleted) {
@@ -761,11 +764,12 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             if (request.completion.isCompleted) return@launch
 
             val timeout = LocalImageWorkerRemoteException(
-                code = LOCAL_IMAGE_WORKER_WATCHDOG_TIMEOUT_CODE,
+                code = policy.timeoutCode,
                 message = localImageWorkerWatchdogMessage(
                     timeoutMs = policy.timeoutMs,
                     phase = request.lastProgressPhase,
-                    stageTrace = request.lastStageTrace
+                    stageTrace = request.lastStageTrace,
+                    runtimeLabel = policy.runtimeLabel
                 )
             )
             val timedOutEndpoint = currentEndpoint()
@@ -943,6 +947,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         val runtime: LocalImageRuntime,
         val requestedSteps: Int?,
         val requestedUseCfg: Boolean?,
+        val requestedBackendMode: String?,
         val onProgress: (LocalImageProgress) -> Unit
     ) {
         val completion = CompletableDeferred<LocalImageWorkerProtocol.ResultEnvelope>()

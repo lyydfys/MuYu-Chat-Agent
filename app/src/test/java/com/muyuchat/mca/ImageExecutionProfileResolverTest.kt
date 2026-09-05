@@ -99,7 +99,13 @@ class ImageExecutionProfileResolverTest {
                 "${model.id} legacy compatibility template drifted from its catalog profile",
                 catalogProfile.copy(
                     provenance = legacyProfile.provenance,
-                    tokenizer = catalogProfile.tokenizer.copy(assets = emptyList())
+                    tokenizer = catalogProfile.tokenizer.copy(assets = emptyList()),
+                    // Legacy profiles intentionally keep their historical ten-step
+                    // validation floor.  Install-time catalog profiles expose the
+                    // four-step semantic smoke floor used by current QNN packages.
+                    scheduler = catalogProfile.scheduler.copy(
+                        minSteps = legacyProfile.scheduler.minSteps
+                    )
                 ),
                 legacyProfile
             )
@@ -371,7 +377,7 @@ class ImageExecutionProfileResolverTest {
 
         val mnn = resolve("sd15_mnn_512_quality").profile
         assertEquals(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, mnn.conditioning.diskDataType)
-        assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, mnn.tokenizer.backend)
+        assertEquals(ImageTokenizerBackend.MNN_MTOK, mnn.tokenizer.backend)
 
         val sana = resolve("mnn_sana_edit_v2").profile
         assertEquals(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, sana.conditioning.diskDataType)
@@ -392,6 +398,26 @@ class ImageExecutionProfileResolverTest {
             assertEquals(ImageTimestepSpacing.LEADING, scheduler.timestepSpacing)
             assertEquals(2, scheduler.order)
         }
+    }
+
+    @Test
+    fun `MNN SD15 token count follows active CFG branches while Sana stays per branch`() {
+        val cfg = resolve("sd15_mnn_512_quality")
+        assertTrue(cfg.profile.defaults.useCfg)
+        assertEquals(154, cfg.layers.resolved.tokenCount)
+
+        val noCfg = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = "sd15_mnn_512_quality",
+                userOverrides = ImageGenerationOverrides(useCfg = false)
+            )
+        )
+        assertFalse(noCfg.profile.defaults.useCfg)
+        assertEquals(77, noCfg.layers.resolved.tokenCount)
+
+        val sana = resolve("mnn_sana_edit_v2")
+        assertTrue(sana.profile.defaults.useCfg)
+        assertEquals(256, sana.layers.resolved.tokenCount)
     }
 
     @Test
@@ -1036,7 +1062,7 @@ class ImageExecutionProfileResolverTest {
         assertTrue(communityMnn.hasHostWritableClipTextualInversionTopology())
 
         val officialMnn = resolve("sd15_mnn_512_quality").profile
-        assertEquals(ImageTokenizerBackend.TOKENIZERS_CPP, officialMnn.tokenizer.backend)
+        assertEquals(ImageTokenizerBackend.MNN_MTOK, officialMnn.tokenizer.backend)
         assertFalse(officialMnn.tokenizer.supportsPromptWeighting)
         assertFalse(officialMnn.capabilities.supportsPromptWeighting)
         assertFalse(officialMnn.capabilities.supportsClipSkip)
@@ -1649,6 +1675,47 @@ class ImageExecutionProfileResolverTest {
         assertFalse(resolution.profile.scheduler.skipPrkSteps)
         assertEquals(29, resolution.layers.resolved.timetableCount)
         assertEquals(58, resolution.layers.resolved.unetExecutionCount)
+    }
+
+    @Test
+    fun `qnn sd15 keeps quality floor for ordinary short step requests`() {
+        val failure = expectResolutionFailure {
+            ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = "cyberrealistic_sd15_qnn228",
+                    userOverrides = ImageGenerationOverrides(steps = 4)
+                )
+            )
+        }
+        assertTrue(failure.validation.issues.any { it.code == "SCHEDULER_CONTRACT_INVALID" })
+        assertTrue(failure.validation.issues.any { it.code == "GENERATION_DEFAULTS_INVALID" })
+    }
+
+    @Test
+    fun `qnn sd15 accepts short semantic smoke step counts only with marker`() {
+        val resolution = try {
+            ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = "cyberrealistic_sd15_qnn228",
+                    userOverrides = ImageGenerationOverrides(
+                        scheduler = ImageSchedulerAlgorithm.PNDM_PLMS,
+                        steps = 4,
+                        allowLowStepSmoke = true
+                    )
+                )
+            )
+        } catch (error: ImageProfileResolutionException) {
+            throw AssertionError(
+                error.validation.issues.joinToString(),
+                error
+            )
+        }
+
+        assertEquals(4, resolution.profile.scheduler.defaultSteps)
+        assertEquals(4, resolution.profile.scheduler.minSteps)
+        assertEquals(4, resolution.profile.defaults.steps)
+        assertEquals(13, resolution.layers.resolved.timetableCount)
+        assertEquals(26, resolution.layers.resolved.unetExecutionCount)
     }
 
     @Test

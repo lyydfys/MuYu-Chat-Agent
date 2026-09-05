@@ -12,6 +12,148 @@ import org.junit.Test
 
 class LocalImageExecutionProfileIntegrationTest {
     @Test
+    fun `semantic smoke low-step marker is internal and preserves normal qnn quality floor`() {
+        val root = Files.createTempDirectory("image-profile-semantic-low-step").toFile()
+        try {
+            val primary = root.resolve("unet.bin").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+            val model = LocalImageModelRecord(
+                id = PINNED_RECOMMENDATION,
+                displayName = "Semantic smoke model",
+                path = primary.absolutePath,
+                fileName = primary.name,
+                sizeBytes = primary.length(),
+                sha256 = FINGERPRINT,
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SD15,
+                bundleRoot = root.absolutePath
+            )
+
+            val ordinary = resolveLocalImageExecutionProfile(
+                model = model,
+                options = LocalImageGenerationOptions(steps = 4),
+                bundleRoot = root
+            )
+            assertEquals(4, ordinary.profile.scheduler.minSteps)
+            assertEquals(4, ordinary.profile.defaults.steps)
+
+            val smoke = resolveLocalImageExecutionProfile(
+                model = model,
+                options = LocalImageGenerationOptions(
+                    steps = 4,
+                    allowLowStepSmoke = true
+                ),
+                bundleRoot = root
+            )
+            assertEquals(4, smoke.profile.scheduler.minSteps)
+            assertEquals(4, smoke.profile.defaults.steps)
+            assertFalse(LocalImageGenerationOptions(allowLowStepSmoke = true).toJson().has("allowLowStepSmoke"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `semantic smoke low-step marker preserves normal mnn quality floor`() {
+        val ordinaryFailure = assertThrows(ImageProfileResolutionException::class.java) {
+            ImageExecutionProfileResolver.resolve(
+                ImageExecutionProfileResolverInput(
+                    modelFingerprint = "b".repeat(64),
+                    runtime = LocalImageRuntime.MNN_DIFFUSION,
+                    family = LocalImageModelFamily.SD15,
+                    recommendationId = "sd15_mnn_512_quality",
+                    userOverrides = ImageGenerationOverrides(
+                        scheduler = ImageSchedulerAlgorithm.EULER,
+                        steps = 1
+                    )
+                )
+            )
+        }
+        assertTrue(ordinaryFailure.validation.issues.any {
+            it.code == "SCHEDULER_CONTRACT_INVALID"
+        })
+
+        val smoke = ImageExecutionProfileResolver.resolve(
+            ImageExecutionProfileResolverInput(
+                modelFingerprint = "b".repeat(64),
+                runtime = LocalImageRuntime.MNN_DIFFUSION,
+                family = LocalImageModelFamily.SD15,
+                recommendationId = "sd15_mnn_512_quality",
+                userOverrides = ImageGenerationOverrides(
+                    scheduler = ImageSchedulerAlgorithm.EULER,
+                    steps = 1,
+                    allowLowStepSmoke = true
+                )
+            )
+        )
+
+        assertEquals("mnn.sd15.official.512", smoke.profile.profileId)
+        assertEquals(ImageSchedulerAlgorithm.EULER, smoke.profile.scheduler.algorithm)
+        assertEquals(1, smoke.profile.scheduler.minSteps)
+        assertEquals(1, smoke.profile.scheduler.defaultSteps)
+        assertEquals(1, smoke.profile.scheduler.order)
+        assertTrue(smoke.profile.scheduler.scaleModelInput)
+        assertFalse(smoke.profile.scheduler.lowerOrderFinal)
+        assertEquals(1, smoke.profile.defaults.steps)
+    }
+
+    @Test
+    fun `legacy root graph paths rebind to one unique nested publisher directory`() {
+        val root = Files.createTempDirectory("image-profile-legacy-nested-paths").toFile()
+        try {
+            val nested = root.resolve("stable_diffusion_v2_1").apply { mkdirs() }
+            listOf("text_encoder.bin", "unet.bin", "vae.bin").forEachIndexed { index, name ->
+                nested.resolve(name).writeBytes(byteArrayOf((index + 1).toByte()))
+            }
+            val base = ImageExecutionProfileResolver.resolve(
+                ImageExecutionProfileResolverInput(
+                    modelFingerprint = "a".repeat(64),
+                    runtime = LocalImageRuntime.QNN_HTP,
+                    family = LocalImageModelFamily.SD15
+                )
+            ).profile
+            val legacy = base.copy(
+                graph = base.graph.copy(
+                    textEncoder = ImageGraphArtifactContract("text_encoder.bin"),
+                    unet = ImageGraphArtifactContract("unet.bin"),
+                    vae = ImageGraphArtifactContract("vae.bin")
+                )
+            )
+
+            val rebound = legacy.rebindInstalledArtifactPaths(root)
+
+            assertEquals("stable_diffusion_v2_1/text_encoder.bin", rebound.graph.textEncoder?.relativePath)
+            assertEquals("stable_diffusion_v2_1/unet.bin", rebound.graph.unet?.relativePath)
+            assertEquals("stable_diffusion_v2_1/vae.bin", rebound.graph.vae?.relativePath)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `legacy root graph path stays unresolved when basename is ambiguous`() {
+        val root = Files.createTempDirectory("image-profile-ambiguous-nested-paths").toFile()
+        try {
+            listOf("a", "b").forEach { directory ->
+                root.resolve(directory).apply { mkdirs() }
+                    .resolve("unet.bin")
+                    .writeBytes(byteArrayOf(1))
+            }
+            val base = ImageExecutionProfileResolver.resolve(
+                ImageExecutionProfileResolverInput(
+                    modelFingerprint = "b".repeat(64),
+                    runtime = LocalImageRuntime.QNN_HTP,
+                    family = LocalImageModelFamily.SD15
+                )
+            ).profile
+            val legacy = base.copy(graph = base.graph.copy(unet = ImageGraphArtifactContract("unet.bin")))
+
+            assertEquals("unet.bin", legacy.rebindInstalledArtifactPaths(root).graph.unet?.relativePath)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `legacy model without stored sha reaches generic runtime resolution`() {
         val root = Files.createTempDirectory("image-profile-legacy-fingerprint").toFile()
         try {

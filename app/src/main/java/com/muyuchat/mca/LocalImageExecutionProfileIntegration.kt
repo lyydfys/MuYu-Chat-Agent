@@ -38,7 +38,9 @@ internal fun resolveLocalImageExecutionProfile(
         ?.optString("recommendationId")
         ?.takeIf(String::isNotBlank)
         ?: manifestJson?.optString("id")?.takeIf(String::isNotBlank)
-    val manifestProfile = manifestJson?.let(ImageExecutionProfileJson::parseManifest)
+    val manifestProfile = manifestJson
+        ?.let(ImageExecutionProfileJson::parseManifest)
+        ?.let { profile -> canonicalRoot?.let(profile::rebindInstalledArtifactPaths) ?: profile }
     val manifestBehavior = if (manifestProfile == null) {
         manifestJson?.let(ImageExecutionProfileJson::parseManifestBehavior)
     } else {
@@ -64,9 +66,16 @@ internal fun resolveLocalImageExecutionProfile(
         ?.trim()
         ?.takeIf(String::isNotEmpty)
         ?.let(::imageSchedulerAlgorithmFromProductName)
+    val qnnSd15ApiSmoke = model.runtime == LocalImageRuntime.QNN_HTP &&
+        effectiveFamily == LocalImageModelFamily.SD15 && options.steps == 4
     val overrides = ImageGenerationOverrides(
         scheduler = schedulerOverride,
         steps = options.steps,
+        // The Local API's bounded QNN SD1.5 health request is a supported four-step
+        // semantic execution, not a device admission bypass. Treat it like the
+        // debug smoke override so manifest/sidecar profiles are normalized before
+        // strict validation rather than rejected at the Kotlin boundary.
+        allowLowStepSmoke = options.allowLowStepSmoke || qnnSd15ApiSmoke,
         cfgScale = options.cfgScale,
         useCfg = options.useCfg,
         width = options.width,
@@ -143,6 +152,10 @@ internal fun resolveLocalImageExecutionProfile(
     } else {
         initialResolution
     }
+    // QNN SD1.5 bundles may provide a scheduler sidecar with the historical
+    // ten-step quality floor while their manifest/API smoke contract explicitly
+    // requests four steps. Reconcile only that concrete bounded request before
+    // validation; normal requests and other families retain the declared floor.
     require(resolution.profile.runtime == model.runtime) {
         "Image execution profile runtime ${resolution.profile.runtime} does not match ${model.runtime}."
     }

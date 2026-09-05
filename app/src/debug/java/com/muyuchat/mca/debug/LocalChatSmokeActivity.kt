@@ -4,9 +4,14 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.util.Log
+import android.view.WindowManager
 import com.muyuchat.api.local.LocalApiRuntime
+import com.muyuchat.api.local.LocalApiControlPlane
 import com.muyuchat.api.local.McaLoopbackServer
+import com.muyuchat.mca.IsolatedLocalChatRunners
+import com.muyuchat.mca.LiteRtQualcommRuntimeStager
 import com.muyuchat.core.download.DownloadStatus
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.download.RecommendedChatRuntime
@@ -19,11 +24,13 @@ import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LlamaAdvancedParams
 import com.muyuchat.core.engine.LoadParams
 import com.muyuchat.core.engine.LocalChatRunnerDebug
+import com.muyuchat.core.engine.LocalChatExecutionContext
 import com.muyuchat.core.engine.LocalChatRuntime
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.core.engine.QairtExecutionPurpose
 import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
+import com.muyuchat.core.engine.defaultLocalChatRunner
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.modelstore.ModelStoreRepository
@@ -124,7 +131,10 @@ internal data class LocalChatSmokeGlobalSnapshot(
     private val stageSink: ((String, JSONObject) -> Unit)?,
     private val engine: McaInferenceService?,
     private val streamChatProvider: ((ChatRequest) -> Flow<GenerateEvent>)?,
+    private val streamChatWithContextProvider: ((ChatRequest, LocalChatExecutionContext) -> Flow<GenerateEvent>)?,
     private val stopGenerationProvider: (suspend () -> Unit)?,
+    private val stopGenerationIfRequestActiveProvider: (suspend (String) -> Boolean)?,
+    private val controlPlane: LocalApiControlPlane?,
     private val loadedModelJsonProvider: () -> String,
     private val paramsJsonProvider: () -> String,
     private val generationParamsProvider: () -> GenerationParams,
@@ -135,7 +145,10 @@ internal data class LocalChatSmokeGlobalSnapshot(
 ) {
     fun restore() {
         LocalApiRuntime.streamChatProvider = streamChatProvider
+        LocalApiRuntime.streamChatWithContextProvider = streamChatWithContextProvider
         LocalApiRuntime.stopGenerationProvider = stopGenerationProvider
+        LocalApiRuntime.stopGenerationIfRequestActiveProvider = stopGenerationIfRequestActiveProvider
+        LocalApiRuntime.controlPlane = controlPlane
         LocalApiRuntime.loadedModelJsonProvider = loadedModelJsonProvider
         LocalApiRuntime.paramsJsonProvider = paramsJsonProvider
         LocalApiRuntime.generationParamsProvider = generationParamsProvider
@@ -156,7 +169,10 @@ internal data class LocalChatSmokeGlobalSnapshot(
             stageSink = LocalChatRunnerDebug.stageSink,
             engine = LocalApiRuntime.engine,
             streamChatProvider = LocalApiRuntime.streamChatProvider,
+            streamChatWithContextProvider = LocalApiRuntime.streamChatWithContextProvider,
             stopGenerationProvider = LocalApiRuntime.stopGenerationProvider,
+            stopGenerationIfRequestActiveProvider = LocalApiRuntime.stopGenerationIfRequestActiveProvider,
+            controlPlane = LocalApiRuntime.controlPlane,
             loadedModelJsonProvider = LocalApiRuntime.loadedModelJsonProvider,
             paramsJsonProvider = LocalApiRuntime.paramsJsonProvider,
             generationParamsProvider = LocalApiRuntime.generationParamsProvider,
@@ -206,6 +222,33 @@ internal fun resolveLocalChatSmokeAdvancedJson(input: String?): String {
     )
     require(merged.issues.isEmpty()) {
         "Invalid advancedJson: ${merged.errorMessages.joinToString("; ")}"
+    }
+    return merged.json
+}
+
+/**
+ * Debug-only escape hatch for load-bound MNN options. Passing a JSON object
+ * containing booleans through `adb shell am` is fragile on Android: the shell
+ * can reinterpret a colon as an intent URI separator. These dedicated extras
+ * keep the benchmark protocol unambiguous while still flowing through the
+ * normal advanced-parameter validation/merge path.
+ */
+internal fun resolveLocalChatSmokeMnnOverrides(input: String?, intent: Intent): String {
+    val patch = JSONObject()
+    intent.getStringExtra("mnnBackendType")
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?.let { patch.put("backend_type", it) }
+    if (intent.hasExtra("mnnMmap")) {
+        patch.put("mmap", intent.getBooleanExtra("mnnMmap", true))
+    }
+    if (intent.hasExtra("mnnKvcacheMmap")) {
+        patch.put("kvcache_mmap", intent.getBooleanExtra("mnnKvcacheMmap", true))
+    }
+    if (patch.length() == 0) return input ?: "{}"
+    val merged = LlamaAdvancedParams.merge(input ?: "{}", patch.toString())
+    require(merged.issues.isEmpty()) {
+        "Invalid MNN override parameters: ${merged.errorMessages.joinToString("; ")}"
     }
     return merged.json
 }
@@ -283,6 +326,7 @@ internal fun requiresLocalChatSmokeVisionReady(
     runtime == LocalChatRuntime.MNN_CPU ||
         runtime == LocalChatRuntime.GENIEX_QAIRT ||
         runtime == LocalChatRuntime.GENIEX_LLAMA_CPP ||
+        runtime == LocalChatRuntime.LITERT_LM ||
         !visionProjectorPath.isNullOrBlank()
     )
 
@@ -652,6 +696,67 @@ internal object LocalChatSmokeProcessGate {
 
 open class LocalChatSmokeActivity : Activity() {
     private val tag = "MCA-CHAT-SMOKE"
+    private var smokeWakeLock: PowerManager.WakeLock? = null
+
+    @Synchronized
+    private fun acquireSmokePowerGuard() {
+        // Long OpenCL/MNN runs are commonly frozen by vendor background policy
+        // when the display sleeps. Keep this protection debug-only: production
+        // chat lifecycle and battery policy remain unchanged.
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setTurnScreenOn(true)
+        }
+        val powerManager = getSystemService(POWER_SERVICE) as? PowerManager ?: return
+        val wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "$packageName:LocalChatSmoke"
+        )
+        smokeWakeLock = runCatching {
+            wakeLock.apply {
+                setReferenceCounted(false)
+                // A bounded fallback prevents a leaked debug activity from holding
+                // the CPU forever if the process is terminated before finally runs.
+                acquire(4L * 60L * 60L * 1000L)
+            }
+        }.onFailure { error ->
+            runCatching {
+                if (wakeLock.isHeld) wakeLock.release()
+            }
+            // WAKE_LOCK is a normal permission, but a vendor may still reject
+            // acquisition. Keep the screen-on flag and let the smoke proceed.
+            Log.w(tag, "debug smoke partial wake lock unavailable", error)
+        }.getOrNull()
+        Log.i(tag, "debug smoke power guard acquired=${smokeWakeLock != null}")
+    }
+
+    @Synchronized
+    private fun releaseSmokePowerGuard() {
+        smokeWakeLock?.let { wakeLock ->
+            runCatching {
+                if (wakeLock.isHeld) wakeLock.release()
+            }
+        }
+        smokeWakeLock = null
+        val clearScreenFlag: () -> Unit = {
+            runCatching {
+                window.clearFlags(
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                )
+            }
+            Unit
+        }
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            clearScreenFlag()
+        } else {
+            runCatching { runOnUiThread { clearScreenFlag() } }
+        }
+        Log.i(tag, "debug smoke power guard released")
+    }
 
     open override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -659,16 +764,26 @@ open class LocalChatSmokeActivity : Activity() {
             finish()
             return
         }
+        runCatching { acquireSmokePowerGuard() }
+            .onFailure { error -> Log.w(tag, "debug smoke power guard setup failed", error) }
         Thread {
             try {
                 runSmoke()
             } finally {
+                releaseSmokePowerGuard()
                 LocalChatSmokeProcessGate.release()
                 runOnUiThread {
                     if (!isFinishing) finish()
                 }
             }
         }.start()
+    }
+
+    override fun onDestroy() {
+        // The worker normally releases the guard in its finally block. Keep an
+        // idempotent fallback for an externally destroyed debug activity.
+        releaseSmokePowerGuard()
+        super.onDestroy()
     }
 
     private fun runSmoke() {
@@ -705,14 +820,20 @@ open class LocalChatSmokeActivity : Activity() {
         }
 
         var engine: McaInferenceService? = null
+        var isolatedRunners: IsolatedLocalChatRunners? = null
         var terminalEvent: JSONObject? = null
         var qairtDryRunBundleSha256: String? = null
         var qairtDryRunReadyToRecord = false
         val advancedJsonInput = intent.getStringExtra("advancedJson") ?: "{}"
         var advancedJsonMerged: String? = null
         var cancelThenSecondResult: JSONObject? = null
+        var mnnCacheAbResult: JSONObject? = null
         try {
-            val resolvedAdvancedJson = resolveLocalChatSmokeAdvancedJson(advancedJsonInput)
+            val advancedJsonWithMnnOverrides = resolveLocalChatSmokeMnnOverrides(
+                advancedJsonInput,
+                intent
+            )
+            val resolvedAdvancedJson = resolveLocalChatSmokeAdvancedJson(advancedJsonWithMnnOverrides)
             advancedJsonMerged = resolvedAdvancedJson
             val target = runBlocking { resolveTarget(::write) }
             val nCtx = intent.getIntExtra("nCtx", 32768)
@@ -724,7 +845,7 @@ open class LocalChatSmokeActivity : Activity() {
             val continuousTurns = intent.getIntExtra("continuousTurns", 1).coerceIn(1, 64)
             val sampling = LocalChatSmokeSampling(
                 temperature = intent.getFloatExtra("temperature", 0.0f).coerceIn(0.0f, 2.0f),
-                topK = intent.getIntExtra("topK", 1).coerceIn(1, 256),
+                topK = intent.getIntExtra("topK", 1).coerceIn(0, 256),
                 topP = intent.getFloatExtra("topP", 1.0f).coerceIn(0.0f, 1.0f),
                 minP = intent.getFloatExtra("minP", 0.0f),
                 repeatPenalty = intent.getFloatExtra("repeatPenalty", 1.08f),
@@ -764,15 +885,60 @@ open class LocalChatSmokeActivity : Activity() {
                 qairtDryRunBundleSha256 = target.qairtBundleSha256?.takeIf { it.isNotBlank() }
                     ?: error("qairt_dry_run requires a registered QAIRT bundle SHA-256.")
             }
-            val activeEngine = McaInferenceService(applicationContext)
+            val liteRtQualcommStage = if (
+                target.runtime == LocalChatRuntime.LITERT_LM &&
+                    runCatching {
+                        JSONObject(resolvedAdvancedJson).optString("backend")
+                            .trim()
+                            .equals("npu", ignoreCase = true)
+                    }.getOrDefault(false)
+            ) {
+                LiteRtQualcommRuntimeStager.stage(applicationContext).also { stage ->
+                    write(
+                        JSONObject()
+                            .put("status", "litert_lm_runtime_stage")
+                            .put("ok", stage != null)
+                            .put("variant", stage?.variant ?: JSONObject.NULL)
+                            .put("fingerprint", stage?.fingerprint ?: JSONObject.NULL)
+                            .put("reused", stage?.reused ?: JSONObject.NULL)
+                            .put("directory", stage?.directory?.absolutePath ?: JSONObject.NULL)
+                    )
+                }
+            } else {
+                null
+            }
+            val productionBoundaryRunners = when (target.runtime) {
+                LocalChatRuntime.MNN_CPU,
+                LocalChatRuntime.LITERT_LM,
+                LocalChatRuntime.GENIEX_LLAMA_CPP,
+                LocalChatRuntime.GENIEX_QAIRT -> IsolatedLocalChatRunners(applicationContext)
+                else -> null
+            }
+            isolatedRunners = productionBoundaryRunners
+            val activeEngine = McaInferenceService(
+                context = applicationContext,
+                // MNN, LiteRT-LM, and both GenieX transports use the same
+                // isolated worker as the product path. GenieX SDK plugin
+                // registration is process-global and must never happen in the
+                // debug/UI process before the selected runtime is loaded.
+                runners = productionBoundaryRunners?.runners ?: mapOf(
+                    target.runtime to defaultLocalChatRunner(target.runtime)
+                ),
+                nativeLibraryDirOverride = liteRtQualcommStage?.directory?.absolutePath
+            )
             engine = activeEngine
             // The app process can retain a MainViewModel provider from a prior UI
             // session. Bind both loopback callbacks to this smoke's engine so the
             // direct and API legs exercise the same loaded native model. The
             // captured global values are restored in finally below.
             LocalApiRuntime.engine = activeEngine
+            LocalApiRuntime.streamChatWithContextProvider = { request, context -> activeEngine.streamChat(request, context) }
             LocalApiRuntime.streamChatProvider = { request -> activeEngine.streamChat(request) }
             LocalApiRuntime.stopGenerationProvider = { activeEngine.stopGeneration() }
+            LocalApiRuntime.stopGenerationIfRequestActiveProvider = null
+            // This debug listener owns a separate engine from MainViewModel.
+            // Production coordinator callbacks are restored with the snapshot.
+            LocalApiRuntime.controlPlane = null
             LocalApiRuntime.loadedModelJsonProvider = {
                 val nativeStats = runCatching { JSONObject(activeEngine.nativeStatsJson()) }
                     .getOrElse { JSONObject() }
@@ -917,6 +1083,130 @@ open class LocalChatSmokeActivity : Activity() {
                             JSONObject()
                                 .put("status", "api_engine_stream_ok")
                                 .put("apiEngine", realApi)
+                        )
+                    }
+                    "litertlm_cache_ab" -> {
+                        require(target.runtime == LocalChatRuntime.LITERT_LM) {
+                            "litertlm_cache_ab requires a LiteRT-LM target."
+                        }
+                        require(imagePath.isNullOrBlank()) {
+                            "litertlm_cache_ab is text-only; omit imagePath."
+                        }
+                        writeLoad("first_load_ok", timedLoad(activeEngine, target, loadParams), activeEngine)
+
+                        // Keep the same LiteRT Conversation across two requests.
+                        // The second request includes the first turn transcript,
+                        // so the runtime can reuse its KV cache instead of
+                        // creating a fresh conversation for the same prefix.
+                        val firstMessages = listOf(
+                            ChatMessage(Role.SYSTEM, systemPrompt),
+                            ChatMessage(Role.USER, prompt)
+                        )
+                        val first = generationSmoke(
+                            engine = activeEngine,
+                            nCtx = nCtx,
+                            nThreads = nThreads,
+                            maxTokens = maxTokens,
+                            imagePath = null,
+                            prompt = prompt,
+                            systemPrompt = systemPrompt,
+                            sampling = sampling,
+                            advancedJson = resolvedAdvancedJson,
+                            requestMessages = firstMessages
+                        )
+                        val firstText = first.optString("text")
+                        require(firstText.isNotBlank()) {
+                            "litertlm_cache_ab first turn produced no assistant text."
+                        }
+                        write(
+                            JSONObject()
+                                .put("status", "litertlm_cache_first_ok")
+                                .put("round", 1)
+                                .put("generation", first)
+                        )
+
+                        val followUpPrompt = intent.getStringExtra("followUpPrompt")
+                            .orEmpty()
+                            .ifBlank { "Reply with only the word cached." }
+                        val secondMessages = firstMessages +
+                            ChatMessage(Role.ASSISTANT, firstText) +
+                            ChatMessage(Role.USER, followUpPrompt)
+                        val second = generationSmoke(
+                            engine = activeEngine,
+                            nCtx = nCtx,
+                            nThreads = nThreads,
+                            maxTokens = maxTokens,
+                            imagePath = null,
+                            prompt = followUpPrompt,
+                            systemPrompt = systemPrompt,
+                            sampling = sampling,
+                            advancedJson = resolvedAdvancedJson,
+                            requestMessages = secondMessages,
+                            allowGenerationFailure = true
+                        )
+                        require(second.optBoolean("doneSeen", false) &&
+                            second.optString("text").isNotBlank() &&
+                            (second.isNull("error") || second.optString("error").isBlank())) {
+                            "litertlm_cache_ab second turn failed: ${second.optString("error")}"
+                        }
+                        val firstStats = first.optJSONObject("nativeStats") ?: JSONObject()
+                        val secondStats = second.optJSONObject("nativeStats") ?: JSONObject()
+                        val firstKv = firstStats.optInt("kvCacheTokens", 0)
+                        val secondKv = secondStats.optInt("kvCacheTokens", 0)
+                        require(firstKv > 0 && secondKv > firstKv) {
+                            "litertlm_cache_ab did not observe a growing Conversation KV cache: first=$firstKv second=$secondKv"
+                        }
+                        val cacheResult = JSONObject()
+                            .put("sameConversation", true)
+                            .put("cacheHit", true)
+                            .put("firstPromptChars", prompt.length)
+                            .put("firstPromptSha256", localChatSmokeTextSha256(prompt))
+                            .put("followUpPrompt", followUpPrompt.take(4096))
+                            .put("followUpPromptSha256", localChatSmokeTextSha256(followUpPrompt))
+                            .put("firstStats", firstStats)
+                            .put("secondStats", secondStats)
+                            .put("firstKvCacheTokens", firstKv)
+                            .put("secondKvCacheTokens", secondKv)
+                        write(
+                            JSONObject(cacheResult.toString())
+                                .put("status", "litertlm_cache_ab_ok")
+                        )
+
+                        val guard = apiHiddenReasoningGuardSmoke()
+                        write(JSONObject().put("status", "api_guard_ok").put("apiGuard", guard))
+                        write(JSONObject().put("status", "api_engine_stream_start"))
+                        val realApi = apiEngineStreamSmoke(
+                            nCtx = nCtx,
+                            maxTokens = maxTokens,
+                            imagePath = null,
+                            prompt = followUpPrompt,
+                            systemPrompt = systemPrompt,
+                            sampling = sampling,
+                            advancedJson = resolvedAdvancedJson
+                        )
+                        write(
+                            JSONObject()
+                                .put("status", "api_engine_stream_ok")
+                                .put("apiEngine", realApi)
+                        )
+                    }
+                    "direct_once" -> {
+                        writeLoad("first_load_ok", timedLoad(activeEngine, target, loadParams), activeEngine)
+                        val generation = generationSmoke(
+                            activeEngine,
+                            nCtx,
+                            nThreads,
+                            maxTokens,
+                            imagePath,
+                            prompt,
+                            systemPrompt,
+                            sampling,
+                            resolvedAdvancedJson
+                        )
+                        write(
+                            JSONObject()
+                                .put("status", "generation_ok")
+                                .put("generation", generation)
                         )
                     }
                     "direct_twice" -> {
@@ -1127,6 +1417,152 @@ open class LocalChatSmokeActivity : Activity() {
                                 .put("recoverySuccess", true)
                         )
                     }
+                    "mnn_cache_ab" -> {
+                        require(target.runtime == LocalChatRuntime.MNN_CPU) {
+                            "mnn_cache_ab requires an MNN target (runtime=mnn_cpu)."
+                        }
+                        require(imagePath.isNullOrBlank()) {
+                            "mnn_cache_ab is text-only; omit imagePath so MNN prompt/KV reuse remains enabled."
+                        }
+                        writeLoad("first_load_ok", timedLoad(activeEngine, target, loadParams), activeEngine)
+
+                        // Keep the first request's rendered prefix stable. The native MNN
+                        // bridge commits this transcript plus the generated assistant turn;
+                        // the second request must include that assistant content before the
+                        // follow-up user turn for an exact prefix candidate.
+                        val firstMessages = listOf(
+                            ChatMessage(Role.SYSTEM, systemPrompt),
+                            ChatMessage(Role.USER, prompt)
+                        )
+                        val first = generationSmoke(
+                            engine = activeEngine,
+                            nCtx = nCtx,
+                            nThreads = nThreads,
+                            maxTokens = maxTokens,
+                            imagePath = null,
+                            prompt = prompt,
+                            systemPrompt = systemPrompt,
+                            sampling = sampling,
+                            advancedJson = resolvedAdvancedJson,
+                            requestMessages = firstMessages
+                        )
+                        // Preserve the visible assistant text exactly as emitted; the native
+                        // prefix comparator already ignores presentation-only trailing spaces.
+                        val firstText = first.optString("text")
+                        require(firstText.isNotBlank()) {
+                            "mnn_cache_ab first turn produced no assistant text."
+                        }
+                        val firstRound = mnnCacheRoundEvidence(first)
+                        write(
+                            JSONObject()
+                                .put("status", "mnn_cache_ab_first_ok")
+                                .put("round", 1)
+                                .put("generation", first)
+                                .put("stats", firstRound)
+                                .put("promptCacheHit", firstRound.optBoolean("promptCacheHit", false))
+                                .put("reusedTokens", firstRound.optInt("reusedTokens", 0))
+                                .put("prefillMs", firstRound.optLong("prefillMs", 0L))
+                                .put("decodeTps", firstRound.optDouble("decodeTps", 0.0))
+                                .put("ttftMs", firstRound.optLong("ttftMs", 0L))
+                        )
+
+                        val followUpPrompt = intent.getStringExtra("followUpPrompt")
+                            .orEmpty()
+                            .ifBlank { "Reply with one short word confirming the cached context." }
+                        val secondMessages = firstMessages +
+                            ChatMessage(Role.ASSISTANT, firstText) +
+                            ChatMessage(Role.USER, followUpPrompt)
+                        val javaPrefixStable = mnnCacheMessageTranscriptSha256(firstMessages) ==
+                            mnnCacheMessageTranscriptSha256(secondMessages.dropLast(2))
+                        val second = generationSmoke(
+                            engine = activeEngine,
+                            nCtx = nCtx,
+                            nThreads = nThreads,
+                            maxTokens = maxTokens,
+                            imagePath = null,
+                            prompt = followUpPrompt,
+                            systemPrompt = systemPrompt,
+                            sampling = sampling,
+                            advancedJson = resolvedAdvancedJson,
+                            requestMessages = secondMessages,
+                            allowGenerationFailure = true
+                        )
+                        val secondRound = mnnCacheRoundEvidence(second)
+                        val secondSucceeded = mnnCacheGenerationSucceeded(second)
+                        write(
+                            JSONObject()
+                                .put("status", if (secondSucceeded) "mnn_cache_ab_second_ok" else "mnn_cache_ab_second_failed")
+                                .put("round", 2)
+                                .put("generation", second)
+                                .put("stats", secondRound)
+                                .put("promptCacheHit", secondRound.optBoolean("promptCacheHit", false))
+                                .put("reusedTokens", secondRound.optInt("reusedTokens", 0))
+                                .put("prefillMs", secondRound.optLong("prefillMs", 0L))
+                                .put("decodeTps", secondRound.optDouble("decodeTps", 0.0))
+                                .put("ttftMs", secondRound.optLong("ttftMs", 0L))
+                                .put("generationSucceeded", mnnCacheGenerationSucceeded(second))
+                                .put("generationError", second.opt("error") ?: JSONObject.NULL)
+                        )
+                        val cacheAbResult = JSONObject()
+                            .put("roundCount", 2)
+                            .put("firstPrompt", prompt.take(4_096))
+                            .put("firstPromptChars", prompt.length)
+                            .put("firstPromptSha256", localChatSmokeTextSha256(prompt))
+                            .put("followUpPrompt", followUpPrompt.take(4_096))
+                            .put("followUpPromptChars", followUpPrompt.length)
+                            .put("followUpPromptSha256", localChatSmokeTextSha256(followUpPrompt))
+                            .put("firstAssistantTextSha256", localChatSmokeTextSha256(firstText))
+                            .put("javaPrefixStable", javaPrefixStable)
+                            .put("firstTranscriptSha256", mnnCacheMessageTranscriptSha256(firstMessages))
+                            .put(
+                                "secondPrefixTranscriptSha256",
+                                mnnCacheMessageTranscriptSha256(secondMessages.dropLast(2))
+                            )
+                            .put("firstStats", firstRound)
+                            .put("secondStats", secondRound)
+                            .put("secondGenerationSucceeded", mnnCacheGenerationSucceeded(second))
+                            .put("secondGenerationError", second.opt("error") ?: JSONObject.NULL)
+                            .put("cacheHit", secondRound.optBoolean("promptCacheHit", false))
+                            .put("reusedTokens", secondRound.optInt("reusedTokens", 0))
+                        mnnCacheAbResult = cacheAbResult
+                        // Execute the exact second transcript with a fresh native model,
+                        // even when the cached leg failed. This is a control, not a retry.
+                        write(JSONObject().put("status", "mnn_cache_cold_unload_ok")
+                            .put("unloadMs", timedUnload(activeEngine)))
+                        writeLoad("mnn_cache_cold_load_ok", timedLoad(activeEngine, target, loadParams), activeEngine)
+                        val cold = generationSmoke(
+                            engine = activeEngine, nCtx = nCtx, nThreads = nThreads, maxTokens = maxTokens,
+                            imagePath = null, prompt = followUpPrompt, systemPrompt = systemPrompt,
+                            sampling = sampling, advancedJson = resolvedAdvancedJson,
+                            requestMessages = secondMessages, allowGenerationFailure = true
+                        )
+                        val coldStats = mnnCacheRoundEvidence(cold)
+                        val coldSucceeded = mnnCacheGenerationSucceeded(cold)
+                        val coldNoReuse = !coldStats.optBoolean("promptCacheHit", false) &&
+                            coldStats.optInt("reusedTokens", 0) == 0
+                        val coldControl = JSONObject()
+                            .put("generation", cold).put("stats", coldStats)
+                            .put("generationSucceeded", coldSucceeded).put("noReuse", coldNoReuse)
+                            .put("sameRequestTranscript", true)
+                            .put("requestTranscriptSha256", mnnCacheMessageTranscriptSha256(secondMessages))
+                            .put("cachedText", second.optString("text"))
+                            .put("coldText", cold.optString("text"))
+                        cacheAbResult.put("coldControl", coldControl)
+                        write(JSONObject().put("status", if (coldSucceeded && coldNoReuse)
+                            "mnn_cache_cold_ok" else "mnn_cache_cold_failed").put("coldControl", coldControl))
+                        val cacheAbSucceeded = secondSucceeded && javaPrefixStable &&
+                            cacheAbResult.optBoolean("cacheHit", false) &&
+                            cacheAbResult.optInt("reusedTokens", 0) > 0 && coldSucceeded && coldNoReuse
+                        write(
+                            JSONObject(cacheAbResult.toString())
+                                .put("status", if (cacheAbSucceeded) "mnn_cache_ab_ok" else "mnn_cache_ab_failed")
+                        )
+                        require(cacheAbSucceeded) {
+                            "mnn_cache_ab failed: secondSucceeded=$secondSucceeded, " +
+                                "cacheHit=${cacheAbResult.optBoolean("cacheHit", false)}, " +
+                                "error=${second.optString("error")}."
+                        }
+                    }
                     else -> {
                         writeLoad("first_load_ok", timedLoad(activeEngine, target, loadParams), activeEngine)
                         write(
@@ -1152,6 +1588,14 @@ open class LocalChatSmokeActivity : Activity() {
                             write(JSONObject().put("status", "generation_ok").put("generation", generation))
                         } else {
                             val turns = JSONArray()
+                            // Keep a real conversation transcript between turns.  Reissuing
+                            // the same one-message request exercises repeated generation, but
+                            // it cannot prove that a runtime's role formatting or KV cache can
+                            // consume the previous assistant answer.
+                            val conversationMessages = mutableListOf<ChatMessage>(
+                                ChatMessage(Role.SYSTEM, systemPrompt),
+                                smokeUserMessage(imagePath, prompt)
+                            )
                             repeat(continuousTurns) { index ->
                                 val generation = generationSmoke(
                                     activeEngine,
@@ -1162,15 +1606,33 @@ open class LocalChatSmokeActivity : Activity() {
                                     prompt,
                                     systemPrompt,
                                     sampling,
-                                    resolvedAdvancedJson
+                                    resolvedAdvancedJson,
+                                    requestMessages = conversationMessages.toList()
                                 )
                                 turns.put(generation)
                                 write(
                                     JSONObject()
                                         .put("status", "generation_turn_ok")
                                         .put("turn", index + 1)
+                                        .put("requestMessageCount", conversationMessages.size)
+                                        .put(
+                                            "requestTranscriptSha256",
+                                            mnnCacheMessageTranscriptSha256(conversationMessages)
+                                        )
                                         .put("generation", generation)
                                 )
+                                // Preserve the exact stream text in the transcript. The native
+                                // MNN cache applies the same protocol filter before committing
+                                // its assistant payload, so this remains the canonical follow-up
+                                // text used by the next request.
+                                val assistantText = generation.optString("text")
+                                require(assistantText.isNotBlank()) {
+                                    "continuous turn ${index + 1} produced no assistant text."
+                                }
+                                if (index + 1 < continuousTurns) {
+                                    conversationMessages += ChatMessage(Role.ASSISTANT, assistantText)
+                                    conversationMessages += smokeUserMessage(imagePath, prompt)
+                                }
                             }
                             val finalGeneration = JSONObject(turns.getJSONObject(turns.length() - 1).toString())
                                 .put("turnCount", continuousTurns)
@@ -1215,6 +1677,9 @@ open class LocalChatSmokeActivity : Activity() {
                 .put("advancedJsonInput", advancedJsonInput)
                 .put("advancedJsonMerged", resolvedAdvancedJson)
                 .apply {
+                    mnnCacheAbResult?.let { result ->
+                        put("mnnCacheAb", JSONObject(result.toString()))
+                    }
                     cancelThenSecondResult?.let { result ->
                         put("cancelThenSecond", result)
                         put("cancellationSuccess", result.optBoolean("cancellationSuccess", false))
@@ -1234,6 +1699,9 @@ open class LocalChatSmokeActivity : Activity() {
                     }
                 )
                 .apply {
+                    mnnCacheAbResult?.let { result ->
+                        put("mnnCacheAb", JSONObject(result.toString()))
+                    }
                     cancelThenSecondResult?.let { result ->
                         put("cancelThenSecond", result)
                         put("cancellationSuccess", result.optBoolean("cancellationSuccess", false))
@@ -1249,6 +1717,7 @@ open class LocalChatSmokeActivity : Activity() {
                     smokeEngine?.shutdown()
                 }
             }.exceptionOrNull()?.stackTraceToString()
+            runCatching { isolatedRunners?.close() }
             val destroyFailureStages = eventLog.destroyFailureStages()
             if (!qairtDryRunBundleSha256.isNullOrBlank()) {
                 if (shutdownError.isNullOrBlank()) {
@@ -1627,7 +2096,9 @@ open class LocalChatSmokeActivity : Activity() {
         prompt: String,
         systemPrompt: String,
         sampling: LocalChatSmokeSampling,
-        advancedJson: String
+        advancedJson: String,
+        requestMessages: List<ChatMessage>? = null,
+        allowGenerationFailure: Boolean = false
     ): JSONObject {
         val text = StringBuilder()
         var doneSeen = false
@@ -1639,10 +2110,15 @@ open class LocalChatSmokeActivity : Activity() {
             sampling = sampling,
             advancedJson = advancedJson
         )
-        withTimeout(localChatSmokeGenerationTimeoutMs(prompt.length, nCtx, maxTokens)) {
+        val timeoutPromptChars = requestMessages
+            ?.sumOf { message -> message.content.length }
+            ?.coerceAtMost(256 * 1024)
+            ?: prompt.length
+        var generationError: String? = null
+        withTimeout(localChatSmokeGenerationTimeoutMs(timeoutPromptChars, nCtx, maxTokens)) {
             engine.streamChat(
                 ChatRequest(
-                    messages = listOf(smokeUserMessage(imagePath, prompt)),
+                    messages = requestMessages ?: listOf(smokeUserMessage(imagePath, prompt)),
                     params = params
                 )
             ).collect { event ->
@@ -1651,22 +2127,112 @@ open class LocalChatSmokeActivity : Activity() {
                     is GenerateEvent.Persist -> Unit
                     is GenerateEvent.Chunk -> text.append(event.text)
                     is GenerateEvent.Done -> doneSeen = true
-                    is GenerateEvent.Error -> error(event.message)
+                    is GenerateEvent.Error -> {
+                        if (allowGenerationFailure) {
+                            generationError = event.message
+                        } else {
+                            error(event.message)
+                        }
+                    }
                 }
             }
         }
-        require(text.isNotBlank()) { "generation smoke produced no visible text" }
-        require(doneSeen) { "generation smoke did not receive Done" }
+        if (!allowGenerationFailure) {
+            require(text.isNotBlank()) { "generation smoke produced no visible text" }
+            require(doneSeen) { "generation smoke did not receive Done" }
+        }
         val visibleText = text.toString()
         return localChatSmokeGenerationResult(
             visibleText = visibleText,
             imagePath = imagePath,
             doneSeen = doneSeen,
             flowCompleted = true,
-            error = null,
+            error = generationError,
             nativeStats = JSONObject(engine.nativeStatsJson())
         )
     }
+
+    /**
+     * Extract the stable, round-level evidence used by the MNN cache A/B smoke.
+     * Keep the complete nativeStats on the generation object as well; this
+     * compact projection makes CPU/OpenCL comparisons easy to parse from the
+     * event log without depending on a particular native stats alias.
+     */
+    private fun mnnCacheRoundEvidence(generation: JSONObject): JSONObject {
+        val nativeStats = generation.optJSONObject("nativeStats") ?: JSONObject()
+        val promptCache = nativeStats.optJSONObject("promptCache") ?: JSONObject()
+        val cacheReuse = nativeStats.optJSONObject("cacheReuse") ?: JSONObject()
+        fun cacheValue(name: String, alias: String): Any = when {
+            promptCache.has(name) -> promptCache.opt(name) ?: JSONObject.NULL
+            nativeStats.has(alias) -> nativeStats.opt(alias) ?: JSONObject.NULL
+            else -> JSONObject.NULL
+        }
+        val promptCacheHit = when {
+            promptCache.has("hit") -> promptCache.optBoolean("hit", false)
+            nativeStats.has("promptCacheHit") -> nativeStats.optBoolean("promptCacheHit", false)
+            else -> cacheReuse.optBoolean("hit", false)
+        }
+        val reusedTokens = when {
+            promptCache.has("reusedTokens") -> promptCache.optInt("reusedTokens", 0)
+            nativeStats.has("promptCacheReusedTokens") ->
+                nativeStats.optInt("promptCacheReusedTokens", 0)
+            else -> cacheReuse.optInt("reusedTokens", 0)
+        }
+        return JSONObject()
+            .put("backend", nativeStats.optString("backend"))
+            .put("backendType", nativeStats.optString("backendType"))
+            .put("backendDevices", nativeStats.opt("backendDevices") ?: JSONArray())
+            .put("promptCacheHit", promptCacheHit)
+            .put("reusedTokens", reusedTokens)
+            .put("promptCache", JSONObject(promptCache.toString()))
+            .put("cacheReuse", JSONObject(cacheReuse.toString()))
+            .put("kvHistoryBefore", cacheValue("kvHistoryBefore", "promptCacheKvHistoryBefore"))
+            .put("tokenHistoryBefore", cacheValue("tokenHistoryBefore", "promptCacheTokenHistoryBefore"))
+            .put(
+                "tokenHistoryAfterPrefill",
+                cacheValue("tokenHistoryAfterPrefill", "promptCacheTokenHistoryAfterPrefill")
+            )
+            .put("prefixExtended", cacheValue("prefixExtended", "promptCachePrefixExtended"))
+            .put("committed", cacheValue("committed", "promptCacheCommitted"))
+            .put("promptCacheState", cacheValue("state", "promptCacheState"))
+            .put("promptCacheReason", cacheValue("reason", "promptCacheReason"))
+            .put("promptTokens", nativeStats.optInt("promptTokens", 0))
+            .put("prefillTokens", nativeStats.optInt("prefillTokens", 0))
+            .put("prefillMs", nativeStats.optLong("prefillMs", 0L))
+            .put("decodeTps", nativeStats.optDouble("decodeTps", 0.0))
+            .put("ttftMs", nativeStats.optLong("ttftMs", 0L))
+            .put("decodeMs", nativeStats.optLong("decodeMs", 0L))
+            .put("completionTokens", nativeStats.optInt("completionTokens", 0))
+            .put("generationStopReason", nativeStats.optString("generationStopReason"))
+            .put("textSha256", generation.optString("textSha256"))
+            .apply {
+                // Preserve JSON null for unavailable diagnostics; measured zero is valid evidence.
+                listOf(
+                    "logitsCount", "logitsFiniteCount", "logitsNonFiniteCount", "logitsAllFinite",
+                    "logitsMin", "logitsMax", "logitsDiagnostics", "firstLogits", "samplerConfig", "promptCacheReuse",
+                    "effectiveConfigJson", "loadedConfigJson", "lastConfigJson",
+                    "mnnDebugGeneratedTokenIds"
+                ).forEach { key -> put(key, nativeStats.opt(key) ?: JSONObject.NULL) }
+            }
+    }
+
+    private fun mnnCacheMessageTranscriptSha256(messages: List<ChatMessage>): String =
+        localChatSmokeTextSha256(
+            buildString {
+                messages.forEach { message ->
+                    append(message.role.name.lowercase())
+                        .append('\u0000')
+                        .append(message.content)
+                        .append('\u0001')
+                }
+            }
+        )
+
+    private fun mnnCacheGenerationSucceeded(generation: JSONObject): Boolean =
+        generation.optBoolean("doneSeen", false) &&
+            generation.optString("text").isNotBlank() &&
+            (!generation.has("error") || generation.isNull("error") ||
+                generation.optString("error").isBlank())
 
     private suspend fun cancellationSmoke(
         engine: McaInferenceService,
@@ -1911,11 +2477,13 @@ open class LocalChatSmokeActivity : Activity() {
 
     private suspend fun apiHiddenReasoningGuardSmoke(): JSONObject {
         val previousStreamProvider = LocalApiRuntime.streamChatProvider
+        val previousContextProvider = LocalApiRuntime.streamChatWithContextProvider
         val previousStopProvider = LocalApiRuntime.stopGenerationProvider
         val stopCalls = AtomicInteger(0)
         val port = freePort()
         val server = McaLoopbackServer(port = port, bindHost = "127.0.0.1", apiKey = "")
         return try {
+            LocalApiRuntime.streamChatWithContextProvider = null
             LocalApiRuntime.streamChatProvider = {
                 flowOf(
                     GenerateEvent.Chunk(
@@ -1933,7 +2501,9 @@ open class LocalChatSmokeActivity : Activity() {
             server.start()
             val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true,"hide_reasoning":true}"""
             val response = rawHttp(port, chatRequest(body))
-            require(response.startsWith("HTTP/1.1 200 OK")) { "guard API status failed" }
+            require(response.httpStatusLine() == "HTTP/1.1 200 OK") {
+                "guard API status failed: ${response.take(2048)}"
+            }
             require(response.contains("visible answer")) { "guard API did not emit visible answer" }
             require(response.contains("data: [DONE]")) { "guard API did not emit [DONE]" }
             require(stopCalls.get() == 0) { "guard API unexpectedly called stopGeneration" }
@@ -1944,6 +2514,7 @@ open class LocalChatSmokeActivity : Activity() {
         } finally {
             server.shutdown()
             LocalApiRuntime.streamChatProvider = previousStreamProvider
+            LocalApiRuntime.streamChatWithContextProvider = previousContextProvider
             LocalApiRuntime.stopGenerationProvider = previousStopProvider
         }
     }
@@ -2014,7 +2585,7 @@ open class LocalChatSmokeActivity : Activity() {
             val response = withTimeout(timeoutMs) {
                 rawHttp(port, chatRequest(body), timeoutMs.toInt())
             }
-            require(response.startsWith("HTTP/1.1 200 OK")) {
+            require(response.httpStatusLine() == "HTTP/1.1 200 OK") {
                 "engine API status failed: ${response.lineSequence().firstOrNull().orEmpty()}"
             }
             require(response.contains("data: [DONE]")) { "engine API did not emit [DONE]" }
@@ -2064,6 +2635,12 @@ open class LocalChatSmokeActivity : Activity() {
             "Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n\r\n" +
             body
 
+    private fun String.httpStatusLine(): String =
+        lineSequence()
+            .map(String::trim)
+            .firstOrNull { it.startsWith("HTTP/", ignoreCase = true) }
+            .orEmpty()
+
     private fun rawHttp(port: Int, request: String, readTimeoutMs: Int = 15_000): String =
         Socket("127.0.0.1", port).use { socket ->
             socket.soTimeout = readTimeoutMs
@@ -2082,12 +2659,15 @@ open class LocalChatSmokeActivity : Activity() {
             "gguf", "llama", "llama_cpp", "llama.cpp" -> LocalChatRuntime.LLAMA_CPP
             "geniex_llama_cpp", "geniex_gguf", "geniex_htp" -> LocalChatRuntime.GENIEX_LLAMA_CPP
             "geniex", "geniex_qairt", "qairt", "qnn", "qnn_htp" -> LocalChatRuntime.GENIEX_QAIRT
+            "litert_lm", "litertlm", "litert-lm" -> LocalChatRuntime.LITERT_LM
             else -> default
         }
 
     private fun defaultForPath(path: String): LocalChatRuntime =
         if (File(path).isDirectory || path.endsWith(".mnn", ignoreCase = true)) {
             LocalChatRuntime.MNN_CPU
+        } else if (path.endsWith(".litertlm", ignoreCase = true)) {
+            LocalChatRuntime.LITERT_LM
         } else {
             LocalChatRuntime.LLAMA_CPP
         }
@@ -2118,6 +2698,7 @@ open class LocalChatSmokeActivity : Activity() {
             ChatModelRuntime.MNN -> LocalChatRuntime.MNN_CPU
             ChatModelRuntime.LLAMA_CPP -> LocalChatRuntime.LLAMA_CPP
             ChatModelRuntime.GENIEX_QAIRT -> LocalChatRuntime.GENIEX_QAIRT
+            ChatModelRuntime.LITERT_LM -> LocalChatRuntime.LITERT_LM
         }
 
     private data class SmokeTarget(

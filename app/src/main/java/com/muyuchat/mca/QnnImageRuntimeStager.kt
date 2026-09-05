@@ -2,7 +2,7 @@ package com.muyuchat.mca
 
 import android.content.Context
 import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
-import com.muyuchat.core.deviceprofile.DeviceProfileReader
+import com.muyuchat.core.telemetry.SocDetector
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -79,12 +79,17 @@ internal fun stageQnnImageBundleRuntime(
     if (bundleRoot == null || requiredRuntimeProfile?.completeBundleRuntime != true) {
         return stager.stage(profile)
     }
-    val device = runCatching { DeviceProfileReader(context.applicationContext).read() }.getOrNull()
-    val chipsetCode = device?.let { profile ->
-        profile.accelerationProfile.chipsetCode.ifBlank { profile.socModel }
+    // Determine the transport hint from the immutable platform SoC fields only.
+    // DeviceProfileReader also probes every discovered QNN host library; doing
+    // that before the bundle is staged can load an unrelated APK/OEM profile
+    // into this process and defeat the coherent stage selected below.
+    val soc = runCatching { SocDetector.detect() }.getOrNull()
+    val chipsetCode = soc?.let { detected ->
+        DeviceAccelerationAnalyzer.normalizeChipsetCode(
+            "${detected.manufacturer} ${detected.model}"
+        )
     }.orEmpty()
     val deviceArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(chipsetCode)
-        ?: device?.accelerationProfile?.qnnRuntime?.htpArchVersion?.takeIf { it > 0 }
         ?: return stager.stage(profile)
     val transport = qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, deviceArch)
         // A device/profile comparison is a transport hint, never an admission

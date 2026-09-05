@@ -74,11 +74,27 @@ internal data class IsolatedNativeFailureDiagnostic(
  * concrete preflight, native load/context, smoke, and teardown result does.
  */
 internal object IsolatedNativeFailureDiagnostics {
-    fun watchdog(stage: String, timeoutMs: Long): IsolatedNativeFailureDiagnostic {
+    fun watchdog(
+        stage: String,
+        timeoutMs: Long,
+        code: String = "worker_watchdog_timeout",
+        operationLabel: String? = null
+    ): IsolatedNativeFailureDiagnostic {
         val canonicalStage = canonicalStage(stage)
         return IsolatedNativeFailureDiagnostic(
-            code = "worker_watchdog_timeout",
-            message = "隔离 native worker 在 $canonicalStage 阶段超过 ${timeoutMs.coerceAtLeast(0L)}ms，已由 watchdog 回收。",
+            code = code.takeIf { it.matches(Regex("[a-z0-9_]{1,96}")) }
+                ?: "worker_watchdog_timeout",
+            message = buildString {
+                operationLabel
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { append(it).append(' ') }
+                append("隔离 native worker 在 ")
+                append(canonicalStage)
+                append(" 阶段超过 ")
+                append(timeoutMs.coerceAtLeast(0L))
+                append("ms，已由 watchdog 回收。")
+            },
             stage = canonicalStage
         )
     }

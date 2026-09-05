@@ -228,7 +228,9 @@ function Read-BenchmarkConfig {
     $script:LastConfigDocument = $document
 
     $schemaVersion = Get-PropertyValue -Object $config -Name "schemaVersion"
-    if ($schemaVersion -isnot [int] -or $schemaVersion -ne 1) { throw "Benchmark config schemaVersion must be integer 1." }
+    if (-not (Test-BenchmarkSchemaVersion -Value $schemaVersion)) {
+        throw "Benchmark config schemaVersion must be integer 1."
+    }
     $artifactType = Get-PropertyValue -Object $config -Name "artifactType"
     if ($artifactType -isnot [string] -or $artifactType -cne "benchmark_config") {
         throw "Benchmark config artifactType must be 'benchmark_config'."

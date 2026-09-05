@@ -25,16 +25,25 @@ class MnnBundleReadinessAnalyzerTest {
     }
 
     @Test
-    fun workingQwen08bShapeAcceptsLlmMnnJsonWithoutEmbeddings() {
-        val bundle = completeChatBundle(excludedComponents = setOf("embeddings_bf16.bin"))
-        listOf("mca_runtime_config.json", "visual.mnn", "visual.mnn.weight")
-            .forEach { component -> File(bundle, component).writeText("component") }
+    fun tiedEmbeddingInLlmWeightDoesNotRequireIndependentEmbeddingFile() {
+        val bundle = completeChatBundle(
+            excludedComponents = setOf("embeddings_bf16.bin", "llm.mnn.json")
+        )
+        File(bundle, "config.json").writeText("{}")
+        File(bundle, "llm_config.json").writeText(
+            """{"hidden_size":8,"tie_embeddings":[8,16,16,4,4]}"""
+        )
+        File(bundle, "llm.mnn.weight").apply {
+            outputStream().use { output -> output.write(ByteArray(32)) }
+        }
 
         val readiness = MnnBundleReadinessAnalyzer.analyze(bundle)
 
         assertEquals(MnnBundleReadinessStatus.READY, readiness.status)
         assertTrue(readiness.canLoad)
         assertTrue(readiness.diagnostics.isEmpty())
+        assertFalse("embeddings_bf16.bin" in readiness.requiredComponentPaths)
+        assertFalse("llm.mnn.json" in readiness.requiredComponentPaths)
     }
 
     @Test
@@ -42,7 +51,6 @@ class MnnBundleReadinessAnalyzerTest {
         val bundle = completeChatBundle(
             excludedComponents = setOf(
                 "llm_config.json",
-                "llm.mnn.json",
                 "embeddings_bf16.bin"
             )
         )
@@ -52,7 +60,7 @@ class MnnBundleReadinessAnalyzerTest {
         assertEquals(MnnBundleReadinessStatus.BLOCKED, readiness.status)
         assertFalse(readiness.canLoad)
         assertEquals(
-            listOf("llm_config.json", "embeddings_bf16.bin or llm.mnn.json"),
+            listOf("llm_config.json", "embeddings_bf16.bin"),
             readiness.missingRequiredComponents
         )
         assertEquals(
@@ -63,12 +71,44 @@ class MnnBundleReadinessAnalyzerTest {
             readiness.diagnostics.map { diagnostic -> diagnostic.code }
         )
         assertEquals(
-            listOf("llm_config.json", "embeddings_bf16.bin or llm.mnn.json"),
+            listOf("llm_config.json", "embeddings_bf16.bin"),
             readiness.diagnostics.map { diagnostic -> diagnostic.path }
         )
         assertTrue(readiness.diagnosticSummary().contains("llm_config.json"))
         assertTrue(readiness.diagnosticSummary().contains("embeddings_bf16.bin"))
-        assertTrue(readiness.diagnosticSummary().contains("llm.mnn.json"))
+    }
+
+    @Test
+    fun graphMetadataDoesNotSubstituteForMissingEmbeddingData() {
+        val bundle = completeChatBundle(excludedComponents = setOf("embeddings_bf16.bin"))
+
+        val readiness = MnnBundleReadinessAnalyzer.analyze(bundle)
+
+        assertEquals(MnnBundleReadinessStatus.BLOCKED, readiness.status)
+        assertEquals(listOf("embeddings_bf16.bin"), readiness.missingRequiredComponents)
+    }
+
+    @Test
+    fun outOfBoundsTiedEmbeddingIsBlockedBeforeNativeLoad() {
+        val bundle = completeChatBundle(
+            excludedComponents = setOf("embeddings_bf16.bin", "llm.mnn.json")
+        )
+        File(bundle, "config.json").writeText("{}")
+        File(bundle, "llm_config.json").writeText(
+            """{"hidden_size":8,"tie_embeddings":[8,16,17,4,4]}"""
+        )
+        File(bundle, "llm.mnn.weight").apply {
+            outputStream().use { output -> output.write(ByteArray(32)) }
+        }
+
+        val readiness = MnnBundleReadinessAnalyzer.analyze(bundle)
+
+        assertEquals(MnnBundleReadinessStatus.BLOCKED, readiness.status)
+        assertEquals(
+            MnnBundleDiagnosticCode.TIE_EMBEDDINGS_INVALID,
+            readiness.diagnostics.single().code
+        )
+        assertTrue(readiness.diagnosticSummary().contains("tie_embeddings"))
     }
 
     @Test
@@ -117,6 +157,44 @@ class MnnBundleReadinessAnalyzerTest {
 
         assertTrue(ready.canLoad)
         assertTrue("vision/visual.mnn" in ready.requiredComponentPaths)
+    }
+
+    @Test
+    fun modelSideVisualDeclarationRequiresConcreteVisualGraph() {
+        val bundle = completeChatBundle()
+        File(bundle, "config.json").writeText("{}")
+        File(bundle, "llm_config.json").writeText(
+            """{"model_type":"qwen3_5","is_visual":true}"""
+        )
+
+        val blocked = MnnBundleReadinessAnalyzer.analyze(bundle)
+
+        assertEquals(MnnBundleReadinessStatus.BLOCKED, blocked.status)
+        assertEquals(listOf("visual.mnn"), blocked.missingRequiredComponents)
+
+        File(bundle, "visual.mnn").writeText("visual component")
+        val ready = MnnBundleReadinessAnalyzer.analyze(bundle)
+
+        assertEquals(MnnBundleReadinessStatus.READY, ready.status)
+        assertTrue("visual.mnn" in ready.requiredComponentPaths)
+    }
+
+    @Test
+    fun modelSideVisualPathIsResolvedInsideBundle() {
+        val bundle = completeChatBundle()
+        File(bundle, "config.json").writeText("{}")
+        File(bundle, "llm_config.json").writeText(
+            """{"is_visual":true,"visual_model":"vision/encoder.mnn"}"""
+        )
+        File(bundle, "vision/encoder.mnn").apply {
+            parentFile?.mkdirs()
+            writeText("visual component")
+        }
+
+        val readiness = MnnBundleReadinessAnalyzer.analyze(bundle)
+
+        assertEquals(MnnBundleReadinessStatus.READY, readiness.status)
+        assertTrue("vision/encoder.mnn" in readiness.requiredComponentPaths)
     }
 
     @Test

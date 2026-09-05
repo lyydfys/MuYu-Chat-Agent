@@ -42,6 +42,26 @@ class LocalImageWorkerWatchdogTest {
     }
 
     @Test
+    fun `explicit mnn opencl receives a disposable worker deadline`() {
+        val policy = localImageWorkerWatchdogPolicy(
+            runtime = LocalImageRuntime.MNN_DIFFUSION,
+            family = LocalImageModelFamily.SD15,
+            steps = 4,
+            backendMode = "gpu"
+        )
+
+        assertEquals(mnnOpenClWorkerTimeoutMs(4), policy?.timeoutMs)
+        assertEquals(MNN_OPENCL_WORKER_WATCHDOG_TIMEOUT_CODE, policy?.timeoutCode)
+        assertNull(
+            localImageWorkerWatchdogPolicy(
+                runtime = LocalImageRuntime.MNN_DIFFUSION,
+                family = LocalImageModelFamily.SD15,
+                backendMode = "cpu"
+            )
+        )
+    }
+
+    @Test
     fun `timeout message preserves last phase and accumulated native stages`() {
         val timeoutMs = sdxlWorkerTimeoutMs(30, true)
         val message = localImageWorkerWatchdogMessage(
@@ -80,6 +100,8 @@ class LocalImageWorkerWatchdogTest {
         assertEquals(true, localImageWorkerWatchdogStartsAtPhase("conditioning"))
         assertEquals(true, localImageWorkerWatchdogStartsAtPhase("context_create"))
         assertEquals(true, localImageWorkerWatchdogStartsAtPhase("graph_execute"))
+        assertEquals(true, localImageWorkerWatchdogStartsAtPhase("generating"))
+        assertEquals(true, localImageWorkerWatchdogStartsAtPhase("saving"))
     }
 
     @Test

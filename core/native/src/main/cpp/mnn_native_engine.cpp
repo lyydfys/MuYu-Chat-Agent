@@ -27,6 +27,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -37,10 +38,13 @@
 #include "diffusion_scheduler.hpp"
 #include "image_conditioning.hpp"
 #include "jni_utf8_codec.hpp"
+#include "mnn_diffusion_batch_policy.hpp"
 #include "mnn_legacy_chat_template_policy.hpp"
+#include "mnn_embedding_bundle_policy.hpp"
 #include "mnn_qnn_prompt_handoff.hpp"
 #include "native_prompt_language_contract.hpp"
 #include "mnn_runtime_capability_policy.hpp"
+#include "mnn_sampling_config.hpp"
 #include "mnn_stream_protocol_filter.hpp"
 #include "textual_inversion_conditioning.hpp"
 #include "mnn_vision_path_policy.hpp"
@@ -59,10 +63,11 @@
 #endif
 
 #ifndef MCA_MNN_RUNTIME_CACHE_NAMESPACE
-// Keep this prefix aligned with vendor/mnn/mnn-vendor.properties. Bump it when
-// the pinned MNN overlay changes so ABI-sensitive mmap/KV files are never
-// reused across libllm revisions.
-#define MCA_MNN_RUNTIME_CACHE_NAMESPACE "19dfc834ccb8"
+#if MCA_WITH_MNN_LLM
+#error "MNN runtime cache namespace must come from the verified vendor patch"
+#else
+#define MCA_MNN_RUNTIME_CACHE_NAMESPACE "unlinked"
+#endif
 #endif
 
 #if (MCA_WITH_MNN_LLM || MCA_WITH_MNN_DIFFUSION) && defined(MNN_IMGCODECS)
@@ -123,6 +128,11 @@ std::string g_model_path;
 std::string g_original_model_path;
 std::string g_visual_model_path;
 std::string g_mnn_model_type;
+// The MNN LLM backend is load-bound and may be selected through the resolved
+// runtime profile ("cpu" or "opencl"). Keep an explicit native snapshot so
+// diagnostics never report CPU after an OpenCL load merely because the JNI
+// class is historically named NativeMnnBridge.
+std::string g_mnn_backend_type = "cpu";
 std::string g_native_lib_dir;
 std::string g_pending_chunk;
 std::string g_pending_utf8_tail;
@@ -133,6 +143,8 @@ mca::mnn::MnnRequestLifecyclePolicy g_mnn_request_lifecycle;
 bool g_mnn_debug_trace_enabled = false;
 bool g_mnn_debug_trace_truncated = false;
 std::string g_mnn_debug_raw_output;
+bool g_mnn_debug_token_ids_truncated = false;
+std::vector<int> g_mnn_debug_generated_token_ids;
 bool g_mnn_debug_prompt_truncated = false;
 std::string g_mnn_debug_prompt;
 std::string g_last_config_json = "{}";
@@ -179,6 +191,7 @@ std::atomic<int> g_mnn_prefill_total_tokens{0};
 MNN::Transformer::Llm* g_llm = nullptr;
 
 struct MnnPromptCacheRuntimeState {
+    int completion_tokens_before_rollback = -1;
     std::vector<MNN::Transformer::ChatMessage> committed_messages;
     std::vector<MNN::Transformer::ChatMessage> request_messages;
     size_t kv_history_before = 0;
@@ -202,6 +215,17 @@ struct MnnPromptCacheRuntimeState {
 MnnPromptCacheRuntimeState g_mnn_prompt_cache;
 long long g_mnn_prompt_cache_hits = 0;
 long long g_mnn_prompt_cache_misses = 0;
+
+void capture_mnn_debug_generated_token_ids_locked() {
+    if (!g_mnn_debug_trace_enabled || g_llm == nullptr || g_llm->getContext() == nullptr) return;
+    constexpr size_t kMaxDebugGeneratedTokenIds = 64;
+    const auto& history = g_llm->getContext()->history_tokens;
+    const size_t start = std::min(g_mnn_prompt_cache.generation_history_start, history.size());
+    const size_t available = history.size() - start;
+    const size_t accepted = std::min(available, kMaxDebugGeneratedTokenIds);
+    g_mnn_debug_generated_token_ids.assign(history.begin() + start, history.begin() + start + accepted);
+    g_mnn_debug_token_ids_truncated = accepted < available;
+}
 
 void append_mnn_debug_raw_output(const char* data, size_t size) {
     if (!g_mnn_debug_trace_enabled || data == nullptr || size == 0) return;
@@ -576,6 +600,294 @@ json read_json_file_or_empty(const std::string& path) {
     return parsed;
 }
 
+bool read_mnn_config_object(
+        const std::string& path,
+        const std::string& label,
+        json& output,
+        std::string& error) {
+    struct stat info {};
+    if (stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0) {
+        error = label + " is missing, empty, or not a regular file: " + path;
+        return false;
+    }
+    std::ifstream input(path.c_str(), std::ios::binary);
+    if (!input.good()) {
+        error = label + " cannot be opened: " + path;
+        return false;
+    }
+    output = json::parse(input, nullptr, false);
+    if (!output.is_object()) {
+        error = label + " must contain a JSON object: " + path;
+        return false;
+    }
+    return true;
+}
+
+void merge_mnn_config(json& target, const json& source) {
+    if (!target.is_object() || !source.is_object()) return;
+    for (auto it = source.begin(); it != source.end(); ++it) {
+        auto existing = target.find(it.key());
+        if (existing != target.end() && existing->is_object() && it.value().is_object()) {
+            merge_mnn_config(*existing, it.value());
+        } else {
+            target[it.key()] = it.value();
+        }
+    }
+}
+
+bool mnn_configured_component_path(
+        const json& config,
+        const std::string& root,
+        const char* key,
+        const char* fallback,
+        std::string& relative,
+        std::string& absolute,
+        std::string& error) {
+    std::string raw = fallback;
+    const auto value = config.find(key);
+    if (value != config.end()) {
+        if (!value->is_string() || value->get<std::string>().empty()) {
+            error = std::string("MNN config field '") + key + "' must be a non-empty relative path.";
+            return false;
+        }
+        raw = value->get<std::string>();
+    }
+    relative = mca::mnn::normalizeMnnVisualRelativePath(raw);
+    if (relative.empty()) {
+        error = std::string("MNN config field '") + key +
+                "' contains an unsafe component path: " + raw;
+        return false;
+    }
+    absolute = join_path(root, relative);
+    return true;
+}
+
+bool require_mnn_component(
+        const json& config,
+        const std::string& root,
+        const char* key,
+        const char* fallback,
+        std::string& relative,
+        std::string& absolute,
+        std::string& error) {
+    if (!mnn_configured_component_path(
+            config, root, key, fallback, relative, absolute, error)) {
+        return false;
+    }
+    if (!nonempty_regular_file_exists(absolute)) {
+        error = std::string("Required MNN component '") + relative +
+                "' is missing, empty, or not a regular file.";
+        return false;
+    }
+    return true;
+}
+
+bool mnn_json_exact_int64(const json& value, int64_t& output) {
+    if (value.is_number_unsigned()) {
+        const auto raw = value.get<uint64_t>();
+        if (raw > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) return false;
+        output = static_cast<int64_t>(raw);
+        return true;
+    }
+    if (value.is_number_integer()) {
+        output = value.get<int64_t>();
+        return true;
+    }
+    return false;
+}
+
+bool parse_mnn_tie_embedding_descriptor(
+        const json& value,
+        mca::mnn::TieEmbeddingDescriptor& descriptor,
+        std::string& error) {
+    const auto read = [&error](const json& raw, const char* name, int64_t& target) {
+        if (!mnn_json_exact_int64(raw, target)) {
+            error = std::string("tie_embeddings field '") + name + "' must be an exact integer.";
+            return false;
+        }
+        return true;
+    };
+    if (value.is_array()) {
+        if (value.size() < 5U ||
+            !read(value[0], "weight_offset", descriptor.weight_offset) ||
+            !read(value[1], "alpha_offset", descriptor.alpha_offset) ||
+            !read(value[2], "alpha_size", descriptor.alpha_size) ||
+            !read(value[3], "quant_bit", descriptor.quant_bit) ||
+            !read(value[4], "quant_block", descriptor.quant_block)) {
+            if (error.empty()) {
+                error = "legacy tie_embeddings must contain at least five exact integers.";
+            }
+            return false;
+        }
+        if (value.size() >= 6U) {
+            if (value[5].is_boolean()) {
+                descriptor.alpha_fp16 = value[5].get<bool>();
+            } else {
+                int64_t alphaFp16 = 0;
+                if (!read(value[5], "alpha_fp16", alphaFp16)) return false;
+                descriptor.alpha_fp16 = alphaFp16 != 0;
+            }
+        }
+        return true;
+    }
+    if (!value.is_object()) {
+        error = "tie_embeddings must be an array or object.";
+        return false;
+    }
+    for (const auto* name : {
+             "weight_offset", "alpha_offset", "alpha_size", "quant_bit", "quant_block"}) {
+        const auto field = value.find(name);
+        if (field == value.end()) {
+            error = std::string("tie_embeddings is missing field '") + name + "'.";
+            return false;
+        }
+        int64_t* target = nullptr;
+        if (std::strcmp(name, "weight_offset") == 0) target = &descriptor.weight_offset;
+        else if (std::strcmp(name, "alpha_offset") == 0) target = &descriptor.alpha_offset;
+        else if (std::strcmp(name, "alpha_size") == 0) target = &descriptor.alpha_size;
+        else if (std::strcmp(name, "quant_bit") == 0) target = &descriptor.quant_bit;
+        else target = &descriptor.quant_block;
+        if (!read(*field, name, *target)) return false;
+    }
+    const auto alphaDtypeIt = value.find("alpha_dtype");
+    if (alphaDtypeIt != value.end() && !alphaDtypeIt->is_string()) {
+        error = "tie_embeddings alpha_dtype must be a string.";
+        return false;
+    }
+    const auto alphaDtype = alphaDtypeIt == value.end()
+            ? std::string("fp32")
+            : alphaDtypeIt->get<std::string>();
+    if (alphaDtype != "fp16" && alphaDtype != "fp32") {
+        error = "tie_embeddings alpha_dtype must be fp16 or fp32.";
+        return false;
+    }
+    descriptor.alpha_fp16 = alphaDtype == "fp16";
+    return true;
+}
+
+std::string mnn_chat_bundle_preflight_message(const std::string& configPath) {
+    const auto root = parent_dir(configPath);
+    json rootConfig;
+    std::string error;
+    if (!read_mnn_config_object(configPath, "MNN config.json", rootConfig, error)) return error;
+
+    std::string llmConfigRelative;
+    std::string llmConfigPath;
+    if (!require_mnn_component(
+            rootConfig,
+            root,
+            "llm_config",
+            "llm_config.json",
+            llmConfigRelative,
+            llmConfigPath,
+            error)) {
+        return error;
+    }
+    json modelConfig;
+    if (!read_mnn_config_object(llmConfigPath, "MNN llm_config", modelConfig, error)) return error;
+
+    json effective = rootConfig;
+    merge_mnn_config(effective, modelConfig);
+    std::string modelRelative;
+    std::string modelPath;
+    if (!require_mnn_component(
+            effective, root, "llm_model", "llm.mnn", modelRelative, modelPath, error)) {
+        return error;
+    }
+    std::string weightRelative;
+    std::string weightPath;
+    if (!require_mnn_component(
+            effective, root, "llm_weight", "llm.mnn.weight", weightRelative, weightPath, error)) {
+        return error;
+    }
+    std::string tokenizerRelative;
+    std::string tokenizerPath;
+    if (!require_mnn_component(
+            effective, root, "tokenizer_file", "tokenizer.txt", tokenizerRelative, tokenizerPath, error)) {
+        return error;
+    }
+
+    if (effective.contains("ple_embed_file")) {
+        std::string pleRelative;
+        std::string plePath;
+        if (!require_mnn_component(
+                effective, root, "ple_embed_file", "", pleRelative, plePath, error)) {
+            return error;
+        }
+    }
+    if (effective.value("is_visual", false)) {
+        std::string visualRelative;
+        std::string visualPath;
+        if (!require_mnn_component(
+                effective, root, "visual_model", "visual.mnn", visualRelative, visualPath, error)) {
+            return error;
+        }
+    }
+    if (effective.value("is_audio", false)) {
+        std::string audioRelative;
+        std::string audioPath;
+        if (!require_mnn_component(
+                effective, root, "audio_model", "audio.mnn", audioRelative, audioPath, error)) {
+            return error;
+        }
+    }
+
+    const auto tie = effective.find("tie_embeddings");
+    if (tie == effective.end()) {
+        std::string embeddingRelative;
+        std::string embeddingPath;
+        if (!require_mnn_component(
+                effective,
+                root,
+                "embedding_file",
+                "embeddings_bf16.bin",
+                embeddingRelative,
+                embeddingPath,
+                error)) {
+            return error;
+        }
+        return "";
+    }
+
+    mca::mnn::TieEmbeddingDescriptor descriptor;
+    if (!parse_mnn_tie_embedding_descriptor(*tie, descriptor, error)) {
+        return "Invalid MNN tie_embeddings metadata: " + error;
+    }
+    const bool tiedToLlmWeight = descriptor.weight_offset > 0;
+    std::string storageRelative = weightRelative;
+    std::string storagePath = weightPath;
+    if (!tiedToLlmWeight &&
+        !require_mnn_component(
+                effective,
+                root,
+                "embedding_file",
+                "embeddings_bf16.bin",
+                storageRelative,
+                storagePath,
+                error)) {
+        return error;
+    }
+    struct stat storageInfo {};
+    if (stat(storagePath.c_str(), &storageInfo) != 0 || !S_ISREG(storageInfo.st_mode) ||
+        storageInfo.st_size <= 0) {
+        return "MNN tie_embeddings backing file is missing or empty: " + storageRelative;
+    }
+    int64_t hiddenSize = 0;
+    const auto hidden = effective.find("hidden_size");
+    if (hidden == effective.end() || !mnn_json_exact_int64(*hidden, hiddenSize)) {
+        return "MNN tie_embeddings requires an exact integer hidden_size.";
+    }
+    const auto validation = mca::mnn::validateTieEmbedding(
+            descriptor,
+            hiddenSize,
+            static_cast<uint64_t>(storageInfo.st_size));
+    if (!validation.valid) {
+        return "Invalid MNN tie_embeddings metadata for '" + storageRelative + "': " +
+                validation.error;
+    }
+    return "";
+}
+
 struct MnnPublishedImageEvidence {
     long long bytes = 0;
     std::string sha256;
@@ -891,6 +1203,23 @@ std::string prepare_mnn_runtime_config(const std::string& requestedPath) {
             : read_json_file_or_empty(join_path(root, safeLlmConfig));
     bool configChanged = inject_legacy_mnn_chat_template(config, modelConfig);
 
+    // Upstream defaults to tokenizer.txt even though current exporters may
+    // emit tokenizer.mtok. Keep directory loads compatible by making the
+    // selected fallback explicit in the generated runtime config.
+    const auto tokenizerIt = config.find("tokenizer_file");
+    const bool tokenizerDeclared = tokenizerIt != config.end() &&
+            tokenizerIt->is_string() && !tokenizerIt->get<std::string>().empty();
+    const bool modelTokenizerDeclared = modelConfig.is_object() &&
+            modelConfig.find("tokenizer_file") != modelConfig.end() &&
+            modelConfig["tokenizer_file"].is_string() &&
+            !modelConfig["tokenizer_file"].get<std::string>().empty();
+    if (!tokenizerDeclared && !modelTokenizerDeclared &&
+        !nonempty_regular_file_exists(join_path(root, "tokenizer.txt")) &&
+        nonempty_regular_file_exists(join_path(root, "tokenizer.mtok"))) {
+        config["tokenizer_file"] = "tokenizer.mtok";
+        configChanged = true;
+    }
+
     std::string configuredVisual;
     bool configuredVisualDeclared = false;
     auto visualIt = config.find("visual_model");
@@ -1165,8 +1494,32 @@ void configure_mnn_debug_trace_locked(const json& params) {
             enabled->is_boolean() && enabled->get<bool>();
     g_mnn_debug_trace_truncated = false;
     g_mnn_debug_raw_output.clear();
+    g_mnn_debug_token_ids_truncated = false;
+    g_mnn_debug_generated_token_ids.clear();
     g_mnn_debug_prompt_truncated = false;
     g_mnn_debug_prompt.clear();
+}
+
+std::string mnn_debug_raw_output_hex() {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string encoded;
+    encoded.reserve(g_mnn_debug_raw_output.size() * 2U);
+    for (const unsigned char value : g_mnn_debug_raw_output) {
+        encoded.push_back(kHex[value >> 4U]);
+        encoded.push_back(kHex[value & 0x0fU]);
+    }
+    return encoded;
+}
+
+std::string mnn_debug_generated_token_ids_json() {
+    std::ostringstream out;
+    out << '[';
+    for (size_t index = 0; index < g_mnn_debug_generated_token_ids.size(); ++index) {
+        if (index > 0) out << ',';
+        out << g_mnn_debug_generated_token_ids[index];
+    }
+    out << ']';
+    return out.str();
 }
 
 struct MnnChatImageInput {
@@ -1422,6 +1775,10 @@ struct MnnSemanticExecutionContract {
     std::string embedding_disk_data_type;
     MnnVaeScalingLocation vae_scaling_location = MnnVaeScalingLocation::None;
     double vae_scaling_factor = 1.0;
+    // Explicit VAE output range.  Older bundles may omit this field; retain
+    // the historical [-1,1] default in that case rather than guessing from
+    // runtime values (which can make a valid dark image look washed out).
+    std::string vae_output_range = "NEGATIVE_ONE_TO_ONE";
     int width = 0;
     int height = 0;
     std::string graph_name;
@@ -2384,8 +2741,11 @@ bool parse_mnn_semantic_execution_contract(
         return false;
     }
     contract.tokenizer_max_length = static_cast<int>(integerValue);
-    if (contract.tokenizer_max_length != 77 || contract.token_count != 154U) {
-        error = "The current MNN direct CLIP graph requires tokenizerMaxLength=77 and tokenCount=154.";
+    const size_t expectedTokenCount = static_cast<size_t>(contract.tokenizer_max_length) *
+            (contract.use_cfg ? 2U : 1U);
+    if (contract.tokenizer_max_length != 77 || contract.token_count != expectedTokenCount) {
+        error = "The current MNN direct CLIP graph requires tokenizerMaxLength=77 and "
+                "tokenCount=154 with CFG or tokenCount=77 without CFG.";
         return false;
     }
     if (!mnn_contract_boolean(
@@ -2446,6 +2806,22 @@ bool parse_mnn_semantic_execution_contract(
         std::fabs(contract.vae_scaling_factor - 1.0) > 1e-12) {
         error = "vaeScalingLocation=NONE requires vaeScalingFactor=1.";
         return false;
+    }
+    if (params.contains("pixelRange") && !params.at("pixelRange").is_null()) {
+        if (!mnn_contract_string(params, "pixelRange", contract.vae_output_range, error)) {
+            return false;
+        }
+        contract.vae_output_range = normalize_mnn_contract_enum(contract.vae_output_range);
+        // normalize_mnn_contract_enum() deliberately emits the wire form in
+        // lower snake_case (for example, negative_one_to_one).  Compare
+        // against that normalized representation; the previous uppercase
+        // comparison rejected valid Kotlin contracts before the graph ran.
+        if (contract.vae_output_range != "negative_one_to_one" &&
+            contract.vae_output_range != "zero_to_one" &&
+            contract.vae_output_range != "zero_to_255") {
+            error = "Unsupported MNN pixelRange contract value: " + contract.vae_output_range;
+            return false;
+        }
     }
     if (params.contains("vaeLatentScale")) {
         error = "Deprecated vaeLatentScale conflicts with the explicit VAE scaling contract.";
@@ -2528,10 +2904,6 @@ bool parse_mnn_semantic_execution_contract(
     }
     if (!contract.use_cfg && !contract.negative_prompt.empty()) {
         error = "A negativePrompt cannot affect pixels when useCfg=false.";
-        return false;
-    }
-    if (contract.tokenizer_backend == "MNN_MTOK" && !contract.negative_prompt.empty()) {
-        error = "MNN_MTOK fallback is allowed only when negativePrompt is empty.";
         return false;
     }
     const auto textualInversionCount = params.find("textualInversionCount");
@@ -2641,6 +3013,7 @@ json mnn_native_effective_json(
         {"embeddingDiskDataType", evidence.embedding_disk_data_type},
         {"vaeScalingLocation", mnn_vae_scaling_wire_name(contract.vae_scaling_location)},
         {"vaeScalingFactor", contract.vae_scaling_factor},
+        {"pixelRange", contract.vae_output_range},
         {"width", contract.width},
         {"height", contract.height},
         {"seed", contract.seed},
@@ -3059,10 +3432,26 @@ std::string mnn_error_code_name(MNN::ErrorCode code) {
     }
 }
 
+// The SD1.5 MNN bundle currently shipped by the app contains fused transformer
+// operators (GroupNorm/FmhaV2/SplitGeLU) that are registered by the OpenCL
+// backend but not by this MNN CPU build.  A resize failure with NOT_SUPPORT is
+// therefore a backend capability mismatch, not a malformed bundle or an
+// invalid tensor shape.  Keep this predicate deliberately narrow: it is used
+// only for the strict direct SD1.5 path and never admits a device by chipset.
+bool mnn_sd15_unet_backend_unsupported(const std::vector<std::string>& errors) {
+    return std::any_of(errors.begin(), errors.end(), [](const std::string& value) {
+        return value.find("status 2") != std::string::npos ||
+                value.find("NOT_SUPPORT") != std::string::npos ||
+                value.find("Create execution error : 304") != std::string::npos ||
+                value.find("GroupNorm") != std::string::npos;
+    });
+}
+
 struct UnetSmokeProfile {
     std::string name;
     bool resizeDefer = false;
     bool inputUser = false;
+    int batch = 2;
 };
 
 void configure_interpreter_profile(MNN::Interpreter* interpreter, const UnetSmokeProfile& profile) {
@@ -3084,8 +3473,20 @@ json run_unet_interpreter_smoke_once(
         const std::string& backendMode,
         const UnetSmokeProfile& profile) {
     const auto path = root + "/unet.mnn";
-    if (!file_exists(path)) {
-        return json({{"ok", false}, {"error", "unet.mnn does not exist."}});
+    const auto weightPath = path + ".weight";
+    if (!nonempty_regular_file_exists(path)) {
+        return json({
+            {"ok", false},
+            {"errorCode", "MNN_DIFFUSION_BUNDLE_INCOMPLETE"},
+            {"error", "unet.mnn is missing, empty, or not a regular file."}
+        });
+    }
+    if (!nonempty_regular_file_exists(weightPath)) {
+        return json({
+            {"ok", false},
+            {"errorCode", "MNN_DIFFUSION_BUNDLE_INCOMPLETE"},
+            {"error", "unet.mnn.weight is missing, empty, or not a regular file."}
+        });
     }
     const auto started = now_ms();
     __android_log_print(ANDROID_LOG_INFO, "mca_mnn_native",
@@ -3096,10 +3497,7 @@ json run_unet_interpreter_smoke_once(
     }
     __android_log_print(ANDROID_LOG_INFO, "mca_mnn_native",
                         "UNet smoke[%s] create_interpreter_completed", profile.name.c_str());
-    const auto weightPath = path + ".weight";
-    if (file_exists(weightPath)) {
-        interpreter->setExternalFile(weightPath.c_str());
-    }
+    interpreter->setExternalFile(weightPath.c_str());
     configure_interpreter_profile(interpreter.get(), profile);
     MNN::ScheduleConfig config;
     MNN::BackendConfig backendConfig;
@@ -3134,13 +3532,12 @@ json run_unet_interpreter_smoke_once(
             {"hasEncoderHiddenStates", encoder != nullptr}
         });
     }
-    // MNN's StableDiffusion wrapper feeds the UNet in NCHW with CFG batch=2:
-    // sample=[2,4,64,64], timestep=[1], encoder_hidden_states=[2,77,768].
-    // Using NHWC or batch=1 makes some converted SD1.5 UNets fail at resize
-    // with COMPUTE_SIZE_ERROR before any operator executes.
-    interpreter->resizeTensor(sample, {2, 4, 64, 64});
+    // Prefer a batched CFG graph, while also supporting exporters that freeze
+    // the leading dimension at one. Production executes the latter twice per
+    // scheduler timestep, so one real batch-1 graph run is the matching smoke.
+    interpreter->resizeTensor(sample, {profile.batch, 4, 64, 64});
     interpreter->resizeTensor(timestep, {1});
-    interpreter->resizeTensor(encoder, {2, 77, 768});
+    interpreter->resizeTensor(encoder, {profile.batch, 77, 768});
     int resizeStatusBefore = -1;
     int resizeStatusAfter = -1;
     interpreter->getSessionInfo(session, MNN::Interpreter::RESIZE_STATUS, &resizeStatusBefore);
@@ -3164,16 +3561,22 @@ json run_unet_interpreter_smoke_once(
         interpreter->releaseSession(session);
         return json({
             {"ok", false},
+            {"errorCode", "MNN_UNET_RESIZE_FAILED"},
             {"error", "UNet resizeSession failed or invalidated an input tensor."},
+            {"backendMode", useOpenCl ? "opencl" : "cpu"},
             {"profile", profile.name},
+            {"sessionBatch", profile.batch},
+            {"cfgExecutionMode", profile.batch == 2 ? "batched" : "sequential"},
             {"resizeStatusBefore", resizeStatusBefore},
             {"resizeStatusAfter", resizeStatusAfter},
             {"inputs", inputs}
         });
     }
 
-    std::vector<float> sampleBuffer(static_cast<size_t>(2 * 4 * 64 * 64), 0.0f);
-    std::vector<float> encoderBuffer(static_cast<size_t>(2 * 77 * 768), 0.0f);
+    std::vector<float> sampleBuffer(
+            static_cast<size_t>(profile.batch * 4 * 64 * 64), 0.0f);
+    std::vector<float> encoderBuffer(
+            static_cast<size_t>(profile.batch * 77 * 768), 0.0f);
     std::vector<int> timestepBuffer = {1};
     std::string copyError;
     __android_log_print(ANDROID_LOG_INFO, "mca_mnn_native",
@@ -3200,7 +3603,9 @@ json run_unet_interpreter_smoke_once(
         {"encoderCopyError", encoderCopyError},
         {"timestepCopyError", timestepCopyError},
         {"layout", "NCHW"},
-        {"classifierFreeGuidanceBatch", 2}
+        {"sessionBatch", profile.batch},
+        {"logicalCfgBranches", 2},
+        {"cfgExecutionMode", profile.batch == 2 ? "batched" : "sequential"}
     };
     if (!sampleCopied || !encoderCopied || !timestepCopied) {
         __android_log_print(ANDROID_LOG_ERROR, "mca_mnn_native",
@@ -3275,9 +3680,18 @@ json run_unet_interpreter_smoke_once(
 }
 
 json run_unet_interpreter_smoke(const std::string& root, const std::string& backendMode) {
-    const std::vector<UnetSmokeProfile> profiles = {
-            {"defer-inside", true, false}
-    };
+    std::vector<UnetSmokeProfile> profiles;
+    const auto batches = mca::mnn::diffusionBatchCandidates(true);
+    profiles.reserve(batches.count);
+    for (size_t index = 0; index < batches.count; ++index) {
+        const int batch = batches.values[index];
+        profiles.push_back({
+                batch == 2 ? "defer-inside-batch2" : "defer-inside-batch1",
+                true,
+                false,
+                batch
+        });
+    }
     json attempts = json::array();
     json best = json::object();
     for (const auto& profile : profiles) {
@@ -3287,9 +3701,9 @@ json run_unet_interpreter_smoke(const std::string& root, const std::string& back
             attempt["attempts"] = attempts;
             return attempt;
         }
-        if (best.empty()) {
-            best = attempt;
-        }
+        // If every candidate fails, surface the final batch-1 compatibility
+        // attempt while retaining all earlier attempts for diagnosis.
+        best = attempt;
     }
     if (best.empty()) {
         best = json({{"ok", false}, {"error", "UNet smoke did not run any profile."}});
@@ -3441,9 +3855,17 @@ bool configure_mnn_session(
 void configure_direct_interpreter(
         MNN::Interpreter* interpreter,
         bool resizeDefer = false,
-        bool inputUser = false) {
+        bool inputUser = false,
+        bool debugSession = true) {
     if (interpreter == nullptr) return;
-    interpreter->setSessionMode(MNN::Interpreter::Session_Debug);
+    // Session_Debug is useful for the explicit graph smoke because it exposes
+    // tensor metadata, but it adds bookkeeping to every invocation.  Never
+    // enable it for the production diffusion/text/VAE path: those sessions are
+    // reused across all timesteps and the debug bookkeeping is needlessly
+    // expensive on CPU (and can substantially increase the native heap).
+    if (debugSession) {
+        interpreter->setSessionMode(MNN::Interpreter::Session_Debug);
+    }
     interpreter->setSessionMode(inputUser
             ? MNN::Interpreter::Session_Input_User
             : MNN::Interpreter::Session_Input_Inside);
@@ -4219,7 +4641,7 @@ bool run_community_clip_encoder_direct(
     } else if (!hasDeclaredBinding && !pinnedExternalWeightPath.empty()) {
         interpreter->setExternalFile(pinnedExternalWeightPath.c_str());
     }
-    configure_direct_interpreter(interpreter.get());
+    configure_direct_interpreter(interpreter.get(), false, false, false);
     MNN::ScheduleConfig config;
     MNN::BackendConfig backendConfig;
     std::string config_error;
@@ -4496,7 +4918,7 @@ bool run_sdxl_clip_encoder_direct(
         return false;
     }
     interpreter->setExternalFile(pinnedExternalWeightPath.c_str());
-    configure_direct_interpreter(interpreter.get());
+    configure_direct_interpreter(interpreter.get(), false, false, false);
     MNN::ScheduleConfig config;
     MNN::BackendConfig backendConfig;
     std::string config_error;
@@ -5350,29 +5772,43 @@ bool tokenize_mnn_sd15_prompt(
                     "non-unity prompt weights before the Transformer.";
             return false;
         }
-        const auto standardIds = pair.negative_then_positive();
+        const auto standardIds = contract.use_cfg
+                ? pair.negative_then_positive()
+                : pair.positive.ids;
         ids.assign(standardIds.begin(), standardIds.end());
         executedTokenPair = pair;
         hasExecutedTokenPair = true;
         evidence.tokenizer_backend = "TOKENIZERS_CPP";
     } else if (contract.tokenizer_backend == "MNN_MTOK") {
-        if (!contract.negative_prompt.empty()) {
-            error = "MNN_MTOK cannot execute a non-empty negativePrompt exactly.";
-            return false;
-        }
         if (!file_exists(root + "/tokenizer.mtok")) {
             error = "tokenizerBackend=MNN_MTOK requires tokenizer.mtok in the MNN bundle root.";
             return false;
         }
         MNN::DIFFUSION::MtokTokenizer tokenizer(
-                MNN::DIFFUSION::MtokTokenizer::Style::kPair,
+                MNN::DIFFUSION::MtokTokenizer::Style::kSingle,
                 contract.tokenizer_bos_id,
                 contract.tokenizer_eos_id);
         if (!tokenizer.load(root)) {
             error = "Failed to load the explicitly selected MNN_MTOK tokenizer.";
             return false;
         }
-        ids = tokenizer.encode(prompt, contract.tokenizer_max_length);
+        const auto positiveIds = tokenizer.encode(prompt, contract.tokenizer_max_length);
+        if (positiveIds.size() != static_cast<size_t>(contract.tokenizer_max_length)) {
+            error = "MNN_MTOK positive prompt did not produce tokenizerMaxLength token ids.";
+            return false;
+        }
+        if (contract.use_cfg) {
+            const auto negativeIds = tokenizer.encode(
+                    contract.negative_prompt,
+                    contract.tokenizer_max_length);
+            if (negativeIds.size() != static_cast<size_t>(contract.tokenizer_max_length)) {
+                error = "MNN_MTOK negative prompt did not produce tokenizerMaxLength token ids.";
+                return false;
+            }
+            ids.reserve(negativeIds.size() + positiveIds.size());
+            ids.insert(ids.end(), negativeIds.begin(), negativeIds.end());
+        }
+        ids.insert(ids.end(), positiveIds.begin(), positiveIds.end());
         evidence.tokenizer_backend = "MNN_MTOK";
     } else {
         error = "Unsupported MNN tokenizer backend after strict contract parsing.";
@@ -5441,18 +5877,19 @@ bool copy_mnn_timestep_to_tensor(
             error = "UNet timestep exceeds int32 range.";
             return false;
         }
-        // The official converted MNN graph exposes an int32 timestep and its
-        // module runner truncates the scheduler's float timestep before input.
+        // The official converted MNN graph exposes an int32 timestep. Preserve
+        // the scheduler's nearest discrete timestep instead of truncating toward
+        // zero, which biases every fractional schedule point downward.
         return copy_vector_to_tensor<int>(
                 tensor,
-                {static_cast<int>(timestep)},
+                {static_cast<int>(std::llround(timestep))},
                 error);
     }
     error = "UNet timestep input must be scalar float32 or int32.";
     return false;
 }
 
-bool run_text_encoder_direct(
+bool run_text_encoder_direct_once(
         const std::string& root,
         const std::vector<int>& ids,
         const std::string& backendMode,
@@ -5493,7 +5930,7 @@ bool run_text_encoder_direct(
             interpreter->setExternalFile(weightPath.c_str());
         }
     }
-    configure_direct_interpreter(interpreter.get());
+    configure_direct_interpreter(interpreter.get(), false, false, false);
     MNN::ScheduleConfig config;
     MNN::BackendConfig backendConfig;
     std::string config_error;
@@ -5514,10 +5951,13 @@ bool run_text_encoder_direct(
     }
     interpreter->resizeTensor(input, {batch, 77});
     interpreter->resizeSession(session, 1);
+    int resizeStatus = -1;
+    interpreter->getSessionInfo(session, MNN::Interpreter::RESIZE_STATUS, &resizeStatus);
     input = interpreter->getSessionInput(session, "input_ids");
-    if (input == nullptr) {
+    if (resizeStatus != 0 || input == nullptr) {
         interpreter->releaseSession(session);
-        error = std::string(graphLabel) + " input_ids tensor is missing after resize.";
+        error = std::string(graphLabel) + " resizeSession failed with status " +
+                std::to_string(resizeStatus) + ".";
         return false;
     }
     std::string copyError;
@@ -5547,10 +5987,87 @@ bool run_text_encoder_direct(
     return true;
 }
 
+bool run_text_encoder_direct(
+        const std::string& root,
+        const std::vector<int>& ids,
+        const std::string& backendMode,
+        int threads,
+        FloatTensorData& embeddings,
+        std::string& error,
+        const MnnOpenedTextEncoderBinding* textEncoderBinding = nullptr) {
+    if (ids.size() != 2U * 77U) {
+        return run_text_encoder_direct_once(
+                root,
+                ids,
+                backendMode,
+                threads,
+                embeddings,
+                error,
+                textEncoderBinding);
+    }
+
+    std::string batchedError;
+    if (run_text_encoder_direct_once(
+            root,
+            ids,
+            backendMode,
+            threads,
+            embeddings,
+            batchedError,
+            textEncoderBinding)) {
+        return true;
+    }
+
+    const std::vector<int> negativeIds(ids.begin(), ids.begin() + 77);
+    const std::vector<int> positiveIds(ids.begin() + 77, ids.end());
+    FloatTensorData negative;
+    FloatTensorData positive;
+    std::string negativeError;
+    if (!run_text_encoder_direct_once(
+            root,
+            negativeIds,
+            backendMode,
+            threads,
+            negative,
+            negativeError,
+            textEncoderBinding)) {
+        error = "text_encoder batch-2 execution failed: " + batchedError +
+                " Sequential negative branch also failed: " + negativeError;
+        return false;
+    }
+    std::string positiveError;
+    if (!run_text_encoder_direct_once(
+            root,
+            positiveIds,
+            backendMode,
+            threads,
+            positive,
+            positiveError,
+            textEncoderBinding)) {
+        error = "text_encoder batch-2 execution failed: " + batchedError +
+                " Sequential positive branch failed: " + positiveError;
+        return false;
+    }
+
+    embeddings.shape = {2, 77, 768};
+    embeddings.values.clear();
+    embeddings.values.reserve(negative.values.size() + positive.values.size());
+    embeddings.values.insert(
+            embeddings.values.end(), negative.values.begin(), negative.values.end());
+    embeddings.values.insert(
+            embeddings.values.end(), positive.values.begin(), positive.values.end());
+    error.clear();
+    return true;
+}
+
 class DirectMnnUnetSession {
 public:
     ~DirectMnnUnetSession() {
         close();
+    }
+
+    int batch() const {
+        return batch_;
     }
 
     bool initialize(
@@ -5575,7 +6092,7 @@ public:
         if (file_exists(weight_path_)) {
             interpreter_->setExternalFile(weight_path_.c_str());
         }
-        configure_direct_interpreter(interpreter_.get());
+        configure_direct_interpreter(interpreter_.get(), false, false, false);
         MNN::ScheduleConfig config;
         MNN::BackendConfig backendConfig;
         std::string configError;
@@ -5609,6 +6126,25 @@ public:
         encoder_input_ = interpreter_->getSessionInput(session_, "encoder_hidden_states");
         if (resizeStatus != 0 || sample_input_ == nullptr || timestep_input_ == nullptr || encoder_input_ == nullptr) {
             error = "UNet resizeSession failed with status " + std::to_string(resizeStatus) + ".";
+            close();
+            return false;
+        }
+        const std::vector<int> expectedSampleShape = {batch_, 4, 64, 64};
+        const std::vector<int> expectedEncoderShape = {batch_, 77, 768};
+        const std::vector<int> expectedTimestepShape = {1};
+        const auto sampleShape = mnn_tensor_shape(sample_input_);
+        const auto encoderShape = mnn_tensor_shape(encoder_input_);
+        const auto timestepShape = mnn_tensor_shape(timestep_input_);
+        if (sampleShape != expectedSampleShape ||
+            encoderShape != expectedEncoderShape ||
+            timestepShape != expectedTimestepShape) {
+            error = "UNet input shape mismatch after resize: sample expected " +
+                    tensor_shape_string(expectedSampleShape) + ", got " +
+                    tensor_shape_string(sampleShape) + "; encoder_hidden_states expected " +
+                    tensor_shape_string(expectedEncoderShape) + ", got " +
+                    tensor_shape_string(encoderShape) + "; timestep expected " +
+                    tensor_shape_string(expectedTimestepShape) + ", got " +
+                    tensor_shape_string(timestepShape) + ".";
             close();
             return false;
         }
@@ -5695,7 +6231,7 @@ private:
 bool run_unet_direct(
         const std::string& root,
         const std::vector<float>& sample,
-        int timestep,
+        double timestep,
         const FloatTensorData& embeddings,
         const std::string& backendMode,
         int threads,
@@ -5703,7 +6239,7 @@ bool run_unet_direct(
         std::string& error) {
     constexpr int kCfgBatch = 2;
     constexpr int kLatentElements = 4 * 64 * 64;
-    if (timestep < 0 || timestep >= 1000) {
+    if (!std::isfinite(timestep) || timestep < 0.0 || timestep >= 1000.0) {
         error = "UNet timestep must be in [0, 999].";
         return false;
     }
@@ -5730,7 +6266,7 @@ bool run_unet_direct(
     if (file_exists(weightPath)) {
         interpreter->setExternalFile(weightPath.c_str());
     }
-    configure_direct_interpreter(interpreter.get());
+    configure_direct_interpreter(interpreter.get(), false, false, false);
     MNN::ScheduleConfig config;
     MNN::BackendConfig backendConfig;
     std::string config_error;
@@ -5773,14 +6309,18 @@ bool run_unet_direct(
         return false;
     }
     std::string copyError;
-    std::vector<int> timestepValues = {timestep};
     __android_log_print(ANDROID_LOG_INFO, "mca_mnn_native", "UNet direct copy_inputs_start");
     if (!copy_vector_to_tensor<float>(sampleInput, sample, copyError)) {
         interpreter->releaseSession(session);
         error = "UNet sample input copy failed: " + copyError;
         return false;
     }
-    if (!copy_vector_to_tensor<int>(timestepInput, timestepValues, copyError)) {
+    // Exporters differ: some SD1.5 MNN graphs expose an int32 timestep while
+    // others retain the scheduler's float32 value.  Always dispatch through the
+    // type-aware helper; truncating a fractional DPM++ timestep silently turns
+    // the denoiser into a noise generator even though every graph invocation
+    // reports success.
+    if (!copy_mnn_timestep_to_tensor(timestepInput, static_cast<double>(timestep), copyError)) {
         interpreter->releaseSession(session);
         error = "UNet timestep input copy failed: " + copyError;
         return false;
@@ -5846,7 +6386,7 @@ bool run_vae_decoder_direct(
     if (file_exists(weightPath)) {
         interpreter->setExternalFile(weightPath.c_str());
     }
-    configure_direct_interpreter(interpreter.get());
+    configure_direct_interpreter(interpreter.get(), false, false, false);
     MNN::ScheduleConfig config;
     MNN::BackendConfig backendConfig;
     std::string config_error;
@@ -5867,10 +6407,19 @@ bool run_vae_decoder_direct(
     }
     interpreter->resizeTensor(input, {1, 4, 64, 64});
     interpreter->resizeSession(session, 1);
+    int resizeStatus = -1;
+    interpreter->getSessionInfo(session, MNN::Interpreter::RESIZE_STATUS, &resizeStatus);
     input = interpreter->getSessionInput(session, "latent_sample");
-    if (input == nullptr) {
+    if (resizeStatus != 0 || input == nullptr) {
         interpreter->releaseSession(session);
-        error = "VAE latent_sample tensor is missing after resize.";
+        error = "VAE resizeSession failed with status " + std::to_string(resizeStatus) + ".";
+        return false;
+    }
+    const auto resizedShape = mnn_tensor_shape(input);
+    if (resizedShape != std::vector<int>({1, 4, 64, 64})) {
+        interpreter->releaseSession(session);
+        error = "VAE latent_sample shape mismatch after resize: expected [1,4,64,64], got " +
+                tensor_shape_string(resizedShape) + ".";
         return false;
     }
     std::string copyError;
@@ -5887,6 +6436,13 @@ bool run_vae_decoder_direct(
         return false;
     }
     auto* tensor = interpreter->getSessionOutput(session, "sample");
+    if (tensor == nullptr) tensor = interpreter->getSessionOutput(session, "output");
+    if (tensor == nullptr) tensor = interpreter->getSessionOutput(session, nullptr);
+    if (tensor == nullptr) {
+        interpreter->releaseSession(session);
+        error = "VAE decoder output tensor is missing (expected sample/output).";
+        return false;
+    }
     const bool ok = copy_tensor_to_float_vector(tensor, image, error);
     interpreter->releaseSession(session);
     if (!ok) {
@@ -6030,7 +6586,11 @@ bool pndm_step(
 }
 #endif
 
-bool write_vae_image_to_file(const FloatTensorData& image, const std::string& outputPath, std::string& error) {
+bool write_vae_image_to_file(
+        const FloatTensorData& image,
+        const std::string& outputPath,
+        const std::string& pixelRange,
+        std::string& error) {
     if (!validate_float_tensor_contract(image, {1, 3, 512, 512}, "VAE image", error)) {
         return false;
     }
@@ -6043,17 +6603,36 @@ bool write_vae_image_to_file(const FloatTensorData& image, const std::string& ou
     constexpr int height = 512;
     constexpr int width = 512;
     constexpr size_t plane = static_cast<size_t>(height) * static_cast<size_t>(width);
+    const std::string normalizedRange = normalize_mnn_contract_enum(pixelRange);
+    if (normalizedRange != "negative_one_to_one" &&
+        normalizedRange != "zero_to_one" &&
+        normalizedRange != "zero_to_255") {
+        error = "Unsupported VAE output pixel range: " + pixelRange;
+        return false;
+    }
     std::vector<uint8_t> rgb(plane * 3);
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             const size_t idx = static_cast<size_t>(y) * width + x;
             auto toByte = [&](float value) -> uint8_t {
-                const float scaled = std::max(0.0f, std::min(1.0f, value * 0.5f + 0.5f)) * 255.0f;
+                float normalized = 0.0f;
+                if (normalizedRange == "negative_one_to_one") {
+                    normalized = value * 0.5f + 0.5f;
+                } else if (normalizedRange == "zero_to_one") {
+                    normalized = value;
+                } else {
+                    normalized = value / 255.0f;
+                }
+                const float scaled = std::max(0.0f, std::min(1.0f, normalized)) * 255.0f;
                 return static_cast<uint8_t>(std::round(scaled));
             };
-            const uint8_t b = toByte(image.values[idx]);
+            // The SD1.5 VAE contract is NCHW RGB.  Do not treat the first
+            // plane as BGR: that silently swaps red/blue while still
+            // producing a structurally valid PNG and makes visual quality
+            // debugging misleading.
+            const uint8_t r = toByte(image.values[idx]);
             const uint8_t g = toByte(image.values[plane + idx]);
-            const uint8_t r = toByte(image.values[plane * 2 + idx]);
+            const uint8_t b = toByte(image.values[plane * 2 + idx]);
             rgb[idx * 3] = r;
             rgb[idx * 3 + 1] = g;
             rgb[idx * 3 + 2] = b;
@@ -6543,13 +7122,69 @@ json run_mnn_sd15_interpreter_direct(
     if (progressCallback) progressCallback(5);
 
     DirectMnnUnetSession unetSession;
-    if (!unetSession.initialize(
-            root,
-            contract.backend_mode,
-            contract.threads,
-            conditioningBatch,
-            error)) {
-        return json({{"ok", false}, {"error", error}});
+    const auto unetBatchCandidates =
+            mca::mnn::diffusionBatchCandidates(contract.use_cfg);
+    std::vector<std::string> unetBatchErrors;
+    bool unetInitialized = false;
+    for (size_t index = 0; index < unetBatchCandidates.count; ++index) {
+        const int candidate = unetBatchCandidates.values[index];
+        std::string candidateError;
+        if (unetSession.initialize(
+                root,
+                contract.backend_mode,
+                contract.threads,
+                candidate,
+                candidateError)) {
+            unetInitialized = true;
+            break;
+        }
+        unetBatchErrors.push_back(
+                "batch=" + std::to_string(candidate) + ": " + candidateError);
+    }
+    if (!unetInitialized) {
+        std::ostringstream message;
+        message << "UNet could not initialize a compatible CFG batch";
+        for (size_t index = 0; index < unetBatchErrors.size(); ++index) {
+            message << (index == 0 ? ": " : "; ") << unetBatchErrors[index];
+        }
+        const auto messageText = message.str();
+        json failure = {
+                {"ok", false},
+                {"error", messageText},
+                {"backendMode", contract.backend_mode}
+        };
+        // This is intentionally emitted only for a CPU SD1.5 graph whose
+        // real resize/encode attempt returned NOT_SUPPORT.  Callers may then
+        // choose an explicitly permitted OpenCL retry while preserving the
+        // original CPU failure in execution evidence.
+        if (contract.backend_mode == "cpu" &&
+            mnn_sd15_unet_backend_unsupported(unetBatchErrors)) {
+            failure["errorCode"] = "MNN_UNET_BACKEND_UNSUPPORTED";
+            failure["nativeStatus"] = static_cast<int>(MNN::NOT_SUPPORT);
+            failure["fallbackEligible"] = true;
+            failure["unsupportedOps"] = {"GroupNorm", "FmhaV2", "SplitGeLU"};
+            failure["error"] =
+                    "MNN SD1.5 UNet cannot execute on the CPU backend: the graph contains "
+                    "fused operators not registered by this MNN CPU build. " + messageText;
+        }
+        return failure;
+    }
+    bool sequentialCfg =
+            mca::mnn::usesSequentialCfg(contract.use_cfg, unetSession.batch());
+    size_t graphInvocationsPerTimestep =
+            mca::mnn::graphInvocationsPerTimestep(contract.use_cfg, unetSession.batch());
+    bool runtimeBatchFallbackAttempted = false;
+    if (graphInvocationsPerTimestep == 0U) {
+        return json({
+                {"ok", false},
+                {"error", "UNet batch policy selected an invalid execution plan."}
+        });
+    }
+    if (includeDebug) {
+        debug["unetSessionBatch"] = unetSession.batch();
+        debug["cfgExecutionMode"] = sequentialCfg ? "sequential" : "batched";
+        debug["graphInvocationsPerTimestep"] = graphInvocationsPerTimestep;
+        debug["unetBatchFallbacks"] = unetBatchErrors;
     }
 
     mca::diffusion::DiffusionScheduler scheduler(contract.scheduler.config);
@@ -6597,23 +7232,112 @@ json run_mnn_sd15_interpreter_direct(
         if (!scheduler.scale_model_input(latent, i, &modelInput, &error)) {
             return json({{"ok", false}, {"error", "MNN direct scheduler input scaling failed: " + error}});
         }
-        std::vector<float> sampleBatch;
-        sampleBatch.reserve(modelInput.size() * static_cast<size_t>(conditioningBatch));
-        sampleBatch.insert(sampleBatch.end(), modelInput.begin(), modelInput.end());
-        if (contract.use_cfg) {
-            sampleBatch.insert(sampleBatch.end(), modelInput.begin(), modelInput.end());
-        }
-
         FloatTensorData batchedNoise;
-        if (!unetSession.run(
-                sampleBatch,
-                scheduler.timesteps()[i],
-                embeddings,
-                batchedNoise,
-                error)) {
-            return json({{"ok", false}, {"error", error}});
+        bool executeSequentialCfg = sequentialCfg;
+        if (!executeSequentialCfg) {
+            std::vector<float> sampleBatch;
+            sampleBatch.reserve(
+                    modelInput.size() * static_cast<size_t>(conditioningBatch));
+            sampleBatch.insert(sampleBatch.end(), modelInput.begin(), modelInput.end());
+            if (contract.use_cfg) {
+                sampleBatch.insert(sampleBatch.end(), modelInput.begin(), modelInput.end());
+            }
+            if (!unetSession.run(
+                    sampleBatch,
+                    scheduler.timesteps()[i],
+                    embeddings,
+                    batchedNoise,
+                    error)) {
+                if (!mca::mnn::shouldRetryFirstBatchedCfgExecution(
+                        contract.use_cfg,
+                        unetSession.batch(),
+                        i,
+                        runtimeBatchFallbackAttempted)) {
+                    return json({{"ok", false}, {"error", error}});
+                }
+                runtimeBatchFallbackAttempted = true;
+                const std::string batch2ExecutionError = error;
+                std::string batch1InitializationError;
+                if (!unetSession.initialize(
+                        root,
+                        contract.backend_mode,
+                        contract.threads,
+                        1,
+                        batch1InitializationError)) {
+                    return json({
+                            {"ok", false},
+                            {"error", "UNet batch-2 first execution failed: " +
+                                    batch2ExecutionError +
+                                    " Batch-1 compatibility reinitialization failed: " +
+                                    batch1InitializationError}
+                    });
+                }
+                sequentialCfg =
+                        mca::mnn::usesSequentialCfg(contract.use_cfg, unetSession.batch());
+                graphInvocationsPerTimestep =
+                        mca::mnn::graphInvocationsPerTimestep(
+                                contract.use_cfg, unetSession.batch());
+                if (!sequentialCfg || graphInvocationsPerTimestep != 2U) {
+                    return json({
+                            {"ok", false},
+                            {"error", "UNet batch-1 compatibility reinitialization selected an invalid execution plan."}
+                    });
+                }
+                const std::string runtimeFallbackReason =
+                        "batch=2 first execution: " + batch2ExecutionError;
+                unetBatchErrors.push_back(runtimeFallbackReason);
+                if (includeDebug) {
+                    debug["unetSessionBatch"] = unetSession.batch();
+                    debug["cfgExecutionMode"] = "sequential";
+                    debug["graphInvocationsPerTimestep"] = graphInvocationsPerTimestep;
+                    debug["unetBatchFallbacks"] = unetBatchErrors;
+                    debug["unetRuntimeFallbackReason"] = batch2ExecutionError;
+                    debug["unetRuntimeFallbackTimestepIndex"] = i;
+                }
+                error.clear();
+                executeSequentialCfg = true;
+            } else {
+                ++evidence.graph_invocation_count;
+            }
         }
-        ++evidence.graph_invocation_count;
+        if (executeSequentialCfg) {
+            constexpr size_t kEmbeddingBranchElements = 77U * 768U;
+            batchedNoise.shape = {2, 4, 64, 64};
+            batchedNoise.values.clear();
+            batchedNoise.values.reserve(modelInput.size() * 2U);
+            for (size_t branch = 0; branch < 2U; ++branch) {
+                FloatTensorData branchEmbeddings;
+                branchEmbeddings.shape = {1, 77, 768};
+                const auto begin = embeddings.values.begin() +
+                        static_cast<std::ptrdiff_t>(branch * kEmbeddingBranchElements);
+                const auto end = begin + static_cast<std::ptrdiff_t>(kEmbeddingBranchElements);
+                branchEmbeddings.values.assign(begin, end);
+                FloatTensorData branchNoise;
+                if (!unetSession.run(
+                        modelInput,
+                        scheduler.timesteps()[i],
+                        branchEmbeddings,
+                        branchNoise,
+                        error)) {
+                    return json({
+                            {"ok", false},
+                            {"error", "UNet sequential CFG branch " +
+                                    std::to_string(branch) + " failed: " + error}
+                    });
+                }
+                batchedNoise.values.insert(
+                        batchedNoise.values.end(),
+                        branchNoise.values.begin(),
+                        branchNoise.values.end());
+                ++evidence.graph_invocation_count;
+                if (branch == 0U) {
+                    const auto cancelled = mnn_asset_cancel_callback();
+                    if (cancelled()) {
+                        return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}});
+                    }
+                }
+            }
+        }
         evidence.unet_execution_count += branchCount;
         if (!validate_float_tensor_contract(
                 batchedNoise,
@@ -6642,12 +7366,18 @@ json run_mnn_sd15_interpreter_direct(
             return json({{"ok", false}, {"error", "MNN direct scheduler step failed: " + error}});
         }
         latent = std::move(stepResult.previous_sample);
+        if (includeDebug && i + 1U == timetableCount) {
+            debug["finalLatentStats"] = float_vector_stats_json(latent);
+        }
         if (progressCallback) {
             progressCallback(5 + static_cast<int>((i + 1U) * 80U / timetableCount));
         }
     }
+    const size_t expectedGraphInvocationCount =
+            timetableCount * graphInvocationsPerTimestep;
     if (scheduler.completed_step_count() != timetableCount ||
-        evidence.unet_execution_count != contract.scheduler.expected_unet_execution_count) {
+        evidence.unet_execution_count != contract.scheduler.expected_unet_execution_count ||
+        evidence.graph_invocation_count != expectedGraphInvocationCount) {
         return json({
             {"ok", false},
             {"error", "MNN direct execution counts differ from the resolved scheduler contract."}
@@ -6670,10 +7400,14 @@ json run_mnn_sd15_interpreter_direct(
             contract.threads,
             image,
             error)) {
-        return json({{"ok", false}, {"error", error}});
+            return json({{"ok", false}, {"error", error}});
+    }
+    if (includeDebug) {
+        debug["vaeOutputStats"] = float_vector_stats_json(image.values);
+        debug["vaeOutputShape"] = image.shape;
     }
     if (progressCallback) progressCallback(95);
-    if (!write_vae_image_to_file(image, outputPath, error)) {
+    if (!write_vae_image_to_file(image, outputPath, contract.vae_output_range, error)) {
         return json({{"ok", false}, {"error", error}});
     }
     if (textualInversionRequested &&
@@ -6761,38 +7495,150 @@ struct ParsedMnnChatMessages {
     }
 };
 
+// Compose/UI persistence can change presentation-only bytes around a protocol
+// boundary.  Keep this equivalence deliberately narrow: the vendor token-LCP
+// remains the authority for the amount of KV that is actually reusable, while
+// this helper only decides whether two message transcripts are candidates for
+// the same transaction.  In particular, ordinary whitespace inside prose is
+// never folded or removed.
+std::string normalize_mnn_chat_message_for_prefix(
+        std::string text,
+        bool assistantProtocol) {
+    // Normalize CRLF/lone CR first so a transcript copied through a different
+    // transport cannot fail the prefix check merely because of line endings.
+    std::string lineNormalized;
+    lineNormalized.reserve(text.size());
+    for (size_t index = 0; index < text.size(); ++index) {
+        const char value = text[index];
+        if (value == '\r') {
+            if (index + 1 < text.size() && text[index + 1] == '\n') ++index;
+            lineNormalized.push_back('\n');
+        } else {
+            lineNormalized.push_back(value);
+        }
+    }
+    text = std::move(lineNormalized);
+
+    // Stream filtering and Compose persistence may disagree on invisible
+    // Unicode formatting characters emitted around protocol boundaries.
+    static const std::vector<std::string> invisible = {
+            "\xE2\x80\x8B", // U+200B ZERO WIDTH SPACE
+            "\xE2\x80\x8C", // U+200C ZERO WIDTH NON-JOINER
+            "\xE2\x80\x8D", // U+200D ZERO WIDTH JOINER
+            "\xEF\xBB\xBF"  // U+FEFF ZERO WIDTH NO-BREAK SPACE / BOM
+    };
+    for (const auto& marker : invisible) {
+        size_t position = 0;
+        while ((position = text.find(marker, position)) != std::string::npos) {
+            text.erase(position, marker.size());
+        }
+    }
+
+    // A few MNN exports emit an answer protocol tag followed by a newline,
+    // while the UI/API path persists the same visible answer without that
+    // presentation newline ("<answer>\\n7391" vs "<answer>7391").  Treat
+    // whitespace immediately after known protocol labels as equivalent, but
+    // do not generalize this to arbitrary text.
+    if (assistantProtocol) {
+        static const std::vector<std::string> protocolLabels = {
+                "<answer>",
+                "<final>",
+                "<response>",
+                "<|channel|>final",
+                "<|channel>final",
+                "<|channel|>response",
+                "<|channel>response"
+        };
+        // Protocol labels are only special at the beginning of the assistant
+        // payload. A literal label in the middle of prose must remain part of
+        // the user's answer and must not be rewritten.
+        size_t labelStart = 0;
+        while (labelStart < text.size() &&
+                std::isspace(static_cast<unsigned char>(text[labelStart]))) {
+            ++labelStart;
+        }
+        for (const auto& label : protocolLabels) {
+            if (text.compare(labelStart, label.size(), label) != 0) continue;
+            size_t content = labelStart + label.size();
+            while (content < text.size() &&
+                    (text[content] == ' ' || text[content] == '\t' ||
+                     text[content] == '\n')) {
+                ++content;
+            }
+            if (content > labelStart + label.size()) {
+                text.erase(labelStart + label.size(), content - (labelStart + label.size()));
+            }
+            break;
+        }
+    }
+
+    // Trailing line padding is presentation-only at any message boundary and
+    // was already ignored by the old comparator. For assistant payloads, also
+    // ignore leading padding introduced before a protocol label; user/system
+    // leading spaces remain exact.
+    size_t first = 0;
+    if (assistantProtocol) {
+        while (first < text.size() &&
+                std::isspace(static_cast<unsigned char>(text[first]))) {
+            ++first;
+        }
+    }
+    size_t last = text.size();
+    while (last > first &&
+            std::isspace(static_cast<unsigned char>(text[last - 1]))) {
+        --last;
+    }
+    if (first != 0 || last != text.size()) {
+        text = text.substr(first, last - first);
+    }
+    return text;
+}
+
 bool mnn_chat_messages_prefix(
         const std::vector<MNN::Transformer::ChatMessage>& prefix,
         const std::vector<MNN::Transformer::ChatMessage>& messages) {
     if (prefix.size() > messages.size()) return false;
-    const auto normalize = [](std::string text) {
-        // Stream filtering and Compose persistence may disagree only on invisible formatting
-        // characters emitted around protocol boundaries. Treat those as presentation details;
-        // the vendor token-LCP below remains the authority for how much KV is actually reusable.
-        static const std::vector<std::string> invisible = {
-                "\xE2\x80\x8B", // U+200B ZERO WIDTH SPACE
-                "\xE2\x80\x8C", // U+200C ZERO WIDTH NON-JOINER
-                "\xE2\x80\x8D", // U+200D ZERO WIDTH JOINER
-                "\xEF\xBB\xBF"  // U+FEFF ZERO WIDTH NO-BREAK SPACE / BOM
-        };
-        for (const auto& marker : invisible) {
-            size_t position = 0;
-            while ((position = text.find(marker, position)) != std::string::npos) {
-                text.erase(position, marker.size());
-            }
-        }
-        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
-            text.pop_back();
-        }
-        return text;
+    // normalize() includes the historical U+200B ZERO WIDTH SPACE cleanup;
+    // assistant protocol whitespace is handled by the shared helper below.
+    const auto normalize = [](const std::string& text) {
+        return normalize_mnn_chat_message_for_prefix(text, false);
     };
     for (size_t index = 0; index < prefix.size(); ++index) {
-        if (prefix[index].first != messages[index].first ||
-                normalize(prefix[index].second) != normalize(messages[index].second)) {
+        if (prefix[index].first != messages[index].first) return false;
+        const auto prefixText = prefix[index].first == "assistant"
+                ? normalize_mnn_chat_message_for_prefix(prefix[index].second, true)
+                : normalize(prefix[index].second);
+        const auto messageText = messages[index].first == "assistant"
+                ? normalize_mnn_chat_message_for_prefix(messages[index].second, true)
+                : normalize(messages[index].second);
+        if (prefixText != messageText) {
             return false;
         }
     }
     return true;
+}
+
+void restore_mnn_committed_assistant_text_locked(
+        const std::vector<MNN::Transformer::ChatMessage>& committed,
+        std::vector<MNN::Transformer::ChatMessage>& messages) {
+    const size_t count = std::min(committed.size(), messages.size());
+    for (size_t index = 0; index < count; ++index) {
+        // Only assistant turns are rewritten. User/system text must remain
+        // exactly what the caller supplied; token-level LCP can safely trim a
+        // genuine mismatch without mutating user content.
+        if (committed[index].first != "assistant" ||
+                messages[index].first != committed[index].first) {
+            continue;
+        }
+        if (committed[index].second == messages[index].second) continue;
+        if (normalize_mnn_chat_message_for_prefix(committed[index].second, true) ==
+                normalize_mnn_chat_message_for_prefix(messages[index].second, true)) {
+            // The committed value came from live history_tokens. Reusing it,
+            // rather than the normalized display value, keeps the next
+            // ChatMessages render byte/token-identical to the live KV prefix.
+            messages[index].second = committed[index].second;
+        }
+    }
 }
 
 void clear_mnn_prompt_cache_tracking_locked(const std::string& reason) {
@@ -6814,7 +7660,11 @@ void reset_mnn_native_prompt_cache_locked() {
 
 size_t mnn_effective_kv_history_locked() {
     if (g_llm == nullptr || g_llm->getContext() == nullptr) return 0;
-    return static_cast<size_t>(std::max(0, g_llm->getContext()->all_seq_len));
+    // `all_seq_len` is the logical sequence length and can temporarily lead or
+    // lag the backend while OpenCL commits a chunk or applies a lazy rollback.
+    // The vendor's committed KV counter is the only safe basis for cache-hit
+    // accounting and for deciding whether stale history must be cleared.
+    return g_llm->getCurrentHistory();
 }
 
 std::string mnn_prompt_cache_assistant_text_locked() {
@@ -6829,19 +7679,109 @@ std::string mnn_prompt_cache_assistant_text_locked() {
         if (g_llm->is_stop(token)) continue;
         response += g_llm->tokenizer_decode(token);
     }
-    // Protocol stop markers are not necessarily tokenizer stop ids. Keep the
-    // cached transcript aligned with the visible stream by dropping anything
-    // from the first configured marker onward.
-    size_t markerEnd = std::string::npos;
-    for (const auto& marker : g_active_stop_markers) {
-        if (marker.empty()) continue;
-        const auto markerPos = response.find(marker);
-        if (markerPos != std::string::npos) {
-            markerEnd = std::min(markerEnd, markerPos);
-        }
+    // The stream path filters protocol framing before exposing text to Kotlin.
+    // Re-run that exact filter on the decoded token transcript before storing
+    // the assistant turn.  OpenCL/Qwen exports can emit a plain `user` line
+    // after a valid answer instead of a tokenizer EOS; committing the raw
+    // suffix makes the next ChatMessages prefix differ from what the caller
+    // sends back and turns every follow-up into a full prefill.  A temporary
+    // filter is intentional: the live stream filter is already stopped and
+    // must not be mutated while its terminal chunk is being drained.
+    mca::mnn::StreamProtocolFilterState cacheFilter;
+    cacheFilter.reset(g_active_stop_markers);
+    auto filtered = mca::mnn::filter_stream_protocol(
+            cacheFilter,
+            std::move(response),
+            true);
+    return std::move(filtered.visible);
+}
+
+bool mnn_role_protocol_stop_reason(const std::string& reason) {
+    return reason == "unexpected_role_token" ||
+            reason == "plain_role_header_after_visible_text" ||
+            reason == "role_header_after_visible_text" ||
+            reason == "xml_response_end" ||
+            reason == "xml_response_start_after_visible_text";
+}
+
+void trim_mnn_protocol_suffix_from_live_history_locked() {
+    if (!mnn_role_protocol_stop_reason(g_generation_stop_reason) ||
+            g_llm == nullptr || g_llm->getContext() == nullptr) {
+        return;
     }
-    if (markerEnd != std::string::npos) response.resize(markerEnd);
-    return response;
+    const auto* context = g_llm->getContext();
+    const size_t generationStart = std::min(
+            g_mnn_prompt_cache.generation_history_start,
+            context->history_tokens.size());
+    if (generationStart >= context->history_tokens.size()) return;
+
+    // Locate the first byte of the role marker in the decoded completion and
+    // map it back to its owning token.  This handles a marker split over
+    // multiple stream writes/tokens while preserving all valid answer tokens.
+    std::string decodedCompletion;
+    std::vector<std::pair<size_t, size_t>> tokenRanges;
+    tokenRanges.reserve(context->history_tokens.size() - generationStart);
+    mca::mnn::StreamProtocolFilterState filter;
+    filter.reset(g_active_stop_markers);
+    for (size_t index = generationStart; index < context->history_tokens.size(); ++index) {
+        const auto piece = g_llm->tokenizer_decode(context->history_tokens[index]);
+        const size_t begin = decodedCompletion.size();
+        decodedCompletion.append(piece);
+        tokenRanges.emplace_back(begin, decodedCompletion.size());
+        const auto result = mca::mnn::filter_stream_protocol(filter, piece, false);
+        if (!result.stopped || filter.stop_reason != g_generation_stop_reason) continue;
+
+        size_t markerPosition = std::string::npos;
+        if (g_generation_stop_reason == "plain_role_header_after_visible_text") {
+            markerPosition = mca::mnn::detail::first_plain_role_line(decodedCompletion).position;
+        } else if (g_generation_stop_reason == "unexpected_role_token") {
+            markerPosition = mca::mnn::detail::first_terminal_marker(
+                    decodedCompletion,
+                    mca::mnn::unsafe_role_tokens()).position;
+        } else if (g_generation_stop_reason == "xml_response_end") {
+            markerPosition = filter.stop_marker_offset;
+        } else if (g_generation_stop_reason == "xml_response_start_after_visible_text") {
+            markerPosition = mca::mnn::detail::first_terminal_marker(
+                    decodedCompletion,
+                    mca::mnn::xml_protocol_start_markers()).position;
+        } else {
+            markerPosition = mca::mnn::detail::first_role_header(decodedCompletion).position;
+        }
+
+        size_t trimToken = index;
+        if (markerPosition != std::string::npos) {
+            for (size_t rangeIndex = 0; rangeIndex < tokenRanges.size(); ++rangeIndex) {
+                const auto [rangeBegin, rangeEnd] = tokenRanges[rangeIndex];
+                if (markerPosition >= rangeBegin && markerPosition < rangeEnd) {
+                    trimToken = generationStart + rangeIndex;
+                    break;
+                }
+            }
+        }
+        // History is token-granular.  If the protocol marker shares a token
+        // with visible answer text (a common tokenizer merge such as
+        // "answer</response>"), erasing that token would also erase the last
+        // visible fragment from the committed transcript.  Keep the token in
+        // live KV; the next prompt-cache LCP pass will trim the protocol
+        // suffix while preserving the complete caller-provided answer.
+        bool markerStartsAtTokenBoundary = markerPosition == std::string::npos;
+        if (markerPosition != std::string::npos && trimToken < tokenRanges.size() + generationStart) {
+            const auto rangeBegin = tokenRanges[trimToken - generationStart].first;
+            markerStartsAtTokenBoundary = markerPosition == rangeBegin;
+        }
+        if (markerStartsAtTokenBoundary &&
+                trimToken > generationStart && trimToken < g_llm->getCurrentHistory()) {
+            // eraseHistory() schedules the backend removal and also truncates
+            // history_tokens for a plain suffix removal. The next prefill then
+            // commits the exact visible-prefix state before token-LCP reuse.
+            g_llm->eraseHistory(trimToken, 0);
+            auto* mutableContext = const_cast<MNN::Transformer::LlmContext*>(context);
+            if (mutableContext->history_tokens.size() > trimToken) {
+                mutableContext->history_tokens.resize(trimToken);
+            }
+        }
+        return;
+    }
 }
 
 void mark_mnn_prompt_cache_disabled_locked(bool multimodal, const std::string& reason) {
@@ -6854,7 +7794,7 @@ void mark_mnn_prompt_cache_disabled_locked(bool multimodal, const std::string& r
 }
 
 void prepare_mnn_text_prompt_cache_locked(
-        const std::vector<MNN::Transformer::ChatMessage>& messages) {
+        std::vector<MNN::Transformer::ChatMessage>& messages) {
     if (g_mnn_prompt_cache.reset_before_next_text) {
         reset_mnn_native_prompt_cache_locked();
         g_mnn_prompt_cache.committed_messages.clear();
@@ -6862,9 +7802,26 @@ void prepare_mnn_text_prompt_cache_locked(
         g_mnn_prompt_cache.state = "cleared_after_invalidation";
     }
 
-    const bool hasCommittedTranscript = !g_mnn_prompt_cache.committed_messages.empty();
-    const bool extendsCommittedTranscript = hasCommittedTranscript &&
+    bool hasCommittedTranscript = !g_mnn_prompt_cache.committed_messages.empty();
+    bool extendsCommittedTranscript = hasCommittedTranscript &&
             mnn_chat_messages_prefix(g_mnn_prompt_cache.committed_messages, messages);
+    // A caller may legitimately start a new conversation on the same loaded
+    // MNN session.  Keeping the previous committed transcript in that case
+    // makes the vendor's live KV look reusable even though the new request is
+    // not its prefix; the next decode can then stop on a stale role marker.
+    // Clear only this mismatched session.  Matching prefixes retain the normal
+    // prompt-cache path and its longest-common-prefix reuse.
+    if (hasCommittedTranscript && !extendsCommittedTranscript) {
+        reset_mnn_native_prompt_cache_locked();
+        g_mnn_prompt_cache.committed_messages.clear();
+        hasCommittedTranscript = false;
+        extendsCommittedTranscript = false;
+    }
+    if (extendsCommittedTranscript) {
+        restore_mnn_committed_assistant_text_locked(
+                g_mnn_prompt_cache.committed_messages,
+                messages);
+    }
     const size_t currentHistory = mnn_effective_kv_history_locked();
     // A live KV sequence without a matching transcript is never eligible for
     // reuse. This can occur after an interrupted multimodal request or an
@@ -6884,6 +7841,7 @@ void prepare_mnn_text_prompt_cache_locked(
     g_mnn_prompt_cache.prefilled_tokens = 0;
     g_mnn_prompt_cache.reused_tokens = 0;
     g_mnn_prompt_cache.request_active = true;
+    g_mnn_prompt_cache.completion_tokens_before_rollback = -1;
     g_mnn_prompt_cache.enabled = true;
     g_mnn_prompt_cache.hit = false;
     g_mnn_prompt_cache.committed = false;
@@ -6896,8 +7854,26 @@ void prepare_mnn_text_prompt_cache_locked(
         // Align the vendor's rendered-text eligibility guard with the persisted transcript.
         // Its live token LCP still trims at the first real token mismatch, so this cannot reuse
         // stale KV when normalization removed a presentation-only character.
-        g_llm->syncPromptCache(messages);
+        // Keep the cached text anchored to the last committed turn.  `messages`
+        // already contains the new user turn and must remain the pending delta;
+        // syncing it here would make the vendor believe that delta was committed
+        // before prefill, defeating the next-turn LCP calculation.
+        g_llm->syncPromptCache(g_mnn_prompt_cache.committed_messages);
     }
+}
+
+template <typename T, typename = void>
+struct MnnHasLogBuffer : std::false_type {};
+template <typename T>
+struct MnnHasLogBuffer<T, std::void_t<decltype(std::declval<const T&>().log_buffer)>> : std::true_type {};
+// MNN 3.6.x captures Llm errors into context->log_buffer; older runtimes lack it.
+template <typename ContextT>
+static std::string mnn_context_log_snapshot(const ContextT* context) {
+    if (context == nullptr) return "";
+    if constexpr (MnnHasLogBuffer<ContextT>::value) {
+        return context->log_buffer.substr(0, 1536);
+    }
+    return "";
 }
 
 bool capture_mnn_text_prefill_locked(std::string& error) {
@@ -6911,6 +7887,11 @@ bool capture_mnn_text_prefill_locked(std::string& error) {
             context->status == LlmStatus::TIMEOUT ||
             context->status == LlmStatus::NOT_LOADED) {
         error = "MNN text prefill failed before decode.";
+        const std::string mnnLog = mnn_context_log_snapshot(context);
+        if (!mnnLog.empty()) {
+            error += " MNN log: " + mnnLog;
+        }
+        error += " 当前 MNN 模型与运行时可能不兼容或模型文件不完整，请重新导出模型或改用 GGUF 兼容引擎。";
         return false;
     }
     g_mnn_prompt_cache.token_history_after_prefill = context->history_tokens.size();
@@ -6948,6 +7929,7 @@ void commit_mnn_text_prompt_cache_locked(const std::string& reason) {
     if (!g_mnn_prompt_cache.request_active || !g_mnn_prompt_cache.enabled || g_llm == nullptr) {
         return;
     }
+    trim_mnn_protocol_suffix_from_live_history_locked();
     auto committed = g_mnn_prompt_cache.request_messages;
     const auto response = mnn_prompt_cache_assistant_text_locked();
     if (!response.empty()) {
@@ -6960,7 +7942,14 @@ void commit_mnn_text_prompt_cache_locked(const std::string& reason) {
     g_mnn_prompt_cache.committed = true;
     g_mnn_prompt_cache.rolled_back = false;
     g_mnn_prompt_cache.state = g_mnn_prompt_cache.hit ? "committed_hit" : "committed_miss";
-    g_mnn_prompt_cache.reason = reason;
+    // Keep cache diagnostics about cache eligibility, while the native
+    // generation stop reason remains available separately in
+    // `generationStopReason`.  In particular, a successful hit that ended
+    // on a plain role line must not be reported as a cache failure merely
+    // because that role line was the model's protocol terminator.
+    g_mnn_prompt_cache.reason = g_mnn_prompt_cache.hit
+            ? "native_history_retained"
+            : (g_mnn_prompt_cache.prefix_extended ? "prefix_not_reused" : reason);
 }
 
 void rollback_mnn_text_prompt_cache_locked(
@@ -6984,6 +7973,10 @@ void rollback_mnn_text_prompt_cache_locked(
         }
     }
     if (!restored) {
+        // reset clears live history and gen_seq_len; retain completed request
+        // accounting so rejected output is not reported as zero generated tokens.
+        g_mnn_prompt_cache.completion_tokens_before_rollback = g_llm != nullptr && g_llm->getContext() != nullptr
+                ? g_llm->getContext()->gen_seq_len : 0;
         reset_mnn_native_prompt_cache_locked();
         g_mnn_prompt_cache.committed_messages.clear();
         g_mnn_prompt_cache.reset_before_next_text = false;
@@ -6992,7 +7985,6 @@ void rollback_mnn_text_prompt_cache_locked(
     g_mnn_prompt_cache.request_active = false;
     g_mnn_prompt_cache.committed = false;
     g_mnn_prompt_cache.rolled_back = true;
-    g_mnn_prompt_cache.hit = false;
     g_mnn_prompt_cache.state = restored ? "rolled_back" : "cleared_after_rollback";
     g_mnn_prompt_cache.reason = reason;
 }
@@ -7008,6 +8000,10 @@ void settle_mnn_text_prompt_cache_locked(const std::string& reason) {
     if (status == LlmStatus::USER_CANCEL || status == LlmStatus::INTERNAL_ERROR ||
             status == LlmStatus::TIMEOUT || status == LlmStatus::NOT_LOADED) {
         rollback_mnn_text_prompt_cache_locked(reason, true);
+        return;
+    }
+    if (!mca::mnn::detail::has_non_whitespace(mnn_prompt_cache_assistant_text_locked())) {
+        rollback_mnn_text_prompt_cache_locked("empty_visible_response", true);
         return;
     }
     commit_mnn_text_prompt_cache_locked(reason);
@@ -7220,9 +8216,27 @@ json build_mnn_config(const std::string& config_path, const std::string& params_
     json config = json::object();
     const int n_ctx = std::max(1, opt_int(params, "n_ctx", 8192));
     const int n_threads = std::max(1, opt_int(params, "n_threads", 4));
-    config["backend_type"] = "cpu";
+    // Preserve the resolved MNN transport.  The JNI class is shared by CPU
+    // and OpenCL runners, so hard-coding CPU here causes an OpenCL request to
+    // load on CPU and then fail during prefill with the generic -203 code.
+    std::string backendType = params.value("backend_type", std::string());
+    if (backendType.empty()) backendType = params.value("backendType", std::string());
+    if (backendType.empty()) backendType = params.value("backend", std::string());
+    if (backendType.empty()) backendType = params.value("backendMode", std::string());
+    if (backendType.empty()) backendType = params.value("backend_mode", std::string());
+    const auto advancedForBackend = advanced_json_from_params(params);
+    if (backendType.empty()) backendType = advancedForBackend.value("backend_type", std::string());
+    if (backendType.empty()) backendType = advancedForBackend.value("backendType", std::string());
+    if (backendType.empty()) backendType = advancedForBackend.value("backend", std::string());
+    backendType = normalize_mnn_contract_enum(std::move(backendType));
+    if (backendType == "gpu" || backendType == "open_cl") backendType = "opencl";
+    if (backendType != "opencl") backendType = "cpu";
+    config["backend_type"] = backendType;
     config["thread_num"] = n_threads;
-    config["precision"] = "low";
+    // CPU text inference must avoid the low-precision Arm kernels that can
+    // yield non-finite logits on converted Qwen packages. OpenCL retains the
+    // established low-precision path.
+    config["precision"] = backendType == "cpu" ? "high" : "low";
     config["memory"] = "low";
     config["power"] = "normal";
     config["use_mmap"] = opt_bool(params, "mmap", true);
@@ -7257,22 +8271,6 @@ json build_mnn_config(const std::string& config_path, const std::string& params_
     }
     if (!for_load) {
         config["max_new_tokens"] = std::max(1, opt_int(params, "n_predict", 512));
-        config["temperature"] = params.value("temperature", 0.6);
-        // MNN creates its sampler from the runtime config. Always send a
-        // numeric seed: -1 restores entropy for callers that did not request
-        // determinism, while a non-negative value makes the request repeatable.
-        config["seed"] = std::max(-1, opt_int(params, "seed", -1));
-        // MNN's bundled configs use camelCase (`topK` / `topP`) while MCA's
-        // public generation parameters use OpenAI-style snake_case. Preserve
-        // both spellings so set_config reaches every MNN sampler variant.
-        const int top_k = opt_int(params, "top_k", opt_int(params, "topK", 20));
-        const double top_p = params.contains("top_p")
-                ? params.value("top_p", 0.95)
-                : params.value("topP", 0.95);
-        config["top_k"] = top_k;
-        config["topK"] = top_k;
-        config["top_p"] = top_p;
-        config["topP"] = top_p;
     }
     const auto advanced = advanced_json_from_params(params);
     const bool advancedHasNCtx = advanced.contains("n_ctx");
@@ -7282,6 +8280,19 @@ json build_mnn_config(const std::string& config_path, const std::string& params_
     const bool advancedHasNPredict = advanced.contains("n_predict");
     const bool advancedHasMaxNewTokens = advanced.contains("max_new_tokens");
     merge_json_object(config, advanced);
+    // Advanced parameters may use any of the public backend spellings.  Keep
+    // one canonical value after merging so load and beginCompletion compare
+    // the same signature and OpenCL is never reported as an unknown backend.
+    std::string mergedBackend = config.value("backend_type", std::string());
+    if (mergedBackend.empty()) mergedBackend = config.value("backendType", std::string());
+    if (mergedBackend.empty()) mergedBackend = config.value("backend", std::string());
+    if (mergedBackend.empty()) mergedBackend = config.value("backendMode", std::string());
+    if (mergedBackend.empty()) mergedBackend = config.value("backend_mode", std::string());
+    mergedBackend = normalize_mnn_contract_enum(std::move(mergedBackend));
+    if (mergedBackend == "gpu" || mergedBackend == "open_cl") mergedBackend = "opencl";
+    if (mergedBackend != "opencl") mergedBackend = "cpu";
+    config["backend_type"] = mergedBackend;
+    mca::mnn::applyCpuCacheSafety(config);
     if (advancedHasNCtx && !advancedHasMaxAllTokens) {
         config["max_all_tokens"] = opt_int(config, "n_ctx", n_ctx);
     } else if (advancedHasMaxAllTokens && !advancedHasNCtx) {
@@ -7331,34 +8342,7 @@ json build_mnn_config(const std::string& config_path, const std::string& params_
     config["thread_num"] = std::max(1, opt_int(config, "thread_num", n_threads));
     if (!for_load) {
         config["max_new_tokens"] = std::max(1, opt_int(config, "max_new_tokens", 512));
-        config["seed"] = std::max(-1, opt_int(config, "seed", opt_int(params, "seed", -1)));
-        const double temperature = config.value("temperature", 0.6);
-        const int top_k = opt_int(config, "top_k", opt_int(config, "topK", 20));
-        const double top_p = config.contains("top_p")
-                ? config.value("top_p", 0.95)
-                : config.value("topP", 0.95);
-        config["top_k"] = top_k;
-        config["topK"] = top_k;
-        config["top_p"] = top_p;
-        config["topP"] = top_p;
-        // MNN's sampler may still draw from top-k when temperature is zero. Product
-        // callers expect temperature=0 to mean greedy decoding; leaving top_k=20 made
-        // identical cold runs intermittently select EOP as the first token. Enforce
-        // deterministic greedy semantics after advanced overrides are merged.
-        if (!std::isfinite(temperature) || temperature <= 0.0) {
-            config["temperature"] = 0.0;
-            config["top_k"] = 1;
-            config["topK"] = 1;
-            config["top_p"] = 1.0;
-            config["topP"] = 1.0;
-            // MNN's temperature sampler divides by temperature, so a zero
-            // temperature must select its explicit greedy pipeline instead.
-            config["sampler_type"] = "greedy";
-        } else {
-            // A prior greedy request must not pin later creative requests to
-            // greedy mode in the persistent native LLM instance.
-            config["sampler_type"] = "mixed";
-        }
+        mca::mnn::applySamplingConfig(config, params, advanced);
     }
     return config;
 }
@@ -7371,6 +8355,7 @@ void destroy_llm_locked() {
         g_llm = nullptr;
     }
     g_mnn_model_type.clear();
+    g_mnn_backend_type = "cpu";
     g_multimodal_system_prompt_suppressed = false;
     g_multimodal_history_suppressed = false;
     g_sync_stepping = true;
@@ -7383,12 +8368,14 @@ void destroy_llm_locked() {
 std::vector<std::string> mnn_load_signature_differences(
         const json& loaded,
         const json& requested) {
-    static const std::array<const char*, 9> kLoadBoundFields = {
+    static const std::array<const char*, 11> kLoadBoundFields = {
             "backend_type",
             "precision",
             "memory",
             "power",
             "use_mmap",
+            "use_cached_mmap",
+            "tmp_path",
             "kvcache_mmap",
             "max_all_tokens",
             "n_ctx",
@@ -7511,6 +8498,17 @@ std::string stats_json_locked() {
     double prefill_tps = 0.0;
     double effective_prompt_tps = 0.0;
     double decode_tps = 0.0;
+    size_t logits_count = 0;
+    size_t logits_finite_count = 0;
+    size_t logits_non_finite_count = 0;
+    float logits_min = 0.0f;
+    float logits_max = 0.0f;
+    bool logits_all_finite = false;
+    std::string logits_diagnostics = "null";
+    std::string first_logits_diagnostics = "null";
+    std::string prompt_cache_reuse = "null";
+    std::string sampler_config = "null";
+    std::string effective_config;
 #if MCA_WITH_MNN_LLM
     if (g_llm != nullptr && g_llm->getContext() != nullptr) {
         const auto* context = g_llm->getContext();
@@ -7521,7 +8519,8 @@ std::string stats_json_locked() {
                 ? g_mnn_prompt_cache.prefilled_tokens
                 : context->prompt_len;
         prefill_tokens = computed_prefill_tokens;
-        completion_tokens = context->gen_seq_len;
+        completion_tokens = g_mnn_prompt_cache.completion_tokens_before_rollback >= 0
+                ? g_mnn_prompt_cache.completion_tokens_before_rollback : context->gen_seq_len;
         prefill_ms = context->prefill_us / 1000;
         decode_ms = context->decode_us / 1000;
         if (prefill_ms > 0 && computed_prefill_tokens > 0) {
@@ -7536,11 +8535,25 @@ std::string stats_json_locked() {
         if (g_generation_started_at_ms > 0 && g_first_chunk_at_ms > 0) {
             ttft_ms = g_first_chunk_at_ms - g_generation_started_at_ms;
         }
+        logits_count = context->logits_count;
+        logits_finite_count = context->logits_finite_count;
+        logits_non_finite_count = context->logits_non_finite_count;
+        logits_min = context->logits_min;
+        logits_max = context->logits_max;
+        logits_all_finite = context->logits_all_finite;
+        if (!context->logits_diagnostics_json.empty()) logits_diagnostics = context->logits_diagnostics_json;
+        if (!context->first_logits_diagnostics_json.empty()) first_logits_diagnostics = context->first_logits_diagnostics_json;
+        if (!context->prompt_cache_diagnostics_json.empty()) prompt_cache_reuse = context->prompt_cache_diagnostics_json;
+        if (!context->sampler_config_json.empty()) sampler_config = context->sampler_config_json;
+        effective_config = g_llm->dump_config();
     }
 #endif
+    const std::string backend_type = g_mnn_backend_type.empty() ? "cpu" : g_mnn_backend_type;
+    const bool opencl_backend = backend_type == "opencl";
+    const std::string backend_id = std::string("mnn_") + backend_type;
     std::ostringstream out;
     out << "{"
-        << "\"backend\":\"mnn_cpu\","
+        << "\"backend\":\"" << escape_json(backend_id) << "\","
         << "\"loaded\":" << (g_loaded ? "true" : "false") << ","
         << "\"runnerReady\":" << (g_runner_ready ? "true" : "false") << ","
         << "\"loadGeneration\":" << g_load_generation << ","
@@ -7568,6 +8581,10 @@ std::string stats_json_locked() {
         << "\"hit\":" << (g_mnn_prompt_cache.hit ? "true" : "false") << ","
         << "\"reusedTokens\":" << g_mnn_prompt_cache.reused_tokens << ","
         << "\"prefillTokens\":" << g_mnn_prompt_cache.prefilled_tokens << ","
+        << "\"kvHistoryBefore\":" << g_mnn_prompt_cache.kv_history_before << ","
+        << "\"tokenHistoryBefore\":" << g_mnn_prompt_cache.token_history_before << ","
+        << "\"tokenHistoryAfterPrefill\":"
+        << g_mnn_prompt_cache.token_history_after_prefill << ","
         << "\"prefixExtended\":" << (g_mnn_prompt_cache.prefix_extended ? "true" : "false") << ","
         << "\"committed\":" << (g_mnn_prompt_cache.committed ? "true" : "false") << ","
         << "\"multimodalDisabled\":"
@@ -7580,6 +8597,10 @@ std::string stats_json_locked() {
         << "\"promptCacheHit\":" << (g_mnn_prompt_cache.hit ? "true" : "false") << ","
         << "\"promptCacheReusedTokens\":" << g_mnn_prompt_cache.reused_tokens << ","
         << "\"promptCachePrefillTokens\":" << g_mnn_prompt_cache.prefilled_tokens << ","
+        << "\"promptCacheKvHistoryBefore\":" << g_mnn_prompt_cache.kv_history_before << ","
+        << "\"promptCacheTokenHistoryBefore\":" << g_mnn_prompt_cache.token_history_before << ","
+        << "\"promptCacheTokenHistoryAfterPrefill\":"
+        << g_mnn_prompt_cache.token_history_after_prefill << ","
         << "\"promptCacheState\":\"" << escape_json(g_mnn_prompt_cache.state) << "\","
         << "\"promptCacheReason\":\"" << escape_json(g_mnn_prompt_cache.reason) << "\","
         << "\"cacheReuse\":{"
@@ -7590,11 +8611,16 @@ std::string stats_json_locked() {
         << "\"reason\":\"" << escape_json(g_mnn_prompt_cache.reason) << "\"},"
 #else
         << "\"promptCache\":{\"enabled\":false,\"hit\":false,\"reusedTokens\":0,"
-        << "\"prefillTokens\":0,\"state\":\"unavailable\",\"reason\":\"mnn_llm_not_linked\"},"
+        << "\"prefillTokens\":0,\"kvHistoryBefore\":0,\"tokenHistoryBefore\":0,"
+        << "\"tokenHistoryAfterPrefill\":0,\"state\":\"unavailable\","
+        << "\"reason\":\"mnn_llm_not_linked\"},"
         << "\"promptCacheEnabled\":false,"
         << "\"promptCacheHit\":false,"
         << "\"promptCacheReusedTokens\":0,"
         << "\"promptCachePrefillTokens\":0,"
+        << "\"promptCacheKvHistoryBefore\":0,"
+        << "\"promptCacheTokenHistoryBefore\":0,"
+        << "\"promptCacheTokenHistoryAfterPrefill\":0,"
         << "\"promptCacheState\":\"unavailable\","
         << "\"promptCacheReason\":\"mnn_llm_not_linked\","
         << "\"cacheReuse\":{\"hit\":false,\"reusedTokens\":0,\"hits\":0,\"misses\":0,"
@@ -7607,6 +8633,21 @@ std::string stats_json_locked() {
         << "\"effectivePromptTps\":" << effective_prompt_tps << ","
         << "\"decodeMs\":" << decode_ms << ","
         << "\"decodeTps\":" << decode_tps << ","
+        << "\"logitsCount\":" << logits_count << ","
+        << "\"logitsFiniteCount\":" << logits_finite_count << ","
+        << "\"logitsNonFiniteCount\":" << logits_non_finite_count << ","
+        << "\"logitsAllFinite\":" << (logits_all_finite ? "true" : "false") << ","
+        << "\"logitsDiagnostics\":" << logits_diagnostics << ","
+        << "\"firstLogits\":" << first_logits_diagnostics << ","
+        << "\"samplerConfig\":" << sampler_config << ","
+        << "\"effectiveConfigJson\":\"" << escape_json(effective_config) << "\","
+        << "\"logitsMin\":";
+    if (logits_finite_count == 0) out << "null";
+    else out << logits_min;
+    out << ",\"logitsMax\":";
+    if (logits_finite_count == 0) out << "null";
+    else out << logits_max;
+    out << ","
         << "\"generationActive\":" << (g_generation_active ? "true" : "false") << ","
         << "\"generatedSteps\":" << g_generated_steps << ","
         << "\"streamedBytes\":" << g_streamed_bytes << ","
@@ -7615,6 +8656,11 @@ std::string stats_json_locked() {
         << "\"mnnDebugTraceTruncated\":" << (g_mnn_debug_trace_truncated ? "true" : "false") << ","
         << "\"mnnDebugRawOutput\":\""
         << escape_json(sanitize_utf8_for_diagnostics(g_mnn_debug_raw_output)) << "\","
+        << "\"mnnDebugRawOutputHex\":\"" << mnn_debug_raw_output_hex() << "\","
+        << "\"mnnDebugGeneratedTokenIds\":" << mnn_debug_generated_token_ids_json() << ","
+        << "\"promptCacheReuse\":" << prompt_cache_reuse << ","
+        << "\"mnnDebugTokenIdsTruncated\":"
+        << (g_mnn_debug_token_ids_truncated ? "true" : "false") << ","
         << "\"mnnDebugPromptTruncated\":" << (g_mnn_debug_prompt_truncated ? "true" : "false") << ","
         << "\"mnnDebugPrompt\":\""
         << escape_json(sanitize_utf8_for_diagnostics(g_mnn_debug_prompt)) << "\","
@@ -7625,7 +8671,8 @@ std::string stats_json_locked() {
         << "\"maxNewTokens\":" << g_max_new_tokens << ","
         << "\"loadedConfigJson\":\"" << escape_json(g_loaded_config_json) << "\","
         << "\"lastConfigJson\":\"" << escape_json(g_last_config_json) << "\","
-        << "\"backendDevices\":[\"cpu\"],"
+        << "\"backendType\":\"" << escape_json(backend_type) << "\","
+        << "\"backendDevices\":[\"" << (opencl_backend ? "opencl" : "cpu") << "\"],"
         << "\"lastError\":\"" << escape_json(g_last_error) << "\""
         << "}";
     return out.str();
@@ -7701,9 +8748,9 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_initBackends(
     g_native_lib_dir = jstring_to_std(env, nativeLibDir);
 #if MCA_WITH_MNN_LLM
     set_error("");
-    __android_log_print(ANDROID_LOG_INFO, "mca_mnn_native", "MNN CPU runner ready.");
+    __android_log_print(ANDROID_LOG_INFO, "mca_mnn_native", "MNN LLM runner ready (CPU/OpenCL selected by runtime profile).");
 #else
-    set_error("MNN CPU runner adapter loaded, but official MNN-LLM runtime is not linked in this build.");
+    set_error("MNN runner adapter loaded, but official MNN-LLM runtime is not linked in this build.");
 #endif
 }
 
@@ -7725,6 +8772,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_loadModel(
     reset_generation_state_locked();
     g_original_model_path = normalize_mnn_model_path(jstring_to_std(env, configPath));
     g_model_path = resolve_mnn_config_path(g_original_model_path);
+    g_mnn_backend_type = "cpu";
     g_vision_ready = false;
     g_visual_model_path.clear();
     reset_active_stop_markers_locked();
@@ -7745,6 +8793,20 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_loadModel(
             set_error("MNN config path does not exist: " + g_model_path);
             return kMnnLoadFailed;
         }
+        if (const auto preflightFailure = mnn_chat_bundle_preflight_message(g_model_path);
+                !preflightFailure.empty()) {
+            set_error("MNN bundle preflight failed: " + preflightFailure);
+            return kMnnLoadFailed;
+        }
+        const auto preparedConfig = read_json_file_or_empty(g_model_path);
+        if (preparedConfig.is_object() &&
+                preparedConfig.value("is_visual", false) &&
+                !g_vision_ready) {
+            set_error(
+                    "MNN model bundle declares a visual component but is missing the visual model file "
+                    "(visual.mnn). Load a complete multimodal package before loading this model.");
+            return kMnnLoadFailed;
+        }
         g_model_stop_markers = mnn_model_stop_markers(g_model_path);
         g_active_stop_markers = g_model_stop_markers;
         destroy_llm_locked();
@@ -7754,6 +8816,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_loadModel(
             return kMnnLoadFailed;
         }
         const auto config = build_mnn_config(g_model_path, params, true);
+        g_mnn_backend_type = config.value("backend_type", std::string("cpu"));
         g_max_all_tokens = std::max(1, config.value("max_all_tokens", 8192));
         g_n_threads = std::max(1, config.value("thread_num", 4));
         g_loaded_config_json = config.dump();
@@ -7761,7 +8824,11 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_loadModel(
         g_llm->set_config(g_last_config_json);
         const bool ok = g_llm->load();
         if (!ok) {
-            set_error("MNN load() failed. Check package components, memory headroom, and CPU backend compatibility.");
+            const std::string mnnLog = mnn_context_log_snapshot(g_llm->getContext());
+            set_error(
+                    "MNN load() failed for backend '" + g_mnn_backend_type +
+                    "'. Check package components, memory headroom, and backend compatibility." +
+                    (mnnLog.empty() ? std::string() : " MNN log: " + mnnLog));
             g_vision_ready = false;
             destroy_llm_locked();
             return kMnnLoadFailed;
@@ -7855,7 +8922,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
         const auto params = jstring_to_std(env, paramsJson);
         const auto parsed_params = json::parse(params, nullptr, false);
         configure_mnn_debug_trace_locked(parsed_params);
-        const auto parsed = parse_chat_messages(jstring_to_std(env, messagesJson));
+        auto parsed = parse_chat_messages(jstring_to_std(env, messagesJson));
         requestHasMedia = parsed.hasMediaInputs();
         auto config = build_mnn_config(g_model_path, params, false);
         const auto loaded_config = json::parse(g_loaded_config_json, nullptr, false);
@@ -7914,7 +8981,35 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
                     "multimodal_request_requires_fresh_visual_prefill");
         }
         g_llm->set_config(g_last_config_json);
-        const bool completedSynchronously = begin_mnn_response(parsed);
+        bool completedSynchronously = false;
+        try {
+            completedSynchronously = begin_mnn_response(parsed);
+        } catch (const std::exception& firstError) {
+            // A stale MNN prompt/KV transaction can make the first prefill
+            // fail with the generic -203 bridge code.  Text requests are
+            // retryable because no visual executor state is involved: clear
+            // only the cached transaction, reset the decoder, and perform one
+            // clean prefill.  Visual requests remain fail-closed and are not
+            // retried here because resetting Omni can invalidate image VARPs.
+            if (!textOnlyRequest || g_llm == nullptr) {
+                throw;
+            }
+            const std::string firstMessage = firstError.what();
+            rollback_mnn_text_prompt_cache_locked("prefill_retry_after_cache_error", true);
+            g_llm->reset();
+            g_pending_chunk.clear();
+            g_pending_utf8_tail.clear();
+            g_stream_buffer = std::make_unique<MnnStreamBuffer>();
+            g_output_stream = std::make_unique<std::ostream>(g_stream_buffer.get());
+            g_llm->set_config(g_last_config_json);
+            try {
+                completedSynchronously = begin_mnn_response(parsed);
+            } catch (const std::exception& retryError) {
+                throw std::runtime_error(
+                        "MNN text prefill failed after one clean KV retry. first=" +
+                        firstMessage + "; retry=" + retryError.what());
+            }
+        }
         g_sync_stepping = !completedSynchronously;
         if (completedSynchronously) {
             // Leave the buffered native output untouched here. The first
@@ -7958,7 +9053,12 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
         g_generation_stop_reason = detail.find("mnn_multimodal_prefill_failed") != std::string::npos
                 ? "prefill_failed"
                 : "begin_failed";
-        set_error(std::string("MNN beginCompletion exception: ") + detail);
+        const std::string backend = g_mnn_backend_type.empty() ? "cpu" : g_mnn_backend_type;
+        const std::string contextLog = mnn_context_log_snapshot(
+                g_llm == nullptr ? nullptr : g_llm->getContext());
+        set_error(
+                "MNN beginCompletion exception (backend=" + backend + "): " + detail +
+                (contextLog.empty() ? std::string() : " MNN log: " + contextLog));
         return kMnnBeginFailed;
     } catch (...) {
         g_generation_active = false;
@@ -7968,7 +9068,10 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
             rollback_mnn_text_prompt_cache_locked("begin_failed", true);
         }
         g_generation_stop_reason = "begin_failed";
-        set_error("MNN beginCompletion exception: unknown native error");
+        set_error(
+                "MNN beginCompletion exception (backend=" +
+                (g_mnn_backend_type.empty() ? std::string("cpu") : g_mnn_backend_type) +
+                "): unknown native error");
         return kMnnBeginFailed;
     }
 #else
@@ -8011,7 +9114,18 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk(JNIEnv* en
     }
     try {
         g_llm->generate(1);
+        if (g_llm->getContext() != nullptr &&
+                g_llm->getContext()->status == MNN::Transformer::LlmStatus::INTERNAL_ERROR) {
+            g_generation_active = false;
+            const auto reason = g_llm->getContext()->logits_error.empty()
+                    ? std::string("mnn_internal_error") : g_llm->getContext()->logits_error;
+            g_generation_stop_reason = reason;
+            rollback_mnn_text_prompt_cache_locked(reason, true);
+            set_error("MNN generation aborted: " + reason + ".");
+            return nullptr;
+        }
         g_generated_steps += 1;
+        capture_mnn_debug_generated_token_ids_locked();
         filter_mnn_stop_markers_locked(false);
         if (!g_pending_chunk.empty() || !g_pending_utf8_tail.empty()) {
             bool emitted = false;
@@ -9132,11 +10246,13 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
     std::string input_image_sha256;
     std::string mask_image_path;
     std::string control_image_path;
+    int64_t batch_count_value = 0;
     if (!mnn_contract_string(params, "taskMode", task_mode, contractError) ||
         !optional_json_string(params, "inputImagePath", "", input_image_path, contractError) ||
         !optional_json_string(params, "inputImageSha256", "", input_image_sha256, contractError) ||
         !optional_json_string(params, "maskImagePath", "", mask_image_path, contractError) ||
         !optional_json_string(params, "controlImagePath", "", control_image_path, contractError) ||
+        !mnn_contract_integer(params, "batchCount", batch_count_value, contractError) ||
         (sana_family &&
          !mnn_contract_string(params, "negativePrompt", negative_prompt, contractError, true))) {
         const auto out = json({
@@ -9147,6 +10263,17 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         }).dump();
         return utf8_to_jstring(env, out);
     }
+    if (batch_count_value != 1) {
+        const auto out = json({
+            {"ok", false},
+            {"backend", "mnn_diffusion"},
+            {"errorCode", "EXECUTION_CONTRACT_UNSUPPORTED"},
+            {"field", "batchCount"},
+            {"error", "MNN-Diffusion currently produces exactly one image per native request."}
+        }).dump();
+        return utf8_to_jstring(env, out);
+    }
+    const int batch_count = static_cast<int>(batch_count_value);
     if (sana_family) {
         std::string canonicalBackend;
         if (!canonical_mnn_diffusion_backend(backend_mode, canonicalBackend, contractError)) {
@@ -9233,15 +10360,14 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
             return utf8_to_jstring(env, out);
         }
         if (params.contains("strength") ||
-            opt_int(params, "batchCount", 1) != 1 ||
             params.contains("vaeTiling") || params.contains("preview") ||
             params.contains("clipSkip")) {
             const auto out = json({
                 {"ok", false},
                 {"backend", "mnn_diffusion"},
                 {"errorCode", "EXECUTION_CONTRACT_UNSUPPORTED"},
-                {"field", "strength,batchCount,vaeTiling,preview,clipSkip"},
-                {"error", "MNN Sana edit does not expose strength, batch, tiling, preview, or clip-skip controls through its native API."}
+                {"field", "strength,vaeTiling,preview,clipSkip"},
+                {"error", "MNN Sana edit does not expose strength, tiling, preview, or clip-skip controls through its native API."}
             }).dump();
             return utf8_to_jstring(env, out);
         }
@@ -9587,6 +10713,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
             nativeEffective["outputPath"] = output_path;
             nativeEffective["outputBytes"] = output_evidence.bytes;
             nativeEffective["outputSha256"] = output_evidence.sha256;
+            nativeEffective["batchCount"] = batch_count;
             json out = json({
                 {"ok", true},
                 {"nativeExecution", true},
@@ -9609,6 +10736,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
                 {"negativePromptSpecified", params.contains("negativePrompt")},
                 {"sampleMethod", "flow_match"},
                 {"memoryMode", memory_mode},
+                {"batchCount", batch_count},
                 {"taskMode", task_mode},
                 {"inputImagePath", input_image_path},
                 {"maskImagePath", ""},
@@ -9649,6 +10777,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate(
         nativeEffective["outputPath"] = output_path;
         nativeEffective["outputBytes"] = output_evidence.bytes;
         nativeEffective["outputSha256"] = output_evidence.sha256;
+        nativeEffective["batchCount"] = batch_count;
         json out = nativeEffective;
         out["ok"] = true;
         out["nativeExecution"] = true;

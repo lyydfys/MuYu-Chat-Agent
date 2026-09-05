@@ -1,11 +1,28 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.engine.LocalChatRuntime
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalChatWorkerIsolationContractTest {
+    @Test
+    fun litertNpuSelectionAcceptsAllBackendAliases() {
+        listOf(
+            "{\"backend\":\"npu\"}",
+            "{\"backend_type\":\"npu\"}",
+            "{\"backendType\":\"npu\"}",
+            "{\"advanced_json\":{\"backend_type\":\"npu\"}}"
+        ).forEach { params ->
+            assertEquals(
+                "npu",
+                localChatWorkerOperationTarget(LocalChatRuntime.LITERT_LM, params).backend
+            )
+        }
+    }
+
     @Test
     fun ordinaryTextRuntimesUseTheDedicatedProcessAndBinderProxy() {
         val manifest = sourceFile("app/src/main/AndroidManifest.xml")
@@ -30,13 +47,16 @@ class LocalChatWorkerIsolationContractTest {
         assertTrue(runners.contains("put(LocalChatRuntime.MNN_CPU, mnn)"))
         assertTrue(runners.contains("RemoteLocalChatRunner(context, LocalChatRuntime.GENIEX_QAIRT)"))
         assertTrue(runners.contains("put(LocalChatRuntime.GENIEX_QAIRT, qairt)"))
+        assertTrue(runners.contains("RemoteLocalChatRunner(context, LocalChatRuntime.LITERT_LM)"))
+        assertTrue(runners.contains("put(LocalChatRuntime.LITERT_LM, liteRtLm)"))
         assertTrue(service.contains("runtime == LocalChatRuntime.GENIEX_QAIRT"))
+        assertTrue(service.contains("runtime == LocalChatRuntime.LITERT_LM"))
         assertTrue(client.contains("ILocalChatWorker.Stub.asInterface"))
         assertTrue(client.contains("RemoteLocalChatRunnerException"))
         assertTrue(aidl.contains("in ParcelFileDescriptor requestPayload"))
         assertTrue(client.contains("LocalChatWorkerRequestTransport.write"))
         assertFalse(runners.contains("defaultLocalChatRunners(context)"))
-        assertTrue(runners.contains("defaultLocalChatRunner(LocalChatRuntime.GENIEX_LLAMA_CPP"))
+        assertTrue(runners.contains("RemoteLocalChatRunner(context, LocalChatRuntime.GENIEX_LLAMA_CPP)"))
         assertTrue(service.contains("defaultLocalChatRunner(runtime, applicationContext)"))
         assertTrue(service.contains("runners.getOrPut(runtime)"))
         assertTrue(transport.contains("MAX_MESSAGES_BYTES = 16 * 1024 * 1024"))
@@ -54,7 +74,12 @@ class LocalChatWorkerIsolationContractTest {
         assertTrue(client.contains("Last durable worker diagnostic"))
         assertTrue(aidl.contains("oneway void shutdown()"))
         assertTrue(service.contains("ConcurrentHashMap<Long, Runnable>"))
-        assertTrue(service.contains("NATIVE_PREFILL_TIMEOUT_MS"))
+        assertTrue(service.contains("localChatWorkerOperationPolicy"))
+        val loadBody = functionBody(service, "override fun loadModel(")
+        assertTrue(loadBody.contains("operationTarget = loadTarget"))
+        assertTrue(service.contains("mnn_opencl_prefill_timeout"))
+        assertTrue(service.contains("litert_gpu_prefill_timeout"))
+        assertTrue(service.contains("scheduleForcedRecoveryAfterStop"))
         assertTrue(aidl.contains("void resetPrefillProgress()"))
         assertTrue(service.contains("override fun resetPrefillProgress()"))
         assertTrue(client.contains("service.resetPrefillProgress()"))
@@ -72,5 +97,22 @@ class LocalChatWorkerIsolationContractTest {
             directory = directory.parentFile
         }
         error("Unable to locate source file: $relativePath")
+    }
+
+    private fun functionBody(source: String, signature: String): String {
+        val start = source.indexOf(signature)
+        require(start >= 0) { "Missing function: $signature" }
+        val open = source.indexOf('{', start)
+        var depth = 0
+        for (index in open until source.length) {
+            when (source[index]) {
+                '{' -> depth += 1
+                '}' -> {
+                    depth -= 1
+                    if (depth == 0) return source.substring(start, index + 1)
+                }
+            }
+        }
+        error("Unterminated function: $signature")
     }
 }

@@ -5,6 +5,7 @@ import android.util.Log
 import com.muyuchat.core.modelstore.QairtExecutionAdmission
 import com.muyuchat.core.modelstore.QairtBundleRiskAnalyzer
 import com.muyuchat.core.modelstore.QairtBundleRuntimeIdentity
+import com.muyuchat.core.modelstore.validateLiteRtLmLoadPreflight
 import com.muyuchat.core.telemetry.MemorySnapshot
 import com.muyuchat.core.telemetry.RuntimeMetrics
 import com.muyuchat.core.telemetry.SocDetector
@@ -73,6 +74,38 @@ private data class NativeGpuOffloadEvidence(
     val autoFallbackApplied: Boolean,
     val autoFallbackReason: String?
 )
+
+/**
+ * Mirrors the native MNN visual-package discovery used before load.  Some
+ * exporter bundles omit the optional JSON declaration yet ship visual.mnn;
+ * native enables vision for those packages, so their load-bound mmap policy
+ * must be resolved the same way on the JVM side.
+ */
+internal fun isMnnVisualProfileForLoad(modelPath: String, advancedJson: String): Boolean {
+    val advanced = runCatching { JSONObject(advancedJson) }.getOrNull()
+    if (advanced?.optString("visual_model")?.isNotBlank() == true ||
+        advanced?.optBoolean("is_visual", false) == true
+    ) return true
+
+    val selected = File(modelPath)
+    val config = when {
+        selected.isFile && selected.name.equals("config.json", ignoreCase = true) -> selected
+        selected.isDirectory -> File(selected, "config.json")
+        else -> selected.parentFile?.let { File(it, "config.json") }
+    } ?: return false
+    val root = runCatching {
+        if (!config.isFile || !config.canRead()) return@runCatching null
+        JSONObject(config.readText(Charsets.UTF_8))
+    }.getOrNull() ?: return false
+    if (root.optBoolean("is_visual", false) || root.optString("visual_model").isNotBlank()) {
+        return true
+    }
+
+    val bundleRoot = config.parentFile ?: return false
+    return listOf("visual.mnn", "visual.mnn.weight").any { name ->
+        File(bundleRoot, name).let { it.isFile && it.length() > 0L }
+    }
+}
 
 /**
  * Native allocation alone must never promote a runtime to GPU execution. This
@@ -151,7 +184,8 @@ class McaInferenceService(
     installationScopeId: String? = null,
     private val deviceClockContextProvider: DeviceClockContextProvider = DeviceClockContextProvider(),
     persistentPrefixCacheStoreOverride: PersistentPrefixCacheStore? = null,
-    private val prefillProgressPollIntervalMs: Long = PREFILL_PROGRESS_POLL_INTERVAL_MS
+    private val prefillProgressPollIntervalMs: Long = PREFILL_PROGRESS_POLL_INTERVAL_MS,
+    private val nativeLibraryDirOverride: String? = null
 ) {
     init {
         require(prefillProgressPollIntervalMs > 0L) {
@@ -416,9 +450,13 @@ class McaInferenceService(
     }
 
     init {
+        val runnerNativeLibraryDir = nativeLibraryDirOverride
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: appContext.applicationInfo.nativeLibraryDir
         this.runners.values.forEach { runner ->
             if (runner.isAvailable) {
-                runCatching { runner.initBackends(appContext.applicationInfo.nativeLibraryDir) }
+                runCatching { runner.initBackends(runnerNativeLibraryDir) }
             }
         }
         val defaultRunner = this.runners[activeRuntime]
@@ -441,6 +479,13 @@ class McaInferenceService(
     ): Result<RuntimeStats> = withContext(io) {
         runCatching {
             require(modelPath.isNotBlank()) { "modelPath must not be blank" }
+            if (runtime == LocalChatRuntime.LITERT_LM) {
+                val modelFile = File(modelPath)
+                val preflight = validateLiteRtLmLoadPreflight(modelFile, modelFile.length())
+                require(preflight.canLoad) {
+                    "${preflight.title}：${preflight.details}"
+                }
+            }
             val resolvedIdentity = executionProfile?.runtimeIdentity
                 ?: runtimeIdentity
                 ?: defaultRuntimeIdentity(
@@ -468,7 +513,7 @@ class McaInferenceService(
                 "execution profile identity changed during load resolution"
             }
             val effectiveLoadParams = loadParamsForProfile(params, resolvedExecutionProfile)
-            val nativeLoadParamsJson = parameterCoordinator.nativeLoadJson(resolvedExecutionProfile)
+            val nativeLoadParamsJson = nativeLoadParamsJson(resolvedExecutionProfile)
             val admissionMemory = memorySnapshotProvider?.invoke() ?: telemetry.memorySnapshotDetailed()
             val admission = qairtExecutionAdmissionForLoad(
                 modelPath = modelPath,
@@ -692,6 +737,19 @@ class McaInferenceService(
             if (activeLoadSession != null &&
                 (isolatedWorkerSessionNeedsReload || isolatedWorkerSessionLostLocked())
             ) {
+                val recoveryRunner = runnerFor(activeRuntime)
+                if (recoveryRunner.sessionRecoveryPolicy() ==
+                    LocalChatSessionRecoveryPolicy.EXPLICIT_RELOAD_REQUIRED
+                ) {
+                    parameterCoordinator.markUnloaded()
+                    isolatedWorkerSessionNeedsReload = true
+                    val message = recoveryRunner.sessionRecoveryMessage()
+                        ?: "加速后端上一轮未在限定时间内完成，隔离会话已回收。请显式重新加载模型或选择 CPU 后重试。"
+                    val errorStats = current.copy(loaded = false, lastError = message)
+                    _stats.value = errorStats
+                    emit(GenerateEvent.Error(message, errorStats))
+                    return@lifecycle
+                }
                 emit(GenerateEvent.Phase(GenerationPhase.LOAD, current))
                 val reloadError = reloadActiveSessionForNextRequestLocked(
                     SessionReloadReason.WORKER_SESSION_LOST
@@ -1735,6 +1793,28 @@ class McaInferenceService(
         mlock = profile.resolvedLoadBoundValues.value("mlock") as? Boolean ?: requested.mlock
     )
 
+    /**
+     * LiteRT-LM's GPU delegate compiles sizeable kernels during Engine.initialize().
+     * Supplying an app-private cache makes that compilation durable and avoids
+     * repeating the multi-gigabyte first-load work after every worker restart.
+     * The directory is scoped by the model artifact fingerprint so unrelated
+     * models/backends never share compiler output.
+     */
+    private fun nativeLoadParamsJson(profile: ModelExecutionProfile): String {
+        val json = JSONObject(parameterCoordinator.nativeLoadJson(profile))
+        if (profile.runtimeIdentity.runtime != LocalChatRuntime.LITERT_LM) return json.toString()
+        val backend = json.optString("backend").trim().lowercase()
+        if (backend.isBlank()) return json.toString()
+        val fingerprint = profile.runtimeIdentity.artifactFingerprint
+            .filter { it.isLetterOrDigit() }
+            .takeIf { it.isNotBlank() }
+            ?: "model"
+        val cache = File(appContext.cacheDir, "litertlm/$fingerprint-$backend")
+            .apply { mkdirs() }
+        json.put("cache_dir", cache.absolutePath)
+        return json.toString()
+    }
+
     /** Called only while [mutex] is held. */
     private fun validateExecutionProfilePathLocked(
         modelPath: String,
@@ -1760,7 +1840,7 @@ class McaInferenceService(
         activeLoadSession = session.copy(
             runtimeIdentity = profile.runtimeIdentity,
             executionProfile = profile,
-            nativeLoadParamsJson = parameterCoordinator.nativeLoadJson(profile),
+            nativeLoadParamsJson = nativeLoadParamsJson(profile),
             params = loadParamsForProfile(session.params, profile)
         )
     }
@@ -1775,7 +1855,7 @@ class McaInferenceService(
             params = loadParamsForProfile(session.params, profile),
             runtimeIdentity = profile.runtimeIdentity,
             executionProfile = profile,
-            nativeLoadParamsJson = parameterCoordinator.nativeLoadJson(profile)
+            nativeLoadParamsJson = nativeLoadParamsJson(profile)
         )
     }
 
@@ -1807,7 +1887,8 @@ class McaInferenceService(
     private suspend fun isolatedWorkerSessionLostLocked(): Boolean = withContext(io) {
         if (activeRuntime != LocalChatRuntime.LLAMA_CPP &&
             activeRuntime != LocalChatRuntime.MNN_CPU &&
-            activeRuntime != LocalChatRuntime.GENIEX_QAIRT
+            activeRuntime != LocalChatRuntime.GENIEX_QAIRT &&
+            activeRuntime != LocalChatRuntime.LITERT_LM
         ) return@withContext false
         runCatching {
             JSONObject(runnerFor(activeRuntime).getRuntimeStatsJson())
@@ -1833,7 +1914,8 @@ class McaInferenceService(
             ?: return reason.missingSessionMessage
         if (session.runtime != LocalChatRuntime.LLAMA_CPP &&
             session.runtime != LocalChatRuntime.MNN_CPU &&
-            session.runtime != LocalChatRuntime.GENIEX_QAIRT
+            session.runtime != LocalChatRuntime.GENIEX_QAIRT &&
+            session.runtime != LocalChatRuntime.LITERT_LM
         ) {
             return "当前运行时不支持隔离文本 worker 会话恢复，请重新加载模型。"
         }
@@ -1970,7 +2052,7 @@ class McaInferenceService(
             // discard any stale pending transaction before publication.
             parameterCoordinator.prepareOrdinaryLoad(target)
         }
-        val nativeLoadJson = parameterCoordinator.nativeLoadJson(target)
+        val nativeLoadJson = nativeLoadParamsJson(target)
         runCatching { runner.requestStop() }
         runCatching { runner.unloadModel() }
         parameterCoordinator.markUnloaded()
@@ -2617,6 +2699,7 @@ class McaInferenceService(
                 LocalChatRuntime.LLAMA_CPP -> "llama.cpp-embedded"
                 LocalChatRuntime.GENIEX_LLAMA_CPP,
                 LocalChatRuntime.GENIEX_QAIRT -> "geniex-embedded"
+                LocalChatRuntime.LITERT_LM -> "litert-lm@0.16.1"
             },
             nativeLibrarySha256 = "embedded-unreported",
             backendFingerprint = listOfNotNull(
@@ -2635,22 +2718,7 @@ class McaInferenceService(
     }
 
     private fun isMnnVisualProfile(modelPath: String, params: LoadParams): Boolean {
-        val advanced = runCatching { JSONObject(params.advancedJson) }.getOrNull()
-        if (advanced?.optString("visual_model")?.isNotBlank() == true ||
-            advanced?.optBoolean("is_visual", false) == true
-        ) return true
-
-        val selected = File(modelPath)
-        val config = when {
-            selected.isFile && selected.name.equals("config.json", ignoreCase = true) -> selected
-            selected.isDirectory -> File(selected, "config.json")
-            else -> selected.parentFile?.let { File(it, "config.json") }
-        } ?: return false
-        val root = runCatching {
-            if (!config.isFile || !config.canRead()) return@runCatching null
-            JSONObject(config.readText(Charsets.UTF_8))
-        }.getOrNull() ?: return false
-        return root.optBoolean("is_visual", false) || root.optString("visual_model").isNotBlank()
+        return isMnnVisualProfileForLoad(modelPath, params.advancedJson)
     }
 
     private fun parameterSha256(value: String): String = MessageDigest.getInstance("SHA-256")
@@ -2682,4 +2750,3 @@ class McaInferenceService(
         private val VISION_DIAGNOSTIC_SHA256_PATTERN = Regex("[a-f0-9]{64}")
     }
 }
-

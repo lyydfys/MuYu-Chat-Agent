@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
+import android.util.Log
 import com.muyuchat.api.local.imagePromptExecutionSha256
 import com.muyuchat.core.deviceprofile.DeviceProfileReader
 import com.muyuchat.core.download.ImageEngineMinDeviceTier
@@ -656,6 +657,7 @@ internal data class LocalImageBundleManifest(
     val components: List<LocalImageBundleComponentContract> = emptyList(),
     val executionProfileRequiredPaths: List<String> = emptyList(),
     val executionProfileGraphPaths: Map<String, String> = emptyMap(),
+    val executionProfileQnnSdk: String? = null,
     val executionProfileDeclared: Boolean = false,
     val componentCount: Int = 0
 )
@@ -1080,9 +1082,14 @@ data class LocalImageGenerationOptions(
     val vaeTiling: LocalImageVaeTilingOptions? = null,
     val textualInversionIds: List<String> = emptyList(),
     val ultraFix: LocalImageUltraFixOptions? = null,
-    val preview: LocalImagePreviewOptions? = null
+    val preview: LocalImagePreviewOptions? = null,
+    /** Debug-only marker for the semantic smoke harness; never accepted from public JSON. */
+    internal val allowLowStepSmoke: Boolean = false
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
+        // Preserve null here so normal product requests can still resolve the
+        // model's default negative prompt. Concrete native execution params are
+        // canonicalised to a string immediately before crossing the JNI boundary.
         negativePrompt?.let { put("negativePrompt", it) }
         width?.let { put("width", it) }
         height?.let { put("height", it) }
@@ -1310,6 +1317,23 @@ internal fun throwLocalImageNativeFailure(
         throw LocalImageProductContractException(code.lowercase(), message)
     }
     error(message)
+}
+
+/** Logs a native failure at the Android boundary without coupling pure error mapping to Log. */
+private fun logLocalImageNativeFailure(result: JSONObject, fallbackMessage: String) {
+    val message = sequenceOf(
+        result.optString("error"),
+        result.optString("message"),
+        fallbackMessage
+    ).map { it.trim() }.firstOrNull(String::isNotEmpty).orEmpty()
+    val code = result.optString("errorCode").trim()
+    Log.e(
+        "MCA-LocalImage",
+        "native_failure code=${code.ifBlank { "unknown" }} " +
+            "backend=${result.optString("backend").take(64)} " +
+            "stage=${result.optString("executionStage").take(64)} " +
+            "message=${message.take(512)}"
+    )
 }
 
 internal data class VerifiedTextualInversionExecutionEvidence(
@@ -2609,6 +2633,7 @@ class LocalImageProvider(context: Context) {
             val json = JSONObject(raw)
             if (!json.optBoolean("ok", false)) {
                 if (json.optBoolean("cancelled", false)) throw LocalImageWorkerCancelledException()
+                logLocalImageNativeFailure(json, "stable-diffusion.cpp ESRGAN upscale failed.")
                 throwLocalImageNativeFailure(json, "stable-diffusion.cpp ESRGAN upscale failed.")
             }
             val nativeEffective = json.optJSONObject("nativeEffective")
@@ -2830,9 +2855,6 @@ class LocalImageProvider(context: Context) {
                 ?: File(model.path).parentFile?.takeIf { it.isDirectory }
                 ?: error("QNN image engine requires a complete QNN bundle directory.")
             val runtimeResolution = qnnRuntimeDirectoryResolutionFor(appContext, bundleRoot)
-            require(runtimeResolution.stagingError == null) {
-                runtimeResolution.stagingError.orEmpty()
-            }
             val qnnHealth = QnnHtpImageRunner(context = appContext).health(
                 device = DeviceProfileReader(appContext).read(),
                 bundleRoot = bundleRoot
@@ -3206,6 +3228,7 @@ class LocalImageProvider(context: Context) {
                     if (embeddingJson.optBoolean("cancelled", false) || cancellationRequested.get()) {
                         throw LocalImageWorkerCancelledException()
                     }
+                    logLocalImageNativeFailure(embeddingJson, "Failed to encode QNN prompt embeddings.")
                     throwLocalImageNativeFailure(
                         embeddingJson,
                         "Failed to encode QNN prompt embeddings."
@@ -3646,7 +3669,8 @@ class LocalImageProvider(context: Context) {
                         nativeResult = json,
                         outputBytes = verifiedOutput.outputBytes,
                         inputExecutionAudit = inputExecutionAudit,
-                        requestedPreview = effectiveOptions.preview
+                        requestedPreview = effectiveOptions.preview,
+                        stagedRuntime = runtimeResolution.stagedRuntime
                     ).toString()
                 ).takeIf(String::isNotBlank)
                     ?: error("QNN execution evidence could not be sanitized.")
@@ -3874,7 +3898,16 @@ class LocalImageProvider(context: Context) {
             )
             val steps = resolved.steps
             val threads = resolveMnnDiffusionThreads(effectiveOptions.threads, defaultLocalImageThreads())
-            val backendMode = resolveMnnDiffusionBackendMode(effectiveOptions.backendMode)
+            // Keep the distinction between an omitted backend (automatic compatibility
+            // selection) and an explicit user choice.  The shipped SD1.5 MNN graph is
+            // OpenCL-capable but its fused UNet operators are not registered by our CPU
+            // build, so only the automatic path may retry on OpenCL after a proven CPU
+            // NOT_SUPPORT result.
+            val requestedBackendMode = requestedMnnDiffusionBackendMode(effectiveOptions.backendMode)
+            var backendMode = resolveMnnDiffusionBackendMode(effectiveOptions.backendMode)
+            val backendAttempts = mutableListOf<MnnDiffusionBackendAttempt>()
+            var backendFallbackApplied = false
+            var backendFallbackReason: String? = null
             val sampleMethod = imageSchedulerProductName(resolved.scheduler)
             require(effectiveOptions.tokenEmbeddingMode == null) {
                 "MNN-Diffusion no longer accepts tokenEmbeddingMode; token table precision is " +
@@ -3887,33 +3920,43 @@ class LocalImageProvider(context: Context) {
             val seed = resolved.seed.toInt()
             val cfgScale = resolved.cfgScale
             val useCfg = resolved.useCfg
-            val params = ImageExecutionProfileNativeContract.toNativeParamsJson(profileResolution)
-                .put("prompt", prompt.trim())
-                .put("negativePrompt", effectiveNegativePrompt)
-                .put("family", profile.family.name)
-                .put("variant", profile.variant.name)
-                .put("width", width)
-                .put("height", height)
-                .put("steps", steps)
-                .put("threads", threads)
-                .put("seed", seed)
-                .put("randomSeed", seed)
-                .put("cfgScale", cfgScale)
-                .put("useCfg", useCfg)
-                .put("sampleMethod", sampleMethod)
-                .put("runner", runner)
-                .put("backendMode", backendMode)
-                .put("memoryMode", memoryMode)
-            effectiveOptions.putProductInputNativeParams(params)
-            nativeTextEncoderBinding?.let { binding ->
-                params.put("nativeTextEncoderEvidence", binding.toNativeJson())
-            }
-            textualInversionLease?.let { lease ->
-                val nativeSelection = lease.selection.toNativeJson(lease.rootPath)
-                nativeSelection.keys().forEach { key ->
-                    params.put(key, nativeSelection.get(key))
+            // Rebuilt per attempt so an OpenCL failure can retry once on CPU.
+            fun mnnNativeParams(backend: String): JSONObject {
+                val p = ImageExecutionProfileNativeContract.toNativeParamsJson(profileResolution)
+                    .put("prompt", prompt.trim())
+                    .put("negativePrompt", effectiveNegativePrompt)
+                    .put("family", profile.family.name)
+                    .put("variant", profile.variant.name)
+                    .put("width", width)
+                    .put("height", height)
+                    .put("steps", steps)
+                    .put("threads", threads)
+                    .put("seed", seed)
+                    .put("randomSeed", seed)
+                    .put("cfgScale", cfgScale)
+                    .put("useCfg", useCfg)
+                    .put("sampleMethod", sampleMethod)
+                    .put("runner", runner)
+                    .put("backendMode", backend)
+                    // MNN's direct VAE writer needs the profile-declared
+                    // output range just like QNN. Keep this field local to
+                    // the MNN execution payload so legacy shared contract
+                    // consumers remain backward compatible.
+                    .put("pixelRange", profile.vae.outputRange.name)
+                    .put("memoryMode", memoryMode)
+                effectiveOptions.putProductInputNativeParams(p)
+                nativeTextEncoderBinding?.let { binding ->
+                    p.put("nativeTextEncoderEvidence", binding.toNativeJson())
                 }
+                textualInversionLease?.let { lease ->
+                    val nativeSelection = lease.selection.toNativeJson(lease.rootPath)
+                    nativeSelection.keys().forEach { key ->
+                        p.put(key, nativeSelection.get(key))
+                    }
+                }
+                return p
             }
+            val initialParams = mnnNativeParams(backendMode)
             onProgress(
                 LocalImageProgress(
                     phase = "request_validated",
@@ -3926,7 +3969,7 @@ class LocalImageProvider(context: Context) {
                     width = width,
                     height = height,
                     cancelRequested = false,
-                    requestOptionsJson = mnnDiffusionControlAuditJson(params).toString()
+                    requestOptionsJson = mnnDiffusionControlAuditJson(initialParams).toString()
                 )
             )
             val progressPoller = launch {
@@ -3935,23 +3978,97 @@ class LocalImageProvider(context: Context) {
                     delay(500)
                 }
             }
-            val raw = try {
-                mnnDiffusionBridge.generate(
-                    bundleRoot.absolutePath,
-                    params.toString(),
-                    outputFile.canonicalPath
+            fun mnnGenerate(backend: String): JSONObject {
+                val result = JSONObject(
+                    mnnDiffusionBridge.generate(
+                        bundleRoot.absolutePath,
+                        mnnNativeParams(backend).toString(),
+                        outputFile.canonicalPath
+                    )
                 )
+                backendAttempts += MnnDiffusionBackendAttempt(
+                    backend = backend,
+                    ok = result.optBoolean("ok", false),
+                    errorCode = result.optString("errorCode").trim().ifBlank { null },
+                    error = result.optString("error").trim().ifBlank { null }
+                )
+                return result
+            }
+            var json: JSONObject
+            try {
+                json = mnnGenerate(backendMode)
+                if (!json.optBoolean("ok", false) &&
+                    !json.optBoolean("cancelled", false) &&
+                    !cancellationRequested.get() &&
+                    requestedBackendMode == "auto" &&
+                    backendMode == "cpu" &&
+                    isMnnCpuBackendUnsupported(json)
+                ) {
+                    // This is a graph-proven compatibility fallback, not a chipset
+                    // allowlist.  Preserve the complete CPU failure in backendAttempts.
+                    backendFallbackApplied = true
+                    backendFallbackReason = json.optString("error").trim().ifBlank {
+                        json.optString("errorCode").trim().ifBlank {
+                            "CPU UNet returned NOT_SUPPORT during graph initialization."
+                        }
+                    }
+                    backendMode = "opencl"
+                    json = mnnGenerate(backendMode)
+                }
+                // Keep a narrow automatic fallback for a future package whose preferred
+                // backend is OpenCL but whose device reports an OpenCL execution failure.
+                // Explicit OpenCL requests remain explicit and never silently change backend.
+                if (!json.optBoolean("ok", false) &&
+                    !json.optBoolean("cancelled", false) &&
+                    !cancellationRequested.get() &&
+                    requestedBackendMode == "auto" &&
+                    backendMode == "opencl" &&
+                    backendAttempts.none { it.backend == "cpu" }
+                ) {
+                    val openClFailure = json
+                    backendFallbackApplied = true
+                    backendFallbackReason = openClFailure.optString("error").trim().ifBlank {
+                        openClFailure.optString("errorCode").trim().ifBlank {
+                            "OpenCL execution failed."
+                        }
+                    }
+                    backendMode = "cpu"
+                    json = mnnGenerate(backendMode)
+                }
             } finally {
                 progressPoller.cancelAndJoin()
                 mnnDiffusionBridge.currentProgressOrNull()?.let(onProgress)
             }
-            val json = JSONObject(raw)
             if (!json.optBoolean("ok", false)) {
                 if (json.optBoolean("cancelled", false) || cancellationRequested.get()) {
                     throw LocalImageWorkerCancelledException()
                 }
+                if (requestedBackendMode == "cpu" && isMnnCpuBackendUnsupported(json)) {
+                    json.put("errorCode", MNN_UNET_BACKEND_UNSUPPORTED_ERROR_CODE)
+                    json.put(
+                        "error",
+                        "MNN SD1.5 CPU backend does not support the fused UNet operators " +
+                            "in this bundle (GroupNorm/FmhaV2/SplitGeLU). " +
+                            json.optString("error").trim()
+                    )
+                }
+                json.withMnnBackendAudit(
+                    requested = requestedBackendMode,
+                    effective = backendMode,
+                    attempts = backendAttempts,
+                    fallback = backendFallbackApplied,
+                    fallbackReason = backendFallbackReason
+                )
+                logLocalImageNativeFailure(json, "MNN-Diffusion image generation failed.")
                 throwLocalImageNativeFailure(json, "MNN-Diffusion image generation failed.")
             }
+            json.withMnnBackendAudit(
+                requested = requestedBackendMode,
+                effective = backendMode,
+                attempts = backendAttempts,
+                fallback = backendFallbackApplied,
+                fallbackReason = backendFallbackReason
+            )
             ImageExecutionProfileNativeContract.parseAndValidate(profileResolution, json)
             nativeTextEncoderBinding?.verifyNativeReceipt(json)
             require(mnnDiffusionBackendMatches(backendMode, json.getString("backendMode"))) {
@@ -4204,6 +4321,7 @@ class LocalImageProvider(context: Context) {
             if (json.optBoolean("cancelled", false) || cancellationRequested.get()) {
                 throw LocalImageWorkerCancelledException()
             }
+            logLocalImageNativeFailure(json, "stable-diffusion.cpp image generation failed.")
             throwLocalImageNativeFailure(json, "stable-diffusion.cpp image generation failed.")
         }
         ImageExecutionProfileNativeContract.parseAndValidate(profileResolution, json)
@@ -5256,7 +5374,8 @@ internal fun qnnImageExecutionMetadata(
     nativeResult: JSONObject,
     outputBytes: Long,
     inputExecutionAudit: JSONObject? = null,
-    requestedPreview: LocalImagePreviewOptions? = null
+    requestedPreview: LocalImagePreviewOptions? = null,
+    stagedRuntime: QnnImageStagedRuntime? = null
 ): JSONObject = JSONObject().also { metadata ->
     val nativeDetailStageMask =
         nativeResult.strictUInt64Hex(QNN_NATIVE_DETAIL_STAGE_MASK_HEX_FIELD)
@@ -5528,6 +5647,21 @@ internal fun qnnImageExecutionMetadata(
                     .put("typedGraphBindingsCompiled", compile.optBoolean("typedGraphBindingsCompiled", false))
             }
         }
+        // A semantic QNN result reports the actual runtime under
+        // `executionRuntime`; unlike the preflight `runtimeInspection`, this
+        // is emitted only after a graph has executed.  Preserve just the
+        // stable architecture integers in product metadata (not private
+        // library paths), using the staged profile only as a last-resort hint.
+        val htpTelemetry = resolveQnnHtpArchTelemetry(
+            nativeResult = nativeResult,
+            stagedRuntime = stagedRuntime
+        )
+        htpTelemetry.selectedHtpArch?.let { selected ->
+            metadata.put("selectedHtpArch", selected)
+        }
+        htpTelemetry.transportHtpArch?.let { transport ->
+            metadata.put("transportHtpArch", transport)
+        }
     }
 }
 
@@ -5688,18 +5822,222 @@ class LocalImageModelStore(context: Context) {
 
     fun loadModels(): List<LocalImageModelRecord> {
         val raw = prefs.getString(KEY_MODELS, null).orEmpty()
-        if (raw.isBlank()) return emptyList()
-        return runCatching {
+        val persisted = if (raw.isBlank()) {
+            emptyList()
+        } else runCatching {
             val array = JSONArray(raw)
             List(array.length()) { index ->
                 LocalImageModelRecord.fromJson(array.getJSONObject(index))
             }.sortedByDescending { it.updatedAt }
         }.getOrDefault(emptyList())
+
+        // Models downloaded by the runtime/model smoke tools live below the
+        // application-owned `files/models` directory, while the UI's import
+        // flow historically persisted records under `image_models`.  Discover
+        // complete, manifest-declared image bundles from both locations so a
+        // valid QNN bundle is visible without requiring a second manual import.
+        // Discovery is structural only: it never filters on chipset/profile;
+        // the native load/graph path remains the execution authority.
+        val discovered = discoverInstalledImageBundles()
+        if (discovered.isEmpty()) {
+            val deduplicated = deduplicateImageRecords(persisted)
+            // Compare the identity projection, not just the size: a duplicate collapse
+            // must be physically persisted even when another flow would offset the count.
+            if (deduplicated.map(::persistedRecordIdentity) != persisted.map(::persistedRecordIdentity)) {
+                runCatching { saveModels(deduplicated) }
+            }
+            return deduplicated
+        }
+        val merged = deduplicateImageRecords(persisted + discovered)
+            .sortedByDescending { it.updatedAt }
+        val discoveredNewCandidate = discovered.any { candidate ->
+            persisted.none { existing ->
+                existing.bundleRoot == candidate.bundleRoot && existing.path == candidate.path
+            }
+        }
+        // Write back whenever the on-disk identity set would change (a stale parent/dirty
+        // record collapsed by dedup), or discovery surfaced a bundle not yet persisted.
+        if (merged.map(::persistedRecordIdentity) != persisted.map(::persistedRecordIdentity) ||
+            discoveredNewCandidate
+        ) {
+            // Best-effort persistence makes the next refresh stable, but a
+            // read-only discovery failure must never hide the in-memory result.
+            runCatching { saveModels(merged) }
+        }
+        return merged
+    }
+
+    /** Stable on-disk identity: model id + canonical bundle root + canonical primary path. */
+    private fun persistedRecordIdentity(model: LocalImageModelRecord): String {
+        val canonicalPath = runCatching { File(model.path).canonicalPath }.getOrDefault(model.path)
+        return "${model.id.trim()}|${canonicalModelRoot(model)}|$canonicalPath"
+    }
+
+    /** Collapse stale duplicate ids created by older discovery/import flows.
+     * Keep the record whose canonical bundle contains executable graph assets;
+     * this is data hygiene, not a device/profile admission decision. */
+    private fun deduplicateImageRecords(records: List<LocalImageModelRecord>): List<LocalImageModelRecord> =
+        records.groupBy { model ->
+            val id = model.id.trim()
+            if (id.isNotEmpty()) "id:$id" else "root:${canonicalModelRoot(model)}"
+        }.values.flatMap { candidates -> deduplicateSameIdentityGroup(candidates) }
+
+    /**
+     * Identity here is model id (or canonical bundle root for id-less records).
+     * Step 1 collapses records that point at the very same canonical root (an exact
+     * duplicate), keeping the healthiest one. Step 2 decides whether the remaining
+     * distinct roots are one logical bundle with a stale parent-directory record, or
+     * two genuinely different bundles that merely share an id:
+     *  - 0/1 complete executable roots -> a stale parent (no executable asset) beside
+     *    the real extracted bundle: collapse to the healthiest record so the parent
+     *    dirty entry is physically removed and cannot resurface as a ":2" alias.
+     *  - >=2 complete executable roots at DISTINCT canonical paths -> two user-imported
+     *    bundles we cannot prove are duplicates: keep both instead of deleting one.
+     * This never consults chipset/device-model/profile and never merges records that
+     * differ in id; the winner is always a whole record, preserving configured,
+     * runtime/family/path/sha256 and every other field.
+     */
+    private fun deduplicateSameIdentityGroup(
+        candidates: List<LocalImageModelRecord>
+    ): List<LocalImageModelRecord> {
+        val bestPerRoot = candidates
+            .groupBy { canonicalModelRoot(it) }
+            .values
+            .map { sameRoot -> sameRoot.maxWithOrNull(DEDUPLICATION_COMPARATOR) ?: sameRoot.first() }
+        val completeRoots = bestPerRoot.count { it.rootContainsExecutableImageAsset() }
+        return if (completeRoots >= 2) {
+            // Two distinct, self-contained bundles share an id. Preserve both.
+            bestPerRoot.sortedByDescending { it.updatedAt }
+        } else {
+            // A stale parent/partial duplicate sits beside the real bundle.
+            listOf(bestPerRoot.maxWithOrNull(DEDUPLICATION_COMPARATOR) ?: bestPerRoot.first())
+        }
+    }
+
+    private fun LocalImageModelRecord.rootContainsExecutableImageAsset(): Boolean {
+        val root = bundleRoot?.takeIf(String::isNotBlank)?.let(::File) ?: return false
+        return root.isDirectory &&
+            listOf("unet.bin", "unet.mnn", "model.gguf").any { File(root, it).isFile }
+    }
+
+    private val DEDUPLICATION_COMPARATOR: Comparator<LocalImageModelRecord> =
+        compareBy<LocalImageModelRecord> { model -> if (model.rootContainsExecutableImageAsset()) 1 else 0 }
+            .thenBy { it.configured }
+            .thenBy { canonicalModelRoot(it).count { ch -> ch == File.separatorChar || ch == '/' } }
+            .thenBy { it.updatedAt }
+
+    private fun canonicalModelRoot(model: LocalImageModelRecord): String =
+        model.bundleRoot?.let { root -> runCatching { File(root).canonicalPath }.getOrDefault(root) }
+            ?: runCatching { File(model.path).canonicalPath }.getOrDefault(model.path)
+
+    private fun discoverInstalledImageBundles(): List<LocalImageModelRecord> {
+        val roots = listOfNotNull(
+            appContext.getExternalFilesDir("models"),
+            File(appContext.filesDir, "models")
+        ).distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
+        // Materialize every candidate directory first. A container such as files/models is
+        // itself walked at depth 0; without the descendant-ownership check below it would
+        // recursively adopt a grandchild bundle's manifest/primary and be persisted as a
+        // bogus "parent directory" record beside the real extracted bundle (the source of
+        // the duplicate cyberrealistic entry / ":2" alias).
+        val candidateDirs = roots
+            .filter { it.isDirectory }
+            .flatMap { root ->
+                // Smoke tools and manual copies may place a bundle directly
+                // under files/models or one-to-several wrapper directories
+                // deep inside an extracted archive. Discover all bounded-depth
+                // directories instead of assuming exactly one/two levels.
+                val canonicalRoot = runCatching { root.canonicalFile }.getOrDefault(root)
+                root.walkTopDown()
+                    .filter(File::isDirectory)
+                    .filter { candidate ->
+                        val depth = runCatching {
+                            candidate.canonicalFile.toPath().nameCount - canonicalRoot.toPath().nameCount
+                        }.getOrDefault(Int.MAX_VALUE)
+                        depth in 0..4
+                    }
+                    .toList()
+            }
+            .map { directory -> runCatching { directory.canonicalFile }.getOrDefault(directory) }
+            .distinctBy { it.path }
+        val candidatePaths = candidateDirs.map { it.path }.toSet()
+        return candidateDirs.mapNotNull { bundleRoot ->
+            runCatching {
+                // Discovery must not require a manifest as an admission gate. Older
+                // QNN/MNN archives shipped only graph files; infer the runtime and
+                // primary artifact from the concrete directory, then let readiness and
+                // native load decide whether the bundle is executable.
+                // A stale/malformed optional manifest must not make an
+                // otherwise discoverable downloaded bundle disappear
+                // from the model list.  Treat it as advisory metadata;
+                // structural files remain discoverable and native load
+                // will report a concrete format error when selected.
+                // Only a manifest that is a DIRECT child may authorize this directory's
+                // identity; a descendant bundle's manifest belongs to that descendant.
+                val hasDirectManifest = bundleRoot.listFiles()
+                    ?.any { it.isFile && it.name.equals("manifest.json", ignoreCase = true) } == true
+                val manifest = if (hasDirectManifest) {
+                    runCatching {
+                        when (val inspection = inspectLocalImageBundleManifestFromRoot(bundleRoot)) {
+                            is LocalImageBundleManifestInspection.Ready -> inspection.manifest
+                            else -> null
+                        }
+                    }.getOrNull()
+                } else {
+                    null
+                }
+                val primary = manifest?.primaryFile?.takeIf { it.isFile && it.length() > 0L }
+                    ?: findPrimaryImageModel(bundleRoot)
+                    ?: bundleRoot.walkTopDown().firstOrNull {
+                        it.isFile && it.length() > 0L &&
+                            (it.name.endsWith(".bin", true) ||
+                                it.name.endsWith(".mnn", true) ||
+                                it.name.endsWith(".safetensors", true) ||
+                                it.name.endsWith(".gguf", true))
+                    }
+                    ?: return@runCatching null
+                // A container directory without its own manifest must not adopt a primary
+                // that lives inside a different candidate bundle directory; the deeper
+                // directory owns that artifact and emits the record instead.
+                val primaryCanonical = runCatching { primary.canonicalFile }.getOrDefault(primary)
+                val ownedByDescendantBundle = candidatePaths.any { otherPath ->
+                    otherPath != bundleRoot.path &&
+                        primaryCanonical.path.startsWith(otherPath + File.separator)
+                }
+                if (!hasDirectManifest && ownedByDescendantBundle) return@runCatching null
+                val runtime = manifest?.runtime ?: inferLocalImageRuntimeForBundle(bundleRoot, primary)
+                if (runtime != LocalImageRuntime.QNN_HTP && runtime != LocalImageRuntime.MNN_DIFFUSION &&
+                    runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP
+                ) return@runCatching null
+                LocalImageModelRecord(
+                    id = manifest?.id ?: bundleRoot.name,
+                    displayName = manifest?.displayName ?: bundleRoot.name,
+                    path = primary.absolutePath,
+                    fileName = primary.name,
+                    sizeBytes = bundleRoot.walkTopDown().filter { it.isFile }.sumOf { it.length() },
+                    sha256 = sha256(primary),
+                    runtime = runtime,
+                    family = manifest?.family ?: LocalImageModelFamily.infer(bundleRoot.name),
+                    imageSize = manifest?.imageSize ?: defaultImageSizeFor(bundleRoot.name),
+                    source = "local:discovered",
+                    bundleRoot = bundleRoot.absolutePath,
+                    componentCount = bundleRoot.walkTopDown().count { it.isFile }.coerceAtLeast(1),
+                    updatedAt = bundleRoot.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
+                )
+            }.getOrNull()
+        }
+            .distinctBy { runCatching { it.bundleRoot?.let(::File)?.canonicalPath ?: it.path }.getOrDefault(it.path) }
     }
 
     fun saveModels(models: List<LocalImageModelRecord>) {
         val array = JSONArray()
-        models.sortedByDescending { it.updatedAt }.forEach { array.put(it.toJson()) }
+        // Persist the same canonical-id hygiene used by loadModels(). Older
+        // versions could leave a parent-directory record beside the extracted
+        // executable bundle; writing the deduplicated projection prevents that
+        // stale entry from resurfacing as a versioned API alias after restart.
+        deduplicateImageRecords(models)
+            .sortedByDescending { it.updatedAt }
+            .forEach { array.put(it.toJson()) }
         prefs.edit().putString(KEY_MODELS, array.toString()).apply()
     }
 
@@ -6359,6 +6697,44 @@ internal fun qnnRuntimeSearchDirectories(
 }
 
 /**
+ * Builds the native QNN search path around one coherent private runtime. Once
+ * a bundle or the APK has been staged, other app-private discovery results are
+ * deliberately excluded: the native resolver must not combine a host library
+ * from one QNN profile with a Skel/Stub pair from another. OEM platform paths
+ * remain as a fallback for device transport dependencies such as libcdsprpc.
+ */
+internal fun qnnRuntimeDirectoriesForResolvedRuntime(
+    privateRuntimeDirectory: String?,
+    packagedNativeDirectory: String,
+    fallbackDirectories: List<String>,
+    detectedSearchDirectories: List<String>
+): List<String> {
+    val hasPrivateRuntime = !privateRuntimeDirectory.isNullOrBlank()
+    val fallback = if (hasPrivateRuntime) {
+        fallbackDirectories.filter(::isQnnPlatformRuntimeDirectory)
+    } else {
+        fallbackDirectories
+    }
+    val detected = if (hasPrivateRuntime) emptyList() else detectedSearchDirectories
+    return qnnRuntimeSearchDirectories(
+        bundleRoot = null,
+        existingDirectories = listOfNotNull(
+            privateRuntimeDirectory,
+            packagedNativeDirectory.takeIf { !hasPrivateRuntime }
+        ) + fallback + detected
+    )
+}
+
+private fun isQnnPlatformRuntimeDirectory(path: String): Boolean {
+    val normalized = path.trim().replace('\\', '/')
+    return normalized.startsWith("/vendor/") ||
+        normalized.startsWith("/odm/") ||
+        normalized.startsWith("/system/") ||
+        normalized.startsWith("/system_ext/") ||
+        normalized.startsWith("/product/")
+}
+
+/**
  * Resolves only linker-loadable QNN directories for an image bundle. A
  * complete runtime found beside a downloaded bundle is staged to private
  * code-cache storage first; it is never returned from external storage.
@@ -6369,27 +6745,39 @@ internal data class QnnRuntimeDirectoryResolution(
     val stagingError: String? = null
 )
 
+internal fun qnnSdkForPackagedImageRuntime(manifest: LocalImageBundleManifest?): String? =
+    manifest?.requiredRuntimeProfile?.qnnSdk ?: manifest?.executionProfileQnnSdk
+
 internal fun qnnRuntimeDirectoryResolutionFor(
     context: Context,
     bundleRoot: File?
 ): QnnRuntimeDirectoryResolution {
     val appContext = context.applicationContext
-    val requiredRuntimeProfile = bundleRoot
-        ?.let { root -> runCatching { localImageBundleManifestFromRoot(root)?.requiredRuntimeProfile }.getOrNull() }
+    val manifest = bundleRoot?.let(::localImageBundleManifestFromRoot)
+    val requiredRuntimeProfile = manifest?.requiredRuntimeProfile
     val staged = stageQnnImageBundleRuntime(appContext, bundleRoot, requiredRuntimeProfile)
-    if (staged.failed) {
-        // Do not quietly fall back to an APK/GenieX host pair here. Mixing it
-        // with the bundle's intended Skel/Stub profile can poison HTP state
-        // and produce a misleading incompatible-context result.
-        return QnnRuntimeDirectoryResolution(
-            directories = emptyList(),
-            stagingError = staged.error
+    // Bundle-specific staging is an optimization, not an admission gate. A
+    // device may still expose a coherent OEM/system QNN runtime, so preserve
+    // the diagnostic but continue through generic runtime discovery and let
+    // the real native graph load decide compatibility.
+    // A downloaded image bundle may contain only graph/model artifacts. In
+    // that case use the APK's pinned Qualcomm asset set, staged into the
+    // app-private code cache. This is important on devices where the APK also
+    // carries another HTP profile in nativeLibraryDir: passing that directory
+    // alongside the selected profile lets the native resolver pick the wrong
+    // (usually newer) Skel/Stub pair and hang while opening the context.
+    val packagedQualcommRuntime = runCatching {
+        LiteRtQualcommRuntimeStager.stageForImageBundle(
+            context = appContext,
+            bundleRuntimeAlreadyStaged = staged.runtime != null,
+            qnnSdk = qnnSdkForPackagedImageRuntime(manifest)
         )
-    }
+    }.getOrNull()
+    val privateRuntimeDirectory = staged.runtime?.directory?.absolutePath
+        ?: packagedQualcommRuntime?.directory?.absolutePath
     val fallback = listOf(
         File(appContext.filesDir, "qnnlibs").absolutePath,
         File(appContext.filesDir, "runtime_libs").absolutePath,
-        appContext.applicationInfo.nativeLibraryDir,
         "/vendor/lib64",
         "/vendor/lib/rfsa/adsp",
         "/odm/lib64",
@@ -6397,22 +6785,30 @@ internal fun qnnRuntimeDirectoryResolutionFor(
         "/system_ext/lib64",
         "/product/lib64"
     )
-    val detectedRuntime = runCatching {
-        // This runs after staging, so DeviceProfileReader can only see the
-        // coherent private profile rather than the external bundle path.
-        DeviceProfileReader(appContext).read().accelerationProfile.qnnRuntime
-    }.getOrNull()
-    val selectedHostDirectory = detectedRuntime?.qnnSystemLibraryPath
-        ?.let(::File)
-        ?.parentFile
-        ?.absolutePath
+    val detectedRuntime = if (privateRuntimeDirectory == null) {
+        runCatching { DeviceProfileReader(appContext).read().accelerationProfile.qnnRuntime }
+            .getOrNull()
+    } else {
+        // Do not probe another host library after a coherent stage has been
+        // selected. QNN keeps process-level state after dlopen, so probing a
+        // stale app/OEM profile here could poison the exact staged graph load.
+        null
+    }
+    val packagedNativeDirectory = appContext.applicationInfo.nativeLibraryDir
+        .let(::File)
+        .canonicalPath
+    val detectedSearchDirectories = detectedRuntime?.searchDirectories.orEmpty().filterNot { path ->
+        runCatching { File(path).canonicalPath == packagedNativeDirectory }.getOrDefault(false)
+    }
     return QnnRuntimeDirectoryResolution(
-        directories = qnnRuntimeSearchDirectories(
-            bundleRoot = null,
-            existingDirectories = listOfNotNull(staged.runtime?.directory?.absolutePath, selectedHostDirectory) +
-                fallback + detectedRuntime?.searchDirectories.orEmpty()
+        directories = qnnRuntimeDirectoriesForResolvedRuntime(
+            privateRuntimeDirectory = privateRuntimeDirectory,
+            packagedNativeDirectory = appContext.applicationInfo.nativeLibraryDir,
+            fallbackDirectories = fallback,
+            detectedSearchDirectories = detectedSearchDirectories
         ),
-        stagedRuntime = staged.runtime
+        stagedRuntime = staged.runtime,
+        stagingError = staged.error
     )
 }
 
@@ -6801,7 +7197,12 @@ private fun LocalImageModelRecord.resolvedMnnFamily(): LocalImageModelFamily {
 private fun inferLocalImageRuntimeForBundle(root: File, primary: File): LocalImageRuntime =
     when {
         root.walkTopDown().any {
-            it.isFile && listOf("qnn", "qairt", "htp").any { token -> token in it.invariantSeparatorsPath.lowercase() }
+            it.isFile && (
+                listOf("qnn", "qairt", "htp").any { token -> token in it.invariantSeparatorsPath.lowercase() } ||
+                    it.name.endsWith(".ctx", ignoreCase = true) ||
+                    it.name.equals("unet.bin", ignoreCase = true) &&
+                        root.walkTopDown().any { sibling -> sibling.name.contains("clip", true) }
+            )
         } -> LocalImageRuntime.QNN_HTP
         primary.extension.equals("mnn", ignoreCase = true) -> LocalImageRuntime.MNN_DIFFUSION
         root.walkTopDown().any { it.isFile && it.extension.equals("mnn", ignoreCase = true) } -> LocalImageRuntime.MNN_DIFFUSION
@@ -6895,6 +7296,13 @@ private fun parseLocalImageBundleManifest(
     val executionProfilePaths = effectiveExecutionProfile?.requiredExecutionProfilePaths()
         ?: executionProfile?.requiredExecutionProfilePaths()
         ?: ParsedExecutionProfilePaths.Empty
+    val executionProfileQnnSdk = if (effectiveExecutionProfile != null) {
+        effectiveExecutionProfile.graph.qnnSdk
+    } else {
+        executionProfile
+            ?.strictOptionalObject("graph")
+            ?.strictOptionalNonBlankString("qnnSdk")
+    }
     val requiredRuntimeProfile = manifest.strictOptionalObject("requiredRuntimeProfile")?.let { profile ->
         val qnnSdk = profile.strictRequiredString("qnnSdk")
         val htpArch = profile.strictRequiredPositiveInt("htpArch")
@@ -6906,6 +7314,14 @@ private fun parseLocalImageBundleManifest(
                 default = true
             )
         )
+    }
+    require(
+        requiredRuntimeProfile == null ||
+            executionProfileQnnSdk == null ||
+            requiredRuntimeProfile.qnnSdk == executionProfileQnnSdk
+    ) {
+        "Image bundle requiredRuntimeProfile.qnnSdk (${requiredRuntimeProfile?.qnnSdk}) " +
+            "does not match executionProfile.graph.qnnSdk ($executionProfileQnnSdk)."
     }
     val primaryPath = components?.firstComponentPath("DIFFUSION")
         ?: components?.firstComponentPath("MODEL")
@@ -6948,6 +7364,7 @@ private fun parseLocalImageBundleManifest(
         components = componentContracts,
         executionProfileRequiredPaths = executionProfilePaths.requiredPaths,
         executionProfileGraphPaths = executionProfilePaths.graphPaths,
+        executionProfileQnnSdk = executionProfileQnnSdk,
         executionProfileDeclared = executionProfileDeclared,
         componentCount = components?.length() ?: 0
     )
@@ -6968,7 +7385,9 @@ internal fun LocalImageBundleManifest.resolveRuntimeComponentContract(
         .asSequence()
         .filter(LocalImageBundleComponentContract::required)
         .filterNot { component -> component.relativePath.isArchiveContainerPath() }
-        .map(LocalImageBundleComponentContract::relativePath)
+        .map { component ->
+            resolveInstalledImageBundleArtifactPath(root, component.relativePath)
+        }
         .toList()
     val requiredArchives = components
         .asSequence()
@@ -6988,8 +7407,14 @@ internal fun LocalImageBundleManifest.resolveRuntimeComponentContract(
     } else {
         emptyList()
     }
+    val reboundExecutionProfileRequiredPaths = executionProfileRequiredPaths.map { path ->
+        resolveInstalledImageBundleArtifactPath(root, path)
+    }
+    val reboundSmokePaths = smokePaths.map { path ->
+        resolveInstalledImageBundleArtifactPath(root, path)
+    }
     val requiredRuntimePaths = (
-        executionProfileRequiredPaths + smokePaths +
+        reboundExecutionProfileRequiredPaths + reboundSmokePaths +
             requiredNonArchiveComponents + inferredLegacyAssets
         ).distinct()
     try {
@@ -7005,15 +7430,18 @@ internal fun LocalImageBundleManifest.resolveRuntimeComponentContract(
         )
     }
 
-    val graphTextEncoder = executionProfileGraphPaths["textEncoder"]
+    val reboundGraphPaths = executionProfileGraphPaths.mapValues { (_, path) ->
+        resolveInstalledImageBundleArtifactPath(root, path)
+    }
+    val graphTextEncoder = reboundGraphPaths["textEncoder"]
     val graphComplete = listOf("textEncoder", "unet", "vae")
-        .all(executionProfileGraphPaths::containsKey) &&
-        (task != "CONTROL_IMAGE" || executionProfileGraphPaths.containsKey("controlNet"))
+        .all(reboundGraphPaths::containsKey) &&
+        (task != "CONTROL_IMAGE" || reboundGraphPaths.containsKey("controlNet"))
     val declaredCommunityClipComplete = graphTextEncoder
         ?.substringAfterLast('/')
         ?.equals("clip_v2.mnn", ignoreCase = true) != true ||
         listOf("tokenizer.json", "token_emb.bin", "pos_emb.bin")
-            .all(executionProfileRequiredPaths::contains)
+            .all(reboundExecutionProfileRequiredPaths::contains)
     val profileContractComplete = executionProfileDeclared &&
         graphComplete && declaredCommunityClipComplete
 
@@ -7312,6 +7740,15 @@ private fun JSONObject.strictRequiredString(field: String): String {
         ?: throw IllegalArgumentException("Image bundle manifest $field must be a non-empty string.")
 }
 
+private fun JSONObject.strictOptionalNonBlankString(field: String): String? {
+    if (!has(field) || isNull(field)) return null
+    val value = opt(field)
+    require(value is String && value.isNotBlank()) {
+        "Image bundle manifest $field must be a non-empty string when present."
+    }
+    return value.trim()
+}
+
 private fun JSONObject.strictRequiredPositiveInt(field: String): Int {
     val value = opt(field)
     return (value as? Number)
@@ -7482,8 +7919,24 @@ internal fun resolveSdxlQnnConditioningRoot(bundleRoot: File): File {
         )
 }
 
-private fun File.hasCompleteSdxlQnnConditioningAssets(): Boolean =
-    SDXL_QNN_CONDITIONING_ASSET_NAMES.all { name -> File(this, name).isFile }
+/**
+ * Returns whether an imported bundle contains the complete dual-CLIP SDXL
+ * conditioning contract in one safe directory. This is intentionally a
+ * package-layout check, not a device capability check.
+ */
+internal fun hasCompleteSdxlQnnConditioningBundle(bundleRoot: File): Boolean =
+    runCatching { resolveSdxlQnnConditioningRoot(bundleRoot) }.isSuccess
+
+private fun File.hasCompleteSdxlQnnConditioningAssets(): Boolean {
+    val directory = runCatching { canonicalFile }.getOrNull() ?: return false
+    return SDXL_QNN_CONDITIONING_ASSET_NAMES.all { name ->
+        val asset = runCatching { File(directory, name).canonicalFile }.getOrNull()
+        asset != null &&
+            asset.parentFile == directory &&
+            asset.isFile &&
+            asset.length() > 0L
+    }
+}
 
 private val SDXL_QNN_CONDITIONING_ASSET_NAMES = setOf(
     "clip.mnn",
@@ -8115,8 +8568,16 @@ internal fun evaluateLocalImageSmokePixels(
 }
 
 internal fun resolveMnnDiffusionBackendMode(requestedBackendMode: String?): String {
-    if (requestedBackendMode == null) return "opencl"
+    // Default to CPU: MNN 3.6.0 OpenCL can hang inside a blocking native UNet
+    // call on some Adreno devices (clFinish never returns), which would stall
+    // the user's image request forever. Explicit OpenCL stays available as an
+    // opt-in until the runtime hang is resolved.
+    if (requestedBackendMode == null) return "cpu"
     return when (requestedBackendMode.trim().lowercase()) {
+        // `auto` is a user-facing selection mode.  Start on the conservative
+        // CPU graph; the caller may retry OpenCL only after native CPU
+        // execution proves the fused UNet is unsupported.
+        "auto" -> "cpu"
         "opencl", "gpu" -> "opencl"
         "cpu" -> "cpu"
         else -> throw IllegalArgumentException(

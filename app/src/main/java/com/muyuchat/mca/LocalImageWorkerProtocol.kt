@@ -5,6 +5,7 @@ import org.json.JSONObject
 
 internal object LocalImageWorkerProtocol {
     private const val VERSION = 5
+    private const val INTERNAL_ALLOW_LOW_STEP_SMOKE = "allowLowStepSmoke"
 
     data class GenerateRequest(
         val requestId: String,
@@ -92,7 +93,10 @@ internal object LocalImageWorkerProtocol {
             .put("model", model.toJson())
             .put("prompt", prompt)
             .put("options", optionJson)
-            .apply { batchLineage?.let { put("batchLineage", it.toJson()) } }
+            .apply {
+                if (options.allowLowStepSmoke) put(INTERNAL_ALLOW_LOW_STEP_SMOKE, true)
+                batchLineage?.let { put("batchLineage", it.toJson()) }
+            }
             .toString()
     }
 
@@ -101,23 +105,25 @@ internal object LocalImageWorkerProtocol {
         json.requireCurrentVersion()
         val optionJson = json.optJSONObject("options")
         val parsedOptions = LocalImageGenerationOptions.fromJson(optionJson)
+        val allowLowStepSmoke = json.optionalStrictBoolean(INTERNAL_ALLOW_LOW_STEP_SMOKE) ?: false
         val sampler = optionJson?.explicitString("sampler", preserveEmpty = true)
         if (sampler != null && parsedOptions.sampleMethod != null) {
             require(sampler == parsedOptions.sampleMethod) {
                 "sampler and sampleMethod must resolve to the same value."
             }
         }
+        val workerOptions = (if (sampler != null) {
+            parsedOptions.copy(sampleMethod = sampler)
+        } else {
+            parsedOptions
+        }).copy(allowLowStepSmoke = allowLowStepSmoke)
         return GenerateRequest(
             requestId = json.requireString("requestId"),
             model = LocalImageModelRecord.fromJson(
                 json.optJSONObject("model") ?: kotlin.error("Missing local image model.")
             ),
             prompt = json.requireString("prompt"),
-            options = if (sampler != null) {
-                parsedOptions.copy(sampleMethod = sampler)
-            } else {
-                parsedOptions
-            },
+            options = workerOptions,
             batchLineage = json.optJSONObject("batchLineage")
                 ?.let(ImageGenerationBatchLineage::fromJson)
         )
@@ -394,6 +400,13 @@ internal object LocalImageWorkerProtocol {
         require(raw is String) { "$name must be a string when specified." }
         val value = raw.trim()
         return value.takeIf { preserveEmpty || it.isNotEmpty() }
+    }
+
+    private fun JSONObject.optionalStrictBoolean(name: String): Boolean? {
+        if (!has(name)) return null
+        require(!isNull(name)) { "$name must be a boolean when specified." }
+        return (get(name) as? Boolean)
+            ?: throw IllegalArgumentException("$name must be a boolean when specified.")
     }
 
     private val UPSCALE_TARGET_SCALES = setOf(2, 3, 4)

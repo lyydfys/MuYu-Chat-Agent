@@ -44,7 +44,7 @@ inline std::string loadFailureCodeFromLlamaError(std::string_view detail) {
             "unsupported quant", "unsupported tensor type", "unsupported ggml type",
             "unknown tensor type", "unsupported operation", "unsupported file version",
             "not implemented",
-            // Exact GGUF parser diagnostics in llama.cpp b10262.
+            // Exact GGUF parser diagnostics in llama.cpp b10590.
             "ggufv1 is no longer supported",
             "this software only supports up to version",
             "has invalid ggml type"

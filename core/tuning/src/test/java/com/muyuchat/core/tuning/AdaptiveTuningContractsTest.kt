@@ -149,6 +149,25 @@ class AdaptiveTuningContractsTest {
     }
 
     @Test
+    fun preferredLiteRtTransportSurvivesTheSafeBaseline() {
+        val profile = SafeBaselineFactory.create(
+            runtimeIdentity = identity(
+                modelId = "gemma4-qualcomm",
+                runtime = LocalChatRuntime.LITERT_LM
+            ),
+            device = device(),
+            capabilities = ModelTuningCapabilities(
+                runtime = TuningRuntime.UNKNOWN,
+                knowledgeLevel = ModelKnowledgeLevel.UNKNOWN,
+                preferredBackend = "npu"
+            )
+        )
+
+        assertEquals("npu", profile.loadBound.backend)
+        assertEquals("npu", profile.engineProfile.resolvedLoadBoundValues.value("backend"))
+    }
+
+    @Test
     fun missingUnknownTemplateIsBlockedWithAnAction() {
         val profile = SafeBaselineFactory.create(
             runtimeIdentity = identity("unknown-no-template"),

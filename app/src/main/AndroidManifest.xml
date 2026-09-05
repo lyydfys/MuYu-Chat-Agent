@@ -8,6 +8,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-sdk tools:overrideLibrary="com.geniex.sdk" />
+    <!-- Match Edge Gallery's optional NPU declaration without making NPU a
+         device-admission requirement; native load remains authoritative. -->
+    <uses-feature android:name="android.hardware.npu" android:required="false" />
 
     <application
         android:name=".McaApplication"
@@ -24,6 +27,16 @@
 
         <uses-native-library
             android:name="libcdsprpc.so"
+            android:required="false" />
+
+        <!-- LiteRT-LM GPU is an optional OpenCL transport.  Declaring these
+             libraries keeps CPU-only devices installable; the native engine
+             remains authoritative when GPU initialization is attempted. -->
+        <uses-native-library
+            android:name="libvndksupport.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libOpenCL.so"
             android:required="false" />
 
         <service

@@ -82,6 +82,8 @@ internal data class ImageGenerationOverrides(
     val scheduler: ImageSchedulerAlgorithm? = null,
     val predictionType: ImagePredictionType? = null,
     val steps: Int? = null,
+    /** Internal debug-only escape hatch for short semantic smoke requests. */
+    val allowLowStepSmoke: Boolean = false,
     val cfgScale: Double? = null,
     val useCfg: Boolean? = null,
     val width: Int? = null,
@@ -859,7 +861,12 @@ internal object ImageExecutionProfileResolver {
         val resolvedScheduler = base.scheduler.withResolvedAlgorithm(
             algorithm = overrides.scheduler ?: base.scheduler.algorithm,
             predictionType = overrides.predictionType ?: base.scheduler.predictionType,
-            defaultSteps = overrides.steps ?: base.scheduler.defaultSteps
+            defaultSteps = overrides.steps ?: base.scheduler.defaultSteps,
+            allowLowStepSmoke = overrides.allowLowStepSmoke &&
+                base.runtime in setOf(
+                    LocalImageRuntime.QNN_HTP,
+                    LocalImageRuntime.MNN_DIFFUSION
+                )
         )
         val schedulerAdjustedBase = base.copy(scheduler = resolvedScheduler)
             .withTopologyDerivedQnnUltraFixCapability()
@@ -942,15 +949,25 @@ internal object ImageExecutionProfileResolver {
     private fun ImageSchedulerContract.withResolvedAlgorithm(
         algorithm: ImageSchedulerAlgorithm,
         predictionType: ImagePredictionType = this.predictionType,
-        defaultSteps: Int = this.defaultSteps
+        defaultSteps: Int = this.defaultSteps,
+        allowLowStepSmoke: Boolean = false
     ): ImageSchedulerContract {
+        // Semantic smoke uses a deliberately tiny step count to exercise the complete native
+        // graph/PNG path quickly. Keep the model's quality floor for every normal product call;
+        // the internal marker is only set by the debug semantic smoke harness.
+        val resolvedMinSteps = if (allowLowStepSmoke) {
+            minOf(minSteps, defaultSteps)
+        } else {
+            minSteps
+        }
         // applyUserOverrides is also the normal no-op merge path. Retain a complete scheduler
         // sidecar unchanged unless the algorithm itself changes; some native profiles declare
         // otherwise-unused compatibility values such as skipPrkSteps deliberately.
         if (algorithm == this.algorithm) {
             return copy(
                 predictionType = predictionType,
-                defaultSteps = defaultSteps
+                defaultSteps = defaultSteps,
+                minSteps = resolvedMinSteps
             )
         }
         val isFlowMatch = algorithm == ImageSchedulerAlgorithm.FLOW_MATCH
@@ -991,7 +1008,8 @@ internal object ImageExecutionProfileResolver {
             scaleModelInput = algorithm == ImageSchedulerAlgorithm.EULER ||
                 algorithm == ImageSchedulerAlgorithm.EULER_A,
             order = if (algorithm == ImageSchedulerAlgorithm.DPMPP_2M) 2 else 1,
-            defaultSteps = defaultSteps
+            defaultSteps = defaultSteps,
+            minSteps = resolvedMinSteps
         )
     }
 
@@ -1008,6 +1026,12 @@ internal object ImageExecutionProfileResolver {
                 profile.conditioning.textEncoderInputShape.getOrNull(1)
                     ?.takeIf { it > 0 }
                     ?: profile.tokenizer.maxLength
+            }
+            profile.runtime == LocalImageRuntime.MNN_DIFFUSION -> {
+                // MNN SD executes one tokenizer sequence per active conditioning branch.
+                // Declaring a separate negative prompt describes capability, not an always-on
+                // branch when CFG has been disabled for this request.
+                profile.tokenizer.maxLength * branches
             }
             profile.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP -> {
                 // stable-diffusion.cpp only prepares the negative conditioner
@@ -1378,7 +1402,14 @@ internal object ImageExecutionProfileResolver {
             ImageSchedulerAlgorithm.DPMPP_2M,
             ImagePredictionType.EPSILON,
             steps,
-            if (variant == ImageModelVariant.HYPER) 1 else 10,
+            // The Qualcomm SD1.5 bundles ship a four-step semantic smoke profile and
+            // the Local API uses that same bounded request for health checks.  Keeping
+            // the historical lower bound at ten makes an otherwise valid `steps=4`
+            // request fail profile validation before native execution (the scheduler's
+            // defaultSteps becomes smaller than minSteps).  Four is still a conservative
+            // floor for this topology; one-step graph smoke remains available through
+            // the explicit internal low-step-smoke override.
+            if (variant == ImageModelVariant.HYPER) 1 else 4,
             50,
             timestepSpacing = ImageTimestepSpacing.LEADING,
             order = 2
@@ -1581,7 +1612,7 @@ internal object ImageExecutionProfileResolver {
             order = 2
         ),
         tokenizer = clipTokenizer(
-            ImageTokenizerBackend.TOKENIZERS_CPP,
+            ImageTokenizerBackend.MNN_MTOK,
             supportsPromptWeighting = false
         ),
         conditioning = conditioning(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, ImageEmbeddingConversionStrategy.GRAPH_EXECUTION, 768),

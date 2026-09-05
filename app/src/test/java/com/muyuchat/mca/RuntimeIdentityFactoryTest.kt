@@ -80,6 +80,11 @@ class RuntimeIdentityFactoryTest {
             val model = manifest(bundle, runtime = ChatModelRuntime.MNN)
 
             val first = build(model)
+            assertTrue(
+                first.identity.runtimeVersion.contains(
+                    "mnn@3.6.1-d407447ed56c4121a11ccbd266dc184ca1ead0c2"
+                )
+            )
             assertTrue(first.configFingerprint.isNotBlank())
             assertTrue(first.identity.tokenizerFingerprint.isNotBlank())
             assertTrue(first.identity.templateFingerprint.isNotBlank())
@@ -200,7 +205,7 @@ class RuntimeIdentityFactoryTest {
                 installationScopeId = "scope"
             )
             assertEquals("b".repeat(64), result.identity.projectorFingerprint)
-            assertTrue(result.identity.runtimeVersion.contains("llama.cpp@f26efa02a77dc3660f94ac90efee59394f3bc74d"))
+            assertTrue(result.identity.runtimeVersion.contains("llama.cpp@6657ded4faa3b8450221119fc6b4d002e35104a2"))
             assertEquals("runtime-parameters-v2-sparse-moe-mmap", result.identity.parameterPolicyVersion)
             assertTrue(result.identity.evaluatorFingerprint.length == 64)
             assertTrue("local_chat" in result.identity.capabilities)
@@ -307,6 +312,7 @@ class RuntimeIdentityFactoryTest {
             ChatModelRuntime.MNN -> LocalChatRuntime.MNN_CPU
             ChatModelRuntime.GENIEX_QAIRT -> LocalChatRuntime.GENIEX_QAIRT
             ChatModelRuntime.LLAMA_CPP -> LocalChatRuntime.LLAMA_CPP
+            ChatModelRuntime.LITERT_LM -> LocalChatRuntime.LITERT_LM
         },
         device = device,
         installationScopeId = "test-installation"

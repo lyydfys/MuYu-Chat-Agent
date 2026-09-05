@@ -2,6 +2,7 @@ package com.muyuchat.core.modelstore
 
 internal enum class ModelImportKind {
     GGUF,
+    LITERT_LM,
     MNN_ZIP,
     MNN_COMPONENT,
     UNKNOWN
@@ -16,9 +17,12 @@ internal enum class ModelImportKind {
 internal fun classifyModelImport(displayName: String?, header: ByteArray): ModelImportKind {
     val normalizedName = displayName.orEmpty().trim()
     return when {
+        header.hasLiteRtLmMagic() -> ModelImportKind.LITERT_LM
         header.hasGgufMagic() -> ModelImportKind.GGUF
         header.hasZipMagic() -> ModelImportKind.MNN_ZIP
         normalizedName.isMnnComponentName() -> ModelImportKind.MNN_COMPONENT
+        header.size < LITERT_LM_MAGIC_SIZE && normalizedName.endsWith(".litertlm", ignoreCase = true) ->
+            ModelImportKind.LITERT_LM
         header.size < MAGIC_SIZE && normalizedName.endsWith(".gguf", ignoreCase = true) -> ModelImportKind.GGUF
         header.size < MAGIC_SIZE && normalizedName.endsWith(".zip", ignoreCase = true) -> ModelImportKind.MNN_ZIP
         else -> ModelImportKind.UNKNOWN
@@ -32,6 +36,15 @@ internal fun normalizedGgufImportName(displayName: String?): String {
         .substringAfterLast('\\')
         .ifBlank { "model" }
     return if (candidate.endsWith(".gguf", ignoreCase = true)) candidate else "$candidate.gguf"
+}
+
+internal fun normalizedLiteRtLmImportName(displayName: String?): String {
+    val candidate = displayName.orEmpty()
+        .trim()
+        .substringAfterLast('/')
+        .substringAfterLast('\\')
+        .ifBlank { "model" }
+    return if (candidate.endsWith(".litertlm", ignoreCase = true)) candidate else "$candidate.litertlm"
 }
 
 private fun ByteArray.hasGgufMagic(): Boolean =

@@ -263,6 +263,41 @@ class LocalImageProductClosureTest {
     }
 
     @Test
+    fun `debug image semantic harness never treats manifest json as executable model`() {
+        val debugSmoke = sourceFile(
+            "app/src/debug/java/com/muyuchat/mca/debug/LocalImageSmokeActivity.kt"
+        )
+
+        assertTrue(debugSmoke.contains("val manifestFile = File(root, \"manifest.json\").canonicalFile"))
+        assertTrue(debugSmoke.contains("requested?.takeUnless { it.canonicalFile == manifestFile }"))
+        assertTrue(debugSmoke.contains("val declaredPrimary = manifest?.primaryFile"))
+        assertTrue(debugSmoke.contains("val smokePrimary = manifest"))
+    }
+
+    @Test
+    fun `debug QNN smoke treats compatibility metadata as advisory and publishes runtime evidence`() {
+        val debugSmoke = sourceFile(
+            "app/src/debug/java/com/muyuchat/mca/debug/LocalImageSmokeActivity.kt"
+        )
+        val graph = functionBody(debugSmoke, "private fun runQnnImageSmoke(")
+        val semantic = functionBody(debugSmoke, "private fun runQnnSemanticGenerate(")
+
+        assertTrue(graph.contains("val productReady = result.optBoolean(\"ok\") && smokeResult.provesNpuExecution"))
+        assertFalse(graph.contains("compatibilityMessage == null"))
+        assertFalse(graph.contains("result.put(\"ok\", false)"))
+        assertTrue(graph.contains("result.put(\"compatibilityAdvisory\", compatibilityMessage != null)"))
+        assertTrue(graph.contains("result.put(\"compatibilityBlocked\", false)"))
+        listOf("runtimeDirs", "runtimeInspection").forEach { field ->
+            assertTrue("Graph smoke must publish $field", graph.contains(".put(\"$field\""))
+            assertTrue("Semantic smoke must publish $field", semantic.contains(".put(\"$field\""))
+        }
+        assertTrue(semantic.contains(".put(\"selectedHtpArch\", selectedHtpArch)"))
+        assertTrue(semantic.contains(".put(\"transportHtpArch\", transportHtpArch)"))
+        assertTrue(semantic.contains("result.put(\"selectedHtpArch\", selectedHtpArch)"))
+        assertTrue(semantic.contains("result.put(\"transportHtpArch\", transportHtpArch)"))
+    }
+
+    @Test
     fun `retry and history recreation retain immutable model inputs and generation parameters`() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")

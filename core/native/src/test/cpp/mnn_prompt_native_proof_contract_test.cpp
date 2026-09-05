@@ -14,11 +14,36 @@ std::string read_text(const char* path) {
     return buffer.str();
 }
 
+std::string function_body(const std::string& source, const std::string& signature) {
+    const size_t signature_position = source.find(signature);
+    const size_t opening_brace = signature_position == std::string::npos
+            ? std::string::npos
+            : source.find('{', signature_position + signature.size());
+    assert(signature_position != std::string::npos);
+    assert(opening_brace != std::string::npos);
+    int depth = 0;
+    for (size_t position = opening_brace; position < source.size(); ++position) {
+        if (source[position] == '{') ++depth;
+        if (source[position] == '}' && --depth == 0) {
+            return source.substr(opening_brace, position - opening_brace + 1U);
+        }
+    }
+    assert(false);
+    return {};
+}
+
 void require_contains(const std::string& source, const std::string& needle) {
     if (source.find(needle) == std::string::npos) {
         std::fprintf(stderr, "missing MNN prompt-proof needle: %s\n", needle.c_str());
     }
     assert(source.find(needle) != std::string::npos);
+}
+
+void require_not_contains(const std::string& source, const std::string& needle) {
+    if (source.find(needle) != std::string::npos) {
+        std::fprintf(stderr, "unexpected MNN prompt-proof needle: %s\n", needle.c_str());
+    }
+    assert(source.find(needle) == std::string::npos);
 }
 
 void require_not_contains_between(const std::string& source,
@@ -96,6 +121,37 @@ void require_sequence_from(const std::string& source,
 int main(int argc, char** argv) {
     assert(argc == 2);
     const std::string source = read_text(argv[1]);
+
+    const auto parser = function_body(source, "bool parse_mnn_semantic_execution_contract(");
+    require_contains(parser, "const size_t expectedTokenCount =");
+    require_contains(parser, "(contract.use_cfg ? 2U : 1U)");
+    require_contains(parser, "contract.token_count != expectedTokenCount");
+    require_not_contains(parser, "MNN_MTOK fallback is allowed only when negativePrompt is empty.");
+
+    const auto tokenizer = function_body(source, "bool tokenize_mnn_sd15_prompt(");
+    require_contains(tokenizer, "MNN::DIFFUSION::MtokTokenizer::Style::kSingle");
+    require_contains(tokenizer, "const auto positiveIds = tokenizer.encode(prompt, contract.tokenizer_max_length)");
+    require_contains(tokenizer, "const auto negativeIds = tokenizer.encode(");
+    require_contains(tokenizer, "contract.negative_prompt,");
+    require_contains(tokenizer, "ids.insert(ids.end(), negativeIds.begin(), negativeIds.end())");
+    require_contains(tokenizer, "ids.insert(ids.end(), positiveIds.begin(), positiveIds.end())");
+    require_contains(tokenizer, "? pair.negative_then_positive()");
+    require_contains(tokenizer, ": pair.positive.ids");
+    require_contains(tokenizer, "if (ids.size() != contract.token_count)");
+    require_contains(tokenizer, "evidence.token_count = ids.size()");
+    require_contains(tokenizer, "mnn_token_id_fingerprint(activeTokenIds)");
+    require_sequence_from(
+            tokenizer,
+            "const auto negativeIds = tokenizer.encode(",
+            "ids.insert(ids.end(), negativeIds.begin(), negativeIds.end())",
+            "ids.insert(ids.end(), positiveIds.begin(), positiveIds.end())");
+    require_not_contains(tokenizer, "MNN::DIFFUSION::MtokTokenizer::Style::kPair");
+    require_not_contains(tokenizer, "MNN_MTOK cannot execute a non-empty negativePrompt exactly.");
+
+    require_contains(source, "!mnn_contract_integer(params, \"batchCount\", batch_count_value, contractError)");
+    require_contains(source, "if (batch_count_value != 1)");
+    require_contains(source, "nativeEffective[\"batchCount\"] = batch_count;");
+    require_contains(source, "{\"batchCount\", batch_count}");
 
     require_contains(source, "image_prompt_execution_sha256(prompt, contract.negative_prompt)");
     require_contains(source, "nativePromptExecutionSha256");

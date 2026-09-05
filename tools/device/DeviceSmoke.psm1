@@ -1114,13 +1114,43 @@ function Test-DeviceSmokeMnnProtocolLeak {
     return $Text -match '(?i)<\|[^|>\r\n]{1,80}\|>|<eop>|(?:^|\s)(?:human|user|assistant)\s*:'
 }
 
+function Assert-DeviceSmokeMnnGenerationQuality {
+    param([object]$Generation)
+
+    $text = Get-DeviceSmokeProperty -Object $Generation -Name 'text'
+    if ($text -isnot [string]) { $text = Get-DeviceSmokeProperty -Object $Generation -Name 'textPreview' }
+    if ([string]::IsNullOrWhiteSpace($text)) { throw 'MNN generation quality: empty output' }
+    if ($text.Trim() -cmatch '^(.)\1{7,}$') { throw 'MNN generation quality: fixed repeated output' }
+    $stats = Get-DeviceSmokeProperty -Object $Generation -Name 'nativeStats'
+    $ids = Get-DeviceSmokeProperty -Object $stats -Name 'mnnDebugGeneratedTokenIds'
+    if ($ids -is [System.Array] -and $ids.Count -ge 8 -and @($ids | Select-Object -Unique).Count -eq 1) {
+        throw 'MNN generation quality: fixed repeated token stream'
+    }
+    $count = Get-DeviceSmokeProperty -Object $stats -Name 'logitsCount'
+    $finite = Get-DeviceSmokeProperty -Object $stats -Name 'logitsFiniteCount'
+    $nonFinite = Get-DeviceSmokeProperty -Object $stats -Name 'logitsNonFiniteCount'
+    $min = Get-DeviceSmokeProperty -Object $stats -Name 'logitsMin'
+    $max = Get-DeviceSmokeProperty -Object $stats -Name 'logitsMax'
+    if ($null -ne $nonFinite -and [int64]$nonFinite -gt 0) { throw 'MNN generation quality: non-finite logits' }
+    if ($null -ne $count -and [int64]$count -gt 1 -and $finite -eq $count -and
+        $null -ne $min -and $null -ne $max -and [double]$min -eq 0 -and [double]$max -eq 0) {
+        throw 'MNN generation quality: all-zero logits'
+    }
+}
+
 function Assert-DeviceSmokeMnnChatContract {
-    param([object]$Json)
+    param(
+        [object]$Json,
+        [ValidateSet('mnn_cpu', 'mnn_opencl')]
+        [string]$ExpectedBackend = 'mnn_cpu'
+    )
 
     Assert-DeviceSmokeCompleted -Json $Json
     $issues = New-Object System.Collections.ArrayList
     $nativeStats = Get-DeviceSmokeLatestNativeStats -Json $Json
-    if ((Get-DeviceSmokeProperty -Object $nativeStats -Name 'backend') -cne 'mnn_cpu') { [void]$issues.Add('nativeStats.backend must be mnn_cpu') }
+    if ((Get-DeviceSmokeProperty -Object $nativeStats -Name 'backend') -cne $ExpectedBackend) {
+        [void]$issues.Add("nativeStats.backend must be $ExpectedBackend")
+    }
     if (-not (Test-DeviceSmokeJsonBooleanTrue (Get-DeviceSmokeProperty -Object $nativeStats -Name 'loaded'))) { [void]$issues.Add('nativeStats.loaded must be true') }
     if (-not (Test-DeviceSmokeJsonBooleanTrue (Get-DeviceSmokeProperty -Object $nativeStats -Name 'runnerReady'))) { [void]$issues.Add('nativeStats.runnerReady must be true') }
     $generation = @(Find-DeviceSmokeEvent -Json $Json -Status 'generation_ok')
@@ -1134,6 +1164,7 @@ function Assert-DeviceSmokeMnnChatContract {
         if (Test-DeviceSmokeMnnProtocolLeak $generationInspectableText) {
             [void]$issues.Add('generation_ok leaks an MNN template/protocol marker')
         }
+        Assert-DeviceSmokeMnnGenerationQuality -Generation (Get-DeviceSmokeProperty -Object $generation[0] -Name 'generation')
     }
     $turns = @(Find-DeviceSmokeEvent -Json $Json -Status 'generation_turn_ok')
     foreach ($turn in $turns) {
@@ -1157,6 +1188,24 @@ function Assert-DeviceSmokeMnnChatContract {
         $apiInspectableText = if ($apiText -is [string]) { $apiText } else { $apiPreview }
         if (Test-DeviceSmokeMnnProtocolLeak $apiInspectableText) {
             [void]$issues.Add('api_engine_stream_ok leaks an MNN template/protocol marker')
+        }
+    }
+    if ($ExpectedBackend -eq 'mnn_cpu') {
+        $allFinite = Get-DeviceSmokeProperty -Object $nativeStats -Name 'logitsAllFinite'
+        $logitsCount = Get-DeviceSmokeProperty -Object $nativeStats -Name 'logitsCount'
+        $logitsMin = Get-DeviceSmokeProperty -Object $nativeStats -Name 'logitsMin'
+        $logitsMax = Get-DeviceSmokeProperty -Object $nativeStats -Name 'logitsMax'
+        $tokenIds = Get-DeviceSmokeProperty -Object $nativeStats -Name 'mnnDebugGeneratedTokenIds'
+        $zeroVocabulary = (Test-DeviceSmokeJsonBooleanTrue $allFinite) -and
+            $null -ne $logitsCount -and [int64]$logitsCount -gt 1 -and
+            $null -ne $logitsMin -and $null -ne $logitsMax -and
+            [double]$logitsMin -eq 0.0 -and [double]$logitsMax -eq 0.0
+        $longZeroStream = $false
+        if ($tokenIds -is [System.Array] -and $tokenIds.Count -ge 8) {
+            $longZeroStream = @($tokenIds | Where-Object { [int]$_ -ne 0 }).Count -eq 0
+        }
+        if ($zeroVocabulary -or $longZeroStream) {
+            [void]$issues.Add('MNN CPU produced an all-zero logits/token stream; chat quality is invalid')
         }
     }
     if ($issues.Count -gt 0) { throw "MNN chat contract failed: $($issues -join '; ')." }
@@ -1230,6 +1279,165 @@ function Assert-DeviceSmokeQnnChatContract {
     }
     if (-not (Test-DeviceSmokeQnnEvidence -Json $Json)) { [void]$issues.Add('NPU/HTP/QAIRT evidence is missing') }
     if ($issues.Count -gt 0) { throw "QNN chat contract failed: $($issues -join '; ')." }
+}
+
+function Test-DeviceSmokePositiveFiniteNumber {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return $false }
+    [double]$number = 0.0
+    $parsed = [double]::TryParse(
+        [string]$Value,
+        [Globalization.NumberStyles]::Float,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [ref]$number
+    )
+    return $parsed -and -not [double]::IsNaN($number) -and
+        -not [double]::IsInfinity($number) -and $number -gt 0.0
+}
+
+function Find-DeviceSmokeStageEvent {
+    param([object]$Json, [string]$Stage)
+
+    return @(Get-DeviceSmokeEvents -Json $Json | Where-Object {
+        $status = Get-DeviceSmokeProperty -Object $_ -Name 'status'
+        $eventStage = Get-DeviceSmokeProperty -Object $_ -Name 'stage'
+        ($status -is [string] -and $status -ceq $Stage) -or
+            ($eventStage -is [string] -and $eventStage -ceq $Stage)
+    } | Select-Object -Last 1)
+}
+
+function Assert-DeviceSmokeLiteRtLmChatContract {
+    param(
+        [object]$Json,
+        [ValidateSet('full', 'api_only', 'litertlm_cache_ab')]
+        [string]$SmokeMode = 'full',
+        [ValidateSet('cpu', 'gpu', 'npu')]
+        [string]$Backend = 'npu'
+    )
+
+    Assert-DeviceSmokeCompleted -Json $Json
+    $issues = New-Object System.Collections.ArrayList
+    $nativeStats = Get-DeviceSmokeLatestNativeStats -Json $Json
+    if ((Get-DeviceSmokeProperty -Object $nativeStats -Name 'backend') -cne 'litert_lm') {
+        [void]$issues.Add('nativeStats.backend must be litert_lm')
+    }
+    if ((Get-DeviceSmokeProperty -Object $nativeStats -Name 'backendMode') -cne $Backend) {
+        [void]$issues.Add("nativeStats.backendMode must be $Backend")
+    }
+    $effectiveConfig = Get-DeviceSmokeProperty -Object $nativeStats -Name 'effectiveConfig'
+    if ((Get-DeviceSmokeProperty -Object $effectiveConfig -Name 'backend') -cne $Backend) {
+        [void]$issues.Add("nativeStats.effectiveConfig.backend must be $Backend")
+    }
+    if (-not (Test-DeviceSmokeJsonBooleanTrue (Get-DeviceSmokeProperty -Object $nativeStats -Name 'loaded'))) {
+        [void]$issues.Add('nativeStats.loaded must be true')
+    }
+    if (-not (Test-DeviceSmokeJsonBooleanTrue (Get-DeviceSmokeProperty -Object $nativeStats -Name 'runnerReady'))) {
+        [void]$issues.Add('nativeStats.runnerReady must be true')
+    }
+
+    $backendDevices = [string](Get-DeviceSmokeProperty -Object $nativeStats -Name 'backendDevices')
+    if ([string]::IsNullOrWhiteSpace($backendDevices) -or
+        $backendDevices -notmatch [regex]::Escape($Backend)) {
+        [void]$issues.Add("nativeStats.backendDevices must contain $Backend evidence")
+    }
+
+    # Direct native runners emit litert_lm_load_ok, while the production
+    # isolated worker is observed at the smoke engine boundary. Both prove a
+    # successful completed load; do not reject the production evidence shape.
+    $hasLoadEvidence =
+        @(Find-DeviceSmokeStageEvent -Json $Json -Stage 'litert_lm_load_ok').Count -ge 1 -or
+        @(Find-DeviceSmokeStageEvent -Json $Json -Stage 'smoke_engine_load_call_ok').Count -ge 1
+    if (-not $hasLoadEvidence) {
+        [void]$issues.Add('successful LiteRT-LM load stage is missing (expected litert_lm_load_ok or smoke_engine_load_call_ok)')
+    }
+
+    if ($Backend -eq 'npu') {
+        # NPU text alone does not prove that the isolated Qualcomm QNN/HTP set
+        # was used. Require the staging event for the Qualcomm transport.
+        $runtimeStage = @(Find-DeviceSmokeEvent -Json $Json -Status 'litert_lm_runtime_stage')
+        if ($runtimeStage.Count -ne 1) {
+            [void]$issues.Add('litert_lm_runtime_stage event is missing')
+        } else {
+            if (-not (Test-DeviceSmokeJsonBooleanTrue (Get-DeviceSmokeProperty -Object $runtimeStage[0] -Name 'ok'))) {
+                [void]$issues.Add('litert_lm_runtime_stage.ok must be true')
+            }
+            $variant = [string](Get-DeviceSmokeProperty -Object $runtimeStage[0] -Name 'variant')
+            if ($variant -notmatch '^(?i:generic|v73|v75|v79|v81)$') {
+                [void]$issues.Add('litert_lm_runtime_stage.variant must be generic, v73, v75, v79, or v81')
+            }
+            $stageDirectory = [string](Get-DeviceSmokeProperty -Object $runtimeStage[0] -Name 'directory')
+            if ([string]::IsNullOrWhiteSpace($stageDirectory)) {
+                [void]$issues.Add('litert_lm_runtime_stage.directory must be present')
+            }
+        }
+    }
+
+    if ($SmokeMode -eq 'full') {
+        $generation = @(Find-DeviceSmokeEvent -Json $Json -Status 'generation_ok')
+        if ($generation.Count -ne 1) {
+            [void]$issues.Add('generation_ok event is missing')
+        } else {
+            $text = Get-DeviceSmokePathValue -Object $generation[0] -Path @('generation', 'text')
+            $preview = Get-DeviceSmokePathValue -Object $generation[0] -Path @('generation', 'textPreview')
+            if (($text -isnot [string] -or [string]::IsNullOrWhiteSpace($text)) -and
+                ($preview -isnot [string] -or [string]::IsNullOrWhiteSpace($preview))) {
+                [void]$issues.Add('generation_ok requires visible text')
+            }
+        }
+    } elseif ($SmokeMode -eq 'litertlm_cache_ab') {
+        $firstGeneration = @(Find-DeviceSmokeEvent -Json $Json -Status 'litertlm_cache_first_ok')
+        if ($firstGeneration.Count -eq 1) {
+            $text = Get-DeviceSmokePathValue -Object $firstGeneration[0] -Path @('generation', 'text')
+            $preview = Get-DeviceSmokePathValue -Object $firstGeneration[0] -Path @('generation', 'textPreview')
+            if (($text -isnot [string] -or [string]::IsNullOrWhiteSpace($text)) -and
+                ($preview -isnot [string] -or [string]::IsNullOrWhiteSpace($preview))) {
+                [void]$issues.Add('litertlm_cache_first_ok requires visible text')
+            }
+        }
+    }
+
+    if ($SmokeMode -eq 'litertlm_cache_ab') {
+        foreach ($status in @('litertlm_cache_first_ok', 'litertlm_cache_ab_ok')) {
+            if (@(Find-DeviceSmokeEvent -Json $Json -Status $status).Count -ne 1) {
+                [void]$issues.Add("$status event is missing")
+            }
+        }
+        $cache = @(Find-DeviceSmokeEvent -Json $Json -Status 'litertlm_cache_ab_ok')
+        if ($cache.Count -eq 1) {
+            $cacheResult = $cache[0]
+            if (-not (Test-DeviceSmokeJsonBooleanTrue (Get-DeviceSmokeProperty -Object $cacheResult -Name 'cacheHit'))) {
+                [void]$issues.Add('litertlm_cache_ab_ok.cacheHit must be true')
+            }
+            $firstKv = Get-DeviceSmokeProperty -Object $cacheResult -Name 'firstKvCacheTokens'
+            $secondKv = Get-DeviceSmokeProperty -Object $cacheResult -Name 'secondKvCacheTokens'
+            if (-not (Test-DeviceSmokePositiveFiniteNumber $firstKv) -or
+                -not (Test-DeviceSmokePositiveFiniteNumber $secondKv) -or
+                [double]$secondKv -le [double]$firstKv) {
+                [void]$issues.Add('litertlm_cache_ab_ok must show a growing KV cache token count')
+            }
+        }
+    }
+
+    $api = @(Find-DeviceSmokeEvent -Json $Json -Status 'api_engine_stream_ok')
+    if ($api.Count -ne 1) {
+        [void]$issues.Add('api_engine_stream_ok event is missing')
+    } elseif (-not (Test-DeviceSmokeJsonBooleanTrue (
+        Get-DeviceSmokePathValue -Object $api[0] -Path @('apiEngine', 'visibleSeen'))
+    )) {
+        [void]$issues.Add('api_engine_stream_ok requires apiEngine.visibleSeen=true')
+    }
+
+    if (-not (Test-DeviceSmokeJsonBooleanTrue (Get-DeviceSmokeProperty -Object $nativeStats -Name 'benchmarkEnabled'))) {
+        [void]$issues.Add('nativeStats.benchmarkEnabled must be true')
+    }
+    foreach ($field in @('prefillTps', 'decodeTps', 'prefillTokens', 'completionTokens')) {
+        if (-not (Test-DeviceSmokePositiveFiniteNumber (Get-DeviceSmokeProperty -Object $nativeStats -Name $field))) {
+            [void]$issues.Add("nativeStats.$field must be a positive benchmark value")
+        }
+    }
+    if ($issues.Count -gt 0) { throw "LiteRT-LM Qualcomm chat contract failed: $($issues -join '; ')." }
+    return $nativeStats
 }
 
 function Assert-DeviceSmokeQairtDryRunContract {
@@ -1387,17 +1595,20 @@ Export-ModuleMember -Function @(
     'Assert-DeviceSmokeCompleted',
     'Assert-DeviceSmokeMnnChatBundle',
     'Assert-DeviceSmokeMnnChatContract',
+    'Assert-DeviceSmokeMnnGenerationQuality',
     'Assert-DeviceSmokeMnnChatTextFragments',
     'Assert-DeviceSmokeMnnDiffusionBundle',
     'Assert-DeviceSmokeMnnDiffusionContract',
     'Assert-DeviceSmokePackageInstalled',
     'Assert-DeviceSmokeQairtChatBundle',
     'Assert-DeviceSmokeQairtDryRunContract',
+    'Assert-DeviceSmokeLiteRtLmChatContract',
     'Assert-DeviceSmokeQnnChatContract',
     'Assert-DeviceSmokeQnnImageBundle',
     'Assert-DeviceSmokeQnnImageContract',
     'Assert-DeviceSmokeWorkerIsolationContract',
     'Get-DeviceSmokeEvents',
+    'Get-DeviceSmokeProperty',
     'Get-DeviceSmokeSafeName',
     'Get-DeviceSmokeLatestNativeStats',
     'Initialize-DeviceSmokeDevice',

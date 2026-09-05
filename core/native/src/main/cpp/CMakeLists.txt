@@ -138,10 +138,12 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
     endif()
     set_property(TARGET llama PROPERTY SOURCES ${MCA_LLAMA_TARGET_SOURCES_WITHOUT_MODEL})
     target_sources(llama PRIVATE ${CMAKE_CURRENT_LIST_DIR}/llama_model_mmap_prefetch_override.cpp)
-    # GenieX 0.3.x ships a llama.cpp plugin built against the pre-n_ctx
-    # common_sampler_init ABI. Keep the current API and export a two-argument
-    # forwarding symbol from llama-common for that binary plugin.
-    target_sources(llama-common PRIVATE ${CMAKE_CURRENT_LIST_DIR}/llama_common_legacy_compat.cpp)
+    # The APK intentionally uses the current llama/ggml libraries for both the
+    # built-in backend and GenieX. Export the one legacy llama-common entry
+    # still referenced by GenieX 0.3.12 so its plugin remains loadable without
+    # packaging a second, conflicting native dependency set.
+    target_sources(llama-common PRIVATE
+            ${CMAKE_CURRENT_LIST_DIR}/llama_common_legacy_compat.cpp)
     find_package(Threads REQUIRED)
     set(MTMD_SRC ${LLAMA_SRC}/tools/mtmd)
     add_library(mca_mtmd STATIC
@@ -149,9 +151,11 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
             ${MTMD_SRC}/mtmd-audio.cpp
             ${MTMD_SRC}/mtmd-image.cpp
             ${MTMD_SRC}/mtmd-helper.cpp
+            ${MTMD_SRC}/mtmd-helper-gen.cpp
             ${MTMD_SRC}/clip.cpp
             ${MTMD_SRC}/models/cogvlm.cpp
             ${MTMD_SRC}/models/conformer.cpp
+            ${MTMD_SRC}/models/dots3note.cpp
             ${MTMD_SRC}/models/dotsocr.cpp
             ${MTMD_SRC}/models/exaone4_5.cpp
             ${MTMD_SRC}/models/gemma4a.cpp
@@ -172,6 +176,7 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
             ${MTMD_SRC}/models/paddleocr.cpp
             ${MTMD_SRC}/models/pixtral.cpp
             ${MTMD_SRC}/models/minimax-m3.cpp
+            ${MTMD_SRC}/models/muse-glimmer.cpp
             ${MTMD_SRC}/models/qwen2vl.cpp
             ${MTMD_SRC}/models/qwen3vl.cpp
             ${MTMD_SRC}/models/mimovl.cpp
@@ -179,6 +184,11 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
             ${MTMD_SRC}/models/qwen3a.cpp
             ${MTMD_SRC}/models/step3vl.cpp
             ${MTMD_SRC}/models/siglip.cpp
+            ${MTMD_SRC}/models/qwen3tts-spkenc.cpp
+            ${MTMD_SRC}/models/qwen3tts-gen.cpp
+            ${MTMD_SRC}/models/pockettts-seanet.cpp
+            ${MTMD_SRC}/models/pockettts-spkenc.cpp
+            ${MTMD_SRC}/models/pockettts-gen.cpp
             ${MTMD_SRC}/models/whisper-enc.cpp
             ${MTMD_SRC}/models/deepseekocr.cpp
             ${MTMD_SRC}/models/deepseekocr2.cpp
@@ -189,7 +199,12 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
     target_include_directories(mca_mtmd PUBLIC ${MTMD_SRC})
     target_include_directories(mca_mtmd PRIVATE ${LLAMA_SRC} ${LLAMA_SRC}/vendor)
     target_link_libraries(mca_mtmd PUBLIC ggml llama)
-    target_link_libraries(mca_mtmd PRIVATE Threads::Threads)
+    target_link_libraries(mca_mtmd PRIVATE
+            Threads::Threads
+            vendor::hash
+            vendor::miniaudio
+            vendor::stb
+            vendor::sheredom)
     target_compile_features(mca_mtmd PRIVATE cxx_std_17)
     set_target_properties(mca_mtmd PROPERTIES POSITION_INDEPENDENT_CODE ON)
     if(ANDROID)
@@ -297,6 +312,12 @@ if(ANDROID_ABI STREQUAL "arm64-v8a" AND EXISTS "${MCA_MNN_LLM_HEADER}" AND MCA_M
     set_target_properties(mca_imported_mnn_llm PROPERTIES
             IMPORTED_LOCATION "${MCA_MNN_RUNTIME_ROOT}/${MCA_MNN_RUNTIME_LLM_RELATIVE}")
     target_compile_definitions(mca_mnn_native PRIVATE MCA_WITH_MNN_LLM=1)
+    include("${CMAKE_CURRENT_LIST_DIR}/mnn_vendor_cache.cmake")
+    mca_mnn_cache_namespace(
+        "${CMAKE_CURRENT_LIST_DIR}/../../../../../vendor/mnn/mnn-vendor.properties"
+        MCA_MNN_RUNTIME_CACHE_NAMESPACE)
+    target_compile_definitions(mca_mnn_native PRIVATE
+        MCA_MNN_RUNTIME_CACHE_NAMESPACE="${MCA_MNN_RUNTIME_CACHE_NAMESPACE}")
     target_include_directories(mca_mnn_native PRIVATE
             ${MCA_MNN_SOURCE_ROOT}/include
             ${MCA_MNN_SOURCE_ROOT}/source

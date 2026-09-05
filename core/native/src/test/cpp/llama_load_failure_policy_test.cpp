@@ -27,7 +27,7 @@ int main() {
     constexpr std::string_view corrupt =
             "MCA_LOAD_GGUF_CORRUPT_OR_TRUNCATED";
 
-    // Exact diagnostics emitted by third_party/llama.cpp/ggml/src/gguf.cpp at b10262.
+    // Exact diagnostics emitted by third_party/llama.cpp/ggml/src/gguf.cpp at b10590.
     expectCode(
             "gguf_init_from_reader: bad GGUF version: 0\n"
             "gguf_init_from_reader: failed to read header\n",

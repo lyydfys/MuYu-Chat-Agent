@@ -3,6 +3,7 @@
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import org.json.JSONArray
 import java.io.File
 import java.io.FileOutputStream
@@ -30,16 +31,19 @@ class ModelStoreRepository(private val context: Context) {
                 ChatModelRuntime.MNN -> isCompleteMnnBundleDirectory(File(model.path))
                 ChatModelRuntime.GENIEX_QAIRT -> isCompleteQairtBundleDirectory(File(model.path))
                 ChatModelRuntime.LLAMA_CPP -> true
+                ChatModelRuntime.LITERT_LM -> isLiteRtLmFile(File(model.path))
             }
         }
         val recoveredMnn = recoverManagedMnnBundles(loadablePersisted)
         val recoveredGguf = recoverManagedGgufModels(loadablePersisted + recoveredMnn)
-        val merged = (loadablePersisted + recoveredMnn + recoveredGguf).distinctByPathKeepingNewest()
+        val recoveredLiteRtLm = recoverManagedLiteRtLmModels(loadablePersisted + recoveredMnn + recoveredGguf)
+        val merged = (loadablePersisted + recoveredMnn + recoveredGguf + recoveredLiteRtLm).distinctByPathKeepingNewest()
         if (
             normalized != persisted ||
             loadablePersisted != normalized ||
             recoveredMnn.isNotEmpty() ||
-            recoveredGguf.isNotEmpty()
+            recoveredGguf.isNotEmpty() ||
+            recoveredLiteRtLm.isNotEmpty()
         ) {
             save(merged)
         }
@@ -93,6 +97,8 @@ class ModelStoreRepository(private val context: Context) {
             if (header.isNotEmpty()) source.unread(header)
             when (classifyModelImport(providedName, header)) {
                 ModelImportKind.GGUF -> importGgufFromStreamLocked(source, providedName, providerReportedSize)
+                ModelImportKind.LITERT_LM ->
+                    importLiteRtLmFromStreamLocked(source, providedName, providerReportedSize)
                 ModelImportKind.MNN_ZIP -> {
                     require(allowMnnZip) { "请选择有效的 GGUF 模型文件。" }
                     importMnnBundleFromZipStream(
@@ -102,8 +108,59 @@ class ModelStoreRepository(private val context: Context) {
                 }
                 ModelImportKind.MNN_COMPONENT ->
                     error("MNN 高速引擎需要同时选择 config.json、llm_config.json、llm.mnn、llm.mnn.weight、tokenizer，以及 embeddings_bf16.bin / llm.mnn.json；或导入完整 zip 包。")
-                ModelImportKind.UNKNOWN -> error("无法识别所选文件。请选择 GGUF 模型，或选择完整 MNN 组件 / zip 包。")
+                ModelImportKind.UNKNOWN -> error("无法识别所选文件。请选择 GGUF / LiteRT-LM 模型，或选择完整 MNN 组件 / zip 包。")
             }
+        }
+    }
+
+    private fun importLiteRtLmFromStreamLocked(
+        source: InputStream,
+        providedName: String?,
+        providerReportedSize: Long?
+    ): ModelManifest {
+        val fileName = normalizedLiteRtLmImportName(providedName)
+
+        managedModelDir.mkdirs()
+        val target = uniqueTarget(fileName)
+        val staging = atomicImportStagingFile(target)
+        var importedDigest: String? = null
+        var ownsTarget = false
+        try {
+            val sourceDigest = copyWithSha256(source, staging)
+            verifyProviderCopyAgainstAdvisorySize(providerReportedSize, staging.length())
+            val compatibility = validateLiteRtLmLoadPreflight(staging, staging.length())
+            require(compatibility.canLoad) { compatibility.message }
+            require(sha256(staging).equals(sourceDigest, ignoreCase = true)) {
+                "LiteRT-LM 文件复制后 SHA-256 校验失败。"
+            }
+            require(commitAtomicImportPath(staging, target)) { "无法原子提交导入的 LiteRT-LM 模型。" }
+            ownsTarget = true
+            importedDigest = sourceDigest
+        } catch (error: Throwable) {
+            if (ownsTarget) target.delete()
+            throw error
+        } finally {
+            cleanupAtomicImportStagingFile(staging, requireNotNull(target.parentFile))
+        }
+
+        return try {
+            val copiedDigest = requireNotNull(importedDigest) { "LiteRT-LM 导入摘要丢失。" }
+            val manifest = ModelManifest(
+                id = UUID.randomUUID().toString(),
+                displayName = stripKnownExtension(fileName, ".litertlm"),
+                path = target.absolutePath,
+                runtime = ChatModelRuntime.LITERT_LM,
+                source = ModelSource.LOCAL,
+                fileName = target.name,
+                sizeBytes = target.length(),
+                sha256 = copiedDigest,
+                quant = "LiteRT-LM"
+            )
+            upsert(manifest)
+            manifest
+        } catch (error: Throwable) {
+            if (ownsTarget) target.delete()
+            throw error
         }
     }
 
@@ -197,8 +254,12 @@ class ModelStoreRepository(private val context: Context) {
                 val importedKind = target.inputStream().use { input ->
                     classifyModelImport(name, input.readPrefix(IMPORT_MAGIC_BYTES))
                 }
-                require(importedKind != ModelImportKind.GGUF && importedKind != ModelImportKind.MNN_ZIP) {
-                    "一次只能导入一个 GGUF 主模型或一个 MNN ZIP；MNN 多选仅用于完整组件文件。"
+                require(
+                    importedKind != ModelImportKind.GGUF &&
+                        importedKind != ModelImportKind.LITERT_LM &&
+                        importedKind != ModelImportKind.MNN_ZIP
+                ) {
+                    "一次只能导入一个 GGUF / LiteRT-LM 主模型或一个 MNN ZIP；MNN 多选仅用于完整组件文件。"
                 }
             }
             val readiness = MnnBundleReadinessAnalyzer.analyze(stagingDir)
@@ -260,6 +321,15 @@ class ModelStoreRepository(private val context: Context) {
         license: String? = null,
         source: ModelSource = ModelSource.MODELSCOPE
     ): ModelManifest {
+        if (file.name.endsWith(".litertlm", ignoreCase = true) || file.hasLiteRtLmMagic()) {
+            return registerDownloadedLiteRtLmModel(
+                file = file,
+                repoId = repoId,
+                revision = revision,
+                license = license,
+                source = source
+            )
+        }
         require(file.exists()) { "Downloaded file does not exist: ${file.absolutePath}" }
         require(file.extension.equals("gguf", ignoreCase = true)) { "下载完成的聊天模型不是 GGUF。" }
         val metadata = GgufMetadataReader.read(file)
@@ -279,6 +349,38 @@ class ModelStoreRepository(private val context: Context) {
             sha256 = sha256(file),
             quant = metadata.quant,
             architecture = metadata.architecture,
+            license = license
+        )
+        upsert(manifest)
+        return manifest
+    }
+
+    /** Registers an already-downloaded official LiteRT-LM container. */
+    fun registerDownloadedLiteRtLmModel(
+        file: File,
+        repoId: String? = null,
+        revision: String? = null,
+        license: String? = null,
+        source: ModelSource = ModelSource.MODELSCOPE,
+        displayName: String? = null
+    ): ModelManifest {
+        require(file.exists()) { "Downloaded file does not exist: ${file.absolutePath}" }
+        val compatibility = validateLiteRtLmLoadPreflight(file, file.length())
+        require(compatibility.canLoad) { compatibility.message }
+        val manifest = ModelManifest(
+            id = UUID.randomUUID().toString(),
+            displayName = displayName?.trim()?.takeIf { it.isNotBlank() }
+                ?: stripKnownExtension(file.name, ".litertlm"),
+            path = file.absolutePath,
+            runtime = ChatModelRuntime.LITERT_LM,
+            source = source,
+            repoId = repoId,
+            revision = revision,
+            fileName = file.name,
+            sizeBytes = file.length(),
+            sha256 = sha256(file),
+            quant = "LiteRT-LM",
+            architecture = inferArchitectureLabel(file.name, ChatModelRuntime.LITERT_LM),
             license = license
         )
         upsert(manifest)
@@ -317,7 +419,8 @@ class ModelStoreRepository(private val context: Context) {
             sizeBytes = coreSizeBytes,
             sha256 = coreSha256,
             quant = quant,
-            architecture = architecture,
+            architecture = architecture?.takeIf { it.isNotBlank() }
+                ?: inferArchitectureLabel(bundleDir.name, ChatModelRuntime.MNN),
             license = license
         )
         upsert(manifest)
@@ -335,8 +438,9 @@ class ModelStoreRepository(private val context: Context) {
         architecture: String? = null
     ): ModelManifest {
         val resolvedBundleDir = resolveQairtBundleRoot(bundleDir)
-        require(isCompleteQairtBundleDirectory(resolvedBundleDir)) {
-            "QAIRT 模型包不完整：需要解包后的 GenieX/QAIRT 配置、context/bin 或模型资产文件。"
+        val readiness = QairtBundleReadinessAnalyzer.analyze(resolvedBundleDir)
+        require(readiness.canLoad) {
+            readiness.diagnosticSummary()
         }
         val manifest = ModelManifest(
             id = UUID.randomUUID().toString(),
@@ -497,6 +601,17 @@ class ModelStoreRepository(private val context: Context) {
         return when (model.runtime) {
             ChatModelRuntime.MNN -> validateMnnBundle(model, file, fullHash = true).canLoad
             ChatModelRuntime.GENIEX_QAIRT -> validateQairtBundle(model, file).canLoad
+            ChatModelRuntime.LITERT_LM -> {
+                if (!validateLiteRtLmLoadPreflight(file, model.sizeBytes).canLoad) return false
+                val actualSha256 = runCatching { sha256(file) }.getOrNull() ?: return false
+                val verified = isFastRecoveryFingerprint(model.sha256) ||
+                    actualSha256.equals(model.sha256, ignoreCase = true)
+                if (!verified) return false
+                if (isFastRecoveryFingerprint(model.sha256)) {
+                    updateModel(model.copy(sha256 = actualSha256))
+                }
+                true
+            }
             ChatModelRuntime.LLAMA_CPP -> {
                 if (!file.isFile || file.length() != model.sizeBytes) return false
                 val actualSha256 = runCatching { sha256(file) }.getOrNull() ?: return false
@@ -538,6 +653,9 @@ class ModelStoreRepository(private val context: Context) {
         }
         if (model.runtime == ChatModelRuntime.GENIEX_QAIRT) {
             return validateQairtBundle(model, file)
+        }
+        if (model.runtime == ChatModelRuntime.LITERT_LM) {
+            return validateLiteRtLmLoadPreflight(file, model.sizeBytes)
         }
         val compatibility = validateGgufLoadPreflight(file, model.sizeBytes)
         if (!compatibility.canLoad) return compatibility
@@ -723,7 +841,7 @@ class ModelStoreRepository(private val context: Context) {
                         sizeBytes = coreSizeBytes,
                         sha256 = coreSha256,
                         quant = "MNN",
-                        architecture = null,
+                        architecture = inferArchitectureLabel(bundleDir.name, ChatModelRuntime.MNN),
                         createdAt = bundleDir.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
                     )
                 }.getOrNull()
@@ -750,6 +868,30 @@ class ModelStoreRepository(private val context: Context) {
                     sha256 = fastManagedRecoveryFingerprint(managedModelDir, listOf(file)),
                     quant = candidate.metadata.quant,
                     architecture = candidate.metadata.architecture,
+                    createdAt = file.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
+                )
+            }.getOrNull()
+        }
+
+    private fun recoverManagedLiteRtLmModels(existing: List<ModelManifest>): List<ModelManifest> =
+        findRecoverableManagedLiteRtLmFiles(managedModelDir, existing).mapNotNull { candidate ->
+            runCatching {
+                val file = candidate.file
+                ModelManifest(
+                    id = UUID.nameUUIDFromBytes(
+                        "litertlm:${file.canonicalPath}".toByteArray(Charsets.UTF_8)
+                    ).toString(),
+                    displayName = stripKnownExtension(file.name, ".litertlm"),
+                    path = file.absolutePath,
+                    runtime = ChatModelRuntime.LITERT_LM,
+                    source = ModelSource.LOCAL,
+                    repoId = null,
+                    revision = null,
+                    fileName = file.name,
+                    sizeBytes = file.length(),
+                    sha256 = fastManagedRecoveryFingerprint(managedModelDir, listOf(file)),
+                    quant = "LiteRT-LM",
+                    architecture = inferArchitectureLabel(file.name, ChatModelRuntime.LITERT_LM),
                     createdAt = file.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
                 )
             }.getOrNull()
@@ -799,21 +941,71 @@ class ModelStoreRepository(private val context: Context) {
     private fun normalizeManifest(model: ModelManifest): ModelManifest = when (model.runtime) {
         ChatModelRuntime.MNN -> normalizeMnnManifest(model)
         ChatModelRuntime.GENIEX_QAIRT -> normalizeQairtManifest(model)
-        ChatModelRuntime.LLAMA_CPP -> model
+        ChatModelRuntime.LLAMA_CPP -> normalizeLlamaManifest(model)
+        ChatModelRuntime.LITERT_LM -> normalizeLiteRtLmManifest(model)
+    }
+
+    private fun normalizeLiteRtLmManifest(model: ModelManifest): ModelManifest {
+        val file = File(model.path)
+        if (file.name.isBlank()) return model
+        val inferredName = stripKnownExtension(file.name, ".litertlm")
+        val inferredArchitecture = model.architecture
+            ?.takeIf { it.isNotBlank() && !it.equals("unknown", ignoreCase = true) }
+            ?: inferArchitectureLabel(file.name, ChatModelRuntime.LITERT_LM)
+        val displayName = model.displayName.trim()
+        val normalizedDisplayName = if (displayName.isBlank()) inferredName else displayName
+        val normalizedFileName = if (model.fileName.isBlank()) file.name else model.fileName
+        return if (normalizedDisplayName != model.displayName ||
+            normalizedFileName != model.fileName ||
+            inferredArchitecture != model.architecture) {
+            model.copy(
+                displayName = normalizedDisplayName,
+                fileName = normalizedFileName,
+                architecture = inferredArchitecture
+            )
+        } else {
+            model
+        }
+    }
+
+    private fun normalizeLlamaManifest(model: ModelManifest): ModelManifest {
+        val file = File(model.path)
+        if (!file.isFile) return model
+        val normalizedName = file.nameWithoutExtension
+            .lowercase()
+            .replace(Regex("[^a-z0-9._-]+"), "_")
+        val inferred = model.architecture
+            ?.takeIf { it.isNotBlank() && !it.equals("unknown", ignoreCase = true) }
+            ?: when {
+                "gemma" in normalizedName -> "gemma"
+                "qwen" in normalizedName -> "qwen"
+                "llama" in normalizedName -> "llama"
+                "mistral" in normalizedName -> "mistral"
+                "phi" in normalizedName -> "phi"
+                else -> "gguf"
+            }
+        return if (inferred != model.architecture) model.copy(architecture = inferred) else model
     }
 
     private fun normalizeMnnManifest(model: ModelManifest): ModelManifest {
         val bundleDir = File(model.path)
         val inferredName = inferMnnDisplayName(bundleDir.name)
-        if (inferredName.isBlank() || inferredName == model.displayName) return model
+        val inferredArchitecture = model.architecture
+            ?.takeIf { it.isNotBlank() && !it.equals("unknown", ignoreCase = true) }
+            ?: inferArchitectureLabel(bundleDir.name, ChatModelRuntime.MNN)
+        if (inferredName.isBlank() && inferredArchitecture == model.architecture) return model
         val current = model.displayName.trim()
         val compactCurrent = current.lowercase().replace(Regex("[^a-z0-9]"), "")
         val compactInferred = inferredName.lowercase().replace(Regex("[^a-z0-9]"), "")
         val looksTruncated = current.isBlank() ||
             compactCurrent.length < compactInferred.length &&
             compactInferred.startsWith(compactCurrent)
-        return if (looksTruncated) {
-            model.copy(displayName = inferredName, fileName = bundleDir.name.ifBlank { model.fileName })
+        return if (looksTruncated || inferredArchitecture != model.architecture) {
+            model.copy(
+                displayName = if (looksTruncated) inferredName else model.displayName,
+                fileName = if (looksTruncated) bundleDir.name.ifBlank { model.fileName } else model.fileName,
+                architecture = inferredArchitecture
+            )
         } else {
             model
         }
@@ -834,6 +1026,34 @@ class ModelStoreRepository(private val context: Context) {
 
     private fun stripKnownExtension(value: String, extension: String): String =
         if (value.endsWith(extension, ignoreCase = true)) value.dropLast(extension.length) else value
+
+    /**
+     * Best-effort presentation metadata only.  This never participates in
+     * compatibility, admission, or runtime selection; native load remains the
+     * authority for whether a package can execute.
+     */
+    private fun inferArchitectureLabel(value: String, runtime: ChatModelRuntime): String? {
+        val name = value.lowercase().replace('-', '_').replace(' ', '_')
+        return when (runtime) {
+            ChatModelRuntime.MNN -> when {
+                name.contains("sdxl") -> "stable_diffusion_xl"
+                name.contains("sd15") || name.contains("sd_1_5") || name.contains("stable_diffusion") ->
+                    "stable_diffusion_1_5"
+                name.contains("sana") -> "sana_diffusion"
+                name.contains("qwen") -> "qwen"
+                name.contains("gemma") -> "gemma"
+                name.contains("llama") -> "llama"
+                else -> "mnn"
+            }
+            ChatModelRuntime.LITERT_LM -> when {
+                name.contains("gemma") -> "gemma"
+                name.contains("qwen") -> "qwen"
+                name.contains("llama") -> "llama"
+                else -> "litert_lm_text_decoder"
+            }
+            else -> null
+        }
+    }
 
     private fun validateMnnBundle(
         model: ModelManifest,
@@ -860,23 +1080,24 @@ class ModelStoreRepository(private val context: Context) {
                     files = requiredFiles.map { File(bundleDir, it) }
                 )
             }.getOrNull()
-            return if (
+            if (
                 hasReadableCore &&
                 coreSize == model.sizeBytes &&
                 currentFingerprint.equals(model.sha256, ignoreCase = true)
             ) {
-                ModelCompatibilityResult(
+                return ModelCompatibilityResult(
                     canLoad = true,
                     title = "MNN 模型包校验通过",
                     details = "runtime=${model.runtime.storageValue}, core=${formatBytes(coreSize)}"
                 )
-            } else {
-                ModelCompatibilityResult(
-                    canLoad = false,
-                    title = "MNN 模型包校验失败",
-                    details = "恢复后的核心组件已变化，请重新扫描或主动执行完整校验"
-                )
             }
+            // A fast-recovery fingerprint is deliberately only a bounded-I/O
+            // hint.  It can change after a move, timestamp normalization, or a
+            // harmless metadata rewrite.  Do not turn that hint into a hard
+            // rejection: fall through to the complete component scan/hash
+            // below.  The native load remains gated by the real bundle
+            // readiness result, and a successful scan migrates the persisted
+            // identity to the new exact component hash.
         }
         if (!fullHash && hasReadableCore && coreSize == model.sizeBytes && model.sha256.isNotBlank()) {
             // Import/download and the explicit "verify" action own full content hashing.
@@ -908,6 +1129,11 @@ class ModelStoreRepository(private val context: Context) {
                 details = "runtime=${model.runtime.storageValue}, core=${formatBytes(coreSize)}"
             )
         } else {
+            Log.e(
+                "MCA-ModelStore",
+                "mnn_validation_failed path=${bundleDir.absolutePath.take(256)} " +
+                    "required=${requiredFiles.size} coreSize=$coreSize modelSize=${model.sizeBytes}"
+            )
             ModelCompatibilityResult(
                 canLoad = false,
                 title = "MNN 模型包校验失败",
@@ -923,8 +1149,13 @@ class ModelStoreRepository(private val context: Context) {
         if (!bundleDir.isDirectory) {
             return ModelCompatibilityResult(false, "QAIRT 模型包路径不是目录", bundleDir.absolutePath)
         }
-        if (!isCompleteQairtBundleDirectory(bundleDir)) {
-            return ModelCompatibilityResult(false, "QAIRT 模型包不完整", "请删除后重新下载完整 GenieX QAIRT zip 包")
+        val readiness = QairtBundleReadinessAnalyzer.analyze(bundleDir)
+        if (!readiness.canLoad) {
+            return ModelCompatibilityResult(
+                canLoad = false,
+                title = "QAIRT 模型包不完整",
+                details = readiness.diagnosticSummary() + " 请删除后重新下载完整 GenieX QAIRT zip 包。"
+            )
         }
         val size = directorySize(bundleDir)
         val hash = runCatching { sha256Directory(bundleDir) }.getOrNull()
@@ -939,7 +1170,7 @@ class ModelStoreRepository(private val context: Context) {
             canLoad = true,
             title = "QAIRT 模型包校验通过",
             details = "runtime=${model.runtime.storageValue}, files=${bundleDir.walkTopDown().count { it.isFile }}, " +
-                "size=${formatBytes(size)}, ${graphProfile.diagnosticSummary()}"
+                "size=${formatBytes(size)}, ${readiness.diagnosticSummary()} ${graphProfile.diagnosticSummary()}"
         )
     }
 
@@ -1080,7 +1311,7 @@ class ModelStoreRepository(private val context: Context) {
 
     private companion object {
         private val MODEL_IMPORT_LOCK = Any()
-        private const val IMPORT_MAGIC_BYTES = 4
+        private const val IMPORT_MAGIC_BYTES = LITERT_LM_MAGIC_SIZE
         private const val MB = 1024L * 1024L
         private const val GB = 1024L * MB
         private val WINDOWS_DRIVE_PREFIX = Regex("^[A-Za-z]:($|/)")
@@ -1221,6 +1452,10 @@ internal data class RecoverableManagedGgufFile(
     val metadata: GgufMetadata
 )
 
+internal data class RecoverableManagedLiteRtLmFile(
+    val file: File
+)
+
 /**
  * Produces a stable, bounded-I/O identity for assets rediscovered after their
  * product manifest was lost. Large tensor/weight payloads contribute path,
@@ -1355,6 +1590,54 @@ internal fun findRecoverableManagedGgufFiles(
         .sortedBy { it.file.relativeTo(root).invariantSeparatorsPath.lowercase() }
 }
 
+/**
+ * Finds valid LiteRT-LM containers below the app-owned model root after a
+ * manifest loss. The scan reads only the bounded container header and never
+ * hashes or parses the model payload.
+ */
+internal fun findRecoverableManagedLiteRtLmFiles(
+    managedRoot: File,
+    existing: List<ModelManifest>
+): List<RecoverableManagedLiteRtLmFile> {
+    val root = runCatching { managedRoot.canonicalFile }
+        .getOrNull()
+        ?.takeIf { it.isDirectory }
+        ?: return emptyList()
+    val rootPrefix = root.path + File.separator
+    val representedPaths = existing
+        .mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }
+        .toSet()
+    val pending = ArrayDeque<File>().apply { add(root) }
+    val visitedDirectories = mutableSetOf(root.path)
+    val recovered = mutableListOf<RecoverableManagedLiteRtLmFile>()
+
+    while (pending.isNotEmpty()) {
+        val directory = pending.removeFirst()
+        directory.listFiles().orEmpty().forEach { entry ->
+            val candidate = runCatching { entry.canonicalFile }.getOrNull() ?: return@forEach
+            if (!candidate.path.startsWith(rootPrefix)) return@forEach
+            when {
+                candidate.isDirectory -> {
+                    if (candidate.isManagedImportStagingDirectory()) return@forEach
+                    if (visitedDirectories.add(candidate.path)) pending += candidate
+                }
+                candidate.isFile &&
+                    candidate.canRead() &&
+                    candidate.length() >= LITERT_LM_MAGIC_SIZE &&
+                    candidate.path !in representedPaths &&
+                    (candidate.name.endsWith(".litertlm", ignoreCase = true) || candidate.hasLiteRtLmMagic()) &&
+                    candidate.hasLiteRtLmMagic() &&
+                    isLiteRtLmFile(candidate) -> {
+                    recovered += RecoverableManagedLiteRtLmFile(candidate)
+                }
+            }
+        }
+    }
+    return recovered
+        .distinctBy { it.file.path }
+        .sortedBy { it.file.relativeTo(root).invariantSeparatorsPath.lowercase() }
+}
+
 private fun File.isManagedImportStagingDirectory(): Boolean =
     CURRENT_IMPORT_DIRECTORY.matches(name) || LEGACY_NAMED_IMPORT_ARTIFACT.matches(name)
 
@@ -1463,37 +1746,19 @@ internal fun isCompleteMnnBundleDirectory(bundleDir: File): Boolean {
 }
 
 internal fun isCompleteQairtBundleDirectory(bundleDir: File): Boolean {
-    val root = bundleDir.canonicalDirectoryOrNull() ?: return false
-    if (!root.hasQairtRootMarker()) return false
-    val files = root.safeFilesUnderRoot()
-    if (files.isEmpty()) return false
-    val names = files.map { it.name.lowercase() }
-    val hasRuntimeConfig = names.any { name ->
-        name == "genie_config.json" ||
-            name == "htp_backend_ext_config.json" ||
-            name == "config.json" ||
-            name.endsWith(".json") && ("genie" in name || "qairt" in name || "qnn" in name)
-    }
-    val hasQairtArtifact = names.any { name ->
-        name.endsWith(".bin") ||
-            name.endsWith(".serialized") ||
-            name.endsWith(".ctx") ||
-            name.endsWith(".qnn") ||
-            name.endsWith(".so") && ("qnn" in name || "genie" in name)
-    }
-    return hasRuntimeConfig && hasQairtArtifact
+    return QairtBundleReadinessAnalyzer.analyze(bundleDir).canLoad
 }
 
 /** Returns this root or one unambiguous, in-place wrapper directory; never follows an external child. */
 internal fun findQairtBundleRoot(bundleDir: File): File? {
     val root = bundleDir.canonicalDirectoryOrNull() ?: return null
-    if (isCompleteQairtBundleDirectory(root)) return root
+    if (root.hasQairtRootMarker()) return root
 
     val entries = root.listFiles()?.toList() ?: return null
     if (entries.size != 1) return null
     val child = entries.single().canonicalDirectoryOrNull() ?: return null
     if (child.parentFile?.canonicalFile?.path != root.path) return null
-    return child.takeIf(::isCompleteQairtBundleDirectory)
+    return child.takeIf(File::hasQairtRootMarker)
 }
 
 internal data class RecoverableInstalledQairtBundle(
@@ -1565,25 +1830,6 @@ private fun File.hasQairtRootMarker(): Boolean = listOf("metadata.json", "genie_
     val candidate = File(this, name)
     val canonical = runCatching { candidate.canonicalFile }.getOrNull()
     canonical?.isFile == true && canonical.parentFile?.canonicalFile?.path == path
-}
-
-private fun File.safeFilesUnderRoot(): List<File> {
-    val root = canonicalDirectoryOrNull() ?: return emptyList()
-    val files = mutableListOf<File>()
-    val pending = ArrayDeque<File>().apply { add(root) }
-    val visited = mutableSetOf(root.path)
-    while (pending.isNotEmpty()) {
-        val directory = pending.removeFirst()
-        directory.listFiles()?.forEach { child ->
-            val canonical = runCatching { child.canonicalFile }.getOrNull() ?: return@forEach
-            if (!canonical.path.startsWith(root.path + File.separator)) return@forEach
-            when {
-                canonical.isFile && canonical.length() > 0L -> files += canonical
-                canonical.isDirectory && visited.add(canonical.path) -> pending += canonical
-            }
-        }
-    }
-    return files
 }
 
 /**

@@ -7,6 +7,8 @@ import com.muyuchat.core.modelstore.QairtExecutionAdmissionMode
 import com.muyuchat.core.modelstore.QairtBundleRuntimeIdentity
 import com.muyuchat.core.telemetry.MemorySnapshot
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.file.Files
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.toList
@@ -19,6 +21,54 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class McaInferenceServiceLoadRecoveryTest {
+    @Test
+    fun truncatedLiteRtLmContainerIsRejectedBeforeNativeLoad() = runBlocking {
+        val model = Files.createTempFile("truncated", ".litertlm").toFile()
+        val bytes = ByteArray(64)
+        "LITERTLM".toByteArray(Charsets.US_ASCII).copyInto(bytes)
+        ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putInt(8, 1)
+            putLong(24, 4_096L)
+        }
+        model.writeBytes(bytes)
+        val liteRtRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.LITERT_LM)
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(
+                LocalChatRuntime.MNN_CPU to FakeLocalChatRunner(),
+                LocalChatRuntime.LITERT_LM to liteRtRunner
+            )
+        )
+
+        val result = service.loadModel(
+            modelPath = model.absolutePath,
+            runtime = LocalChatRuntime.LITERT_LM
+        )
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("文件头/结构无效"))
+        assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("截断"))
+        assertEquals(0, liteRtRunner.loadCalls)
+    }
+
+    @Test
+    fun undeclaredMnnVisualComponentUsesTheNativeVisualLoadPolicy() {
+        val bundle = Files.createTempDirectory("mnn-visual-load-policy").toFile()
+        File(bundle, "config.json").writeText("""{"llm_model":"llm.mnn"}""")
+        File(bundle, "visual.mnn").writeBytes(byteArrayOf(1))
+
+        assertTrue(isMnnVisualProfileForLoad(bundle.absolutePath, "{}"))
+        assertTrue(isMnnVisualProfileForLoad(bundle.absolutePath, """{"mmap":true}"""))
+    }
+
+    @Test
+    fun textOnlyMnnBundleDoesNotEnableTheVisualLoadPolicy() {
+        val bundle = Files.createTempDirectory("mnn-text-load-policy").toFile()
+        File(bundle, "config.json").writeText("""{"llm_model":"llm.mnn"}""")
+
+        assertFalse(isMnnVisualProfileForLoad(bundle.absolutePath, "{}"))
+    }
+
     @Test
     fun generateErrorKeepsLegacyConstructorDefaults() {
         val stats = RuntimeStats()
@@ -916,6 +966,38 @@ class McaInferenceServiceLoadRecoveryTest {
     }
 
     @Test
+    fun acceleratedWorkerTimeoutRequiresExplicitReloadInsteadOfRetryingTheSameBackend() = runBlocking {
+        val message = "MNN OpenCL 未在限定时间内完成，请显式重新加载或选择 CPU。"
+        val runner = FakeLocalChatRunner(
+            runnerRuntime = LocalChatRuntime.MNN_CPU,
+            recoveryPolicy = LocalChatSessionRecoveryPolicy.EXPLICIT_RELOAD_REQUIRED,
+            recoveryMessage = message
+        )
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(LocalChatRuntime.MNN_CPU to runner),
+            installationScopeId = "test-installation"
+        )
+        service.loadModel(
+            modelPath = "/models/mnn-opencl/config.json",
+            runtime = LocalChatRuntime.MNN_CPU,
+            params = LoadParams(nCtx = 4096, nThreads = 4)
+        ).getOrThrow()
+        runner.simulateWorkerSessionLoss()
+
+        val events = service.streamChat(simpleWorkerRecoveryRequest()).toList()
+
+        val error = events.single() as GenerateEvent.Error
+        assertEquals(message, error.message)
+        assertFalse(events.any { it is GenerateEvent.Done })
+        assertFalse(events.any { it is GenerateEvent.Phase && it.phase == GenerationPhase.LOAD })
+        assertEquals(1, runner.loadCalls)
+        assertEquals(0, runner.beginCalls)
+        assertFalse(service.stats.value.loaded)
+        assertEquals(message, service.stats.value.lastError)
+    }
+
+    @Test
     fun thrownWorkerReloadIsCoherentAndRetriesOnTheNextTurn() = runBlocking {
         val runner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.LLAMA_CPP)
         val service = McaInferenceService(
@@ -1599,7 +1681,10 @@ class McaInferenceServiceLoadRecoveryTest {
     private class FakeLocalChatRunner(
         private val runnerRuntime: LocalChatRuntime = LocalChatRuntime.MNN_CPU,
         private val loadReturnCode: Int = 0,
-        private var statsJson: String = loadedStatsJson(runnerRuntime)
+        private var statsJson: String = loadedStatsJson(runnerRuntime),
+        private val recoveryPolicy: LocalChatSessionRecoveryPolicy =
+            LocalChatSessionRecoveryPolicy.AUTOMATIC,
+        private val recoveryMessage: String? = null
     ) : LocalChatRunner {
         var loadCalls = 0
         var unloadCalls = 0
@@ -1649,6 +1734,10 @@ class McaInferenceServiceLoadRecoveryTest {
         override fun requestStop() {
             requestStopCalls += 1
         }
+
+        override fun sessionRecoveryPolicy(): LocalChatSessionRecoveryPolicy = recoveryPolicy
+
+        override fun sessionRecoveryMessage(): String? = recoveryMessage
 
         override fun getRuntimeStatsJson(): String = statsJson
         override fun shutdown() {

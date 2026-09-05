@@ -106,7 +106,7 @@ class ModelScopeClientTest {
     fun includesDefaultRecommendedModels() {
         val recommendations = client.recommendedModels()
 
-        assertEquals(39, recommendations.size)
+        assertEquals(48, recommendations.size)
         assertEquals(ModelScopeRecommendedGroup.LIGHT_CHAT, recommendations[0].group)
         val qwen35ExperimentalMnn = recommendations.first { it.id == "qwen35_08b_uncensored_mnn" }
         assertEquals(RecommendedChatRuntime.MNN, qwen35ExperimentalMnn.chatRuntime)
@@ -114,6 +114,48 @@ class ModelScopeClientTest {
         assertEquals(RecommendedModelStatus.EXPERIMENTAL, qwen35ExperimentalMnn.status)
         assertEquals("config.json", qwen35ExperimentalMnn.recommendedFileName)
         assertNotNull(qwen35ExperimentalMnn.mnnModelBundle)
+        val gemmaE2bGpu = recommendations.first { it.id == "gemma4_e2b_litertlm_gpu" }
+        assertEquals(RecommendedChatRuntime.LITERT_LM, gemmaE2bGpu.chatRuntime)
+        assertEquals(RecommendedComputeBackend.GPU, gemmaE2bGpu.computeBackend)
+        assertEquals("litert-community/gemma-4-E2B-it-litert-lm", gemmaE2bGpu.repoId)
+        assertEquals(ModelRepositoryProvider.MODELSCOPE, gemmaE2bGpu.provider)
+        assertEquals(RecommendedModelStatus.EXPERIMENTAL, gemmaE2bGpu.status)
+        assertEquals("gemma-4-E2B-it-gpu.litertlm", gemmaE2bGpu.recommendedFileName)
+        assertEquals(
+            "https://www.modelscope.cn/models/litert-community/gemma-4-E2B-it-litert-lm/summary",
+            gemmaE2bGpu.modelPageUrl
+        )
+        val gemmaE4bGpu = recommendations.first { it.id == "gemma4_e4b_litertlm_gpu" }
+        assertEquals(RecommendedComputeBackend.GPU, gemmaE4bGpu.computeBackend)
+        assertEquals("litert-community/gemma-4-E4B-it-litert-lm", gemmaE4bGpu.repoId)
+        assertEquals(ModelRepositoryProvider.MODELSCOPE, gemmaE4bGpu.provider)
+        assertEquals("gemma-4-E4B-it-gpu.litertlm", gemmaE4bGpu.recommendedFileName)
+        assertFalse(gemmaE4bGpu.tags.contains("Abliterated"))
+        val gemmaE2bNpu = recommendations.first { it.id == "gemma4_e2b_litertlm_npu" }
+        assertEquals(RecommendedComputeBackend.NPU, gemmaE2bNpu.computeBackend)
+        assertEquals(ModelRepositoryProvider.MODELSCOPE, gemmaE2bNpu.provider)
+        assertEquals("gemma-4-E2B-it_qualcomm_sm8750.litertlm", gemmaE2bNpu.recommendedFileName)
+        assertEquals(setOf("SM8750", "SM8750P"), gemmaE2bNpu.supportedChipsetCodes)
+        assertTrue(gemmaE2bNpu.downloadable)
+        val gemma12bNpu = recommendations.first { it.id == "gemma4_12b_litertlm_npu" }
+        assertEquals(ModelRepositoryProvider.MODELSCOPE, gemma12bNpu.provider)
+        assertEquals(RecommendedChatRuntime.LITERT_LM, gemma12bNpu.chatRuntime)
+        assertEquals(RecommendedComputeBackend.NPU, gemma12bNpu.computeBackend)
+        assertEquals("", gemma12bNpu.recommendedFileName)
+        assertFalse(gemma12bNpu.downloadable)
+        assertTrue(gemma12bNpu.downloadBlockReason.orEmpty().contains("没有可确认"))
+        listOf("gemma4_12b_litertlm_cpu", "gemma4_12b_litertlm_gpu", "gemma4_12b_litertlm_npu")
+            .forEach { id -> assertEquals("master", recommendations.first { it.id == id }.revision) }
+        val gemma12bGpu = recommendations.first { it.id == "gemma4_12b_litertlm_gpu" }
+        assertEquals(RecommendedComputeBackend.GPU, gemma12bGpu.computeBackend)
+        assertEquals("gemma-4-12B-it-gpu.litertlm", gemma12bGpu.recommendedFileName)
+        val gemmaE4bNpu = recommendations.first { it.id == "gemma4_e4b_litertlm_npu" }
+        assertEquals(RecommendedComputeBackend.NPU, gemmaE4bNpu.computeBackend)
+        assertEquals("qualcomm/Gemma-4-E4B-it", gemmaE4bNpu.repoId)
+        assertEquals("https://hf-mirror.com/qualcomm/Gemma-4-E4B-it", gemmaE4bNpu.modelPageUrl)
+        assertEquals("", gemmaE4bNpu.recommendedFileName)
+        assertFalse(gemmaE4bNpu.downloadable)
+        assertTrue(gemmaE4bNpu.downloadBlockReason.orEmpty().contains("没有可确认"))
         val qairtVisionChat = recommendations.first { it.id == "qwen3_vl_4b_qairt_w4a16" }
         assertEquals(RecommendedChatRuntime.GENIEX_QAIRT, qairtVisionChat.chatRuntime)
         assertEquals(ModelRepositoryProvider.HUGGING_FACE, qairtVisionChat.provider)
@@ -202,7 +244,10 @@ class ModelScopeClientTest {
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "bitcpm4_cann_8b_tq2" }.chatRuntime)
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "glm47_flash_tq1" }.chatRuntime)
         assertTrue(recommendations.any { it.group == ModelScopeRecommendedGroup.LOCAL_IMAGE && it.downloadable })
-        assertEquals(0, recommendations.count { !it.downloadable })
+        assertEquals(
+            setOf("gemma4_e4b_litertlm_npu", "gemma4_12b_litertlm_npu"),
+            recommendations.filterNot { it.downloadable }.map { it.id }.toSet()
+        )
         assertEquals("qwen-image-2512-Q2_K.gguf", recommendations.first { it.id == "qwen_image_2512_q2" }.recommendedFileName)
         assertEquals("unet.mnn", recommendations.first { it.id == "sd15_mnn_512_quality" }.recommendedFileName)
         assertEquals("sd_turbo.safetensors", recommendations.first { it.id == "sd_turbo_512_experimental" }.recommendedFileName)
@@ -534,6 +579,48 @@ class ModelScopeClientTest {
     }
 
     @Test
+    fun gemma12bLiteRtRecommendationsQueryTheModelScopeMasterRevision() {
+        val requestedUrls = mutableListOf<String>()
+        val body = """
+            {"Code":200,"Data":{"Files":[
+              {"Path":"gemma-4-12B-it.litertlm","Size":6547589312,
+               "Sha256":"74fc29a10c20eb5b3ced6c389471a7994a0ffd657255b2a1c764262fb9054aef"}
+            ]}}
+        """.trimIndent()
+        val networkClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request()
+                requestedUrls += request.url.toString()
+                Response.Builder()
+                    .request(request)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+        val resolvingClient = ModelScopeClient(
+            client = networkClient,
+            endpoints = listOf("https://modelscope.test")
+        )
+        val recommendation = resolvingClient.recommendedModels()
+            .single { it.id == "gemma4_12b_litertlm_cpu" }
+
+        val files = resolvingClient.listRecommendedFiles(recommendation)
+
+        assertEquals(1, files.size)
+        assertEquals("gemma-4-12B-it.litertlm", files.single().name)
+        assertEquals(6_547_589_312L, files.single().sizeBytes)
+        assertEquals(
+            "74fc29a10c20eb5b3ced6c389471a7994a0ffd657255b2a1c764262fb9054aef",
+            files.single().sha256
+        )
+        assertEquals(1, requestedUrls.size)
+        assertTrue(requestedUrls.single().contains("Revision=master"))
+    }
+
+    @Test
     fun unverifiedImageCatalogClaimsStayExperimentalAndDownloadable() {
         val recommendations = client.userFacingRecommendedModels().associateBy { it.id }
         val evidenceLimitedIds = setOf(
@@ -634,21 +721,43 @@ class ModelScopeClientTest {
         val userFacingChat = client.userFacingRecommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.CHAT }
 
-        assertEquals(12, userFacingChat.size)
-        val cpuChat = userFacingChat.filter { it.chatRuntime != RecommendedChatRuntime.GENIEX_QAIRT }
-        val npuChat = userFacingChat.filter { it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT }
-        assertEquals(8, cpuChat.size)
-        assertEquals(4, npuChat.size)
+        assertEquals(21, userFacingChat.size)
+        val cpuChat = userFacingChat.filter {
+            it.computeBackend != RecommendedComputeBackend.NPU &&
+                it.chatRuntime != RecommendedChatRuntime.GENIEX_QAIRT
+        }
+        val npuChat = userFacingChat.filter {
+            it.computeBackend == RecommendedComputeBackend.NPU ||
+                it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT
+        }
+        assertEquals(14, cpuChat.size)
+        assertEquals(7, npuChat.size)
         assertTrue(cpuChat.all { it.status == RecommendedModelStatus.EXPERIMENTAL })
         assertEquals(
-            setOf(RecommendedModelStatus.RECOMMENDED, RecommendedModelStatus.EXPERIMENTAL),
+            setOf(
+                RecommendedModelStatus.RECOMMENDED,
+                RecommendedModelStatus.EXPERIMENTAL,
+                RecommendedModelStatus.PENDING_INTEGRATION
+            ),
             npuChat.map { it.status }.toSet()
         )
-        assertTrue(userFacingChat.all { it.downloadable })
+        assertTrue(
+            userFacingChat.all { model ->
+                model.downloadable || model.id in setOf("gemma4_e4b_litertlm_npu", "gemma4_12b_litertlm_npu")
+            }
+        )
+        assertEquals(
+            setOf("gemma4_e4b_litertlm_npu", "gemma4_12b_litertlm_npu"),
+            userFacingChat.filterNot { it.downloadable }.map { it.id }.toSet()
+        )
         assertTrue(
             userFacingChat.all { model ->
                 val matchingChipset = model.supportedChipsetCodes.firstOrNull().orEmpty()
-                model.downloadEligibilityFor(matchingChipset).canDownload
+                model.downloadable && model.downloadEligibilityFor(matchingChipset).canDownload ||
+                    !model.downloadable && model.id in setOf(
+                        "gemma4_e4b_litertlm_npu",
+                        "gemma4_12b_litertlm_npu"
+                    )
             }
         )
     }
@@ -661,7 +770,7 @@ class ModelScopeClientTest {
         }
 
         assertTrue(npuModels.isNotEmpty())
-        npuModels.forEach { model ->
+        npuModels.filter { it.downloadable }.forEach { model ->
             listOf("SM8550", "SM8750", "SM8850", "MT6989", "").forEach { chipset ->
                 val eligibility = model.downloadEligibilityFor(
                     deviceChipsetCode = chipset,
@@ -670,6 +779,10 @@ class ModelScopeClientTest {
                 assertTrue("${model.id} must stay downloadable on '$chipset'", eligibility.canDownload)
                 assertNull(eligibility.blockedReason)
             }
+        }
+        npuModels.filterNot { it.downloadable }.forEach { model ->
+            assertTrue(model.id in setOf("gemma4_e4b_litertlm_npu", "gemma4_12b_litertlm_npu"))
+            assertTrue(model.downloadBlockReason.orEmpty().contains("没有可确认"))
         }
     }
 
@@ -1047,17 +1160,19 @@ class ModelScopeClientTest {
         val allRecommendations = client.recommendedModels()
         val recommendations = client.userFacingRecommendedModels()
 
-        assertEquals(30, recommendations.size)
+        assertEquals(39, recommendations.size)
         assertTrue(recommendations.all { it.visibleInRecommendations })
 
         val cpuChat = recommendations.filter {
             it.kind == ModelScopeRecommendedKind.CHAT &&
+                it.computeBackend != RecommendedComputeBackend.NPU &&
                 it.chatRuntime != RecommendedChatRuntime.GENIEX_QAIRT &&
                 it.visionModelBundle?.accelerator != VisionModelAccelerator.QNN_HTP
         }
         val npuChat = recommendations.filter {
             it.kind == ModelScopeRecommendedKind.CHAT &&
-                (it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT ||
+                (it.computeBackend == RecommendedComputeBackend.NPU ||
+                    it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT ||
                     it.visionModelBundle?.accelerator == VisionModelAccelerator.QNN_HTP)
         }
         val cpuImage = recommendations.filter {
@@ -1069,8 +1184,8 @@ class ModelScopeClientTest {
                 it.imageEngineBundle?.accelerator == ImageEngineAccelerator.QNN_HTP
         }
 
-        assertEquals(8, cpuChat.size)
-        assertEquals(4, npuChat.size)
+        assertEquals(14, cpuChat.size)
+        assertEquals(7, npuChat.size)
         assertEquals(7, cpuImage.size)
         assertEquals(11, npuImage.size)
 
@@ -1083,14 +1198,18 @@ class ModelScopeClientTest {
             listOf(
                 "qwen35_08b_uncensored_mnn",
                 "qwen35_2b_abliterated_gguf",
-                "gemma4_e2b_uncensored_gguf"
+                "gemma4_e2b_uncensored_gguf",
+                "gemma4_e2b_litertlm_cpu",
+                "gemma4_e2b_litertlm_gpu"
             ),
             cpuChatIds(ModelScopeRecommendedGroup.LIGHT_CHAT)
         )
         assertEquals(
             listOf(
                 "qwen35_4b_uncensored_mnn",
-                "gemma4_e4b_uncensored_gguf"
+                "gemma4_e4b_uncensored_gguf",
+                "gemma4_e4b_litertlm_cpu",
+                "gemma4_e4b_litertlm_gpu"
             ),
             cpuChatIds(ModelScopeRecommendedGroup.MAIN_CHAT)
         )
@@ -1098,7 +1217,9 @@ class ModelScopeClientTest {
             listOf(
                 "qwen35_9b_uncensored_mnn",
                 "qwen35_35b_a3b_iq2_xxs",
-                "gemma4_26b_a4b_abliterated_gguf"
+                "gemma4_26b_a4b_abliterated_gguf",
+                "gemma4_12b_litertlm_cpu",
+                "gemma4_12b_litertlm_gpu"
             ),
             cpuChatIds(ModelScopeRecommendedGroup.QUALITY_CHAT)
         )
@@ -1107,7 +1228,10 @@ class ModelScopeClientTest {
                 "qwen3_vl_4b_qairt_w4a16",
                 "qwen3_4b_2507_qairt_w4a16",
                 "qwen3_8b_qairt_w4a16",
-                "qwen25_vl_7b_qairt_w4a16"
+                "qwen25_vl_7b_qairt_w4a16",
+                "gemma4_e2b_litertlm_npu",
+                "gemma4_e4b_litertlm_npu",
+                "gemma4_12b_litertlm_npu"
             ),
             npuChat.sortedBy { it.priority }.map { it.id }
         )
@@ -1169,7 +1293,14 @@ class ModelScopeClientTest {
         assertTrue(recommendations.none { it.id in hiddenIds })
         assertTrue(allRecommendations.none { it.id == "sd15_mnn_384_fast" })
 
-        assertTrue(recommendations.all { it.downloadable })
+        assertTrue(
+            recommendations.all {
+                it.downloadable || it.id in setOf(
+                    "gemma4_e4b_litertlm_npu",
+                    "gemma4_12b_litertlm_npu"
+                )
+            }
+        )
         val meinaMix = recommendations.single { it.id == "meinamix_sd15_qnn228" }
         assertEquals(RecommendedModelStatus.EXPERIMENTAL, meinaMix.status)
         assertTrue(meinaMix.visibleInRecommendations)
@@ -1764,6 +1895,11 @@ class ModelScopeClientTest {
     @Test
     fun classifiesAuxiliaryGgufFiles() {
         assertTrue(remote("Qwen3.5-4B-Q4_K_M.gguf").isChatModelCandidate())
+        val liteRtLm = remote("Gemma3-1B-IT.litertlm")
+        assertEquals(RemoteModelFileKind.LITERT_LM_MODEL, liteRtLm.fileKind())
+        assertTrue(liteRtLm.isChatModelCandidate())
+        assertTrue(liteRtLm.isLiteRtLmModelCandidate())
+        assertEquals("LiteRT-LM 聊天模型", liteRtLm.kindLabel())
         assertEquals(RemoteModelFileKind.IMAGE_MODEL, remote("z_image_turbo-Q4_K.gguf").fileKind())
         assertEquals(RemoteModelFileKind.IMAGE_MODEL, remote("qwen-image-Q4_K_M.gguf").fileKind())
         assertEquals(RemoteModelFileKind.IMAGE_MODEL, remote("LongCat-Image-Q4_0.gguf").fileKind())
@@ -1802,6 +1938,60 @@ class ModelScopeClientTest {
                 .copy(bundleRole = ImageEngineBundleComponentRole.CONDITIONING)
                 .fileKind()
         )
+    }
+
+    @Test
+    fun parsesOnlyLiteRtLmFilesForDedicatedListing() {
+        val files = client.parseLiteRtLmFilesForTest(
+            repoId = "litert-community/Gemma3-1B-IT",
+            revision = "main",
+            endpoint = "https://huggingface.co",
+            body = """
+                [
+                  {"path":"README.md","size":10},
+                  {"path":"Gemma3-1B-IT.litertlm","size":1234},
+                  {"path":"Gemma3-1B-IT.gguf","size":5678}
+                ]
+            """.trimIndent()
+        )
+
+        assertEquals(listOf("Gemma3-1B-IT.litertlm"), files.map { it.name })
+        assertEquals(
+            "https://hf-mirror.com/litert-community/Gemma3-1B-IT/resolve/main/Gemma3-1B-IT.litertlm?download=true",
+            files.single().downloadUrl
+        )
+        assertEquals(RemoteModelFileKind.LITERT_LM_MODEL, files.single().fileKind())
+    }
+
+    @Test
+    fun genericEngineListingIncludesLiteRtLmContainersAlongsideGguf() {
+        val networkClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(
+                        """
+                            [
+                              {"path":"model.gguf","size":100},
+                              {"path":"model.litertlm","size":200}
+                            ]
+                        """.trimIndent().toResponseBody("application/json".toMediaType())
+                    )
+                    .build()
+            }
+            .build()
+        val resolvingClient = ModelScopeClient(
+            client = networkClient,
+            endpoints = listOf("https://modelscope.invalid")
+        )
+
+        val files = resolvingClient.listEngineFiles("owner/model")
+
+        assertEquals(listOf("model.gguf", "model.litertlm"), files.map { it.name })
+        assertTrue(files.last().isLiteRtLmModelCandidate())
     }
 
     @Test
@@ -1978,7 +2168,8 @@ class ModelScopeClientTest {
         "sd15_mnn_512_quality" to ExpectedImageProfile(
             "mnn.sd15.official.512", ImageEngineModelFamily.SD15, ImageEngineModelVariant.STANDARD,
             20, 7.0, true, ImageEngineSchedulerAlgorithm.DPMPP_2M, 512, 512,
-            ImageEngineTokenizerBackend.TOKENIZERS_CPP, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215
+            ImageEngineTokenizerBackend.MNN_MTOK, ImageEngineVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215,
+            clip1PadRule = ImageEngineClipPadRule.EOS
         ),
         "mnn_sana_edit_v2" to ExpectedImageProfile(
             "mnn.sana-edit.v2", ImageEngineModelFamily.SANA, ImageEngineModelVariant.SANA_EDIT,

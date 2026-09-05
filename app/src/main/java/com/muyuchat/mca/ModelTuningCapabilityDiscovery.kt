@@ -51,6 +51,7 @@ internal fun discoverModelTuningCapabilities(
             LocalChatRuntime.GENIEX_QAIRT -> TuningRuntime.QAIRT
             LocalChatRuntime.LLAMA_CPP,
             LocalChatRuntime.GENIEX_LLAMA_CPP -> TuningRuntime.LLAMA_CPP
+            LocalChatRuntime.LITERT_LM -> TuningRuntime.UNKNOWN
         },
         knowledgeLevel = if (known) ModelKnowledgeLevel.KNOWN else ModelKnowledgeLevel.UNKNOWN,
         metadataReadable = metadataReadable,
@@ -65,6 +66,33 @@ internal fun discoverModelTuningCapabilities(
         supportsGpuOffload = llama && "gpu_offload" in capabilities,
         supportsCpuMoeTuning = llama && known && "cpu_moe" in capabilities,
         supportsSpeculativeMtp = llama && "draft_mtp" in capabilities,
-        qairtAdmissionPassed = qairtAdmissionPassed
+        qairtAdmissionPassed = qairtAdmissionPassed,
+        preferredBackend = preferredLiteRtBackend(model, identity)
     )
+}
+
+/**
+ * Returns the transport explicitly implied by a LiteRT-LM variant name. This
+ * value only seeds the execution profile; it never admits, hides, or blocks a
+ * model. A concrete native load remains the compatibility authority.
+ */
+internal fun preferredLiteRtBackend(
+    model: ModelManifest,
+    identity: ModelRuntimeIdentity
+): String? {
+    if (identity.runtime != LocalChatRuntime.LITERT_LM) return null
+    val material = listOf(
+        model.id,
+        model.displayName,
+        model.fileName,
+        model.path,
+        model.repoId
+    ).filterNotNull().joinToString(" ").lowercase()
+    return when {
+        listOf("qualcomm", "qnn", "npu", "htp", "snapdragon").any(material::contains) -> "npu"
+        listOf("google_tensor", "google-tensor", "googletensor", "tensor_tpu").any(material::contains) ->
+            "google_tensor"
+        listOf("gpu", "opencl", "open_cl", "vulkan").any(material::contains) -> "gpu"
+        else -> "cpu"
+    }
 }

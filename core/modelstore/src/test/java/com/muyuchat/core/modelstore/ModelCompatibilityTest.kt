@@ -211,7 +211,7 @@ class ModelCompatibilityTest {
             "llm_config.json",
             "llm.mnn",
             "llm.mnn.weight",
-            "llm.mnn.json",
+            "embeddings_bf16.bin",
             "tokenizer.txt"
         )
             .forEach { name -> File(dir, name).writeText("x") }
@@ -226,7 +226,7 @@ class ModelCompatibilityTest {
         assertFalse(isCompleteMnnBundleDirectory(dir))
 
         File(dir, "llm.mnn.weight").writeText("x")
-        File(dir, "llm.mnn.json").delete()
+        File(dir, "embeddings_bf16.bin").delete()
         assertFalse(isCompleteMnnBundleDirectory(dir))
     }
 
@@ -238,10 +238,12 @@ class ModelCompatibilityTest {
         File(dir, "genie_config.json").writeText("{}")
         assertFalse(isCompleteQairtBundleDirectory(dir))
 
+        File(dir, "metadata.json").writeText("{\"model_id\":\"test\",\"genie\":{\"supports_vision\":false}}")
+        File(dir, "tokenizer.json").writeText("{}")
         File(dir, "qnn_context.bin").writeBytes(byteArrayOf(1, 2, 3))
         assertTrue(isCompleteQairtBundleDirectory(dir))
 
-        File(dir, "genie_config.json").delete()
+        File(dir, "metadata.json").delete()
         assertFalse(isCompleteQairtBundleDirectory(dir))
     }
 
@@ -337,6 +339,8 @@ class ModelCompatibilityTest {
 
     private fun writeQairtBundle(dir: File) {
         File(dir, "genie_config.json").writeText("{}")
+        File(dir, "metadata.json").writeText("{\"model_id\":\"test\",\"genie\":{\"supports_vision\":false}}")
+        File(dir, "tokenizer.json").writeText("{}")
         File(dir, "qnn_context.bin").writeBytes(byteArrayOf(1))
     }
 

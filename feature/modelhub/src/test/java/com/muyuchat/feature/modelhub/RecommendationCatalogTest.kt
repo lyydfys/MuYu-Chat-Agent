@@ -1,6 +1,7 @@
 package com.muyuchat.feature.modelhub
 
 import com.muyuchat.core.download.ModelScopeClient
+import com.muyuchat.core.download.RecommendedChatRuntime
 import com.muyuchat.core.download.RecommendedModelSection
 import com.muyuchat.core.download.RecommendedModelStatus
 import org.junit.Assert.assertEquals
@@ -85,6 +86,32 @@ class RecommendationCatalogTest {
         assertTrue(recommendationDownloadAccess(cyberRealistic, "MT6989", deviceIsSnapdragon = false).canDownload)
         assertTrue(recommendationDownloadAccess(cyberRealistic, "MT6989", deviceIsSnapdragon = false).experimental)
         assertTrue(recommendationDownloadAccess(cyberRealistic, "", deviceIsSnapdragon = false).canDownload)
+    }
+
+    @Test
+    fun deviceFitRanksNpuPackagesButNeverTurnsARecommendationIntoAnAdmissionGate() {
+        val npu = recommendations.first { it.id == "gemma4_e2b_litertlm_npu" }
+
+        val snapdragon = recommendationDownloadAccess(npu, "SM8850", deviceIsSnapdragon = true)
+        assertTrue(snapdragon.canDownload)
+        assertEquals(RecommendationDeviceFit.VENDOR_GENERIC, snapdragon.deviceFit)
+        assertEquals("设备路径：骁龙通用尝试；以本机 native load 和首轮推理结果为准", recommendationDeviceFitLine(snapdragon))
+
+        val nonSnapdragon = recommendationDownloadAccess(npu, "MT6989", deviceIsSnapdragon = false)
+        assertTrue(nonSnapdragon.canDownload)
+        assertEquals(RecommendationDeviceFit.CROSS_VENDOR, nonSnapdragon.deviceFit)
+
+        val unknown = recommendationDownloadAccess(npu, "", deviceIsSnapdragon = false)
+        assertTrue(unknown.canDownload)
+        assertEquals(RecommendationDeviceFit.UNKNOWN, unknown.deviceFit)
+
+        val cpu = recommendations.first {
+            it.chatRuntime == RecommendedChatRuntime.LITERT_LM && it.id == "gemma4_e2b_litertlm_cpu"
+        }
+        assertEquals(
+            RecommendationDeviceFit.UNIVERSAL,
+            recommendationDownloadAccess(cpu, "MT6989", deviceIsSnapdragon = false).deviceFit
+        )
     }
 
     @Test
@@ -297,27 +324,40 @@ class RecommendationCatalogTest {
 
     private fun expectedIds(section: RecommendedModelSection): List<String> =
         recommendations.filter { it.section == section }
+            .filterNot { section == RecommendedModelSection.NPU_CHAT && it.chatRuntime == com.muyuchat.core.download.RecommendedChatRuntime.LITERT_LM }
             .sortedWith(compareBy({ it.priority }, { it.id }))
             .map { it.id }
 
     private fun assertCpuCatalog(catalog: RecommendationCatalog) {
-        assertEquals(3, catalog.lightChat.size)
-        assertEquals(2, catalog.mainChat.size)
-        assertEquals(3, catalog.qualityChat.size)
-        assertEquals(8, catalog.lightChat.size + catalog.mainChat.size + catalog.qualityChat.size)
+        assertEquals(5, catalog.lightChat.size)
+        assertEquals(4, catalog.mainChat.size)
+        assertEquals(5, catalog.qualityChat.size)
+        assertEquals(14, catalog.lightChat.size + catalog.mainChat.size + catalog.qualityChat.size)
         assertEquals(4, catalog.npuChat.size)
+        assertEquals(
+            listOf(
+                "gemma4_e2b_litertlm_npu",
+                "gemma4_e4b_litertlm_npu",
+                "gemma4_12b_litertlm_npu"
+            ),
+            catalog.litertNpu.map { it.id }
+        )
         assertEquals(
             listOf(
                 "qwen35_08b_uncensored_mnn",
                 "qwen35_2b_abliterated_gguf",
-                "gemma4_e2b_uncensored_gguf"
+                "gemma4_e2b_uncensored_gguf",
+                "gemma4_e2b_litertlm_cpu",
+                "gemma4_e2b_litertlm_gpu"
             ),
             catalog.lightChat.map { it.id }
         )
         assertEquals(
             listOf(
                 "qwen35_4b_uncensored_mnn",
-                "gemma4_e4b_uncensored_gguf"
+                "gemma4_e4b_uncensored_gguf",
+                "gemma4_e4b_litertlm_cpu",
+                "gemma4_e4b_litertlm_gpu"
             ),
             catalog.mainChat.map { it.id }
         )
@@ -325,7 +365,9 @@ class RecommendationCatalogTest {
             listOf(
                 "qwen35_9b_uncensored_mnn",
                 "qwen35_35b_a3b_iq2_xxs",
-                "gemma4_26b_a4b_abliterated_gguf"
+                "gemma4_26b_a4b_abliterated_gguf",
+                "gemma4_12b_litertlm_cpu",
+                "gemma4_12b_litertlm_gpu"
             ),
             catalog.qualityChat.map { it.id }
         )

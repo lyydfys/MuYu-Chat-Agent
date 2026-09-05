@@ -37,7 +37,7 @@ internal object RuntimeIdentityFactory {
     private const val EMBEDDED_TEMPLATE_VERSION = "embedded-template-v1"
     private const val EMBEDDED_CONFIG_VERSION = "embedded-config-v1"
     private const val DIRECTORY_MERKLE_VERSION = "directory-merkle-v1"
-    private const val NATIVE_SET_VERSION = "native-library-set-v1"
+    private const val NATIVE_SET_VERSION = "native-library-set-v2-litert-qualcomm"
     private const val MAX_TEMPLATE_CONFIG_BYTES = 4L * 1024L * 1024L
     private const val MNN_RUNTIME_CONFIG_FILE_NAME = "mca_runtime_config.json"
     private val SHA256 = Regex("^[0-9a-fA-F]{64}$")
@@ -310,10 +310,11 @@ internal object RuntimeIdentityFactory {
 
     private fun runtimeVersion(runtime: LocalChatRuntime, platform: PlatformSnapshot): String {
         val implementation = when (runtime) {
-            LocalChatRuntime.LLAMA_CPP -> "llama.cpp@f26efa02a77dc3660f94ac90efee59394f3bc74d"
-            LocalChatRuntime.MNN_CPU -> "mnn@3.6.0-cc20f672af9e177e2fa338c332dc097de2fc9264"
+            LocalChatRuntime.LLAMA_CPP -> "llama.cpp@6657ded4faa3b8450221119fc6b4d002e35104a2"
+            LocalChatRuntime.MNN_CPU -> "mnn@3.6.1-d407447ed56c4121a11ccbd266dc184ca1ead0c2"
             LocalChatRuntime.GENIEX_LLAMA_CPP -> "geniex@0.3.12-mca1+llama.cpp"
             LocalChatRuntime.GENIEX_QAIRT -> "geniex-qairt@0.3.12-mca1"
+            LocalChatRuntime.LITERT_LM -> "litert-lm@0.16.1"
         }
         return "$implementation|apk=${platform.packageName}/${platform.versionName}#${platform.versionCode}"
     }
@@ -492,6 +493,15 @@ internal object RuntimeIdentityFactory {
                 add("qairt_admission:$qairtAdmissionState")
                 if (device.accelerationProfile.qnnRuntime.ready) add("qnn_htp_candidate")
             }
+            LocalChatRuntime.LITERT_LM -> {
+                add("litert_lm")
+                add("litert_lm_cpu")
+                // CPU/GPU/NPU are selectable runtime transports.  Actual
+                // backend initialization and generation evidence remain the
+                // authority for the active transport.
+                add("gpu_offload")
+                add("npu_candidate")
+            }
         }
     }
 
@@ -586,6 +596,19 @@ internal object RuntimeIdentityFactory {
                 "libQnnSystem.so", "libQnnHtp.so", "libQnnHtpPrepare.so",
                 "libQnnHtpV79.so", "libQnnHtpV79Stub.so", "libQnnHtpV79Skel.so",
                 "libQnnHtpV81.so", "libQnnHtpV81Stub.so", "libQnnHtpV81Skel.so"
+            )
+            LocalChatRuntime.LITERT_LM -> listOf(
+                "liblitertlm_jni.so",
+                // LiteRT Qualcomm NPU transport and optional JIT compiler.
+                // Missing files remain part of the fingerprint and are not an
+                // admission decision; the engine's real load decides support.
+                "libLiteRtDispatch_Qualcomm.so",
+                "libLiteRtCompilerPlugin_Qualcomm.so",
+                "libQnnSystem.so",
+                "libQnnHtp.so",
+                "libQnnHtpPrepare.so",
+                "libQnnIr.so",
+                "libQnnSaver.so"
             )
         }
         // A future QAIRT package may use a different HTP generation. Include

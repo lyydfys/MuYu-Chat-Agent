@@ -139,13 +139,8 @@ internal class QnnHtpImageRunner(
         val runtimeResolution = context?.let { appContext ->
             qnnRuntimeDirectoryResolutionFor(appContext, bundleRoot)
         }
-        if (runtimeResolution?.stagingError != null) {
-            return manifest.report(
-                state = LocalImageQnnState.QNN_RUNTIME_MISSING,
-                backend = backendLabel,
-                message = runtimeResolution.stagingError
-            )
-        }
+        // Staging is advisory; continue with generic/OEM runtime directories
+        // and let real graph execution decide compatibility.
         // Device/runtime discovery is advisory only. Generic runtime candidates
         // and real native load/graph execution determine compatibility.
         val declaredSmokeSpecs = manifest.qnnSmokeSpecs.ifEmpty {
@@ -354,13 +349,17 @@ internal fun qnnSemanticGraphBundleMissingComponents(
     requiresControlNet: Boolean = false
 ): List<String> =
     buildList {
+        val hasCompleteSdxlConditioning = hasCompleteSdxlQnnConditioningBundle(root)
         if (root.nonEmptyQnnContextPath(
                 "text_encoder.bin",
                 "clip_v2.mnn",
                 "text_encoder.mnn"
-            ) == null
+            ) == null && !hasCompleteSdxlConditioning
         ) {
-            add("text_encoder.bin (or clip_v2.mnn/text_encoder.mnn)")
+            add(
+                "text_encoder.bin (or clip_v2.mnn/text_encoder.mnn, " +
+                    "or complete SDXL clip.mnn + clip_2.mnn conditioning)"
+            )
         }
         if (root.nonEmptyQnnContextPath("unet.bin") == null) add("unet.bin")
         if (root.nonEmptyQnnContextPath("vae.bin", "vae_decoder.bin") == null) {

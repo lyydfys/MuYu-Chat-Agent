@@ -44,6 +44,22 @@ class LocalChatRunnerTest {
     }
 
     @Test
+    fun genieXInitAcceptsOnlyAnEmptySdkFailure() {
+        requireSuccessfulGenieXSdkInit(null)
+        requireSuccessfulGenieXSdkInit("")
+        requireSuccessfulGenieXSdkInit("   ")
+    }
+
+    @Test
+    fun genieXInitSurfacesFreshPluginRegistrationFailure() {
+        val failure = assertThrows(IllegalStateException::class.java) {
+            requireSuccessfulGenieXSdkInit("Cannot registerPlugin llama_cpp")
+        }
+
+        assertEquals("Cannot registerPlugin llama_cpp", failure.message)
+    }
+
+    @Test
     fun detectsTextAndVisionGenieXModelsWithoutGuessingFromRuntime() {
         val textDir = Files.createTempDirectory("mca-geniex-text").toFile()
         val visionDir = Files.createTempDirectory("mca-geniex-vlm").toFile()
@@ -99,6 +115,56 @@ class LocalChatRunnerTest {
         assertTrue(runners.containsKey(LocalChatRuntime.LLAMA_CPP))
         assertTrue(runners.containsKey(LocalChatRuntime.GENIEX_LLAMA_CPP))
         assertTrue(runners.containsKey(LocalChatRuntime.GENIEX_QAIRT))
+    }
+
+    @Test
+    fun geniexLlamaCpuFallbackRequiresAnExplicitCpuComputeUnit() {
+        assertTrue(
+            genieXLlamaCppCpuFallbackRequested(
+                """{"geniex_compute_unit":"CPU"}"""
+            )
+        )
+        assertTrue(
+            genieXLlamaCppCpuFallbackRequested(
+                """{"compute_unit":"cpu_only"}"""
+            )
+        )
+        assertTrue(
+            genieXLlamaCppCpuFallbackRequested(
+                """{"advanced_json":"{\"geniex_compute_unit\":\"cpu\"}"}"""
+            )
+        )
+        assertFalse(genieXLlamaCppCpuFallbackRequested("{}"))
+        assertFalse(
+            genieXLlamaCppCpuFallbackRequested(
+                """{"geniex_compute_unit":"hybrid"}"""
+            )
+        )
+        assertFalse(
+            genieXLlamaCppCpuFallbackRequested(
+                """{"geniex_compute_unit":"gpu"}"""
+            )
+        )
+        assertFalse(
+            genieXLlamaCppCpuFallbackRequested(
+                """{"geniex_compute_unit":"npu"}"""
+            )
+        )
+    }
+
+    @Test
+    fun geniexLlamaRuntimeUsesTheSafeSelectorWithoutReplacingAcceleratedChoices() {
+        val source = sourceFile(
+            "core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt"
+        )
+        val factoryBody = source.substringAfter("fun defaultLocalChatRunner(")
+            .substringBefore("fun defaultLocalChatRunners(")
+
+        assertTrue(factoryBody.contains("GenieXLlamaCppChatRunner(context)"))
+        assertTrue(source.contains("only an explicit CPU"))
+        assertTrue(source.contains("Hybrid/GPU/NPU requests continue to"))
+        assertTrue(source.contains("EXECUTION_PATH_CPU_FALLBACK"))
+        assertTrue(source.contains("delegate.initBackends(nativeLibDir)"))
     }
 
     @Test
@@ -222,5 +288,15 @@ class LocalChatRunnerTest {
             destroyCalls += 1
             return 0
         }
+    }
+
+    private fun sourceFile(relativePath: String): String {
+        var directory = java.io.File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
+        while (true) {
+            val candidate = java.io.File(directory, relativePath)
+            if (candidate.isFile) return candidate.readText(Charsets.UTF_8)
+            directory = directory.parentFile ?: break
+        }
+        error("Unable to locate source: $relativePath")
     }
 }

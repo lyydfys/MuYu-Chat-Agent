@@ -66,6 +66,17 @@ class ModelScopeClient(
         return listModelFiles(input, revision, provider, setOf("gguf"))
     }
 
+    /**
+     * Lists official LiteRT-LM containers without mixing them with GGUF files.
+     * LiteRT-LM is a distinct container/runtime, so callers should not infer
+     * compatibility from a repository name or from a `.gguf` fallback.
+     */
+    fun listLiteRtLmFiles(
+        input: String,
+        revision: String = "main",
+        provider: ModelRepositoryProvider = ModelRepositoryProvider.HUGGING_FACE
+    ): List<RemoteModelFile> = listModelFiles(input, revision, provider, setOf("litertlm"))
+
     fun listEngineFiles(
         input: String,
         revision: String = "master",
@@ -75,7 +86,10 @@ class ModelScopeClient(
         val extensions = if ("mnn" in repoId.lowercase()) {
             MODEL_FILE_EXTENSIONS + MNN_MODEL_FILE_EXTENSIONS
         } else {
-            setOf("gguf")
+            // Keep the generic repository browser focused on executable chat
+            // containers. LiteRT-LM is intentionally listed beside GGUF,
+            // rather than hidden behind a device/profile allowlist.
+            setOf("gguf", "litertlm")
         }
         return listModelFiles(repoId, revision, provider, extensions)
     }
@@ -175,6 +189,20 @@ class ModelScopeClient(
         if (model.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT) {
             return listOf(recommendedQairtChatFile(model, preferredQairtChipsets))
         }
+        if (model.chatRuntime == RecommendedChatRuntime.LITERT_LM) {
+            return listModelFiles(
+                input = model.repoId,
+                revision = model.revision,
+                provider = model.provider,
+                extensions = setOf("litertlm")
+            ).sortedWith(
+                compareByDescending<RemoteModelFile> {
+                    it.name.equals(model.recommendedFileName, ignoreCase = true)
+                }.thenBy {
+                    it.sizeBytes ?: Long.MAX_VALUE
+                }
+            )
+        }
         return listGgufFiles(model.repoId, model.revision, model.provider).sortedWith(
             compareByDescending<RemoteModelFile> {
                 it.name.equals(model.recommendedFileName, ignoreCase = true)
@@ -231,7 +259,7 @@ class ModelScopeClient(
             } else {
                 it.isChatModelCandidate()
             }
-        } ?: error("推荐仓库 ${model.repoId} 没有找到可下载的主模型 GGUF 文件。")
+        } ?: error("推荐仓库 ${model.repoId} 没有找到可下载的主模型文件。")
     }
 
     fun recommendedMnnBundleFiles(model: ModelScopeRecommendedModel): List<RemoteModelFile> {
@@ -495,6 +523,21 @@ class ModelScopeClient(
         body = body,
         provider = provider,
         extensions = setOf("gguf")
+    )
+
+    internal fun parseLiteRtLmFilesForTest(
+        repoId: String,
+        revision: String,
+        endpoint: String,
+        body: String,
+        provider: ModelRepositoryProvider = ModelRepositoryProvider.HUGGING_FACE
+    ): List<RemoteModelFile> = collectGgufFiles(
+        repoId = repoId,
+        revision = revision,
+        endpoint = endpoint,
+        body = body,
+        provider = provider,
+        extensions = setOf("litertlm")
     )
 
     private fun collectFromJson(
@@ -1126,21 +1169,22 @@ class ModelScopeClient(
             maxLength: Int = 77,
             dualClip: Boolean = false,
             padZero: Boolean = false,
+            modelDeclaredTokenIds: Boolean = backend == ImageEngineTokenizerBackend.MNN_MTOK,
             supportsPromptWeighting: Boolean = backend != ImageEngineTokenizerBackend.MNN_MTOK,
             supportsTextualInversion: Boolean = false,
             separateNegativePrompt: Boolean = true
         ): ImageEngineTokenizerContractSpec = ImageEngineTokenizerContractSpec(
             backend = backend,
-            bosId = if (backend == ImageEngineTokenizerBackend.MNN_MTOK) null else 49_406,
-            eosId = if (backend == ImageEngineTokenizerBackend.MNN_MTOK) null else 49_407,
+            bosId = if (modelDeclaredTokenIds) null else 49_406,
+            eosId = if (modelDeclaredTokenIds) null else 49_407,
             padId = when {
-                backend == ImageEngineTokenizerBackend.MNN_MTOK -> null
+                modelDeclaredTokenIds -> null
                 dualClip || padZero -> 0
                 else -> 49_407
             },
             maxLength = maxLength,
             clip1PadRule = when {
-                backend == ImageEngineTokenizerBackend.MNN_MTOK -> ImageEngineClipPadRule.MODEL_DECLARED
+                modelDeclaredTokenIds -> ImageEngineClipPadRule.MODEL_DECLARED
                 padZero -> ImageEngineClipPadRule.ZERO
                 else -> ImageEngineClipPadRule.EOS
             },
@@ -1531,7 +1575,8 @@ class ModelScopeClient(
                 family = ImageEngineModelFamily.SD15,
                 variant = ImageEngineModelVariant.STANDARD,
                 tokenizer = clipTokenizer(
-                    ImageEngineTokenizerBackend.TOKENIZERS_CPP,
+                    ImageEngineTokenizerBackend.MNN_MTOK,
+                    modelDeclaredTokenIds = false,
                     supportsPromptWeighting = false
                 ),
                 conditioning = imageConditioning(
@@ -2157,6 +2202,200 @@ class ModelScopeClient(
         private val GEN5_QNN_CHIPSETS = setOf("SM8850", "SM8850P")
 
         private val DEFAULT_RECOMMENDED_MODELS = listOf(
+            // Gemma 4 LiteRT-LM matrix: keep the three model sizes and the
+            // three execution transports visible together. Hardware labels
+            // are recommendation hints; every card remains downloadable.
+            ModelScopeRecommendedModel(
+                id = "gemma4_e2b_litertlm_cpu",
+                title = "Gemma 4 E2B 无审查 · LiteRT-LM CPU",
+                repoId = "PeppX/gemma-4-e2b-uncensored-litertlm",
+                revision = "0adcc4e5497d0bd4202a7a6f2c72c00d1a0d4be9",
+                description = "社区 INT4 文本包，约 2.4GB、32K 上下文；CPU 通用路径，未做 MCA 真机验收。",
+                recommendedFileName = "gemma-4-E2B-it-Uncensored-MAX.litertlm",
+                parameterScale = "E2B",
+                quant = "INT4",
+                minRamGb = 8,
+                tags = listOf("Gemma 4", "E2B", "LiteRT-LM", "CPU", "无审查实验"),
+                priority = 5,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.LIGHT_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.LITERT_LM,
+                computeBackend = RecommendedComputeBackend.CPU
+            ),
+            ModelScopeRecommendedModel(
+                id = "gemma4_e2b_litertlm_gpu",
+                title = "Gemma 4 E2B · LiteRT-LM GPU",
+                // The official GPU-specialized artifact is a different file
+                // from the community uncensored CPU package above. Keeping
+                // the two catalog entries separate prevents the resolver from
+                // silently downloading a CPU/general bundle for a GPU card.
+                repoId = "litert-community/gemma-4-E2B-it-litert-lm",
+                revision = "master",
+                description = "官方 LiteRT-LM GPU 专用包；无审查 CPU 社区包仍单独保留，GPU 卡只解析官方 *-gpu 文件。",
+                recommendedFileName = "gemma-4-E2B-it-gpu.litertlm",
+                parameterScale = "E2B",
+                quant = "INT4",
+                minRamGb = 8,
+                tags = listOf("Gemma 4", "E2B", "LiteRT-LM", "GPU", "官方后端包"),
+                priority = 6,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.LIGHT_CHAT,
+                provider = ModelRepositoryProvider.MODELSCOPE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.LITERT_LM,
+                computeBackend = RecommendedComputeBackend.GPU
+            ),
+            ModelScopeRecommendedModel(
+                id = "gemma4_e2b_litertlm_npu",
+                title = "Gemma 4 E2B · LiteRT-LM Qualcomm NPU",
+                // The official catalog contains a real Qualcomm LiteRT-LM
+                // artifact for SM8750. Other Snapdragon devices remain free to
+                // try it; the chipset match only ranks the recommendation.
+                repoId = "litert-community/gemma-4-E2B-it-litert-lm",
+                revision = "master",
+                description = "官方 Qualcomm SM8750 专版 LiteRT-LM；其他 Snapdragon 设备可下载尝试，实际兼容性由 native load 判定。",
+                recommendedFileName = "gemma-4-E2B-it_qualcomm_sm8750.litertlm",
+                parameterScale = "E2B",
+                quant = "Qualcomm",
+                minRamGb = 8,
+                tags = listOf("Gemma 4", "E2B", "LiteRT-LM", "Qualcomm NPU", "SM8750 专版"),
+                priority = 7,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.MAIN_CHAT,
+                provider = ModelRepositoryProvider.MODELSCOPE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ANY_SNAPDRAGON,
+                supportedChipsetCodes = setOf("SM8750", "SM8750P"),
+                chatRuntime = RecommendedChatRuntime.LITERT_LM,
+                computeBackend = RecommendedComputeBackend.NPU
+            ),
+            ModelScopeRecommendedModel(
+                id = "gemma4_e4b_litertlm_cpu",
+                title = "Gemma 4 E4B 无审查 · LiteRT-LM CPU",
+                repoId = "olekk/gemma-4-E4B-it-abliterated-litert-lm",
+                revision = "a4eecccd3b0ba1777660180cda60a396eedcb8aa",
+                description = "发布者明确标注 abliterated/uncensored 的 E4B 包；CPU 通用路径，约 3.66GB。",
+                recommendedFileName = "gemma-4-E4B-it-abliterated.litertlm",
+                parameterScale = "E4B",
+                quant = "LiteRT-LM",
+                minRamGb = 12,
+                tags = listOf("Gemma 4", "E4B", "LiteRT-LM", "CPU", "Abliterated", "无审查实验"),
+                priority = 8,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.MAIN_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.LITERT_LM,
+                computeBackend = RecommendedComputeBackend.CPU
+            ),
+            ModelScopeRecommendedModel(
+                id = "gemma4_e4b_litertlm_gpu",
+                title = "Gemma 4 E4B · LiteRT-LM GPU",
+                repoId = "litert-community/gemma-4-E4B-it-litert-lm",
+                revision = "master",
+                description = "官方 LiteRT-LM GPU 专用包；无审查/abliterated CPU 包仍单独保留，GPU 卡只解析官方 *-gpu 文件。",
+                recommendedFileName = "gemma-4-E4B-it-gpu.litertlm",
+                parameterScale = "E4B",
+                quant = "LiteRT-LM",
+                minRamGb = 12,
+                tags = listOf("Gemma 4", "E4B", "LiteRT-LM", "GPU", "官方后端包"),
+                priority = 9,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.MAIN_CHAT,
+                provider = ModelRepositoryProvider.MODELSCOPE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.LITERT_LM,
+                computeBackend = RecommendedComputeBackend.GPU
+            ),
+            ModelScopeRecommendedModel(
+                id = "gemma4_e4b_litertlm_npu",
+                title = "Gemma 4 E4B · LiteRT-LM Qualcomm NPU（暂无专版）",
+                // DarrenJiaImbue's similarly named bundle is a bouncer
+                // classifier for a forked runtime, not a Qualcomm LiteRT-LM
+                // model. Do not advertise it as an NPU backend. Keep a visible
+                // card so the matrix explains the gap and links to the
+                // official Qualcomm release page, but make the absent artifact
+                // an explicit, concrete download block.
+                repoId = "qualcomm/Gemma-4-E4B-it",
+                revision = "main",
+                description = "官方 Qualcomm 发布页目前只提供 Genie/GenieX QAIRT 压缩包，没有可确认的 E4B LiteRT-LM Qualcomm .litertlm 专版；本卡仅说明缺口，不会把通用包误标为 NPU。",
+                recommendedFileName = "",
+                parameterScale = "E4B",
+                quant = "暂无 LiteRT-LM 专版",
+                minRamGb = 16,
+                tags = listOf("Gemma 4", "E4B", "LiteRT-LM", "Qualcomm NPU", "暂无专版"),
+                priority = 10,
+                status = RecommendedModelStatus.PENDING_INTEGRATION,
+                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                downloadable = false,
+                downloadBlockReason = "当前仓库没有可确认的 E4B LiteRT-LM Qualcomm .litertlm 专版；请使用 CPU/GPU 官方包或单独接入 GenieX QAIRT。",
+                downloadPolicy = RecommendedModelDownloadPolicy.ANY_SNAPDRAGON,
+                chatRuntime = RecommendedChatRuntime.LITERT_LM,
+                computeBackend = RecommendedComputeBackend.NPU
+            ),
+            ModelScopeRecommendedModel(
+                id = "gemma4_12b_litertlm_cpu",
+                title = "Gemma 4 12B · LiteRT-LM CPU",
+                repoId = "litert-community/gemma-4-12B-it-litert-lm",
+                // ModelScope exposes this repository on `master`; `main`
+                // responds with HTTP 200 but an empty Files list.
+                revision = "master",
+                description = "官方社区 12B LiteRT-LM 包，约 6.5GB，仅推荐大内存设备。",
+                recommendedFileName = "gemma-4-12B-it.litertlm",
+                parameterScale = "12B",
+                quant = "LiteRT-LM",
+                minRamGb = 24,
+                tags = listOf("Gemma 4", "12B", "LiteRT-LM", "CPU", "高内存"),
+                priority = 11,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
+                provider = ModelRepositoryProvider.MODELSCOPE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.LITERT_LM,
+                computeBackend = RecommendedComputeBackend.CPU
+            ),
+            ModelScopeRecommendedModel(
+                id = "gemma4_12b_litertlm_gpu",
+                title = "Gemma 4 12B · LiteRT-LM GPU",
+                repoId = "litert-community/gemma-4-12B-it-litert-lm",
+                revision = "master",
+                description = "官方 LiteRT-LM GPU 专用包，约 5.99GB；与 CPU 通用包分开，避免 GPU 卡误下载 CPU 文件。",
+                recommendedFileName = "gemma-4-12B-it-gpu.litertlm",
+                parameterScale = "12B",
+                quant = "LiteRT-LM",
+                minRamGb = 24,
+                tags = listOf("Gemma 4", "12B", "LiteRT-LM", "GPU", "高内存"),
+                priority = 12,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
+                provider = ModelRepositoryProvider.MODELSCOPE,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                chatRuntime = RecommendedChatRuntime.LITERT_LM,
+                computeBackend = RecommendedComputeBackend.GPU
+            ),
+            ModelScopeRecommendedModel(
+                id = "gemma4_12b_litertlm_npu",
+                title = "Gemma 4 12B · LiteRT-LM Qualcomm NPU（暂无专版）",
+                repoId = "litert-community/gemma-4-12B-it-litert-lm",
+                revision = "master",
+                description = "官方 12B 仓库目前只有 CPU 通用、GPU 专用和 Web 文件，没有可确认的 Qualcomm/NPU .litertlm 专版；本卡不会把通用包误标为 NPU。",
+                recommendedFileName = "",
+                parameterScale = "12B",
+                quant = "暂无 LiteRT-LM 专版",
+                minRamGb = 24,
+                tags = listOf("Gemma 4", "12B", "LiteRT-LM", "Qualcomm NPU", "暂无专版"),
+                priority = 13,
+                status = RecommendedModelStatus.PENDING_INTEGRATION,
+                group = ModelScopeRecommendedGroup.QUALITY_CHAT,
+                provider = ModelRepositoryProvider.MODELSCOPE,
+                downloadable = false,
+                downloadBlockReason = "当前官方 12B 仓库没有可确认的 Qualcomm LiteRT-LM .litertlm 专版；请使用 CPU/GPU 文件。",
+                downloadPolicy = RecommendedModelDownloadPolicy.ANY_SNAPDRAGON,
+                chatRuntime = RecommendedChatRuntime.LITERT_LM,
+                computeBackend = RecommendedComputeBackend.NPU
+            ),
             ModelScopeRecommendedModel(
                 id = "qwen35_08b_uncensored_mnn",
                 title = "Qwen3.5-0.8B 低拒答实验版 · MNN",

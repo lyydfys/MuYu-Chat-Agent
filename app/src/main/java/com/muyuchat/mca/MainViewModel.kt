@@ -604,7 +604,22 @@ internal fun localImageApiCatalogEntries(
         addAll(imageModels.map(LocalImageModelRecord::id))
     }.toMutableSet()
 
-    return configuredModels.map { model ->
+    // Duplicate persisted records can share an id while pointing at different roots.
+    // Assign public aliases from the healthiest record first so the unsuffixed API id
+    // never resolves to a stale parent directory. This mirrors resolveLocalImageApiModel.
+    val orderedModels = configuredModels.sortedWith(
+        compareByDescending<LocalImageModelRecord> { model ->
+            val root = model.bundleRoot?.let(::File)
+            if (root?.isDirectory == true &&
+                listOf("unet.bin", "unet.mnn", "model.gguf").any { File(root, it).isFile }
+            ) 1 else 0
+        }
+            .thenByDescending { model ->
+                model.bundleRoot?.count { ch -> ch == File.separatorChar || ch == '/' } ?: -1
+            }
+    )
+
+    return orderedModels.map { model ->
         val baseId = localImageApiModelBaseId(model.id)
         var apiId = baseId
         var suffix = 2
@@ -761,14 +776,51 @@ internal fun resolveLocalImageApiModel(
 ): LocalImageModelRecord? {
     val requested = requestedModelId.trim()
     if (requested.isEmpty()) return null
+    // Resolve persisted/downloaded identifiers even when the model is not
+    // currently configured. The caller can then return the precise 409
+    // "not ready" response instead of masking a known model as 404.
+    imageModels.asSequence().filter { model ->
+        val aliases = buildSet {
+            add(model.id)
+            add(model.displayName)
+            add(model.fileName)
+            model.bundleRoot?.let { root ->
+                add(File(root).name)
+                add(File(root).nameWithoutExtension)
+            }
+        }
+        aliases.any { it.isNotBlank() && it == requested }
+    }.sortedWith(compareByDescending<LocalImageModelRecord> { it.configured }
+        .thenByDescending { model ->
+            val root = model.bundleRoot?.let(::File)
+            if (root?.isDirectory == true &&
+                listOf("unet.bin", "unet.mnn", "model.gguf").any { File(root, it).isFile }
+            ) 1 else 0
+        }
+        .thenByDescending { it.bundleRoot?.count { ch -> ch == File.separatorChar || ch == '/' } ?: -1 })
+        .firstOrNull()?.let { return it }
     localImageApiCatalogEntries(chatModelIds, imageModels)
         .firstOrNull { entry ->
-            entry.apiId == requested ||
-                localApiPublicModelId(entry.model.displayName, entry.apiId) == requested
+            val model = entry.model
+            val aliases = buildSet {
+                add(entry.apiId)
+                add(localApiPublicModelId(model.displayName, entry.apiId))
+                // Accept stable identifiers used by downloaded manifests and older API clients.
+                add(model.id)
+                add(model.displayName)
+                add(model.fileName)
+                model.bundleRoot?.let { root ->
+                    add(File(root).name)
+                    add(File(root).nameWithoutExtension)
+                }
+            }
+            aliases.any { alias -> alias.isNotBlank() && alias == requested }
         }
         ?.let { return it.model }
     // Preserve the pre-discovery Images API contract for callers that already persisted a raw id.
-    return imageModels.firstOrNull { model -> model.id == requested }
+    return imageModels.firstOrNull { model ->
+        model.id == requested || model.displayName == requested || model.fileName == requested
+    }
 }
 
 private fun localImageApiModelBaseId(rawModelId: String): String {
@@ -3566,7 +3618,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             val localImageModels = localImageModelStore.loadModels()
             val persistedImageModelId = localImageModelStore.loadSelectedModelId()
-            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(localImageModels)
+            // QNN verification is advisory telemetry.  A staging/runtime probe failure must
+            // never discard the structurally discovered image catalog from the product UI.
+            // Keep the models visible and let the real load/graph path report the concrete
+            // runtime failure when the user selects one.
+            val qnnVerificationCurrentByModelId = runCatching {
+                currentQnnImageVerificationByModelId(localImageModels)
+            }.getOrElse { emptyMap() }
             val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(localModels)
             if (!managedRuntimeReadinessRefreshGate.isCurrent(refreshToken)) return
 
@@ -3807,14 +3865,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ).profile
             val backend = profile.tokenizer.backend
             if (backend == ImageTokenizerBackend.SDCPP_NATIVE) return@runCatching null
-            // The adapter mirrors MtokTokenizer::encodeSingle, but this profile family has no
-            // descriptor-backed tokenizer.mtok binding that proves the UI would open the exact
-            // file consumed by the generation engine. Do not turn a directory scan into an
-            // apparently exact count. This affects only the UI meter, never model admission or
-            // execution.
-            if (backend == ImageTokenizerBackend.MNN_MTOK) {
-                return@runCatching null
-            }
+            // MNN_MTOK is a concrete tokenizer consumed by the same native bridge as
+            // generation. It does not need a tokenizer.json sidecar; passing a null JSON
+            // path lets the bridge open the verified tokenizer.mtok from bundleRoot and
+            // keeps the UI token meter consistent with actual execution.
             val verifiedNativeMultilingualTokenizer = profile
                 .textEncoderLanguage
                 ?.evidence
@@ -9307,6 +9361,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val preflight = modelStore.validateForLoad(requestedModel.id)
             val validatedCatalog = publishManagedChatCatalogAfterValidation()
             if (!preflight.canLoad) {
+                // Keep model-load failures observable without leaking prompts, API keys,
+                // or model contents.  The UI message remains user friendly while this
+                // structured event gives support tooling a stable runtime/code boundary.
+                Log.e(
+                    "MCA-ModelLoad",
+                    "preflight_failed modelId=${requestedModel.id} runtime=${requestedModel.runtime.storageValue} " +
+                        "title=${preflight.title} details=${preflight.details.take(512)}"
+                )
                 failBeforeNativeReplacement("加载前检查失败：${preflight.message}")
                 return@launch
             }
@@ -9436,7 +9498,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } ?: persistedState?.activeExecutionProfile
             val capabilities = modelTuningCapabilities(model, identity, qairtAdmissionPassed)
             val adaptive = buildAdaptiveTuningRecommendation(model, identity, device, capabilities)
-            var bootstrapProfile = persistedProfile ?: adaptive.executionProfile.engineProfile
+            // A profile persisted before variant-aware LiteRT transport
+            // selection may contain the generic CPU default. Do not let that
+            // stale profile silently force a Qualcomm/GPU artifact onto CPU;
+            // retain it only when it agrees with the model-declared advisory
+            // backend (or when the user explicitly overrode backend).
+            val reusablePersistedProfile = persistedProfile?.takeIf { persisted ->
+                val preferred = capabilities.preferredBackend
+                preferred == null || "backend" in runtimeUserOverrideFields ||
+                    persisted.resolvedLoadBoundValues.value("backend")?.toString()
+                        ?.trim()?.lowercase()?.replace('-', '_') == preferred
+            }
+            var bootstrapProfile = reusablePersistedProfile ?: adaptive.executionProfile.engineProfile
             val persistedRevisions = runtimeProfileStore.profiles(identity.identityHash).map { it.revision }
             if (runtimeUserOverrideFields.isNotEmpty()) {
                 val requested = engine.resolveExecutionProfile(
@@ -14520,6 +14593,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val execution = runCatching {
                     sanitizedLocalImageApiExecution(result.executionMetadataJson)
                 }.getOrElse { JSONObject() }
+                // Expose the resolved, non-sensitive execution contract on the authenticated
+                // API response. Paths and device-private runtime directories remain excluded;
+                // clients can now audit exactly which profile/scheduler bounds were applied.
+                runCatching {
+                    val profileRoot = model.bundleRoot
+                        ?.takeIf(String::isNotBlank)
+                        ?.let(::File)
+                        ?.takeIf(File::isDirectory)
+                        ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+                    val profile = resolveLocalImageExecutionProfile(
+                        model = model,
+                        options = effectiveOptions.normalizedForPromptExecutionProfile(model.runtime),
+                        bundleRoot = profileRoot
+                    ).profile
+                    execution.put(
+                        "resolvedProfile",
+                        JSONObject()
+                            .put("profileId", profile.profileId)
+                            .put("profileRevision", profile.profileRevision)
+                            .put("runtime", profile.runtime.name)
+                            .put("family", profile.family.name)
+                            .put("scheduler", JSONObject()
+                                .put("algorithm", profile.scheduler.algorithm.name)
+                                .put("predictionType", profile.scheduler.predictionType.name)
+                                .put("defaultSteps", profile.scheduler.defaultSteps)
+                                .put("minSteps", profile.scheduler.minSteps)
+                                .put("maxSteps", profile.scheduler.maxSteps))
+                            .put("defaults", JSONObject()
+                                .put("steps", profile.defaults.steps)
+                                .put("width", profile.defaults.width)
+                                .put("height", profile.defaults.height)
+                                .put("cfgScale", profile.defaults.cfgScale))
+                            .put("supportedSchedulers", JSONArray(
+                                profile.capabilities.supportedSchedulers.map { it.name }))
+                    )
+                }
                 execution.put(
                     "responseOutputEvidence",
                     localImageApiResponseOutputEvidence(result.outputs)
@@ -17189,6 +17298,7 @@ private fun ChatModelRuntime.toLocalChatRuntime(): LocalChatRuntime =
         ChatModelRuntime.MNN -> LocalChatRuntime.MNN_CPU
         ChatModelRuntime.LLAMA_CPP -> LocalChatRuntime.LLAMA_CPP
         ChatModelRuntime.GENIEX_QAIRT -> LocalChatRuntime.GENIEX_QAIRT
+        ChatModelRuntime.LITERT_LM -> LocalChatRuntime.LITERT_LM
     }
 
 private fun ImageEngineBundleRuntime.toLocalImageRuntime(): LocalImageRuntime =

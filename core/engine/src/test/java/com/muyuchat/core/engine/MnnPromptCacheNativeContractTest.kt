@@ -56,6 +56,20 @@ class MnnPromptCacheNativeContractTest {
     }
 
     @Test
+    fun emptyVisibleResponseRollsBackBeforeCommitAndHistoryUsesAbsoluteBoundary() {
+        val native = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
+        val settle = functionBody(native, "void settle_mnn_text_prompt_cache_locked(")
+        assertTrue(settle.contains("has_non_whitespace(mnn_prompt_cache_assistant_text_locked())"))
+        assertTrue(settle.contains("rollback_mnn_text_prompt_cache_locked(\"empty_visible_response\", true)"))
+        assertTrue(settle.indexOf("empty_visible_response") < settle.indexOf("commit_mnn_text_prompt_cache_locked(reason)"))
+        val vendor = sourceFile("third_party/MNN/transformers/llm/engine/src/llm.cpp")
+        val erase = functionBody(vendor, "void Llm::eraseHistory(")
+        assertTrue(erase.contains("trimPromptTokenHistory(mContext->history_tokens, begin)"))
+        assertTrue(erase.contains("mMeta->n_reserve = 0"))
+        assertTrue(erase.contains("mMeta->reserve = nullptr"))
+    }
+
+    @Test
     fun prefixChangesAndMultimodalTransitionsInvalidateKnownTranscript() {
         val native = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
         val disabled = functionBody(native, "void mark_mnn_prompt_cache_disabled_locked(")
@@ -68,13 +82,30 @@ class MnnPromptCacheNativeContractTest {
     }
 
     @Test
+    fun recurrentReuseAlignsStateAndRollbackRetainsObservedGenerationEvidence() {
+        val native = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
+        val rollback = functionBody(native, "void rollback_mnn_text_prompt_cache_locked(")
+        assertTrue(rollback.contains("completion_tokens_before_rollback"))
+        assertFalse(rollback.contains("g_mnn_prompt_cache.hit = false"))
+        val vendor = sourceFile("third_party/MNN/transformers/llm/engine/src/llm.cpp")
+        assertTrue(vendor.contains("token_split = recurrentReusablePrefix("))
+        assertTrue(vendor.contains("mMeta->recurrentCheckpoint"))
+        assertTrue(vendor.contains("checkpointPrefillChunks(input_ids.size(), mBlockSize)"))
+        val activity = sourceFile("app/src/debug/java/com/muyuchat/mca/debug/LocalChatSmokeActivity.kt")
+        val compare = activity.substringAfter("\"mnn_cache_ab\" -> {").substringBefore("val cacheAbSucceeded")
+        assertTrue(compare.contains("requestMessages = secondMessages, allowGenerationFailure = true"))
+        assertTrue(compare.contains("timedUnload(activeEngine)"))
+        assertTrue(compare.contains("cacheAbResult.put(\"coldControl\", coldControl)"))
+    }
+
+    @Test
     fun vendorReuseUsesLiveTokenLcpAndBridgeSnapshotsEffectiveKv() {
         val native = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
         val vendor = sourceFile("third_party/MNN/transformers/llm/engine/src/llm.cpp")
         val prepare = functionBody(native, "void prepare_mnn_text_prompt_cache_locked(")
         val rollback = functionBody(native, "void rollback_mnn_text_prompt_cache_locked(")
 
-        assertTrue(native.contains("getContext()->all_seq_len"))
+        assertTrue(native.contains("g_llm->getCurrentHistory()"))
         assertTrue(prepare.contains("mnn_effective_kv_history_locked()"))
         assertTrue(rollback.contains("mnn_effective_kv_history_locked()"))
         assertTrue(vendor.contains("promptCacheReusableTokenPrefix("))
@@ -90,7 +121,7 @@ class MnnPromptCacheNativeContractTest {
 
         assertTrue(prefix.contains("ZERO WIDTH SPACE"))
         assertTrue(prefix.contains("normalize(prefix[index].second)"))
-        assertTrue(prepare.contains("g_llm->syncPromptCache(messages)"))
+        assertTrue(prepare.contains("g_llm->syncPromptCache(g_mnn_prompt_cache.committed_messages)"))
         assertTrue(prepare.contains("extendsCommittedTranscript"))
     }
 

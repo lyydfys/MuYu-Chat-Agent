@@ -4,7 +4,10 @@ import com.muyuchat.core.download.ModelScopeRecommendedGroup
 import com.muyuchat.core.download.ModelScopeRecommendedKind
 import com.muyuchat.core.download.ModelScopeRecommendedModel
 import com.muyuchat.core.download.RecommendedModelSection
+import com.muyuchat.core.download.RecommendedModelDownloadPolicy
 import com.muyuchat.core.download.RecommendedModelStatus
+import com.muyuchat.core.download.RecommendedChatRuntime
+import com.muyuchat.core.download.RecommendedComputeBackend
 import com.muyuchat.core.download.downloadEligibilityFor
 import java.util.Locale
 
@@ -13,6 +16,8 @@ internal data class RecommendationCatalog(
     val mainChat: List<ModelScopeRecommendedModel>,
     val qualityChat: List<ModelScopeRecommendedModel>,
     val npuChat: List<ModelScopeRecommendedModel>,
+    /** LiteRT-LM NPU cards are kept separate from the legacy NPU chat section. */
+    val litertNpuModels: List<ModelScopeRecommendedModel> = emptyList(),
     val cpuImage: List<ModelScopeRecommendedModel>,
     val npuImageSd15: List<ModelScopeRecommendedModel>,
     val npuImageSdxl: List<ModelScopeRecommendedModel>,
@@ -20,6 +25,16 @@ internal data class RecommendationCatalog(
 ) {
     val npuImage: List<ModelScopeRecommendedModel>
         get() = npuImageSd15 + npuImageSdxl + npuImageGen5
+
+    val litertCpu: List<ModelScopeRecommendedModel>
+        get() = allChat.filter { it.chatRuntime == RecommendedChatRuntime.LITERT_LM && it.computeBackend == RecommendedComputeBackend.CPU }
+    val litertGpu: List<ModelScopeRecommendedModel>
+        get() = allChat.filter { it.chatRuntime == RecommendedChatRuntime.LITERT_LM && it.computeBackend == RecommendedComputeBackend.GPU }
+    val litertNpu: List<ModelScopeRecommendedModel>
+        get() = litertNpuModels
+
+    private val allChat: List<ModelScopeRecommendedModel>
+        get() = lightChat + mainChat + qualityChat + npuChat
 }
 
 /** A collapsed tier exposes only its approved P0 entry; expansion reveals the rest in-place. */
@@ -37,7 +52,7 @@ internal fun buildRecommendationCatalog(
     // but a raw recommendation list must never resurrect entries deliberately
     // hidden from the product UI.
     val visibleModels = models.filter { it.visibleInRecommendations }
-    val comparator = recommendationComparator()
+    val comparator = recommendationComparator(deviceChipsetCode, deviceIsSnapdragon)
     fun modelsIn(section: RecommendedModelSection): List<ModelScopeRecommendedModel> =
         visibleModels.filter { it.section == section }.sortedWith(comparator)
 
@@ -45,11 +60,16 @@ internal fun buildRecommendationCatalog(
     // Device discovery ranks packages and marks an unmatched package as an
     // experiment; it never removes a user-visible model from the catalog.
     val npuImage = modelsIn(RecommendedModelSection.NPU_IMAGE)
+    val npuChatModels = modelsIn(RecommendedModelSection.NPU_CHAT)
     return RecommendationCatalog(
         lightChat = cpuChat.filter { it.group == ModelScopeRecommendedGroup.LIGHT_CHAT },
         mainChat = cpuChat.filter { it.group == ModelScopeRecommendedGroup.MAIN_CHAT },
         qualityChat = cpuChat.filter { it.group == ModelScopeRecommendedGroup.QUALITY_CHAT },
-        npuChat = modelsIn(RecommendedModelSection.NPU_CHAT),
+        npuChat = npuChatModels.filter { it.chatRuntime != RecommendedChatRuntime.LITERT_LM },
+        litertNpuModels = npuChatModels.filter {
+            it.chatRuntime == RecommendedChatRuntime.LITERT_LM &&
+                it.computeBackend == RecommendedComputeBackend.NPU
+        },
         cpuImage = modelsIn(RecommendedModelSection.CPU_IMAGE),
         npuImageSd15 = npuImage.filterNot { it.id in SDXL_QNN_MODEL_IDS || it.id in GEN5_QNN_MODEL_IDS },
         npuImageSdxl = npuImage.filter { it.id in SDXL_QNN_MODEL_IDS },
@@ -76,17 +96,49 @@ private fun ModelScopeRecommendedModel.matchesChipset(deviceChipsetCode: String)
     return supportedChipsetCodes.any { it.trim().uppercase(Locale.ROOT) == normalizedDevice }
 }
 
-private fun recommendationComparator(): Comparator<ModelScopeRecommendedModel> {
+private fun recommendationComparator(
+    deviceChipsetCode: String,
+    deviceIsSnapdragon: Boolean
+): Comparator<ModelScopeRecommendedModel> {
     // `priority` is the approved P0/P1/P2 order. RAM and verification state are
-    // advisory card metadata and must never reorder the product catalog.
-    return compareBy<ModelScopeRecommendedModel> { it.priority }
+    // advisory card metadata. NPU packages get a device-fit tie breaker first
+    // so a collapsed list presents a likely compatible transport, without
+    // hiding the remaining packages.
+    return compareBy<ModelScopeRecommendedModel> {
+        if (it.section in setOf(RecommendedModelSection.NPU_CHAT, RecommendedModelSection.NPU_IMAGE)) {
+            recommendationDeviceFitRank(recommendationDownloadAccess(it, deviceChipsetCode, deviceIsSnapdragon).deviceFit)
+        } else {
+            0
+        }
+    }.thenBy { it.priority }
         .thenBy { it.id }
+}
+
+private fun recommendationDeviceFitRank(fit: RecommendationDeviceFit): Int = when (fit) {
+    RecommendationDeviceFit.EXACT -> 0
+    RecommendationDeviceFit.VENDOR_GENERIC -> 1
+    RecommendationDeviceFit.UNIVERSAL -> 2
+    RecommendationDeviceFit.UNKNOWN -> 3
+    RecommendationDeviceFit.CROSS_VENDOR -> 4
 }
 
 internal data class RecommendationDownloadAccess(
     val canDownload: Boolean,
-    val experimental: Boolean
+    val experimental: Boolean,
+    val deviceFit: RecommendationDeviceFit
 )
+
+/**
+ * A recommendation confidence label, deliberately independent from access.
+ * Native model loading remains the authority on whether a package runs.
+ */
+internal enum class RecommendationDeviceFit(val label: String) {
+    UNIVERSAL("通用路径"),
+    EXACT("精确适配"),
+    VENDOR_GENERIC("骁龙通用尝试"),
+    CROSS_VENDOR("跨厂商尝试"),
+    UNKNOWN("未知设备尝试")
+}
 
 /**
  * The catalog keeps visibility and device-fit advice separate from download
@@ -101,14 +153,33 @@ internal fun recommendationDownloadAccess(
     val normalizedDevice = deviceChipsetCode.trim().uppercase(Locale.ROOT)
     val exactChipsetMatch = model.matchesChipset(normalizedDevice)
     val eligibility = model.downloadEligibilityFor(deviceChipsetCode, deviceIsSnapdragon)
+    val deviceFit = when {
+        model.downloadPolicy == RecommendedModelDownloadPolicy.ALL_DEVICES ->
+            RecommendationDeviceFit.UNIVERSAL
+        exactChipsetMatch -> RecommendationDeviceFit.EXACT
+        normalizedDevice.isBlank() -> RecommendationDeviceFit.UNKNOWN
+        deviceIsSnapdragon || normalizedDevice.isSnapdragonChipsetCodeForRecommendation() ->
+            RecommendationDeviceFit.VENDOR_GENERIC
+        else -> RecommendationDeviceFit.CROSS_VENDOR
+    }
     val experimental = model.status != RecommendedModelStatus.RECOMMENDED ||
         (model.section in setOf(RecommendedModelSection.NPU_CHAT, RecommendedModelSection.NPU_IMAGE) &&
-            !exactChipsetMatch)
+            deviceFit !in setOf(RecommendationDeviceFit.EXACT, RecommendationDeviceFit.UNIVERSAL))
     return RecommendationDownloadAccess(
         canDownload = eligibility.canDownload,
-        experimental = experimental
+        experimental = experimental,
+        deviceFit = deviceFit
     )
 }
+
+private fun String.isSnapdragonChipsetCodeForRecommendation(): Boolean {
+    if (isBlank()) return false
+    if (contains("SNAPDRAGON") || contains("骁龙")) return true
+    return matches(Regex("^(?:SM|SDM|MSM|APQ|QCS|QCM)[A-Z0-9_-]+$"))
+}
+
+internal fun recommendationDeviceFitLine(access: RecommendationDownloadAccess): String =
+    "设备路径：${access.deviceFit.label}；以本机 native load 和首轮推理结果为准"
 
 /**
  * Keep the recommendation card honest about where the app will try to get a
@@ -134,6 +205,8 @@ internal fun recommendationVerificationLine(
     model: ModelScopeRecommendedModel,
     qairtVerified: Boolean
 ): String = when {
+    model.id in LITERT_LM_NPU_UNAVAILABLE_MODEL_IDS ->
+        "当前无可确认的 Qualcomm LiteRT-LM 专版；请使用同尺寸 CPU/GPU 文件，或单独接入 GenieX QAIRT"
     model.id in COMMUNITY_LOW_REFUSAL_MODEL_IDS ->
         "工程状态：社区低拒答实验包，发布者声明已降低拒答；尚无 MCA 生产设备验收，实际兼容性以完整包、native load 与真实执行为准"
     model.id in TEXT_VERIFIED_MNN_MODEL_IDS ->
@@ -180,6 +253,12 @@ private val COMMUNITY_LOW_REFUSAL_MODEL_IDS = setOf(
     "gemma4_e4b_uncensored_gguf",
     "qwen35_9b_uncensored_mnn",
     "gemma4_26b_a4b_abliterated_gguf"
+)
+
+/** Visible matrix entries whose concrete Qualcomm LiteRT-LM artifact is absent. */
+private val LITERT_LM_NPU_UNAVAILABLE_MODEL_IDS = setOf(
+    "gemma4_e4b_litertlm_npu",
+    "gemma4_12b_litertlm_npu"
 )
 
 private val SHARED_QNN_SD15_IMG2IMG_MODEL_IDS = setOf(

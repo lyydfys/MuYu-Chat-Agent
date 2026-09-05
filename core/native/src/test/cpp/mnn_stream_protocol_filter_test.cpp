@@ -4,6 +4,25 @@
 #include <string>
 #include <vector>
 
+static void expectXml(const std::string& raw, const std::string& expected, bool stopped) {
+    // Every two-chunk split plus byte-wise streaming must agree with one write.
+    for (size_t split = 0; split <= raw.size(); ++split) {
+        mca::mnn::StreamProtocolFilterState state;
+        state.reset({"<|im_end|>"});
+        std::string visible = mca::mnn::filter_stream_protocol(state, raw.substr(0, split), false).visible;
+        visible += mca::mnn::filter_stream_protocol(state, raw.substr(split), true).visible;
+        assert(visible == expected);
+        assert(state.stopped == stopped);
+    }
+    mca::mnn::StreamProtocolFilterState state;
+    state.reset({"<|im_end|>"});
+    std::string visible;
+    for (const char ch : raw) visible += mca::mnn::filter_stream_protocol(state, std::string(1, ch), false).visible;
+    visible += mca::mnn::filter_stream_protocol(state, "", true).visible;
+    assert(visible == expected);
+    assert(state.stopped == stopped);
+}
+
 int main() {
     using mca::mnn::StreamProtocolFilterState;
     using mca::mnn::filter_stream_protocol;
@@ -97,6 +116,65 @@ int main() {
     assert(unsafe_tail.visible.empty());
     assert(unsafe_tail.stopped);
     assert(unsafe_role.stop_reason == "unexpected_role_token");
+
+    // Some MNN tokenizers detokenize the next role as a plain `assistant`
+    // line.  It is protocol framing only when it occupies a whole line; the
+    // same word inside normal prose must remain untouched.
+    StreamProtocolFilterState plain_role;
+    plain_role.reset(terminal_markers);
+    assert(filter_stream_protocol(plain_role, "answer\nassistant\nleak", false).visible == "answer\n");
+    assert(plain_role.stopped);
+
+    StreamProtocolFilterState plain_user;
+    plain_user.reset(terminal_markers);
+    const auto plain_user_result = filter_stream_protocol(
+        plain_user,
+        "answer\nuser\nnext prompt",
+        false);
+    assert(plain_user_result.visible == "answer\n");
+    assert(plain_user_result.stopped);
+
+    StreamProtocolFilterState prose_assistant;
+    prose_assistant.reset(terminal_markers);
+    const auto prose = filter_stream_protocol(
+        prose_assistant,
+        "The assistant answered clearly.",
+        false);
+    assert(prose.visible == "The assistant answered clearly.");
+    assert(!prose.stopped);
+
+    for (const std::string literal : {
+            "The <response> tag contains a reply; </response> closes it.",
+            "\"<answer>\" and \"</answer>\" are literal XML tags.",
+            "`<response>value</response>` is an example.",
+            "```xml\n<response>value</response>\n```",
+            "</response> is a closing tag.",
+            "Partial tag: <res", "Partial closing tag: </resp"}) {
+        expectXml(literal, literal, false);
+    }
+    expectXml("<answer>4</answer>\nuser\nleak", "4", true);
+    expectXml("<response>Yes</response><|im_end|>", "Yes", true);
+    expectXml("<answer>Use <response>x</response> here.</answer>",
+              "Use <response>x</response> here.", true);
+    expectXml("<response>Use <response>x</response> here.</response>",
+              "Use <response>x</response> here.", true);
+    expectXml("<response>The tag `</response>` closes it.</response>",
+              "The tag `</response>` closes it.", true);
+    expectXml("<response>\"</response>\" closes it.</response>",
+              "\"</response>\" closes it.", true);
+    expectXml("<response>```xml\n<response>x</response>\n```\nDone.</response>",
+              "```xml\n<response>x</response>\n```\nDone.", true);
+    expectXml("<answer>\n\n</answer>", "\n\n", true);
+    StreamProtocolFilterState empty;
+    empty.reset({});
+    const auto empty_result = filter_stream_protocol(empty, "<answer>\n\n</answer>", true);
+    assert(!mca::mnn::detail::has_non_whitespace(empty_result.visible));
+
+    StreamProtocolFilterState offset;
+    offset.reset({});
+    const std::string with_literal = "<answer>Use <response>x</response> here.</answer>";
+    filter_stream_protocol(offset, with_literal, true);
+    assert(offset.stop_marker_offset == with_literal.rfind("</answer>"));
 
     return 0;
 }

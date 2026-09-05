@@ -18,15 +18,15 @@ param(
     [int]$Threads = 4,
     [int]$Seed = 42,
     [double]$CfgScale = 7.0,
-    [double]$DistilledGuidance = 3.5,
-    [double]$FlowShift = -1.0,
+    [Nullable[double]]$DistilledGuidance = $null,
+    [Nullable[double]]$FlowShift = $null,
     [string]$SampleMethod = 'euler',
     [string]$Family = 'SD15',
     [string]$BackendMode = 'cpu',
-    [string]$TokenEmbeddingMode = 'auto',
     [ValidateRange(0, 2147483647)]
     [int]$MemoryMode = 0,
-    [string]$Runner = 'module',
+    [AllowEmptyString()]
+    [string]$Runner = '',
     [ValidateRange(1, 2147483647)]
     [int]$Runs = 1,
     [ValidateSet('reuse', 'cold')]
@@ -79,10 +79,24 @@ foreach ($argument in @(
         [pscustomobject]@{ Name = 'SampleMethod'; Value = $SampleMethod },
         [pscustomobject]@{ Name = 'Family'; Value = $Family },
         [pscustomobject]@{ Name = 'BackendMode'; Value = $BackendMode },
-        [pscustomobject]@{ Name = 'TokenEmbeddingMode'; Value = $TokenEmbeddingMode },
         [pscustomobject]@{ Name = 'Runner'; Value = $Runner }
     )) {
     Assert-DeviceSmokeSingleLineArgument -Value $argument.Value -Name $argument.Name
+}
+$isSanaFamily = $Family.Trim().Equals('SANA', [System.StringComparison]::OrdinalIgnoreCase)
+if ([string]::IsNullOrWhiteSpace($Runner)) {
+    $Runner = if ($isSanaFamily) { 'sana_varp' } else { 'direct' }
+} else {
+    $Runner = $Runner.Trim().ToLowerInvariant()
+    $supportedRunners = if ($isSanaFamily) {
+        @('sana_varp', 'sana', 'module')
+    } else {
+        @('direct', 'module')
+    }
+    if ($Runner -notin $supportedRunners) {
+        $familyLabel = if ($isSanaFamily) { 'SANA' } else { 'Stable Diffusion' }
+        throw "Unsupported MNN $familyLabel runner '$Runner'. Supported values are $($supportedRunners -join ', ')."
+    }
 }
 if (-not $BundleRoot.StartsWith('/')) {
     throw 'BundleRoot must be an absolute Android path.'
@@ -102,6 +116,9 @@ if ($WorkerMainLeaseHoldSeconds -gt 0 -and -not $WorkerProductPath) {
 }
 if ($WorkerKillWindowSeconds -gt 0 -and $WorkerMainLeaseHoldSeconds -gt 0) {
     throw 'WorkerKillWindowSeconds and WorkerMainLeaseHoldSeconds must be tested in separate runs.'
+}
+if ($PSBoundParameters.ContainsKey('DistilledGuidance') -or $PSBoundParameters.ContainsKey('FlowShift')) {
+    throw 'MNN-Diffusion does not support DistilledGuidance or FlowShift. Those controls are stable-diffusion.cpp-only.'
 }
 if ([string]::IsNullOrWhiteSpace($SessionId)) {
     $SessionId = New-DeviceSmokeSessionId -Prefix "mnn-diffusion-$Mode"
@@ -159,12 +176,9 @@ for ($run = 1; $run -le $Runs; $run++) {
             '--ei', 'threads', [string]$Threads,
             '--ei', 'seed', [string]$Seed,
             '--ef', 'cfgScale', (ConvertTo-DeviceSmokeInvariantDouble -Value $CfgScale),
-            '--ef', 'distilledGuidance', (ConvertTo-DeviceSmokeInvariantDouble -Value $DistilledGuidance),
-            '--ef', 'flowShift', (ConvertTo-DeviceSmokeInvariantDouble -Value $FlowShift),
             '--es', 'sampleMethod', $SampleMethod,
             '--es', 'family', $Family,
             '--es', 'backendMode', $BackendMode,
-            '--es', 'tokenEmbeddingMode', $TokenEmbeddingMode,
             '--ei', 'memoryMode', [string]$MemoryMode,
             '--es', 'runner', $Runner,
             '--ez', 'directUnetSmoke', ([string](-not $WorkerProductPath)).ToLowerInvariant(),
@@ -280,12 +294,11 @@ $summary = [pscustomobject][ordered]@{
     threads = $Threads
     seed = $Seed
     cfgScale = $CfgScale
-    distilledGuidance = $DistilledGuidance
-    flowShift = $FlowShift
+    distilledGuidance = $null
+    flowShift = $null
     sampleMethod = $SampleMethod
     family = $Family
     backendMode = $BackendMode
-    tokenEmbeddingMode = $TokenEmbeddingMode
     memoryMode = $MemoryMode
     runner = $Runner
     directUnetSmoke = [bool](-not $WorkerProductPath)

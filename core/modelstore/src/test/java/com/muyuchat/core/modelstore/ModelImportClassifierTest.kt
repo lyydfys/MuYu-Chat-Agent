@@ -5,6 +5,25 @@ import org.junit.Test
 
 class ModelImportClassifierTest {
     @Test
+    fun liteRtLmMagicWinsOverProviderExtension() {
+        val magic = LITERT_LM_MAGIC.toByteArray(Charsets.US_ASCII)
+
+        assertEquals(ModelImportKind.LITERT_LM, classifyModelImport("provider-document", magic))
+        assertEquals(ModelImportKind.LITERT_LM, classifyModelImport("model.gguf", magic))
+        assertEquals("provider-document.litertlm", normalizedLiteRtLmImportName(" provider-document "))
+    }
+
+    @Test
+    fun liteRtLmExtensionIsOnlyAShortHeaderFallback() {
+        assertEquals(ModelImportKind.LITERT_LM, classifyModelImport("MODEL.LITERTLM ", byteArrayOf()))
+        assertEquals(ModelImportKind.UNKNOWN, classifyModelImport(
+            "MODEL.LITERTLM",
+            byteArrayOf('n'.code.toByte(), 'o'.code.toByte(), 'p'.code.toByte(), 'e'.code.toByte(),
+                'x'.code.toByte(), 'x'.code.toByte(), 'x'.code.toByte(), 'x'.code.toByte())
+        ))
+    }
+
+    @Test
     fun ggufMagicWinsWhenProviderOmitsOrMislabelsExtension() {
         val magic = byteArrayOf('G'.code.toByte(), 'G'.code.toByte(), 'U'.code.toByte(), 'F'.code.toByte())
 

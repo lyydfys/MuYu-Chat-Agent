@@ -8,6 +8,7 @@ import com.muyuchat.core.engine.EffectiveExecutionSignature
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LlamaAdvancedParams
 import com.muyuchat.core.engine.LlamaCppRuntimeParameterAdapter
+import com.muyuchat.core.engine.LiteRtLmRuntimeParameterAdapter
 import com.muyuchat.core.engine.LocalChatRuntime
 import com.muyuchat.core.engine.MnnRuntimeParameterAdapter
 import com.muyuchat.core.engine.ModelExecutionProfile as EngineModelExecutionProfile
@@ -19,6 +20,14 @@ import com.muyuchat.core.engine.RuntimeOverrideSignature
 import com.muyuchat.core.engine.RuntimeParameterAdapter
 import org.json.JSONObject
 import kotlin.math.max
+
+private fun isSupportedLiteRtBackend(value: String): Boolean =
+    value.trim().lowercase().replace('-', '_') in setOf(
+        "cpu",
+        "gpu",
+        "npu",
+        "google_tensor"
+    )
 
 /** Runtime families intentionally kept independent from model-store/UI enums. */
 enum class TuningRuntime {
@@ -345,11 +354,14 @@ fun TuningPlan.toAdaptive(
                 nParallel = advanced?.nParallel ?: 1,
                 mmap = advanced?.mmap ?: mmap,
                 mlock = advanced?.mlock ?: mlock,
-                backend = when (capabilities.runtime) {
-                    TuningRuntime.LLAMA_CPP, TuningRuntime.UNKNOWN -> backend.ifBlank { "cpu" }
-                    TuningRuntime.MNN -> "cpu"
-                    TuningRuntime.QAIRT -> "qairt"
-                }
+                backend = capabilities.preferredBackend
+                    ?.takeIf { runtimeIdentity.runtime == LocalChatRuntime.LITERT_LM }
+                    ?.takeIf(::isSupportedLiteRtBackend)
+                    ?: when (capabilities.runtime) {
+                        TuningRuntime.LLAMA_CPP, TuningRuntime.UNKNOWN -> backend.ifBlank { "cpu" }
+                        TuningRuntime.MNN -> "cpu"
+                        TuningRuntime.QAIRT -> "qairt"
+                    }
             ),
             hotExecution = HotExecutionParams(
                 nThreads = nThreads,
@@ -403,7 +415,13 @@ data class ModelTuningCapabilities(
     val supportsGpuOffload: Boolean = false,
     val supportsCpuMoeTuning: Boolean = false,
     val supportsSpeculativeMtp: Boolean = false,
-    val qairtAdmissionPassed: Boolean = false
+    val qairtAdmissionPassed: Boolean = false,
+    /**
+     * Advisory transport selected from the model's declared variant. This is
+     * deliberately not an admission gate: a native load/graph execution must
+     * still prove that the transport works on the current device.
+     */
+    val preferredBackend: String? = null
 ) {
     companion object {
         fun forIdentity(
@@ -440,11 +458,14 @@ object SafeBaselineFactory {
             !capabilities.chatTemplateReady -> "请补充或选择经过验证的 chat template"
             else -> null
         }
-        val backend = when (capabilities.runtime) {
-            TuningRuntime.MNN -> "cpu"
-            TuningRuntime.QAIRT -> "qairt"
-            TuningRuntime.LLAMA_CPP, TuningRuntime.UNKNOWN -> "cpu"
-        }
+        val backend = capabilities.preferredBackend
+            ?.takeIf { runtimeIdentity.runtime == LocalChatRuntime.LITERT_LM }
+            ?.takeIf(::isSupportedLiteRtBackend)
+            ?: when (capabilities.runtime) {
+                TuningRuntime.MNN -> "cpu"
+                TuningRuntime.QAIRT -> "qairt"
+                TuningRuntime.LLAMA_CPP, TuningRuntime.UNKNOWN -> "cpu"
+            }
         return buildTuningExecutionProfile(
             runtimeIdentity = runtimeIdentity,
             kind = ExecutionProfileKind.SAFE_BASELINE,
@@ -526,6 +547,11 @@ private fun buildTuningExecutionProfile(
         LocalChatRuntime.GENIEX_QAIRT -> requested.apply {
             put("backend", loadBound.backend)
         }
+        LocalChatRuntime.LITERT_LM -> requested.apply {
+            put("n_ctx", loadBound.nCtx)
+            put("backend", loadBound.backend)
+            put("n_threads", hotExecution.nThreads)
+        }
     }
     (loadBound.extensions + hotExecution.extensions).toSortedMap().forEach { (field, value) ->
         requested.put(field, value)
@@ -579,6 +605,7 @@ private fun runtimeParameterAdapter(runtime: LocalChatRuntime): RuntimeParameter
     LocalChatRuntime.LLAMA_CPP, LocalChatRuntime.GENIEX_LLAMA_CPP -> LlamaCppRuntimeParameterAdapter()
     LocalChatRuntime.MNN_CPU -> MnnRuntimeParameterAdapter()
     LocalChatRuntime.GENIEX_QAIRT -> QairtRuntimeParameterAdapter()
+    LocalChatRuntime.LITERT_LM -> LiteRtLmRuntimeParameterAdapter()
 }
 
 private fun TuningRuntime.accepts(runtime: LocalChatRuntime): Boolean = when (this) {
@@ -592,6 +619,7 @@ internal fun LocalChatRuntime.toTuningRuntime(): TuningRuntime = when (this) {
     LocalChatRuntime.LLAMA_CPP, LocalChatRuntime.GENIEX_LLAMA_CPP -> TuningRuntime.LLAMA_CPP
     LocalChatRuntime.MNN_CPU -> TuningRuntime.MNN
     LocalChatRuntime.GENIEX_QAIRT -> TuningRuntime.QAIRT
+    LocalChatRuntime.LITERT_LM -> TuningRuntime.UNKNOWN
 }
 
 private fun HotExecutionParams.toCanonicalParameterSet(): CanonicalParameterSet = CanonicalParameterSet.of(

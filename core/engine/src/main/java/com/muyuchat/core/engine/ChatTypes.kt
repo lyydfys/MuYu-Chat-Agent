@@ -182,7 +182,14 @@ data class GenerationParams(
 
         fun fromJson(root: JSONObject, defaults: GenerationParams = GenerationParams()): GenerationParams =
             GenerationParams(
-                nCtx = root.optInt("n_ctx", defaults.nCtx),
+                // LiteRT-LM profiles call the context-length constructor field
+                // `max_num_tokens`; it is the same value MCA exposes as
+                // `n_ctx`.  Keep this alias in the generation parser because
+                // profile merging passes the canonical load-bound map here.
+                nCtx = root.optInt(
+                    "n_ctx",
+                    root.optInt("max_num_tokens", root.optInt("maxNumTokens", defaults.nCtx))
+                ),
                 nPredict = root.optInt("n_predict", root.optInt("max_tokens", defaults.nPredict)).takeIf { it > 0 } ?: defaults.nPredict,
                 nThreads = root.optInt("n_threads", defaults.nThreads),
                 temperature = root.optDouble("temperature", defaults.temperature.toDouble()).toFloat(),
@@ -605,4 +612,3 @@ sealed interface GenerateEvent {
         val action: String? = null
     ) : GenerateEvent
 }
-

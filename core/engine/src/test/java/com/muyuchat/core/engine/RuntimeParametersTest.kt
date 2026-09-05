@@ -472,6 +472,100 @@ class RuntimeParametersTest {
     }
 
     @Test
+    fun mnnDebugTraceIsGenerationOnlyAndReachesOnlyNestedNativeAdvancedJson() {
+        val identity = identity(LocalChatRuntime.MNN_CPU)
+        val adapter = MnnRuntimeParameterAdapter()
+        val partition = adapter.partition(
+            identity,
+            """{"advanced_json":{"mca_debug_trace":true}}"""
+        )
+        val resolution = adapter.resolveLoadProfile(
+            identity,
+            """{"advanced_json":{"mca_debug_trace":true}}""",
+            profileId = "mnn-debug-trace"
+        )
+        val policy = adapter.registry.forRuntime(identity).policy("mca_debug_trace")
+
+        assertEquals(ParameterOwner.SESSION_DIAGNOSTIC, policy.owner)
+        assertEquals(ParameterMutability.GENERATION_ONLY, policy.mutability)
+        assertTrue(partition.quarantinedOverrides.isEmpty())
+        assertTrue(JSONObject(partition.generationJson).getBoolean("mca_debug_trace"))
+        assertFalse(resolution.profile.resolvedLoadBoundValues.fields.contains("mca_debug_trace"))
+
+        val nativeLoad = JSONObject(adapter.nativeLoadJson(resolution.profile))
+        assertFalse(nativeLoad.has("mca_debug_trace"))
+        assertFalse(nativeLoad.optJSONObject("advanced_json")?.has("mca_debug_trace") == true)
+
+        val nativeCompletion = JSONObject(
+            adapter.nativeCompletionJson(
+                partition,
+                resolution.profile,
+                RuntimeOverrideSignature.none(identity)
+            )
+        )
+        assertFalse(nativeCompletion.has("mca_debug_trace"))
+        assertTrue(nativeCompletion.getJSONObject("advanced_json").getBoolean("mca_debug_trace"))
+    }
+
+    @Test
+    fun mnnAdvancedSamplingSurvivesGenerationPartitionAndNativeCompletion() {
+        val identity = identity(LocalChatRuntime.MNN_CPU)
+        val adapter = MnnRuntimeParameterAdapter()
+        for (backend in listOf("cpu", "opencl")) {
+            for (camelCase in listOf(false, true)) {
+                for (stringAdvanced in listOf(false, true)) {
+                    val advanced = JSONObject()
+                        .put("backend_type", backend)
+                        .put("temperature", 0.7).put("seed", 123)
+                        .put(if (camelCase) "topK" else "top_k", 24)
+                        .put(if (camelCase) "topP" else "top_p", 0.8)
+                        .put(if (camelCase) "minP" else "min_p", 0.02)
+                    val ordinary = GenerationParams(
+                        temperature = 0.5f, topK = 50, topP = 0.95f, minP = 0f, seed = 9,
+                        advancedJson = JSONObject().put("backend_type", backend).toString()
+                    )
+                    val baseline = adapter.resolveLoadProfile(identity, ordinary.toJson(), profileId = "baseline")
+                    val request = JSONObject(ordinary.copy(advancedJson = advanced.toString()).toJson())
+                    if (stringAdvanced) request.put("advanced_json", request.getJSONObject("advanced_json").toString())
+                    val partition = adapter.partition(identity, request.toString())
+                    val resolved = adapter.resolveLoadProfile(identity, request.toString(), profileId = "advanced")
+                    val native = JSONObject(adapter.nativeCompletionJson(
+                        partition, resolved.profile, RuntimeOverrideSignature.none(identity)
+                    ))
+                    assertEquals(0.7, native.getDouble("temperature"), 0.000001)
+                    assertEquals(24, native.getInt("top_k"))
+                    assertEquals(0.8, native.getDouble("top_p"), 0.000001)
+                    assertEquals(0.02, native.getDouble("min_p"), 0.000001)
+                    assertEquals(123, native.getInt("seed"))
+                    assertTrue(partition.quarantinedOverrides.none { it.field in setOf("topK", "topP", "minP") })
+                    assertEquals(baseline.profile.resolvedLoadSignature, resolved.profile.resolvedLoadSignature)
+                    val load = native.getJSONObject("advanced_json")
+                    assertEquals(backend, load.getString("backend_type"))
+                    assertEquals(if (backend == "cpu") "high" else "low", load.getString("precision"))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun mnnSamplingCanonicalWinsAliasAndNullDoesNotMaskOrdinaryValue() {
+        val adapter = MnnRuntimeParameterAdapter()
+        val partition = adapter.partition(identity(LocalChatRuntime.MNN_CPU),
+            """{"top_k":50,"top_p":0.9,"min_p":0.1,"seed":9,"temperature":0.5,
+                "advanced_json":{"topK":24,"top_k":0,"topP":0.8,"top_p":null,"minP":0,
+                    "temperature":null,"seed":null}}""")
+        val generation = JSONObject(partition.generationJson)
+        assertEquals(0, generation.getInt("top_k"))
+        assertEquals(0.8, generation.getDouble("top_p"), 0.000001)
+        assertEquals(0.0, generation.getDouble("min_p"), 0.000001)
+        assertEquals(0.5, generation.getDouble("temperature"), 0.000001)
+        assertEquals(9, generation.getInt("seed"))
+        val llama = LlamaCppRuntimeParameterAdapter().partition(identity(LocalChatRuntime.LLAMA_CPP),
+            """{"top_k":50,"advanced_json":{"top_k":24}}""")
+        assertEquals(50, JSONObject(llama.generationJson).getInt("top_k"))
+    }
+
+    @Test
     fun allSixSignaturesAreCanonicalAndRuntimeOverrideDoesNotMutateCommitted() {
         val identity = identity(LocalChatRuntime.LLAMA_CPP)
         val first = CanonicalParameterSet.of(linkedMapOf("n_ctx" to 4096, "mmap" to true))
@@ -816,6 +910,27 @@ class RuntimeParametersTest {
     }
 
     @Test
+    fun mnnPrecisionIsNormalizedPerBackendBeforeSigning() {
+        val identity = identity(LocalChatRuntime.MNN_CPU)
+        val adapter = MnnRuntimeParameterAdapter()
+        for ((backend, requestedPrecision, expectedPrecision) in listOf(
+            Triple("cpu", "low", "high"),
+            Triple("opencl", "high", "low"),
+            Triple("unknown", "low", "high")
+        )) {
+            val profile = adapter.resolveLoadProfile(
+                identity,
+                JSONObject().put("backend", backend).put("precision", requestedPrecision).toString()
+            ).profile
+            assertEquals(expectedPrecision, profile.resolvedLoadBoundValues.value("precision"))
+            assertEquals(
+                expectedPrecision,
+                JSONObject(adapter.nativeLoadJson(profile)).getJSONObject("advanced_json").getString("precision")
+            )
+        }
+    }
+
+    @Test
     fun mnnLoadedSignatureUsesLoadSnapshotNotMutableGenerationConfig() {
         val identity = identity(LocalChatRuntime.MNN_CPU)
         val adapter = MnnRuntimeParameterAdapter()
@@ -828,7 +943,7 @@ class RuntimeParametersTest {
             .put("max_all_tokens", 4096)
             .put("n_ctx", 4096)
             .put("backend_type", "cpu")
-            .put("precision", "low")
+            .put("precision", "high")
             .put("memory", "low")
             .put("power", "normal")
             .put("use_mmap", false)
@@ -839,6 +954,10 @@ class RuntimeParametersTest {
             .put("lastConfigJson", JSONObject(loadedConfig.toString()).put("max_all_tokens", 8192).toString())
 
         assertTrue(adapter.activeLoadedSignature(identity, stats.toString(), profile.resolvedLoadSignature) != null)
+        val unsafeStats = JSONObject(stats.toString()).put(
+            "loadedConfigJson", JSONObject(loadedConfig.toString()).put("precision", "low").toString()
+        )
+        assertNull(adapter.activeLoadedSignature(identity, unsafeStats.toString(), profile.resolvedLoadSignature))
         assertTrue(
             adapter.isLoadSignatureMismatch(
                 NativeRuntimeErrorCodes.LOAD_SIGNATURE_MISMATCH,

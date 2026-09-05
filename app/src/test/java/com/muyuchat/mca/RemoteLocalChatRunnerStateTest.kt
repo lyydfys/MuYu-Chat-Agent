@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.engine.LocalChatRuntime
 import java.io.File
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -57,7 +58,50 @@ class RemoteLocalChatRunnerStateTest {
         assertTrue(body.contains("nativeOperationGate.tryLock()"))
         assertTrue(body.contains("deferredRuntimeStatsJson"))
         assertTrue(body.contains("guardedNativeCall(\"stats\""))
-        assertTrue(source.contains("stage == \"stats\" -> NATIVE_STATS_TIMEOUT_MS"))
+        assertEquals(
+            1_800_000L,
+            localChatWorkerOperationPolicy(
+                target = LocalChatWorkerOperationTarget(LocalChatRuntime.LLAMA_CPP, "cpu"),
+                rawStage = "stats"
+            ).timeoutMs
+        )
+    }
+
+    @Test
+    fun acceleratedTimeoutPoliciesRemainBackendSpecificAndCpuStaysGeneric() {
+        val litert = localChatWorkerOperationTarget(
+            LocalChatRuntime.LITERT_LM,
+            "{\"backend\":\"gpu\"}"
+        )
+        assertEquals("gpu", litert.backend)
+        assertEquals(
+            120_000L,
+            localChatWorkerOperationPolicy(litert, "load").timeoutMs
+        )
+        assertEquals(
+            "litert_gpu_prefill_timeout",
+            localChatWorkerOperationPolicy(litert, "prefill").timeoutFailureCode
+        )
+        assertTrue(localChatWorkerOperationPolicy(litert, "decode").forceProcessRecoveryOnCancel)
+
+        val openCl = localChatWorkerOperationTarget(
+            LocalChatRuntime.MNN_CPU,
+            "{\"advanced_json\":{\"backend_type\":\"GPU\"}}"
+        )
+        assertEquals("opencl", openCl.backend)
+        assertEquals(
+            75_000L,
+            localChatWorkerOperationPolicy(openCl, "prefill").timeoutMs
+        )
+        assertEquals(
+            "mnn_opencl_decode_timeout",
+            localChatWorkerOperationPolicy(openCl, "decode").timeoutFailureCode
+        )
+
+        val cpu = localChatWorkerOperationTarget(LocalChatRuntime.MNN_CPU, "{\"backend_type\":\"cpu\"}")
+        val cpuPolicy = localChatWorkerOperationPolicy(cpu, "prefill")
+        assertEquals(30L * 60L * 1_000L, cpuPolicy.timeoutMs)
+        assertFalse(cpuPolicy.forceProcessRecoveryOnCancel)
     }
 
     private fun functionBody(source: String, signature: String): String {

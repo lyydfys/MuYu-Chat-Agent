@@ -182,6 +182,29 @@ try {
         -Executable $mnnPromptProof `
         -Arguments @(Join-Path $nativeMain 'mnn_native_engine.cpp')
 
+    $mnnChatDebugTrace = Build-HostTest `
+        -Name 'mnn_chat_debug_trace_source_contract_test' `
+        -Sources @(Join-Path $nativeTests 'mnn_chat_debug_trace_source_contract_test.cpp')
+    Run-HostTest `
+        -Name 'mnn_chat_debug_trace_source_contract_test' `
+        -Executable $mnnChatDebugTrace `
+        -Arguments @(Join-Path $nativeMain 'mnn_native_engine.cpp')
+
+    $mnnDiffusionBatchPolicy = Build-HostTest `
+        -Name 'mnn_diffusion_batch_policy_test' `
+        -Sources @(Join-Path $nativeTests 'mnn_diffusion_batch_policy_test.cpp')
+    Run-HostTest `
+        -Name 'mnn_diffusion_batch_policy_test' `
+        -Executable $mnnDiffusionBatchPolicy
+
+    $mnnDiffusionBatchSource = Build-HostTest `
+        -Name 'mnn_diffusion_batch_source_contract_test' `
+        -Sources @(Join-Path $nativeTests 'mnn_diffusion_batch_source_contract_test.cpp')
+    Run-HostTest `
+        -Name 'mnn_diffusion_batch_source_contract_test' `
+        -Executable $mnnDiffusionBatchSource `
+        -Arguments @(Join-Path $nativeMain 'mnn_native_engine.cpp')
+
     $qnnPromptProof = Build-HostTest `
         -Name 'qnn_prompt_native_proof_contract_test' `
         -Sources @(
@@ -212,7 +235,7 @@ try {
         -Executable $textualInversionLoad `
         -Arguments @(Join-Path $buildRoot 'textual-inversion-fixtures')
 
-    Write-Host 'PASS: 8 native image contract host tests compiled and ran successfully.'
+    Write-Host 'PASS: 11 native image contract host tests compiled and ran successfully.'
 }
 finally {
     $env:TEMP = $originalTemp

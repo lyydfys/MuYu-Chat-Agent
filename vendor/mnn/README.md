@@ -1,8 +1,19 @@
 # MCA MNN vendor overlay
 
-The application uses upstream MNN `3.6.0` at commit
-`cc20f672af9e177e2fa338c332dc097de2fc9264` plus the repository-owned
-`mca-mnn-3.6.0.patch` overlay.
+The application uses upstream MNN `3.6.1` at commit
+`d407447ed56c4121a11ccbd266dc184ca1ead0c2` plus the repository-owned
+`mca-mnn-3.6.1.patch` overlay.
+
+The complete upstream 3.6.1 runtime is required for models exported with its
+Transformer-C4 graph contract. In particular, Qwen3.5 depends on the matching
+CPU and OpenCL LinearAttention shape/layout implementations, fused `MUL_SILU`
+executors, fp16 accumulation fix, and OpenCL correctness fixes. Do not replace
+this baseline with a partial operator backport: such a runtime can load a 3.6.1
+graph while silently producing invalid logits.
+
+The overlay contains only MCA-owned prompt-cache, multimodal embedding, Sana
+diffusion, deterministic sampler, and fail-closed execution safeguards. All
+general CPU/OpenCL graph behavior comes from the pinned upstream release.
 
 `third_party/MNN` remains an untracked vendor checkout. Restore it with:
 

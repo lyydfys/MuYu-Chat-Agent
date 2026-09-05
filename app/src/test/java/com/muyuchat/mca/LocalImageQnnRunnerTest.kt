@@ -171,6 +171,57 @@ class LocalImageQnnRunnerTest {
     }
 
     @Test
+    fun externalSdxlQnnDualClipBundleBypassesTheSd15SemanticGateAndResolvesSdxlProfile() {
+        val bundle = externalSdxlQnnBundle()
+        try {
+            val health = QnnHtpImageRunner(runnerReady = true).health(
+                device = snapdragonElite(qnnReady = true),
+                bundleRoot = bundle
+            )
+            val profile = resolveLocalImageExecutionProfile(
+                model = LocalImageModelRecord(
+                    id = "external-sdxl-qnn",
+                    displayName = "External SDXL QNN",
+                    path = File(bundle, "unet.bin").absolutePath,
+                    fileName = "unet.bin",
+                    sizeBytes = File(bundle, "unet.bin").length(),
+                    sha256 = "1".repeat(64),
+                    runtime = LocalImageRuntime.QNN_HTP,
+                    family = LocalImageModelFamily.SDXL,
+                    bundleRoot = bundle.absolutePath
+                ),
+                options = LocalImageGenerationOptions(),
+                bundleRoot = bundle
+            ).profile
+
+            assertEquals(LocalImageQnnState.SMOKE_REQUIRED, health.state)
+            assertFalse(health.message.contains("text_encoder.bin"))
+            assertEquals("clip.mnn", profile.graph.textEncoder?.relativePath)
+            assertEquals(ImageWorkerStrategy.SPLIT_UNET_VAE, profile.graph.workerStrategy)
+        } finally {
+            bundle.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun incompleteExternalSdxlQnnConditioningRemainsRejectedBySemanticGate() {
+        val bundle = externalSdxlQnnBundle().apply {
+            check(File(this, "clip_2.mnn.weight").delete())
+        }
+        try {
+            val health = QnnHtpImageRunner(runnerReady = true).health(
+                device = snapdragonElite(qnnReady = true),
+                bundleRoot = bundle
+            )
+
+            assertEquals(LocalImageQnnState.BUNDLE_INCOMPLETE, health.state)
+            assertTrue(health.message.contains("complete SDXL"))
+        } finally {
+            bundle.deleteRecursively()
+        }
+    }
+
+    @Test
     fun semanticQnnBundleRequiresEveryNonEmptyNativeContext() {
         listOf("text_encoder.bin", "unet.bin", "vae.bin").forEach { missingName ->
             val missingBundle = semanticQnnImageBundle(missingName = missingName)
@@ -901,6 +952,22 @@ class LocalImageQnnRunnerTest {
         )
         return root
     }
+
+    private fun externalSdxlQnnBundle(): File =
+        Files.createTempDirectory("external-sdxl-qnn-bundle").toFile().apply {
+            listOf(
+                "clip.mnn",
+                "clip_2.mnn",
+                "clip_2.mnn.weight",
+                "tokenizer.json",
+                "token_emb.bin",
+                "token_emb_2.bin",
+                "pos_emb.bin",
+                "pos_emb_2.bin",
+                "unet.bin",
+                "vae_decoder.bin"
+            ).forEach { name -> touch(name) }
+        }
 
     private fun completeExtractedQnnBundle(prefix: String): File =
         Files.createTempDirectory(prefix).toFile().apply {

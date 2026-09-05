@@ -127,6 +127,7 @@ class ParameterFieldPolicyRegistry(
                     )
                     LocalChatRuntime.MNN_CPU -> mnnPolicies()
                     LocalChatRuntime.GENIEX_QAIRT -> qairtPolicies()
+                    LocalChatRuntime.LITERT_LM -> litertLmPolicies()
                 }
             )
 
@@ -153,10 +154,34 @@ class ParameterFieldPolicyRegistry(
             behaviorHotField("chat_template_mode", "template-correctness")
             behaviorHotField("template_policy_ref", "template-correctness")
             generationFields()
+            put(
+                "mca_debug_trace",
+                ParameterFieldPolicy(
+                    field = "mca_debug_trace",
+                    owner = ParameterOwner.SESSION_DIAGNOSTIC,
+                    mutability = ParameterMutability.GENERATION_ONLY,
+                    apiOverridePolicy = ParameterApiOverridePolicy.REQUEST_ALLOWED,
+                    affectsSemantics = false,
+                    evidence = "explicit-debug-smoke-opt-in"
+                )
+            )
         }
 
         private fun qairtPolicies(): Map<String, ParameterFieldPolicy> = buildMap {
             loadFields("bundle_fingerprint", "backend", "runtime_id", "context_binary", "shape_profile")
+            behaviorHotField("chat_template_mode", "template-correctness")
+            behaviorHotField("template_policy_ref", "template-correctness")
+            generationFields()
+        }
+
+        /**
+         * LiteRT-LM creates an immutable Engine from these values. Keep the
+         * constructor inputs load-bound so a request cannot silently change
+         * the backend or context allocation of an active session. CPU thread
+         * count is also part of Backend.CPU and therefore remains load-bound.
+         */
+        private fun litertLmPolicies(): Map<String, ParameterFieldPolicy> = buildMap {
+            loadFields("backend", "max_num_tokens", "cache_dir", "n_threads")
             behaviorHotField("chat_template_mode", "template-correctness")
             behaviorHotField("template_policy_ref", "template-correctness")
             generationFields()
@@ -750,8 +775,13 @@ class MnnRuntimeParameterAdapter(
         "max_all_tokens" to "n_ctx",
         "thread_num" to "n_threads",
         "backend_type" to "backend",
-        "use_mmap" to "mmap"
+        "use_mmap" to "mmap",
+        "topK" to "top_k",
+        "topP" to "top_p",
+        "minP" to "min_p"
     )
+
+    override val advancedOverrideFields = setOf("temperature", "top_k", "top_p", "min_p", "seed")
 
     override fun runtimeDefaults(identity: ModelRuntimeIdentity): Pair<Map<String, Any?>, Map<String, Any?>> =
         mapOf(
@@ -771,6 +801,30 @@ class MnnRuntimeParameterAdapter(
         warnings: MutableList<String>,
         sourceByField: MutableMap<String, String>
     ) {
+        // The native MNN bridge owns the effective precision per transport:
+        // CPU uses high precision to avoid non-finite logits from the low-
+        // precision Arm kernels, while OpenCL retains the validated low path.
+        // Normalize the signed profile to that same effective value so load
+        // readback cannot reject an otherwise valid CPU session.
+        val backend = requestedLoad["backend"]
+            ?.toString()
+            ?.trim()
+            ?.lowercase()
+            ?.replace('-', '_')
+        val effectiveBackend = when (backend) {
+            "gpu", "opencl", "open_cl" -> "opencl"
+            else -> "cpu"
+        }
+        if (requestedLoad["backend"] != effectiveBackend) {
+            requestedLoad["backend"] = effectiveBackend
+            sourceByField["backend"] = "runtime-safety:mnn-transport"
+        }
+        val effectivePrecision = if (effectiveBackend == "opencl") "low" else "high"
+        if (!effectivePrecision.equals(requestedLoad["precision"]?.toString(), ignoreCase = true)) {
+            warnings += "precision normalized to $effectivePrecision for MNN $effectiveBackend runtime"
+            requestedLoad["precision"] = effectivePrecision
+            sourceByField["precision"] = "runtime-safety:mnn-precision"
+        }
         if (requestedLoad["is_visual"] == false) {
             // false is only a metadata hint, not a native execution field;
             // omit it so text bundles do not fail readback on runtimes that
@@ -824,8 +878,15 @@ class MnnRuntimeParameterAdapter(
         // MNN rebuilds a complete config at beginCompletion. Materialize the
         // already-resolved load signature so native can fail closed rather than
         // silently falling back to different defaults.
+        val generation = JSONObject(partition.generationJson)
         return JSONObject(nativeLoadJson(profile)).apply {
-            mergeJson(JSONObject(partition.generationJson))
+            if (generation.has(MNN_DEBUG_TRACE_FIELD)) {
+                val advanced = optJSONObject("advanced_json") ?: JSONObject()
+                advanced.put(MNN_DEBUG_TRACE_FIELD, generation.opt(MNN_DEBUG_TRACE_FIELD))
+                put("advanced_json", advanced)
+                generation.remove(MNN_DEBUG_TRACE_FIELD)
+            }
+            mergeJson(generation)
             mergeJson(profile.hotExecutionValues.plus(override.values).toJsonObject())
             mergeJson(profile.modelBehaviorValues.toJsonObject())
         }.toString()
@@ -854,6 +915,10 @@ class MnnRuntimeParameterAdapter(
     override fun isLoadSignatureMismatch(beginReturnCode: Int, nativeError: String?): Boolean =
         beginReturnCode == NativeRuntimeErrorCodes.LOAD_SIGNATURE_MISMATCH ||
             nativeError.orEmpty().contains("load signature", ignoreCase = true)
+
+    private companion object {
+        const val MNN_DEBUG_TRACE_FIELD = "mca_debug_trace"
+    }
 }
 
 class QairtRuntimeParameterAdapter(
@@ -886,11 +951,185 @@ class QairtRuntimeParameterAdapter(
             nativeError.orEmpty().contains("signature", ignoreCase = true)
 }
 
+/**
+ * Parameter adapter for the Kotlin LiteRT-LM Engine API.
+ *
+ * LiteRT-LM does not expose the llama.cpp/MNN style native config readback on
+ * every release. We still validate the concrete load state that is available
+ * (the session is loaded and reports the requested backend), and use the
+ * immutable, coordinator-resolved profile for the remaining fields when the
+ * runner cannot echo them. This keeps profile authorization useful without
+ * making a device allowlist a prerequisite for loading a model.
+ */
+class LiteRtLmRuntimeParameterAdapter(
+    registry: ParameterFieldPolicyRegistry = ParameterFieldPolicyRegistry()
+) : BaseRuntimeParameterAdapter(LocalChatRuntime.LITERT_LM, registry) {
+    override val aliases: Map<String, String> = mapOf(
+        "n_ctx" to "max_num_tokens",
+        "maxNumTokens" to "max_num_tokens",
+        "backend_type" to "backend",
+        "backendType" to "backend",
+        "cacheDir" to "cache_dir",
+        "cache_directory" to "cache_dir",
+        "thread_count" to "n_threads",
+        "threadCount" to "n_threads"
+    )
+
+    override fun runtimeDefaults(identity: ModelRuntimeIdentity): Pair<Map<String, Any?>, Map<String, Any?>> =
+        mapOf(
+            "backend" to "cpu",
+            "max_num_tokens" to 4096,
+            "n_threads" to 4
+        ) to emptyMap()
+
+    override fun normalize(
+        identity: ModelRuntimeIdentity,
+        requestedLoad: MutableMap<String, Any?>,
+        requestedHot: MutableMap<String, Any?>,
+        warnings: MutableList<String>,
+        sourceByField: MutableMap<String, String>
+    ) {
+        val rawBackend = requestedLoad["backend"]
+        val normalizedBackend = canonicalBackend(rawBackend?.toString()) ?: "cpu"
+        if (rawBackend != null &&
+            !canonicalBackend(rawBackend.toString()).equals(normalizedBackend, ignoreCase = true)
+        ) {
+            warnings += "backend normalized to $normalizedBackend because LiteRT-LM supports cpu, gpu, npu, or google_tensor"
+        } else if (rawBackend != null && rawBackend.toString() != normalizedBackend) {
+            warnings += "backend normalized to $normalizedBackend"
+        }
+        requestedLoad["backend"] = normalizedBackend
+        sourceByField["backend"] = if (rawBackend == null) "runtime-default" else "runtime-safety"
+
+        val rawMaxTokens = requestedLoad["max_num_tokens"]
+        val maxTokens = integerValue(rawMaxTokens)
+        if (maxTokens == null || maxTokens < 1) {
+            requestedLoad["max_num_tokens"] = 4096
+            sourceByField["max_num_tokens"] = "runtime-safety"
+            if (rawMaxTokens != null) {
+                warnings += "max_num_tokens normalized to 4096 because it must be a positive integer"
+            }
+        } else {
+            requestedLoad["max_num_tokens"] = maxTokens
+        }
+
+        val rawThreads = requestedLoad["n_threads"]
+        val threads = integerValue(rawThreads)
+        if (threads == null || threads < 1) {
+            requestedLoad["n_threads"] = 4
+            sourceByField["n_threads"] = "runtime-safety"
+            if (rawThreads != null) {
+                warnings += "n_threads normalized to 4 because it must be a positive integer"
+            }
+        } else {
+            requestedLoad["n_threads"] = threads
+        }
+
+        val rawCacheDir = requestedLoad["cache_dir"]
+        if (rawCacheDir == null || rawCacheDir == JSONObject.NULL || rawCacheDir.toString().trim().isEmpty()) {
+            requestedLoad.remove("cache_dir")
+            sourceByField.remove("cache_dir")
+        } else if (rawCacheDir !is String) {
+            requestedLoad["cache_dir"] = rawCacheDir.toString()
+        }
+    }
+
+    override fun activeValuesFromStats(root: JSONObject): JSONObject? {
+        val config = configObject(root) ?: JSONObject()
+        val values = linkedMapOf<String, Any?>()
+
+        fun copyKnown(source: JSONObject, onlyIfAbsent: Boolean = false) {
+            source.keys().forEach { key ->
+                val target = aliases[key] ?: key
+                if (!onlyIfAbsent || !values.containsKey(target)) {
+                    values[target] = source.opt(key)
+                }
+            }
+        }
+
+        copyKnown(config)
+        // Some LiteRT-LM releases put backend/effective limits at the stats
+        // root instead of inside effectiveConfig. Preserve either shape.
+        copyKnown(root, onlyIfAbsent = true)
+
+        if (values.isEmpty()) return null
+        return JSONObject().apply {
+            values.forEach { (field, value) ->
+                when (field) {
+                    "backend" -> canonicalBackend(value?.toString())?.let { put(field, it) }
+                    "max_num_tokens", "n_threads" -> integerValue(value)?.let { put(field, it) }
+                    else -> if (value != null && value != JSONObject.NULL) put(field, value)
+                }
+            }
+        }
+    }
+
+    override fun activeLoadedSignature(
+        identity: ModelRuntimeIdentity,
+        nativeStatsJson: String,
+        expected: ResolvedLoadSignature
+    ): ActiveLoadedSignature? {
+        if (expected.identityHash != identity.identityHash) return null
+        val root = runCatching { JSONObject(nativeStatsJson) }.getOrNull() ?: return null
+        if (!root.optBoolean("loaded", false)) return null
+
+        val observed = activeValuesFromStats(root)
+        val observedBackend = observed?.optString("backend")
+            ?.takeIf { it.isNotBlank() }
+            ?: root.optString("backend").takeIf { it.isNotBlank() }
+        val expectedBackend = expected.values.value("backend")?.toString() ?: "cpu"
+        if (observedBackend == null ||
+            canonicalBackend(observedBackend) != canonicalBackend(expectedBackend)
+        ) return null
+
+        // Prefer exact readback when the runner supplies effectiveConfig. A
+        // valid loaded/backend witness is sufficient for LiteRT-LM builds that
+        // do not expose the other EngineConfig fields in their stats payload.
+        super.activeLoadedSignature(identity, nativeStatsJson, expected)
+            ?.let { return it }
+        return ActiveLoadedSignature.of(identity, expected.values)
+    }
+
+    override fun isLoadSignatureMismatch(beginReturnCode: Int, nativeError: String?): Boolean =
+        beginReturnCode == NativeRuntimeErrorCodes.LOAD_SIGNATURE_MISMATCH ||
+            nativeError.orEmpty().contains("load signature", ignoreCase = true)
+
+    private fun configObject(root: JSONObject): JSONObject? {
+        val raw = root.opt("effectiveConfig")
+            ?: root.opt("loadedConfigJson")
+            ?: root.opt("lastConfigJson")
+            ?: root.opt("config")
+        return when (raw) {
+            is JSONObject -> raw
+            is String -> runCatching { JSONObject(raw) }.getOrNull()
+            else -> null
+        }
+    }
+
+    private fun integerValue(value: Any?): Int? = when (value) {
+        is Number -> value.toInt()
+        is String -> value.trim().toIntOrNull()
+        else -> null
+    }
+
+    private fun canonicalBackend(raw: String?): String? {
+        val value = raw?.trim()?.lowercase()?.replace('-', '_') ?: return null
+        return when (value) {
+            "cpu", "host" -> "cpu"
+            "gpu", "opencl", "open_cl" -> "gpu"
+            "npu", "qnn", "qualcomm" -> "npu"
+            "google_tensor", "googletensor", "tpu", "google_tensor_processor" -> "google_tensor"
+            else -> null
+        }
+    }
+}
+
 abstract class BaseRuntimeParameterAdapter(
     final override val runtime: LocalChatRuntime,
     final override val registry: ParameterFieldPolicyRegistry
 ) : RuntimeParameterAdapter {
     protected open val aliases: Map<String, String> = emptyMap()
+    protected open val advancedOverrideFields: Set<String> = emptySet()
 
     protected abstract fun runtimeDefaults(
         identity: ModelRuntimeIdentity
@@ -931,6 +1170,18 @@ abstract class BaseRuntimeParameterAdapter(
         advanced?.keys()?.forEach { key -> flattened[aliases[key] ?: key] = advanced.opt(key) }
         root.keys().forEach { key ->
             if (key != "advanced_json") flattened[aliases[key] ?: key] = root.opt(key)
+        }
+        // MNN resolves advanced sampling controls before ordinary controls.
+        // Canonical names win over aliases within the same source, as in native.
+        advancedOverrideFields.forEach { field ->
+            for (source in listOfNotNull(advanced, root)) {
+                val key = (listOf(field) + aliases.filterValues { it == field }.keys)
+                    .firstOrNull { source.has(it) && !source.isNull(it) }
+                if (key != null) {
+                    flattened[field] = source.opt(key)
+                    break
+                }
+            }
         }
 
         val view = registry.forRuntime(identity)
@@ -1215,7 +1466,8 @@ class ParameterCoordinator(
             LocalChatRuntime.LLAMA_CPP to LlamaCppRuntimeParameterAdapter(registry),
             LocalChatRuntime.GENIEX_LLAMA_CPP to LlamaCppRuntimeParameterAdapter(registry),
             LocalChatRuntime.MNN_CPU to MnnRuntimeParameterAdapter(registry),
-            LocalChatRuntime.GENIEX_QAIRT to QairtRuntimeParameterAdapter(registry)
+            LocalChatRuntime.GENIEX_QAIRT to QairtRuntimeParameterAdapter(registry),
+            LocalChatRuntime.LITERT_LM to LiteRtLmRuntimeParameterAdapter(registry)
         )
     )
 

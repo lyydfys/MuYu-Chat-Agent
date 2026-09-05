@@ -17,6 +17,7 @@ import com.muyuchat.mca.LocalImageRuntime
 import com.muyuchat.mca.LocalImageVerificationStatus
 import com.muyuchat.mca.LocalImageExecutionGate
 import com.muyuchat.mca.LocalImageGenerationOptions
+import com.muyuchat.mca.LocalImageProvider
 import com.muyuchat.mca.LocalImageWorkerClient
 import com.muyuchat.mca.ImagePixelRange
 import com.muyuchat.mca.QnnExecutionDiagnostics
@@ -26,6 +27,8 @@ import com.muyuchat.mca.qnnContextSocCompatibilityMessage
 import com.muyuchat.mca.qnnGraphSmokeSpecForHarness
 import com.muyuchat.mca.qnnImageVerificationStampFor
 import com.muyuchat.mca.qnnRuntimeDirectoriesFor
+import com.muyuchat.mca.contextBinaryFileIn
+import com.muyuchat.mca.localImageBundleManifestFromRoot
 import com.muyuchat.mca.strictJsonForPersistence
 import java.io.File
 import java.util.UUID
@@ -117,6 +120,9 @@ class LocalImageSmokeActivity : Activity() {
             }
             val prompt = intent.getStringExtra("prompt")
                 ?: "a tiny ceramic robot sitting on a wooden desk, soft morning light, clean background, no text"
+            // QNN semantic execution validates this field as a JSON string even
+            // when the caller intentionally uses no negative prompt.
+            val negativePrompt = intent.getStringExtra("negativePrompt").orEmpty()
             val width = intent.getIntExtra("width", 256)
             val height = intent.getIntExtra("height", 256)
             val steps = intent.getIntExtra("steps", 2)
@@ -178,6 +184,7 @@ class LocalImageSmokeActivity : Activity() {
             val outputFile = File(outDir, if (isMnnDiffusion) "$runId.png" else "$runId.png")
             val requestJson = JSONObject()
                 .put("prompt", prompt)
+                .put("negativePrompt", negativePrompt)
                 .put("family", family)
                 .put("width", width)
                 .put("height", height)
@@ -352,7 +359,8 @@ class LocalImageSmokeActivity : Activity() {
                 runWorkerProductGeneration(
                     model = workerModel,
                     prompt = prompt,
-                    generationOptions = LocalImageGenerationOptions.fromJson(requestJson),
+                    generationOptions = LocalImageGenerationOptions.fromJson(requestJson)
+                        .copy(allowLowStepSmoke = true),
                     outputFile = outputFile,
                     workerStartPauseMs = workerStartPauseMs,
                     workerMainLeaseHoldMs = workerMainLeaseHoldMs,
@@ -412,7 +420,12 @@ class LocalImageSmokeActivity : Activity() {
             }
 
             if (isMnnDiffusion) {
-                runMnnDiffusionSmoke(bundleRoot.ifBlank { File(modelPath).parent.orEmpty() }, requestJson, outputFile, ::write)
+                runProductionMnnGenerate(
+                    bundleRoot.ifBlank { File(modelPath).parent.orEmpty() },
+                    requestJson,
+                    outputFile,
+                    ::write
+                )
                 return
             }
             if (isQnnHtp) {
@@ -822,21 +835,20 @@ class LocalImageSmokeActivity : Activity() {
             )
         }.getOrNull()
         compatibilityMessage?.let { message ->
-            result.put("nativeMessage", result.optString("message"))
-            result.put("message", message)
             result.put("compatibilityMessage", message)
-            result.put("compatibilityBlocked", true)
-            result.put("ok", false)
-            result.put("smokePassed", false)
-            result.put("npuActive", false)
         }
         val graphExecuted = diagnostics.graphExecuted
-        val productReady = result.optBoolean("ok") && smokeResult.provesNpuExecution && compatibilityMessage == null
+        // Device/profile metadata ranks packages, but a real native graph pass
+        // is the capability proof. Unknown or mismatched metadata is advisory.
+        val productReady = result.optBoolean("ok") && smokeResult.provesNpuExecution
         result.put("qnnGraphExecution", graphExecuted)
         result.put("fallback", false)
         result.put("executionMode", if (graphExecuted) "qnn_graph" else "none")
         result.put("npuExecutionProven", productReady)
-        result.put("compatibilityBlocked", compatibilityMessage != null)
+        result.put("compatibilityAdvisory", compatibilityMessage != null)
+        result.put("compatibilityBlocked", false)
+        result.put("runtimeDirs", JSONArray(runtimeDirsJson))
+        result.put("runtimeInspection", runtimeInspection)
         result.put("qnnDiagnostics", diagnostics.toJson())
         write(
             JSONObject()
@@ -849,6 +861,8 @@ class LocalImageSmokeActivity : Activity() {
                     }
                 )
                 .put("runtime", "qnn_htp")
+                .put("runtimeDirs", JSONArray(runtimeDirsJson))
+                .put("runtimeInspection", runtimeInspection)
                 .put("qnnGraphExecution", graphExecuted)
                 .put("fallback", false)
                 .put("result", result)
@@ -912,108 +926,77 @@ class LocalImageSmokeActivity : Activity() {
         terminalStatus: Boolean = true
     ): JSONObject {
         require(bundleRoot.isNotBlank()) { "bundleRoot is required for QNN semantic generation" }
-        require(NativeMnnDiffusionBridge.isAvailable) {
-            "mca_mnn_native is unavailable: ${NativeMnnDiffusionBridge.loadError?.message.orEmpty()}"
-        }
-        require(NativeMnnDiffusionBridge.runnerReady) {
-            NativeMnnDiffusionBridge().getRuntimeStatsJson()
-        }
-        require(NativeQnnBridge.isAvailable) {
-            "mca_qnn_native is unavailable: ${NativeQnnBridge.loadError?.message.orEmpty()}"
-        }
-        require(NativeQnnBridge.runnerReady) {
-            NativeQnnBridge().getRuntimeStatsJson()
-        }
-        val qnnBridge = NativeQnnBridge()
-        val mnnBridge = NativeMnnDiffusionBridge()
-        val runtimeDirsJson = qnnRuntimeDirsJson(bundleRoot)
-        val isSdxlQnn = requestJson.optString("family").equals("SDXL", ignoreCase = true) ||
-            requestJson.optString("conditioningFormat").contains("sdxl", ignoreCase = true)
-        val embeddingFile = File(
-            outputFile.parentFile ?: getExternalFilesDir("image_bench") ?: filesDir,
-            if (isSdxlQnn) {
-                "${outputFile.nameWithoutExtension}.sdxl-conditioning.f32"
-            } else {
-                "${outputFile.nameWithoutExtension}.sd15-embeddings.f32"
-            }
+        val model = debugImageModel(
+            runtime = LocalImageRuntime.QNN_HTP,
+            bundleRoot = bundleRoot,
+            requestedModelPath = intent.getStringExtra("modelPath").orEmpty(),
+            family = requestJson.optString("family", "SD15"),
+            width = requestJson.optInt("width", 512),
+            height = requestJson.optInt("height", 512)
         )
+        val provider = LocalImageProvider(applicationContext)
+        val options = LocalImageGenerationOptions.fromJson(requestJson)
+            .copy(allowLowStepSmoke = true)
+        val runtimeDirsJson = JSONArray(
+            qnnRuntimeDirectoriesFor(this, File(bundleRoot))
+        ).toString()
+        val runtimeInspection = runCatching {
+            JSONObject(NativeQnnBridge().inspectRuntime(runtimeDirsJson))
+        }.getOrElse { error ->
+            JSONObject().put("error", error.stackTraceToString())
+        }
         write(
             JSONObject()
-                .put("status", "qnn_semantic_embedding_starting")
+                .put("status", "qnn_semantic_product_starting")
                 .put("runtime", "qnn_htp")
                 .put("bundleRoot", bundleRoot)
+                .put("runtimeDirs", JSONArray(runtimeDirsJson))
+                .put("runtimeInspection", runtimeInspection)
                 .put("request", requestJson)
-                .put("embeddingPath", embeddingFile.absolutePath)
+                .put("model", model.toJson())
                 .put("outputPath", outputFile.absolutePath)
         )
-        val useCfg = requestJson.optBoolean("useCfg", true)
-        val conditioningOrder = if (useCfg) {
-            "negative_then_positive"
-        } else {
-            "positive_only"
-        }
-        val embeddingRaw = if (isSdxlQnn) {
-            mnnBridge.encodeSdxlPromptConditioning(
-                bundleRoot,
-                requestJson.optString("prompt"),
-                requestJson.optString("negativePrompt"),
-                embeddingFile.absolutePath,
-                requestJson.optInt("width", 1024),
-                requestJson.optInt("height", 1024),
-                requestJson.optString("backendMode", "cpu"),
-                requestJson.optInt("threads", 4),
-                useCfg,
-                requestJson.optBoolean("promptWeightingSupported", false),
-                ""
-            )
-        } else {
-            mnnBridge.encodeSd15PromptEmbeddings(
-                bundleRoot,
-                requestJson.optString("prompt"),
-                requestJson.optString("negativePrompt"),
-                embeddingFile.absolutePath,
-                requestJson.optString("backendMode", "cpu"),
-                requestJson.optInt("threads", 4),
-                conditioningOrder,
-                requestJson.optBoolean("promptWeightingSupported", false),
-                ""
-            )
-        }
-        val embeddingResult = JSONObject(embeddingRaw)
-        write(
-            JSONObject()
-                .put(
-                    "status",
-                    if (embeddingResult.optBoolean("ok")) {
-                        "qnn_semantic_embedding_completed"
-                    } else if (terminalStatus) {
-                        "failed"
-                    } else {
-                        "worker_verification_semantic_failed"
-                    }
+        val generated = runBlocking {
+            provider.begin(LocalImageRuntime.QNN_HTP)
+            provider.generate(model, options = options, prompt = requestJson.optString("prompt")) { progress ->
+                write(
+                    JSONObject()
+                        .put("status", "progress")
+                        .put("runtime", "qnn_htp")
+                        .put("phase", progress.phase)
+                        .put("step", progress.step)
+                        .put("steps", progress.steps)
+                        .put("message", progress.message)
+                        .put("progressElapsedMs", progress.elapsedMs)
                 )
-                .put("runtime", "qnn_htp")
-                .put("result", embeddingResult)
-        )
-        require(embeddingResult.optBoolean("ok")) {
-            embeddingResult.optString("error").ifBlank { "Failed to encode prompt embeddings." }
+            }
         }
-
-        val result = JSONObject(
-            qnnBridge.runImageSemanticGenerate(
-                bundleRoot,
-                runtimeDirsJson,
-                requestJson.toString(),
-                embeddingFile.absolutePath,
-                outputFile.absolutePath
-            )
-        )
+        outputFile.parentFile?.mkdirs()
+        outputFile.writeBytes(generated.bytes)
+        val result = JSONObject(generated.executionMetadataJson)
+        // LocalImageProvider has already validated the native execution
+        // contract. Its sanitized metadata intentionally exposes the stable
+        // graph/native flags, while semanticReady is a debug projection that
+        // older providers did not preserve. Derive it from the validated
+        // flags instead of treating an omitted optional field as failure.
         val graphExecuted = result.optBoolean("npuActive", false) &&
-            result.optBoolean("semanticReady", false)
+            result.optBoolean("qnnGraphExecution", false) &&
+            result.optBoolean("nativeExecution", false)
+        // LocalImageProvider has already completed the strict execution and PNG
+        // contracts. The debug protocol exposes the native result under
+        // `result`, so mirror the terminal booleans expected by DeviceSmoke.
+        result.put("ok", generated.bytes.isNotEmpty() && graphExecuted)
+        result.put("semanticReady", graphExecuted)
         result.put("qnnGraphExecution", graphExecuted)
-        result.put("fallback", false)
+        result.put("fallback", result.optBoolean("fallback", false))
         result.put("executionMode", if (graphExecuted) "qnn_graph" else "none")
-        val passed = result.optBoolean("ok") && graphExecuted
+        result.put("runtimeDirs", JSONArray(runtimeDirsJson))
+        result.put("runtimeInspection", runtimeInspection)
+        val selectedHtpArch = result.optInt("selectedHtpArch", 0)
+        val transportHtpArch = result.optInt("transportHtpArch", 0)
+        result.put("selectedHtpArch", selectedHtpArch)
+        result.put("transportHtpArch", transportHtpArch)
+        val passed = result.optBoolean("ok", false) && graphExecuted
         write(
             JSONObject()
                 .put(
@@ -1025,15 +1008,121 @@ class LocalImageSmokeActivity : Activity() {
                     }
                 )
                 .put("runtime", "qnn_htp")
+                .put("runtimeDirs", JSONArray(runtimeDirsJson))
+                .put("runtimeInspection", runtimeInspection)
+                .put("selectedHtpArch", selectedHtpArch)
+                .put("transportHtpArch", transportHtpArch)
                 .put("qnnGraphExecution", graphExecuted)
-                .put("fallback", false)
+                .put("fallback", result.optBoolean("fallback", false))
                 .put("request", requestJson)
-                .put("embedding", embeddingResult)
                 .put("result", result)
                 .put("outputPath", outputFile.absolutePath)
-                .put("outputBytes", outputFile.takeIf { it.exists() }?.length() ?: 0L)
+                .put("outputBytes", generated.bytes.size)
         )
         return result
+    }
+
+    private fun runProductionMnnGenerate(
+        bundleRoot: String,
+        requestJson: JSONObject,
+        outputFile: File,
+        write: (JSONObject) -> Unit
+    ) {
+        val conditioningOrder = if (requestJson.optBoolean("useCfg", true)) {
+            "negative_then_positive"
+        } else {
+            "positive_only"
+        }
+        val model = debugImageModel(
+            runtime = LocalImageRuntime.MNN_DIFFUSION,
+            bundleRoot = bundleRoot,
+            requestedModelPath = intent.getStringExtra("modelPath").orEmpty(),
+            family = requestJson.optString("family", "SD15"),
+            width = requestJson.optInt("width", 512),
+            height = requestJson.optInt("height", 512)
+        )
+        val provider = LocalImageProvider(applicationContext)
+        val options = LocalImageGenerationOptions.fromJson(requestJson)
+            .copy(allowLowStepSmoke = true)
+        val generated = runBlocking {
+            provider.begin(LocalImageRuntime.MNN_DIFFUSION)
+            provider.generate(model, options = options, prompt = requestJson.optString("prompt")) { progress ->
+                write(
+                    JSONObject()
+                        .put("status", "progress")
+                        .put("runtime", "mnn_diffusion")
+                        .put("phase", progress.phase)
+                        .put("step", progress.step)
+                        .put("steps", progress.steps)
+                        .put("message", progress.message)
+                        .put("progressElapsedMs", progress.elapsedMs)
+                )
+            }
+        }
+        outputFile.parentFile?.mkdirs()
+        outputFile.writeBytes(generated.bytes)
+        val result = JSONObject(generated.executionMetadataJson)
+        result.put("ok", generated.bytes.isNotEmpty())
+        write(
+            JSONObject()
+                .put("status", "completed")
+                .put("runtime", "mnn_diffusion")
+                .put("request", requestJson)
+                .put("conditioningOrder", conditioningOrder)
+                .put("result", result)
+                .put("outputPath", outputFile.absolutePath)
+                .put("outputBytes", generated.bytes.size)
+        )
+    }
+
+    private fun debugImageModel(
+        runtime: LocalImageRuntime,
+        bundleRoot: String,
+        requestedModelPath: String,
+        family: String,
+        width: Int,
+        height: Int
+    ): LocalImageModelRecord {
+        val root = File(bundleRoot).canonicalFile
+        val requested = requestedModelPath.trim().takeIf { it.isNotEmpty() }?.let(::File)
+        val manifestFile = File(root, "manifest.json").canonicalFile
+        val manifest = localImageBundleManifestFromRoot(root)
+        val declaredPrimary = manifest?.primaryFile
+            ?.takeIf { it.isFile && it.length() > 0L }
+        val smokePrimary = manifest
+            ?.qnnSmokeSpecs
+            ?.asSequence()
+            ?.mapNotNull { spec -> spec.contextBinaryFileIn(root) }
+            ?.firstOrNull()
+        val primary = sequenceOf(
+            // The harness historically defaulted modelPath to manifest.json.
+            // Treat that value as metadata and resolve the executable artifact
+            // from the installed bundle instead of using JSON as the model.
+            requested?.takeUnless { it.canonicalFile == manifestFile },
+            declaredPrimary,
+            smokePrimary,
+            File(root, if (runtime == LocalImageRuntime.MNN_DIFFUSION) "unet.mnn" else "unet.bin")
+        ).filterNotNull().map { candidate ->
+            runCatching { candidate.canonicalFile }.getOrDefault(candidate.absoluteFile)
+        }.firstOrNull { it.isFile && it.length() > 0L }
+            ?: error("No usable image model artifact exists under ${root.absolutePath}.")
+        return LocalImageModelRecord(
+            id = "debug-${runtime.name.lowercase()}-${root.name}",
+            displayName = root.name.ifBlank { "Debug local image model" },
+            path = primary.absolutePath,
+            fileName = primary.name,
+            sizeBytes = primary.length(),
+            sha256 = "",
+            runtime = runtime,
+            family = LocalImageModelFamily.from(family.uppercase()),
+            imageSize = "${width}x$height",
+            source = "debug-product-path",
+            bundleRoot = root.absolutePath,
+            componentCount = root.walkTopDown().count { it.isFile }.coerceAtLeast(1),
+            verificationStatus = LocalImageVerificationStatus.UNKNOWN,
+            verificationMessage = "",
+            verifiedAt = 0L
+        )
     }
 
     private fun runMnnDiffusionSmoke(

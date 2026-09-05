@@ -9,6 +9,14 @@
 
 namespace mca::mnn {
 
+struct XmlBodyCursor {
+    size_t nested_wrappers = 0;
+    size_t pending_backticks = 0;
+    size_t code_backticks = 0;
+    bool quoted = false;
+    bool escaped = false;
+};
+
 /**
  * Filters MNN's textual protocol framing before it reaches JNI.  MNN can split
  * special tokens across stream writes, so this state object deliberately holds
@@ -18,6 +26,10 @@ struct StreamProtocolFilterState {
     std::vector<std::string> terminal_markers;
     std::string pending_marker_prefix;
     std::string pending_role_header;
+    std::string xml_wrapper_end;
+    XmlBodyCursor xml_body;
+    size_t input_bytes = 0;
+    size_t stop_marker_offset = std::string::npos;
     bool visible_output_seen = false;
     bool stopped = false;
     std::string stop_reason;
@@ -26,6 +38,10 @@ struct StreamProtocolFilterState {
         terminal_markers = std::move(markers);
         pending_marker_prefix.clear();
         pending_role_header.clear();
+        xml_wrapper_end.clear();
+        xml_body = {};
+        input_bytes = 0;
+        stop_marker_offset = std::string::npos;
         visible_output_seen = false;
         stopped = false;
         stop_reason.clear();
@@ -70,6 +86,22 @@ inline const std::vector<std::string>& unsafe_role_tokens() {
     return tokens;
 }
 
+inline const std::vector<std::string>& xml_protocol_end_markers() {
+    static const std::vector<std::string> markers = {
+        "</response>",
+        "</answer>",
+    };
+    return markers;
+}
+
+inline const std::vector<std::string>& xml_protocol_start_markers() {
+    static const std::vector<std::string> markers = {
+        "<response>",
+        "<answer>",
+    };
+    return markers;
+}
+
 inline bool is_role_header_marker(const std::string& marker) {
     for (const auto& spec : role_header_specs()) {
         if (marker == spec.start || (!spec.ends_at_newline && marker == spec.end)) {
@@ -87,7 +119,39 @@ inline bool has_non_whitespace(const std::string& text) {
     });
 }
 
+inline size_t scan_xml_body(XmlBodyCursor& cursor, const std::string& text, const std::string& closing) {
+    if (closing.empty()) return std::string::npos;
+    const std::string opening = "<" + closing.substr(2);
+    for (size_t index = 0; index < text.size(); ++index) {
+        const char ch = text[index];
+        if (ch == '`' && !cursor.quoted && !cursor.escaped) {
+            ++cursor.pending_backticks;
+            continue;
+        }
+        if (cursor.pending_backticks > 0) {
+            if (cursor.code_backticks == 0) cursor.code_backticks = cursor.pending_backticks;
+            else if (cursor.code_backticks == cursor.pending_backticks) cursor.code_backticks = 0;
+            cursor.pending_backticks = 0;
+        }
+        if (cursor.code_backticks != 0) continue;
+        if (cursor.escaped) { cursor.escaped = false; continue; }
+        if (ch == '\\') { cursor.escaped = true; continue; }
+        if (ch == '"') { cursor.quoted = !cursor.quoted; continue; }
+        if (cursor.quoted) continue;
+        if (text.compare(index, opening.size(), opening) == 0) {
+            ++cursor.nested_wrappers;
+            index += opening.size() - 1;
+        } else if (text.compare(index, closing.size(), closing) == 0) {
+            if (cursor.nested_wrappers == 0) return index;
+            --cursor.nested_wrappers;
+            index += closing.size() - 1;
+        }
+    }
+    return std::string::npos;
+}
+
 inline void mark_visible(StreamProtocolFilterState& state, const std::string& text) {
+    scan_xml_body(state.xml_body, text, state.xml_wrapper_end);
     if (has_non_whitespace(text)) {
         state.visible_output_seen = true;
     }
@@ -105,6 +169,38 @@ struct MarkerMatch {
     size_t length = 0;
     const RoleHeaderSpec* role_header = nullptr;
 };
+
+inline MarkerMatch first_plain_role_line(const std::string& text) {
+    // A few converted MNN packages detokenize the role header as a bare line
+    // (`assistant\n`) instead of emitting ChatML special-token text.  Match
+    // only a complete line at the beginning of the stream or immediately
+    // after a newline; ordinary prose such as "the assistant answered" must
+    // remain visible.
+    static const std::vector<std::string> roles = {
+        "assistant", "user", "system", "developer", "tool"
+    };
+    size_t position = 0;
+    while (position <= text.size()) {
+        const bool lineStart = position == 0 || text[position - 1] == '\n';
+        if (lineStart) {
+            for (const auto& role : roles) {
+                if (text.size() < position + role.size() ||
+                        text.compare(position, role.size(), role) != 0) continue;
+                const size_t end = position + role.size();
+                if (end == text.size() || text[end] == '\n' || text[end] == '\r') {
+                    MarkerMatch result;
+                    result.position = position;
+                    result.length = role.size();
+                    return result;
+                }
+            }
+        }
+        const auto newline = text.find('\n', position);
+        if (newline == std::string::npos) break;
+        position = newline + 1;
+    }
+    return {};
+}
 
 inline MarkerMatch first_terminal_marker(
         const std::string& text,
@@ -156,6 +252,8 @@ inline size_t trailing_protocol_prefix_bytes(
     for (const auto& marker : terminal_markers) inspect(marker);
     for (const auto& spec : role_header_specs()) inspect(spec.start);
     for (const auto& token : unsafe_role_tokens()) inspect(token);
+    for (const auto& marker : xml_protocol_end_markers()) inspect(marker);
+    for (const auto& marker : xml_protocol_start_markers()) inspect(marker);
     return longest;
 }
 
@@ -223,26 +321,77 @@ inline StreamProtocolFilterResult filter_stream_protocol(
     text.append(state.pending_marker_prefix);
     state.pending_marker_prefix.clear();
     text.append(incoming);
+    state.input_bytes += incoming.size();
 
     std::string visible;
     while (true) {
         const auto terminal = detail::first_terminal_marker(text, state.terminal_markers);
         const auto role_header = detail::first_role_header(text);
         const auto unsafe_role = detail::first_terminal_marker(text, unsafe_role_tokens());
+        const auto plain_role = detail::first_plain_role_line(text);
+        auto xml_start = detail::first_terminal_marker(text, xml_protocol_start_markers());
+        // Only a leading XML wrapper is framing. Tags in prose, quotes, or
+        // code are body text; an unmatched closing tag is not a turn boundary.
+        if (state.visible_output_seen || detail::has_non_whitespace(visible) ||
+                !state.xml_wrapper_end.empty() ||
+                (xml_start.position != std::string::npos &&
+                 detail::has_non_whitespace(text.substr(0, xml_start.position)))) {
+            xml_start = {};
+        }
+        auto xml_cursor = state.xml_body;
+        const detail::MarkerMatch xml_end = {
+            detail::scan_xml_body(xml_cursor, text, state.xml_wrapper_end), state.xml_wrapper_end.size(), nullptr
+        };
         if (terminal.position != std::string::npos &&
+                (xml_end.position == std::string::npos || terminal.position <= xml_end.position) &&
+                (xml_start.position == std::string::npos || terminal.position <= xml_start.position) &&
                 (role_header.position == std::string::npos || terminal.position <= role_header.position) &&
-                (unsafe_role.position == std::string::npos || terminal.position <= unsafe_role.position)) {
+                (unsafe_role.position == std::string::npos || terminal.position <= unsafe_role.position) &&
+                (plain_role.position == std::string::npos || terminal.position <= plain_role.position)) {
             visible.append(text, 0, terminal.position);
             detail::mark_visible(state, visible);
             detail::stop(state, "stop_marker");
             return {std::move(visible), true};
         }
         if (unsafe_role.position != std::string::npos &&
+                (xml_end.position == std::string::npos || unsafe_role.position <= xml_end.position) &&
+                (xml_start.position == std::string::npos || unsafe_role.position <= xml_start.position) &&
                 (role_header.position == std::string::npos || unsafe_role.position <= role_header.position)) {
             visible.append(text, 0, unsafe_role.position);
             detail::mark_visible(state, visible);
             detail::stop(state, "unexpected_role_token");
             return {std::move(visible), true};
+        }
+        if (plain_role.position != std::string::npos &&
+                (xml_end.position == std::string::npos || plain_role.position <= xml_end.position) &&
+                (xml_start.position == std::string::npos || plain_role.position <= xml_start.position) &&
+                (role_header.position == std::string::npos || plain_role.position <= role_header.position) &&
+                (unsafe_role.position == std::string::npos || plain_role.position <= unsafe_role.position)) {
+            visible.append(text, 0, plain_role.position);
+            detail::mark_visible(state, visible);
+            detail::stop(state, "plain_role_header_after_visible_text");
+            return {std::move(visible), true};
+        }
+        if (xml_end.position != std::string::npos &&
+                (xml_start.position == std::string::npos || xml_end.position < xml_start.position) &&
+                (role_header.position == std::string::npos || xml_end.position <= role_header.position) &&
+                (unsafe_role.position == std::string::npos || xml_end.position <= unsafe_role.position) &&
+                (plain_role.position == std::string::npos || xml_end.position <= plain_role.position)) {
+            visible.append(text, 0, xml_end.position);
+            detail::mark_visible(state, visible);
+            state.stop_marker_offset = state.input_bytes - text.size() + xml_end.position;
+            detail::stop(state, "xml_response_end");
+            return {std::move(visible), true};
+        }
+        if (xml_start.position != std::string::npos) {
+            const std::string before = text.substr(0, xml_start.position);
+            // XML wrappers are framing emitted by some converted packages;
+            // remove only a leading wrapper and preserve the answer body.
+            state.xml_wrapper_end = text.compare(xml_start.position, xml_start.length, "<answer>") == 0
+                    ? "</answer>" : "</response>";
+            visible.append(before);
+            text.erase(0, xml_start.position + xml_start.length);
+            continue;
         }
         if (role_header.position == std::string::npos) break;
 
@@ -270,7 +419,17 @@ inline StreamProtocolFilterResult filter_stream_protocol(
     const size_t held_bytes = detail::trailing_protocol_prefix_bytes(text, state.terminal_markers);
     if (held_bytes > 0) {
         if (flush) {
-            text.erase(text.size() - held_bytes);
+            // XML prefixes in ordinary body text can be literal fragments.
+            const auto suffix = text.substr(text.size() - held_bytes);
+            const bool literalXml = state.xml_wrapper_end.empty() &&
+                    (state.visible_output_seen || detail::has_non_whitespace(visible) ||
+                     detail::has_non_whitespace(text.substr(0, text.size() - held_bytes))) &&
+                    std::any_of(xml_protocol_start_markers().begin(), xml_protocol_start_markers().end(),
+                        [&](const std::string& marker) { return marker.compare(0, suffix.size(), suffix) == 0; });
+            const bool literalXmlEnd = state.xml_wrapper_end.empty() &&
+                    std::any_of(xml_protocol_end_markers().begin(), xml_protocol_end_markers().end(),
+                        [&](const std::string& marker) { return marker.compare(0, suffix.size(), suffix) == 0; });
+            if (!literalXml && !literalXmlEnd) text.erase(text.size() - held_bytes);
         } else {
             state.pending_marker_prefix.assign(text, text.size() - held_bytes, held_bytes);
             text.erase(text.size() - held_bytes);

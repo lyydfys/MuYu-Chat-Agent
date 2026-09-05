@@ -10,6 +10,7 @@ import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.muyuchat.core.engine.LocalChatSessionRecoveryPolicy
 import com.muyuchat.core.engine.LocalChatRuntime
 import com.muyuchat.core.engine.LocalChatRunner
 import com.muyuchat.core.engine.PersistentPrefixCacheRequest
@@ -218,6 +219,18 @@ internal class RemoteLocalChatRunner(
 
     override fun isSessionKnownLost(): Boolean = synchronized(stateLock) {
         workerSessionLost || (modelLoadedInWorker && remote == null)
+    }
+
+    override fun sessionRecoveryPolicy(): LocalChatSessionRecoveryPolicy = synchronized(stateLock) {
+        if (requiresExplicitAcceleratorReload(workerFailureCodeLocked())) {
+            LocalChatSessionRecoveryPolicy.EXPLICIT_RELOAD_REQUIRED
+        } else {
+            LocalChatSessionRecoveryPolicy.AUTOMATIC
+        }
+    }
+
+    override fun sessionRecoveryMessage(): String? = synchronized(stateLock) {
+        explicitAcceleratorReloadMessage(workerFailureCodeLocked())
     }
 
     override fun getRuntimeStatsJson(): String {
@@ -547,6 +560,22 @@ internal class RemoteLocalChatRunner(
         failure = error
     }
 
+    private fun workerFailureCodeLocked(): String? =
+        (failure as? RemoteLocalChatRunnerException)
+            ?.workerStageDiagnostic
+            ?.failureCode
+
+    private fun requiresExplicitAcceleratorReload(code: String?): Boolean =
+        code.orEmpty().lowercase().let { it.startsWith("litert_gpu_") || it.startsWith("mnn_opencl_") }
+
+    private fun explicitAcceleratorReloadMessage(code: String?): String? = when {
+        code.orEmpty().lowercase().startsWith("litert_gpu_") ->
+            "LiteRT-LM GPU 未在限定时间内完成，隔离会话已回收。当前请求不会自动回退到 CPU；请显式重新加载 GPU，或在模型设置中选择 CPU 后重试。"
+        code.orEmpty().lowercase().startsWith("mnn_opencl_") ->
+            "MNN OpenCL 未在限定时间内完成，隔离会话已回收。当前请求不会自动回退到 CPU；请显式重新加载 OpenCL，或在模型设置中选择 CPU 后重试。"
+        else -> null
+    }
+
     private fun workerUnavailableStatsLocked(): String {
         val diagnostic = (failure as? RemoteLocalChatRunnerException)?.workerStageDiagnostic
             ?: runCatching { stageJournal.read() }.getOrNull()
@@ -593,7 +622,12 @@ internal class RemoteLocalChatRunner(
         val message = buildString {
             append("The isolated local text worker ").append(summary.trim())
             if (safeCause.isNotBlank()) append(": ").append(safeCause)
-            diagnostic?.let { append(". Last durable worker diagnostic: ").append(it.compactDescription()) }
+            diagnostic?.let {
+                append(". Last durable worker diagnostic: ").append(it.compactDescription())
+                explicitAcceleratorReloadMessage(it.failureCode)?.let { hint ->
+                    append(". ").append(hint)
+                }
+            }
         }
         return RemoteLocalChatRunnerException(message, cause, diagnostic)
     }

@@ -79,6 +79,46 @@ class ModelTuningCapabilityDiscoveryTest {
         }
     }
 
+    @Test
+    fun liteRtVariantSuppliesOnlyAnAdvisoryTransportHint() {
+        val file = Files.createTempFile("litert-variant", ".litertlm").toFile()
+        try {
+            val qualcomm = model(file, ChatModelRuntime.LITERT_LM).copy(
+                displayName = "Gemma 4 Qualcomm complete",
+                fileName = "gemma4-qualcomm-complete.litertlm"
+            )
+            val gpu = qualcomm.copy(
+                displayName = "Gemma 4 GPU",
+                fileName = "gemma4-gpu.litertlm"
+            )
+            val cpu = qualcomm.copy(
+                displayName = "Gemma 4 CPU",
+                fileName = "gemma4-cpu.litertlm"
+            )
+            val npuCapabilities = discoverModelTuningCapabilities(
+                qualcomm,
+                identity(LocalChatRuntime.LITERT_LM),
+                qairtAdmissionPassed = false
+            )
+            val gpuCapabilities = discoverModelTuningCapabilities(
+                gpu,
+                identity(LocalChatRuntime.LITERT_LM),
+                qairtAdmissionPassed = false
+            )
+            val cpuCapabilities = discoverModelTuningCapabilities(
+                cpu,
+                identity(LocalChatRuntime.LITERT_LM),
+                qairtAdmissionPassed = false
+            )
+
+            assertEquals("npu", npuCapabilities.preferredBackend)
+            assertEquals("gpu", gpuCapabilities.preferredBackend)
+            assertEquals("cpu", cpuCapabilities.preferredBackend)
+        } finally {
+            file.delete()
+        }
+    }
+
     private fun model(file: File, runtime: ChatModelRuntime = ChatModelRuntime.LLAMA_CPP) = ModelManifest(
         id = "model",
         displayName = "renamed",

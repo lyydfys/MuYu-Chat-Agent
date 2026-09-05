@@ -11,12 +11,44 @@ if (-not ("Mca.Benchmark.StrictJsonValidator" -as [type])) {
     Add-Type -Path (Join-Path $PSScriptRoot "StrictJsonValidator.cs")
 }
 if (-not ("Mca.Benchmark.PngInspector" -as [type])) {
-    Add-Type -Path (Join-Path $PSScriptRoot "PngInspector.cs") -ReferencedAssemblies @("System.IO.Compression.dll")
+    # Supplying an explicit reference list on .NET Core replaces the compiler's
+    # default references, so System.Collections.Generic.List<T> is otherwise
+    # missing despite the source's using directive. Keep the compression
+    # reference explicit and add the collections assembly where it exists.
+    $pngInspectorReferences = @("System.IO.Compression.dll")
+    $runtimeDirectory = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+    $collectionsAssembly = "System.Collections.dll"
+    if ($runtimeDirectory -and (Test-Path -LiteralPath (Join-Path $runtimeDirectory $collectionsAssembly))) {
+        $pngInspectorReferences += $collectionsAssembly
+    }
+    Add-Type -Path (Join-Path $PSScriptRoot "PngInspector.cs") -ReferencedAssemblies $pngInspectorReferences
 }
 
 function Get-StrictFileSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+# PowerShell 7's ConvertFrom-Json coerces ISO-8601-looking strings into
+# System.DateTime, while Windows PowerShell 5.1 keeps them as strings. Benchmark
+# artifacts must parse to identical runtime types on both hosts, so -DateKind
+# String is requested wherever the parameter exists. The parameter is absent on
+# Windows PowerShell 5.1, where the string-preserving behaviour is already the
+# default, so it is only splatted when supported.
+$script:ConvertFromJsonSupportsDateKind = $null
+function Test-ConvertFromJsonDateKindSupport {
+    if ($null -eq $script:ConvertFromJsonSupportsDateKind) {
+        $command = Get-Command ConvertFrom-Json -ErrorAction Stop
+        $script:ConvertFromJsonSupportsDateKind = $command.Parameters.ContainsKey('DateKind')
+    }
+    return $script:ConvertFromJsonSupportsDateKind
+}
+
+function ConvertFrom-StrictJsonText {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+    $arguments = @{ ErrorAction = 'Stop' }
+    if (Test-ConvertFromJsonDateKindSupport) { $arguments['DateKind'] = 'String' }
+    return ConvertFrom-Json -InputObject $Text @arguments
 }
 
 function Read-StrictUtf8JsonFile {
@@ -34,7 +66,7 @@ function Read-StrictUtf8JsonFile {
     catch { throw "File is not strict UTF-8: $Path. $($_.Exception.Message)" }
     try { [Mca.Benchmark.StrictJsonValidator]::Validate($text) }
     catch { throw "Strict JSON validation failed for '$Path': $($_.Exception.Message)" }
-    try { $value = $text | ConvertFrom-Json -ErrorAction Stop }
+    try { $value = ConvertFrom-StrictJsonText -Text $text }
     catch { throw "PowerShell JSON conversion failed for '$Path': $($_.Exception.Message)" }
     if ($RequireObject -and $value -isnot [pscustomobject]) { throw "JSON root must be an object: $Path" }
     return [pscustomobject][ordered]@{
@@ -157,6 +189,32 @@ function Test-BenchmarkJsonNumber {
         }
     }
     return $true
+}
+
+function Test-BenchmarkSchemaVersion {
+    param($Value, [long]$Expected = 1)
+    # JSON integers parse to different runtime types across PowerShell hosts
+    # (Windows PowerShell 5.1: Int32/Decimal; PowerShell 7+: Int64/Double), so
+    # acceptance must key on numeric type plus value, never on one CLR type.
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [bool] -or $Value -is [string] -or $Value -is [char]) { return $false }
+    if ($Value -is [uint64]) { return ($Value -eq [uint64]$Expected) }
+    if ($Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64]) {
+        return ([long]$Value -eq $Expected)
+    }
+    if ($Value -is [single] -or $Value -is [double]) {
+        $number = [double]$Value
+        if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { return $false }
+        return ($number -eq [double]$Expected -and $number -eq [Math]::Floor($number))
+    }
+    if ($Value -is [decimal]) {
+        $number = [decimal]$Value
+        return ($number -eq [decimal]$Expected -and $number -eq [Math]::Floor($number))
+    }
+    return $false
 }
 
 function Assert-JsonDataShape {
@@ -435,4 +493,4 @@ function Assert-SmokeResultDocument {
     }
 }
 
-Export-ModuleMember -Function Get-StrictFileSha256, Read-StrictUtf8JsonFile, Assert-JsonStringIntegrity, Get-JsonStringIntegrityIssues, Test-LikelyMojibake, Assert-JsonDataShape, Get-StrictPngInfo, Get-PngQualityInfo, Assert-PngQuality, Assert-SmokeResultDocument, Assert-BenchmarkArtifact, ConvertTo-ValidatedBenchmarkJson, Write-ValidatedBenchmarkJson
+Export-ModuleMember -Function Get-StrictFileSha256, Read-StrictUtf8JsonFile, Assert-JsonStringIntegrity, Get-JsonStringIntegrityIssues, Test-LikelyMojibake, Assert-JsonDataShape, Get-StrictPngInfo, Get-PngQualityInfo, Assert-PngQuality, Assert-SmokeResultDocument, Assert-BenchmarkArtifact, ConvertTo-ValidatedBenchmarkJson, Write-ValidatedBenchmarkJson, Test-BenchmarkSchemaVersion, Test-BenchmarkJsonNumber, ConvertFrom-StrictJsonText

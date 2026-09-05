@@ -35,6 +35,7 @@ enum class MnnBundleDiagnosticCode {
     REQUIRED_COMPONENT_NOT_FILE,
     REQUIRED_COMPONENT_UNREADABLE,
     CONFIG_DECLARED_COMPONENT_PATH_INVALID,
+    TIE_EMBEDDINGS_INVALID,
     LEGACY_VISUAL_GRAPH_RUNTIME_INCOMPATIBLE,
     CHAT_LLM_CONTRACT_NOT_APPLICABLE
 }
@@ -269,22 +270,36 @@ object MnnBundleReadinessAnalyzer {
             return requirements
         }
 
+        var modelConfig: JSONObject? = null
+
+        fun effectiveHasNonBlankString(key: String): Boolean =
+            modelConfig
+                ?.takeIf { it.has(key) }
+                ?.hasNonBlankString(key)
+                ?: config.hasNonBlankString(key)
+
+        fun effectiveBoolean(key: String): Boolean =
+            modelConfig
+                ?.takeIf { it.has(key) }
+                ?.optBoolean(key, false)
+                ?: config.optBoolean(key, false)
+
         fun configuredPath(
             key: String,
             defaultPath: String? = null,
             allowTokenizerAlternative: Boolean = false,
-            allowEmbeddingAlternative: Boolean = false
+            rootConfigOnly: Boolean = false
         ) {
-            val raw = config.optString(key).trim()
+            val source = modelConfig
+                ?.takeUnless { rootConfigOnly }
+                ?.takeIf { it.opt(key) is String }
+                ?: config
+            val raw = source.optString(key).trim()
             if (raw.isBlank()) {
                 when {
                     allowTokenizerAlternative -> requirements += MnnBundleRequirement.alternatives(
                         "tokenizer.txt",
                         "tokenizer.mtok"
-                    )
-                    allowEmbeddingAlternative -> requirements += MnnBundleRequirement.alternatives(
-                        "embeddings_bf16.bin",
-                        "llm.mnn.json"
                     )
                     defaultPath != null -> addConfiguredRequirement(
                         requirements,
@@ -299,10 +314,18 @@ object MnnBundleReadinessAnalyzer {
             }
         }
 
-        configuredPath("llm_config", defaultPath = "llm_config.json")
+        configuredPath("llm_config", defaultPath = "llm_config.json", rootConfigOnly = true)
+        modelConfig = readModelConfig(bundleDir, config)
         configuredPath("llm_model", defaultPath = "llm.mnn")
         configuredPath("llm_weight", defaultPath = "llm.mnn.weight")
-        configuredPath("embedding_file", allowEmbeddingAlternative = true)
+        collectEmbeddingRequirement(
+            bundleDir = bundleDir,
+            rootConfig = config,
+            modelConfig = modelConfig,
+            requirements = requirements,
+            invalid = invalid,
+            diagnostics = diagnostics
+        )
         configuredPath("tokenizer_file", allowTokenizerAlternative = true)
 
         // Gemma 4's Per-Layer Embeddings are declared by the model-side
@@ -334,17 +357,17 @@ object MnnBundleReadinessAnalyzer {
             "projector_model",
             "projector_weight"
         ).forEach { key ->
-            if (config.hasNonBlankString(key)) {
+            if (effectiveHasNonBlankString(key)) {
                 configuredPath(key)
             }
         }
 
-        val visualConfigured = config.hasNonBlankString("visual_model")
-        if (config.optBoolean("is_visual", false) || visualConfigured) {
+        val visualConfigured = effectiveHasNonBlankString("visual_model")
+        if (effectiveBoolean("is_visual") || visualConfigured) {
             configuredPath("visual_model", defaultPath = "visual.mnn")
         }
-        val audioConfigured = config.hasNonBlankString("audio_model")
-        if (config.optBoolean("is_audio", false) || audioConfigured) {
+        val audioConfigured = effectiveHasNonBlankString("audio_model")
+        if (effectiveBoolean("is_audio") || audioConfigured) {
             configuredPath("audio_model", defaultPath = "audio.mnn")
         }
 
@@ -365,9 +388,240 @@ object MnnBundleReadinessAnalyzer {
         MnnBundleRequirement.single("llm_config.json"),
         MnnBundleRequirement.single("llm.mnn"),
         MnnBundleRequirement.single("llm.mnn.weight"),
-        MnnBundleRequirement.alternatives("embeddings_bf16.bin", "llm.mnn.json"),
+        MnnBundleRequirement.single("embeddings_bf16.bin"),
         MnnBundleRequirement.alternatives("tokenizer.txt", "tokenizer.mtok")
     )
+
+    private fun readModelConfig(bundleDir: File, rootConfig: JSONObject): JSONObject? {
+        val rawPath = rootConfig.optString("llm_config").trim().ifBlank { "llm_config.json" }
+        val path = runCatching { normalizeRelativeComponentPath(rawPath) }.getOrNull() ?: return null
+        return runCatching {
+            JSONObject(File(bundleDir, path).readText(Charsets.UTF_8))
+        }.getOrNull()
+    }
+
+    /**
+     * MNN 3.6 can read tied token embeddings directly from llm.mnn.weight.
+     * The older readiness gate required an unrelated llm.mnn.json metadata
+     * sidecar instead, rejecting valid tied bundles while accepting bundles
+     * with no readable embedding data. Mirror DiskEmbedding's actual storage
+     * choice and validate every range before native code can seek into it.
+     */
+    private fun collectEmbeddingRequirement(
+        bundleDir: File,
+        rootConfig: JSONObject,
+        modelConfig: JSONObject?,
+        requirements: MutableList<MnnBundleRequirement>,
+        invalid: MutableList<String>,
+        diagnostics: MutableList<MnnBundleDiagnostic>
+    ) {
+        fun effectiveString(key: String, defaultValue: String): String {
+            val modelValue = modelConfig?.opt(key)
+            if (modelValue is String && modelValue.isNotBlank()) return modelValue.trim()
+            val rootValue = rootConfig.opt(key)
+            if (rootValue is String && rootValue.isNotBlank()) return rootValue.trim()
+            return defaultValue
+        }
+
+        val tieDeclared = modelConfig?.has("tie_embeddings") == true ||
+            rootConfig.has("tie_embeddings")
+        val tieValue = when {
+            modelConfig?.has("tie_embeddings") == true -> modelConfig.opt("tie_embeddings")
+            rootConfig.has("tie_embeddings") -> rootConfig.opt("tie_embeddings")
+            else -> null
+        }
+        if (!tieDeclared) {
+            addConfiguredRequirement(
+                requirements,
+                "embedding_file",
+                effectiveString("embedding_file", "embeddings_bf16.bin"),
+                invalid,
+                diagnostics
+            )
+            return
+        }
+
+        val descriptor = runCatching {
+            require(tieValue != null && tieValue != JSONObject.NULL) {
+                "tie_embeddings must not be null."
+            }
+            parseTieEmbeddingDescriptor(tieValue)
+        }.getOrElse { error ->
+            addInvalidTieEmbeddingDiagnostic(
+                rootConfig,
+                invalid,
+                diagnostics,
+                error.message.orEmpty()
+            )
+            return
+        }
+        val storageKey = if (descriptor.weightOffset > 0L) "llm_weight" else "embedding_file"
+        val storageDefault = if (descriptor.weightOffset > 0L) {
+            "llm.mnn.weight"
+        } else {
+            "embeddings_bf16.bin"
+        }
+        val storagePath = effectiveString(storageKey, storageDefault)
+        if (descriptor.weightOffset == 0L) {
+            addConfiguredRequirement(
+                requirements,
+                storageKey,
+                storagePath,
+                invalid,
+                diagnostics
+            )
+        }
+
+        val normalizedStoragePath = runCatching {
+            normalizeRelativeComponentPath(storagePath)
+        }.getOrNull() ?: return
+        val storage = File(bundleDir, normalizedStoragePath)
+        if (!storage.isUsableBundleComponent()) return
+        val hiddenSize = effectiveLong(modelConfig, rootConfig, "hidden_size")
+        val validationError = validateTieEmbeddingDescriptor(
+            descriptor = descriptor,
+            hiddenSize = hiddenSize,
+            storageSize = storage.length()
+        )
+        if (validationError != null) {
+            addInvalidTieEmbeddingDiagnostic(rootConfig, invalid, diagnostics, validationError)
+        }
+    }
+
+    private fun addInvalidTieEmbeddingDiagnostic(
+        rootConfig: JSONObject,
+        invalid: MutableList<String>,
+        diagnostics: MutableList<MnnBundleDiagnostic>,
+        detail: String
+    ) {
+        val llmConfigPath = rootConfig.optString("llm_config").trim().ifBlank { "llm_config.json" }
+        val component = "$llmConfigPath: tie_embeddings"
+        invalid += component
+        diagnostics += MnnBundleDiagnostic(
+            code = MnnBundleDiagnosticCode.TIE_EMBEDDINGS_INVALID,
+            severity = MnnBundleDiagnosticSeverity.ERROR,
+            path = llmConfigPath,
+            message = "$component is invalid: $detail"
+        )
+    }
+
+    private data class TieEmbeddingDescriptor(
+        val weightOffset: Long,
+        val alphaOffset: Long,
+        val alphaSize: Long,
+        val quantBit: Long,
+        val quantBlock: Long,
+        val alphaFp16: Boolean
+    )
+
+    private fun parseTieEmbeddingDescriptor(value: Any): TieEmbeddingDescriptor {
+        fun exactLong(raw: Any?, field: String): Long {
+            require(raw is Number) { "$field must be an integer." }
+            val doubleValue = raw.toDouble()
+            val longValue = raw.toLong()
+            require(doubleValue.isFinite() && doubleValue == longValue.toDouble()) {
+                "$field must be an exact 64-bit integer."
+            }
+            return longValue
+        }
+
+        return when (value) {
+            is JSONArray -> {
+                require(value.length() >= 5) { "legacy tie_embeddings must contain at least five integers." }
+                TieEmbeddingDescriptor(
+                    weightOffset = exactLong(value.opt(0), "weight_offset"),
+                    alphaOffset = exactLong(value.opt(1), "alpha_offset"),
+                    alphaSize = exactLong(value.opt(2), "alpha_size"),
+                    quantBit = exactLong(value.opt(3), "quant_bit"),
+                    quantBlock = exactLong(value.opt(4), "quant_block"),
+                    alphaFp16 = value.opt(5).let { raw ->
+                        when (raw) {
+                            null, JSONObject.NULL -> false
+                            is Boolean -> raw
+                            is Number -> exactLong(raw, "alpha_fp16") != 0L
+                            else -> error("alpha_fp16 must be a boolean or integer.")
+                        }
+                    }
+                )
+            }
+            is JSONObject -> {
+                val alphaDtype = value.optString("alpha_dtype", "fp32").lowercase()
+                require(alphaDtype == "fp16" || alphaDtype == "fp32") {
+                    "alpha_dtype must be fp16 or fp32."
+                }
+                TieEmbeddingDescriptor(
+                    weightOffset = exactLong(value.opt("weight_offset"), "weight_offset"),
+                    alphaOffset = exactLong(value.opt("alpha_offset"), "alpha_offset"),
+                    alphaSize = exactLong(value.opt("alpha_size"), "alpha_size"),
+                    quantBit = exactLong(value.opt("quant_bit"), "quant_bit"),
+                    quantBlock = exactLong(value.opt("quant_block"), "quant_block"),
+                    alphaFp16 = alphaDtype == "fp16"
+                )
+            }
+            else -> error("tie_embeddings must be an array or object.")
+        }
+    }
+
+    private fun effectiveLong(modelConfig: JSONObject?, rootConfig: JSONObject, key: String): Long {
+        val raw = when {
+            modelConfig?.opt(key) is Number -> modelConfig.opt(key)
+            rootConfig.opt(key) is Number -> rootConfig.opt(key)
+            else -> null
+        }
+        return (raw as? Number)?.toLong() ?: 0L
+    }
+
+    private fun validateTieEmbeddingDescriptor(
+        descriptor: TieEmbeddingDescriptor,
+        hiddenSize: Long,
+        storageSize: Long
+    ): String? {
+        if (descriptor.weightOffset < 0L || descriptor.alphaOffset < 0L || descriptor.alphaSize <= 0L) {
+            return "offsets must be non-negative and alpha_size must be positive"
+        }
+        if (hiddenSize <= 0L) return "hidden_size must be positive"
+        if (descriptor.quantBit != 4L && descriptor.quantBit != 8L) {
+            return "quant_bit must be 4 or 8"
+        }
+        if (descriptor.quantBlock < 0L || descriptor.quantBlock > hiddenSize ||
+            (descriptor.quantBlock > 0L && hiddenSize % descriptor.quantBlock != 0L)
+        ) {
+            return "quant_block must be zero or divide hidden_size exactly"
+        }
+        if (descriptor.alphaOffset <= descriptor.weightOffset) {
+            return "alpha_offset must follow the quantized weight range"
+        }
+        if (descriptor.alphaOffset > storageSize ||
+            descriptor.alphaSize > storageSize - descriptor.alphaOffset
+        ) {
+            return "alpha range exceeds $storageSize-byte backing file"
+        }
+        val tokenBits = runCatching { Math.multiplyExact(hiddenSize, descriptor.quantBit) }.getOrNull()
+            ?: return "token width overflows"
+        if (tokenBits % 8L != 0L) return "token width is not byte-aligned"
+        val tokenBytes = tokenBits / 8L
+        val weightBytes = descriptor.alphaOffset - descriptor.weightOffset
+        if (tokenBytes <= 0L || weightBytes <= 0L || weightBytes % tokenBytes != 0L) {
+            return "quantized weight range is not a whole number of token rows"
+        }
+        val vocabularySize = weightBytes / tokenBytes
+        val blockCount = if (descriptor.quantBlock == 0L) 1L else hiddenSize / descriptor.quantBlock
+        val alphaElementBytes = if (descriptor.alphaFp16) 2L else 4L
+        if (descriptor.alphaSize % alphaElementBytes != 0L) {
+            return "alpha_size is not aligned to alpha_dtype"
+        }
+        val symmetricElements = runCatching {
+            Math.multiplyExact(vocabularySize, blockCount)
+        }.getOrNull() ?: return "scale count overflows"
+        val asymmetricElements = runCatching {
+            Math.multiplyExact(symmetricElements, 2L)
+        }.getOrNull() ?: return "scale count overflows"
+        val actualElements = descriptor.alphaSize / alphaElementBytes
+        if (actualElements != symmetricElements && actualElements != asymmetricElements) {
+            return "alpha range does not match token and quant-block geometry"
+        }
+        return null
+    }
 
     /**
      * Gemma 4's published MNN 3.5 visual graphs crash inside the MNN 3.6

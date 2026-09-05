@@ -200,6 +200,25 @@ class GenerationParamsTest {
     }
 
     @Test
+    fun litertProfileContextAliasMergesIntoGenerationContext() {
+        val defaults = GenerationParams(nCtx = 8192, nPredict = 512)
+
+        val canonical = GenerationParams.fromJson(
+            JSONObject("{\"max_num_tokens\":4096}"),
+            defaults
+        )
+        val camelCase = GenerationParams.fromJson(
+            JSONObject("{\"maxNumTokens\":2048}"),
+            defaults
+        )
+
+        assertEquals(4096, canonical.nCtx)
+        assertEquals(2048, camelCase.nCtx)
+        assertEquals(512, canonical.nPredict)
+        assertEquals(512, camelCase.nPredict)
+    }
+
+    @Test
     fun loadParamsJsonCarriesContextLengthForNativeBackends() {
         val json = JSONObject(LoadParams(nCtx = 32768, nThreads = 7).toJson())
 

@@ -7,7 +7,14 @@ import java.util.Locale
 enum class RecommendedChatRuntime(val label: String) {
     MNN("MNN 高速引擎"),
     GGUF("GGUF 兼容引擎"),
-    GENIEX_QAIRT("GenieX QAIRT / 骁龙 NPU")
+    GENIEX_QAIRT("GenieX QAIRT / 骁龙 NPU"),
+    LITERT_LM("LiteRT-LM 引擎")
+}
+
+enum class RecommendedComputeBackend(val label: String) {
+    CPU("CPU"),
+    GPU("GPU"),
+    NPU("Qualcomm NPU")
 }
 
 enum class MnnModelBundleComponentRole(val label: String) {
@@ -1080,6 +1087,7 @@ enum class ModelRepositoryProvider(val label: String) {
 
 enum class RemoteModelFileKind {
     CHAT_MODEL,
+    LITERT_LM_MODEL,
     VISION_MODEL,
     IMAGE_MODEL,
     IMAGE_VAE,
@@ -1108,6 +1116,7 @@ fun RemoteModelFile.fileKind(): RemoteModelFileKind {
         visionBundleRole == VisionModelBundleComponentRole.MAIN_MODEL -> RemoteModelFileKind.VISION_MODEL
         visionBundleRole == VisionModelBundleComponentRole.PROJECTOR -> RemoteModelFileKind.PROJECTOR
         !lowerName.hasModelFileExtension() -> RemoteModelFileKind.OTHER
+        lowerName.endsWith(".litertlm") -> RemoteModelFileKind.LITERT_LM_MODEL
         "mmproj" in lowerPath || "projector" in lowerPath -> RemoteModelFileKind.PROJECTOR
         "imatrix" in lowerPath -> RemoteModelFileKind.IMATRIX
         lowerName.startsWith("mtp-") -> RemoteModelFileKind.SPECULATIVE
@@ -1117,7 +1126,10 @@ fun RemoteModelFile.fileKind(): RemoteModelFileKind {
     }
 }
 
-fun RemoteModelFile.isChatModelCandidate(): Boolean = fileKind() == RemoteModelFileKind.CHAT_MODEL
+fun RemoteModelFile.isChatModelCandidate(): Boolean =
+    fileKind() == RemoteModelFileKind.CHAT_MODEL || fileKind() == RemoteModelFileKind.LITERT_LM_MODEL
+
+fun RemoteModelFile.isLiteRtLmModelCandidate(): Boolean = fileKind() == RemoteModelFileKind.LITERT_LM_MODEL
 
 fun RemoteModelFile.isVisionModelCandidate(): Boolean = fileKind() == RemoteModelFileKind.VISION_MODEL
 
@@ -1125,6 +1137,7 @@ fun RemoteModelFile.isImageModelCandidate(): Boolean = fileKind() == RemoteModel
 
 fun RemoteModelFile.kindLabel(): String = when (fileKind()) {
     RemoteModelFileKind.CHAT_MODEL -> "聊天主模型"
+    RemoteModelFileKind.LITERT_LM_MODEL -> "LiteRT-LM 聊天模型"
     RemoteModelFileKind.VISION_MODEL -> "本地识图主模型"
     RemoteModelFileKind.IMAGE_MODEL -> "图像生成模型"
     RemoteModelFileKind.IMAGE_VAE -> "VAE / AE"
@@ -1265,6 +1278,7 @@ data class ModelScopeRecommendedModel(
     val downloadable: Boolean = true,
     val downloadBlockReason: String? = null,
     val chatRuntime: RecommendedChatRuntime = RecommendedChatRuntime.GGUF,
+    val computeBackend: RecommendedComputeBackend = RecommendedComputeBackend.CPU,
     val mnnModelBundle: MnnModelBundleSpec? = null,
     val localImageEngineTier: LocalImageEngineTier? = null,
     val imageEngineBundle: ImageEngineBundleSpec? = null,
@@ -1304,7 +1318,8 @@ data class ModelScopeRecommendedModel(
             kind == ModelScopeRecommendedKind.IMAGE &&
                 imageEngineBundle?.accelerator == ImageEngineAccelerator.QNN_HTP -> RecommendedModelSection.NPU_IMAGE
             kind == ModelScopeRecommendedKind.IMAGE -> RecommendedModelSection.CPU_IMAGE
-            chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT ||
+            computeBackend == RecommendedComputeBackend.NPU ||
+                chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT ||
                 visionModelBundle?.accelerator == VisionModelAccelerator.QNN_HTP -> RecommendedModelSection.NPU_CHAT
             else -> RecommendedModelSection.CPU_CHAT
         }
