@@ -62,8 +62,8 @@ its first real native load and graph execution determine compatibility.
 
 Current release status:
 
-- `v0.2.1` is the current stable release. Its notes and verification record are
-  in [docs/releases/v0.2.1.md](docs/releases/v0.2.1.md); signed APKs are
+- `v0.2.2` is the current stability release. Its notes and verification record are
+  in [docs/releases/v0.2.2.md](docs/releases/v0.2.2.md); signed APKs are
   published through [GitHub Releases](https://github.com/lyydfys/MCA/releases).
 - The first public package target is `arm64-v8a` Android devices.
 - Local chat is the primary stable local path.

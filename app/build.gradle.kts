@@ -120,8 +120,8 @@ android {
         applicationId = "com.muyuchat.mca"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 5
-        versionName = "0.2.1"
+        versionCode = 6
+        versionName = "0.2.2"
 
         ndk {
             abiFilters += mcaAbiFilters
@@ -215,6 +215,12 @@ android {
 // assets/litert-qualcomm/arm64-v8a layout before packaging.
 tasks.configureEach {
     if (name.startsWith("merge") && name.endsWith("Assets")) {
+        dependsOn(syncLiteRtQualcommAssets)
+    }
+    // Lint model/report tasks also inspect the generated asset source set.
+    // Declare the producer dependency explicitly so release validation cannot
+    // race asset synchronization.
+    if (name.contains("lint", ignoreCase = true)) {
         dependsOn(syncLiteRtQualcommAssets)
     }
 }
