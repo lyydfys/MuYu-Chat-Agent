@@ -1,17 +1,18 @@
 package com.muyuchat.feature.chat
 
 /**
- * Exact prompt-token information returned by the model's own tokenizer.
+ * Prompt-token information for the selected model.
  *
  * [overflowOffset] is a UTF-16 offset into the original prompt. It is nullable
- * because some tokenizer backends can report the full count but do not expose
- * token-to-source offsets. A missing offset must never be replaced with a
- * character-count estimate by the UI.
+ * because some exact tokenizer backends do not expose token-to-source offsets.
+ * When [exact] is false, [count] is a conservative estimate and must be labeled
+ * as such; estimated measurements can never publish an overflow offset.
  */
 data class ImagePromptTokenMeasurement(
     val count: Int,
     val maxTokens: Int,
     val overflowOffset: Int? = null,
+    val exact: Boolean = true,
 ) {
     init {
         require(count >= 0) { "Prompt token count must be non-negative." }
@@ -21,6 +22,9 @@ data class ImagePromptTokenMeasurement(
         }
         require(count > maxTokens || overflowOffset == null) {
             "A fitting prompt cannot publish an overflow offset."
+        }
+        require(exact || overflowOffset == null) {
+            "An estimated prompt count cannot publish an exact overflow offset."
         }
     }
 

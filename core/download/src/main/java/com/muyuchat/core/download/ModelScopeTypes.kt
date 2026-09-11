@@ -165,6 +165,11 @@ object RecommendedImageDefaults {
     const val ANIME_NEGATIVE_PROMPT =
         "worst quality, low quality, lowres, bad anatomy, bad hands, missing fingers, extra fingers, " +
             "malformed limbs, realistic photo, text, signature, watermark, username, blurry"
+    /** Keep all constraints within the pinned CLIP tokenizer's 75 content-token budget. */
+    const val ANIMAGINE_XL_NEGATIVE_PROMPT =
+        "worst quality, low quality, blurry, distorted face, asymmetrical eyes, cross-eyed, " +
+            "bad anatomy, bad hands, fused fingers, missing fingers, extra fingers, extra limbs, " +
+            "duplicate, realistic photo, text, signature, watermark, username"
     const val SDXL_NEGATIVE_PROMPT =
         "worst quality, low quality, lowres, blurry, bad anatomy, bad hands, extra fingers, " +
             "missing fingers, deformed, text, signature, watermark"

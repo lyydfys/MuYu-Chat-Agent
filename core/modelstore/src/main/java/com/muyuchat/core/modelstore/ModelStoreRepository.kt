@@ -45,7 +45,9 @@ class ModelStoreRepository(private val context: Context) {
             recoveredGguf.isNotEmpty() ||
             recoveredLiteRtLm.isNotEmpty()
         ) {
-            save(merged)
+            runCatching { save(merged) }.onFailure { error ->
+                android.util.Log.w("McaModelStore", "Catalog recovery could not be saved; preserving readable records", error)
+            }
         }
         merged.sortedByDescending { it.createdAt }
     }
@@ -683,7 +685,7 @@ class ModelStoreRepository(private val context: Context) {
         return File(bundleDir, safeFileName(fileName.substringAfterLast('/')))
     }
 
-    private fun upsert(model: ModelManifest) {
+    private fun upsert(model: ModelManifest) = synchronized(MODEL_IMPORT_LOCK) {
         val modelPath = File(model.path).absolutePath
         val without = listModels().filterNot { it.id == model.id || File(it.path).absolutePath == modelPath }
         save(without + model)

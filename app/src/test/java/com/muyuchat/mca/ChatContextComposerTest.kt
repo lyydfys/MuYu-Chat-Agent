@@ -50,9 +50,10 @@ class ChatContextComposerTest {
         assertTrue(compose.contains("messages.asReversed()"))
         assertTrue(compose.contains("firstOrNull { it.role == Role.USER && it.content.isNotBlank() }"))
         assertTrue(compose.contains("?.content"))
-        assertTrue(compose.contains("?.takeLast(MAX_QUERY_CHARS)"))
+        assertTrue(compose.contains("?.let(::boundedQuery)"))
         assertTrue(source.contains("const val MAX_QUERY_CHARS = 8_192"))
         assertTrue(source.contains("const val MAX_KNOWLEDGE_CHUNKS = 4"))
+        assertTrue(source.contains("value.take(half) + \"\\n…\\n\" + value.takeLast(half)"))
     }
 
     @Test

@@ -49,6 +49,7 @@ import com.muyuchat.core.download.LocalImageEngineTier
 import com.muyuchat.core.download.BundleComponentDownloader
 import com.muyuchat.core.download.MnnModelBundleComponentRole
 import com.muyuchat.core.download.ModelBundleInstaller
+import com.muyuchat.core.download.ModelBundleInstallPlan
 import com.muyuchat.core.download.ModelRepositoryProvider
 import com.muyuchat.core.download.ModelScopeRecommendedModel
 import com.muyuchat.core.download.RemoteModelFile
@@ -137,6 +138,7 @@ import com.muyuchat.feature.agent.AgentTuningJobState
 import com.muyuchat.feature.chat.ImageGenerationUiTaskMode
 import com.muyuchat.feature.chat.ImagePromptTokenMeasurement
 import com.muyuchat.core.nativebridge.NativeMnnDiffusionBridge
+import com.muyuchat.core.sdnative.NativeStableDiffusionBridge
 import com.muyuchat.core.telemetry.SocFamily
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -1470,6 +1472,7 @@ private data class LocalImagePromptTokenizerDescriptor(
     val modelKey: String,
     val bundleRoot: File,
     val backend: ImageTokenizerBackend,
+    val route: ImagePromptTokenMeasurementRoute,
     val tokenizerJsonPath: File?,
     val bosId: Int,
     val eosId: Int,
@@ -1478,7 +1481,7 @@ private data class LocalImagePromptTokenizerDescriptor(
     val promptWeightingEnabled: Boolean,
 )
 
-/** Keeps UI-only exact tokenizer results bounded without ever caching an unavailable backend. */
+/** Keeps UI-only tokenizer results bounded without ever caching an unavailable backend. */
 private class ImagePromptTokenMeasurementCache(
     private val maximumEntries: Int = 96
 ) {
@@ -1540,6 +1543,7 @@ private fun String.takeUtf8Prefix(maxBytes: Int): Utf8BoundedText {
 }
 
 data class MainUiState(
+    val modelLoadStage: String? = null,
     val tab: AppTab = AppTab.CHAT,
     val messages: List<ChatMessage> = emptyList(),
     val chatSessions: List<ChatSessionRecord> = emptyList(),
@@ -1692,13 +1696,13 @@ internal fun MainUiState.restoreAfterConversationMutationFailure(
     )
 }
 
-private sealed interface DownloadedModelRegistration {
+internal sealed interface DownloadedModelRegistration {
     data class Chat(val model: ModelManifest) : DownloadedModelRegistration
     data class Image(val model: LocalImageModelRecord) : DownloadedModelRegistration
     data class VisionProjector(val model: ModelManifest, val shouldReload: Boolean) : DownloadedModelRegistration
 }
 
-private sealed interface VisionBundleDownloadResult {
+internal sealed interface VisionBundleDownloadResult {
     data class ChatModel(val model: ModelManifest) : VisionBundleDownloadResult
     data class EngineBundle(
         val displayName: String,
@@ -2031,7 +2035,11 @@ internal fun localImageExtensionResolutionFailure(
     )
 }
 
-class MainViewModel(application: Application) : AndroidViewModel(application) {
+class MainViewModel @JvmOverloads constructor(
+    application: Application,
+    private val deferStartup: Boolean = false,
+    private val skipInitialModelDiscovery: Boolean = false
+) : AndroidViewModel(application) {
     companion object {
         private val localApiProcessLifecycleLock = Any()
         private var localApiProcessOwnerToken: Any? = null
@@ -2162,15 +2170,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     private val initialWorldBooks = worldBookStore.load()
     private val initialKnowledgeBases = knowledgeBaseStore.loadBases()
-    private val initialKnowledgeDocumentCounts = initialKnowledgeBases.associate { knowledgeBase ->
-        knowledgeBase.id to knowledgeBaseStore.documents(knowledgeBase.id).size
-    }
+    // Per-base document counts are refreshed after the first frame.  Querying every document
+    // table here made startup time grow with the number of imported knowledge bases.
+    private val initialKnowledgeDocumentCounts: Map<String, Int> = emptyMap()
     private val initialKnowledgeBaseIds = initialChatSessions.firstOrNull()
         ?.id
         ?.let(knowledgeBaseStore::selectedKnowledgeBaseIds)
         .orEmpty()
-    private val initialImages = chatSessionStore.loadImages()
-    private val initialFiles = chatSessionStore.loadFiles()
+    // Image/file history is hydrated after the shell is visible; it is not needed to construct
+    // the first chat screen and can be large on devices with many generated images.
+    private val initialImages: List<ImageAssetRecord> = emptyList()
+    private val initialFiles: List<FileAssetRecord> = emptyList()
     private val initialStoredSelectedAssistantId = assistantStore.loadSelectedAssistantId(initialAssistants)
     private val initialSelectedAssistantId = initialChatSessions.firstOrNull()
         ?.assistantSnapshot
@@ -2182,7 +2192,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ?: initialStoredSelectedAssistantId
     private val initialSelectedAssistant = initialAssistants.firstOrNull { it.id == initialSelectedAssistantId }
     private val initialEffectiveParams = initialSelectedAssistant?.toGenerationParams(initialParams) ?: initialParams
-    private val initialLocalImageModels = localImageModelStore.loadModels()
+    private val initialLocalImageModels = if (skipInitialModelDiscovery) emptyList() else localImageModelStore.loadModels(discover = false)
     private val initialLocalImageLoras = localImageLoraStore.load()
     private val initialLocalImageUpscalers = localImageUpscalerStore.load()
     private val initialSelectedLocalImageUpscalerId = imageUpscalerPreferences
@@ -2268,13 +2278,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val managedRuntimeReadinessRefreshGate = ManagedRuntimeReadinessRefreshGate()
     private val imageAssetWriteMutex = Mutex()
     private val imageLibraryMutationMutex = Mutex()
-    private val imageLibraryStartupReconciliation = viewModelScope.async(Dispatchers.IO) {
+    private val imageLibraryStartupReconciliation = viewModelScope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
         try {
+            val initialImages = chatSessionStore.loadImages()
+            val files = chatSessionStore.loadFiles()
+            _uiState.update { state -> state.copy(images = initialImages, files = files) }
             imageLibraryMutationMutex.withLock {
                 imageLibraryBackup.reconcile(initialImages)
                 val report = reconcileImageAssetDirectory(imageAssetDirectory, initialImages)
                 check(report.failed == 0) { "Image asset startup reconciliation was incomplete." }
             }
+            val counts = initialKnowledgeBases.associate { knowledgeBase ->
+                knowledgeBase.id to knowledgeBaseStore.documents(knowledgeBase.id).size
+            }
+            _uiState.update { state -> state.copy(knowledgeDocumentCounts = counts) }
             null
         } catch (error: CancellationException) {
             throw error
@@ -2835,7 +2852,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private val autoUseManagedDownloads = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private var managedDownloadOwnedBusy = false
+
+
     init {
+        if (!deferStartup) startAfterConstruction()
+    }
+
+    internal fun startAfterConstruction() {
+        imageLibraryStartupReconciliation.start()
+        observeManagedDownloads()
         viewModelScope.launch {
             ProcessUiLifecycleEvents.events.collect { event ->
                 when (event) {
@@ -3411,7 +3438,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        viewModelScope.launch(Dispatchers.IO) {
+        launchModelOperation("恢复运行记录失败") {
             recoverInterruptedRuntimeProfiles()
         }
 
@@ -3419,7 +3446,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // storage. Recover a lost MCA product manifest in the background so a
         // multi-gigabyte bundle is reused instead of downloaded again. Directory
         // hashing must never run in the ViewModel constructor/main thread.
-        viewModelScope.launch(Dispatchers.IO) {
+        if (!skipInitialModelDiscovery) launchModelOperation("恢复模型目录失败") {
             val recovered = modelStore.recoverInstalledQairtBundles()
             if (recovered.isNotEmpty()) {
                 refreshManagedRuntimeReadiness()
@@ -3464,8 +3491,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         // Stamp hashing walks the whole managed QNN bundle, so it must not run
-        // on the main thread.  Until this refresh finishes the UI treats every
-        // QNN image package as not ready.
+        // on the main thread.  Run the catalog/readiness refresh after the shell is
+        // published even when startup deliberately skipped initial image discovery.
+        // The refresh publishes a cheap catalog first and hashes packages in the background.
         viewModelScope.launch(Dispatchers.IO) {
             refreshManagedRuntimeReadiness()
         }
@@ -3553,7 +3581,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // verification/certification as automatic-selection admission.
         @Suppress("UNUSED_VARIABLE")
         val advisoryVerification = qnnVerificationCurrentByModelId
-        return selectStructurallyReadyLocalImageModelId(models, preferredId)
+        val preferred = models.firstOrNull { it.id == preferredId }
+        // Debug smoke records share the app UID and may survive an interrupted run. They are
+        // valid test fixtures, but must not silently become the product's default when a real
+        // imported/downloaded engine is available. Manual selection remains unaffected.
+        val preferredForProduct = preferredId?.takeUnless {
+            preferred?.source.equals("local-test", ignoreCase = true) &&
+                models.any {
+                    !it.source.equals("local-test", ignoreCase = true) &&
+                        it.localImageStructuralReadinessMessage() == null
+                }
+        }
+        return selectStructurallyReadyLocalImageModelId(models, preferredForProduct)
     }
 
     /**
@@ -3642,6 +3681,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
                         preferredId = preferredImageModelId
                     )
+                    if (selectedImageModelId != persistedImageModelId) {
+                        localImageModelStore.saveSelectedModelId(selectedImageModelId)
+                    }
                     val selectedImageBackend = if (
                         selectedImageModelId == null && latest.selectedImageBackend == ImageBackend.LOCAL
                     ) {
@@ -3829,9 +3871,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Measures a prompt with the tokenizer declared by the selected local image
-     * model. This is intentionally tokenizer-only: it never loads a diffusion
-     * graph, and an unsupported/unknown backend simply returns null so the UI
-     * cannot present a guessed token count.
+     * model. This is tokenizer-only and never loads a diffusion graph. Known
+     * tokenizer adapters return exact counts; other stable-diffusion.cpp
+     * profiles return an explicitly marked conservative estimate.
      */
     suspend fun measureImagePromptTokens(
         modelChoiceId: String,
@@ -3843,7 +3885,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ?: return@withContext null
         val model = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
             ?: return@withContext null
-        if (!model.configured || !NativeMnnDiffusionBridge.isAvailable) return@withContext null
+        if (!model.configured) return@withContext null
 
         val key = "$modelId|${model.sha256.lowercase()}|${model.updatedAt}"
         val measurementCacheKey = "$key\u001f$prompt"
@@ -3864,7 +3906,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 bundleRoot = root
             ).profile
             val backend = profile.tokenizer.backend
-            if (backend == ImageTokenizerBackend.SDCPP_NATIVE) return@runCatching null
+            val route = imagePromptTokenMeasurementRoute(
+                runtime = profile.runtime,
+                family = profile.family,
+                backend = backend,
+            ) ?: return@runCatching null
             // MNN_MTOK is a concrete tokenizer consumed by the same native bridge as
             // generation. It does not need a tokenizer.json sidecar; passing a null JSON
             // path lets the bridge open the verified tokenizer.mtok from bundleRoot and
@@ -3913,6 +3959,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 modelKey = key,
                 bundleRoot = tokenizerRoot,
                 backend = backend,
+                route = route,
                 tokenizerJsonPath = tokenizerJson,
                 bosId = bosId,
                 eosId = eosId,
@@ -3924,18 +3971,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         imagePromptTokenizerDescriptors.putIfAbsent(key, descriptor)
         currentCoroutineContext().ensureActive()
-        val raw = runCatching {
-            NativeMnnDiffusionBridge().measurePromptTokens(
-                bundleRoot = descriptor.bundleRoot.path,
-                tokenizerBackend = descriptor.backend.name,
-                tokenizerJsonPath = descriptor.tokenizerJsonPath?.path.orEmpty(),
-                prompt = prompt,
-                bosId = descriptor.bosId,
-                eosId = descriptor.eosId,
-                padId = descriptor.padId,
+        if (descriptor.route == ImagePromptTokenMeasurementRoute.ESTIMATE) {
+            val measurement = ImagePromptTokenMeasurement(
+                count = estimateLocalPromptTokens(prompt),
                 maxTokens = descriptor.maxTokens,
-                promptWeightingEnabled = descriptor.promptWeightingEnabled,
+                exact = false,
             )
+            imagePromptTokenMeasurementCache.put(measurementCacheKey, measurement)
+            return@withContext measurement
+        }
+        val raw = runCatching {
+            when (descriptor.route) {
+                ImagePromptTokenMeasurementRoute.MNN_BRIDGE -> {
+                    if (!NativeMnnDiffusionBridge.isAvailable) return@runCatching null
+                    NativeMnnDiffusionBridge().measurePromptTokens(
+                        bundleRoot = descriptor.bundleRoot.path,
+                        tokenizerBackend = descriptor.backend.name,
+                        tokenizerJsonPath = descriptor.tokenizerJsonPath?.path.orEmpty(),
+                        prompt = prompt,
+                        bosId = descriptor.bosId,
+                        eosId = descriptor.eosId,
+                        padId = descriptor.padId,
+                        maxTokens = descriptor.maxTokens,
+                        promptWeightingEnabled = descriptor.promptWeightingEnabled,
+                    )
+                }
+                ImagePromptTokenMeasurementRoute.SDCPP_CLIP -> {
+                    if (!NativeStableDiffusionBridge.isAvailable) return@runCatching null
+                    NativeStableDiffusionBridge().measurePromptTokens(
+                        tokenizerKind = "CLIP",
+                        prompt = prompt,
+                        maxTokens = descriptor.maxTokens,
+                    )
+                }
+                ImagePromptTokenMeasurementRoute.ESTIMATE -> error("Handled before native routing.")
+            }
         }.getOrNull() ?: return@withContext null
         currentCoroutineContext().ensureActive()
         val json = runCatching { JSONObject(raw) }.getOrNull() ?: return@withContext null
@@ -3954,6 +4024,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ?.takeIf { value -> value in 1L..Int.MAX_VALUE.toLong() }
             ?.toInt()
             ?: return@withContext null
+        if (maxTokens != descriptor.maxTokens) return@withContext null
         val overflowOffset = json.opt("overflowByteOffset")
             .takeIf { value -> value is Byte || value is Short || value is Int || value is Long }
             ?.let { (it as Number).toLong() }
@@ -3964,6 +4035,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             count = count,
             maxTokens = maxTokens,
             overflowOffset = overflowOffset,
+            exact = true,
         )
         currentCoroutineContext().ensureActive()
         imagePromptTokenMeasurementCache.put(measurementCacheKey, measurement)
@@ -5370,7 +5442,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val message = if (cancelled) {
                         "已取消图片生成"
                     } else {
-                        error.message ?: "图片生成模型调用失败"
+                        val nativeMessage = error.message ?: "图片生成模型调用失败"
+                        val translatedPrompt = preparedJobSpec.promptExecution
+                            ?.effectivePrompt
+                            ?.takeIf { it.isNotBlank() && it != preparedJobSpec.prompt }
+                        if (translatedPrompt != null) {
+                            "$nativeMessage\n建议使用英文提示词重试：$translatedPrompt"
+                        } else {
+                            nativeMessage
+                        }
                     }
                     _uiState.update { state ->
                         state.copy(
@@ -6287,7 +6367,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importLocalImageModel(uri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
+        launchModelOperation("模型操作未完成") {
             busy("正在导入本地图像生成引擎...")
             runCatching {
                 localImageModelStore.importFromUri(uri)
@@ -6317,6 +6397,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
+                if (error is CancellationException) throw error
                     fail(error.message ?: "本地图像生成引擎导入失败")
                 }
         }
@@ -6668,12 +6749,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteLocalImageModel(modelId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
+        launchModelOperation("模型操作未完成") {
             if (activeImageGenerationModelId == modelId || activeLocalApiImageModelId == modelId) {
                 _uiState.update {
                     it.copy(statusMessage = "当前图片任务正在使用该模型，请停止或等待任务完成后再删除")
                 }
-                return@launch
+                return@launchModelOperation
             }
             val removed = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
             val success = runCatching { localImageModelStore.deleteModel(modelId) }.getOrDefault(false)
@@ -6926,38 +7007,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             state.assistants.map { if (it.id == assistant.id) assistant else it }
         }
         assistantStore.saveAssistants(updatedAssistants)
-        assistantStore.saveSelectedAssistantId(assistant.id)
+        val shouldSelectAssistant = existing == null || existing.id == state.selectedAssistantId
+        if (shouldSelectAssistant) {
+            assistantStore.saveSelectedAssistantId(assistant.id)
+        }
         val updatedParams = assistant.toGenerationParams(state.params)
-        persistGenerationParams(updatedParams)
-        val updatedSessions = state.chatSessions.bindSession(
-            sessionId = state.activeChatSessionId,
-            assistantId = assistant.id,
-            assistantSnapshot = assistant.toConversationSnapshot().takeIf { existing == null },
-            replaceAssistantSnapshot = existing == null,
-            modelMode = state.selectedChatBackend.bindingValue(),
-            modelId = state.currentChatModelId()
-        )
+        if (shouldSelectAssistant) {
+            persistGenerationParams(updatedParams)
+        }
+        // An assistant edit changes the persona that the user sees in the editor.  Keep the
+        // selected assistant, session binding, and effective generation snapshot consistent:
+        // leaving an older snapshot in an existing session made the UI show the new card while
+        // the runner silently continued to use the old one.
+        val applyToActiveConversation = shouldSelectAssistant && state.activeChatSessionId != null
+        val updatedSessions = if (applyToActiveConversation) {
+            state.chatSessions.bindSession(
+                sessionId = state.activeChatSessionId,
+                assistantId = assistant.id,
+                assistantSnapshot = assistant.toConversationSnapshot(),
+                replaceAssistantSnapshot = true,
+                modelMode = state.selectedChatBackend.bindingValue(),
+                modelId = state.currentChatModelId()
+            )
+        } else {
+            state.chatSessions
+        }
         _uiState.update {
             it.copy(
                 assistants = updatedAssistants,
-                selectedAssistantId = assistant.id,
-                params = updatedParams,
+                selectedAssistantId = if (shouldSelectAssistant) assistant.id else state.selectedAssistantId,
+                params = if (shouldSelectAssistant) updatedParams else state.params,
                 chatSessions = updatedSessions,
                 statusMessage = when {
                     existing == null -> "已创建助手：${assistant.name}"
-                    state.activeChatSessionId != null ->
-                        "已更新助手：${assistant.name}；当前对话会继续使用已固定的人设。"
+                    applyToActiveConversation ->
+                        "已更新助手：${assistant.name}；当前对话已应用新的角色卡。"
                     else -> "已更新助手：${assistant.name}"
                 }
             )
         }
         persistChatSessions(updatedSessions)
-        if (existing == null && state.activeChatSessionId != null) {
-            // A newly-created assistant takes over the active conversation.
-            // Do not allow a local runner to continue from the previous role's KV.
+        if (applyToActiveConversation) {
+            // The persona prefix changed. Do not allow a local runner to continue from the
+            // previous role's KV cache, regardless of whether the assistant was newly created.
             markLocalConversationContextInvalid()
         }
-        applyAssistantDefaultModel(assistant)
+        if (shouldSelectAssistant) {
+            applyAssistantDefaultModel(assistant)
+        }
     }
 
     fun saveWebSearchConfig(
@@ -7845,8 +7942,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun finishCharacterCardImport(result: CharacterCardParseResult) {
         val success = result as? CharacterCardParseResult.Success ?: run {
             val failure = result as CharacterCardParseResult.Failure
+            val nextStep = when (failure.error.code) {
+                CharacterCardParseErrorCode.MISSING_CARD_METADATA ->
+                    "请确认选择的是带 chara/ccv3 角色卡元数据的 PNG，而不是普通图片。"
+                CharacterCardParseErrorCode.INVALID_PNG,
+                CharacterCardParseErrorCode.PNG_TOO_LARGE ->
+                    "请重新导出 PNG 角色卡，或改用同一角色卡的 JSON 文件。"
+                CharacterCardParseErrorCode.INVALID_CARD_METADATA,
+                CharacterCardParseErrorCode.CARD_METADATA_TOO_LARGE ->
+                    "请使用标准 Character Card v2/v3 导出文件；如果来自其他应用，请先重新导出。"
+                CharacterCardParseErrorCode.INVALID_JSON,
+                CharacterCardParseErrorCode.UNSUPPORTED_CARD,
+                CharacterCardParseErrorCode.MISSING_CARD_DATA ->
+                    "请导入标准角色卡 JSON（chara_card_v2/chara_card_v3）后重试。"
+                CharacterCardParseErrorCode.IO_ERROR ->
+                    "请重新选择文件并允许文件读取权限。"
+                else -> "请换用标准 PNG/JSON 角色卡后重试。"
+            }
             _uiState.update {
-                it.copy(statusMessage = "角色卡导入失败：${failure.error.message}")
+                it.copy(statusMessage = "角色卡导入失败：${failure.error.message} 下一步：$nextStep")
             }
             return
         }
@@ -8566,7 +8680,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importModel(uris: List<Uri>) {
-        viewModelScope.launch(Dispatchers.IO) {
+        launchModelOperation("导入未完成") {
             busy("正在导入本地推理引擎...")
             runCatching {
                 modelStore.importFromUris(uris)
@@ -8580,6 +8694,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 fail("导入失败：${error.message}")
             }
         }
@@ -8629,36 +8744,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun downloadRecommended(model: ModelScopeRecommendedModel) {
-        recommendedDownloadBlockReason(model)?.let { reason ->
-            _uiState.update { it.copy(statusMessage = reason) }
-            return
-        }
-        if (model.mnnModelBundle != null) {
-            downloadRecommendedMnnBundle(model)
-            return
-        }
-        if (model.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT) {
-            downloadRecommendedQairtChatBundle(model)
-            return
-        }
-        if (model.visionModelBundle?.downloadProjectorByDefault == true) {
-            downloadRecommendedVisionBundle(model)
-            return
-        }
-        if (model.imageEngineBundle != null) {
-            downloadRecommendedImageBundle(model)
-            return
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            busy("正在准备下载推荐模型：${model.title}...")
-            runCatching {
-                modelScopeClient.recommendedFile(model)
-            }.onSuccess { remote ->
-                download(remote)
-            }.onFailure { error ->
-                fail("推荐模型下载准备失败：${error.message}")
-            }
-        }
+        downloadRecommended(model, useAfterDownload = false)
+    }
+
+    fun downloadRecommended(model: ModelScopeRecommendedModel, useAfterDownload: Boolean) {
+        val blocked = recommendedDownloadBlockReason(model)
+        if (blocked != null) { fail(blocked); return }
+        enqueueManagedDownload(ManagedDownloadRequest.recommended(model), useAfterDownload)
     }
 
     private fun recommendedDownloadBlockReason(model: ModelScopeRecommendedModel): String? {
@@ -8671,7 +8763,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun attachVisionProjector(modelId: String, uri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
+        launchModelOperation("模型操作未完成") {
             busy("正在绑定本地视觉投影器...")
             val shouldReload = _uiState.value.loadedModelId == modelId &&
                 _uiState.value.selectedChatBackend == ChatBackend.LOCAL
@@ -8694,395 +8786,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     loadModel(model)
                 }
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 fail("视觉文件绑定失败：${error.message}")
             }
         }
     }
 
-    private fun downloadRecommendedQairtChatBundle(model: ModelScopeRecommendedModel) {
-        viewModelScope.launch(Dispatchers.IO) {
-            busy("正在准备下载 QNN 聊天引擎：${model.title}...")
-            runCatching {
-                val remote = modelScopeClient.recommendedQairtChatFile(
-                    model = model,
-                    preferredChipsets = preferredQairtChipsets(currentDeviceProfile())
-                )
-                val bundleId = remote.name.removeSuffix(".zip").ifBlank { model.id }
-                val bundleDir = modelStore.managedBundleDirFor(bundleId)
-                val finalZip = modelStore.managedBundleFileFor(bundleDir, remote.name)
-                val expected = remote.sizeBytes ?: 0L
-                if (expected > 0L && bundleDir.usableSpace in 1 until expected) {
-                    error("存储空间不足：QAIRT 引擎包还需 ${formatBytes(expected)}，请清理空间后重试。")
-                }
-                val tempDir = getApplication<Application>().externalCacheDir ?: getApplication<Application>().cacheDir
-                val tempFile = File(tempDir, "${bundleId}-${remote.name}.part".replace(Regex("[^A-Za-z0-9._-]"), "_"))
-                downloader.download(remote, tempFile, finalZip) { snapshot ->
-                    _uiState.update {
-                        it.copy(
-                            downloadFileName = snapshot.fileName,
-                            downloadedBytes = snapshot.downloadedBytes,
-                            downloadTotalBytes = snapshot.expectedLength,
-                            downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
-                            downloadRemainingSeconds = snapshot.remainingSeconds,
-                            downloadStatus = snapshot.status,
-                            statusMessage = "正在下载 QNN 聊天引擎：${snapshot.fileName}"
-                        )
-                    }
-                }
-                clearBundleDirectoryExcept(bundleDir, finalZip)
-                unzipIntoDirectory(finalZip, bundleDir)
-                finalZip.delete()
-                val qairtBundleRoot = modelStore.resolveQairtBundleRoot(bundleDir)
-                modelStore.registerDownloadedQairtBundle(
-                    displayName = model.title,
-                    bundleDir = qairtBundleRoot,
-                    repoId = model.repoId,
-                    revision = model.revision,
-                    source = remote.provider.toModelSource(),
-                    quant = model.quant,
-                    architecture = recommendedQairtArchitecture(model)
-                )
-            }.onSuccess { registered ->
-                val localModels = modelStore.listModels()
-                val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(localModels)
-                managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update {
-                    it.copy(
-                        models = localModels,
-                        qairtVerifiedLocalModelIds = qairtVerifiedIds,
-                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
-                            models = localModels,
-                            verifiedLocalModelIds = qairtVerifiedIds,
-                            recommendations = it.recommendedRemoteModels
-                        ),
-                        busy = false,
-                        downloadStatus = DownloadStatus.DONE,
-                        downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
-                        downloadSpeedBytesPerSecond = 0L,
-                        downloadRemainingSeconds = null,
-                        statusMessage = "已下载 QNN 聊天引擎：${registered.displayName}。请在本地模型中加载后执行真机 smoke test；通过前不宣传为已跑通。"
-                    )
-                }
-            }.onFailure { error ->
-                fail("QNN 聊天引擎下载失败：${downloadFailureAdvice(error.message)}")
-            }
-        }
-    }
 
-    private fun downloadRecommendedMnnBundle(model: ModelScopeRecommendedModel) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val bundle = model.mnnModelBundle ?: return@launch
-            busy("正在准备下载 MNN 高速引擎：${bundle.title}...")
-            runCatching {
-                val components = modelScopeClient.recommendedMnnBundleFiles(model)
-                val config = components.firstOrNull {
-                    it.mnnBundleRole == MnnModelBundleComponentRole.CONFIG
-                } ?: error("MNN 模型包缺少 config.json。")
-                val bundleDir = modelStore.managedBundleDirFor(bundle.id)
-                val installer = ModelBundleInstaller(
-                    BundleComponentDownloader { remote, tempFile, stagedFile, onProgress ->
-                        downloader.download(remote, tempFile, stagedFile, onProgress)
-                    }
-                )
-                val plan = installer.plan(bundleDir, components)
-                val knownTotalBytes = components.sumOf { remote -> remote.sizeBytes ?: 0L }
-                val usableSpace = bundleDir.usableSpace
-                if (knownTotalBytes > 0L && usableSpace in 1 until knownTotalBytes) {
-                    error("存储空间不足：MNN 引擎包约需 ${formatBytes(knownTotalBytes)}，请清理空间后重试。")
-                }
-                val downloadedBytesByPath = mutableMapOf<String, Long>()
-                val installed = installer.install(
-                    bundleRoot = bundleDir,
-                    components = components,
-                    stagedTransformer = bundle.installProfile.stagedTransformer()
-                ) { snapshot ->
-                    val targetIndex = plan.targets.indexOfFirst { target ->
-                        target.finalFile.canonicalFile == snapshot.finalFile.canonicalFile
-                    }
-                    val target = plan.targets.getOrNull(targetIndex)
-                    val progressPath = target?.relativePath ?: snapshot.fileName
-                    downloadedBytesByPath[progressPath] = snapshot.downloadedBytes
-                    _uiState.update {
-                        it.copy(
-                            downloadFileName = progressPath,
-                            downloadedBytes = downloadedBytesByPath.values.sum(),
-                            downloadTotalBytes = knownTotalBytes.takeIf { total -> total > 0L } ?: snapshot.expectedLength,
-                            downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
-                            downloadRemainingSeconds = snapshot.remainingSeconds,
-                            downloadStatus = snapshot.status,
-                            statusMessage = "正在下载 MNN 组件 ${(targetIndex + 1).coerceAtLeast(1)}/${plan.targets.size}：${target?.remote?.kindLabel() ?: "组件"} · $progressPath"
-                        )
-                    }
-                }
-                require(installer.verifyInstalledBundle(installed.bundleRoot).isVerified) {
-                    "MNN 模型包安装后的组件校验失败，请重新下载。"
-                }
-                modelStore.registerDownloadedMnnBundle(
-                    displayName = model.title,
-                    bundleDir = installed.bundleRoot,
-                    repoId = bundle.repoId,
-                    revision = bundle.revision,
-                    license = config.license,
-                    source = bundle.provider.toModelSource(),
-                    quant = model.quant,
-                    architecture = model.title.substringBefore(' ').lowercase().takeIf { it.isNotBlank() },
-                    requiredFiles = bundle.requiredComponents.map { it.relativePath }
-                )
-            }.onSuccess { registered ->
-                managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update {
-                    it.copy(
-                        models = modelStore.listModels(),
-                        busy = false,
-                        downloadStatus = DownloadStatus.DONE,
-                        downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
-                        downloadSpeedBytesPerSecond = 0L,
-                        downloadRemainingSeconds = null,
-                        statusMessage = "已下载 MNN 高速引擎包：${registered.displayName}。可在本地模型中加载；GGUF / llama.cpp 继续作为兼容引擎。"
-                    )
-                }
-            }.onFailure { error ->
-                fail("MNN 高速引擎下载失败：${downloadFailureAdvice(error.message)}")
-            }
-        }
-    }
 
-    private fun downloadRecommendedVisionBundle(model: ModelScopeRecommendedModel) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val bundle = model.visionModelBundle ?: return@launch
-            busy("正在准备下载多模态模型包：${bundle.title}...")
-            runCatching {
-                val components = modelScopeClient.recommendedVisionBundleFiles(model)
-                val primary = components.firstOrNull {
-                    it.visionBundleRole == VisionModelBundleComponentRole.MAIN_MODEL
-                } ?: error("多模态模型包缺少主模型。")
-                val projector = components.firstOrNull {
-                    it.visionBundleRole == VisionModelBundleComponentRole.PROJECTOR
-                }
-                val bundleDir = modelStore.managedBundleDirFor(bundle.id)
-                val targets = components.map { remote ->
-                    remote to modelStore.managedBundleFileFor(bundleDir, remote.path)
-                }
-                val bytesToDownload = targets.sumOf { (remote, _) -> remote.sizeBytes ?: 0L }
-                val usableSpace = targets.firstOrNull()?.second?.parentFile?.usableSpace ?: 0L
-                if (bytesToDownload > 0L && usableSpace in 1 until bytesToDownload) {
-                    error("存储空间不足：多模态模型包约需 ${formatBytes(bytesToDownload)}，请清理空间后重试。")
-                }
-                val tempDir = getApplication<Application>().externalCacheDir ?: getApplication<Application>().cacheDir
-                var completedBytes = 0L
-                targets.forEachIndexed { index, (remote, finalFile) ->
-                    val tempFile = File(tempDir, "${bundle.id}-${remote.name}.part".replace(Regex("[^A-Za-z0-9._-]"), "_"))
-                    val completedBefore = completedBytes
-                    downloader.download(remote, tempFile, finalFile) { snapshot ->
-                        _uiState.update {
-                            it.copy(
-                                downloadFileName = snapshot.fileName,
-                                downloadedBytes = completedBefore + snapshot.downloadedBytes,
-                                downloadTotalBytes = bytesToDownload.takeIf { total -> total > 0L } ?: snapshot.expectedLength,
-                                downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
-                                downloadRemainingSeconds = snapshot.remainingSeconds,
-                                downloadStatus = snapshot.status,
-                                statusMessage = "正在下载多模态组件 ${index + 1}/${targets.size}：${remote.kindLabel()} · ${snapshot.fileName}"
-                            )
-                        }
-                    }
-                    completedBytes += finalFile.length()
-                }
-                val primaryFile = targets.firstOrNull { it.first == primary }?.second
-                    ?: error("多模态模型包主模型下载目标不存在。")
-                writeDownloadedVisionBundleManifest(
-                    displayName = model.title,
-                    bundleDir = bundleDir,
-                    bundle = bundle,
-                    targets = targets
-                )
-                if (bundle.runtime == VisionModelBundleRuntime.GGUF_MMPROJ) {
-                    val projectorRemote = projector ?: error("多模态模型包缺少 mmproj / projector。")
-                    val projectorFile = targets.firstOrNull { it.first == projectorRemote }?.second
-                        ?: error("多模态模型包 projector 下载目标不存在。")
-                    val registered = modelStore.registerDownloadedModel(
-                        file = primaryFile,
-                        repoId = primary.repoId,
-                        revision = primary.revision,
-                        license = primary.license,
-                        source = primary.provider.toModelSource()
-                    )
-                    VisionBundleDownloadResult.ChatModel(
-                        modelStore.attachVisionProjectorFile(registered.id, projectorFile, projectorRemote.name)
-                    )
-                } else {
-                    val report = LiteRtQnnVisionRunner(
-                        context = getApplication<Application>()
-                    ).health(
-                        device = currentDeviceProfile(),
-                        bundleRoot = bundleDir
-                    )
-                    VisionBundleDownloadResult.EngineBundle(
-                        displayName = model.title,
-                        bundleDir = bundleDir,
-                        report = report
-                    )
-                }
-            }.onSuccess { result ->
-                managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update {
-                    val status = when (result) {
-                        is VisionBundleDownloadResult.ChatModel ->
-                            "已下载多模态聊天模型：${result.model.displayName}，并绑定视觉投影器。加载后可直接聊天和识图。"
-                        is VisionBundleDownloadResult.EngineBundle ->
-                            "已下载本地图片理解候选包：${result.displayName}。${result.report.message}"
-                    }
-                    it.copy(
-                        models = modelStore.listModels(),
-                        busy = false,
-                        downloadStatus = DownloadStatus.DONE,
-                        downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
-                        downloadSpeedBytesPerSecond = 0L,
-                        downloadRemainingSeconds = null,
-                        statusMessage = status
-                    )
-                }
-            }.onFailure { error ->
-                fail("多模态模型下载失败：${downloadFailureAdvice(error.message)}")
-            }
-        }
-    }
 
-    private fun downloadRecommendedImageBundle(model: ModelScopeRecommendedModel) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val bundle = model.imageEngineBundle ?: return@launch
-            busy("正在准备下载生图引擎包：${bundle.title}...")
-            runCatching {
-                val components = modelScopeClient.recommendedImageBundleFiles(
-                    model = model,
-                    preferredQairtChipsets = preferredQairtChipsets(currentDeviceProfile())
-                )
-                val primary = components.firstOrNull { it.bundleRole == ImageEngineBundleComponentRole.DIFFUSION }
-                    ?: error("生图引擎包缺少 diffusion 主模型。")
-                val bundleDir = localImageModelStore.managedBundleDirFor(bundle.id)
-                val candidateDir = File(bundleDir.parentFile, ".${bundleDir.name}.candidate")
-                val installer = ModelBundleInstaller(
-                    BundleComponentDownloader { remote, tempFile, finalFile, onProgress ->
-                        downloader.download(remote, tempFile, finalFile, onProgress)
-                    }
-                )
-                val plan = installer.plan(candidateDir, components)
-                val knownTotalBytes = components.sumOf { it.sizeBytes ?: 0L }
-                val usableSpace = bundleDir.usableSpace
-                if (knownTotalBytes > 0L && usableSpace in 1 until knownTotalBytes) {
-                    error("存储空间不足：引擎包约需 ${formatBytes(knownTotalBytes)}，请清理空间后重试。")
-                }
-                val downloadedBytesByPath = mutableMapOf<String, Long>()
-                installer.install(candidateDir, components) { snapshot ->
-                    val targetIndex = plan.targets.indexOfFirst { target ->
-                        target.finalFile.canonicalFile == snapshot.finalFile.canonicalFile
-                    }
-                    val target = plan.targets.getOrNull(targetIndex)
-                    val progressPath = target?.relativePath ?: snapshot.fileName
-                    downloadedBytesByPath[progressPath] = snapshot.downloadedBytes
-                    _uiState.update {
-                        it.copy(
-                            downloadFileName = progressPath,
-                            downloadedBytes = downloadedBytesByPath.values.sum(),
-                            downloadTotalBytes = knownTotalBytes.takeIf { total -> total > 0L } ?: snapshot.expectedLength,
-                            downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
-                            downloadRemainingSeconds = snapshot.remainingSeconds,
-                            downloadStatus = snapshot.status,
-                            statusMessage = "正在下载生图组件 ${(targetIndex + 1).coerceAtLeast(1)}/${plan.targets.size}：${target?.remote?.kindLabel() ?: "组件"} · $progressPath"
-                        )
-                    }
-                }
-                var promoted = false
-                var previousBundleBackup: File? = null
-                try {
-                    val primaryFile = plan.targets.firstOrNull { it.remote == primary }?.finalFile
-                        ?: error("生图引擎包主模型下载目标不存在。")
-                    if (primaryFile.extension.equals("zip", ignoreCase = true)) {
-                        extractImageBundleZipIntoDirectory(primaryFile, candidateDir)
-                        check(primaryFile.delete()) { "无法清理已展开的引擎 ZIP：${primaryFile.name}" }
-                    }
-                    val installedBundle = resolveInstalledQnnRuntimeProfile(
-                        bundleDir = candidateDir,
-                        bundle = bundle,
-                        preferredHtpArch = currentDeviceProfile().let { device ->
-                            val chipsetCode = device.accelerationProfile.chipsetCode.ifBlank { device.socModel }
-                            DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(chipsetCode)
-                                ?: device.accelerationProfile.qnnRuntime.htpArchVersion.takeIf { it > 0 }
-                        }
-                    )
-                    preparePinnedQnnRuntimeMetadataIfRequired(candidateDir, installedBundle)
-                    prepareMnnDiffusionTokenizerIfPossible(candidateDir)
-                    val resolvedPrimary = localImageBundleManifestFromRoot(candidateDir)?.primaryFile
-                        ?: findPrimaryImageModel(candidateDir)
-                        ?: error("生图引擎包内没有可注册的 diffusion 主模型。")
-                    val primarySha256 = resolvedPrimary.sha256ForProfile()
-                    val manifestTargets = expandedImageBundleManifestTargets(
-                        bundleDir = candidateDir,
-                        resolvedPrimary = resolvedPrimary,
-                        targets = plan.targets.map { it.remote to it.finalFile }
-                    )
-                    writeDownloadedImageBundleManifest(
-                        displayName = model.title,
-                        bundleDir = candidateDir,
-                        bundle = installedBundle,
-                        targets = manifestTargets,
-                        primarySha256 = primarySha256
-                    )
-                    previousBundleBackup = promoteImageBundleCandidate(candidateDir, bundleDir)
-                    promoted = true
-                    val finalPrimary = File(bundleDir, resolvedPrimary.relativeTo(candidateDir).path)
-                    require(finalPrimary.isFile) { "生图引擎主模型在提交后不存在：${resolvedPrimary.name}" }
-                    val registered = localImageModelStore.registerDownloadedBundle(
-                        displayName = model.title,
-                        bundleDir = bundleDir,
-                        primaryFile = finalPrimary,
-                        primaryRemote = primary,
-                        componentCount = components.size,
-                        runtimeOverride = bundle.runtime.toLocalImageRuntime(),
-                        imageSizeOverride = "${bundle.smokeSpec.width}x${bundle.smokeSpec.height}",
-                        primarySha256 = primarySha256
-                    )
-                    previousBundleBackup?.deleteRecursively()
-                    registered
-                } catch (error: Throwable) {
-                    if (promoted) {
-                        restoreImageBundleBackup(bundleDir, previousBundleBackup)
-                    }
-                    candidateDir.deleteRecursively()
-                    throw error
-                }
-            }.onSuccess { record ->
-                val selection = settleLocalImageSelection(record)
-                val readiness = record.localImageReadinessForUi(
-                    selection.qnnVerificationCurrentByModelId[record.id]
-                )
-                val diagnostic = record.localImageVerificationDiagnosticMessage()
-                managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update {
-                    it.copy(
-                        localImageModels = selection.models,
-                        qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
-                        selectedLocalImageModelId = selection.selectedId,
-                        selectedImageBackend = selection.selectedBackend,
-                        busy = false,
-                        downloadStatus = DownloadStatus.DONE,
-                        downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
-                        downloadSpeedBytesPerSecond = 0L,
-                        downloadRemainingSeconds = null,
-                        statusMessage = if (readiness != null) {
-                            "已下载完整本地生图引擎包：${record.displayName}，但暂不能生成：$readiness"
-                        } else if (diagnostic != null) {
-                            "已下载完整本地生图引擎包：${record.displayName}；$diagnostic"
-                        } else {
-                            "已下载完整本地生图引擎包：${record.displayName}"
-                        }
-                    )
-                }
-            }.onFailure { error ->
-                fail("生图引擎包下载失败：${downloadFailureAdvice(error.message)}")
-            }
-        }
-    }
+
+
+
+
 
     fun searchHubModels(reset: Boolean = true) {
         val state = _uiState.value
@@ -9141,133 +8857,113 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun download(remote: RemoteModelFile) {
-        viewModelScope.launch(Dispatchers.IO) {
-            _uiState.update {
-                it.copy(
-                    busy = true,
-                    downloadFileName = remote.name,
-                    downloadedBytes = 0L,
-                    downloadTotalBytes = remote.sizeBytes ?: 0L,
-                    downloadSpeedBytesPerSecond = 0L,
-                    downloadRemainingSeconds = null,
-                    downloadStatus = DownloadStatus.RUNNING,
-                    statusMessage = "正在下载 ${remote.name}..."
-                )
+        enqueueManagedDownload(ManagedDownloadRequest(remote = remote,
+            projectorTargetId = if (remote.fileKind() == RemoteModelFileKind.PROJECTOR) _uiState.value.loadedModelId else null), false)
+    }
+
+
+
+
+    fun pauseManagedDownloads() {
+        launchModelOperation("暂停下载失败") {
+            androidx.work.WorkManager.getInstance(getApplication<Application>())
+                .cancelAllWorkByTag(ManagedModelDownloadWorker.TAG).result.get()
+        }
+    }
+
+    private fun enqueueManagedDownload(request: ManagedDownloadRequest, useAfterDownload: Boolean) {
+        launchModelOperation("无法开始下载") {
+            if (useAfterDownload) autoUseManagedDownloads.add(request.identity)
+            _uiState.update { it.copy(downloadStatus = DownloadStatus.QUEUED,
+                downloadFileName = request.remote?.name ?: request.recommendationId,
+                statusMessage = "下载任务已保存，网络可用时会继续；可暂停并保留进度。") }
+            ManagedModelDownloadWorker.enqueue(getApplication(), request)
+        }
+    }
+
+    private fun observeManagedDownloads() {
+        viewModelScope.launch {
+            BackgroundDownloadHealth.failure.collect { message ->
+                if (message != null) failDownload(message)
             }
-            runCatching {
-                val remoteKind = remote.fileKind()
-                if (remoteKind == RemoteModelFileKind.MNN_COMPONENT) {
-                    error("MNN 组件需要作为完整高速引擎包下载或多选导入。请回到推荐卡片点击“下载 MNN”，或一次选择完整组件。")
-                }
-                val imageModel = remote.isImageModelCandidate()
-                val targetVisionModel = if (remoteKind == RemoteModelFileKind.PROJECTOR) {
-                    val currentState = _uiState.value
-                    currentState.models.firstOrNull { it.id == currentState.loadedModelId }
-                        ?: error("请先加载要启用识图的本地多模态主模型，再下载 mmproj / projector。")
-                } else {
-                    null
-                }
-                val finalFile = if (imageModel) localImageModelStore.managedFileFor(remote.name) else modelStore.managedFileFor(remote.name)
-                val tempDir = getApplication<Application>().externalCacheDir ?: getApplication<Application>().cacheDir
-                val tempFile = File(tempDir, "${remote.name}.part")
-                val expectedBytes = remote.sizeBytes ?: 0L
-                val usableSpace = finalFile.parentFile?.usableSpace ?: 0L
-                if (expectedBytes > 0L && usableSpace in 1 until expectedBytes) {
-                    error("存储空间不足：模型约需 ${formatBytes(expectedBytes)}，请清理空间后重试。")
-                }
-                downloader.download(remote, tempFile, finalFile) { snapshot ->
-                    _uiState.update {
-                        it.copy(
-                            downloadFileName = snapshot.fileName,
-                            downloadedBytes = snapshot.downloadedBytes,
-                            downloadTotalBytes = snapshot.expectedLength,
-                            downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
-                            downloadRemainingSeconds = snapshot.remainingSeconds,
-                            downloadStatus = snapshot.status,
-                            statusMessage = snapshot.progressText()
-                        )
-                    }
-                }
-                if (imageModel) {
-                    DownloadedModelRegistration.Image(localImageModelStore.registerDownloadedModel(finalFile, remote))
-                } else if (remoteKind == RemoteModelFileKind.PROJECTOR && targetVisionModel != null) {
-                    DownloadedModelRegistration.VisionProjector(
-                        model = modelStore.attachVisionProjectorFile(targetVisionModel.id, finalFile, remote.name),
-                        shouldReload = _uiState.value.loadedModelId == targetVisionModel.id &&
-                            _uiState.value.selectedChatBackend == ChatBackend.LOCAL
-                    )
-                } else {
-                    DownloadedModelRegistration.Chat(
-                        modelStore.registerDownloadedModel(
-                            file = finalFile,
-                            repoId = remote.repoId,
-                            revision = remote.revision,
-                            license = remote.license,
-                            source = remote.provider.toModelSource()
-                        )
-                    )
-                }
-            }.onSuccess { registration ->
-                val registeredImageSelection = (registration as? DownloadedModelRegistration.Image)
-                    ?.let { image -> settleLocalImageSelection(image.model) }
-                managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update {
-                    when (registration) {
-                        is DownloadedModelRegistration.Chat -> it.copy(
-                            models = modelStore.listModels(),
-                            busy = false,
-                            downloadStatus = DownloadStatus.DONE,
-                            downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
-                            downloadSpeedBytesPerSecond = 0L,
-                            downloadRemainingSeconds = null,
-                            statusMessage = "已下载推理模型：${registration.model.displayName}"
-                        )
-                        is DownloadedModelRegistration.VisionProjector -> it.copy(
-                            models = modelStore.listModels(),
-                            busy = false,
-                            downloadStatus = DownloadStatus.DONE,
-                            downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
-                            downloadSpeedBytesPerSecond = 0L,
-                            downloadRemainingSeconds = null,
-                            statusMessage = if (registration.shouldReload) {
-                                "已下载并绑定视觉投影器：${registration.model.visionProjectorFileName ?: "mmproj"}，正在重新加载模型以启用本地识图。"
-                            } else {
-                                "已下载并绑定视觉投影器：${registration.model.visionProjectorFileName ?: "mmproj"}，加载该模型后可本地识图。"
-                            }
-                        )
-                        is DownloadedModelRegistration.Image -> {
-                            val selection = requireNotNull(registeredImageSelection)
-                            val readiness = registration.model.localImageReadinessForUi(
-                                selection.qnnVerificationCurrentByModelId[registration.model.id]
-                            )
-                            val diagnostic = registration.model.localImageVerificationDiagnosticMessage()
-                            it.copy(
-                                localImageModels = selection.models,
-                                qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
-                                selectedLocalImageModelId = selection.selectedId,
-                                selectedImageBackend = selection.selectedBackend,
-                                busy = false,
-                                downloadStatus = DownloadStatus.DONE,
-                                downloadedBytes = it.downloadTotalBytes.takeIf { total -> total > 0L } ?: it.downloadedBytes,
-                                downloadSpeedBytesPerSecond = 0L,
-                                downloadRemainingSeconds = null,
-                                statusMessage = if (readiness != null) {
-                                    "已下载图像主模型：${registration.model.displayName}。$readiness"
-                                } else if (diagnostic != null) {
-                                    "已下载图像生成模型：${registration.model.displayName}；$diagnostic"
-                                } else {
-                                    "已下载图像生成模型：${registration.model.displayName}"
-                                }
-                            )
+        }
+        launchModelOperation("下载任务恢复失败，请在模型页重试") {
+            val app = getApplication<Application>()
+            val acknowledgements = app.getSharedPreferences("mca_download_receipts", Context.MODE_PRIVATE)
+            val handled = acknowledgements.getStringSet("handled", emptySet()).orEmpty().toMutableSet()
+            androidx.work.WorkManager.getInstance(app)
+                .getWorkInfosByTagFlow(ManagedModelDownloadWorker.TAG).collect { infos ->
+                    val active = infos.firstOrNull { it.state == androidx.work.WorkInfo.State.RUNNING }
+                        ?: infos.firstOrNull { !it.state.isFinished }
+                    if (active != null) {
+                        val progress = active.progress
+                        _uiState.update { state ->
+                            if (!state.busy) managedDownloadOwnedBusy = true
+                            state.copy(busy = true,
+                                downloadStatus = if (active.state == androidx.work.WorkInfo.State.RUNNING) DownloadStatus.RUNNING else DownloadStatus.QUEUED,
+                                downloadFileName = progress.getString("file") ?: state.downloadFileName,
+                                downloadedBytes = progress.getLong("bytes", 0),
+                                downloadTotalBytes = progress.getLong("total", 0),
+                                downloadSpeedBytesPerSecond = progress.getLong("speed", 0),
+                                statusMessage = progress.getString("message") ?: "下载任务已保留，正在等待网络或其他下载完成…")
                         }
                     }
+                    infos.filter { it.state.isFinished && it.id.toString() !in handled }
+                        .sortedBy { work -> work.tags.firstOrNull { it.startsWith("created:") }?.removePrefix("created:")?.toLongOrNull() ?: 0L }.forEach { info ->
+                        recoverModelOperation(operation = {
+                            val error = info.outputData.getString("error")
+                            if (info.state == androidx.work.WorkInfo.State.SUCCEEDED && error == null) {
+                                refreshManagedRuntimeReadiness()
+                                val imageId = info.outputData.getString("imageId")
+                                val image = imageId?.let { id -> localImageModelStore.loadModels(discover = false).firstOrNull { it.id == id } }
+                                if (image != null) {
+                                    val selection = settleLocalImageSelection(image)
+                                    _uiState.update { it.copy(localImageModels = selection.models,
+                                        qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
+                                        selectedLocalImageModelId = selection.selectedId, selectedImageBackend = selection.selectedBackend) }
+                                }
+                                if (active == null) {
+                                    _uiState.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
+                                        downloadStatus = DownloadStatus.DONE, downloadSpeedBytesPerSecond = 0,
+                                        downloadRemainingSeconds = null, statusMessage = info.outputData.getString("message")) }
+                                    managedDownloadOwnedBusy = false
+                                }
+                                val model = info.outputData.getString("modelId")?.let(modelStore::getModel)
+                                if (model != null) useDownloadedChatModel(model, info.tags.any { autoUseManagedDownloads.remove(it) })
+                            } else if (active == null) {
+                                _uiState.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
+                                    downloadStatus = if (info.state == androidx.work.WorkInfo.State.CANCELLED) DownloadStatus.PAUSED else DownloadStatus.FAILED,
+                                    downloadSpeedBytesPerSecond = 0, downloadRemainingSeconds = null,
+                                    statusMessage = error ?: "下载已暂停，进度已保留。再次点击下载可继续。") }
+                                managedDownloadOwnedBusy = false
+                            }
+                        }, onFailure = { error ->
+                            failDownload("模型文件已保留，但刷新列表失败：${error.message}。请释放存储空间后刷新本地模型。")
+                        })
+                        handled.add(info.id.toString())
+                        acknowledgements.edit().putStringSet("handled", handled.toList().takeLast(128).toSet()).apply()
+                    }
                 }
-                if (registration is DownloadedModelRegistration.VisionProjector && registration.shouldReload) {
-                    loadModel(registration.model)
-                }
-            }.onFailure { error ->
-                fail("下载失败：${downloadFailureAdvice(error.message)}")
-            }
+        }
+    }
+
+    private fun launchModelOperation(message: String, operation: suspend kotlinx.coroutines.CoroutineScope.() -> Unit): Job =
+        viewModelScope.launch(Dispatchers.IO) {
+            recoverModelOperation(operation = { operation() }, onFailure = { error ->
+                Log.e("McaModelOperation", message, error)
+                _uiState.update { state -> state.copy(busy = false,
+                    statusMessage = "$message：${error.message.orEmpty()}。请检查模型文件和存储空间后重试。",
+                    engineLifecycle = if (state.engineLifecycle == AgentEngineLifecycle.LOADING) {
+                        if (state.stats.loaded) AgentEngineLifecycle.READY else AgentEngineLifecycle.ERROR
+                    } else state.engineLifecycle) }
+            })
+        }
+
+    private fun useDownloadedChatModel(model: ModelManifest, requested: Boolean) {
+        val state = _uiState.value
+        if (requested && !state.busy && !state.isGenerating && state.loadedModelId == null &&
+            state.selectedChatBackend == ChatBackend.LOCAL && state.tab == AppTab.MODELS) {
+            loadModel(model)
         }
     }
 
@@ -9320,7 +9016,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadModel(requestedModel: ModelManifest) {
-        viewModelScope.launch(Dispatchers.IO) {
+        launchModelOperation("模型操作未完成") {
             val runtimeBeforeLoad = captureLoadedRuntimeSnapshot()
             fun failBeforeNativeReplacement(message: String) {
                 // Release the input lock before diagnostics. Native/Binder reads can
@@ -9355,7 +9051,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     busy = true,
                     engineLifecycle = AgentEngineLifecycle.LOADING,
-                    statusMessage = "正在加载 ${requestedModel.displayName}..."
+                    statusMessage = "正在加载 ${requestedModel.displayName}...",
+                    modelLoadStage = "正在检查模型文件"
                 )
             }
             val preflight = modelStore.validateForLoad(requestedModel.id)
@@ -9370,10 +9067,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         "title=${preflight.title} details=${preflight.details.take(512)}"
                 )
                 failBeforeNativeReplacement("加载前检查失败：${preflight.message}")
-                return@launch
+                return@launchModelOperation
             }
             val params = _uiState.value.params
             var persistedModels = validatedCatalog.models
+            _uiState.update { it.copy(modelLoadStage = "正在准备运行环境") }
             var model = persistedModels.firstOrNull { it.id == requestedModel.id } ?: requestedModel
             val qairtVerifiedIds = if (model.runtime == ChatModelRuntime.GENIEX_QAIRT) {
                 validatedCatalog.qairtVerifiedLocalModelIds
@@ -9384,7 +9082,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val memoryAdmission = LocalModelMemoryAdmissionPolicy.evaluate(model, device)
             memoryAdmission.blocker?.let { message ->
                 failBeforeNativeReplacement("加载前内存检查失败：$message")
-                return@launch
+                return@launchModelOperation
             }
             var nativeReplacementOccurred = false
             var stagedBootstrapTransactionId: String? = null
@@ -9641,6 +9339,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val loadParams = model.loadParamsForExecutionProfile(bootstrapProfile)
             // LLAMA, MNN, and QAIRT keep the long-lived native handle in a worker process.
             // The load Result still owns concrete runtime failures and recovery decisions.
+            _uiState.update { it.copy(modelLoadStage = "正在加载模型，首次加载可能较慢") }
             val nativeLoad = engine.loadModel(
                 modelPath = model.path,
                 runtime = runtime,
@@ -9655,6 +9354,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 nativeReplacementOccurred = true
             }
             nativeLoad.getOrThrow()
+            _uiState.update { it.copy(modelLoadStage = "正在确认模型运行配置") }
             nativeReplacementOccurred = true
             val formalProfile = engine.activeExecutionProfile() ?: bootstrapProfile
             require(formalProfile.profileId == bootstrapProfile.profileId) {
@@ -9700,6 +9400,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             activeRuntimeIdentity = identity
             activeModelForRuntimeProfile = model
+            _uiState.update { it.copy(modelLoadStage = "正在完成准备") }
             val effectiveParams = mergeExecutionProfile(params, formalProfile)
             _uiState.update { state ->
                 state.copy(
@@ -9840,7 +9541,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun verifyModel(model: ModelManifest) {
-        viewModelScope.launch(Dispatchers.IO) {
+        launchModelOperation("模型操作未完成") {
             busy("正在校验 ${model.displayName}...")
             val result = modelStore.validateForLoad(model.id)
             val validatedCatalog = publishManagedChatCatalogAfterValidation()
@@ -10519,6 +10220,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ?: initialState.selectedAssistant()?.fileContextEnabled
                     ?: true
             )
+            val contextStatus = buildList {
+                if (initialState.selectedKnowledgeBaseIds.isNotEmpty()) {
+                    add(
+                        if ((assistantSnapshot?.fileContextEnabled
+                                ?: initialState.selectedAssistant()?.fileContextEnabled
+                                ?: true).not()
+                        ) {
+                            "知识库检索已关闭（当前助手的文件上下文开关已关闭）"
+                        } else if (runtimeContextPlan.knowledge.chunks.isEmpty()) {
+                            "本轮知识库未命中（已按当前问题检索）"
+                        } else {
+                            "本轮知识库命中 ${runtimeContextPlan.knowledge.chunks.size} 段"
+                        }
+                    )
+                }
+                val applicableWorldBooks = initialState.worldBooks.count { book ->
+                    book.enabled && when (book.scope) {
+                        WorldBookScope.GLOBAL -> true
+                        WorldBookScope.ASSISTANT -> book.assistantId == (assistantSnapshot?.assistantId
+                            ?: initialState.selectedAssistantId)
+                        WorldBookScope.CHAT -> book.chatSessionId == initialState.activeChatSessionId
+                    }
+                }
+                if (applicableWorldBooks > 0) {
+                    add(
+                        if (runtimeContextPlan.worldBook.selectedEntryIds.isEmpty()) {
+                            "本轮世界书未命中关键词"
+                        } else {
+                            "本轮世界书命中 ${runtimeContextPlan.worldBook.selectedEntryIds.size} 条"
+                        }
+                    )
+                }
+            }.joinToString("；").takeIf { it.isNotBlank() }
+            if (contextStatus != null) {
+                updateGenerationUi { it.copy(statusMessage = contextStatus) }
+            }
             val webSearchTurnMode = if (initialState.webSearchOneShotEnabled) {
                 WebSearchTurnMode.ON
             } else {
@@ -13697,6 +13434,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(busy = true, statusMessage = message) }
     }
 
+    private fun failDownload(message: String) {
+        _uiState.update { it.copy(busy = false, downloadStatus = DownloadStatus.FAILED,
+            downloadSpeedBytesPerSecond = 0L, downloadRemainingSeconds = null, statusMessage = message) }
+    }
+
     private fun fail(message: String) {
         _uiState.update { it.copy(busy = false, statusMessage = message) }
     }
@@ -15470,6 +15212,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrElse { JSONObject() }
         return JSONObject()
             .put("time", System.currentTimeMillis())
+            .put("startup", StartupDiagnostics.read(getApplication()))
             .put("loadedModelId", state.loadedModelId)
             .put("loadedModelName", state.loadedModelName)
             .put("modelPath", loadedModel?.path ?: state.stats.modelPath)
@@ -16743,105 +16486,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun currentDeviceProfile(): DeviceProfile =
         deviceProfileReader.read()
 
-    private fun preferredQairtChipsets(device: DeviceProfile): List<String> =
-        when (device.accelerationProfile.chipsetCode.trim().uppercase(Locale.US)) {
-            "SM8850", "SM8850P" -> listOf(
-                "qualcomm-snapdragon-8-elite-gen5",
-                "qualcomm-snapdragon-8-elite"
-            )
-            "SM8750", "SM8750P" -> listOf(
-                "qualcomm-snapdragon-8-elite",
-                "qualcomm-snapdragon-8-elite-gen5"
-            )
-            "SM8650", "SM8650P" -> listOf(
-                "qualcomm-snapdragon-8gen3",
-                "qualcomm-snapdragon-8-elite",
-                "qualcomm-snapdragon-8-elite-gen5"
-            )
-            "SM8550", "SM8550P" -> listOf(
-                "qualcomm-snapdragon-8gen2",
-                "qualcomm-snapdragon-8-elite",
-                "qualcomm-snapdragon-8-elite-gen5"
-            )
-            // Unknown/future devices must never produce an empty admission
-            // list. The repository client will prefer an exact key when one
-            // exists and otherwise choose a deterministic published fallback.
-            else -> listOf(
-                "qualcomm-snapdragon-8-elite",
-                "qualcomm-snapdragon-8-elite-gen5"
-            )
-        }
 
-    private fun clearBundleDirectoryExcept(bundleDir: File, keepFile: File) {
-        val root = runCatching { bundleDir.canonicalFile }.getOrNull() ?: return
-        val keep = runCatching { keepFile.canonicalFile }.getOrNull()
-        bundleDir.listFiles()?.forEach { child ->
-            val candidate = runCatching { child.canonicalFile }.getOrNull() ?: return@forEach
-            if (keep != null && candidate.absolutePath == keep.absolutePath) return@forEach
-            if (candidate.absolutePath.startsWith(root.absolutePath + File.separator)) {
-                child.deleteRecursively()
-            }
-        }
-    }
 
-    private fun promoteImageBundleCandidate(candidateDir: File, bundleDir: File): File? {
-        val candidate = candidateDir.canonicalFile
-        val destination = bundleDir.canonicalFile
-        val parent = destination.parentFile ?: throw IOException("生图引擎包目录没有父目录：$destination")
-        val backup = File(parent, ".${destination.name}.backup").canonicalFile
-        require(candidate.isDirectory) { "生图引擎候选目录不存在：$candidate" }
-        if (backup.exists() && !backup.deleteRecursively()) {
-            throw IOException("无法清理旧的生图引擎备份：$backup")
-        }
 
-        val hadExistingBundle = destination.exists()
-        if (hadExistingBundle && !destination.renameTo(backup)) {
-            throw IOException("无法备份现有生图引擎包：$destination")
-        }
-        if (!candidate.renameTo(destination)) {
-            if (hadExistingBundle && !destination.exists() && !backup.renameTo(destination)) {
-                throw IOException("无法提交新的生图引擎包，也无法恢复旧包：$backup")
-            }
-            throw IOException("无法提交生图引擎候选包：$candidate")
-        }
-        return backup.takeIf { hadExistingBundle }
-    }
 
-    private fun restoreImageBundleBackup(bundleDir: File, backup: File?) {
-        if (bundleDir.exists() && !bundleDir.deleteRecursively()) {
-            throw IOException("无法移除失败的生图引擎包：$bundleDir")
-        }
-        if (backup != null && backup.exists() && !backup.renameTo(bundleDir)) {
-            throw IOException("无法恢复先前的生图引擎包：$backup")
-        }
-    }
 
-    private fun unzipIntoDirectory(zipFile: File, targetDir: File) {
-        require(zipFile.isFile && zipFile.length() > 0L) { "QAIRT zip 包为空或不存在：${zipFile.name}" }
-        targetDir.mkdirs()
-        val root = targetDir.canonicalFile
-        ZipInputStream(zipFile.inputStream()).use { zip ->
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                val entryName = entry.name.replace('\\', '/').trimStart('/')
-                if (entryName.isBlank()) {
-                    zip.closeEntry()
-                    continue
-                }
-                val target = File(root, entryName).canonicalFile
-                require(target.absolutePath.startsWith(root.absolutePath + File.separator)) {
-                    "QAIRT zip 包包含不安全路径：${entry.name}"
-                }
-                if (entry.isDirectory) {
-                    target.mkdirs()
-                } else {
-                    target.parentFile?.mkdirs()
-                    target.outputStream().use { output -> zip.copyTo(output) }
-                }
-                zip.closeEntry()
-            }
-        }
-    }
+
+
+
+
+
 
     private fun sortRecommendedModels(
         models: List<ModelScopeRecommendedModel>,
@@ -17098,7 +16752,7 @@ private fun ImageExecutionProfile.resolveDownloadedExecutionGraphPaths(
     )
 }
 
-private fun expandedImageBundleManifestTargets(
+internal fun expandedImageBundleManifestTargets(
     bundleDir: File,
     resolvedPrimary: File,
     targets: List<Pair<RemoteModelFile, File>>
@@ -17120,7 +16774,7 @@ private fun expandedImageBundleManifestTargets(
         }
         .toMap()
     return root.walkTopDown()
-        .filter(File::isFile)
+        .filter { file -> file.isFile && file.length() > 0L }
         .filterNot { it.name == "manifest.json" || it.name.endsWith(".part") }
         .map { file ->
             val canonical = file.canonicalFile
@@ -17148,7 +16802,7 @@ private fun expandedImageBundleManifestTargets(
         .toList()
 }
 
-private fun writeDownloadedImageBundleManifest(
+internal fun writeDownloadedImageBundleManifest(
     displayName: String,
     bundleDir: File,
     bundle: ImageEngineBundleSpec,
@@ -17168,7 +16822,7 @@ private fun writeDownloadedImageBundleManifest(
     )
 }
 
-private fun preparePinnedQnnRuntimeMetadataIfRequired(
+internal fun preparePinnedQnnRuntimeMetadataIfRequired(
     bundleDir: File,
     bundle: ImageEngineBundleSpec
 ) {
@@ -17261,7 +16915,7 @@ internal fun downloadedVisionBundleManifestJson(
         .put("components", components)
 }
 
-private fun writeDownloadedVisionBundleManifest(
+internal fun writeDownloadedVisionBundleManifest(
     displayName: String,
     bundleDir: File,
     bundle: VisionModelBundleSpec,
@@ -17287,7 +16941,7 @@ private fun File.relativePathFromCommonRoot(targets: List<Pair<RemoteModelFile, 
     }
 }
 
-private fun ModelRepositoryProvider.toModelSource(): ModelSource =
+internal fun ModelRepositoryProvider.toModelSource(): ModelSource =
     when (this) {
         ModelRepositoryProvider.MODELSCOPE -> ModelSource.MODELSCOPE
         ModelRepositoryProvider.HUGGING_FACE -> ModelSource.HUGGING_FACE
@@ -17301,7 +16955,7 @@ private fun ChatModelRuntime.toLocalChatRuntime(): LocalChatRuntime =
         ChatModelRuntime.LITERT_LM -> LocalChatRuntime.LITERT_LM
     }
 
-private fun ImageEngineBundleRuntime.toLocalImageRuntime(): LocalImageRuntime =
+internal fun ImageEngineBundleRuntime.toLocalImageRuntime(): LocalImageRuntime =
     when (this) {
         ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP -> LocalImageRuntime.STABLE_DIFFUSION_CPP
         ImageEngineBundleRuntime.MNN_DIFFUSION -> LocalImageRuntime.MNN_DIFFUSION

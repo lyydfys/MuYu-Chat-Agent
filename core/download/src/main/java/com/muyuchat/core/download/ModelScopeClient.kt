@@ -860,12 +860,21 @@ class ModelScopeClient(
         private const val QNN_SD15_EXECUTION_PROFILE_REVISION = 5
         private const val QNN_DREAMSHAPER_SD15_EXECUTION_PROFILE_REVISION = 6
         private const val QNN_REALISTICVISIONHYPER_SD15_EXECUTION_PROFILE_REVISION = 6
-        private const val QNN_SDXL_EXECUTION_PROFILE_REVISION = 6
+        private const val QNN_SDXL_EXECUTION_PROFILE_REVISION = 7
         private const val QNN_GEN5_EXECUTION_PROFILE_REVISION = 2
         private val QNN_SD15_CONDITIONING_RUNTIME_ASSETS = listOf(
             "tokenizer.json",
             "token_emb.bin",
             "pos_emb.bin"
+        )
+        private val QNN_SDXL_CONDITIONING_RUNTIME_ASSETS = listOf(
+            "clip_2.mnn",
+            "clip_2.mnn.weight",
+            "tokenizer.json",
+            "token_emb.bin",
+            "token_emb_2.bin",
+            "pos_emb.bin",
+            "pos_emb_2.bin"
         )
         private val QAIRT_IMAGE_RELEASE_ASSET_MODEL_IDS = setOf(
             "qualcomm_sd15_gen5_qnn",
@@ -1259,7 +1268,8 @@ class ModelScopeClient(
         private fun stableDiffusionCppCapabilities(
             schedulers: Set<ImageEngineSchedulerAlgorithm>,
             family: ImageEngineModelFamily,
-            supportsNegativePrompt: Boolean = true
+            supportsNegativePrompt: Boolean = true,
+            fixedSize: Int? = null
         ): ImageEngineGenerationCapabilitiesSpec {
             val supportsStableExtensions = family in setOf(
                 ImageEngineModelFamily.SD15,
@@ -1270,10 +1280,10 @@ class ModelScopeClient(
             val ultraFixMultiple = if (family == ImageEngineModelFamily.SDXL) 32 else 64
             return ImageEngineGenerationCapabilitiesSpec(
                 supportedSchedulers = schedulers,
-                minWidth = 256,
-                maxWidth = 1_536,
-                minHeight = 256,
-                maxHeight = 1_536,
+                minWidth = fixedSize ?: 256,
+                maxWidth = fixedSize ?: 1_536,
+                minHeight = fixedSize ?: 256,
+                maxHeight = fixedSize ?: 1_536,
                 widthMultiple = 64,
                 heightMultiple = 64,
                 supportsNegativePrompt = supportsNegativePrompt,
@@ -1453,7 +1463,10 @@ class ModelScopeClient(
                 // select transport per graph.
                 htpArch = null,
                 vaeEncoder = "vae_encoder.bin",
-                workerStrategy = ImageEngineWorkerStrategy.SPLIT_UNET_VAE
+                workerStrategy = ImageEngineWorkerStrategy.SPLIT_UNET_VAE,
+                schedulerSidecar = null,
+                tokenizerSidecar = null,
+                runtimeAssets = QNN_SDXL_CONDITIONING_RUNTIME_ASSETS
             ),
             defaults = ImageEngineGenerationDefaultsSpec(
                 width = 1024,
@@ -1674,7 +1687,8 @@ class ModelScopeClient(
             algorithm: ImageEngineSchedulerAlgorithm,
             size: Int = 512,
             defaultNegativePrompt: String? = null,
-            supportsNegativePrompt: Boolean = true
+            supportsNegativePrompt: Boolean = true,
+            maxPromptTokens: Int = 77
         ): ImageEngineExecutionProfileSpec {
             val supportsStableExtensions = family in setOf(
                 ImageEngineModelFamily.SD15,
@@ -1684,11 +1698,12 @@ class ModelScopeClient(
             )
             return ImageEngineExecutionProfileSpec(
                 profileId = profileId,
-                profileRevision = if (supportsStableExtensions) 2 else 1,
+                profileRevision = if (supportsStableExtensions || maxPromptTokens > 77) 2 else 1,
                 family = family,
                 variant = variant,
                 tokenizer = clipTokenizer(
                     ImageEngineTokenizerBackend.SDCPP_NATIVE,
+                    maxLength = maxPromptTokens,
                     supportsTextualInversion = supportsStableExtensions,
                     separateNegativePrompt = supportsNegativePrompt
                 ),
@@ -1696,6 +1711,7 @@ class ModelScopeClient(
                     ImageEngineEmbeddingDataType.RUNTIME_NATIVE,
                     ImageEngineEmbeddingConversionStrategy.RUNTIME_NATIVE,
                     1,
+                    maxLength = maxPromptTokens,
                     separateNegativePrompt = supportsNegativePrompt
                 ),
                 scheduler = imageScheduler(
@@ -1722,7 +1738,8 @@ class ModelScopeClient(
                 capabilities = stableDiffusionCppCapabilities(
                     stableDiffusionCppSchedulers(algorithm),
                     family = family,
-                    supportsNegativePrompt = supportsNegativePrompt
+                    supportsNegativePrompt = supportsNegativePrompt,
+                    fixedSize = size
                 )
             )
         }
@@ -1762,7 +1779,7 @@ class ModelScopeClient(
                 profileId = "community.sdxl.base.qnn228",
                 steps = RecommendedImageDefaults.ANIMAGINE_XL_STEPS,
                 cfgScale = RecommendedImageDefaults.ANIMAGINE_XL_CFG,
-                defaultNegativePrompt = RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT
+                defaultNegativePrompt = RecommendedImageDefaults.ANIMAGINE_XL_NEGATIVE_PROMPT
             )
             "cyberrealisticxl_qnn228" -> qnnSdxlExecutionProfile(
                 profileId = "community.sdxl.base.qnn228",
@@ -1808,6 +1825,7 @@ class ModelScopeClient(
                 supportsNegativePrompt = false
             )
             "z_image_turbo_q4" -> stableDiffusionCppExecutionProfile(
+                maxPromptTokens = 512,
                 profileId = "sdcpp.z-image-turbo",
                 family = ImageEngineModelFamily.Z_IMAGE,
                 variant = ImageEngineModelVariant.Z_IMAGE_TURBO,
@@ -1817,6 +1835,7 @@ class ModelScopeClient(
                 supportsNegativePrompt = false
             )
             "flux2_klein_4b_q4" -> stableDiffusionCppExecutionProfile(
+                maxPromptTokens = 512,
                 profileId = "sdcpp.flux2-klein",
                 family = ImageEngineModelFamily.FLUX,
                 variant = ImageEngineModelVariant.FLUX2_KLEIN,
@@ -1829,6 +1848,7 @@ class ModelScopeClient(
                 supportsNegativePrompt = false
             )
             "qwen_image_2512_q2" -> stableDiffusionCppExecutionProfile(
+                maxPromptTokens = 512,
                 profileId = "sdcpp.qwen-image",
                 family = ImageEngineModelFamily.QWEN_IMAGE,
                 variant = ImageEngineModelVariant.QWEN_IMAGE,
@@ -1839,6 +1859,7 @@ class ModelScopeClient(
                 defaultNegativePrompt = RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT
             )
             "longcat_image_q4" -> stableDiffusionCppExecutionProfile(
+                maxPromptTokens = 512,
                 profileId = "sdcpp.longcat-image",
                 family = ImageEngineModelFamily.LONGCAT_IMAGE,
                 variant = ImageEngineModelVariant.LONGCAT_IMAGE,

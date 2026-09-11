@@ -1558,6 +1558,92 @@ class LocalImageModelReadinessTest {
     }
 
     @Test
+    fun animagineArchiveManifestIgnoresEmptyPublisherMarkerAndRequiresRealRuntimeAssets() {
+        val root = Files.createTempDirectory("animagine-qnn-archive").toFile()
+        try {
+            val model = ModelScopeClient().recommendedModels()
+                .single { it.id == "animagine_xl_v4_qnn228" }
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val nested = File(root, "output/qnn_models_sdxl_8gen3").apply { mkdirs() }
+            val runtimeNames = listOf(
+                "unet.bin",
+                "vae_decoder.bin",
+                "vae_encoder.bin",
+                "clip.mnn",
+                "clip_2.mnn",
+                "clip_2.mnn.weight",
+                "tokenizer.json",
+                "token_emb.bin",
+                "token_emb_2.bin",
+                "pos_emb.bin",
+                "pos_emb_2.bin"
+            )
+            val files = runtimeNames.associateWith { name -> nested.touch(name, "animagine-$name") }
+            File(nested, "SDXL").createNewFile()
+            val archive = File(root, "animagineXL40_v4Opt_qnn2.28_8gen3.zip")
+            val archiveRemote = remote(archive.name, ImageEngineBundleComponentRole.DIFFUSION)
+                .copy(relativePath = archive.name)
+            val primary = requireNotNull(files["unet.bin"])
+
+            val targets = expandedImageBundleManifestTargets(
+                bundleDir = root,
+                resolvedPrimary = primary,
+                targets = listOf(archiveRemote to archive)
+            )
+            val relativePaths = targets.map { it.first.relativePath }.toSet()
+            assertFalse(relativePaths.contains("output/qnn_models_sdxl_8gen3/SDXL"))
+            assertEquals(
+                runtimeNames.mapTo(linkedSetOf()) { "output/qnn_models_sdxl_8gen3/$it" },
+                relativePaths
+            )
+
+            val manifestJson = downloadedImageBundleManifestJson(
+                displayName = model.title,
+                bundle = bundle,
+                targets = targets,
+                primarySha256 = primary.sha256ForProfile(),
+                bundleRoot = root
+            )
+            File(root, "manifest.json").writeText(manifestJson.toString(2), Charsets.UTF_8)
+            val profile = ImageExecutionProfileJson.parseProfile(
+                manifestJson.getJSONObject("executionProfile")
+            )
+            val prefix = "output/qnn_models_sdxl_8gen3/"
+            assertNull(profile.graph.schedulerSidecar)
+            assertNull(profile.graph.tokenizerSidecar)
+            assertEquals(prefix + "unet.bin", requireNotNull(profile.graph.unet).relativePath)
+            assertEquals(prefix + "vae_decoder.bin", requireNotNull(profile.graph.vae).relativePath)
+            assertEquals(prefix + "clip.mnn", requireNotNull(profile.graph.textEncoder).relativePath)
+            assertEquals(
+                setOf(
+                    prefix + "clip_2.mnn",
+                    prefix + "clip_2.mnn.weight",
+                    prefix + "tokenizer.json",
+                    prefix + "token_emb.bin",
+                    prefix + "token_emb_2.bin",
+                    prefix + "pos_emb.bin",
+                    prefix + "pos_emb_2.bin"
+                ),
+                profile.graph.configSidecars.toSet()
+            )
+
+            val record = localImageRecord(
+                root = root,
+                primary = primary,
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SDXL
+            )
+            assertNull(record.localImageStructuralReadinessMessage())
+
+            requireNotNull(files["clip_2.mnn.weight"]).delete()
+            val missingMessage = requireNotNull(record.localImageStructuralReadinessMessage())
+            assertTrue(missingMessage.contains(prefix + "clip_2.mnn.weight"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun sdxlConditioningRootFollowsNestedManifestComponentDirectory() {
         val root = Files.createTempDirectory("nested-sdxl-conditioning").toFile()
         val nested = File(root, "output/qnn_models_sdxl_8gen3").apply { mkdirs() }

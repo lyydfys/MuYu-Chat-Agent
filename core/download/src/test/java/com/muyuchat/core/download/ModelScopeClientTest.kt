@@ -397,7 +397,7 @@ class ModelScopeClientTest {
             val profile = requireNotNull(
                 recommendations.first { it.id == id }.imageEngineBundle?.executionProfile
             )
-            assertEquals(6, profile.profileRevision)
+            assertEquals(7, profile.profileRevision)
             assertEquals(ImageEngineWorkerStrategy.SPLIT_UNET_VAE, profile.graph.workerStrategy)
             assertTrue(profile.tokenizer.supportsTextualInversion)
             assertTrue(profile.capabilities.supportsTextualInversion)
@@ -863,7 +863,7 @@ class ModelScopeClientTest {
             val scheduler = bundle.executionProfile!!.scheduler
             assertEquals(ImageEngineSchedulerAlgorithm.DPMPP_2M, scheduler.algorithm)
             assertEquals(2, scheduler.order)
-            assertEquals(6, bundle.executionProfile!!.profileRevision)
+            assertEquals(7, bundle.executionProfile!!.profileRevision)
             assertEquals(
                 setOf(
                     ImageEngineSchedulerAlgorithm.DPMPP_2M,
@@ -1122,6 +1122,22 @@ class ModelScopeClientTest {
             assertTrue(encoder.outputs.all {
                 it.dataType == "float32" && it.shape == listOf(1, 4, 128, 128)
             })
+            val profile = requireNotNull(bundle.executionProfile)
+            assertEquals(7, profile.profileRevision)
+            assertNull(profile.graph.schedulerSidecar)
+            assertNull(profile.graph.tokenizerSidecar)
+            assertEquals(
+                listOf(
+                    "clip_2.mnn",
+                    "clip_2.mnn.weight",
+                    "tokenizer.json",
+                    "token_emb.bin",
+                    "token_emb_2.bin",
+                    "pos_emb.bin",
+                    "pos_emb_2.bin"
+                ),
+                profile.graph.configSidecars
+            )
         }
 
         val cyber = models.single { it.id == "cyberrealisticxl_qnn228" }
@@ -2187,22 +2203,26 @@ class ModelScopeClientTest {
         "z_image_turbo_q4" to ExpectedImageProfile(
             "sdcpp.z-image-turbo", ImageEngineModelFamily.Z_IMAGE, ImageEngineModelVariant.Z_IMAGE_TURBO,
             8, 1.0, false, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 512, 512,
-            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0,
+            tokenizerMaxLength = 512
         ),
         "flux2_klein_4b_q4" to ExpectedImageProfile(
             "sdcpp.flux2-klein", ImageEngineModelFamily.FLUX, ImageEngineModelVariant.FLUX2_KLEIN,
             4, 1.0, false, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 1024, 1024,
-            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0,
+            tokenizerMaxLength = 512
         ),
         "qwen_image_2512_q2" to ExpectedImageProfile(
             "sdcpp.qwen-image", ImageEngineModelFamily.QWEN_IMAGE, ImageEngineModelVariant.QWEN_IMAGE,
             40, 2.5, true, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 1024, 1024,
-            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0,
+            tokenizerMaxLength = 512
         ),
         "longcat_image_q4" to ExpectedImageProfile(
             "sdcpp.longcat-image", ImageEngineModelFamily.LONGCAT_IMAGE, ImageEngineModelVariant.LONGCAT_IMAGE,
             20, 5.0, true, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 1024, 1024,
-            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0,
+            tokenizerMaxLength = 512
         )
     )
 
@@ -2214,8 +2234,8 @@ class ModelScopeClientTest {
         "qualcomm_sd21_gen5_qnn",
         "qualcomm_controlnet_canny_gen5_qnn",
         "sd15_mnn_512_quality" -> RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
-        "meinamix_sd15_qnn228",
-        "animagine_xl_v4_qnn228" -> RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT
+        "meinamix_sd15_qnn228" -> RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT
+        "animagine_xl_v4_qnn228" -> RecommendedImageDefaults.ANIMAGINE_XL_NEGATIVE_PROMPT
         "sdxl_base_qnn228" -> RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT
         "cyberrealisticxl_qnn228" -> RecommendedImageDefaults.CYBERREALISTIC_XL_NEGATIVE_PROMPT
         "mnn_sana_edit_v2" -> RecommendedImageDefaults.EDIT_NEGATIVE_PROMPT

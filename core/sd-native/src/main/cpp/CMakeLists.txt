@@ -66,6 +66,7 @@ add_library(mca_sd_native SHARED
         stable_diffusion_bridge.cpp)
 target_include_directories(mca_sd_native PRIVATE
         ${SDCPP_SRC}/include
+        ${SDCPP_SRC}/src
         ${SDCPP_SRC}/thirdparty
         ${MCA_IMAGE_EXECUTION_MATH_DIR})
 if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")

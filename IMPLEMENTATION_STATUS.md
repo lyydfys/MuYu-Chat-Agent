@@ -6,7 +6,7 @@ machine-specific paths and credentials so the project can be shared safely.
 ## Current Scope
 
 - Android multi-module Gradle project with Compose UI for chat, images, model management, Agent diagnostics, tuning, and settings.
-- Local chat runtimes: `llama.cpp`, MNN CPU, and separately admitted GenieX/QAIRT bundles.
+- Local chat runtimes: `llama.cpp`, MNN CPU/OpenCL, LiteRT-LM, and GenieX/QAIRT bundles; concrete package and runtime requirements determine compatibility.
 - Local image runtimes: `stable-diffusion.cpp`, experimental MNN-Diffusion, and QNN/HTP bundles. Device information ranks recommendations and selects a runtime transport; package integrity and real native load/graph execution determine compatibility.
 - Cloud chat/image integrations for OpenAI-compatible, Anthropic Messages, DashScope, and custom endpoints.
 - ModelScope recommendations, resumable downloads, local import, manifests, SHA-256 validation, and atomic MNN component/ZIP installation.
@@ -35,12 +35,20 @@ machine-specific paths and credentials so the project can be shared safely.
 - Sparse MoE admission is based on GGUF architecture metadata rather than a `35B-A3B` filename. On devices with up to 16 GiB physical RAM, sparse MoE uses reclaimable file-backed mmap pages, disables mlock and whole-file prefetch, forbids a large-model non-mmap fallback, keeps one sequence, and caps context/batch/ubatch at `4096/2048/256`.
 - Exact verified Qwen3.6 35B-A3B artifacts receive Q4 KV, Flash Attention, and `draft-mtp/2`. Adaptive tuning is now generated for the model being loaded, and the rule-set fingerprint invalidates an earlier profile that accidentally borrowed another model's `spec_type=none` plan. SHA-derived MTP capability still works if the user renames the model.
 
-## Current Verification
+## Current Verification (v0.2.3 preparation)
 
-- Full JVM `testDebugUnitTest` matrix: passed on JDK 17.
-- Signed `arm64-v8a :app:assembleRelease`: passed with MNN vendor/runtime provenance and typed QAIRT/QNN header verification.
-- Release packaging is v0.2.1 (`versionCode` 5). The GitHub Release contains the signed arm64 APK and its SHA-256 checksum.
-- APK Signature Scheme v2: verified; certificate SHA-256 `2619AC4CE0AD8397B84C77DF6BA165801FD4FAB1460470F22F1EB7B3E4F9A9CF`.
+- Version: `0.2.3`, `versionCode 7`; publication status is tracked in GitHub Releases.
+- Full JVM `:app:testDebugUnitTest test` passed on JDK 17: 3,687 tests across debug/release reports, 0 failures, 0 errors, 20 skipped. This includes the local-only admission safeguard; it is not distributed.
+- Debug-only smoke tests live in `src/testDebug` and both suites executed successfully (10 tests). Release test compilation no longer depends on debug-only activities.
+- Native image host tests: 12 compiled and executed successfully.
+- MNN vendor verification passed: commit `d407447e`, patch `074b6cd7…26af1a5`, 34 files. This update does not modify the vendor overlay.
+- Signed APK identity, build validation, and limitations are recorded in [v0.2.3 release notes](docs/releases/v0.2.3.md).
+- No ADB device was available in this preparation run. No new v0.2.3 physical-device, startup-latency, image-quality, or production UI/API acceptance is claimed.
+
+## Earlier Device Evidence
+
+The following records predate v0.2.3 and do not certify the current APK:
+
 - Formal Elite MainActivity + authenticated Local API MNN vision acceptance passed with distinct request IDs, native sequences 2 then 3, different image hashes, stable model/profile/signatures, `RuntimeOverride=NONE`, `engineLifecycle=ready`, and `generationActive=false`.
 - Formal Elite MainActivity + authenticated Local API Qwen3.6 35B-A3B acceptance also passed on the 12 GB-class device. Effective settings were mmap on, mlock off, no mmap fallback or prefetch, `4096/2048/256`, Q4 KV, Flash Attention, and `draft-mtp/2`; UI request `ui-0bd6319ae25f4bc4a2f68804118fbffc` used native sequence 2 and returned `ELITE_UI_35B_OK`, while API request `chatcmpl-51173d5c49ec4181b78ed446d1e10e8b` used sequence 3 and returned `ELITE_API_35B_OK`.
 - The bounded log window had no App FATAL, ANR, SIGSEGV, SIGABRT, OOM, crash-buffer entry, or process death.

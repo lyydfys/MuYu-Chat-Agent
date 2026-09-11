@@ -139,6 +139,13 @@ class WorldBookStoreTest {
                       "uid": "constant",
                       "content": "保持回答简洁。",
                       "constant": true
+                    },
+                    {
+                      "uid": "sillytavern-selective",
+                      "key": ["退款"],
+                      "keysecondary": ["订单"],
+                      "selective": true,
+                      "content": "订单退款规则。"
                     }
                   ]
                 }
@@ -152,7 +159,7 @@ class WorldBookStoreTest {
         assertEquals("城市资料", book.name)
         assertEquals(WorldBookScope.CHAT, book.scope)
         assertEquals("chat-7", book.chatSessionId)
-        assertEquals(3, book.entries.size)
+        assertEquals(4, book.entries.size)
 
         val shanghai = requireNotNull(book.entries.firstOrNull { it.id == "shanghai" })
         assertEquals(listOf("上海", "魔都", "沪上"), shanghai.keys)
@@ -164,6 +171,9 @@ class WorldBookStoreTest {
         assertEquals(7, disabled.priority)
 
         assertTrue(requireNotNull(book.entries.firstOrNull { it.id == "constant" }).constant)
+        val selective = requireNotNull(book.entries.firstOrNull { it.id == "sillytavern-selective" })
+        assertEquals(listOf("订单"), selective.secondaryKeys)
+        assertTrue(selective.selective)
     }
 
     @Test
@@ -191,6 +201,38 @@ class WorldBookStoreTest {
         assertTrue(selection.context.contains("西湖有苏堤与白堤。"))
         assertTrue(selection.context.contains("AI 助手应先确认目标。"))
         assertTrue(selection.context.contains("Café 使用组合字符匹配。"))
+    }
+
+    @Test
+    fun supportsSecondaryKeysAndRegexTriggers() {
+        val book = worldBook(
+            name = "advanced",
+            entries = listOf(
+                WorldBookEntry(
+                    id = "selective",
+                    keys = listOf("退款"),
+                    secondaryKeys = listOf("订单"),
+                    content = "订单退款规则。",
+                    selective = true
+                ),
+                WorldBookEntry(
+                    id = "regex",
+                    keys = listOf("ignored"),
+                    content = "版本号规则。",
+                    useRegex = true
+                ).copy(keys = listOf("v\\d+"))
+            )
+        )
+
+        val selection = WorldBookResolver.select(
+            books = listOf(book),
+            messages = listOf(ChatMessage(Role.USER, "请处理订单退款，当前是 v2。")),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 128
+        )
+
+        assertEquals(listOf("regex", "selective"), selection.selectedEntryIds)
     }
 
     @Test

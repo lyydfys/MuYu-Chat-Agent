@@ -68,6 +68,13 @@ class LocalImageAutomaticSelectionPolicyTest {
         }
     }
 
+    @Test
+    fun `product selection does not inherit debug local-test preference when real model exists`() {
+        val source = File("src/main/java/com/muyuchat/mca/MainViewModel.kt").readText()
+        assertTrue(source.contains("preferred?.source.equals(\"local-test\", ignoreCase = true)"))
+        assertTrue(source.contains("must not silently become the product's default"))
+    }
+
     private fun model(
         root: File,
         id: String,

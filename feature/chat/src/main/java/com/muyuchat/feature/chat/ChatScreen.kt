@@ -132,6 +132,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Slider
@@ -243,6 +244,7 @@ private val McaInputText = Color(0xFF1F2937)
 private val McaInputPlaceholder = Color(0xFF8A93A3)
 
 data class ChatUiState(
+    val modelLoadMessage: String? = null,
     val messages: List<ChatMessage> = emptyList(),
     val history: List<ChatHistoryItem> = emptyList(),
     val localModels: List<ChatModelChoice> = emptyList(),
@@ -488,7 +490,10 @@ data class WorldBookUiItem(
     val id: String,
     val name: String,
     val entryCount: Int,
-    val scopeLabel: String
+    val scopeLabel: String,
+    val enabled: Boolean = true,
+    val constantEntryCount: Int = 0,
+    val keywordEntryCount: Int = 0
 )
 
 /** Scope selected before the host launches a world-book document picker. */
@@ -1809,6 +1814,9 @@ fun ChatScreen(
     onLoadModel: (String) -> Unit = {},
     onOpenAgent: () -> Unit,
     onOpenModels: () -> Unit,
+    onOpenRecommendedModels: () -> Unit = onOpenModels,
+    onImportChatModel: () -> Unit = onOpenModels,
+    onImportImageModel: () -> Unit = onOpenModels,
     onOpenApi: () -> Unit,
     onOpenSettings: () -> Unit,
     onSaveAssistant: (AssistantEditorDraft) -> Unit = {},
@@ -1851,10 +1859,12 @@ fun ChatScreen(
     val generationImageGrantMutex = remember { Mutex() }
     var showImages by rememberSaveable { mutableStateOf(false) }
     var showAssistants by rememberSaveable { mutableStateOf(false) }
+    var showQuickStart by rememberSaveable { mutableStateOf(false) }
     var showFileLibrary by rememberSaveable { mutableStateOf(false) }
     var showBackgroundSettings by rememberSaveable { mutableStateOf(false) }
     var pendingBackgroundScope by rememberSaveable { mutableStateOf(ChatBackgroundScope.ASSISTANT) }
     var imagePrompt by rememberSaveable { mutableStateOf("") }
+    var imageValidationError by rememberSaveable { mutableStateOf<String?>(null) }
     var imageTaskModeName by rememberSaveable {
         mutableStateOf(ImageGenerationUiTaskMode.TEXT_TO_IMAGE.name)
     }
@@ -2350,10 +2360,11 @@ fun ChatScreen(
         }
     }
     fun enqueueImagePrompt(prompt: String) {
+        imageValidationError = null
         val cleanPrompt = prompt.trim()
         if (cleanPrompt.isBlank()) return
         if (imageTaskMode !in selectedImageTaskModes) {
-            Toast.makeText(context, "当前模型不支持此生成方式", Toast.LENGTH_SHORT).show()
+            imageValidationError = "当前模型不支持此生成方式"
             return
         }
         val requiredInputMissing = when (imageTaskMode) {
@@ -2364,23 +2375,23 @@ fun ChatScreen(
             ImageGenerationUiTaskMode.CONTROL -> imageControlUri == null
         }
         if (requiredInputMissing) {
-            Toast.makeText(context, "请先选择当前模式需要的图片输入", Toast.LENGTH_SHORT).show()
+            imageValidationError = "请先选择当前模式需要的图片输入"
             return
         }
         val strengthValue = imageStrengthText.toDoubleOrNull()
         if (imageTaskMode in setOf(
                 ImageGenerationUiTaskMode.IMG2IMG,
                 ImageGenerationUiTaskMode.INPAINT
-            ) && (strengthValue == null || strengthValue < 0.0 || strengthValue > 1.0)
+            ) && (strengthValue == null || !strengthValue.isFinite() || strengthValue < 0.0 || strengthValue > 1.0)
         ) {
-            Toast.makeText(context, "重绘强度必须在 [0, 1]", Toast.LENGTH_SHORT).show()
+            imageValidationError = "重绘强度必须在 [0, 1]"
             return
         }
         val controlStrengthValue = imageControlStrengthText.toDoubleOrNull()
         if (imageTaskMode == ImageGenerationUiTaskMode.CONTROL &&
-            (controlStrengthValue == null || controlStrengthValue < 0.0 || controlStrengthValue > 2.0)
+            (controlStrengthValue == null || !controlStrengthValue.isFinite() || controlStrengthValue < 0.0 || controlStrengthValue > 2.0)
         ) {
-            Toast.makeText(context, "控制强度必须在 [0, 2]", Toast.LENGTH_SHORT).show()
+            imageValidationError = "控制强度必须在 [0, 2]"
             return
         }
         val clipSkipValue = if (supportsImageClipSkip) {
@@ -2392,7 +2403,7 @@ fun ChatScreen(
             imageClipSkipText.isNotBlank() &&
             (clipSkipValue == null || clipSkipValue !in -1..32)
         ) {
-            Toast.makeText(context, "CLIP skip 必须为 -1 或 0-32", Toast.LENGTH_SHORT).show()
+            imageValidationError = "CLIP skip 参数必须为 -1 或 0-32"
             return
         }
         val localControls = selectedImageModelChoice?.takeUnless(ChatModelChoice::cloud)
@@ -2463,7 +2474,7 @@ fun ChatScreen(
         if (localControls != null &&
             (cfgScaleValue == null || !cfgScaleValue.isFinite() || cfgScaleValue !in 0.0..30.0)
         ) {
-            Toast.makeText(context, "CFG 必须为 0-30 的有限数值", Toast.LENGTH_SHORT).show()
+            imageValidationError = "CFG 必须为 0-30 的有限数值"
             return
         }
         val seedValue = localControls?.let {
@@ -2472,7 +2483,7 @@ fun ChatScreen(
         if (localControls != null && imageSeedText.isNotBlank() &&
             (seedValue == null || seedValue < 0)
         ) {
-            Toast.makeText(context, "Seed 必须为非负 32 位整数", Toast.LENGTH_SHORT).show()
+            imageValidationError = "Seed 必须为非负 32 位整数"
             return
         }
         val sampleMethodValue = localControls?.let { imageSampler.trim() }
@@ -2481,7 +2492,7 @@ fun ChatScreen(
                     sampleMethodValue !in selectedImageSupportedSamplers
                 )
         ) {
-            Toast.makeText(context, "请选择当前模型支持的采样器", Toast.LENGTH_SHORT).show()
+            imageValidationError = "当前采样器不可用，请选择模型支持的采样器"
             return
         }
         val loraSelections = if (supportsImageLora) {
@@ -2877,7 +2888,6 @@ fun ChatScreen(
                     onOpenModels = onOpenModels,
                     onReasoningModeChange = onReasoningModeChange,
                     onCloudReasoningModeLocked = onCloudReasoningModeLocked,
-                    onOpenBackgroundSettings = { showBackgroundSettings = true },
                     onOpenAppMenu = { onAppMenuOpenChange(true) }
                 )
 
@@ -2895,7 +2905,15 @@ fun ChatScreen(
                     verticalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
                     if (state.messages.isEmpty()) {
-                        item { EmptyChatPanel(state.selectedModelName) }
+                        item {
+                            EmptyChatPanel(
+                                modelName = state.selectedModelName,
+                                onChooseModel = onOpenRecommendedModels,
+                                onImportModel = onImportChatModel,
+                                showSetup = state.history.isEmpty() && state.localModels.isEmpty() && !state.isGenerating,
+                                onOpenQuickStart = { showQuickStart = true }
+                            )
+                        }
                     }
                     val lastAssistantIndex = state.messages.indexOfLast { it.role == Role.ASSISTANT }
                     itemsIndexed(
@@ -2936,6 +2954,7 @@ fun ChatScreen(
             }
 
             ChatInputBar(
+                onOpenModels = onOpenModels,
                 input = state.input,
                 isGenerating = state.isGenerating,
                 statusMessage = state.statusMessage,
@@ -2975,23 +2994,13 @@ fun ChatScreen(
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
 
-            if (showBackgroundSettings) {
-                ChatBackgroundSettingsDialog(
-                    effectiveState = chatBackground,
-                    globalState = globalChatBackground,
-                    assistantState = assistantChatBackground,
-                    sessionState = sessionChatBackground,
-                    hasActiveSession = hasActiveChatSession,
-                    importing = chatBackgroundImporting,
-                    onDismiss = { showBackgroundSettings = false },
-                    onChooseImage = { scope ->
-                        pendingBackgroundScope = scope
-                        chatBackgroundPicker.launch(arrayOf("image/*"))
-                    },
-                    onChange = onChatBackgroundChange,
-                    onReset = { scope -> onChatBackgroundChange(scope, null) }
+            if (showQuickStart) {
+                QuickStartDialog(
+                    onDismiss = { showQuickStart = false },
+                    onChooseModel = { showQuickStart = false; onOpenRecommendedModels() }
                 )
             }
+
 
             SmoothRightToLeftPage(
                 visible = showAssistants,
@@ -3027,6 +3036,10 @@ fun ChatScreen(
                 onDismiss = { showImages = false }
             ) { pageModifier, closePage ->
                 ImagesWorkspaceScreen(
+                    onOpenModels = onOpenRecommendedModels,
+                    onImportModel = onImportImageModel,
+                    statusMessage = imageValidationError ?: state.statusMessage,
+                    onDismissStatusMessage = { imageValidationError = null; onDismissStatusMessage() },
                     images = state.images,
                     generationStartSignal = imageGenerationStartSignal,
                     backupState = state.imageLibraryBackup,
@@ -3618,11 +3631,34 @@ fun ChatScreen(
                 )
             }
 
+            SmoothRightToLeftPage(
+                visible = showBackgroundSettings,
+                onDismiss = { showBackgroundSettings = false; onAppMenuOpenChange(true) }
+            ) { pageModifier, closePage ->
+                ChatBackgroundSettingsPage(
+                    modifier = pageModifier,
+                    effectiveState = chatBackground,
+                    globalState = globalChatBackground,
+                    assistantState = assistantChatBackground,
+                    sessionState = sessionChatBackground,
+                    hasActiveSession = hasActiveChatSession,
+                    importing = chatBackgroundImporting,
+                    onDismiss = closePage,
+                    onChooseImage = { scope ->
+                        pendingBackgroundScope = scope
+                        chatBackgroundPicker.launch(arrayOf("image/*"))
+                    },
+                    onChange = onChatBackgroundChange,
+                    onReset = { scope -> onChatBackgroundChange(scope, null) }
+                )
+            }
+
             PredictiveAppMenuPage(
                 visible = appMenuOpen,
                 onDismiss = { onAppMenuOpenChange(false) }
             ) { menuModifier, closeMenu ->
                 McaAppMenuPage(
+                    onOpenQuickStart = { closeMenu(); showQuickStart = true },
                     state = state,
                     onClose = closeMenu,
                     onOpenModels = {
@@ -3641,6 +3677,7 @@ fun ChatScreen(
                         closeMenu()
                         showImages = true
                     },
+                    onOpenBackgroundSettings = { onAppMenuOpenChange(false); showBackgroundSettings = true },
                     onOpenAssistants = {
                         closeMenu()
                         showAssistants = true
@@ -4351,8 +4388,25 @@ private fun ContextLibraryPage(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(book.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
                             Text(
-                                "${book.scopeLabel} · ${book.entryCount} 条",
+                                buildString {
+                                    append(book.scopeLabel).append(" · ").append(book.entryCount).append(" 条")
+                                    if (book.constantEntryCount > 0) {
+                                        append(" · 常驻 ").append(book.constantEntryCount)
+                                    }
+                                    if (book.keywordEntryCount > 0) {
+                                        append(" · 关键词触发 ").append(book.keywordEntryCount)
+                                    }
+                                },
                                 style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                if (book.constantEntryCount > 0) {
+                                    "常驻条目每轮注入；其余条目需要消息命中关键词。"
+                                } else {
+                                    "本轮消息命中关键词后才会注入。"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -4366,6 +4420,11 @@ private fun ContextLibraryPage(
             item {
                 Spacer(modifier = Modifier.height(14.dp))
                 Text("知识库", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "导入后会自动选中当前会话；发送消息时按词语和词形变化检索，命中片段会显示在发送后的上下文详情中。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
@@ -4579,6 +4638,10 @@ private fun String.toAssistantInt(default: Int, min: Int, max: Int): Int =
 
 @Composable
 private fun ImagesWorkspaceScreen(
+    onOpenModels: () -> Unit,
+    onImportModel: () -> Unit,
+    statusMessage: String?,
+    onDismissStatusMessage: () -> Unit,
     images: List<ImageAssetUiItem>,
     generationStartSignal: Long,
     backupState: ImageLibraryBackupUiState,
@@ -4702,6 +4765,8 @@ private fun ImagesWorkspaceScreen(
     val scope = rememberCoroutineScope()
     val darkTheme = isSystemInDarkTheme()
     var showGenerationCanvas by rememberSaveable { mutableStateOf(false) }
+    var revealParameters by rememberSaveable { mutableStateOf(0) }
+    var inputError by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingConversationPrompt by rememberSaveable { mutableStateOf("") }
     var previewImageId by rememberSaveable { mutableStateOf<String?>(null) }
     var libraryQuery by rememberSaveable { mutableStateOf("") }
@@ -4844,10 +4909,12 @@ private fun ImagesWorkspaceScreen(
     }
 
     fun submitFromImages() {
+        inputError = null
+        onDismissStatusMessage()
         val cleanPrompt = prompt.trim()
         if (cleanPrompt.isBlank()) return
         if (taskMode !in supportedTaskModes) {
-            Toast.makeText(context, "当前模型不支持此生成方式", Toast.LENGTH_SHORT).show()
+            inputError = "当前模型不支持此生成方式"
             return
         }
         val ready = when (taskMode) {
@@ -4858,7 +4925,11 @@ private fun ImagesWorkspaceScreen(
             ImageGenerationUiTaskMode.CONTROL -> controlImageUri != null
         }
         if (!ready) {
-            Toast.makeText(context, "请先选择当前模式需要的图片输入", Toast.LENGTH_SHORT).show()
+            inputError = "请先选择当前模式需要的图片输入"
+            return
+        }
+        if (selectedImageModelId == null) {
+            onOpenModels()
             return
         }
         pendingConversationPrompt = cleanPrompt
@@ -4918,8 +4989,16 @@ private fun ImagesWorkspaceScreen(
                 onCancelGeneration = onCancelGeneration,
                 onUseImageAsset = onUseImageAsset
             )
+        } else if (imageModels.isEmpty() && images.isEmpty()) {
+            Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                ImageGalleryTitleBar(onBack = onBack)
+                Text("还没有可用的生图模型", style = MaterialTheme.typography.titleMedium)
+                Button(onClick = onOpenModels) { Text("选择推荐模型") }
+                OutlinedButton(onClick = onImportModel) { Text("导入已有模型") }
+            }
         } else {
             ImageGalleryHome(
+                revealParameters = revealParameters,
                 images = filteredImages,
                 totalImageCount = images.size,
                 libraryQuery = libraryQuery,
@@ -5117,6 +5196,15 @@ private fun ImagesWorkspaceScreen(
             )
         }
 
+        Column(Modifier.align(Alignment.BottomCenter)) {
+        (inputError ?: statusMessage)?.let { message ->
+            GuidanceNotice(
+                message = message,
+                onModels = onOpenModels,
+                onEdit = { showGenerationCanvas = false; revealParameters += 1 },
+                onDismiss = { inputError = null; onDismissStatusMessage() }
+            )
+        }
         ImagePromptBar(
             prompt = prompt,
             onPromptChange = onPromptChange,
@@ -5137,11 +5225,12 @@ private fun ImagesWorkspaceScreen(
                 }
             },
             onSubmit = ::submitFromImages,
-            placeholder = if (showGenerationCanvas) "回复 MCA" else "描述图像",
+            placeholder = "描述图像",
             isGenerating = isImageGenerating,
             onStop = onCancelGeneration,
-            modifier = Modifier.align(Alignment.BottomCenter)
+            modifier = Modifier.fillMaxWidth()
         )
+        }
 
         previewImageId?.let { imageId ->
             images.firstOrNull { it.id == imageId }?.let { image ->
@@ -5569,6 +5658,7 @@ private val ImageGenerationUiJob.isWorking: Boolean
 
 @Composable
 private fun ImageGalleryHome(
+    revealParameters: Int,
     images: List<ImageAssetUiItem>,
     totalImageCount: Int,
     libraryQuery: String,
@@ -5729,6 +5819,7 @@ private fun ImageGalleryHome(
         }
         item {
             ImageInputOptionsPanel(
+                revealParameters = revealParameters,
                 taskMode = taskMode,
                 selectedModelIsCloud = selectedImageModelIsCloud,
                 executionModel = imageModels.firstOrNull { it.id == selectedImageModelId },
@@ -6439,6 +6530,7 @@ private fun formatImageLibraryDateRange(range: ImageLibraryDateRange): String {
 
 @Composable
 private fun ImageInputOptionsPanel(
+    revealParameters: Int,
     taskMode: ImageGenerationUiTaskMode,
     selectedModelIsCloud: Boolean,
     executionModel: ChatModelChoice?,
@@ -6548,6 +6640,9 @@ private fun ImageInputOptionsPanel(
         executionModel?.id,
         selectedModelIsCloud
     ) { mutableStateOf(false) }
+    LaunchedEffect(revealParameters) {
+        if (revealParameters > 0) advancedParametersExpanded = true
+    }
     fun importParametersFromClipboard() {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
         val raw = clipboard
@@ -6850,12 +6945,13 @@ private fun ImageInputOptionsPanel(
                     append(widthText)
                     append('×')
                     append(heightText)
-                    append(" · ")
-                    append(stepsText)
-                    append(" 步 · CFG ")
-                    append(cfgScaleText)
-                    append(" · ")
-                    append(if (seedText.isBlank()) "随机 seed" else "seed $seedText")
+                    if (executionModel.imageMinWidth == executionModel.imageMaxWidth &&
+                        executionModel.imageMinHeight == executionModel.imageMaxHeight && !ultraFixEnabled) {
+                        append(" · 模型固定尺寸")
+                    }
+                    if (selectedLoras.isNotEmpty()) append(" · LoRA ${selectedLoras.size}")
+                    if (selectedTextualInversionIds.isNotEmpty()) append(" · 嵌入 ${selectedTextualInversionIds.size}")
+                    if (ultraFixEnabled) append(" · UltraFix")
                     if (batchCount > 1) append(" · ${batchCount} 张")
                 }
             } else {
@@ -6884,7 +6980,7 @@ private fun ImageInputOptionsPanel(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "生成参数",
+                        "更多参数",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -9520,18 +9616,25 @@ private fun ImagePromptTokenStatus(
         ?.takeIf(ImagePromptTokenMeasurement::overflows)
         ?.let { it.count - it.maxTokens }
     val label = when {
-        state == ImagePromptTokenUiState.Measuring -> "正在精确计算 Token…"
-        unavailable -> "Token 数量不可用"
+        state == ImagePromptTokenUiState.Measuring -> "正在计算 Token…"
+        unavailable -> "可直接生成 · 暂不支持 Token 统计"
         measurement == null -> null
+        overflowCount != null && !measurement.exact ->
+            "约 ${measurement.count} / ${measurement.maxTokens} Token · 可能超出"
         overflowCount != null ->
             "超出 $overflowCount 个 Token · ${measurement.count} / ${measurement.maxTokens}"
+        !measurement.exact -> "约 ${measurement.count} / ${measurement.maxTokens} Token"
         else -> "${measurement.count} / ${measurement.maxTokens} Token"
     } ?: return
     val accessibilityLabel = when {
         state == ImagePromptTokenUiState.Unavailable ->
-            "当前模型无法提供精确 Token 数量"
+            "当前模型暂不支持 Token 统计，可以直接生成"
+        overflowCount != null && measurement.exact == false ->
+            "提示词估算为 ${measurement.count} 个 Token，模型声明上限 ${measurement.maxTokens}，可能超出"
         overflowCount != null ->
-            "提示词超出模型上限 $overflowCount 个 Token，当前 ${measurement?.count}，上限 ${measurement?.maxTokens}"
+            "提示词超出模型上限 $overflowCount 个 Token，当前 ${measurement.count}，上限 ${measurement.maxTokens}"
+        measurement?.exact == false ->
+            "提示词估算 Token 数 ${measurement.count}，模型声明上限 ${measurement.maxTokens}"
         measurement != null ->
             "提示词 Token 数 ${measurement.count}，上限 ${measurement.maxTokens}"
         else -> "正在使用模型 Tokenizer 精确计算提示词长度"
@@ -9563,7 +9666,6 @@ private fun ImageNegativePromptTagField(
     ) -> ImagePromptTokenMeasurement?)?,
     modifier: Modifier = Modifier
 ) {
-    val tagSession = LocalImagePromptTagAutocompleteSession.current
     val editHistory = remember { ImagePromptEditHistory() }
     var fieldValue by remember {
         mutableStateOf(TextFieldValue(value, TextRange(value.length)))
@@ -9578,7 +9680,6 @@ private fun ImageNegativePromptTagField(
     }
 
     val tokenState = rememberImagePromptTokenUiState(modelId, fieldValue.text, onMeasureTokens)
-    val tokenVisualTransformation = imagePromptVisualTransformation(tokenState)
     val tokenOverflow = tokenState.measurementOrNull?.overflows == true
 
     fun commitFieldValue(next: TextFieldValue) {
@@ -9605,15 +9706,7 @@ private fun ImageNegativePromptTagField(
             minLines = 2,
             maxLines = 4,
             isError = tokenOverflow,
-            visualTransformation = tokenVisualTransformation,
-            trailingIcon = {
-                IconButton(
-                    onClick = tagSession::openManager,
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(Icons.Default.Search, contentDescription = "标签联想与词典设置")
-                }
-            },
+            visualTransformation = VisualTransformation.None,
             modifier = Modifier
                 .fillMaxWidth()
                 .onFocusChanged { focused = it.isFocused }
@@ -9624,16 +9717,6 @@ private fun ImageNegativePromptTagField(
             modifier = Modifier
                 .align(Alignment.End)
                 .padding(top = 4.dp, end = 4.dp),
-        )
-        ImagePromptTagAssistPanel(
-            value = fieldValue,
-            focused = focused,
-            onEdit = ::applyDiscreteFieldValue,
-            onUndo = { editHistory.undo(fieldValue)?.let(::commitFieldValue) },
-            onRedo = { editHistory.redo(fieldValue)?.let(::commitFieldValue) },
-            undoEnabled = editHistory.undoEnabled,
-            redoEnabled = editHistory.redoEnabled,
-            modifier = Modifier.padding(top = 8.dp)
         )
     }
 }
@@ -9660,7 +9743,6 @@ private fun ImagePromptBar(
     val inputIconSurfaceColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else McaInputIconSurface
     val inputTextColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else McaInputText
     val inputPlaceholderColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else McaInputPlaceholder
-    val tagSession = LocalImagePromptTagAutocompleteSession.current
     val editHistory = remember { ImagePromptEditHistory() }
     var fieldValue by remember {
         mutableStateOf(TextFieldValue(prompt, TextRange(prompt.length)))
@@ -9675,7 +9757,6 @@ private fun ImagePromptBar(
     }
 
     val tokenState = rememberImagePromptTokenUiState(modelId, fieldValue.text, onMeasureTokens)
-    val tokenVisualTransformation = imagePromptVisualTransformation(tokenState)
     val tokenOverflow = tokenState.measurementOrNull?.overflows == true
 
     fun commitFieldValue(next: TextFieldValue) {
@@ -9694,16 +9775,6 @@ private fun ImagePromptBar(
     }
 
     Column(modifier = modifier.fillMaxWidth()) {
-        ImagePromptTagAssistPanel(
-            value = fieldValue,
-            focused = focused,
-            onEdit = ::applyDiscreteFieldValue,
-            onUndo = { editHistory.undo(fieldValue)?.let(::commitFieldValue) },
-            onRedo = { editHistory.redo(fieldValue)?.let(::commitFieldValue) },
-            undoEnabled = editHistory.undoEnabled,
-            redoEnabled = editHistory.redoEnabled,
-            modifier = Modifier.padding(horizontal = 16.dp)
-        )
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
@@ -9771,7 +9842,7 @@ private fun ImagePromptBar(
                                     value = fieldValue,
                                     onValueChange = ::applyFieldValue,
                                     maxLines = 3,
-                                    visualTransformation = tokenVisualTransformation,
+                                    visualTransformation = VisualTransformation.None,
                                     textStyle = TextStyle(
                                         color = inputTextColor,
                                         fontSize = 15.sp,
@@ -9789,16 +9860,6 @@ private fun ImagePromptBar(
                                 modifier = Modifier
                                     .align(Alignment.End)
                                     .padding(top = 2.dp),
-                            )
-                        }
-                        IconButton(
-                            onClick = tagSession::openManager,
-                            modifier = Modifier.size(48.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Search,
-                                contentDescription = "标签联想与词典设置",
-                                tint = McaPrimaryBlue
                             )
                         }
                     }
@@ -10086,6 +10147,8 @@ private fun SystemBackMotionHandler(
 
 @Composable
 private fun McaAppMenuPage(
+    onOpenQuickStart: () -> Unit,
+    onOpenBackgroundSettings: () -> Unit,
     state: ChatUiState,
     onClose: () -> Unit,
     onOpenModels: () -> Unit,
@@ -10111,95 +10174,99 @@ private fun McaAppMenuPage(
             }
             Spacer(modifier = Modifier.weight(1f))
         }
-        Spacer(modifier = Modifier.height(22.dp))
-        Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-            McaLogoMark(size = 66.dp, cornerRadius = 18.dp)
-            Spacer(modifier = Modifier.height(12.dp))
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+            Spacer(modifier = Modifier.height(22.dp))
+            Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                McaLogoMark(size = 66.dp, cornerRadius = 18.dp)
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    "MuYu Chat Agent",
+                    style = MaterialTheme.typography.titleLarge.copy(fontSize = 20.sp),
+                    fontWeight = FontWeight.Black
+                )
+            }
+            Spacer(modifier = Modifier.height(28.dp))
+
             Text(
-                "MuYu Chat Agent",
-                style = MaterialTheme.typography.titleLarge.copy(fontSize = 20.sp),
-                fontWeight = FontWeight.Black
+                "MCA",
+                modifier = Modifier.padding(start = 12.dp, bottom = 8.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-        }
-        Spacer(modifier = Modifier.height(28.dp))
+            AppMenuCard {
+                AppMenuRow(
+                    icon = { Icon(Icons.Default.Psychology, null) },
+                    title = "助手与角色",
+                    subtitle = state.assistants.firstOrNull { it.selected }?.let { "${it.name} · 角色卡与能力" } ?: "当前助手、角色卡、提示词与能力",
+                    onClick = onOpenAssistants
+                )
+                AppMenuRow(icon = { Icon(Icons.Default.Folder, null) }, title = "模型管理", subtitle = "本地高速/兼容引擎与魔塔下载", onClick = onOpenModels)
+                AppMenuRow(icon = { McaLogoMark(size = 22.dp, cornerRadius = 7.dp) }, title = "智能调参", subtitle = "测速、推荐与高级参数", onClick = onOpenAgent)
+                AppMenuRow(icon = { Icon(Icons.Default.NetworkWifi, null) }, title = "本地 API", subtitle = "接口地址、Key、API 使用文档", onClick = onOpenApi)
+                AppMenuRow(icon = { Icon(Icons.Default.Settings, null) }, title = "系统设置", subtitle = "运行、日志、诊断与实验功能", onClick = onOpenSettings)
+                AppMenuRow(icon = { Icon(Icons.Default.Image, null) }, title = "聊天背景", subtitle = "设置全局、助手或当前会话背景图片", onClick = onOpenBackgroundSettings)
+                AppMenuRow(icon = { Icon(Icons.Default.Info, null) }, title = "快速开始", subtitle = "聊天、生图与常见问题", onClick = onOpenQuickStart)
+            }
 
-        Text(
-            "MCA",
-            modifier = Modifier.padding(start = 12.dp, bottom = 8.dp),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        AppMenuCard {
-            AppMenuRow(
-                icon = { Icon(Icons.Default.Psychology, null) },
-                title = "助手与角色",
-                subtitle = state.assistants.firstOrNull { it.selected }?.let { "${it.name} · 角色卡与能力" } ?: "当前助手、角色卡、提示词与能力",
-                onClick = onOpenAssistants
+            Spacer(modifier = Modifier.height(18.dp))
+            Text(
+                "本机状态",
+                modifier = Modifier.padding(start = 12.dp, bottom = 8.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            AppMenuRow(icon = { Icon(Icons.Default.Folder, null) }, title = "模型管理", subtitle = "本地高速/兼容引擎与魔塔下载", onClick = onOpenModels)
-            AppMenuRow(icon = { McaLogoMark(size = 22.dp, cornerRadius = 7.dp) }, title = "智能调参", subtitle = "测速、推荐与高级参数", onClick = onOpenAgent)
-            AppMenuRow(icon = { Icon(Icons.Default.NetworkWifi, null) }, title = "本地 API", subtitle = "接口地址、Key、API 使用文档", onClick = onOpenApi)
-            AppMenuRow(icon = { Icon(Icons.Default.Settings, null) }, title = "系统设置", subtitle = "运行、日志、诊断与实验功能", onClick = onOpenSettings)
-        }
+            AppMenuCard {
+                AppMenuRow(
+                    icon = {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (state.selectedModelName == null) Color(0xFF9AA0A6) else Color(0xFF34A853))
+                        )
+                    },
+                    title = displayModelName(state.selectedModelName) ?: "未加载模型",
+                    subtitle = "${"%.1f".format(state.stats.decodeTps)} token/s · ${state.stats.backend.uppercase()} 后端",
+                    onClick = {}
+                )
+                AppMenuRow(
+                    icon = { Icon(Icons.Default.NetworkWifi, null) },
+                    title = "本地 API",
+                    subtitle = if (state.apiEnabled || state.restEnabled) "已启用" else "未启用",
+                    onClick = onOpenApi
+                )
+                AppMenuRow(
+                    icon = { Icon(Icons.Default.Image, null) },
+                    title = "图像任务",
+                    subtitle = state.imageTaskSummary(),
+                    onClick = onOpenImages
+                )
+                AppMenuRow(
+                    icon = { Icon(Icons.Default.Psychology, null) },
+                    title = state.assistants.firstOrNull { it.selected }?.name ?: "默认助手",
+                    subtitle = state.assistants.firstOrNull { it.selected }?.let {
+                        "记忆${if (it.memoryEnabled) "开" else "关"} · 检索${if (it.webSearchEnabled) "开" else "关"}"
+                    } ?: "助手能力状态",
+                    onClick = onOpenAssistants
+                )
+            }
 
-        Spacer(modifier = Modifier.height(18.dp))
-        Text(
-            "本机状态",
-            modifier = Modifier.padding(start = 12.dp, bottom = 8.dp),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        AppMenuCard {
-            AppMenuRow(
-                icon = {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(if (state.selectedModelName == null) Color(0xFF9AA0A6) else Color(0xFF34A853))
-                    )
-                },
-                title = displayModelName(state.selectedModelName) ?: "未加载模型",
-                subtitle = "${"%.1f".format(state.stats.decodeTps)} token/s · ${state.stats.backend.uppercase()} 后端",
-                onClick = {}
+            Spacer(modifier = Modifier.height(18.dp))
+            Text(
+                "历史",
+                modifier = Modifier.padding(start = 12.dp, bottom = 8.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            AppMenuRow(
-                icon = { Icon(Icons.Default.NetworkWifi, null) },
-                title = "本地 API",
-                subtitle = if (state.apiEnabled || state.restEnabled) "已启用" else "未启用",
-                onClick = onOpenApi
-            )
-            AppMenuRow(
-                icon = { Icon(Icons.Default.Image, null) },
-                title = "图像任务",
-                subtitle = state.imageTaskSummary(),
-                onClick = onOpenImages
-            )
-            AppMenuRow(
-                icon = { Icon(Icons.Default.Psychology, null) },
-                title = state.assistants.firstOrNull { it.selected }?.name ?: "默认助手",
-                subtitle = state.assistants.firstOrNull { it.selected }?.let {
-                    "记忆${if (it.memoryEnabled) "开" else "关"} · 检索${if (it.webSearchEnabled) "开" else "关"}"
-                } ?: "助手能力状态",
-                onClick = onOpenAssistants
-            )
-        }
-
-        Spacer(modifier = Modifier.height(18.dp))
-        Text(
-            "历史",
-            modifier = Modifier.padding(start = 12.dp, bottom = 8.dp),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        AppMenuCard {
-            AppMenuRow(
-                icon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                title = "清空全部",
-                subtitle = "删除本机保存的全部聊天记录",
-                contentColor = MaterialTheme.colorScheme.error,
-                onClick = { confirmClear = true }
-            )
+            AppMenuCard {
+                AppMenuRow(
+                    icon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    title = "清空全部",
+                    subtitle = "删除本机保存的全部聊天记录",
+                    contentColor = MaterialTheme.colorScheme.error,
+                    onClick = { confirmClear = true }
+                )
+            }
         }
     }
 
@@ -10250,9 +10317,9 @@ private fun AppMenuRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(52.dp)
+            .heightIn(min = 52.dp)
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(modifier = Modifier.size(34.dp), contentAlignment = Alignment.Center) {
@@ -10752,7 +10819,6 @@ private fun ChatStatusBar(
     onOpenModels: () -> Unit,
     onReasoningModeChange: (ReasoningMode) -> Unit,
     onCloudReasoningModeLocked: () -> Unit,
-    onOpenBackgroundSettings: () -> Unit,
     onOpenAppMenu: () -> Unit
 ) {
     val apiActive = state.selectedModelIsCloud || state.apiEnabled || state.restEnabled
@@ -10760,7 +10826,7 @@ private fun ChatStatusBar(
     val modelRuntimeLabel = state.selectedModelRuntimeLabel?.takeIf { it.isNotBlank() }
     val cacheEvidence = cacheEvidenceLabel(state.stats)
     val performanceSummary = generationPerformanceSummary(state.stats)
-    val modelSubtitle = if (state.selectedModelName == null) {
+    val modelSubtitle = state.modelLoadMessage ?: if (state.selectedModelName == null) {
         modelRuntimeLabel ?: "未加载本地或云端推理引擎"
     } else {
         listOfNotNull(
@@ -10881,9 +10947,6 @@ private fun ChatStatusBar(
                 IconButton(onClick = onNewConversation, modifier = Modifier.size(38.dp)) {
                     Icon(Icons.Default.Edit, contentDescription = "新建聊天", modifier = Modifier.size(22.dp))
                 }
-                IconButton(onClick = onOpenBackgroundSettings, modifier = Modifier.size(38.dp)) {
-                    Icon(Icons.Default.Image, contentDescription = "聊天背景", modifier = Modifier.size(21.dp))
-                }
                 IconButton(onClick = onOpenAppMenu, modifier = Modifier.size(38.dp)) {
                     McaLogoMark(size = 28.dp, cornerRadius = 10.dp)
                 }
@@ -10950,7 +11013,8 @@ private fun decodeChatBackgroundBitmap(context: Context, rawUri: String): Bitmap
 }.getOrNull()
 
 @Composable
-private fun ChatBackgroundSettingsDialog(
+private fun ChatBackgroundSettingsPage(
+    modifier: Modifier = Modifier,
     effectiveState: ChatBackgroundState,
     globalState: ChatBackgroundState,
     assistantState: ChatBackgroundState?,
@@ -10981,12 +11045,13 @@ private fun ChatBackgroundSettingsDialog(
         ChatBackgroundScope.ASSISTANT -> assistantState != null
         ChatBackgroundScope.SESSION -> sessionState != null
     }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("聊天背景") },
-        text = {
+    Column(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).navigationBarsPadding()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回应用菜单") }
+            Text("聊天背景", style = MaterialTheme.typography.titleLarge)
+        }
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text("应用范围", style = MaterialTheme.typography.labelLarge)
@@ -11046,7 +11111,7 @@ private fun ChatBackgroundSettingsDialog(
                     valueRange = 0f..24f
                 )
                 Text("缩放方式", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
                         selected = state.scaleMode == ChatBackgroundScaleMode.CROP,
                         onClick = { onChange(scope, state.copy(scaleMode = ChatBackgroundScaleMode.CROP)) },
@@ -11071,9 +11136,7 @@ private fun ChatBackgroundSettingsDialog(
                     )
                 }
             }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
-    )
+    }
 }
 
 @Composable
@@ -12136,20 +12199,38 @@ private fun sameDay(a: Calendar, b: Calendar): Boolean =
         a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
 
 @Composable
-private fun EmptyChatPanel(modelName: String?) {
+private fun EmptyChatPanel(
+    modelName: String?,
+    showSetup: Boolean = false,
+    onChooseModel: () -> Unit = {},
+    onImportModel: () -> Unit = {},
+    onOpenQuickStart: () -> Unit = {}
+) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(8.dp),
         tonalElevation = 1.dp,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("MCA", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Text(
-                displayModelName(modelName) ?: "请先在模型页加载一个模型。",
+                displayModelName(modelName) ?: "还没有开始聊天，选择一个模型即可使用。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium
             )
+
+            if (modelName == null && showSetup) {
+                Button(onClick = onChooseModel, modifier = Modifier.fillMaxWidth()) {
+                    Text("选择推荐模型")
+                }
+                OutlinedButton(onClick = onImportModel, modifier = Modifier.fillMaxWidth()) {
+                    Text("导入已有模型")
+                }
+                TextButton(onClick = onOpenQuickStart, modifier = Modifier.fillMaxWidth()) {
+                    Text("第一次使用？查看 3 步快速开始")
+                }
+            }
         }
     }
 }
@@ -12257,6 +12338,7 @@ private fun extractAttachmentMeta(input: String): String? {
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun ChatInputBar(
+    onOpenModels: () -> Unit,
     input: String,
     isGenerating: Boolean,
     statusMessage: String?,
@@ -12375,11 +12457,15 @@ private fun ChatInputBar(
                 .navigationBarsPadding()
         ) {
             statusMessage?.takeIf { it.isNotBlank() }?.let { message ->
+                if (userNotice(message) != null) {
+                    GuidanceNotice(message, onOpenModels, onDismissStatusMessage, onDismissStatusMessage)
+                } else {
                 ComposerStatusMessage(
                     message = message,
                     onDismiss = onDismissStatusMessage,
                     modifier = Modifier.padding(start = 4.dp, end = 2.dp, bottom = 6.dp)
                 )
+                }
             }
             if (!webSearchStatusMessage.isNullOrBlank()) {
                 WebSearchStatusChip(

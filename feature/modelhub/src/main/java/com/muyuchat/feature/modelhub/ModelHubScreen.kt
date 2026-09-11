@@ -8,6 +8,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -143,7 +144,8 @@ data class LocalImageModelUiItem(
     val readyForGeneration: Boolean = true,
     val readinessMessage: String? = null,
     val readinessLabel: String = "",
-    val selected: Boolean = false
+    val selected: Boolean = false,
+    val storagePath: String = ""
 )
 
 data class CloudApiUiState(
@@ -218,6 +220,7 @@ private data class PendingLocalModelAction(
 
 @Composable
 fun ModelHubScreen(
+    startInRecommended: Boolean = false,
     state: ModelHubUiState,
     onImportClick: () -> Unit,
     onRepoInputChange: (String) -> Unit,
@@ -260,9 +263,12 @@ fun ModelHubScreen(
     onDeleteCloudModel: (String) -> Unit,
     onRefreshLocal: () -> Unit,
     onBack: () -> Unit,
+    onPauseDownloads: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    var section by rememberSaveable { mutableStateOf(ModelHubSection.LOCAL) }
+    var section by rememberSaveable(startInRecommended) {
+        mutableStateOf(if (startInRecommended) ModelHubSection.RECOMMENDED else ModelHubSection.LOCAL)
+    }
     var cloudEditorKind by rememberSaveable { mutableStateOf<String?>(null) }
 
     Box(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -278,9 +284,13 @@ fun ModelHubScreen(
                 selected = section,
                 onSection = { section = it },
                 onBack = onBack,
-                onRefreshLocal = onRefreshLocal
+                onRefreshLocal = onRefreshLocal,
+                onPauseDownloads = onPauseDownloads
             )
 
+            if (startInRecommended && section == ModelHubSection.RECOMMENDED) {
+                Text("推荐聊天模型下载后自动加载；实验模型需手动加载。", style = MaterialTheme.typography.bodySmall)
+            }
             when (section) {
                 ModelHubSection.LOCAL -> LocalModelsSection(
                     state = state,
@@ -432,7 +442,8 @@ private fun ModelHubHeader(
     selected: ModelHubSection,
     onSection: (ModelHubSection) -> Unit,
     onBack: () -> Unit,
-    onRefreshLocal: () -> Unit
+    onRefreshLocal: () -> Unit,
+    onPauseDownloads: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(
@@ -466,9 +477,21 @@ private fun ModelHubHeader(
 
         state.statusMessage?.let {
             StatusMessageCard(message = it)
+            if (it.contains("失败") || it.contains("不完整") || it.contains("无法")) {
+                Row {
+                    TextButton(onClick = { onSection(ModelHubSection.LOCAL) }) { Text("检查本地模型") }
+                    TextButton(onClick = { onSection(ModelHubSection.RECOMMENDED) }) { Text("选择其他模型") }
+                }
+            }
         }
         if (state.downloadFileName != null) {
             DownloadProgressPanel(state)
+            if (state.downloadStatus == DownloadStatus.RUNNING || state.downloadStatus == DownloadStatus.QUEUED) {
+                TextButton(onClick = onPauseDownloads) { Text("暂停下载（保留进度）") }
+            }
+            if (state.downloadStatus == DownloadStatus.DONE && !state.isBusy) {
+                TextButton(onClick = { onSection(ModelHubSection.LOCAL) }) { Text("已自动导入 · 查看本地模型") }
+            }
         } else if (state.isBusy) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
@@ -528,6 +551,7 @@ private fun LocalModelsSection(
     onDeleteLocalImageModel: (String) -> Unit,
     modifier: Modifier
 ) {
+    var imageOnly by rememberSaveable { mutableStateOf(false) }
     var pendingAction by remember { mutableStateOf<PendingLocalModelAction?>(null) }
     var pendingObservedBusy by remember { mutableStateOf(false) }
     var localActionError by remember { mutableStateOf<String?>(null) }
@@ -572,9 +596,15 @@ private fun LocalModelsSection(
         }
     }
 
-    LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item {
-            CardBox {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = !imageOnly, onClick = { imageOnly = false }, label = { Text("聊天 (${state.localModels.size})") })
+            FilterChip(selected = imageOnly, onClick = { imageOnly = true }, label = { Text("生图 (${state.localImageModels.size})") })
+        }
+    LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (!imageOnly) {
+            item {
+                CardBox {
                 Text("本地推理引擎", fontWeight = FontWeight.Bold)
                 Text("高速引擎优先使用 MNN；兼容引擎继续支持 GGUF / llama.cpp 生态。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 localActionError?.let { StatusMessageCard(message = it) }
@@ -588,11 +618,10 @@ private fun LocalModelsSection(
                     Spacer(Modifier.width(6.dp))
                     Text("+ 导入 GGUF / LiteRT-LM / MNN 本地模型", fontWeight = FontWeight.Bold)
                 }
-                if (state.localModels.isEmpty()) {
-                    Text("还没有本地推理引擎", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                    Text("可以导入 GGUF 或 LiteRT-LM 模型，也可以导入完整 MNN 组件包；不同格式会交给对应运行时加载。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    state.localModels.forEach { model ->
+                    if (state.localModels.isEmpty()) Text("还没有本地推理引擎，可从推荐页下载或导入完整模型。")
+                }
+            }
+            items(state.localModels, key = { "chat-${it.id}-${it.path}" }) { model ->
                         LocalModelCard(
                             model = model,
                             isLoaded = model.id == state.loadedModelId,
@@ -616,28 +645,13 @@ private fun LocalModelsSection(
                             },
                             onAttachVisionProjector = { onAttachVisionProjector(model) }
                         )
-                    }
-                }
             }
-        }
-        item {
-            CardBox {
-                Text("图像生成引擎", fontWeight = FontWeight.Bold)
-                Text("本地文生图模型独立管理，图片页会使用选中的引擎", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (state.localImageModels.isEmpty()) {
-                    Text("还没有本地图像生成引擎", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                    Text("FLUX、Qwen-Image、Z-Image 等需要 zip 引擎包：diffusion 主模型 + VAE/AE + 文本编码器/LLM。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    state.localImageModels.forEach { model ->
-                        LocalImageModelCard(
-                            model = model,
-                            enabled = !state.isBusy,
-                            onSelect = { onSelectLocalImageModel(model.id) },
-                            onVerify = { onVerifyLocalImageModel(model.id) },
-                            onDelete = { onDeleteLocalImageModel(model.id) }
-                        )
-                    }
-                }
+        } else {
+            item {
+                CardBox {
+                    Text("图像生成引擎", fontWeight = FontWeight.Bold)
+                    Text("本地文生图模型独立管理，图片页会使用选中的引擎")
+                    if (state.localImageModels.isEmpty()) Text("还没有本地图像生成引擎，可下载推荐包或导入完整引擎包。")
                 OutlinedButton(
                     onClick = onImportLocalImageModel,
                     enabled = !state.isBusy,
@@ -648,8 +662,19 @@ private fun LocalModelsSection(
                     Spacer(Modifier.width(6.dp))
                     Text("+ 导入本地生图引擎包", fontWeight = FontWeight.Bold)
                 }
+                }
+            }
+            items(state.localImageModels, key = { "image-${it.id}-${it.storagePath}" }) { model ->
+                        LocalImageModelCard(
+                            model = model,
+                            enabled = !state.isBusy,
+                            onSelect = { onSelectLocalImageModel(model.id) },
+                            onVerify = { onVerifyLocalImageModel(model.id) },
+                            onDelete = { onDeleteLocalImageModel(model.id) }
+                        )
             }
         }
+    }
     }
 }
 
@@ -1382,7 +1407,9 @@ private fun RecommendedModelsSection(
                         item(key = "$key-header") {
                             Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                         }
-                        items(models, key = { "$key-${it.id}" }) { model ->
+                        val expanded = "$key-group" in expandedGroups
+                        val visibleModels = if (expanded) models else collapsedRecommendationModels(models)
+                        items(visibleModels, key = { "$key-${it.id}" }) { model ->
                             RecommendedModelCard(
                                 model = model,
                                 deviceTotalRamBytes = state.deviceTotalRamBytes,
@@ -1395,6 +1422,17 @@ private fun RecommendedModelsSection(
                                 onDownload = { onDownload(model) },
                                 onOpenPage = { onOpenPage(model.modelPageUrl) }
                             )
+                        }
+                        if (models.size > 1) {
+                            item(key = "$key-more") {
+                                RecommendationExpandButton(
+                                    expanded = expanded,
+                                    hiddenCount = models.size - 1,
+                                    collapsedLabel = "查看其余模型（${models.size - 1}）",
+                                    expandedLabel = "收起其余模型",
+                                    onClick = { expandedGroups = expandedGroups.toggle("$key-group", expanded) }
+                                )
+                            }
                         }
                     }
                 }
@@ -1900,6 +1938,7 @@ private fun LocalModelCard(
             val isQairtRuntime = model.runtime == ChatModelRuntime.GENIEX_QAIRT
             val canLoadRuntime = !isMnnRuntime || mnnRuntimeAvailable
             val canNormalLoad = canLoadRuntime
+            ModelStoragePath(model.path)
             Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     shortName(model.displayName),
@@ -2171,6 +2210,7 @@ private fun LocalImageModelCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            ModelStoragePath(model.storagePath)
             if (!model.readyForGeneration) {
                 Text(
                     model.readinessMessage ?: "缺少本地生图组件包。",
@@ -2338,8 +2378,8 @@ private fun DownloadStatus?.downloadStatusLabel(): String = when (this) {
     DownloadStatus.QUEUED -> "排队中"
     DownloadStatus.RUNNING -> "下载中"
     DownloadStatus.PAUSED -> "已暂停"
-    DownloadStatus.FAILED -> "连接中断，等待续传"
-    DownloadStatus.DONE -> "完成"
+    DownloadStatus.FAILED -> "失败，请查看原因并重试"
+    DownloadStatus.DONE -> "已导入本地模型"
     null -> "准备中"
 }
 
@@ -2373,5 +2413,15 @@ private fun deviceFitLabel(
         model.minRamGb <= ramGb -> "建议关闭后台"
         model.minRamGb <= ramGb + 2.0 -> "勉强可试"
         else -> "不建议本机运行"
+    }
+}
+
+@Composable
+private fun ModelStoragePath(path: String) {
+    if (path.isBlank()) return
+    var expanded by rememberSaveable(path) { mutableStateOf(false) }
+    TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "收起保存位置" else "查看保存位置") }
+    if (expanded) SelectionContainer {
+        Text(path, style = MaterialTheme.typography.bodySmall)
     }
 }

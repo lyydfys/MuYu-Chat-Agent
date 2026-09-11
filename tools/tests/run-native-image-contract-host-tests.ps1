@@ -160,6 +160,19 @@ try {
         -IncludeDirectories @($tokenizerRoot)
     Run-HostTest -Name 'stable_diffusion_textual_inversion_tokenizer_test' -Executable $sdTokenizer
 
+    $sdPromptTokens = Build-HostTest `
+        -Name 'stable_diffusion_prompt_token_measurement_contract_test' `
+        -Sources @(Join-Path $sdTests 'stable_diffusion_prompt_token_measurement_contract_test.cpp')
+    Run-HostTest `
+        -Name 'stable_diffusion_prompt_token_measurement_contract_test' `
+        -Executable $sdPromptTokens `
+        -Arguments @(
+            (Join-Path $repoRoot 'core\sd-native\src\main\cpp\stable_diffusion_bridge.cpp'),
+            (Join-Path $repoRoot 'core\sd-native\src\main\java\com\muyuchat\core\sdnative\NativeStableDiffusionBridge.kt'),
+            (Join-Path $repoRoot 'app\src\main\java\com\muyuchat\mca\MainViewModel.kt'),
+            (Join-Path $repoRoot 'core\sd-native\src\main\cpp\CMakeLists.txt')
+        )
+
     $qnnInpaint = Build-HostTest `
         -Name 'qnn_inpaint_contract_test' `
         -Sources @(Join-Path $nativeTests 'qnn_inpaint_contract_test.cpp')
@@ -235,7 +248,7 @@ try {
         -Executable $textualInversionLoad `
         -Arguments @(Join-Path $buildRoot 'textual-inversion-fixtures')
 
-    Write-Host 'PASS: 11 native image contract host tests compiled and ran successfully.'
+    Write-Host 'PASS: 12 native image contract host tests compiled and ran successfully.'
 }
 finally {
     $env:TEMP = $originalTemp

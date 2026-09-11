@@ -41,6 +41,15 @@ class ChatSessionAssistantSnapshotContractTest {
     }
 
     @Test
+    fun `editing a non-selected assistant does not rebind the active conversation`() {
+        val body = functionBody(sourceFile("MainViewModel.kt"), "saveAssistantProfile")
+
+        assertTrue(body.contains("val shouldSelectAssistant = existing == null || existing.id == state.selectedAssistantId"))
+        assertTrue(body.contains("val applyToActiveConversation = shouldSelectAssistant && state.activeChatSessionId != null"))
+        assertTrue(body.contains("if (applyToActiveConversation)"))
+    }
+
+    @Test
     fun characterCardImportCommitsItsAssistantBeforePublishingEmbeddedWorldBook() {
         val body = functionBody(sourceFile("MainViewModel.kt"), "finishCharacterCardImport")
 

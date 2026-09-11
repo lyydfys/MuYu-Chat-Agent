@@ -43,7 +43,8 @@ class LocalImageApiModelCatalogTest {
             assertEquals(8_192, ultraFixDimensions.getInt("max_height"))
             assertEquals(64, ultraFixDimensions.getInt("width_multiple"))
             assertEquals(64, ultraFixDimensions.getInt("height_multiple"))
-            assertEquals(1_536, model.imageCapabilitiesForUi().executionDefaults.maxWidth)
+            assertEquals(512, model.imageCapabilitiesForUi().executionDefaults.maxWidth)
+            assertEquals(512, model.imageCapabilitiesForUi().executionDefaults.minWidth)
         } finally {
             root.deleteRecursively()
         }

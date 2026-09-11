@@ -5813,6 +5813,58 @@ internal fun resolveQnnImageGenerationContract(
     )
 }
 
+/**
+ * Finishes the last atomic rename when Android stopped the app after a complete
+ * image bundle had been validated but before it was registered in preferences.
+ * Incomplete candidates are retained so ModelBundleInstaller can resume them.
+ */
+internal fun recoverInterruptedImageBundlePromotions(
+    managedDir: File,
+    isReady: (File) -> Boolean
+): List<File> {
+    val root = runCatching { managedDir.canonicalFile }.getOrNull() ?: return emptyList()
+    if (!root.isDirectory) return emptyList()
+    val recovered = mutableListOf<File>()
+    root.listFiles()
+        .orEmpty()
+        .filter { it.isDirectory && it.name.startsWith(".bundle-") && it.name.endsWith(".candidate") }
+        .forEach { candidateFile ->
+            val candidate = runCatching { candidateFile.canonicalFile }.getOrNull() ?: return@forEach
+            if (!candidate.path.startsWith(root.path + File.separator) || !runCatching { isReady(candidate) }.getOrDefault(false)) {
+                return@forEach
+            }
+            val destinationName = candidate.name.removePrefix(".").removeSuffix(".candidate")
+            if (!destinationName.startsWith("bundle-") || destinationName.isBlank()) return@forEach
+            val destination = runCatching { File(root, destinationName).canonicalFile }.getOrNull() ?: return@forEach
+            if (!destination.path.startsWith(root.path + File.separator)) return@forEach
+            if (destination.exists()) {
+                val emptyDestination = destination.isDirectory && destination.listFiles()?.isEmpty() == true
+                if (!emptyDestination || !destination.delete()) return@forEach
+            }
+            if (candidate.renameTo(destination)) recovered += destination
+        }
+    return recovered
+}
+
+/** Removes only stale, unregistered, empty public bundle directories from older builds. */
+internal fun removeUnregisteredEmptyImageBundleDirectories(
+    managedDir: File,
+    registeredRoots: Set<String>
+) {
+    val registered = registeredRoots.mapTo(mutableSetOf()) { path ->
+        runCatching { File(path).canonicalPath }.getOrDefault(path)
+    }
+    managedDir.listFiles()
+        .orEmpty()
+        .filter { it.isDirectory && it.name.startsWith("bundle-") && it.listFiles()?.isEmpty() == true }
+        .forEach { directory ->
+            val canonical = runCatching { directory.canonicalFile }.getOrNull() ?: return@forEach
+            if (canonical.path !in registered) canonical.delete()
+        }
+}
+
+private val imageModelCatalogLock = Any()
+
 class LocalImageModelStore(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences("mca_local_image_models", Context.MODE_PRIVATE)
@@ -5820,16 +5872,41 @@ class LocalImageModelStore(context: Context) {
         (appContext.getExternalFilesDir("image_models") ?: File(appContext.filesDir, "image_models")).also { it.mkdirs() }
     }
 
-    fun loadModels(): List<LocalImageModelRecord> {
+    fun loadModels(discover: Boolean = true): List<LocalImageModelRecord> = synchronized(imageModelCatalogLock) {
         val raw = prefs.getString(KEY_MODELS, null).orEmpty()
-        val persisted = if (raw.isBlank()) {
+        var persisted = runCatching { parseImageCatalogRecords(raw) }.getOrElse {
+            // Preserve the original catalog for diagnosis/recovery before writing discoveries.
+            if (!prefs.contains("catalog_recovery_raw")) prefs.edit().putString("catalog_recovery_raw", raw).apply()
             emptyList()
-        } else runCatching {
-            val array = JSONArray(raw)
-            List(array.length()) { index ->
-                LocalImageModelRecord.fromJson(array.getJSONObject(index))
-            }.sortedByDescending { it.updatedAt }
-        }.getOrDefault(emptyList())
+        }
+        if (raw.isNotBlank() && runCatching { JSONArray(raw).length() }.getOrDefault(0) > persisted.size &&
+            !prefs.contains("catalog_recovery_raw")) {
+            prefs.edit().putString("catalog_recovery_raw", raw).apply()
+        }
+        if (!discover) return@synchronized deduplicateImageRecords(persisted)
+        val migrated = persisted.map { model ->
+            if (model.sha256.matches(Regex("[0-9a-fA-F]{64}"))) model else {
+                val file = File(model.path)
+                if (!file.isFile) model else runCatching {
+                    model.copy(sha256 = sha256(file), updatedAt = System.currentTimeMillis())
+                }.getOrDefault(model)
+            }
+        }
+        if (migrated != persisted) {
+            runCatching { saveModels(migrated) }
+            persisted = migrated
+        }
+        if (!ManagedModelDownloadWorker.isInstalling) recoverInterruptedImageBundlePromotions(managedDir) { candidate ->
+            when (val inspection = inspectLocalImageBundleManifestFromRoot(candidate)) {
+                is LocalImageBundleManifestInspection.Ready -> inspection.manifest.primaryFile
+                    ?.let { it.isFile && it.length() > 0L } == true
+                else -> false
+            }
+        }
+        removeUnregisteredEmptyImageBundleDirectories(
+            managedDir = managedDir,
+            registeredRoots = persisted.mapNotNull { it.bundleRoot }.toSet()
+        )
 
         // Models downloaded by the runtime/model smoke tools live below the
         // application-owned `files/models` directory, while the UI's import
@@ -5838,7 +5915,7 @@ class LocalImageModelStore(context: Context) {
         // valid QNN bundle is visible without requiring a second manual import.
         // Discovery is structural only: it never filters on chipset/profile;
         // the native load/graph path remains the execution authority.
-        val discovered = discoverInstalledImageBundles()
+        val discovered = discoverInstalledImageBundles(persisted)
         if (discovered.isEmpty()) {
             val deduplicated = deduplicateImageRecords(persisted)
             // Compare the identity projection, not just the size: a duplicate collapse
@@ -5846,7 +5923,7 @@ class LocalImageModelStore(context: Context) {
             if (deduplicated.map(::persistedRecordIdentity) != persisted.map(::persistedRecordIdentity)) {
                 runCatching { saveModels(deduplicated) }
             }
-            return deduplicated
+            return@synchronized deduplicated
         }
         val merged = deduplicateImageRecords(persisted + discovered)
             .sortedByDescending { it.updatedAt }
@@ -5864,7 +5941,7 @@ class LocalImageModelStore(context: Context) {
             // read-only discovery failure must never hide the in-memory result.
             runCatching { saveModels(merged) }
         }
-        return merged
+        return@synchronized merged
     }
 
     /** Stable on-disk identity: model id + canonical bundle root + canonical primary path. */
@@ -5930,8 +6007,9 @@ class LocalImageModelStore(context: Context) {
         model.bundleRoot?.let { root -> runCatching { File(root).canonicalPath }.getOrDefault(root) }
             ?: runCatching { File(model.path).canonicalPath }.getOrDefault(model.path)
 
-    private fun discoverInstalledImageBundles(): List<LocalImageModelRecord> {
+    private fun discoverInstalledImageBundles(persisted: List<LocalImageModelRecord>): List<LocalImageModelRecord> {
         val roots = listOfNotNull(
+            managedDir,
             appContext.getExternalFilesDir("models"),
             File(appContext.filesDir, "models")
         ).distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
@@ -5942,27 +6020,21 @@ class LocalImageModelStore(context: Context) {
         // the duplicate cyberrealistic entry / ":2" alias).
         val candidateDirs = roots
             .filter { it.isDirectory }
-            .flatMap { root ->
-                // Smoke tools and manual copies may place a bundle directly
-                // under files/models or one-to-several wrapper directories
-                // deep inside an extracted archive. Discover all bounded-depth
-                // directories instead of assuming exactly one/two levels.
-                val canonicalRoot = runCatching { root.canonicalFile }.getOrDefault(root)
-                root.walkTopDown()
-                    .filter(File::isDirectory)
-                    .filter { candidate ->
-                        val depth = runCatching {
-                            candidate.canonicalFile.toPath().nameCount - canonicalRoot.toPath().nameCount
-                        }.getOrDefault(Int.MAX_VALUE)
-                        depth in 0..4
-                    }
-                    .toList()
-            }
+            .flatMap { root -> imageDiscoveryWalk(root).filter(File::isDirectory).toList() }
             .map { directory -> runCatching { directory.canonicalFile }.getOrDefault(directory) }
             .distinctBy { it.path }
         val candidatePaths = candidateDirs.map { it.path }.toSet()
         return candidateDirs.mapNotNull { bundleRoot ->
             runCatching {
+                val existing = persisted.firstOrNull { it.bundleRoot == bundleRoot.absolutePath }
+                if (existing != null && existing.sha256.matches(Regex("[0-9a-fA-F]{64}"))) {
+                    val primaryFile = File(existing.path)
+                    if (primaryFile.isFile && primaryFile.length() > 0L &&
+                        primaryFile.lastModified() <= existing.updatedAt &&
+                        File(bundleRoot, "manifest.json").lastModified() <= existing.updatedAt) {
+                        return@runCatching null
+                    }
+                }
                 // Discovery must not require a manifest as an admission gate. Older
                 // QNN/MNN archives shipped only graph files; infer the runtime and
                 // primary artifact from the concrete directory, then let readiness and
@@ -5987,8 +6059,9 @@ class LocalImageModelStore(context: Context) {
                     null
                 }
                 val primary = manifest?.primaryFile?.takeIf { it.isFile && it.length() > 0L }
-                    ?: findPrimaryImageModel(bundleRoot)
-                    ?: bundleRoot.walkTopDown().firstOrNull {
+                    ?: imageDiscoveryWalk(bundleRoot).filter { it.isFile && it.extension.lowercase() in READINESS_MODEL_EXTENSIONS }
+                        .maxWithOrNull(compareBy<File> { it.name.isPrimaryImageModelName() }.thenBy { it.length() })
+                    ?: imageDiscoveryWalk(bundleRoot).firstOrNull {
                         it.isFile && it.length() > 0L &&
                             (it.name.endsWith(".bin", true) ||
                                 it.name.endsWith(".mnn", true) ||
@@ -6005,7 +6078,7 @@ class LocalImageModelStore(context: Context) {
                         primaryCanonical.path.startsWith(otherPath + File.separator)
                 }
                 if (!hasDirectManifest && ownedByDescendantBundle) return@runCatching null
-                val runtime = manifest?.runtime ?: inferLocalImageRuntimeForBundle(bundleRoot, primary)
+                val runtime = manifest?.runtime ?: inferLocalImageRuntimeForBundle(bundleRoot, primary, discovery = true)
                 if (runtime != LocalImageRuntime.QNN_HTP && runtime != LocalImageRuntime.MNN_DIFFUSION &&
                     runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP
                 ) return@runCatching null
@@ -6014,14 +6087,14 @@ class LocalImageModelStore(context: Context) {
                     displayName = manifest?.displayName ?: bundleRoot.name,
                     path = primary.absolutePath,
                     fileName = primary.name,
-                    sizeBytes = bundleRoot.walkTopDown().filter { it.isFile }.sumOf { it.length() },
+                    sizeBytes = imageDiscoveryWalk(bundleRoot).filter { it.isFile }.sumOf { it.length() },
                     sha256 = sha256(primary),
                     runtime = runtime,
                     family = manifest?.family ?: LocalImageModelFamily.infer(bundleRoot.name),
                     imageSize = manifest?.imageSize ?: defaultImageSizeFor(bundleRoot.name),
                     source = "local:discovered",
                     bundleRoot = bundleRoot.absolutePath,
-                    componentCount = bundleRoot.walkTopDown().count { it.isFile }.coerceAtLeast(1),
+                    componentCount = imageDiscoveryWalk(bundleRoot).count { it.isFile }.coerceAtLeast(1),
                     updatedAt = bundleRoot.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
                 )
             }.getOrNull()
@@ -6029,7 +6102,7 @@ class LocalImageModelStore(context: Context) {
             .distinctBy { runCatching { it.bundleRoot?.let(::File)?.canonicalPath ?: it.path }.getOrDefault(it.path) }
     }
 
-    fun saveModels(models: List<LocalImageModelRecord>) {
+    fun saveModels(models: List<LocalImageModelRecord>) = synchronized(imageModelCatalogLock) {
         val array = JSONArray()
         // Persist the same canonical-id hygiene used by loadModels(). Older
         // versions could leave a parent-directory record beside the extracted
@@ -6038,26 +6111,28 @@ class LocalImageModelStore(context: Context) {
         deduplicateImageRecords(models)
             .sortedByDescending { it.updatedAt }
             .forEach { array.put(it.toJson()) }
-        prefs.edit().putString(KEY_MODELS, array.toString()).apply()
+        check(prefs.edit().putString(KEY_MODELS, array.toString()).commit()) {
+            "无法保存模型列表。请释放存储空间后刷新或重试导入，模型文件已保留。"
+        }
     }
 
-    fun updateModel(record: LocalImageModelRecord): List<LocalImageModelRecord> {
+    fun updateModel(record: LocalImageModelRecord): List<LocalImageModelRecord> = synchronized(imageModelCatalogLock) {
         val now = System.currentTimeMillis()
         val models = loadModels().map { existing ->
             if (existing.id == record.id) record.copy(updatedAt = now) else existing
         }
         saveModels(models)
-        return models
+        return@synchronized models
     }
 
-    fun importFromUri(uri: Uri): LocalImageModelRecord {
+    fun importFromUri(uri: Uri): LocalImageModelRecord = synchronized(imageModelCatalogLock) {
         val fileName = queryDisplayName(uri) ?: "image-model.task"
         val extension = fileName.substringAfterLast('.', "").lowercase()
         require(extension in SUPPORTED_EXTENSIONS) {
             "请选择 .gguf、.safetensors、.ckpt、.pth、.pt、.onnx，或包含 diffusion 主模型、VAE/AE、文本编码器/LLM 的 .zip 图像生成引擎包。"
         }
         if (extension == "zip") {
-            return importBundleFromUri(uri, fileName)
+            return@synchronized importBundleFromUri(uri, fileName)
         }
         managedDir.mkdirs()
         val target = uniqueTarget(fileName)
@@ -6076,16 +6151,16 @@ class LocalImageModelStore(context: Context) {
         )
         saveModels(listOf(record) + loadModels().filterNot { it.id == record.id })
         if (loadSelectedModelId() == null && record.isReadyForLocalImageGeneration()) saveSelectedModelId(record.id)
-        return record
+        return@synchronized record
     }
 
     fun registerDownloadedModel(
         file: File,
         remote: RemoteModelFile
-    ): LocalImageModelRecord {
+    ): LocalImageModelRecord = synchronized(imageModelCatalogLock) {
         require(file.exists()) { "下载完成的图像模型文件不存在：${file.absolutePath}" }
         if (file.extension.equals("zip", ignoreCase = true)) {
-            return importBundleFromUri(Uri.fromFile(file), file.name).also {
+            return@synchronized importBundleFromUri(Uri.fromFile(file), file.name).also {
                 runCatching { file.delete() }
             }
         }
@@ -6103,12 +6178,16 @@ class LocalImageModelStore(context: Context) {
         )
         saveModels(listOf(record) + loadModels().filterNot { it.sha256.equals(record.sha256, ignoreCase = true) })
         if (loadSelectedModelId() == null && record.isReadyForLocalImageGeneration()) saveSelectedModelId(record.id)
-        return record
+        return@synchronized record
     }
 
     fun managedBundleDirFor(bundleId: String): File {
         val safeName = bundleId.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "image-engine" }
-        return File(managedDir, "bundle-$safeName").also { it.mkdirs() }
+        // The bundle installer writes into a hidden staging directory and atomically
+        // promotes it only after verification. Materializing the public destination
+        // here leaves a misleading empty folder when Android stops the process during
+        // a large download or while post-download validation is still running.
+        return File(managedDir, "bundle-$safeName")
     }
 
     fun managedBundleFileFor(bundleDir: File, fileName: String): File {
@@ -6125,7 +6204,7 @@ class LocalImageModelStore(context: Context) {
         runtimeOverride: LocalImageRuntime? = null,
         imageSizeOverride: String? = null,
         primarySha256: String? = null
-    ): LocalImageModelRecord {
+    ): LocalImageModelRecord = synchronized(imageModelCatalogLock) {
         require(bundleDir.isDirectory) { "本地生图引擎包目录不存在：${bundleDir.absolutePath}" }
         require(primaryFile.exists()) { "Local image engine bundle is missing a diffusion model: ${primaryFile.name}" }
         if (primaryFile.extension.equals("zip", ignoreCase = true)) {
@@ -6175,7 +6254,7 @@ class LocalImageModelStore(context: Context) {
             saveSelectedModelId(record.id)
             saveSelectedBackend(ImageBackend.LOCAL)
         }
-        return record
+        return@synchronized record
     }
 
     fun managedFileFor(fileName: String): File {
@@ -6183,9 +6262,9 @@ class LocalImageModelStore(context: Context) {
         return uniqueTarget(fileName)
     }
 
-    fun deleteModel(id: String): Boolean {
+    fun deleteModel(id: String): Boolean = synchronized(imageModelCatalogLock) {
         val models = loadModels()
-        val target = models.firstOrNull { it.id == id } ?: return false
+        val target = models.firstOrNull { it.id == id } ?: return@synchronized false
         val targetFile = target.bundleRoot
             ?.takeIf(String::isNotBlank)
             ?.let(::File)
@@ -6199,11 +6278,11 @@ class LocalImageModelStore(context: Context) {
                 targetFile.delete() && !targetFile.exists()
             }
         }.getOrDefault(false)
-        if (!deleted || targetFile.exists()) return false
+        if (!deleted || targetFile.exists()) return@synchronized false
         val remaining = models.filterNot { it.id == id }
         saveModels(remaining)
         if (loadSelectedModelId() == id) saveSelectedModelId(remaining.firstOrNull { it.isReadyForLocalImageGeneration() }?.id)
-        return true
+        return@synchronized true
     }
 
     fun loadSelectedModelId(): String? =
@@ -6221,7 +6300,7 @@ class LocalImageModelStore(context: Context) {
         prefs.edit().putString(KEY_SELECTED_BACKEND, backend.name).apply()
     }
 
-    private fun importBundleFromUri(uri: Uri, fileName: String): LocalImageModelRecord {
+    private fun importBundleFromUri(uri: Uri, fileName: String): LocalImageModelRecord = synchronized(imageModelCatalogLock) {
         val bundleDir = uniqueBundleDir(fileName.substringBeforeLast('.', fileName))
         bundleDir.mkdirs()
         try {
@@ -6270,7 +6349,7 @@ class LocalImageModelStore(context: Context) {
             ) {
                 saveSelectedModelId(record.id)
             }
-            return record
+            return@synchronized record
         } catch (error: Throwable) {
             if (bundleDir.exists()) runCatching { bundleDir.deleteRecursively() }
             throw error
@@ -6610,7 +6689,7 @@ internal fun findPrimaryImageModel(root: File): File? =
         )
         .firstOrNull()
 
-private fun File.isMcaImageBundleManifest(): Boolean =
+internal fun File.isMcaImageBundleManifest(): Boolean =
     isFile && runCatching {
         JSONObject(readText(Charsets.UTF_8)).optString("schema") == "mca.image_engine.bundle.v1"
     }.getOrDefault(false)
@@ -7194,18 +7273,18 @@ private fun LocalImageModelRecord.resolvedMnnFamily(): LocalImageModelFamily {
     return mnnVerificationRoute(family, manifest).family
 }
 
-private fun inferLocalImageRuntimeForBundle(root: File, primary: File): LocalImageRuntime =
+private fun inferLocalImageRuntimeForBundle(root: File, primary: File, discovery: Boolean = false): LocalImageRuntime =
     when {
-        root.walkTopDown().any {
+        (if (discovery) imageDiscoveryWalk(root) else root.walkTopDown()).any {
             it.isFile && (
                 listOf("qnn", "qairt", "htp").any { token -> token in it.invariantSeparatorsPath.lowercase() } ||
                     it.name.endsWith(".ctx", ignoreCase = true) ||
                     it.name.equals("unet.bin", ignoreCase = true) &&
-                        root.walkTopDown().any { sibling -> sibling.name.contains("clip", true) }
+                        (if (discovery) imageDiscoveryWalk(root) else root.walkTopDown()).any { sibling -> sibling.name.contains("clip", true) }
             )
         } -> LocalImageRuntime.QNN_HTP
         primary.extension.equals("mnn", ignoreCase = true) -> LocalImageRuntime.MNN_DIFFUSION
-        root.walkTopDown().any { it.isFile && it.extension.equals("mnn", ignoreCase = true) } -> LocalImageRuntime.MNN_DIFFUSION
+        (if (discovery) imageDiscoveryWalk(root) else root.walkTopDown()).any { it.isFile && it.extension.equals("mnn", ignoreCase = true) } -> LocalImageRuntime.MNN_DIFFUSION
         else -> LocalImageRuntime.infer(primary.name)
     }
 

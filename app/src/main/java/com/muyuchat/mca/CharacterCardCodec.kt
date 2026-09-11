@@ -392,7 +392,12 @@ object CharacterCardCodec {
         } else {
             val compactBase64 = compactBase64(candidate)
                 ?: return failure(CharacterCardParseErrorCode.INVALID_CARD_METADATA, "Character-card metadata is not valid base64 JSON.")
-            val decoded = runCatching { Base64.getDecoder().decode(compactBase64) }.getOrElse { error ->
+            val decoded = runCatching {
+                // Character-card exporters in the wild use both RFC 4648 and URL-safe
+                // alphabets.  Accept either spelling while retaining the same bounded decode.
+                runCatching { Base64.getDecoder().decode(compactBase64) }
+                    .getOrElse { Base64.getUrlDecoder().decode(compactBase64) }
+            }.getOrElse { error ->
                 return failure(CharacterCardParseErrorCode.INVALID_CARD_METADATA, "Character-card metadata base64 is malformed.", error)
             }
             if (decoded.size > MAX_JSON_BYTES) {

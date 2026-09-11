@@ -172,7 +172,7 @@ internal object ImageExecutionProfileResolver {
     private const val QNN_SD15_EXECUTION_PROFILE_REVISION = 5
     private const val QNN_DREAMSHAPER_SD15_EXECUTION_PROFILE_REVISION = 6
     private const val QNN_REALISTICVISIONHYPER_SD15_EXECUTION_PROFILE_REVISION = 6
-    private const val QNN_SDXL_EXECUTION_PROFILE_REVISION = 6
+    private const val QNN_SDXL_EXECUTION_PROFILE_REVISION = 7
     private const val QNN_GEN5_EXECUTION_PROFILE_REVISION = 2
     private val QNN_SD15_CONDITIONING_RUNTIME_ASSETS = listOf(
         "tokenizer.json",
@@ -753,12 +753,28 @@ internal object ImageExecutionProfileResolver {
             defaultSteps = behavior.steps ?: base.scheduler.defaultSteps
         )
         val resizedContracts = resizedImageContracts(base, width, height)
+        val resolvedCapabilities = if (dimensionsChanged &&
+            base.capabilities.minWidth == base.capabilities.maxWidth &&
+            base.capabilities.minHeight == base.capabilities.maxHeight
+        ) {
+            // An explicit package behavior is an intentional dimension override. Re-open the
+            // ordinary SDCPP range so later user overrides remain compatible with that package.
+            base.capabilities.copy(
+                minWidth = 256,
+                maxWidth = 1_536,
+                minHeight = 256,
+                maxHeight = 1_536
+            )
+        } else {
+            base.capabilities
+        }
         return base.copy(
             family = behavior.family ?: base.family,
             variant = behavior.variant ?: base.variant,
             scheduler = scheduler,
             latent = if (dimensionsChanged) resizedContracts.first else base.latent,
             vae = if (dimensionsChanged) resizedContracts.second else base.vae,
+            capabilities = resolvedCapabilities,
             defaults = base.defaults.copy(
                 width = width,
                 height = height,
@@ -1353,7 +1369,7 @@ internal object ImageExecutionProfileResolver {
                 else -> 7.0
             },
             defaultNegativePrompt = when (target.recommendationId) {
-                "animagine_xl_v4_qnn228" -> RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT
+                "animagine_xl_v4_qnn228" -> RecommendedImageDefaults.ANIMAGINE_XL_NEGATIVE_PROMPT
                 "cyberrealisticxl_qnn228" -> RecommendedImageDefaults.CYBERREALISTIC_XL_NEGATIVE_PROMPT
                 else -> RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT
             }
@@ -1375,10 +1391,10 @@ internal object ImageExecutionProfileResolver {
         "mnn.sd15.official.512" -> mnnSd15Profile(profileId, fingerprint)
         "mnn.sana-edit.v2" -> sanaEditProfile(profileId, fingerprint)
         "sdcpp.sd-turbo" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.SD_TURBO, ImageModelVariant.SD_TURBO, 4, 1.0, ImageSchedulerAlgorithm.EULER_A, supportsNegativePrompt = false)
-        "sdcpp.z-image-turbo" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.Z_IMAGE, ImageModelVariant.Z_IMAGE_TURBO, 8, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, supportsNegativePrompt = false)
-        "sdcpp.flux2-klein" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.FLUX, ImageModelVariant.FLUX2_KLEIN, 4, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, supportsNegativePrompt = false)
-        "sdcpp.qwen-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.QWEN_IMAGE, ImageModelVariant.QWEN_IMAGE, 40, 2.5, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT)
-        "sdcpp.longcat-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.LONGCAT_IMAGE, ImageModelVariant.LONGCAT_IMAGE, 20, 5.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT)
+        "sdcpp.z-image-turbo" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.Z_IMAGE, ImageModelVariant.Z_IMAGE_TURBO, 8, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, supportsNegativePrompt = false, maxPromptTokens = 512)
+        "sdcpp.flux2-klein" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.FLUX, ImageModelVariant.FLUX2_KLEIN, 4, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, supportsNegativePrompt = false, maxPromptTokens = 512)
+        "sdcpp.qwen-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.QWEN_IMAGE, ImageModelVariant.QWEN_IMAGE, 40, 2.5, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT, maxPromptTokens = 512)
+        "sdcpp.longcat-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.LONGCAT_IMAGE, ImageModelVariant.LONGCAT_IMAGE, 20, 5.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT, maxPromptTokens = 512)
         else -> error("Unknown built-in image profile target: $profileId")
     }
 
@@ -1502,6 +1518,11 @@ internal object ImageExecutionProfileResolver {
             htpArch = null,
             strategy = ImageWorkerStrategy.SPLIT_UNET_VAE,
             vaeEncoder = "vae_encoder.bin"
+        ).copy(
+            schedulerSidecar = null,
+            tokenizerSidecar = null,
+            configSidecars = listOf("clip_2.mnn", "clip_2.mnn.weight", "tokenizer.json", "token_emb.bin",
+                "token_emb_2.bin", "pos_emb.bin", "pos_emb_2.bin")
         ),
         defaults = defaults(1024, steps, cfg, useCfg, defaultNegativePrompt),
         capabilities = capabilities(
@@ -1702,7 +1723,8 @@ internal object ImageExecutionProfileResolver {
         size: Int = 512,
         defaultNegativePrompt: String? = null,
         supportsNegativePrompt: Boolean = true,
-        runtime: LocalImageRuntime = LocalImageRuntime.STABLE_DIFFUSION_CPP
+        runtime: LocalImageRuntime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+        maxPromptTokens: Int = 77
     ): ImageExecutionProfile = profile(
         profileId = profileId,
         fingerprint = fingerprint,
@@ -1718,6 +1740,7 @@ internal object ImageExecutionProfileResolver {
         ),
         tokenizer = clipTokenizer(
             ImageTokenizerBackend.SDCPP_NATIVE,
+            maxLength = maxPromptTokens,
             separateNegativePrompt = supportsNegativePrompt,
             supportsTextualInversion = runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP &&
                 family.supportsStableDiffusionCppTextualInversion()
@@ -1726,6 +1749,7 @@ internal object ImageExecutionProfileResolver {
             ImageEmbeddingDiskDataType.RUNTIME_NATIVE,
             ImageEmbeddingConversionStrategy.RUNTIME_NATIVE,
             1,
+            maxLength = maxPromptTokens,
             separateNegativePrompt = supportsNegativePrompt
         ),
         vae = vae(ImageVaeScalingLocation.RUNTIME_NATIVE, 1.0, size),
@@ -1748,9 +1772,10 @@ internal object ImageExecutionProfileResolver {
                 else -> setOf(algorithm)
             },
             family = family,
-            supportsNegativePrompt = supportsNegativePrompt
+            supportsNegativePrompt = supportsNegativePrompt,
+            fixedSize = size
         ),
-        profileRevision = if (family.supportsStableDiffusionCppTextualInversion()) 2 else 1
+        profileRevision = if (family.supportsStableDiffusionCppTextualInversion() || maxPromptTokens > 77) 2 else 1
     )
 
     private fun genericProfile(
@@ -1949,6 +1974,7 @@ internal object ImageExecutionProfileResolver {
 
     private fun clipTokenizer(
         backend: ImageTokenizerBackend,
+        maxLength: Int = 77,
         dualClip: Boolean = false,
         padZero: Boolean = false,
         supportsPromptWeighting: Boolean = backend != ImageTokenizerBackend.MNN_MTOK,
@@ -1959,7 +1985,7 @@ internal object ImageExecutionProfileResolver {
         bosId = 49_406,
         eosId = 49_407,
         padId = if (dualClip || padZero) 0 else 49_407,
-        maxLength = 77,
+        maxLength = maxLength,
         clip1PadRule = if (padZero) ImageClipPadRule.ZERO else ImageClipPadRule.EOS,
         clip2PadRule = if (dualClip) ImageClipPadRule.ZERO else null,
         supportsPromptWeighting = supportsPromptWeighting,
@@ -2078,16 +2104,17 @@ internal object ImageExecutionProfileResolver {
     private fun stableDiffusionCapabilities(
         schedulers: Set<ImageSchedulerAlgorithm>,
         family: LocalImageModelFamily,
-        supportsNegativePrompt: Boolean = true
+        supportsNegativePrompt: Boolean = true,
+        fixedSize: Int? = null
     ): ImageGenerationCapabilities {
         val supportsUltraFix = family.supportsStableDiffusionCppUltraFix()
         val ultraFixMultiple = if (family == LocalImageModelFamily.SDXL) 32 else 64
         return ImageGenerationCapabilities(
             supportedSchedulers = schedulers,
-            minWidth = 256,
-            maxWidth = 1_536,
-            minHeight = 256,
-            maxHeight = 1_536,
+            minWidth = fixedSize ?: 256,
+            maxWidth = fixedSize ?: 1_536,
+            minHeight = fixedSize ?: 256,
+            maxHeight = fixedSize ?: 1_536,
             widthMultiple = 64,
             heightMultiple = 64,
             supportsNegativePrompt = supportsNegativePrompt,

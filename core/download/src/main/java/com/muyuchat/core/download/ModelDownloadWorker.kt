@@ -33,8 +33,9 @@ class ModelDownloadWorker(
                 finalFile = File(finalPath)
             )
             Result.success()
-        }.getOrElse {
-            Result.retry()
+        }.getOrElse { error ->
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            if (error.isDownloadStorageFailure() || runAttemptCount >= 3) Result.failure() else Result.retry()
         }
     }
 

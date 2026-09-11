@@ -405,11 +405,11 @@ class LocalImageProductClosureTest {
     @Test
     fun `download registration selects the detected model and active model cannot be deleted`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val bundleDownload = functionBody(source, "private fun downloadRecommendedImageBundle(")
+        val bundleDownload = functionBody(source, "private fun observeManagedDownloads(")
         val delete = functionBody(source, "fun deleteLocalImageModel(")
         val selectChoice = functionBody(source, "fun selectImageGenerationModel(")
 
-        assertTrue(bundleDownload.contains("val selection = settleLocalImageSelection(record)"))
+        assertTrue(bundleDownload.contains("val selection = settleLocalImageSelection(image)"))
         assertTrue(bundleDownload.contains("selectedLocalImageModelId = selection.selectedId"))
         assertTrue(bundleDownload.contains("selectedImageBackend = selection.selectedBackend"))
         assertTrue(delete.contains("activeImageGenerationModelId == modelId"))

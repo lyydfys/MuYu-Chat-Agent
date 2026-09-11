@@ -31,10 +31,14 @@ enum class WorldBookScope(val wireName: String) {
 data class WorldBookEntry(
     val id: String = UUID.randomUUID().toString(),
     val keys: List<String> = emptyList(),
+    val secondaryKeys: List<String> = emptyList(),
     val content: String,
     val enabled: Boolean = true,
     val constant: Boolean = false,
-    val priority: Int = 0
+    val priority: Int = 0,
+    val selective: Boolean = false,
+    val useRegex: Boolean = false,
+    val caseSensitive: Boolean = false
 ) {
     init {
         require(content.isNotBlank()) { "World book entry content is required." }
@@ -147,12 +151,16 @@ object WorldBookCodec {
             .trim()
         if (content.isBlank()) return null
         require(content.length <= MAX_ENTRY_CHARS) { "A world book entry is too large." }
-        val keys = buildList {
-            source.optJSONArray("key")?.forEachString { add(it) }
-            source.optJSONArray("keys")?.forEachString { add(it) }
-            source.optString("key").takeIf { it.isNotBlank() }?.let { add(it) }
-            source.optString("keys").takeIf { it.isNotBlank() }?.let { add(it) }
-        }
+        val keys = readStringValues(source, listOf("key", "keys"))
+            .flatMap { it.split(',', '\n') }
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(32)
+        val secondaryKeys = readStringValues(
+            source,
+            listOf("secondary_keys", "secondaryKeys", "keysecondary", "keySecondary")
+        )
             .flatMap { it.split(',', '\n') }
             .map { it.trim() }
             .filter { it.isNotBlank() }
@@ -160,15 +168,44 @@ object WorldBookCodec {
             .take(32)
         val enabled = !source.has("enabled") || source.optBoolean("enabled", true)
         val constant = source.optBoolean("constant", false)
+        val selective = source.optBoolean("selective", false)
+        val useRegex = source.optBoolean("use_regex", source.optBoolean("useRegex", false))
+        val caseSensitive = source.optBoolean("case_sensitive", source.optBoolean("caseSensitive", false))
         if (!constant && keys.isEmpty()) return null
         return WorldBookEntry(
             id = source.opt("uid")?.toString()?.takeIf { it.isNotBlank() } ?: fallbackId,
             keys = keys,
+            secondaryKeys = secondaryKeys,
             content = content,
             enabled = enabled,
             constant = constant,
-            priority = source.optInt("order", source.optInt("priority", 0))
+            priority = source.optInt("order", source.optInt("priority", 0)),
+            selective = selective,
+            useRegex = useRegex,
+            caseSensitive = caseSensitive
         )
+    }
+
+    private fun readStringValues(source: JSONObject, names: List<String>): List<String> = buildList {
+        names.forEach { name ->
+            when (val value = source.opt(name)) {
+                is JSONArray -> value.forEachString { add(it) }
+                is String -> {
+                    val text = value.trim()
+                    if (text.isBlank()) return@forEach
+                    if (text.startsWith("[") && text.endsWith("]")) {
+                        runCatching { JSONArray(text) }
+                            .getOrNull()
+                            ?.forEachString { add(it) }
+                            ?: add(text)
+                    } else {
+                        add(text)
+                    }
+                }
+                null, JSONObject.NULL -> Unit
+                else -> add(value.toString())
+            }
+        }
     }
 
     private inline fun JSONArray.forEachString(block: (String) -> Unit) {
@@ -335,10 +372,14 @@ class WorldBookStore private constructor(
                     JSONObject()
                         .put("id", entry.id)
                         .put("keys", JSONArray(entry.keys))
+                        .put("secondaryKeys", JSONArray(entry.secondaryKeys))
                         .put("content", entry.content)
                         .put("enabled", entry.enabled)
                         .put("constant", entry.constant)
                         .put("priority", entry.priority)
+                        .put("selective", entry.selective)
+                        .put("useRegex", entry.useRegex)
+                        .put("caseSensitive", entry.caseSensitive)
                 )
             }
         })
@@ -361,10 +402,17 @@ class WorldBookStore private constructor(
                         List(keys.length()) { keyIndex -> keys.optString(keyIndex).trim() }
                             .filter { it.isNotBlank() }
                     }.orEmpty(),
+                    secondaryKeys = entry.optJSONArray("secondaryKeys")?.let { keys ->
+                        List(keys.length()) { keyIndex -> keys.optString(keyIndex).trim() }
+                            .filter { it.isNotBlank() }
+                    }.orEmpty(),
                     content = entry.optString("content"),
                     enabled = !entry.has("enabled") || entry.optBoolean("enabled", true),
                     constant = entry.optBoolean("constant", false),
-                    priority = entry.optInt("priority", 0)
+                    priority = entry.optInt("priority", 0),
+                    selective = entry.optBoolean("selective", false),
+                    useRegex = entry.optBoolean("useRegex", false),
+                    caseSensitive = entry.optBoolean("caseSensitive", false)
                 )
             }
         }.orEmpty()
@@ -405,7 +453,7 @@ internal fun List<WorldBookRecord>.withoutScopedOwners(
 }
 
 object WorldBookResolver {
-    private const val MAX_SCAN_CHARS = 16_384
+    private const val MAX_SCAN_CHARS = 24_576
 
     fun select(
         books: List<WorldBookRecord>,
@@ -415,19 +463,18 @@ object WorldBookResolver {
         tokenBudget: Int
     ): WorldBookSelection {
         if (tokenBudget <= 0) return WorldBookSelection()
-        val scanText = normalize(
+        val scanText = boundedScanText(
             messages
                 .filter { it.role != com.muyuchat.core.engine.Role.SYSTEM }
-                .takeLast(8)
+                .takeLast(16)
                 .joinToString("\n") { it.content }
-                .takeLast(MAX_SCAN_CHARS)
         )
         val candidates = books.asSequence()
             .filter { it.enabled && matchesScope(it, assistantId, chatSessionId) }
             .flatMap { book ->
                 book.entries.asSequence()
                     .filter { it.enabled }
-                    .filter { entry -> entry.constant || entry.keys.any { key -> normalize(key) in scanText } }
+                    .filter { entry -> entry.constant || entryMatches(entry, scanText) }
                     .map { entry -> WorldBookCandidate(book, entry) }
             }
             .sortedWith(
@@ -490,6 +537,39 @@ object WorldBookResolver {
 
     private fun normalize(value: String): String =
         Normalizer.normalize(value, Normalizer.Form.NFKC).lowercase()
+
+    private fun boundedScanText(value: String): String {
+        if (value.length <= MAX_SCAN_CHARS) return value
+        val half = MAX_SCAN_CHARS / 2
+        return value.take(half) + "\n…\n" + value.takeLast(half)
+    }
+
+    private fun entryMatches(entry: WorldBookEntry, scanText: String): Boolean {
+        val primary = entry.keys.any { matchesTrigger(it, entry, scanText) }
+        if (!primary) return false
+        if (!entry.selective || entry.secondaryKeys.isEmpty()) return true
+        return entry.secondaryKeys.any { matchesTrigger(it, entry, scanText) }
+    }
+
+    private fun matchesTrigger(trigger: String, entry: WorldBookEntry, scanText: String): Boolean {
+        if (trigger.isBlank()) return false
+        if (entry.useRegex) {
+            return runCatching {
+                Regex(trigger, if (entry.caseSensitive) emptySet() else setOf(RegexOption.IGNORE_CASE))
+                    .containsMatchIn(scanText)
+            }.getOrDefault(false)
+        }
+        val normalizedTrigger = if (entry.caseSensitive) {
+            Normalizer.normalize(trigger, Normalizer.Form.NFKC)
+        } else {
+            normalize(trigger)
+        }
+        return if (entry.caseSensitive) {
+            scanText.contains(normalizedTrigger)
+        } else {
+            normalize(scanText).contains(normalizedTrigger)
+        }
+    }
 
     private data class WorldBookCandidate(
         val book: WorldBookRecord,

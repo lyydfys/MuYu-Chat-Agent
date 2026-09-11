@@ -4997,30 +4997,84 @@ bool run_sdxl_clip_encoder_direct(
         auto* pooledTensor = find_named_output_by_shape(
                 outputs, pooledShape, pooledNames);
         if (pooledTensor == nullptr) {
-            interpreter->releaseSession(session);
-            error = modelFile +
-                    " must expose a projected pooled output named text_embeds or "
-                    "pooled_output with shape [1, " + std::to_string(embeddingSize) +
-                    "]; refusing to substitute an EOS hidden-state row.";
-            return false;
-        }
-        if (!copy_tensor_to_float_vector(pooledTensor, *pooled, error)) {
-            interpreter->releaseSession(session);
-            error = modelFile + " projected pooled output copy failed: " + error;
-            return false;
-        }
-        if (!validate_float_tensor_contract(
-                *pooled, pooledShape, modelFile + " projected pooled output", error)) {
-            interpreter->releaseSession(session);
-            return false;
-        }
-        if (debug != nullptr) {
-            const auto textEmbeds = outputs.find("text_embeds");
-            (*debug)["pooledSource"] =
-                    textEmbeds != outputs.end() && textEmbeds->second == pooledTensor
-                            ? "text_embeds"
-                            : "pooled_output";
-            (*debug)["pooledStats"] = float_vector_stats_json(pooled->values);
+            // Diffusers-style CLIP-bigG exports may apply the shared text
+            // projection to every position and publish the projected sequence
+            // as [1, seq, emb]; the pooled vector is that sequence's EOS row.
+            // An EOS row of an unprojected hidden state stays rejected: the
+            // UNet requires the exact projected text_embeds contract.
+            auto* pooledSequenceTensor = find_named_output_by_shape(
+                    outputs,
+                    {1, static_cast<int>(tokenIds.size()), embeddingSize},
+                    pooledNames);
+            if (pooledSequenceTensor == nullptr) {
+                interpreter->releaseSession(session);
+                error = modelFile +
+                        " must expose a projected pooled output named text_embeds or "
+                        "pooled_output with shape [1, " + std::to_string(embeddingSize) +
+                        "] or [1, " + std::to_string(tokenIds.size()) + ", " +
+                        std::to_string(embeddingSize) +
+                        "]; refusing to substitute an EOS hidden-state row.";
+                return false;
+            }
+            constexpr int kClipEosTokenId = 49407;
+            const auto eosPosition = std::find(
+                    tokenIds.begin(), tokenIds.end(), kClipEosTokenId);
+            if (eosPosition == tokenIds.end()) {
+                interpreter->releaseSession(session);
+                error = modelFile + " projected pooled sequence requires EOS token id " +
+                        std::to_string(kClipEosTokenId) + " to select the pooled row.";
+                return false;
+            }
+            FloatTensorData pooledSequence;
+            if (!copy_tensor_to_float_vector(pooledSequenceTensor, pooledSequence, error)) {
+                interpreter->releaseSession(session);
+                error = modelFile + " projected pooled sequence copy failed: " + error;
+                return false;
+            }
+            const long eosRow = static_cast<long>(std::distance(tokenIds.begin(), eosPosition));
+            const size_t sequenceElements = tensor_element_count({
+                    1, static_cast<int>(tokenIds.size()), embeddingSize});
+            if (sequenceElements == 0 || pooledSequence.values.size() != sequenceElements ||
+                    eosRow < 0 ||
+                    static_cast<size_t>(eosRow + 1) * static_cast<size_t>(embeddingSize) >
+                            pooledSequence.values.size()) {
+                interpreter->releaseSession(session);
+                error = modelFile + " projected pooled sequence has an invalid EOS row.";
+                return false;
+            }
+            pooled->shape = pooledShape;
+            pooled->values.assign(
+                    pooledSequence.values.begin() + eosRow * embeddingSize,
+                    pooledSequence.values.begin() + (eosRow + 1) * embeddingSize);
+            if (!validate_float_tensor_contract(
+                    *pooled, pooledShape, modelFile + " projected pooled output", error)) {
+                interpreter->releaseSession(session);
+                return false;
+            }
+            if (debug != nullptr) {
+                (*debug)["pooledSource"] = "projected_sequence_eos_row";
+                (*debug)["pooledSequenceEosRow"] = eosRow;
+                (*debug)["pooledStats"] = float_vector_stats_json(pooled->values);
+            }
+        } else {
+            if (!copy_tensor_to_float_vector(pooledTensor, *pooled, error)) {
+                interpreter->releaseSession(session);
+                error = modelFile + " projected pooled output copy failed: " + error;
+                return false;
+            }
+            if (!validate_float_tensor_contract(
+                    *pooled, pooledShape, modelFile + " projected pooled output", error)) {
+                interpreter->releaseSession(session);
+                return false;
+            }
+            if (debug != nullptr) {
+                const auto textEmbeds = outputs.find("text_embeds");
+                (*debug)["pooledSource"] =
+                        textEmbeds != outputs.end() && textEmbeds->second == pooledTensor
+                                ? "text_embeds"
+                                : "pooled_output";
+                (*debug)["pooledStats"] = float_vector_stats_json(pooled->values);
+            }
         }
     }
     interpreter->releaseSession(session);

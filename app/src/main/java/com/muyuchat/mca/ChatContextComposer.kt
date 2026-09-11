@@ -52,7 +52,7 @@ class ChatContextComposer(
             val query = messages.asReversed()
                 .firstOrNull { it.role == Role.USER && it.content.isNotBlank() }
                 ?.content
-                ?.takeLast(MAX_QUERY_CHARS)
+                ?.let(::boundedQuery)
                 .orEmpty()
             knowledgeBaseStore.retrieve(
                 knowledgeBaseIds = knowledgeBaseIds,
@@ -79,5 +79,11 @@ class ChatContextComposer(
     private companion object {
         const val MAX_QUERY_CHARS = 8_192
         const val MAX_KNOWLEDGE_CHUNKS = 4
+
+        fun boundedQuery(value: String): String {
+            if (value.length <= MAX_QUERY_CHARS) return value
+            val half = MAX_QUERY_CHARS / 2
+            return value.take(half) + "\n…\n" + value.takeLast(half)
+        }
     }
 }

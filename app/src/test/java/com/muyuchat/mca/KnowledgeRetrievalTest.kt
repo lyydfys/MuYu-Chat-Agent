@@ -47,6 +47,16 @@ class KnowledgeRetrievalTest {
     }
 
     @Test
+    fun lexicalRetrieverAllowsCommonLatinWordForms() {
+        val ranked = KnowledgeLexicalRetriever.rank(
+            query = "refund",
+            chunks = listOf(chunk("policy", "billing", content = "Refunded payments follow the billing policy."))
+        )
+
+        assertEquals(listOf("policy"), ranked.map { it.chunk.id })
+    }
+
+    @Test
     fun termNormalizationHandlesFullWidthLatinAndCjkBigrams() {
         val terms = KnowledgeLexicalRetriever.terms("\uFF21\uFF29 Agent \u676d\u5dde\u897f\u6e56")
 

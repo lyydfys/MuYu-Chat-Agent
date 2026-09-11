@@ -31,6 +31,8 @@ class LocalImageStoreSmokeActivity : Activity() {
         val logFile = File(outDir, "$runId.json")
         val outputFile = File(outDir, "$runId.png")
         val events = JSONArray()
+        var previousSelectedModelId: String? = null
+        var previousSelectedBackend: ImageBackend? = null
 
         fun write(event: JSONObject) {
             event.put("runId", runId)
@@ -42,6 +44,11 @@ class LocalImageStoreSmokeActivity : Activity() {
 
         try {
             val store = LocalImageModelStore(this)
+            // Debug store smoke runs in the same application UID as the product UI. Keep its
+            // temporary verification selection out of the user's production preference: this
+            // activity may create or select a synthetic model solely for the smoke run.
+            previousSelectedModelId = store.loadSelectedModelId()
+            previousSelectedBackend = store.loadSelectedBackend()
             val initialModels = store.loadModels()
             val bootstrapBundleRoot = intent.getStringExtra("bootstrapBundleRoot")
                 ?.takeIf { it.isNotBlank() }
@@ -162,8 +169,6 @@ class LocalImageStoreSmokeActivity : Activity() {
                     updatedAt = System.currentTimeMillis()
                 )
                 store.updateModel(passedModel)
-                store.saveSelectedModelId(passedModel.id)
-                store.saveSelectedBackend(ImageBackend.LOCAL)
                 write(
                     JSONObject()
                         .put("status", "completed")
@@ -178,6 +183,13 @@ class LocalImageStoreSmokeActivity : Activity() {
         } catch (error: Throwable) {
             write(JSONObject().put("status", "failed").put("error", error.stackTraceToString()))
         } finally {
+            // The smoke activity must never leave its synthetic/local-test model selected for
+            // MainActivity. Restore the selection captured before the run, even on failure.
+            runCatching {
+                val store = LocalImageModelStore(this@LocalImageStoreSmokeActivity)
+                store.saveSelectedModelId(previousSelectedModelId)
+                previousSelectedBackend?.let(store::saveSelectedBackend)
+            }
             runOnUiThread { finish() }
         }
     }

@@ -62,9 +62,12 @@ its first real native load and graph execution determine compatibility.
 
 Current release status:
 
-- `v0.2.2` is the current stability release. Its notes and verification record are
-  in [docs/releases/v0.2.2.md](docs/releases/v0.2.2.md); signed APKs are
-  published through [GitHub Releases](https://github.com/lyydfys/MCA/releases).
+- The current source version is `v0.2.3` (`versionCode 7`), prepared for release.
+  It improves startup recovery, resumable model installation, character cards,
+  world books, knowledge retrieval, and image-model compatibility. See
+  [v0.2.3 release notes](docs/releases/v0.2.3.md) for validation and limitations.
+  Published installers are listed on
+  [GitHub Releases](https://github.com/lyydfys/MuYu-Chat-Agent/releases).
 - The first public package target is `arm64-v8a` Android devices.
 - Local chat is the primary stable local path.
 - Web search is available after the user configures a search provider in

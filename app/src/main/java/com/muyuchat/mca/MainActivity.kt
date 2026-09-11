@@ -26,6 +26,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -140,7 +143,8 @@ internal fun existingImageModelChoiceIds(
 }
 
 class MainActivity : ComponentActivity() {
-    private val viewModel: MainViewModel by viewModels()
+    private val startup: AppStartupViewModel by viewModels()
+    private val viewModel: MainViewModel get() = requireNotNull(startup.state.value.model)
     private var pendingChatExportSessionId: String? = null
     private var pendingVisionProjectorModelId: String? = null
     private var pendingKnowledgeBaseId: String? = null
@@ -160,35 +164,35 @@ class MainActivity : ComponentActivity() {
             savedInstanceState?.getString(PENDING_WORLD_BOOK_SCOPE_KEY)
         )
         val importLauncher = registerForActivityResult(OpenModelDocumentsContract()) { uris ->
-            if (uris.isNotEmpty()) viewModel.importModel(uris)
+            if (uris.isNotEmpty()) startup.whenReady { it.importModel(uris) }
         }
         val localImageModelImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) viewModel.importLocalImageModel(uri)
+            if (uri != null) startup.whenReady { it.importLocalImageModel(uri) }
         }
         val assistantCardImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) viewModel.importAssistantCardFile(uri.toString())
+            if (uri != null) startup.whenReady { it.importAssistantCardFile(uri.toString()) }
         }
         val worldBookImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             val scope = pendingWorldBookImportScope
             pendingWorldBookImportScope = WorldBookScope.GLOBAL
-            if (uri != null) viewModel.importWorldBookFile(uri.toString(), scope)
+            if (uri != null) startup.whenReady { it.importWorldBookFile(uri.toString(), scope) }
         }
         val knowledgeDocumentImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             val knowledgeBaseId = pendingKnowledgeBaseId
             pendingKnowledgeBaseId = null
             if (uri != null && knowledgeBaseId != null) {
-                viewModel.importKnowledgeDocument(knowledgeBaseId, uri.toString())
+                startup.whenReady { it.importKnowledgeDocument(knowledgeBaseId, uri.toString()) }
             }
         }
         val visionProjectorImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             val modelId = pendingVisionProjectorModelId
             pendingVisionProjectorModelId = null
-            if (uri != null && modelId != null) viewModel.attachVisionProjector(modelId, uri)
+            if (uri != null && modelId != null) startup.whenReady { it.attachVisionProjector(modelId, uri) }
         }
         val diagnosticExportLauncher = registerForActivityResult(
             ActivityResultContracts.CreateDocument("application/json")
         ) { uri ->
-            if (uri != null) viewModel.exportDiagnosticReport(uri)
+            if (uri != null) startup.whenReady { it.exportDiagnosticReport(uri) }
         }
         val chatExportLauncher = registerForActivityResult(
             ActivityResultContracts.CreateDocument("text/markdown")
@@ -196,12 +200,22 @@ class MainActivity : ComponentActivity() {
             val sessionId = pendingChatExportSessionId
             pendingChatExportSessionId = null
             if (uri != null && sessionId != null) {
-                viewModel.exportChatSession(sessionId, uri)
+                startup.whenReady { it.exportChatSession(sessionId, uri) }
             }
         }
 
         setContent {
-            val state by viewModel.uiState.collectAsStateWithLifecycle()
+            val startupState by startup.state.collectAsStateWithLifecycle()
+            val readyModel = startupState.model
+            if (readyModel == null) {
+                McaTheme {
+                    AppStartupScreen(startupState,
+                        onRetry = { startup.start() },
+                        onSkipScan = { startup.skipModelDiscovery() })
+                }
+                return@setContent
+            }
+            val state by readyModel.uiState.collectAsStateWithLifecycle()
             McaTheme {
                 McaApp(
                     state = state,
@@ -283,6 +297,7 @@ private fun McaApp(
     viewModel: MainViewModel
 ) {
     var appMenuOpen by rememberSaveable { mutableStateOf(false) }
+    var startModelsInRecommended by rememberSaveable { mutableStateOf(false) }
     var startSettingsInWebSearch by rememberSaveable { mutableStateOf(false) }
     var dismissedUpdateVersion by rememberSaveable { mutableStateOf<String?>(null) }
     val availableAppUpdate = state.appUpdate.takeIf { update ->
@@ -297,9 +312,18 @@ private fun McaApp(
         onTab(AppTab.CHAT)
     }
     val chatVisionCapability = state.chatVisionCapability()
-    val imageGenerationHistoryById = state.images.associate { image ->
-        image.id to ImageGenerationHistoryMetadata.fromJsonOrNull(image.generationMetadataJson)
+    val preparedImageUi by produceState<Map<String, PreparedLocalImageUi>>(
+        initialValue = emptyMap(), state.localImageModels, state.qnnImageVerificationCurrentByModelId
+    ) {
+        value = withContext(Dispatchers.IO) {
+            state.localImageModels.associate { model ->
+                model.path to prepareLocalImageUi(model, state.qnnImageVerificationCurrentByModelId[model.id])
+            }
+        }
     }
+    val imageGenerationHistoryById = remember(state.images) { state.images.associate { image ->
+        image.id to ImageGenerationHistoryMetadata.fromJsonOrNull(image.generationMetadataJson)
+    } }
     val generationHistoryInputUris = retainedGenerationImageContentReferences(
         historyReferences = imageGenerationHistoryById.values
         .filterNotNull()
@@ -357,6 +381,7 @@ private fun McaApp(
         Box(modifier = modifier) {
             ChatScreen(
                 state = ChatUiState(
+                    modelLoadMessage = state.modelLoadStage.takeIf { state.busy && state.engineLifecycle == com.muyuchat.feature.agent.AgentEngineLifecycle.LOADING },
                     messages = state.messages,
                     history = state.chatSessions.map { session ->
                         ChatHistoryItem(
@@ -410,17 +435,11 @@ private fun McaApp(
                         addAll(
                             state.localImageModels
                                 .sortedByDescending { if (it.id == state.selectedLocalImageModelId) 1 else 0 }
-                                .map { model ->
-                                    val qnnVerificationCurrent = state.qnnImageVerificationCurrentByModelId[model.id]
-                                    val imageCapabilities = model.imageCapabilitiesForUi()
-                                    val readiness = model.localImageReadinessForUi(
-                                        qnnVerificationCurrent,
-                                        imageCapabilities
-                                    )
-                                    val readinessLabel = model.localImageReadinessLabelForUi(
-                                        qnnVerificationCurrent,
-                                        imageCapabilities
-                                    )
+                                .mapNotNull { model ->
+                                    val prepared = preparedImageUi[model.path] ?: return@mapNotNull null
+                                    val imageCapabilities = prepared.capabilities ?: return@mapNotNull null
+                                    val readiness = prepared.readiness
+                                    val readinessLabel = prepared.label
                                     val imageDefaults = imageCapabilities.executionDefaults
                                     ChatModelChoice(
                                         id = MainViewModel.LOCAL_IMAGE_MODEL_CHOICE_PREFIX + model.id,
@@ -544,7 +563,10 @@ private fun McaApp(
                                     WorldBookScope.GLOBAL -> "全局"
                                     WorldBookScope.ASSISTANT -> "当前角色"
                                     WorldBookScope.CHAT -> "当前对话"
-                                }
+                                },
+                                enabled = book.enabled,
+                                constantEntryCount = book.entries.count { it.enabled && it.constant },
+                                keywordEntryCount = book.entries.count { it.enabled && !it.constant }
                             )
                         },
                     knowledgeBases = state.knowledgeBases.map { knowledgeBase ->
@@ -913,7 +935,13 @@ private fun McaApp(
                 onSelectWebSearchResearchMode = viewModel::selectWebSearchResearchModeForNextTurn,
                 onLoadModel = viewModel::selectChatModel,
                 onOpenAgent = { onTab(AppTab.AGENT) },
-                onOpenModels = { onTab(AppTab.MODELS) },
+                onOpenModels = { startModelsInRecommended = false; onTab(AppTab.MODELS) },
+                onOpenRecommendedModels = {
+                    startModelsInRecommended = true
+                    onTab(AppTab.MODELS)
+                },
+                onImportChatModel = onImport,
+                onImportImageModel = onImportLocalImageModel,
                 onOpenApi = { onTab(AppTab.API) },
                 onOpenSettings = {
                     startSettingsInWebSearch = false
@@ -1043,24 +1071,26 @@ private fun McaApp(
                 onDismiss = { finishAppMenuReturn() }
             ) { pageModifier, closePage ->
                 ModelHubScreen(
+                startInRecommended = startModelsInRecommended,
                 state = ModelHubUiState(
                     localModels = state.models,
                     mnnRuntimeAvailable = state.mnnRuntimeAvailable,
                     localImageModels = state.localImageModels.map { model ->
-                        val qnnVerificationCurrent = state.qnnImageVerificationCurrentByModelId[model.id]
-                        val readiness = model.localImageReadinessForUi(qnnVerificationCurrent)
+                        val prepared = preparedImageUi[model.path]
+                        val readiness = if (prepared == null) "正在后台读取模型配置…" else prepared.readiness
                         LocalImageModelUiItem(
                             id = model.id,
                             displayName = model.displayName,
                             runtimeLabel = model.runtime.label,
                             familyLabel = model.family.label,
                             fileName = model.fileName,
+                            storagePath = model.bundleRoot ?: model.path,
                             sizeBytes = model.sizeBytes,
                             imageSize = model.imageSize,
                             componentCount = model.componentCount,
                             readyForGeneration = readiness == null,
                             readinessMessage = readiness,
-                            readinessLabel = model.localImageReadinessLabelForUi(qnnVerificationCurrent),
+                            readinessLabel = prepared?.label ?: "正在检查",
                             selected = state.selectedImageBackend == ImageBackend.LOCAL && model.id == state.selectedLocalImageModelId
                         )
                     },
@@ -1128,7 +1158,9 @@ private fun McaApp(
                     ),
                     isBusy = state.busy,
                     loadedModelId = state.loadedModelId,
-                    statusMessage = state.statusMessage
+                    statusMessage = if (state.busy && state.engineLifecycle == com.muyuchat.feature.agent.AgentEngineLifecycle.LOADING) {
+                        state.modelLoadStage ?: state.statusMessage
+                    } else state.statusMessage
                 ),
                 onImportClick = onImport,
                 onRepoInputChange = viewModel::onRepoInputChange,
@@ -1137,7 +1169,9 @@ private fun McaApp(
                 onSearchHubModels = viewModel::searchHubModels,
                 onFetchHubModelFiles = viewModel::fetchHubModelFiles,
                 onShowRecommendedFiles = viewModel::fetchRecommendedFiles,
-                onDownloadRecommended = viewModel::downloadRecommended,
+                onDownloadRecommended = { model ->
+                    viewModel.downloadRecommended(model, useAfterDownload = startModelsInRecommended)
+                },
                 onOpenModelPage = viewModel::openModelScopePage,
                 onDownload = viewModel::download,
                 onLoad = viewModel::loadModel,
@@ -1170,6 +1204,7 @@ private fun McaApp(
                 onSelectCloudImage = viewModel::selectCloudImageModel,
                 onDeleteCloudModel = viewModel::deleteCloudModel,
                 onRefreshLocal = viewModel::refreshLocalModels,
+                onPauseDownloads = viewModel::pauseManagedDownloads,
                 onBack = closePage,
                 modifier = pageModifier
             )

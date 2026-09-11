@@ -32,6 +32,8 @@
 
 #include "json.hpp"
 #include "stable-diffusion.h"
+#include "tokenizers/clip_tokenizer.h"
+#include "util.h"
 #include "image_execution_math.hpp"
 #include "execution_asset_binding.hpp"
 #include "native_prompt_language_contract.hpp"
@@ -48,6 +50,7 @@ using json = nlohmann::json;
 
 std::mutex g_mutex;
 std::mutex g_progress_mutex;
+std::mutex g_prompt_tokenizer_mutex;
 sd_ctx_t *g_ctx = nullptr;
 std::string g_ctx_key;
 std::string g_last_error;
@@ -62,6 +65,69 @@ std::atomic<int> g_ui_progress_callback_count{0};
 std::atomic<int> g_ui_progress_reported_steps{0};
 std::atomic<int> g_ui_progress_max_step{0};
 std::atomic<uint64_t> g_preview_revision{0};
+
+json measure_clip_prompt_tokens(const std::string &prompt, int max_tokens) {
+    // FrozenCLIPEmbedderWithCustomWords always executes 77-token CLIP chunks.
+    // Reject a mismatched profile instead of presenting a precise-looking count
+    // against a limit that the production conditioner does not use.
+    if (max_tokens != 77) {
+        return json({
+                {"ok", false},
+                {"backend", "SDCPP_NATIVE"},
+                {"error", "stable-diffusion.cpp CLIP prompt capacity must be 77 tokens"}
+        });
+    }
+
+    try {
+        const auto parsed_attention = parse_prompt_attention(prompt);
+        size_t content_token_count = 0u;
+        std::lock_guard<std::mutex> lock(g_prompt_tokenizer_mutex);
+        // The embedded CLIP merge table is immutable after construction. Keep a
+        // single tokenizer because rebuilding its 49k-entry vocabulary for every
+        // debounced UI edit is needlessly expensive.
+        static CLIPTokenizer tokenizer;
+        for (const auto &part : parsed_attention) {
+            if (part.first == "BREAK" && part.second == -1.0f) {
+                constexpr size_t kClipContentTokensPerChunk = 75u;
+                const size_t padding =
+                        (kClipContentTokensPerChunk -
+                         (content_token_count % kClipContentTokensPerChunk)) %
+                        kClipContentTokensPerChunk;
+                content_token_count += padding;
+                continue;
+            }
+            const auto tokens = tokenizer.encode(part.first);
+            if (tokens.size() > std::numeric_limits<size_t>::max() - content_token_count) {
+                throw std::overflow_error("CLIP prompt token count overflow");
+            }
+            content_token_count += tokens.size();
+        }
+        if (content_token_count > std::numeric_limits<size_t>::max() - 2u) {
+            throw std::overflow_error("CLIP prompt token count overflow");
+        }
+        return json({
+                {"ok", true},
+                {"backend", "SDCPP_NATIVE"},
+                {"exact", true},
+                // Match the app's existing exact-count contract: include BOS and
+                // EOS, but do not include graph padding or truncate long prompts.
+                {"count", content_token_count + 2u},
+                {"maxTokens", max_tokens}
+        });
+    } catch (const std::exception &error) {
+        return json({
+                {"ok", false},
+                {"backend", "SDCPP_NATIVE"},
+                {"error", error.what()}
+        });
+    } catch (...) {
+        return json({
+                {"ok", false},
+                {"backend", "SDCPP_NATIVE"},
+                {"error", "stable-diffusion.cpp CLIP tokenizer failed"}
+        });
+    }
+}
 
 constexpr uint32_t kStageContractValidated = 1u << 0u;
 constexpr uint32_t kStageContextReady = 1u << 1u;
@@ -5452,6 +5518,29 @@ Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_getProgress(JNIEnv *
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_getNativeConfig(JNIEnv *env, jobject) {
     return string_to_jstring(env, runtime_config_json());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_measurePromptTokens(
+        JNIEnv *env,
+        jobject,
+        jstring tokenizer_kind,
+        jstring prompt,
+        jint max_tokens) {
+    if (env == nullptr) return nullptr;
+    const std::string kind = jstring_to_string(env, tokenizer_kind);
+    if (kind != "CLIP") {
+        return string_to_jstring(env, json({
+                {"ok", false},
+                {"backend", "SDCPP_NATIVE"},
+                {"error", "The selected stable-diffusion.cpp tokenizer has no exact measurement adapter"}
+        }).dump());
+    }
+    return string_to_jstring(
+            env,
+            measure_clip_prompt_tokens(
+                    jstring_to_string(env, prompt),
+                    static_cast<int>(max_tokens)).dump());
 }
 
 extern "C" JNIEXPORT void JNICALL

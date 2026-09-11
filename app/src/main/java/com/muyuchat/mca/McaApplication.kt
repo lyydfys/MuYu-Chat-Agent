@@ -41,7 +41,20 @@ internal object ProcessUiLifecycleEvents {
     }
 }
 
-class McaApplication : Application(), DefaultLifecycleObserver {
+internal object BackgroundDownloadHealth {
+    val failure = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+}
+
+class McaApplication : Application(), DefaultLifecycleObserver, androidx.work.Configuration.Provider {
+    override val workManagerConfiguration: androidx.work.Configuration
+        get() = androidx.work.Configuration.Builder()
+            .setInitializationExceptionHandler { error ->
+                android.util.Log.e("McaBackgroundDownload", "Download scheduler initialization failed", error)
+                BackgroundDownloadHealth.failure.value =
+                    "后台下载暂不可用：${error.message.orEmpty()}。请检查剩余存储空间并重新打开应用；模型文件已保留。"
+            }
+            .build()
+
     override fun onCreate() {
         super<Application>.onCreate()
         // The signer set is process-local and fail-closed if Android cannot expose it.

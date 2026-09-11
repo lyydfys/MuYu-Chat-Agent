@@ -7,16 +7,16 @@ import org.junit.Test
 
 class ImagePromptTagAutocompleteIntegrationTest {
     @Test
-    fun `image workspace shares one autocomplete provider across positive and negative prompts`() {
+    fun `image workspace keeps textual inversion autocomplete without the dictionary manager`() {
         val source = sourceFile(
             "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt"
         )
 
         assertTrue(source.countOccurrences("ImagePromptTagAutocompleteProvider(") == 1)
         assertTrue(source.contains("private fun ImageNegativePromptTagField("))
-        assertTrue(source.countOccurrences("ImagePromptTagAssistPanel(") >= 2)
+        assertTrue(source.countOccurrences("ImagePromptTagAssistPanel(") == 0)
         assertTrue(source.countOccurrences("TextFieldValue(") >= 4)
-        assertTrue(source.countOccurrences("标签联想与词典设置") >= 2)
+        assertTrue(source.countOccurrences("标签联想与词典设置") == 0)
         assertTrue(source.contains("onFocusChanged { focused = it.isFocused }"))
         assertFalse(source.contains("BasicTextField(\n                        value = prompt,"))
     }

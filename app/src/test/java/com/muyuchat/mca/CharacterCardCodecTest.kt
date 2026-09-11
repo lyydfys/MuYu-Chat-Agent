@@ -124,6 +124,22 @@ class CharacterCardCodecTest {
     }
 
     @Test
+    fun parsesUrlSafeBase64CharacterCardMetadata() {
+        val card = ccv2Card(name = "URL safe", description = "accepted")
+        val payload = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(card.toByteArray(StandardCharsets.UTF_8))
+        val png = png(
+            chunk("IHDR", ihdr()),
+            chunk("tEXt", textChunk("chara", payload)),
+            chunk("IEND", byteArrayOf())
+        )
+
+        val success = assertSuccess(CharacterCardCodec.parsePng(png))
+
+        assertEquals("URL safe", success.card.name)
+    }
+
+    @Test
     fun parsesCompressedZtextMetadata() {
         val card = ccv2Card(name = "zTXt card", description = "compressed metadata")
         val payload = Base64.getEncoder().encodeToString(card.toByteArray(StandardCharsets.UTF_8))

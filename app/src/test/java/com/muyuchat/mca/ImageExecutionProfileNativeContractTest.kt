@@ -76,7 +76,7 @@ class ImageExecutionProfileNativeContractTest {
             assertEquals(false, json.getBoolean("unconditionalBranch"))
             assertEquals(steps, json.getInt("steps"))
             assertEquals(steps, json.getInt("unetExecutionCount"))
-            assertEquals(77, json.getInt("tokenCount"))
+            assertEquals(if (recommendationId == "sd_turbo_512_experimental") 77 else 512, json.getInt("tokenCount"))
         }
     }
 

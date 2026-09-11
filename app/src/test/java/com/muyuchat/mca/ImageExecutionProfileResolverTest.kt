@@ -113,6 +113,19 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
+    fun `every recommended image profile fixes capabilities to its configured default size`() {
+        ModelScopeClient().recommendedModels()
+            .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+            .forEach { model ->
+                val profile = resolve(model.id).profile
+                assertEquals("${model.id} fixed width", profile.defaults.width, profile.capabilities.minWidth)
+                assertEquals("${model.id} fixed width max", profile.defaults.width, profile.capabilities.maxWidth)
+                assertEquals("${model.id} fixed height", profile.defaults.height, profile.capabilities.minHeight)
+                assertEquals("${model.id} fixed height max", profile.defaults.height, profile.capabilities.maxHeight)
+            }
+    }
+
+    @Test
     fun `all catalog primary fingerprints recover their exact profile despite a stale card id`() {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
@@ -493,7 +506,7 @@ class ImageExecutionProfileResolverTest {
         assertEquals(8, zImageTurbo.layers.resolved.unetExecutionCount)
         assertEquals(1.0, zImageTurbo.profile.defaults.cfgScale, 0.0)
         assertFalse(zImageTurbo.profile.defaults.useCfg)
-        assertEquals(77, zImageTurbo.layers.resolved.tokenCount)
+        assertEquals(512, zImageTurbo.layers.resolved.tokenCount)
         assertEquals(listOf(ImageProfileSource.BUILT_IN), zImageTurbo.sourceChain)
     }
 
@@ -505,7 +518,7 @@ class ImageExecutionProfileResolverTest {
             "dreamshaper_sd15_qnn228" to RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
             "meinamix_sd15_qnn228" to RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT,
             "sdxl_base_qnn228" to RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT,
-            "animagine_xl_v4_qnn228" to RecommendedImageDefaults.ANIME_NEGATIVE_PROMPT,
+            "animagine_xl_v4_qnn228" to RecommendedImageDefaults.ANIMAGINE_XL_NEGATIVE_PROMPT,
             "cyberrealisticxl_qnn228" to RecommendedImageDefaults.CYBERREALISTIC_XL_NEGATIVE_PROMPT,
             "qualcomm_sd15_gen5_qnn" to RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
             "qualcomm_sd21_gen5_qnn" to RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
@@ -553,7 +566,7 @@ class ImageExecutionProfileResolverTest {
         ).forEach { id ->
             assertEquals(
                 "$id must retain one active tokenizer branch of parsing capacity",
-                77,
+                if (id == "sd_turbo_512_experimental") 77 else 512,
                 resolve(id).layers.resolved.tokenCount
             )
         }
@@ -1114,7 +1127,7 @@ class ImageExecutionProfileResolverTest {
             "cyberrealisticxl_qnn228"
         ).forEach { id ->
             val splitQnn = resolve(id).profile
-            assertEquals(6, splitQnn.profileRevision)
+            assertEquals(7, splitQnn.profileRevision)
             assertEquals(ImageWorkerStrategy.SPLIT_UNET_VAE, splitQnn.graph.workerStrategy)
             assertTrue(splitQnn.tokenizer.supportsTextualInversion)
             assertTrue(splitQnn.capabilities.supportsTextualInversion)

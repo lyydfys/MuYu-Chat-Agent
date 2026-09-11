@@ -22,6 +22,7 @@ keyPassword=...
 ```powershell
 $env:JAVA_HOME='<path-to-jdk-17>'
 $env:ANDROID_HOME='<path-to-android-sdk>'
+$env:MCA_QNN_SDK_ROOT='<path-to-qairt-sdk>'
 .\gradlew.bat :app:assembleRelease -Pmca.abis=arm64-v8a
 ```
 

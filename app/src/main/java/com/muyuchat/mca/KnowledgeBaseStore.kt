@@ -363,6 +363,13 @@ object KnowledgeLexicalRetriever {
                 term in chunkTerms && term.length >= 3 -> 6
                 term in chunkTerms && term.length == 2 -> 3
                 term in chunkTerms -> 1
+                // Keep the first release offline and deterministic, but tolerate common
+                // inflection/derivation differences (refund/refunded, model/models). This
+                // avoids reporting an empty knowledge result when the user changes grammar.
+                term.length >= 4 && chunkTerms.any { candidate ->
+                    candidate.length >= 4 &&
+                        (candidate.startsWith(term) || term.startsWith(candidate))
+                } -> 2
                 else -> 0
             }
         }

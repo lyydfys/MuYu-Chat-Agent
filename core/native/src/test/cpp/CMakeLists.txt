@@ -92,6 +92,18 @@ add_test(
 )
 
 add_executable(
+    mca_mnn_sdxl_pooled_source_contract_test
+    mnn_sdxl_pooled_source_contract_test.cpp
+)
+target_compile_features(mca_mnn_sdxl_pooled_source_contract_test PRIVATE cxx_std_17)
+
+add_test(
+    NAME mca_mnn_sdxl_pooled_source_contract
+    COMMAND mca_mnn_sdxl_pooled_source_contract_test
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mnn_native_engine.cpp"
+)
+
+add_executable(
     mca_mnn_sampler_source_contract_test
     mnn_sampler_source_contract_test.cpp
 )

@@ -6,6 +6,10 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -17,7 +21,8 @@ import java.util.concurrent.TimeUnit
 class ResumableDownloader(
     private val client: OkHttpClient = defaultClient(),
     private val maxRetries: Int = 8,
-    private val retryDelayMs: Long = 1_200L
+    private val retryDelayMs: Long = 1_200L,
+    private val storageBudget: DownloadStorageBudget = DownloadStorageBudget()
 ) {
     suspend fun download(
         remote: RemoteModelFile,
@@ -35,9 +40,10 @@ class ResumableDownloader(
             try {
                 return@withContext downloadAttempt(remote, tempFile, finalFile, onProgress)
             } catch (error: Throwable) {
+                currentCoroutineContext().ensureActive()
                 if (error is CancellationException) throw error
                 lastError = error
-                val willRetry = attempt < maxRetries
+                val willRetry = attempt < maxRetries && !error.isDownloadStorageFailure()
                 val progressMessage = retryMessage(
                     error = error,
                     tempFile = tempFile,
@@ -68,23 +74,29 @@ class ResumableDownloader(
         )
     }
 
-    private fun downloadAttempt(
+    private suspend fun downloadAttempt(
         remote: RemoteModelFile,
         tempFile: File,
         finalFile: File,
         onProgress: (DownloadTaskSnapshot) -> Unit
-    ): DownloadTaskSnapshot {
+    ): DownloadTaskSnapshot = coroutineScope {
         var downloaded = tempFile.takeIf { it.exists() }?.length() ?: 0L
         val request = request(remote.downloadUrl, downloaded)
         val startedAt = System.currentTimeMillis()
         var lastProgressAt = startedAt
 
-        client.newCall(request).execute().use { response ->
+        val downloadContext = currentCoroutineContext()
+        val call = client.newCall(request)
+        // Cancellation must close a blocked socket, including while no bytes arrive.
+        val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
+            try { awaitCancellation() } finally { call.cancel() }
+        }
+        try { call.execute().use { response ->
             val contentRangeTotal = response.header("Content-Range")?.contentRangeTotal()
             val knownLength = remote.sizeBytes ?: contentRangeTotal ?: 0L
 
             if (response.code == 416 && knownLength > 0L && downloaded >= knownLength) {
-                return finalizeDownload(remote, tempFile, finalFile, knownLength, onProgress)
+                return@coroutineScope finalizeDownload(remote, tempFile, finalFile, knownLength, onProgress)
             }
 
             require(response.isSuccessful || response.code == 206) {
@@ -108,16 +120,23 @@ class ResumableDownloader(
             onProgress(snapshot(remote, tempFile, finalFile, expectedLength, downloaded, DownloadStatus.RUNNING))
 
             val body = requireNotNull(response.body) { "下载响应为空。" }
+            storageBudget.requireAvailable(tempFile, (expectedLength - downloaded).coerceAtLeast(0L))
             RandomAccessFile(tempFile, "rw").use { output ->
                 output.seek(downloaded)
                 if (!append) output.setLength(0L)
                 body.byteStream().use { input ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     var lastProgressBytes = downloaded
+                    var spaceCheckAt = downloaded
                     while (true) {
+                        downloadContext.ensureActive()
                         val read = input.read(buffer)
                         if (read < 0) break
                         currentThreadInterruptedCheck()
+                        if (downloaded >= spaceCheckAt) {
+                            storageBudget.requireAvailable(tempFile, if (expectedLength > 0L) minOf(PROGRESS_STEP_BYTES, expectedLength - downloaded) else PROGRESS_STEP_BYTES)
+                            spaceCheckAt = downloaded + PROGRESS_STEP_BYTES
+                        }
                         output.write(buffer, 0, read)
                         downloaded += read
                         if (downloaded - lastProgressBytes >= PROGRESS_STEP_BYTES) {
@@ -141,11 +160,11 @@ class ResumableDownloader(
                 }
             }
 
-            return finalizeDownload(remote, tempFile, finalFile, expectedLength, onProgress)
-        }
+            return@coroutineScope finalizeDownload(remote, tempFile, finalFile, expectedLength, onProgress)
+        } } finally { cancellation.cancel() }
     }
 
-    private fun finalizeDownload(
+    private suspend fun finalizeDownload(
         remote: RemoteModelFile,
         tempFile: File,
         finalFile: File,
@@ -167,8 +186,11 @@ class ResumableDownloader(
             }
         }
 
-        if (finalFile.exists()) finalFile.delete()
-        require(tempFile.renameTo(finalFile)) { "模型文件重命名失败。" }
+        currentCoroutineContext().ensureActive()
+        // The previous usable model must survive a failed replacement.
+        java.nio.file.Files.move(tempFile.toPath(), finalFile.toPath(),
+            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
         val done = snapshot(remote, tempFile, finalFile, finalFile.length(), finalFile.length(), DownloadStatus.DONE)
         onProgress(done)
         return done
@@ -269,11 +291,12 @@ class ResumableDownloader(
         return if (gb >= 1.0) "%.2f GB".format(gb) else "%.1f MB".format(mb)
     }
 
-    private fun sha256(file: File): String {
+    private suspend fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
             while (true) {
+                currentCoroutineContext().ensureActive()
                 val read = input.read(buffer)
                 if (read <= 0) break
                 digest.update(buffer, 0, read)

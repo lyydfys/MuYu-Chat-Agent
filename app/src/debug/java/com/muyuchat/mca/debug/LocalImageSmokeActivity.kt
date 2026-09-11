@@ -708,18 +708,14 @@ class LocalImageSmokeActivity : Activity() {
                 LocalImageRuntime.STABLE_DIFFUSION_CPP -> "stable-diffusion.cpp"
                 else -> model.runtime.name.lowercase()
             }
-            val qnnSemanticEvidence = verificationEvidence.optJSONObject("semantic")
-            val qnnExecutionProven = isQnn && qnnSemanticEvidence?.let { semantic ->
-                semantic.optBoolean("ok", false) &&
-                    semantic.optBoolean("npuActive", false) &&
-                    semantic.optBoolean("semanticReady", false)
-            } == true
-            if (isQnn) {
-                require(qnnExecutionProven) {
-                    "QNN worker result cannot be accepted without preserved main-process semantic NPU evidence."
-                }
-            }
-            val resultJson = JSONObject()
+            val resultJson = (if (isQnn) {
+                qnnWorkerSmokeResult(
+                    executionMetadataJson = result.executionMetadataJson,
+                    outputBytes = result.bytes,
+                    requestedSteps = generationOptions.steps,
+                    mainProcessVerification = verificationEvidence
+                )
+            } else JSONObject())
                 .put("ok", true)
                 .put("fallback", false)
                 .put("mimeType", result.mimeType)
@@ -746,21 +742,16 @@ class LocalImageSmokeActivity : Activity() {
                     )
                 }
             }
-            if (isQnn) {
-                resultJson
-                    .put("npuActive", qnnSemanticEvidence?.optBoolean("npuActive", false) == true)
-                    .put("semanticReady", qnnSemanticEvidence?.optBoolean("semanticReady", false) == true)
-                    .put("mainProcessVerification", verificationEvidence)
-            }
             write(
                 JSONObject()
                     .put("status", "completed")
                     .put("runtime", runtimeLabel)
                     .put("executionMode", "worker_product")
                     .put("workerProductPath", true)
-                    .put("qnnGraphExecution", qnnExecutionProven)
+                    .put("qnnGraphExecution", isQnn && resultJson.optBoolean("qnnGraphExecution", false))
                     .put("fallback", false)
                     .put("result", resultJson)
+                    .put("nativeStats", resultJson.optJSONObject("nativeEffective") ?: JSONObject.NULL)
                     .put("outputPath", outputFile.absolutePath)
                     .put("outputBytes", outputFile.length())
             )
