@@ -37,7 +37,7 @@ machine-specific paths and credentials so the project can be shared safely.
 
 ## Current Verification (v0.2.3 preparation)
 
-- Version: `0.2.3`, `versionCode 7`; publication status is tracked in GitHub Releases.
+- Version: `0.2.3`, `versionCode 7`; the signed arm64 package is published as [GitHub Release v0.2.3](https://github.com/lyydfys/MuYu-Chat-Agent/releases/tag/v0.2.3).
 - Full JVM `:app:testDebugUnitTest test` passed on JDK 17: 3,687 tests across debug/release reports, 0 failures, 0 errors, 20 skipped. This includes the local-only admission safeguard; it is not distributed.
 - Debug-only smoke tests live in `src/testDebug` and both suites executed successfully (10 tests). Release test compilation no longer depends on debug-only activities.
 - Native image host tests: 12 compiled and executed successfully.

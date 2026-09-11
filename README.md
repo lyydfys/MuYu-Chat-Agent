@@ -5,7 +5,7 @@ user-configured cloud APIs, model management, and image-generation engines under
 user control.
 
 [![Android CI](https://github.com/lyydfys/MCA/actions/workflows/android-ci.yml/badge.svg)](https://github.com/lyydfys/MCA/actions/workflows/android-ci.yml)
-[![Release](https://img.shields.io/github/v/release/lyydfys/MCA?include_prereleases&label=release)](https://github.com/lyydfys/MCA/releases)
+[![Release](https://img.shields.io/github/v/release/lyydfys/MuYu-Chat-Agent?include_prereleases&label=release)](https://github.com/lyydfys/MuYu-Chat-Agent/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 MCA is an Android-native, local-first AI workspace for people who want direct
@@ -62,12 +62,12 @@ its first real native load and graph execution determine compatibility.
 
 Current release status:
 
-- The current source version is `v0.2.3` (`versionCode 7`), prepared for release.
-  It improves startup recovery, resumable model installation, character cards,
-  world books, knowledge retrieval, and image-model compatibility. See
+- `v0.2.3` (`versionCode 7`) is the current stability release. It improves
+  startup recovery, resumable model installation, character cards, world books,
+  knowledge retrieval, and image-model compatibility. See the
   [v0.2.3 release notes](docs/releases/v0.2.3.md) for validation and limitations.
-  Published installers are listed on
-  [GitHub Releases](https://github.com/lyydfys/MuYu-Chat-Agent/releases).
+  The signed arm64 installer is published on
+  [GitHub Releases](https://github.com/lyydfys/MuYu-Chat-Agent/releases/tag/v0.2.3).
 - The first public package target is `arm64-v8a` Android devices.
 - Local chat is the primary stable local path.
 - Web search is available after the user configures a search provider in
@@ -167,7 +167,7 @@ Current release status:
 ## Install
 
 Download the latest alpha APK from
-[GitHub Releases](https://github.com/lyydfys/MCA/releases). Android may ask you
+[GitHub Releases](https://github.com/lyydfys/MuYu-Chat-Agent/releases). Android may ask you
 to allow installation from your browser or file manager.
 
 The APK does not include model weights or cloud credentials. After installing:
