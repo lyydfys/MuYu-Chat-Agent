@@ -1000,9 +1000,7 @@ internal fun localImagePromptPreparationFailureMessage(error: Exception): String
         "image_prompt_unsupported_native_language" ->
             "当前原生多语文本编码器只支持中文汉字、已支持的中文标点和安全 ASCII 提示词语法，尚未启动图片生成。"
         "image_prompt_requires_canonical_english_tags" ->
-            error.message.orEmpty().ifBlank {
-                "当前模型需要英文规范标签；请导入主标签词典和中文翻译词典后，用中文检索并点选英文候选。"
-            }
+            "当前模型只接受英文提示词。请将正向和负向提示词改写为英文后重试；本次尚未启动图片生成。"
         "execution_contract_unsupported" ->
             "当前生成设置与模型执行合同不兼容，尚未启动图片生成。"
         "image_prompt_translation_input_too_large" ->
@@ -1021,6 +1019,35 @@ internal fun localImagePromptPreparationFailureMessage(error: Exception): String
             "中文提示词转换失败，尚未启动图片生成。"
         else -> LOCAL_IMAGE_PROMPT_PREPARATION_FALLBACK_MESSAGE
     }
+
+/**
+ * Converts worker transport failures into an actionable product message. The low-level Binder
+ * message is still kept in the worker journal/logs, but showing it verbatim leaves users with no
+ * way to tell whether a model is incomplete or the previous disposable worker is still retiring.
+ */
+internal fun localImageGenerationFailureMessage(error: Throwable): String = when (error) {
+    is LocalImageWorkerDisconnectedException -> {
+        val detail = error.message.orEmpty()
+        if (detail.contains("binding", ignoreCase = true) ||
+            detail.contains("disconnected", ignoreCase = true) ||
+            detail.contains("null binding", ignoreCase = true)
+        ) {
+            "本地图像生成 worker 正在退出或重新连接，本次请求未完成。请等待 1 秒后重试；" +
+                "如果仍失败，请在模型管理中校验模型包并确认所有组件完整。"
+        } else {
+            "本地图像生成 worker 进程异常退出，本次请求未完成，可能是模型包不完整或可用内存不足。" +
+                "请先释放其他已加载模型和后台应用，再到模型管理中校验模型包后重试；" +
+                "校验失败时请重新导入完整模型包。"
+        }
+    }
+    is LocalImageWorkerRemoteException ->
+        "本地图像生成引擎返回错误：${error.message.orEmpty().ifBlank { "未知错误" }}。" +
+            "下一步：确认模型包完整并重试。"
+    is LocalImageWorkerException ->
+        "本地图像生成 worker 返回了无效结果，本次请求未完成。下一步：先校验模型包和组件可读性，" +
+            "然后重新尝试；仍失败时请重新导入完整模型包。"
+    else -> error.message ?: "图片生成模型调用失败，请检查模型包后重试。"
+}
 
 internal fun List<ImageGenerationJobRecord>.withLocalImagePromptPreparationFailureIfActive(
     activeJobId: String?,
@@ -1624,6 +1651,10 @@ data class MainUiState(
     val downloadSpeedBytesPerSecond: Long = 0L,
     val downloadRemainingSeconds: Long? = null,
     val downloadStatus: DownloadStatus? = null,
+    val downloadIntegrityStatus: String = "UNKNOWN",
+    val downloadIntegrityMessage: String? = null,
+    val downloadExecutionStatus: String = "UNKNOWN",
+    val downloadExecutionMessage: String? = null,
     val busy: Boolean = false,
     val loadedModelId: String? = null,
     val loadedModelName: String? = null,
@@ -4733,8 +4764,8 @@ class MainViewModel @JvmOverloads constructor(
 
     fun retryImageGeneration(jobId: String) {
         val sourceJob = _uiState.value.imageJobs.firstOrNull { it.id == jobId }
-        val snapshot = sourceJob?.spec
-        if (sourceJob == null || snapshot == null) {
+        val originalSnapshot = sourceJob?.spec
+        if (sourceJob == null || originalSnapshot == null) {
             _uiState.update { it.copy(statusMessage = "原图片任务参数已不可用，无法按原任务重试。") }
             return
         }
@@ -4742,6 +4773,18 @@ class MainViewModel @JvmOverloads constructor(
             _uiState.update { it.copy(statusMessage = "当前图片任务仍在运行，无需重复提交。") }
             return
         }
+        // A retry is a new admission. Re-resolve the current model record and discard prompt
+        // execution evidence captured by the failed/previous worker; the profile, tokenizer and
+        // language gate must be evaluated again before a new worker is bound.
+        val currentModel = originalSnapshot.localModelSnapshot?.let { previous ->
+            _uiState.value.localImageModels.firstOrNull { it.id == previous.id } ?: previous
+        }
+        val retrySnapshot = originalSnapshot.copy(
+            localModelSnapshot = currentModel,
+            promptExecution = null
+        )
+        val jobSnapshot = retrySnapshot
+        val snapshot = jobSnapshot
         enqueueImageGeneration(
             prompt = snapshot.prompt,
             inputDraft = snapshot.inputDraft,
@@ -5058,6 +5101,12 @@ class MainViewModel @JvmOverloads constructor(
             _uiState.update { it.copy(statusMessage = "请先在模型管理的本地页导入并选择图像生成引擎。") }
             return false
         }
+        requestedLocalModel?.localImageStructuralReadinessMessage()?.let { readiness ->
+            _uiState.update {
+                it.copy(statusMessage = "图片生成尚未启动：$readiness")
+            }
+            return false
+        }
         if (requestedBackend == ImageBackend.CLOUD && requestedCloudConfig == null) {
             _uiState.update { it.copy(statusMessage = "请先在模型管理的云端页接入并选择图像生成模型。") }
             return false
@@ -5290,6 +5339,22 @@ class MainViewModel @JvmOverloads constructor(
                     val model = requireNotNull(requestedLocalModel) {
                         "The queued local image model snapshot is missing."
                     }
+                    model.localImageStructuralReadinessMessage()?.let { readiness ->
+                        val message = "图片生成尚未启动：$readiness"
+                        _uiState.update { state ->
+                            val updatedJobs = state.imageJobs.withLocalImagePromptPreparationFailureIfActive(
+                                activeJobId = activeImageGenerationJobId,
+                                jobId = jobId,
+                                message = message
+                            )
+                            if (updatedJobs === state.imageJobs) state
+                            else state.copy(
+                                imageJobs = updatedJobs,
+                                statusMessage = message
+                            )
+                        }
+                        return@launch
+                    }
                     val promptExecution = try {
                         prepareLocalImagePromptExecution(
                             model = model,
@@ -5442,7 +5507,7 @@ class MainViewModel @JvmOverloads constructor(
                     val message = if (cancelled) {
                         "已取消图片生成"
                     } else {
-                        val nativeMessage = error.message ?: "图片生成模型调用失败"
+                        val nativeMessage = localImageGenerationFailureMessage(error)
                         val translatedPrompt = preparedJobSpec.promptExecution
                             ?.effectivePrompt
                             ?.takeIf { it.isNotBlank() && it != preparedJobSpec.prompt }
@@ -6474,64 +6539,84 @@ class MainViewModel @JvmOverloads constructor(
                 _uiState.update { it.copy(statusMessage = "未找到本地图像生成引擎") }
                 return@launch
             }
-            busy("正在校验 ${model.displayName}...")
-            val primary = File(model.path)
-            val readiness = model.localImageReadinessMessage()
-            val structuralReadiness = model.localImageStructuralReadinessMessage()
-            val readable = model.configured && primary.isFile && primary.canRead()
-            var verification = when {
-                !readable -> false to "主模型文件不可读，请重新导入或重新下载。"
-                model.runtime == LocalImageRuntime.MNN_DIFFUSION && structuralReadiness != null ->
-                    false to structuralReadiness
-                model.runtime == LocalImageRuntime.MNN_DIFFUSION ->
-                    verifyMnnDiffusionImageRuntime(model)
-                model.runtime == LocalImageRuntime.QNN_HTP && structuralReadiness != null ->
-                    false to structuralReadiness
-                model.runtime == LocalImageRuntime.QNN_HTP ->
-                    verifyQnnImageRuntime(model)
-                readiness != null -> false to readiness
-                else -> {
-                    val componentText = if (model.componentCount > 1) "，组件 ${model.componentCount} 个" else ""
-                    true to "主模型可读$componentText，可用于图片页本地生图。"
+            val verificationRequestId = "verify-image-${System.currentTimeMillis()}-${UUID.randomUUID()}"
+            val generationLease = tryAcquireObservedImageGenerationLease(verificationRequestId)
+            if (generationLease == null) {
+                _uiState.update {
+                    it.copy(statusMessage = "已有图片任务正在运行，请等待完成后再校验模型。")
                 }
+                return@launch
             }
-            val qnnPersistence = qnnVerificationPersistence(model, verification)
-            verification = qnnPersistence.verification
-            val verifiedModel = model.copy(
-                verificationStatus = verification.toLocalImageVerificationStatus(model.runtime, model.family),
-                verificationMessage = verification.second,
-                verifiedAt = System.currentTimeMillis(),
-                qnnVerificationStamp = qnnPersistence.stamp
-            )
-            val models = localImageModelStore.updateModel(verifiedModel)
-            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(models)
-            val selectedId = selectedReadyLocalImageModelId(
-                models = models,
-                qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
-                preferredId = localImageModelStore.loadSelectedModelId()
-            )
-            if (selectedId != localImageModelStore.loadSelectedModelId()) {
-                localImageModelStore.saveSelectedModelId(selectedId)
-            }
-            val message = if (verification.first) {
-                "图像引擎校验通过：${verification.second}"
-            } else {
-                "图像引擎校验失败：${verification.second}"
-            }
-            managedRuntimeReadinessRefreshGate.invalidate()
-            _uiState.update {
-                it.copy(
-                    localImageModels = models,
-                    qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
-                    selectedLocalImageModelId = selectedId,
-                    selectedImageBackend = if (selectedId == null && it.selectedImageBackend == ImageBackend.LOCAL) {
-                        ImageBackend.CLOUD
-                    } else {
-                        it.selectedImageBackend
-                    },
-                    busy = false,
-                    statusMessage = message
+            try {
+                model.localImageStructuralReadinessMessage()?.let { readiness ->
+                    _uiState.update {
+                        it.copy(statusMessage = "图像引擎校验未开始：$readiness")
+                    }
+                    return@launch
+                }
+                busy("正在校验 ${model.displayName}...")
+                val primary = File(model.path)
+                val readiness = model.localImageReadinessMessage()
+                val structuralReadiness = model.localImageStructuralReadinessMessage()
+                val readable = model.configured && primary.isFile && primary.canRead()
+                var verification = when {
+                    !readable -> false to "主模型文件不可读，请重新导入或重新下载。"
+                    model.runtime == LocalImageRuntime.MNN_DIFFUSION && structuralReadiness != null ->
+                        false to structuralReadiness
+                    model.runtime == LocalImageRuntime.MNN_DIFFUSION ->
+                        verifyMnnDiffusionImageRuntime(model)
+                    model.runtime == LocalImageRuntime.QNN_HTP && structuralReadiness != null ->
+                        false to structuralReadiness
+                    model.runtime == LocalImageRuntime.QNN_HTP ->
+                        verifyQnnImageRuntime(model)
+                    readiness != null -> false to readiness
+                    else -> {
+                        val componentText = if (model.componentCount > 1) "，组件 ${model.componentCount} 个" else ""
+                        true to "主模型可读$componentText，可用于图片页本地生图。"
+                    }
+                }
+                val qnnPersistence = qnnVerificationPersistence(model, verification)
+                verification = qnnPersistence.verification
+                val verifiedModel = model.copy(
+                    verificationStatus = verification.toLocalImageVerificationStatus(model.runtime, model.family),
+                    verificationMessage = verification.second,
+                    verifiedAt = System.currentTimeMillis(),
+                    qnnVerificationStamp = qnnPersistence.stamp
                 )
+                val models = localImageModelStore.updateModel(verifiedModel)
+                val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(models)
+                val selectedId = selectedReadyLocalImageModelId(
+                    models = models,
+                    qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
+                    preferredId = localImageModelStore.loadSelectedModelId()
+                )
+                if (selectedId != localImageModelStore.loadSelectedModelId()) {
+                    localImageModelStore.saveSelectedModelId(selectedId)
+                }
+                val message = if (verification.first) {
+                    "图像引擎校验通过：${verification.second}"
+                } else {
+                    "图像引擎校验失败：${verification.second}"
+                }
+                managedRuntimeReadinessRefreshGate.invalidate()
+                _uiState.update {
+                    it.copy(
+                        localImageModels = models,
+                        qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
+                        selectedLocalImageModelId = selectedId,
+                        selectedImageBackend = if (selectedId == null && it.selectedImageBackend == ImageBackend.LOCAL) {
+                            ImageBackend.CLOUD
+                        } else {
+                            it.selectedImageBackend
+                        },
+                        busy = false,
+                        statusMessage = message
+                    )
+                }
+            } finally {
+                check(releaseObservedImageGenerationLease(generationLease)) {
+                    "Image verification lease was replaced before request completion."
+                }
             }
         }
     }
@@ -8876,6 +8961,10 @@ class MainViewModel @JvmOverloads constructor(
             if (useAfterDownload) autoUseManagedDownloads.add(request.identity)
             _uiState.update { it.copy(downloadStatus = DownloadStatus.QUEUED,
                 downloadFileName = request.remote?.name ?: request.recommendationId,
+                downloadIntegrityStatus = "RUNNING",
+                downloadIntegrityMessage = "等待文件下载完成后校验。",
+                downloadExecutionStatus = "PENDING",
+                downloadExecutionMessage = "等待安装阶段读取本机兼容性。",
                 statusMessage = "下载任务已保存，网络可用时会继续；可暂停并保留进度。") }
             ManagedModelDownloadWorker.enqueue(getApplication(), request)
         }
@@ -8905,7 +8994,11 @@ class MainViewModel @JvmOverloads constructor(
                                 downloadedBytes = progress.getLong("bytes", 0),
                                 downloadTotalBytes = progress.getLong("total", 0),
                                 downloadSpeedBytesPerSecond = progress.getLong("speed", 0),
-                                statusMessage = progress.getString("message") ?: "下载任务已保留，正在等待网络或其他下载完成…")
+                                statusMessage = progress.getString("message") ?: "下载任务已保留，正在等待网络或其他下载完成…",
+                                downloadIntegrityStatus = progress.getString("integrityStatus") ?: state.downloadIntegrityStatus,
+                                downloadIntegrityMessage = progress.getString("integrityMessage") ?: state.downloadIntegrityMessage,
+                                downloadExecutionStatus = progress.getString("executionStatus") ?: state.downloadExecutionStatus,
+                                downloadExecutionMessage = progress.getString("executionMessage") ?: state.downloadExecutionMessage)
                         }
                     }
                     infos.filter { it.state.isFinished && it.id.toString() !in handled }
@@ -8925,7 +9018,11 @@ class MainViewModel @JvmOverloads constructor(
                                 if (active == null) {
                                     _uiState.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
                                         downloadStatus = DownloadStatus.DONE, downloadSpeedBytesPerSecond = 0,
-                                        downloadRemainingSeconds = null, statusMessage = info.outputData.getString("message")) }
+                                        downloadRemainingSeconds = null, statusMessage = info.outputData.getString("message"),
+                                        downloadIntegrityStatus = info.outputData.getString("integrityStatus") ?: it.downloadIntegrityStatus,
+                                        downloadIntegrityMessage = info.outputData.getString("integrityMessage") ?: it.downloadIntegrityMessage,
+                                        downloadExecutionStatus = info.outputData.getString("executionStatus") ?: it.downloadExecutionStatus,
+                                        downloadExecutionMessage = info.outputData.getString("executionMessage") ?: it.downloadExecutionMessage) }
                                     managedDownloadOwnedBusy = false
                                 }
                                 val model = info.outputData.getString("modelId")?.let(modelStore::getModel)
@@ -8934,7 +9031,11 @@ class MainViewModel @JvmOverloads constructor(
                                 _uiState.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
                                     downloadStatus = if (info.state == androidx.work.WorkInfo.State.CANCELLED) DownloadStatus.PAUSED else DownloadStatus.FAILED,
                                     downloadSpeedBytesPerSecond = 0, downloadRemainingSeconds = null,
-                                    statusMessage = error ?: "下载已暂停，进度已保留。再次点击下载可继续。") }
+                                    statusMessage = error ?: "下载已暂停，进度已保留。再次点击下载可继续。",
+                                    downloadIntegrityStatus = info.outputData.getString("integrityStatus") ?: it.downloadIntegrityStatus,
+                                    downloadIntegrityMessage = info.outputData.getString("integrityMessage") ?: it.downloadIntegrityMessage,
+                                    downloadExecutionStatus = info.outputData.getString("executionStatus") ?: it.downloadExecutionStatus,
+                                    downloadExecutionMessage = info.outputData.getString("executionMessage") ?: it.downloadExecutionMessage) }
                                 managedDownloadOwnedBusy = false
                             }
                         }, onFailure = { error ->
@@ -14120,13 +14221,6 @@ class MainViewModel @JvmOverloads constructor(
                     httpStatus = 404,
                     message = "The requested local image model was not found."
                 )
-            if (!candidate.configured) {
-                throw ImageGenerationProviderException(
-                    code = "image_model_not_ready",
-                    httpStatus = 409,
-                    message = "The requested local image model is not configured."
-                )
-            }
             candidate
         } else {
             _uiState.value.selectedLocalImageModel()
@@ -14135,6 +14229,14 @@ class MainViewModel @JvmOverloads constructor(
                     httpStatus = 503,
                     message = "No configured local image model is selected."
                 )
+        }
+        model.localImageStructuralReadinessMessage()?.let { readiness ->
+            throw ImageGenerationProviderException(
+                code = "image_model_not_ready",
+                httpStatus = 409,
+                message = "The selected local image model is not ready: $readiness " +
+                    "Re-download or re-import the complete model bundle, then retry."
+            )
         }
         if (!supportsAuthenticatedLocalImageCount(model.runtime, request.imageCount)) {
             throw ImageGenerationProviderException(

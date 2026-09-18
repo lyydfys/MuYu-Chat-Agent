@@ -638,6 +638,7 @@ internal data class LocalImageBundleComponentContract(
 
 internal data class LocalImageBundleManifest(
     val id: String? = null,
+    val recommendationId: String? = null,
     val displayName: String? = null,
     val task: String? = null,
     val runtime: LocalImageRuntime? = null,
@@ -695,6 +696,8 @@ data class LocalImageModelRecord(
     val imageSize: String = "512x512",
     val source: String = "local",
     val bundleRoot: String? = null,
+    /** Stable catalog identity used to connect a downloaded bundle to its recommendation card. */
+    val recommendationId: String? = null,
     val componentCount: Int = 1,
     val verificationStatus: LocalImageVerificationStatus = LocalImageVerificationStatus.UNKNOWN,
     val verificationMessage: String = "",
@@ -704,7 +707,15 @@ data class LocalImageModelRecord(
     val updatedAt: Long = System.currentTimeMillis()
 ) {
     val configured: Boolean
-        get() = path.isNotBlank() && File(path).exists() && bundleRoot?.let { File(it).exists() } != false
+        get() {
+            val primary = File(path)
+            val root = bundleRoot?.takeIf(String::isNotBlank)?.let(::File)
+            return path.isNotBlank() &&
+                primary.isFile &&
+                primary.canRead() &&
+                primary.length() > 0L &&
+                (root == null || (root.isDirectory && root.canRead()))
+        }
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
@@ -718,6 +729,7 @@ data class LocalImageModelRecord(
         .put("imageSize", imageSize)
         .put("source", source)
         .put("bundleRoot", bundleRoot)
+        .put("recommendationId", recommendationId)
         .put("componentCount", componentCount)
         .put("verificationStatus", verificationStatus.name)
         .put("verificationMessage", verificationMessage)
@@ -728,7 +740,7 @@ data class LocalImageModelRecord(
 
     companion object {
         fun fromJson(json: JSONObject): LocalImageModelRecord =
-            LocalImageModelRecord(
+        LocalImageModelRecord(
                 id = json.optString("id").ifBlank { UUID.randomUUID().toString() },
                 displayName = json.optString("displayName"),
                 path = json.optString("path"),
@@ -740,6 +752,7 @@ data class LocalImageModelRecord(
                 imageSize = json.optString("imageSize", "512x512"),
                 source = json.optString("source", "local"),
                 bundleRoot = json.optString("bundleRoot").takeIf { it.isNotBlank() && it != "null" },
+                recommendationId = json.optString("recommendationId").takeIf { it.isNotBlank() && it != "null" },
                 componentCount = json.optInt("componentCount", 1).coerceAtLeast(1),
                 verificationStatus = LocalImageVerificationStatus.from(json.optString("verificationStatus")),
                 verificationMessage = json.optString("verificationMessage"),
@@ -2821,15 +2834,15 @@ class LocalImageProvider(context: Context) {
         onProgress: (LocalImageProgress) -> Unit = {}
     ): LocalImageResult = withContext(Dispatchers.IO) {
         val options = options.withCanonicalUltraFixControls()
-        if (activeRuntime != model.runtime) begin(model.runtime)
         var textualInversionLease: TextualInversionSelectionLease? = null
         try {
-            require(model.configured) { "本地图像生成模型文件不存在，请重新导入。" }
+            model.localImageStructuralReadinessMessage()?.let { message -> error(message) }
             require(prompt.isNotBlank()) { "请输入图片描述。" }
             require(!cancellationRequested.get()) { "本地生图已停止" }
             options.validateProductInputContract()
             validateLocalImageRuntimeProductOptions(model.runtime, options)
-        if (model.runtime == LocalImageRuntime.QNN_HTP) {
+            if (activeRuntime != model.runtime) begin(model.runtime)
+            if (model.runtime == LocalImageRuntime.QNN_HTP) {
             require(NativeQnnBridge.isAvailable) {
                 val reason = NativeQnnBridge.loadError?.message.orEmpty()
                 "Snapdragon NPU image backend failed to load${if (reason.isBlank()) "" else ": $reason"}"
@@ -6235,6 +6248,7 @@ class LocalImageModelStore(context: Context) {
             imageSize = imageSizeOverride ?: manifest?.imageSize ?: defaultImageSizeFor(familyHint),
             source = "${primaryRemote.provider.name.lowercase()}:${primaryRemote.repoId}",
             bundleRoot = bundleDir.absolutePath,
+            recommendationId = manifest?.recommendationId ?: manifest?.id,
             componentCount = bundleDir.walkTopDown().count { it.isFile }
                 .coerceAtLeast(componentCount)
                 .coerceAtLeast(manifest?.componentCount ?: 0)
@@ -7112,7 +7126,17 @@ fun LocalImageModelRecord.localImageVerificationDiagnosticMessage(): String? {
 }
 
 fun LocalImageModelRecord.localImageStructuralReadinessMessage(): String? {
-    if (!configured) return "本地图像生成模型文件不存在，请重新导入。"
+    val primary = File(path)
+    if (path.isBlank() || !primary.isFile) {
+        return "本地图像生成模型主文件不存在，请重新下载或重新导入。"
+    }
+    if (!primary.canRead() || primary.length() <= 0L) {
+        return "本地图像生成模型主文件为空或不可读，请重新下载或重新导入。"
+    }
+    val declaredRoot = bundleRoot?.takeIf(String::isNotBlank)?.let(::File)
+    if (declaredRoot != null && (!declaredRoot.isDirectory || !declaredRoot.canRead())) {
+        return "本地图像生成模型组件目录不可读或不存在，请重新下载或重新导入完整模型包。"
+    }
     if (runtime == LocalImageRuntime.MNN_DIFFUSION) {
         return mnnDiffusionReadinessMessage()
     }
@@ -7131,11 +7155,13 @@ fun LocalImageModelRecord.localImageStructuralReadinessMessage(): String? {
     val requirement = family.requiredCompanionComponentHint()
     val root = bundleRoot?.let(::File)?.takeIf { it.isDirectory }
         ?: return "缺少组件包：${displayName} 只有 diffusion 主模型，还需要 $requirement。请在模型管理 > 文件中导入包含 diffusion 主模型、VAE/AE、文本编码器/LLM 的 zip 引擎包。"
-    val primary = runCatching { File(path).canonicalPath }.getOrDefault(path)
+    val primaryCanonicalPath = runCatching { File(path).canonicalPath }.getOrDefault(path)
     val files = root.walkTopDown()
         .filter { it.isFile }
         .filter { it.extension.lowercase() in READINESS_MODEL_EXTENSIONS }
-        .filterNot { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) == primary }
+        .filterNot {
+            runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) == primaryCanonicalPath
+        }
         .toList()
     val missing = buildList {
         if (files.none { it.isVaeComponentFile() }) add("VAE")
@@ -7416,6 +7442,7 @@ private fun parseLocalImageBundleManifest(
             ?.takeIf { it.isFile && it.length() > 0L }
     return LocalImageBundleManifest(
         id = manifest.optString("id").takeIf { it.isNotBlank() },
+        recommendationId = manifest.optString("recommendationId").takeIf { it.isNotBlank() },
         displayName = manifest.optString("title").takeIf { it.isNotBlank() }
             ?: manifest.optString("displayName").takeIf { it.isNotBlank() }
             ?: manifest.optString("name").takeIf { it.isNotBlank() },

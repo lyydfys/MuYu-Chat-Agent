@@ -22,26 +22,35 @@ import kotlinx.coroutines.withContext
 class ManagedModelDownloadWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     @OptIn(kotlinx.coroutines.FlowPreview::class)
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        var installer: ManagedModelDownloadInstaller? = null
         try {
             setForeground(foreground("正在等待下载…"))
             installationMutex.withLock {
                 isInstalling = true
                 try {
                 val request = ManagedDownloadRequest.fromJson(requireNotNull(inputData.getString(REQUEST)))
-                val installer = ManagedModelDownloadInstaller(applicationContext, request.projectorTargetId)
+                installer = ManagedModelDownloadInstaller(applicationContext, request.projectorTargetId)
                 val installed = coroutineScope {
                     val reporter = launch {
-                        installer.progress.sample(750).collectLatest { progress ->
+                    installer!!.progress.sample(750).collectLatest { progress ->
                             setProgress(workDataOf("file" to progress.downloadFileName,
                                 "bytes" to progress.downloadedBytes, "total" to progress.downloadTotalBytes,
-                                "speed" to progress.downloadSpeedBytesPerSecond, "message" to progress.statusMessage))
+                                "speed" to progress.downloadSpeedBytesPerSecond, "message" to progress.statusMessage,
+                                "integrityStatus" to progress.integrityStatus,
+                                "integrityMessage" to progress.integrityMessage,
+                                "executionStatus" to progress.executionStatus,
+                                "executionMessage" to progress.executionMessage))
                             setForeground(foreground(progress.statusMessage))
                         }
                     }
-                    try { installer.install(request) } finally { reporter.cancel() }
+                    try { installer!!.install(request) } finally { reporter.cancel() }
                 }
                 Result.success(workDataOf("modelId" to installed.modelId, "imageId" to installed.imageId,
-                    "projector" to installed.projector, "message" to installed.message))
+                    "projector" to installed.projector, "message" to installed.message,
+                    "integrityStatus" to installed.integrityStatus,
+                    "integrityMessage" to installed.integrityMessage,
+                    "executionStatus" to installed.executionStatus,
+                    "executionMessage" to installed.executionMessage))
                 } finally { isInstalling = false }
             }
         } catch (cancelled: CancellationException) {
@@ -49,9 +58,15 @@ class ManagedModelDownloadWorker(context: Context, parameters: WorkerParameters)
         } catch (error: Exception) {
             // Failures are terminal and actionable; process death is resumed by WorkManager.
             // In particular, ENOSPC must not cause an unbounded retry/write loop.
+            installer?.markFailure(error)
             android.util.Log.e("McaModelDownload", "Download/install failed", error)
-            Result.failure(workDataOf("error" to
-                "下载或导入未完成：${error.message.orEmpty().take(900)}。已保留可恢复进度，请检查网络和存储空间后重试。"))
+            val progress = installer?.progress?.value
+            Result.failure(workDataOf(
+                "error" to "下载或导入未完成：${error.message.orEmpty().take(900)}。已保留可恢复进度，请检查网络和存储空间后重试。",
+                "integrityStatus" to (progress?.integrityStatus ?: "FAILED"),
+                "integrityMessage" to (progress?.integrityMessage ?: error.message.orEmpty()),
+                "executionStatus" to (progress?.executionStatus ?: "FAILED"),
+                "executionMessage" to (progress?.executionMessage ?: "安装阶段未完成：${error.message.orEmpty()}")))
         }
     }
 

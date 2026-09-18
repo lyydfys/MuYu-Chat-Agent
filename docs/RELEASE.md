@@ -3,6 +3,14 @@
 MCA release APKs should be published through GitHub Releases, not committed to
 the source tree.
 
+## Build profiles
+
+The standard local/debug validation APK is a complete dual-ABI package. Use
+`docs/BUILD.md` or `scripts/build.ps1`; it must use
+`-Pmca.abis=arm64-v8a,x86_64` and a configured QAIRT/QNN SDK. An arm64-only
+APK is a deliberate public-release profile and must not be used as the local
+debug/validation artifact.
+
 ## Signing
 
 Create a local `signing.properties` file from `signing.properties.example`.

@@ -40,14 +40,15 @@ class ImagePromptTokenMeasurementTest {
     }
 
     @Test
-    fun `ui distinguishes estimates and does not describe generation as unavailable`() {
+    fun `ui distinguishes estimates and keeps unavailable token state actionable`() {
         val source = sourceFile(
             "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt",
         )
 
-        assertTrue(source.contains("可直接生成 · 暂不支持 Token 统计"))
+        assertTrue(source.contains("Token 统计暂不可用 · 生成前仍会检查模型和提示词"))
+        assertTrue(source.contains("生成前仍会检查模型完整性和提示词语言"))
         assertTrue(source.contains("约 \${measurement.count} / \${measurement.maxTokens} Token"))
-        assertFalse(source.contains("Token 数量不可用"))
+        assertFalse(source.contains("可直接生成 · 暂不支持 Token 统计"))
     }
 
     private fun sourceFile(relativePath: String): String {

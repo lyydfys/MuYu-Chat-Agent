@@ -16,6 +16,8 @@ class NativeQnnBridge {
     external fun isRunnerReady(): Boolean
     external fun inspectRuntime(runtimeDirsJson: String): String
     external fun inspectBundle(bundleRoot: String): String
+    /** Reads QNN System context metadata without creating a QNN device or executing a graph. */
+    external fun inspectContextMetadata(contextBinaryPath: String, runtimeDirsJson: String): String
     external fun runImageSmoke(bundleRoot: String, runtimeDirsJson: String, smokeSpecJson: String): String
     external fun runImagePipelineProbe(
         bundleRoot: String,

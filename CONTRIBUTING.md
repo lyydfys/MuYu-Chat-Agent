@@ -15,17 +15,28 @@ so contributions should be small, focused, and easy to test.
 git clone --recurse-submodules <repo-url>
 ```
 
-4. Build:
+4. Build the standard complete APK. The project build contract is documented in
+   [docs/BUILD.md](docs/BUILD.md); it requires both `arm64-v8a` and `x86_64`
+   and a configured QAIRT/QNN SDK:
 
 ```bash
-./gradlew :app:assembleDebug
+export MCA_QNN_SDK_ROOT=/path/to/qairt-sdk
+./gradlew :app:assembleDebug \
+  -Pmca.abis=arm64-v8a,x86_64 \
+  -PmcaQnnSdkRoot="$MCA_QNN_SDK_ROOT" \
+  -PmcaQnnTypedBindingsRequired=true \
+  --no-daemon --console=plain
 ```
 
-On Windows:
+On Windows, use the guarded project script:
 
 ```powershell
-.\gradlew.bat :app:assembleDebug
+.\scripts\build.ps1
 ```
+
+The script rejects a missing QNN SDK or an APK that is missing either ABI or
+the required native runtime libraries. Do not replace it with an arm64-only
+debug build.
 
 ## Contribution Guidelines
 

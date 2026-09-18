@@ -7,12 +7,15 @@ import com.muyuchat.core.modelstore.ModelStoreRepository
 import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.deviceprofile.DeviceProfileReader
 import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
+import com.muyuchat.core.deviceprofile.QnnRuntimeProfileSelector
+import com.muyuchat.core.nativebridge.NativeQnnBridge
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import java.io.File
 import java.io.IOException
 import java.util.Locale
 import java.util.zip.ZipInputStream
+import org.json.JSONObject
 
 internal data class ManagedDownloadProgress(
     val downloadFileName: String? = null,
@@ -21,14 +24,22 @@ internal data class ManagedDownloadProgress(
     val downloadSpeedBytesPerSecond: Long = 0L,
     val downloadRemainingSeconds: Long? = null,
     val downloadStatus: DownloadStatus = DownloadStatus.RUNNING,
-    val statusMessage: String = "正在准备下载…"
+    val statusMessage: String = "正在准备下载…",
+    val integrityStatus: String = "UNKNOWN",
+    val integrityMessage: String? = null,
+    val executionStatus: String = "UNKNOWN",
+    val executionMessage: String? = null
 )
 
 internal data class InstalledManagedDownload(
     val modelId: String? = null,
     val imageId: String? = null,
     val projector: Boolean = false,
-    val message: String
+    val message: String,
+    val integrityStatus: String = "PASSED",
+    val integrityMessage: String? = null,
+    val executionStatus: String = "NOT_APPLICABLE",
+    val executionMessage: String? = null
 )
 
 internal class ManagedModelDownloadInstaller(private val context: Context, private val projectorTargetId: String?) {
@@ -40,9 +51,256 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
     private val _uiState = MutableStateFlow(ManagedDownloadProgress())
     val progress get() = _uiState
     private fun busy(message: String) { _uiState.update { it.copy(statusMessage = message) } }
+    private fun integrityPassed(message: String = "所有下载组件的大小和 SHA-256 与目录声明一致。") {
+        _uiState.update { it.copy(integrityStatus = "PASSED", integrityMessage = message) }
+    }
+    private fun executionResult(status: String, message: String) {
+        _uiState.update { it.copy(executionStatus = status, executionMessage = message) }
+    }
+    /** Publish a terminal installer failure without hiding a previously proven file check. */
+    internal fun markFailure(error: Throwable) {
+        val message = error.message?.takeIf(String::isNotBlank) ?: "下载或安装失败。"
+        _uiState.update {
+            it.copy(
+                integrityStatus = when (it.integrityStatus) {
+                    "PASSED" -> "PASSED"
+                    else -> "FAILED"
+                },
+                integrityMessage = when (it.integrityStatus) {
+                    "PASSED" -> it.integrityMessage
+                    else -> message
+                },
+                executionStatus = "FAILED",
+                executionMessage = "安装阶段未完成：$message",
+                statusMessage = "下载或安装失败：$message"
+            )
+        }
+    }
     private fun formatBytes(bytes: Long) = "%.1f MB".format(bytes / 1048576.0)
 
+    private data class QnnBundlePreflight(val status: String, val message: String)
+
+    private data class QnnPackageMetadata(
+        val socModel: Int? = null,
+        val socVersion: String? = null,
+        val htpArch: Int? = null,
+        val qnnSdk: String? = null,
+        val source: String = ""
+    )
+
+    private data class QnnContextDiagnostic(
+        val text: String,
+        val metadataParsed: Boolean,
+        val packageMetadata: QnnPackageMetadata? = null,
+        val target: QnnContextTargetIdentity? = null
+    )
+
+    private fun readQnnPackageMetadata(bundleDir: File): QnnPackageMetadata? {
+        val candidates = bundleDir.walkTopDown()
+            .filter { it.isFile && it.name.equals("metadata.json", ignoreCase = true) }
+            .take(8)
+            .toList()
+        for (file in candidates) {
+            val root = runCatching { JSONObject(file.readText(Charsets.UTF_8)) }.getOrNull() ?: continue
+            val chipset = root.optJSONObject("chipset_attributes")
+                ?: root.optJSONObject("chipsetAttributes")
+            val tools = root.optJSONObject("tool_versions")
+                ?: root.optJSONObject("toolVersions")
+            val socModel = sequenceOf(
+                chipset?.optInt("soc_model", 0),
+                chipset?.optInt("socModel", 0),
+                root.optInt("soc_model", 0),
+                root.optInt("socModel", 0)
+            ).firstOrNull { it != null && it > 0 }
+            val htpArch = sequenceOf(
+                chipset?.optInt("htp_version", 0),
+                chipset?.optInt("htpVersion", 0),
+                root.optInt("htp_version", 0),
+                root.optInt("htpArch", 0)
+            ).firstOrNull { it != null && it > 0 }
+            val qnnSdk = sequenceOf(
+                tools?.optString("qairt"),
+                tools?.optString("qnn"),
+                root.optString("qnnSdk"),
+                root.optString("qairt")
+            ).map { it?.trim().orEmpty() }.firstOrNull(String::isNotBlank)
+            val socVersion = sequenceOf(
+                chipset?.optString("name"),
+                chipset?.optString("marketing_name"),
+                chipset?.optString("soc_version"),
+                root.optString("socVersion")
+            ).map { it?.trim().orEmpty() }.firstOrNull(String::isNotBlank)
+            if (socModel != null || htpArch != null || qnnSdk != null || socVersion != null) {
+                return QnnPackageMetadata(
+                    socModel = socModel,
+                    socVersion = socVersion,
+                    htpArch = htpArch,
+                    qnnSdk = qnnSdk,
+                    source = file.relativeTo(bundleDir).invariantSeparatorsPath
+                )
+            }
+        }
+        return null
+    }
+
+    /** Metadata-only check: it never creates a QNN device, context, or graph. */
+    private fun inspectQnnBundleCompatibility(
+        bundleDir: File,
+        installedBundle: ImageEngineBundleSpec
+    ): QnnBundlePreflight {
+        val profile = device.accelerationProfile
+        val currentChipset = profile.chipsetCode.ifBlank { device.socModel }
+        val currentSocModel = DeviceAccelerationAnalyzer.expectedQnnSocModelForChipsetCode(currentChipset)
+        val deviceArch = profile.qnnRuntime.htpArchVersion.takeIf { it > 0 }
+            ?: DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(
+                currentChipset
+            )
+        val expectedProfile = installedBundle.requiredRuntimeProfile
+        val contextSpecs = installedBundle.qnnSmokeSpecs
+        if (contextSpecs.isEmpty()) {
+            return QnnBundlePreflight(
+                "EXPERIMENTAL",
+                "实验包：未声明 QNN context 元数据，首次 native load/graph execution 决定本机兼容性。"
+            )
+        }
+        val packageMetadata = readQnnPackageMetadata(bundleDir)
+        val observedContextArchs = mutableSetOf<Int>()
+        val observedContextSocModels = mutableSetOf<Int>()
+        val observedContextSocVersions = mutableSetOf<String>()
+        val observedContextSdkVersions = mutableSetOf<String>()
+        packageMetadata?.socModel?.let(observedContextSocModels::add)
+        packageMetadata?.htpArch?.let(observedContextArchs::add)
+        packageMetadata?.socVersion?.let(observedContextSocVersions::add)
+        packageMetadata?.qnnSdk?.let(observedContextSdkVersions::add)
+
+        val diagnostics = contextSpecs.map { spec ->
+            val relative = resolvedDownloadedQnnContextPath(spec.contextBinary, emptyList())
+            val direct = File(bundleDir, relative).canonicalFile.takeIf {
+                it.path.startsWith(bundleDir.canonicalPath + File.separator)
+            }
+            val file = direct?.takeIf(File::isFile) ?: bundleDir.walkTopDown()
+                .firstOrNull { it.isFile && it.name.equals(spec.contextBinary.substringAfterLast('/'), ignoreCase = true) }
+                ?: return@map QnnContextDiagnostic(
+                    text = "${spec.contextBinary}: context 文件缺失",
+                    metadataParsed = false
+                )
+            if (file.length() <= 0L) return@map QnnContextDiagnostic(
+                text = "${spec.contextBinary}: context 文件为空",
+                metadataParsed = false
+            )
+            val json = runCatching {
+                NativeQnnBridge().inspectContextMetadata(
+                    file.absolutePath,
+                    org.json.JSONArray(qnnRuntimeDirectoriesFor(context, bundleDir)).toString()
+                )
+            }.getOrElse { error -> return@map QnnContextDiagnostic(
+                text = "${spec.contextBinary}: 预检不可用（${error.message ?: "native bridge unavailable"}）",
+                metadataParsed = false
+            ) }
+            val root = JSONObject(json)
+            val runtime = root.optJSONObject("runtime")
+            val metadata = root.optJSONObject("binaryMetadata")
+            val parsed = metadata?.optBoolean("parsed", false) == true
+            val socModel = metadata?.optInt("socModel", 0)?.takeIf { it > 0 }
+            val socVersion = metadata?.optString("socVersion").orEmpty().trim().takeIf { it.isNotBlank() }
+            val build = metadata?.optString("buildId").orEmpty()
+            val arch = socModel?.let(QnnRuntimeProfileSelector::htpArchVersionForSocModel)
+            val sdk = qnnSdkVersionFromContextBuildId(build)
+            socModel?.let(observedContextSocModels::add)
+            socVersion?.let(observedContextSocVersions::add)
+            arch?.let(observedContextArchs::add)
+            sdk?.let(observedContextSdkVersions::add)
+            val target = if (parsed) {
+                qnnContextTargetIdentity(
+                    socModel = socModel ?: 0,
+                    socVersion = socVersion.orEmpty(),
+                    buildId = build,
+                    htpArch = arch
+                )
+            } else null
+            QnnContextDiagnostic(
+                text = buildString {
+                append(spec.contextBinary).append(": ")
+                if (!parsed) {
+                    append("context 元数据无法读取：").append(metadata?.optString("message").orEmpty())
+                } else {
+                    append("目标 SoC=").append(socModel ?: "未知")
+                    arch?.let { append("/HTP V").append(it) }
+                    sdk?.let { append("，context SDK=").append(it) }
+                    metadata.optString("coreApiVersion").takeIf { it.isNotBlank() }?.let { append("，QNN core API=").append(it) }
+                    metadata.optString("backendApiVersion").takeIf { it.isNotBlank() }?.let { append("，backend API=").append(it) }
+                    runtime?.optJSONObject("compile")?.let { compile ->
+                        append("，APK SDK headers=").append(if (compile.optBoolean("sdkHeadersPresent", false)) "有" else "无")
+                    }
+                    runtime?.optInt("htpArchVersion", 0)?.takeIf { it > 0 }?.let { append("，本机 runtime=HTP V").append(it) }
+                    if (deviceArch != null && arch != null && deviceArch != arch) {
+                        append("；当前设备 HTP V").append(deviceArch).append(" 与 context 不同")
+                    }
+                    if (build.isNotBlank()) append("，buildId=").append(build)
+                }
+                },
+                metadataParsed = parsed,
+                packageMetadata = packageMetadata,
+                target = target
+            )
+        }
+        val text = diagnostics.joinToString("；")
+        val targetSocMismatch = currentSocModel != null && observedContextSocModels.any { it != currentSocModel }
+        val targetArchMismatch = deviceArch != null && when {
+            observedContextArchs.isNotEmpty() -> observedContextArchs.any { it != deviceArch }
+            else -> expectedProfile?.htpArch?.let { it != deviceArch } == true
+        }
+        val currentSocLabel = currentSocModel?.toString() ?: "未知"
+        val deviceArchLabel = deviceArch?.toString() ?: "未知"
+        val declaredSdkMismatch = expectedProfile?.qnnSdk?.let { declared ->
+            observedContextSdkVersions.any { observed ->
+                qnnContextSdkMatchesDeclared(observed, declared) == false
+            }
+        } == true
+        val metadataUnavailable = diagnostics.any { diagnostic ->
+            !diagnostic.metadataParsed || diagnostic.target?.socModel == null || diagnostic.target.sdkVersion == null
+        } || (packageMetadata == null && diagnostics.isNotEmpty())
+        val preflightUnavailable = diagnostics.any { diagnostic ->
+            diagnostic.text.contains("文件缺失") ||
+                diagnostic.text.contains("文件为空") ||
+                diagnostic.text.contains("预检不可用") ||
+                diagnostic.text.contains("元数据无法读取")
+        }
+        val reasons = buildList {
+            if (targetSocMismatch) {
+                add("目标 SoC ${observedContextSocModels.joinToString()} 与当前 SoC $currentSocLabel 不同")
+            }
+            if (targetArchMismatch) {
+                add("目标 HTP V${observedContextArchs.joinToString("/V")} 与当前 HTP V$deviceArchLabel 不同")
+            }
+            if (declaredSdkMismatch) {
+                add("context SDK ${observedContextSdkVersions.joinToString()} 与声明 SDK ${expectedProfile.qnnSdk} 不同")
+            }
+            if (metadataUnavailable) add("QNN context 的 SoC/HTP/SDK 元数据不完整")
+        }
+        return if (preflightUnavailable || reasons.isNotEmpty()) {
+            val profileText = expectedProfile?.let { "包声明 QNN ${it.qnnSdk} / HTP V${it.htpArch}" } ?: "包未声明 QNN SDK/HTP"
+            val reasonText = reasons.joinToString("；").ifBlank { "无法完整读取 context 元数据" }
+            QnnBundlePreflight(
+                "EXPERIMENTAL",
+                "实验包：$reasonText。$profileText；仍可下载，首次 native load/graph execution 可能因 contextCreateFromBinary 或 runtime 版本不兼容失败。$text"
+            )
+        } else {
+            val deviceText = deviceArch?.let { "当前设备 HTP V$it" } ?: "当前设备 HTP 未知"
+            QnnBundlePreflight(
+                "PREFLIGHT_PASSED",
+                "QNN context 元数据预检通过（$deviceText）；${text.ifBlank { "首次 native graph execution 仍会记录最终结果。" }}"
+            )
+        }
+    }
+
     suspend fun install(request: ManagedDownloadRequest): InstalledManagedDownload {
+        _uiState.value = ManagedDownloadProgress(
+            downloadStatus = DownloadStatus.RUNNING,
+            statusMessage = "正在准备下载…",
+            integrityStatus = "RUNNING",
+            executionStatus = "PENDING"
+        )
         val recommendation = request.recommendationId?.let { id ->
             modelScopeClient.recommendedModels().firstOrNull { it.id == id }
                 ?: error("推荐模型已更新，请刷新推荐页后重新下载。")
@@ -54,30 +312,63 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
             when {
                 recommendation.mnnModelBundle != null -> {
                     val model = downloadRecommendedMnnBundle(recommendation)
-                    return InstalledManagedDownload(modelId = model.id, message = "已下载并导入：${model.displayName}")
+                    integrityPassed("MNN 全部组件已完成大小、SHA-256 和安装审计校验。")
+                    executionResult("PREFLIGHT_PASSED", "MNN 组件结构和配置已通过预检；首次加载时确认本机后端兼容性。")
+                    val checks = _uiState.value
+                    return InstalledManagedDownload(modelId = model.id, message = "已下载并导入：${model.displayName}",
+                        integrityStatus = checks.integrityStatus, integrityMessage = checks.integrityMessage,
+                        executionStatus = checks.executionStatus, executionMessage = checks.executionMessage)
                 }
                 recommendation.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT -> {
                     val model = downloadRecommendedQairtChatBundle(recommendation)
-                    return InstalledManagedDownload(modelId = model.id, message = "已下载并导入：${model.displayName}")
+                    integrityPassed("QNN 聊天引擎压缩包和安装内容已通过完整性校验。")
+                    executionResult("PREFLIGHT_PASSED", "QNN 聊天引擎已完成结构预检；首次加载时确认本机执行兼容性。")
+                    val checks = _uiState.value
+                    return InstalledManagedDownload(modelId = model.id, message = "已下载并导入：${model.displayName}",
+                        integrityStatus = checks.integrityStatus, integrityMessage = checks.integrityMessage,
+                        executionStatus = checks.executionStatus, executionMessage = checks.executionMessage)
                 }
                 recommendation.visionModelBundle != null -> {
                     return when (val result = downloadRecommendedVisionBundle(recommendation)) {
                         is VisionBundleDownloadResult.ChatModel -> InstalledManagedDownload(modelId = result.model.id,
-                            message = "已导入多模态模型并绑定视觉投影器：${result.model.displayName}")
-                        is VisionBundleDownloadResult.EngineBundle -> InstalledManagedDownload(message = "已导入：${result.displayName}。${result.report.message}")
+                            message = "已导入多模态模型并绑定视觉投影器：${result.model.displayName}",
+                            integrityStatus = _uiState.value.integrityStatus,
+                            integrityMessage = _uiState.value.integrityMessage,
+                            executionStatus = "PREFLIGHT_PASSED",
+                            executionMessage = "模型和视觉投影器已完成结构预检；首次加载时确认本机兼容性")
+                        is VisionBundleDownloadResult.EngineBundle -> InstalledManagedDownload(
+                            message = "已导入：${result.displayName}。${result.report.message}",
+                            integrityStatus = _uiState.value.integrityStatus,
+                            integrityMessage = _uiState.value.integrityMessage,
+                            executionStatus = _uiState.value.executionStatus,
+                            executionMessage = _uiState.value.executionMessage)
                     }
                 }
                 recommendation.imageEngineBundle != null -> {
                     val image = downloadRecommendedImageBundle(recommendation)
-                    return InstalledManagedDownload(imageId = image.id, message = "已下载并导入生图模型：${image.displayName}")
+                    val checks = _uiState.value
+                    return InstalledManagedDownload(
+                        imageId = image.id,
+                        message = "已下载并导入生图模型：${image.displayName}",
+                        integrityStatus = checks.integrityStatus,
+                        integrityMessage = checks.integrityMessage,
+                        executionStatus = checks.executionStatus,
+                        executionMessage = checks.executionMessage
+                    )
                 }
             }
         }
         val remote = request.remote ?: modelScopeClient.recommendedFile(requireNotNull(recommendation))
         return when (val result = download(remote)) {
-            is DownloadedModelRegistration.Chat -> InstalledManagedDownload(modelId = result.model.id, message = "已下载并导入：${result.model.displayName}")
-            is DownloadedModelRegistration.Image -> InstalledManagedDownload(imageId = result.model.id, message = "已下载并导入生图模型：${result.model.displayName}")
-            is DownloadedModelRegistration.VisionProjector -> InstalledManagedDownload(modelId = result.model.id, projector = true, message = "已下载并绑定视觉投影器")
+            is DownloadedModelRegistration.Chat -> InstalledManagedDownload(modelId = result.model.id, message = "已下载并导入：${result.model.displayName}",
+                integrityStatus = _uiState.value.integrityStatus, integrityMessage = _uiState.value.integrityMessage,
+                executionStatus = _uiState.value.executionStatus, executionMessage = _uiState.value.executionMessage)
+            is DownloadedModelRegistration.Image -> InstalledManagedDownload(imageId = result.model.id, message = "已下载并导入生图模型：${result.model.displayName}",
+                integrityStatus = _uiState.value.integrityStatus, integrityMessage = _uiState.value.integrityMessage,
+                executionStatus = _uiState.value.executionStatus, executionMessage = _uiState.value.executionMessage)
+            is DownloadedModelRegistration.VisionProjector -> InstalledManagedDownload(modelId = result.model.id, projector = true, message = "已下载并绑定视觉投影器",
+                integrityStatus = _uiState.value.integrityStatus, integrityMessage = _uiState.value.integrityMessage,
+                executionStatus = _uiState.value.executionStatus, executionMessage = _uiState.value.executionMessage)
         }
     }
     private suspend fun downloadVerifiedOrResume(remote: RemoteModelFile, part: File, final: File,
@@ -114,6 +405,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                     }
                 }
                 busy("下载完成，正在解压并校验 QNN 模型…")
+                integrityPassed("QNN 聊天引擎压缩包已通过大小和 SHA-256 校验。")
                 extractResumableModelZip(finalZip, candidateDir)
                 modelStore.resolveQairtBundleRoot(candidateDir)
                 val backup = promoteImageBundleCandidate(candidateDir, bundleDir)
@@ -177,6 +469,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 require(installer.verifyInstalledBundle(installed.bundleRoot).isVerified) {
                     "MNN 模型包安装后的组件校验失败，请重新下载。"
                 }
+                integrityPassed("MNN 全部组件已完成大小、SHA-256 和安装审计校验。")
                 modelStore.registerDownloadedMnnBundle(
                     displayName = model.title,
                     bundleDir = installed.bundleRoot,
@@ -225,6 +518,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                     }
                     completedBytes += finalFile.length()
                 }
+                integrityPassed("视觉模型和投影器全部通过大小和 SHA-256 校验。")
                 val primaryFile = targets.firstOrNull { it.first == primary }?.second
                     ?: error("多模态模型包主模型下载目标不存在。")
                 writeDownloadedVisionBundleManifest(
@@ -253,6 +547,12 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                     ).health(
                         device = device,
                         bundleRoot = bundleDir
+                    )
+                    executionResult(
+                        if (report.state == LocalVisionNpuState.BUNDLE_INCOMPLETE ||
+                            report.state == LocalVisionNpuState.SMOKE_METADATA_INVALID ||
+                            report.state == LocalVisionNpuState.RUNNER_NOT_PACKAGED) "FAILED" else "PREFLIGHT_PASSED",
+                        report.message
                     )
                     VisionBundleDownloadResult.EngineBundle(
                         displayName = model.title,
@@ -319,6 +619,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                     }
                 }
                 busy("下载完成，正在校验组件并自动导入本地生图模型…")
+                integrityPassed()
                 var promoted = false
                 var previousBundleBackup: File? = null
                 try {
@@ -350,6 +651,16 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                                 ?: device.accelerationProfile.qnnRuntime.htpArchVersion.takeIf { it > 0 }
                         }
                     )
+                    integrityPassed()
+                    if (bundle.runtime == ImageEngineBundleRuntime.QNN_HTP) {
+                        val preflight = inspectQnnBundleCompatibility(
+                            bundleDir = candidateDir,
+                            installedBundle = installedBundle
+                        )
+                        executionResult(preflight.status, preflight.message)
+                    } else {
+                        executionResult("NOT_APPLICABLE", "该模型不依赖 QNN context，安装后由对应运行时校验。")
+                    }
                     preparePinnedQnnRuntimeMetadataIfRequired(candidateDir, installedBundle)
                     prepareMnnDiffusionTokenizerIfPossible(candidateDir)
                     val resolvedPrimary = localImageBundleManifestFromRoot(candidateDir)?.primaryFile
@@ -382,10 +693,21 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                         imageSizeOverride = "${bundle.smokeSpec.width}x${bundle.smokeSpec.height}",
                         primarySha256 = primarySha256
                     )
+                    val checks = _uiState.value
+                    val annotated = if (checks.executionMessage.orEmpty().isNotBlank()) {
+                        localImageModelStore.updateModel(
+                            registered.copy(
+                                verificationStatus = LocalImageVerificationStatus.UNKNOWN,
+                                verificationMessage = checks.executionMessage.orEmpty(),
+                                verifiedAt = 0L
+                            )
+                        ).firstOrNull { it.id == registered.id } ?: registered
+                    } else registered
                     previousBundleBackup?.deleteRecursively()
                     savedArchive.delete()
-                    registered
+                    annotated
                 } catch (error: Throwable) {
+                    markFailure(error)
                     if (promoted) {
                         restoreImageBundleBackup(bundleDir, previousBundleBackup)
                     }
@@ -427,7 +749,8 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                     }
                 }
                 busy("下载完成，正在校验并自动导入本地模型…")
-                if (imageModel) {
+                integrityPassed("文件已通过大小和 SHA-256 校验。")
+                val registration = if (imageModel) {
                     DownloadedModelRegistration.Image(localImageModelStore.registerDownloadedModel(finalFile, remote))
                 } else if (remoteKind == RemoteModelFileKind.PROJECTOR && targetVisionModel != null) {
                     DownloadedModelRegistration.VisionProjector(
@@ -445,6 +768,8 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                         )
                     )
                 }
+                executionResult("PENDING", "文件已导入；本机执行兼容性将在首次加载或模型页校验时确认。")
+                registration
         }
     }
 

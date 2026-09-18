@@ -876,7 +876,9 @@ class ModelScopeClientTest {
                     bundle.executionProfile!!.capabilities.supportedSchedulers
             )
             assertNull(bundle.executionProfile!!.graph.htpArch)
-            assertNull(bundle.requiredRuntimeProfile)
+            assertEquals("2.28", bundle.requiredRuntimeProfile?.qnnSdk)
+            assertEquals(75, bundle.requiredRuntimeProfile?.htpArch)
+            assertFalse(requireNotNull(bundle.requiredRuntimeProfile).completeBundleRuntime)
         }
 
         conditionalOnlyImageIds.forEach { id ->

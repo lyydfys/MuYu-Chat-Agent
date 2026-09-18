@@ -62,12 +62,12 @@ its first real native load and graph execution determine compatibility.
 
 Current release status:
 
-- `v0.2.3` (`versionCode 7`) is the current stability release. It improves
+- `v0.2.4` (`versionCode 8`) is the current stability release. It improves
   startup recovery, resumable model installation, character cards, world books,
   knowledge retrieval, and image-model compatibility. See the
-  [v0.2.3 release notes](docs/releases/v0.2.3.md) for validation and limitations.
+  [v0.2.4 release notes](docs/releases/v0.2.4.md) for validation and limitations.
   The signed arm64 installer is published on
-  [GitHub Releases](https://github.com/lyydfys/MuYu-Chat-Agent/releases/tag/v0.2.3).
+  [GitHub Releases](https://github.com/lyydfys/MuYu-Chat-Agent/releases/tag/v0.2.4).
 - The first public package target is `arm64-v8a` Android devices.
 - Local chat is the primary stable local path.
 - Web search is available after the user configures a search provider in
@@ -290,12 +290,18 @@ git submodule update --init --recursive
 
 ## Build
 
+The complete local/debug APK build contract is documented in
+[docs/BUILD.md](docs/BUILD.md). Use `scripts/build.ps1` on Windows; it fixes
+the debug build to `arm64-v8a,x86_64`, requires the QAIRT/QNN SDK, and validates
+the packaged native libraries after Gradle finishes.
+
 PowerShell:
 
 ```powershell
 $env:JAVA_HOME='<path-to-jdk-17>'
 $env:ANDROID_HOME='<path-to-android-sdk>'
-.\gradlew.bat :app:assembleDebug
+$env:MCA_QNN_SDK_ROOT='<path-to-qairt-sdk>'
+.\scripts\build.ps1
 ```
 
 Bash:
@@ -303,7 +309,12 @@ Bash:
 ```bash
 export JAVA_HOME=/path/to/jdk-17
 export ANDROID_HOME=/path/to/android-sdk
-./gradlew :app:assembleDebug
+export MCA_QNN_SDK_ROOT=/path/to/qairt-sdk
+./gradlew :app:assembleDebug \
+  -Pmca.abis=arm64-v8a,x86_64 \
+  -PmcaQnnSdkRoot="$MCA_QNN_SDK_ROOT" \
+  -PmcaQnnTypedBindingsRequired=true \
+  --no-daemon --console=plain
 ```
 
 The debug APK is generated under:

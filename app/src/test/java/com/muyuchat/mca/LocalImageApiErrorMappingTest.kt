@@ -8,6 +8,21 @@ import org.junit.Test
 
 class LocalImageApiErrorMappingTest {
     @Test
+    fun `ui worker failures explain the problem and the next action`() {
+        val disconnected = localImageGenerationFailureMessage(
+            LocalImageWorkerDisconnectedException("Local image worker process died.")
+        )
+        assertTrue(disconnected.contains("进程异常退出"))
+        assertTrue(disconnected.contains("校验模型包"))
+
+        val reconnecting = localImageGenerationFailureMessage(
+            LocalImageWorkerDisconnectedException("Local image worker binding died.")
+        )
+        assertTrue(reconnecting.contains("等待 1 秒"))
+        assertTrue(reconnecting.contains("重试"))
+    }
+
+    @Test
     fun `authenticated image count capability is explicit per runtime`() {
         assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.STABLE_DIFFUSION_CPP, 8))
         assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.MNN_DIFFUSION, 1))
@@ -41,6 +56,8 @@ class LocalImageApiErrorMappingTest {
         )
         assertEquals("image_worker_unavailable", disconnected.code)
         assertEquals(503, disconnected.httpStatus)
+        assertTrue(disconnected.message.contains("verify", ignoreCase = true))
+        assertTrue(disconnected.message.contains("re-import"))
 
         val invalidResponse = requireNotNull(
             LocalImageWorkerException("Worker result was malformed.")

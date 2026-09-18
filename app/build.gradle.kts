@@ -120,8 +120,8 @@ android {
         applicationId = "com.muyuchat.mca"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 7
-        versionName = "0.2.3"
+        versionCode = 8
+        versionName = "0.2.4"
 
         ndk {
             abiFilters += mcaAbiFilters
@@ -207,6 +207,21 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+// A debug APK is the complete local validation artifact. Keep accidental
+// arm64-only invocations from silently producing a smaller, incomplete APK;
+// the intentional arm64 release profile remains documented in docs/RELEASE.md.
+tasks.configureEach {
+    if (name == "preDebugBuild") {
+        doFirst {
+            val expectedDebugAbis = setOf("arm64-v8a", "x86_64")
+            check(mcaAbiFilters.toSet() == expectedDebugAbis) {
+                "Debug APKs must include both arm64-v8a and x86_64. " +
+                    "Use -Pmca.abis=arm64-v8a,x86_64; arm64-only is reserved for the release profile."
+            }
+        }
     }
 }
 

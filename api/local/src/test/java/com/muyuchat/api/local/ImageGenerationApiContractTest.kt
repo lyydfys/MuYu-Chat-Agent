@@ -1096,6 +1096,7 @@ class ImageGenerationApiContractTest {
             ).code
         )
         mapOf(
+            "image_model_not_ready" to 409,
             "image_prompt_translation_busy" to 409,
             "image_prompt_translation_timeout" to 504,
             "image_prompt_translation_unavailable" to 503,

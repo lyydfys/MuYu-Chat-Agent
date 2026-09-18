@@ -5,6 +5,7 @@ import com.muyuchat.core.download.RecommendedChatRuntime
 import com.muyuchat.core.download.RecommendedModelSection
 import com.muyuchat.core.download.RecommendedModelStatus
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -28,6 +29,22 @@ class RecommendationCatalogTest {
         assertCpuCatalog(catalog)
         assertEquals(expectedIds(RecommendedModelSection.NPU_CHAT), catalog.npuChat.map { it.id })
         assertNpuImageCatalog(catalog)
+    }
+
+    @Test
+    fun sdxlQnn228DeclaresV75TargetButRemainsDownloadableOnV79() {
+        val sdxl = recommendations.first { it.id == "animagine_xl_v4_qnn228" }
+        val profile = requireNotNull(sdxl.imageEngineBundle).requiredRuntimeProfile
+
+        assertEquals("2.28", profile?.qnnSdk)
+        assertEquals(75, profile?.htpArch)
+        assertFalse(requireNotNull(profile).completeBundleRuntime)
+
+        val access = recommendationDownloadAccess(sdxl, "SM8750P", deviceIsSnapdragon = true)
+        assertTrue(access.canDownload)
+        assertTrue(access.experimental)
+        assertTrue(recommendationQnnCompatibilityLine(sdxl, "SM8750P")!!.contains("HTP V79"))
+        assertTrue(recommendationQnnCompatibilityLine(sdxl, "SM8750P")!!.contains("实验包"))
     }
 
     @Test
@@ -75,6 +92,26 @@ class RecommendationCatalogTest {
         assertTrue("mnn_sana_edit_v2" in visibleIds)
         assertTrue("flux2_klein_4b_q4" in visibleIds)
         assertTrue("meinamix_sd15_qnn228" in visibleIds)
+    }
+
+    @Test
+    fun imageRecommendationReflectsInstalledBundleVerificationState() {
+        val model = recommendations.first { it.id == "cyberrealistic_sd15_qnn228" }
+        fun local(status: String) = LocalImageModelUiItem(
+            id = "local-cyber",
+            displayName = model.title,
+            runtimeLabel = "骁龙 NPU",
+            familyLabel = "SD1.5",
+            fileName = "unet.bin",
+            sizeBytes = 1L,
+            imageSize = "512x512",
+            recommendationId = model.id,
+            verificationStatus = status
+        )
+        assertEquals(RecommendedLocalBundleStatus.NONE, recommendedLocalBundleStatus(model, emptyList()))
+        assertEquals(RecommendedLocalBundleStatus.INSTALLED_UNVERIFIED, recommendedLocalBundleStatus(model, listOf(local("UNKNOWN"))))
+        assertEquals(RecommendedLocalBundleStatus.INSTALLED_VERIFIED, recommendedLocalBundleStatus(model, listOf(local("QNN_IMAGE_SMOKE_PASSED"))))
+        assertEquals(RecommendedLocalBundleStatus.VERIFICATION_FAILED, recommendedLocalBundleStatus(model, listOf(local("FAILED"))))
     }
 
     @Test

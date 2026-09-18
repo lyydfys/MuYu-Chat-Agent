@@ -1,6 +1,7 @@
 ﻿package com.muyuchat.mca
 
 import android.os.Bundle
+import java.io.File
 import androidx.activity.BackEventCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -1078,6 +1079,8 @@ private fun McaApp(
                     localImageModels = state.localImageModels.map { model ->
                         val prepared = preparedImageUi[model.path]
                         val readiness = if (prepared == null) "正在后台读取模型配置…" else prepared.readiness
+                        val recommendationId = model.recommendationId ?: model.bundleRoot
+                            ?.let { root -> runCatching { localImageBundleManifestFromRoot(File(root)) }.getOrNull()?.recommendationId }
                         LocalImageModelUiItem(
                             id = model.id,
                             displayName = model.displayName,
@@ -1091,7 +1094,10 @@ private fun McaApp(
                             readyForGeneration = readiness == null,
                             readinessMessage = readiness,
                             readinessLabel = prepared?.label ?: "正在检查",
-                            selected = state.selectedImageBackend == ImageBackend.LOCAL && model.id == state.selectedLocalImageModelId
+                            selected = state.selectedImageBackend == ImageBackend.LOCAL && model.id == state.selectedLocalImageModelId,
+                            recommendationId = recommendationId,
+                            verificationStatus = model.verificationStatus.name,
+                            verificationMessage = model.verificationMessage
                         )
                     },
                     remoteFiles = state.remoteFiles,
@@ -1107,6 +1113,10 @@ private fun McaApp(
                     downloadSpeedBytesPerSecond = state.downloadSpeedBytesPerSecond,
                     downloadRemainingSeconds = state.downloadRemainingSeconds,
                     downloadStatus = state.downloadStatus,
+                    downloadIntegrityStatus = state.downloadIntegrityStatus,
+                    downloadIntegrityMessage = state.downloadIntegrityMessage,
+                    downloadExecutionStatus = state.downloadExecutionStatus,
+                    downloadExecutionMessage = state.downloadExecutionMessage,
                     deviceTotalRamBytes = state.deviceProfile?.displayTotalRamBytes ?: 0L,
                     deviceAvailableRamBytes = state.deviceProfile?.availableRamBytes ?: 0L,
                     deviceAccelerationSummary = state.deviceProfile?.deviceAccelerationSummary().orEmpty(),
@@ -1173,6 +1183,8 @@ private fun McaApp(
                     viewModel.downloadRecommended(model, useAfterDownload = startModelsInRecommended)
                 },
                 onOpenModelPage = viewModel::openModelScopePage,
+                onOpenLocalModel = viewModel::selectLocalImageModel,
+                onVerifyLocalModel = viewModel::verifyLocalImageModel,
                 onDownload = viewModel::download,
                 onLoad = viewModel::loadModel,
                 onUnload = viewModel::unloadModel,

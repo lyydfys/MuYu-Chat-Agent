@@ -22,6 +22,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private const val LOCAL_IMAGE_WORKER_REBIND_COOLDOWN_MS = 500L
+
 class LocalImageWorkerClient(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val inputDispatcher = LocalImageInputDispatcher(appContext)
@@ -36,6 +38,8 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
     private var closed = false
     private var preparation: Preparation? = null
     private var activeRequest: ActiveRequest? = null
+    /** The service is disposable and self-terminates after unbind; avoid binding its retiring PID. */
+    private var lastBindingReleaseAtElapsedMs: Long = 0L
 
     @Volatile
     var lastWorkerPid: Int = -1
@@ -450,6 +454,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
     private suspend fun awaitService(
         onSessionSelected: (BindingSession) -> Unit = {}
     ): BoundWorker {
+        awaitRebindCooldown()
         lateinit var session: BindingSession
         var immediateService: ILocalImageWorker? = null
         var shouldBind = false
@@ -562,6 +567,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             } else {
                 bindingLifecycle.release(session.lease)
                 bindingSession = null
+                lastBindingReleaseAtElapsedMs = SystemClock.elapsedRealtime()
                 unlinkRemoteDeathRecipientLocked()
                 remote = null
                 remoteBinder = null
@@ -597,6 +603,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                 "Current local image worker binding session could not be released."
             }
             bindingSession = null
+            lastBindingReleaseAtElapsedMs = SystemClock.elapsedRealtime()
         }
         session.deferred.completeExceptionally(failure)
         pendingPreparation?.ready?.completeExceptionally(failure)
@@ -630,6 +637,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                 return@synchronized null
             }
             bindingSession = null
+            lastBindingReleaseAtElapsedMs = SystemClock.elapsedRealtime()
             unlinkRemoteDeathRecipientLocked()
             remote = null
             remoteBinder = null
@@ -665,6 +673,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                 bindingLifecycle.release(expectedSession.lease)
             ) {
                 bindingSession = null
+                lastBindingReleaseAtElapsedMs = SystemClock.elapsedRealtime()
                 unlinkRemoteDeathRecipientLocked()
                 remote = null
                 remoteBinder = null
@@ -828,6 +837,25 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         val service = remote?.takeIf { remoteBinder?.isBinderAlive == true }
             ?: return@synchronized null
         BoundWorker(service, session)
+    }
+
+    /**
+     * LocalImageWorkerService deliberately exits after every request. A new request issued in the
+     * same event loop turn can otherwise attach to that retiring service and receive onNullBinding
+     * or a binder-death callback. The short cooldown is transport-only and does not delay native
+     * execution once a fresh service is bound.
+     */
+    private suspend fun awaitRebindCooldown() {
+        val remaining = synchronized(stateLock) {
+            if (bindingSession != null || lastBindingReleaseAtElapsedMs <= 0L) {
+                0L
+            } else {
+                (LOCAL_IMAGE_WORKER_REBIND_COOLDOWN_MS -
+                    (SystemClock.elapsedRealtime() - lastBindingReleaseAtElapsedMs))
+                    .coerceAtLeast(0L)
+            }
+        }
+        if (remaining > 0L) delay(remaining)
     }
 
     private fun isCurrentBindingSession(session: BindingSession): Boolean =

@@ -97,6 +97,18 @@ class LocalImageWorkerClientLifecycleTest {
     }
 
     @Test
+    fun newBindWaitsForDisposableWorkerRetirementAfterTerminalRelease() {
+        val source = localImageWorkerClientSource()
+        val awaitService = functionBody(source, "): BoundWorker {")
+        val cooldown = functionBody(source, "private suspend fun awaitRebindCooldown(")
+        assertTrue(awaitService.contains("awaitRebindCooldown()"))
+        assertTrue(cooldown.contains("LOCAL_IMAGE_WORKER_REBIND_COOLDOWN_MS"))
+        assertTrue(cooldown.contains("bindingSession != null"))
+        assertTrue(cooldown.contains("delay(remaining)"))
+        assertTrue(source.contains("lastBindingReleaseAtElapsedMs = SystemClock.elapsedRealtime()"))
+    }
+
+    @Test
     fun staleBindingSessionCannotReleaseOrInvalidateItsReplacement() {
         val lifecycle = LocalImageWorkerBindingLifecycle()
         val first = requireNotNull(lifecycle.issueBind())
@@ -457,6 +469,19 @@ class LocalImageWorkerClientLifecycleTest {
         assertTrue(deadClient.contains("requestJournalCancellation(active.requestId)"))
         assertTrue(deadClient.contains("provider.cancel()"))
         assertTrue(deadClient.contains("active.job?.cancel("))
+    }
+
+    @Test
+    fun workerRejectsIncompleteModelBeforeProviderBegin() {
+        val source = localImageWorkerServiceSource()
+        val generate = functionBody(source, "override fun generate(")
+        val readiness = generate.indexOf("localImageStructuralReadinessMessage()")
+        val active = generate.indexOf("val active = ActiveGeneration", readiness)
+        val providerBegin = generate.indexOf("provider.begin(request.model.runtime)", active)
+        assertTrue(readiness >= 0)
+        assertTrue(active > readiness)
+        assertTrue(providerBegin > active)
+        assertTrue(generate.substring(readiness, active).contains("code = \"image_model_not_ready\""))
     }
 
     @Test

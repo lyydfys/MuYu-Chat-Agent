@@ -2101,6 +2101,15 @@ class ModelScopeClient(
                     timeoutSeconds = 360
                 ),
                 qnnSmokeSpecs = sdxlQnnSmokeSpecs(),
+                // These archives were exported with QNN 2.28 for the SM8650/
+                // HTP V75 class. The runtime contract is advisory at install
+                // time; a V79 device may still download and try the package,
+                // but the card and preflight must call it experimental.
+                requiredRuntimeProfile = ImageEngineQnnRuntimeProfileSpec(
+                    qnnSdk = "2.28",
+                    htpArch = 75,
+                    completeBundleRuntime = false
+                ),
                 executionProfile = profile
             )
         }

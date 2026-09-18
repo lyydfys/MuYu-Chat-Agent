@@ -9,6 +9,7 @@ import com.muyuchat.core.download.RecommendedModelStatus
 import com.muyuchat.core.download.RecommendedChatRuntime
 import com.muyuchat.core.download.RecommendedComputeBackend
 import com.muyuchat.core.download.downloadEligibilityFor
+import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
 import java.util.Locale
 
 internal data class RecommendationCatalog(
@@ -162,7 +163,12 @@ internal fun recommendationDownloadAccess(
             RecommendationDeviceFit.VENDOR_GENERIC
         else -> RecommendationDeviceFit.CROSS_VENDOR
     }
+    val expectedHtpArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(normalizedDevice)
+    val declaredHtpArch = model.imageEngineBundle?.requiredRuntimeProfile?.htpArch
+    val imageRuntimeMismatch = model.section == RecommendedModelSection.NPU_IMAGE &&
+        declaredHtpArch != null && expectedHtpArch != null && declaredHtpArch != expectedHtpArch
     val experimental = model.status != RecommendedModelStatus.RECOMMENDED ||
+        imageRuntimeMismatch ||
         (model.section in setOf(RecommendedModelSection.NPU_CHAT, RecommendedModelSection.NPU_IMAGE) &&
             deviceFit !in setOf(RecommendationDeviceFit.EXACT, RecommendationDeviceFit.UNIVERSAL))
     return RecommendationDownloadAccess(
@@ -180,6 +186,20 @@ private fun String.isSnapdragonChipsetCodeForRecommendation(): Boolean {
 
 internal fun recommendationDeviceFitLine(access: RecommendationDownloadAccess): String =
     "设备路径：${access.deviceFit.label}；以本机 native load 和首轮推理结果为准"
+
+internal fun recommendationQnnCompatibilityLine(
+    model: ModelScopeRecommendedModel,
+    deviceChipsetCode: String
+): String? {
+    val profile = model.imageEngineBundle?.requiredRuntimeProfile ?: return null
+    val deviceArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(deviceChipsetCode)
+    val target = "包目标：QNN ${profile.qnnSdk} / HTP V${profile.htpArch}"
+    return when {
+        deviceArch == null -> "$target；当前设备 HTP 未知，下载后由 native load 决定"
+        deviceArch == profile.htpArch -> "$target；当前设备匹配 HTP V$deviceArch"
+        else -> "$target；当前设备 HTP V$deviceArch 未找到匹配 context/runtime，标为实验包"
+    }
+}
 
 /**
  * Keep the recommendation card honest about where the app will try to get a
@@ -276,6 +296,29 @@ internal fun recommendationDownloadCtaLabel(
     !canDownload -> "暂不可下载"
     experimental -> "实验下载"
     else -> "下载"
+}
+
+internal enum class RecommendedLocalBundleStatus {
+    NONE,
+    INSTALLED_UNVERIFIED,
+    INSTALLED_VERIFIED,
+    VERIFICATION_FAILED
+}
+
+internal fun recommendedLocalBundleStatus(
+    model: ModelScopeRecommendedModel,
+    localModels: List<LocalImageModelUiItem>
+): RecommendedLocalBundleStatus {
+    val local = localModels.firstOrNull { item ->
+        item.recommendationId == model.id || item.recommendationId == model.imageEngineBundle?.id
+    } ?: return RecommendedLocalBundleStatus.NONE
+    return when {
+        local.verificationStatus == "FAILED" -> RecommendedLocalBundleStatus.VERIFICATION_FAILED
+        local.verificationStatus in setOf(
+            "PASSED", "MNN_SMOKE_PASSED", "QNN_IMAGE_SMOKE_PASSED", "QNN_SMOKE_PASSED", "QNN_PIPELINE_PROBE_PASSED"
+        ) -> RecommendedLocalBundleStatus.INSTALLED_VERIFIED
+        else -> RecommendedLocalBundleStatus.INSTALLED_UNVERIFIED
+    }
 }
 
 internal fun recommendationStatusLabel(status: RecommendedModelStatus): String = when (status) {

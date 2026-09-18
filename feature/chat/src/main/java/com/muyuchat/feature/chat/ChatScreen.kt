@@ -9617,7 +9617,7 @@ private fun ImagePromptTokenStatus(
         ?.let { it.count - it.maxTokens }
     val label = when {
         state == ImagePromptTokenUiState.Measuring -> "正在计算 Token…"
-        unavailable -> "可直接生成 · 暂不支持 Token 统计"
+        unavailable -> "Token 统计暂不可用 · 生成前仍会检查模型和提示词"
         measurement == null -> null
         overflowCount != null && !measurement.exact ->
             "约 ${measurement.count} / ${measurement.maxTokens} Token · 可能超出"
@@ -9628,7 +9628,7 @@ private fun ImagePromptTokenStatus(
     } ?: return
     val accessibilityLabel = when {
         state == ImagePromptTokenUiState.Unavailable ->
-            "当前模型暂不支持 Token 统计，可以直接生成"
+            "当前模型暂时无法统计 Token；生成前仍会检查模型完整性和提示词语言"
         overflowCount != null && measurement.exact == false ->
             "提示词估算为 ${measurement.count} 个 Token，模型声明上限 ${measurement.maxTokens}，可能超出"
         overflowCount != null ->

@@ -117,6 +117,10 @@ data class ModelHubUiState(
     val downloadSpeedBytesPerSecond: Long = 0L,
     val downloadRemainingSeconds: Long? = null,
     val downloadStatus: DownloadStatus? = null,
+    val downloadIntegrityStatus: String = "UNKNOWN",
+    val downloadIntegrityMessage: String? = null,
+    val downloadExecutionStatus: String = "UNKNOWN",
+    val downloadExecutionMessage: String? = null,
     val deviceTotalRamBytes: Long = 0L,
     val deviceAvailableRamBytes: Long = 0L,
     val deviceAccelerationSummary: String = "",
@@ -145,7 +149,10 @@ data class LocalImageModelUiItem(
     val readinessMessage: String? = null,
     val readinessLabel: String = "",
     val selected: Boolean = false,
-    val storagePath: String = ""
+    val storagePath: String = "",
+    val recommendationId: String? = null,
+    val verificationStatus: String = "UNKNOWN",
+    val verificationMessage: String = ""
 )
 
 data class CloudApiUiState(
@@ -231,6 +238,8 @@ fun ModelHubScreen(
     onShowRecommendedFiles: (ModelScopeRecommendedModel) -> Unit,
     onDownloadRecommended: (ModelScopeRecommendedModel) -> Unit,
     onOpenModelPage: (String) -> Unit,
+    onOpenLocalModel: (String) -> Unit = {},
+    onVerifyLocalModel: (String) -> Unit = {},
     onDownload: (RemoteModelFile) -> Unit,
     onLoad: (ModelManifest) -> Unit,
     onUnload: (ModelManifest) -> Unit,
@@ -329,6 +338,11 @@ fun ModelHubScreen(
                     },
                     onDownload = onDownloadRecommended,
                     onOpenPage = onOpenModelPage,
+                    onOpenLocalModel = { modelId ->
+                        section = ModelHubSection.LOCAL
+                        onOpenLocalModel(modelId)
+                    },
+                    onVerifyLocalModel = onVerifyLocalModel,
                     modifier = Modifier.weight(1f)
                 )
                 ModelHubSection.MARKET -> MarketSection(
@@ -1261,6 +1275,8 @@ private fun RecommendedModelsSection(
     onShowFiles: (ModelScopeRecommendedModel) -> Unit,
     onDownload: (ModelScopeRecommendedModel) -> Unit,
     onOpenPage: (String) -> Unit,
+    onOpenLocalModel: (String) -> Unit,
+    onVerifyLocalModel: (String) -> Unit,
     modifier: Modifier
 ) {
     val catalog = remember(
@@ -1340,6 +1356,9 @@ private fun RecommendedModelsSection(
                             deviceChipsetCode = state.deviceChipsetCode,
                             deviceIsSnapdragon = state.deviceIsSnapdragon,
                             qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                            localImageModels = state.localImageModels,
+                            onOpenLocalModel = onOpenLocalModel,
+                            onVerifyLocalModel = onVerifyLocalModel,
                             enabled = !state.isBusy,
                             onShowFiles = { onShowFiles(model) },
                             onDownload = { onDownload(model) },
@@ -1378,6 +1397,9 @@ private fun RecommendedModelsSection(
                         deviceChipsetCode = state.deviceChipsetCode,
                         deviceIsSnapdragon = state.deviceIsSnapdragon,
                         qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                        localImageModels = state.localImageModels,
+                        onOpenLocalModel = onOpenLocalModel,
+                        onVerifyLocalModel = onVerifyLocalModel,
                         enabled = !state.isBusy,
                         onShowFiles = { onShowFiles(model) },
                         onDownload = { onDownload(model) },
@@ -1417,6 +1439,9 @@ private fun RecommendedModelsSection(
                                 deviceChipsetCode = state.deviceChipsetCode,
                                 deviceIsSnapdragon = state.deviceIsSnapdragon,
                                 qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                                localImageModels = state.localImageModels,
+                                onOpenLocalModel = onOpenLocalModel,
+                                onVerifyLocalModel = onVerifyLocalModel,
                                 enabled = !state.isBusy,
                                 onShowFiles = { onShowFiles(model) },
                                 onDownload = { onDownload(model) },
@@ -1460,6 +1485,9 @@ private fun RecommendedModelsSection(
                         deviceChipsetCode = state.deviceChipsetCode,
                         deviceIsSnapdragon = state.deviceIsSnapdragon,
                         qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                        localImageModels = state.localImageModels,
+                        onOpenLocalModel = onOpenLocalModel,
+                        onVerifyLocalModel = onVerifyLocalModel,
                         enabled = !state.isBusy,
                         onShowFiles = { onShowFiles(model) },
                         onDownload = { onDownload(model) },
@@ -1501,6 +1529,9 @@ private fun RecommendedModelsSection(
                                 deviceChipsetCode = state.deviceChipsetCode,
                                 deviceIsSnapdragon = state.deviceIsSnapdragon,
                                 qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                                localImageModels = state.localImageModels,
+                                onOpenLocalModel = onOpenLocalModel,
+                                onVerifyLocalModel = onVerifyLocalModel,
                                 enabled = !state.isBusy,
                                 onShowFiles = { onShowFiles(model) },
                                 onDownload = { onDownload(model) },
@@ -1687,12 +1718,46 @@ private fun DownloadProgressPanel(state: ModelHubUiState) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        DownloadCheckLine("文件完整性", state.downloadIntegrityStatus, state.downloadIntegrityMessage)
+        DownloadCheckLine("本机执行兼容性", state.downloadExecutionStatus, state.downloadExecutionMessage)
     }
+}
+
+@Composable
+private fun DownloadCheckLine(title: String, status: String, message: String?) {
+    val normalized = status.uppercase()
+    val label = when (normalized) {
+        "PASSED" -> "通过"
+        "PREFLIGHT_PASSED" -> "预检通过"
+        "FAILED" -> "失败"
+        "PENDING" -> "检查中"
+        "RUNNING" -> "校验中"
+        "EXPERIMENTAL" -> "实验包"
+        "NOT_APPLICABLE" -> "不适用"
+        else -> "待检查"
+    }
+    val color = when (normalized) {
+        "FAILED" -> MaterialTheme.colorScheme.error
+        "PASSED", "PREFLIGHT_PASSED" -> MaterialTheme.colorScheme.primary
+        "EXPERIMENTAL" -> MaterialTheme.colorScheme.secondary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Text(
+        buildString {
+            append(title).append("：").append(label)
+            message?.takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
+        },
+        style = MaterialTheme.typography.labelSmall,
+        color = color,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis
+    )
 }
 
 @Composable
 private fun RecommendedModelCard(
     model: ModelScopeRecommendedModel,
+    localImageModels: List<LocalImageModelUiItem> = emptyList(),
     deviceTotalRamBytes: Long,
     deviceAvailableRamBytes: Long,
     deviceChipsetCode: String,
@@ -1701,15 +1766,31 @@ private fun RecommendedModelCard(
     enabled: Boolean,
     onShowFiles: () -> Unit,
     onDownload: () -> Unit,
-    onOpenPage: () -> Unit
+    onOpenPage: () -> Unit,
+    onOpenLocalModel: (String) -> Unit = {},
+    onVerifyLocalModel: (String) -> Unit = {}
 ) {
     val hasModelPage = !model.repoId.startsWith("pending/", ignoreCase = true)
     val downloadAccess = recommendationDownloadAccess(model, deviceChipsetCode, deviceIsSnapdragon)
     val fitLabel = deviceFitLabel(model, deviceTotalRamBytes, deviceAvailableRamBytes)
     val hardwareLine = recommendationHardwareLine(model, fitLabel)
     val devicePathLine = recommendationDeviceFitLine(downloadAccess)
+    val qnnCompatibilityLine = recommendationQnnCompatibilityLine(model, deviceChipsetCode)
     val verificationLine = recommendationVerificationLine(model, qairtVerified)
     val shortDescription = model.recommendationShortDescription()
+    val localModel = localImageModels.firstOrNull { local ->
+        local.recommendationId == model.id || local.id == model.imageEngineBundle?.id
+    }
+    val localVerificationPassed = localModel != null && localModel.verificationStatus in setOf(
+        "PASSED", "MNN_SMOKE_PASSED", "QNN_IMAGE_SMOKE_PASSED", "QNN_SMOKE_PASSED", "QNN_PIPELINE_PROBE_PASSED"
+    )
+    val localStatusLine = localModel?.let {
+        when {
+            localVerificationPassed -> "本地 bundle：已安装 · 已校验"
+            it.verificationStatus == "FAILED" -> "本地 bundle：校验失败 · ${it.verificationMessage.ifBlank { "可重新校验" }}"
+            else -> "本地 bundle：已安装 · 尚未完成本机校验"
+        }
+    }
     val experimentalDownload = model.status == RecommendedModelStatus.EXPERIMENTAL &&
         downloadAccess.canDownload
     val fitColor = if (fitLabel == "不建议本机运行") {
@@ -1734,7 +1815,7 @@ private fun RecommendedModelCard(
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f)
             )
-            RecommendationStatusBadge(model.status)
+            RecommendationStatusBadge(model.status, experimental = downloadAccess.experimental)
         }
         Text(
             "${recommendedRouteLabel(model)} · ${model.parameterScale} · ${model.quant}",
@@ -1764,6 +1845,24 @@ private fun RecommendedModelCard(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
+        qnnCompatibilityLine?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (it.contains("实验包")) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        localStatusLine?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (localVerificationPassed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
         Text(
             shortDescription,
             style = MaterialTheme.typography.bodySmall,
@@ -1781,7 +1880,33 @@ private fun RecommendedModelCard(
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (experimentalDownload) {
+            if (localModel != null) {
+                OutlinedButton(
+                    onClick = {
+                        if (localVerificationPassed) onOpenLocalModel(localModel.id)
+                        else onVerifyLocalModel(localModel.id)
+                    },
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(999.dp)
+                ) {
+                    Icon(
+                        if (localVerificationPassed) Icons.Default.Image else Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        when {
+                            localVerificationPassed -> "打开本地模型"
+                            localModel.verificationStatus == "FAILED" -> "校验失败 · 重试"
+                            else -> "已安装 · 重新校验"
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            } else if (experimentalDownload) {
                 OutlinedButton(
                     onClick = onDownload,
                     enabled = enabled,
@@ -2140,8 +2265,11 @@ private fun LocalModelDeleteDialog(
 }
 
 @Composable
-private fun RecommendationStatusBadge(status: RecommendedModelStatus) {
-    val (containerColor, contentColor) = when (status) {
+private fun RecommendationStatusBadge(status: RecommendedModelStatus, experimental: Boolean = false) {
+    val effectiveStatus = if (experimental && status == RecommendedModelStatus.RECOMMENDED) {
+        RecommendedModelStatus.EXPERIMENTAL
+    } else status
+    val (containerColor, contentColor) = when (effectiveStatus) {
         RecommendedModelStatus.RECOMMENDED ->
             MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
         RecommendedModelStatus.EXPERIMENTAL ->
@@ -2153,7 +2281,7 @@ private fun RecommendationStatusBadge(status: RecommendedModelStatus) {
     }
     Surface(color = containerColor, shape = RoundedCornerShape(999.dp)) {
         Text(
-            recommendationStatusLabel(status),
+            if (experimental && status == RecommendedModelStatus.RECOMMENDED) "实验包" else recommendationStatusLabel(status),
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
             style = MaterialTheme.typography.labelSmall,
             color = contentColor

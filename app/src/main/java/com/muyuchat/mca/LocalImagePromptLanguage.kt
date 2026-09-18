@@ -155,10 +155,8 @@ internal fun requireLocalImagePromptLanguageAdmission(
     if (requiresLocalImagePromptTranslation(profile, prompt, executedNegativePrompt)) {
         throw LocalImageProductContractException(
             code = "image_prompt_requires_canonical_english_tags",
-            message = "当前图片模型使用英文主导文本编码器。请先导入主标签词典和中文翻译词典，" +
-                "用中文检索并点选候选，将英文规范标签插入正向或负向提示词后再生成；" +
-                "整句中文自动翻译是独立能力，目前未配置已许可且可验证的离线翻译模型，" +
-                "不会自动翻译。"
+            message = "当前模型只接受英文提示词。请将正向和负向提示词改写为英文后重试；" +
+                "本次尚未启动图片生成。"
         )
     }
     if (profile.textEncoderLanguageCapability() ==

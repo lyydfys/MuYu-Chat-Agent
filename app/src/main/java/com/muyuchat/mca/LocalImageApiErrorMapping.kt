@@ -16,7 +16,10 @@ internal fun Throwable.toLocalImageApiProviderExceptionOrNull(): ImageGeneration
         is LocalImageWorkerDisconnectedException -> ImageGenerationProviderException(
             code = "image_worker_unavailable",
             httpStatus = 503,
-            message = message.orEmpty().ifBlank { "The local image worker is unavailable." }
+            message = "The local image worker exited or disconnected before completion. " +
+                "Release other loaded models or memory-heavy apps, verify that the selected " +
+                "model bundle is complete and readable, then retry; " +
+                "if it persists, re-import the complete model bundle."
         )
         is LocalImageProductContractException ->
             ImageGenerationProviderException.fromWorkerFailure(code, message.orEmpty())

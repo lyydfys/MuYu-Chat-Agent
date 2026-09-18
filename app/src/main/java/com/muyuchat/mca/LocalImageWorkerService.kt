@@ -196,6 +196,21 @@ class LocalImageWorkerService : Service() {
                 return false
             }
 
+            // Keep malformed/partial downloaded bundles out of the native entry point even when
+            // a caller bypasses MainViewModel (smoke harnesses and authenticated API callers can
+            // reach the worker directly). This turns an avoidable native crash into a structured
+            // 409-style product error and leaves the disposable worker reusable.
+            request.model.localImageStructuralReadinessMessage()?.let { readiness ->
+                sendError(
+                    callback = callback,
+                    requestId = request.requestId,
+                    code = "image_model_not_ready",
+                    message = "The selected local image model is not ready: $readiness " +
+                        "Re-download or re-import the complete model bundle, then retry."
+                )
+                return false
+            }
+
             val active = ActiveGeneration(request.requestId, callback)
             val accepted = synchronized(stateLock) {
                 if (activeGeneration != null) {

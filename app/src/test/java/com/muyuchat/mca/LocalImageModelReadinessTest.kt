@@ -33,6 +33,38 @@ import org.junit.Test
 
 class LocalImageModelReadinessTest {
     @Test
+    fun emptyOrUnreadablePrimaryFilesAreNotConfigured() {
+        val root = Files.createTempDirectory("mca-image-configured-preflight").toFile()
+        try {
+            val empty = root.resolve("empty.safetensors").apply { createNewFile() }
+            val record = localImageRecord(
+                root = root,
+                primary = empty,
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.CUSTOM
+            )
+            assertFalse(record.configured)
+            assertTrue(
+                requireNotNull(record.localImageStructuralReadinessMessage())
+                    .contains("为空或不可读")
+            )
+
+            val directory = root.resolve("directory-model").apply { mkdirs() }
+            val directoryRecord = record.copy(
+                path = directory.absolutePath,
+                fileName = directory.name
+            )
+            assertFalse(directoryRecord.configured)
+            assertTrue(
+                requireNotNull(directoryRecord.localImageStructuralReadinessMessage())
+                    .contains("主文件不存在")
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun everyRecommendedImagePersistsItsCatalogExecutionProfileBoundToPrimaryBytes() {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }

@@ -15,6 +15,8 @@ class LocalImagePromptCancellationContractTest {
         val expectedMessages = linkedMapOf(
             "invalid_image_prompt" to
                 "图片提示词长度或内容无效，尚未启动图片生成。",
+            "image_prompt_requires_canonical_english_tags" to
+                "当前模型只接受英文提示词。请将正向和负向提示词改写为英文后重试；本次尚未启动图片生成。",
             "invalid_image_profile_prompt_language" to
                 "模型默认负向提示词语言不兼容，尚未启动图片生成。",
             "execution_contract_unsupported" to
@@ -392,6 +394,43 @@ class LocalImagePromptCancellationContractTest {
 
         assertFalse(source.contains("private suspend fun translateLocalImagePrompt("))
         assertFalse(source.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_TIMEOUT_MS"))
+    }
+
+    @Test
+    fun `retry discards stale prompt execution evidence and rebinds current model`() {
+        val source = mainViewModelSource()
+        val retry = functionBody(source, "fun retryImageGeneration(")
+        assertTrue(retry.contains("_uiState.value.localImageModels.firstOrNull"))
+        assertTrue(retry.contains("promptExecution = null"))
+        assertTrue(retry.contains("jobSnapshot = retrySnapshot"))
+    }
+
+    @Test
+    fun `local image enqueue and api reject structurally incomplete bundles before worker admission`() {
+        val source = mainViewModelSource()
+        val enqueue = functionBody(source, "private fun enqueueImageGeneration(")
+        val preflight = enqueue.indexOf("localImageStructuralReadinessMessage()")
+        val generationLease = enqueue.indexOf("tryAcquireObservedImageGenerationLease(jobId)")
+        val workerBegin = enqueue.indexOf("localImageWorkerClient.begin(")
+        assertTrue(preflight >= 0)
+        assertTrue(generationLease > preflight)
+        assertTrue(workerBegin > preflight)
+
+        val api = functionBody(source, "private suspend fun generateLocalApiImage(")
+        val apiReadiness = api.indexOf("localImageStructuralReadinessMessage()")
+        val apiWorker = api.indexOf("localImageWorkerClient.generate(")
+        assertTrue(apiReadiness >= 0)
+        assertTrue(apiWorker > apiReadiness)
+    }
+
+    @Test
+    fun `worker disconnect and remote failures expose an actionable next step`() {
+        val source = mainViewModelSource()
+        assertTrue(source.contains("internal fun localImageGenerationFailureMessage(error: Throwable)"))
+        assertTrue(source.contains("可用内存不足"))
+        assertTrue(source.contains("校验模型包后重试"))
+        assertTrue(source.contains("请等待 1 秒后重试"))
+        assertTrue(source.contains("val nativeMessage = localImageGenerationFailureMessage(error)"))
     }
 
     @Test

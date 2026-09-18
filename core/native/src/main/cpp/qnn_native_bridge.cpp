@@ -14128,6 +14128,38 @@ Java_com_muyuchat_core_nativebridge_NativeQnnBridge_inspectBundle(
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_com_muyuchat_core_nativebridge_NativeQnnBridge_inspectContextMetadata(
+        JNIEnv* env,
+        jobject,
+        jstring contextBinaryPath,
+        jstring runtimeDirsJson) noexcept {
+    return qnn_jni_json_guard(env, "inspectContextMetadata", [&]() {
+        const std::string context_path = jstring_to_std(env, contextBinaryPath);
+        const auto dirs = parse_json_string_array(jstring_to_std(env, runtimeDirsJson));
+        const RuntimeProbe runtime = inspect_runtime_internal(dirs, true, false);
+        std::string metadata_json = "{}";
+#if MCA_WITH_QNN_SDK_HEADERS
+        if (!context_path.empty() && exists_file(context_path)) {
+            metadata_json = binary_metadata_json(
+                inspect_qnn_context_binary_metadata(runtime, read_binary_file(context_path)));
+        } else {
+            QnnBinaryMetadata metadata;
+            metadata.attempted = true;
+            metadata.message = "QNN context binary is missing or empty.";
+            metadata_json = binary_metadata_json(metadata);
+        }
+#else
+        metadata_json = "{\"attempted\":true,\"parsed\":false,\"message\":\"QNN SDK headers were not available at build time.\"}";
+#endif
+        std::ostringstream out;
+        out << "{\"contextPath\":" << quote(context_path)
+            << ",\"runtime\":" << runtime_probe_json(runtime)
+            << ",\"binaryMetadata\":" << metadata_json << "}";
+        return out.str();
+    });
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runImageSmoke(
         JNIEnv* env,
         jobject,

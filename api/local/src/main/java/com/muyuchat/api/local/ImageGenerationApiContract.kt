@@ -329,7 +329,7 @@ class ImageGenerationProviderException(
 
         private fun workerFailureHttpStatus(code: String): Int = when {
             code == "worker_busy" || code == "image_generation_busy" ||
-                code == "image_prompt_translation_busy" -> 409
+                code == "image_prompt_translation_busy" || code == "image_model_not_ready" -> 409
             code == "qnn_sdxl_worker_timeout" || code.endsWith("_timeout") -> 504
             code in setOf(
                 "image_worker_unavailable",
