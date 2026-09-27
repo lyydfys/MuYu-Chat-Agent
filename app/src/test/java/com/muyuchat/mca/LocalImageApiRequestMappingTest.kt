@@ -10,6 +10,100 @@ import org.junit.Test
 
 class LocalImageApiRequestMappingTest {
     @Test
+    fun `Qwen execution contract is paired with profile prompt request and PNG`() {
+        val promptSha256 = "a".repeat(64)
+        val outputSha256 = "b".repeat(64)
+        val profileBinding = "c".repeat(64)
+        val promptBinding = "d".repeat(64)
+        val native = JSONObject()
+            .put("nativePromptExecutionSha256", promptSha256)
+            .put("nativePromptBindingStage", "conditioning_consumed")
+        val execution = JSONObject()
+            .put("nativePromptExecutionSha256", promptSha256)
+            .put("nativePromptBindingStage", "conditioning_consumed")
+            .put("nativeEffective", native)
+
+        bindQwenImage21ExecutionEvidence(
+            execution = execution,
+            profileId = "mnn.qwen-image-2.1.opencl",
+            profileRevision = 1,
+            modelFingerprint = "e".repeat(64),
+            profileBindingFingerprint = profileBinding,
+            promptLanguageBindingFingerprint = promptBinding,
+            runtime = "MNN_DIFFUSION",
+            width = 512,
+            height = 512,
+            steps = 20,
+            seed = 42,
+            outputBytes = 123_456L,
+            outputSha256 = outputSha256
+        )
+
+        val nested = execution.getJSONObject("nativeEffective")
+        listOf(
+            "executionSchema",
+            "profileId",
+            "profileRevision",
+            "modelFingerprint",
+            "profileBindingFingerprint",
+            "imageProfileBindingFingerprint",
+            "promptLanguageBindingFingerprint",
+            "runtime",
+            "taskMode",
+            "scheduler",
+            "width",
+            "height",
+            "steps",
+            "seed",
+            "batchCount",
+            "cfgScale",
+            "promptExecutionSha256",
+            "outputSha256",
+            "outputBytes"
+        ).forEach { key -> assertEquals("Qwen field $key must be paired", execution.get(key), nested.get(key)) }
+        assertEquals("qwen_image_21_mnn_v1", execution.getString("executionSchema"))
+        assertEquals("text_to_image", execution.getString("taskMode"))
+        assertEquals("flow_match", execution.getString("scheduler"))
+        assertEquals(1.0, execution.getDouble("cfgScale"), 0.0)
+        assertEquals(outputSha256, nested.getString("outputSha256"))
+        assertEquals(123_456L, nested.getLong("outputBytes"))
+    }
+
+    @Test
+    fun `Qwen execution contract accepts every verified dynamic canvas`() {
+        QwenImage21SizeContract.SUPPORTED_SIZES.forEach { (width, height) ->
+            val promptSha256 = "a".repeat(64)
+            val execution = JSONObject()
+                .put("nativePromptExecutionSha256", promptSha256)
+                .put("nativePromptBindingStage", "conditioning_consumed")
+                .put(
+                    "nativeEffective",
+                    JSONObject()
+                        .put("nativePromptExecutionSha256", promptSha256)
+                        .put("nativePromptBindingStage", "conditioning_consumed")
+                )
+
+            bindQwenImage21ExecutionEvidence(
+                execution = execution,
+                profileId = "mnn.qwen-image-2.1.opencl",
+                profileRevision = 1,
+                modelFingerprint = "e".repeat(64),
+                profileBindingFingerprint = "c".repeat(64),
+                promptLanguageBindingFingerprint = "d".repeat(64),
+                runtime = "MNN_DIFFUSION",
+                width = width,
+                height = height,
+                steps = 20,
+                seed = 42,
+                outputBytes = 123_456L,
+                outputSha256 = "b".repeat(64)
+            )
+            assertEquals(width, execution.getInt("width"))
+            assertEquals(height, execution.getInt("height"))
+        }
+    }
+
+    @Test
     fun `API execution sanitizer removes only empty digests for unused image roles`() {
         val nativeEffective = JSONObject()
             .put("inputImageExecutionCount", 1)

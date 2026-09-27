@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import java.io.File
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -20,7 +21,7 @@ class ChatSessionAssistantSnapshotContractTest {
     fun activeConversationUsesItsSnapshotForTheRequestAndPrefixCache() {
         val source = sourceFile("MainViewModel.kt")
         val startGeneration = functionBody(source, "startGeneration")
-        val sendMessage = functionBody(source, "sendMessage")
+        val sendMessage = functionBody(source, "sendPreparedMessage")
 
         assertTrue(startGeneration.contains("val assistantSnapshot = initialState.activeAssistantSnapshot()"))
         assertTrue(startGeneration.contains("val requestParams = assistantSnapshot?.applyTo(baseParams) ?: baseParams"))
@@ -50,16 +51,27 @@ class ChatSessionAssistantSnapshotContractTest {
     }
 
     @Test
-    fun characterCardImportCommitsItsAssistantBeforePublishingEmbeddedWorldBook() {
+    fun characterCardImportReportsWorldBookFailureWithoutRollingBackTheAssistant() {
         val body = functionBody(sourceFile("MainViewModel.kt"), "finishCharacterCardImport")
 
         val assistantCommit = body.indexOf("assistantStore.saveAssistants(updatedAssistants)")
-        val worldBookPublish = body.indexOf("embeddedWorldBook?.let(worldBookStore::upsert)")
-        val rollback = body.indexOf("assistantStore.saveAssistants(state.assistants)")
+        val worldBookPublish = body.indexOf("worldBookStore.upsert(book)")
 
         assertTrue(assistantCommit >= 0)
         assertTrue(worldBookPublish > assistantCommit)
-        assertTrue(rollback > worldBookPublish)
+        assertFalse(body.contains("assistantStore.saveAssistants(state.assistants)"))
+        assertTrue(body.contains("embeddedCharacterBookStatusSuffix"))
+        assertTrue(body.contains("embeddedWorldBookSaveError"))
+    }
+
+    @Test
+    fun embeddedWorldBookParserResultIsIncludedInTheVisibleImportStatus() {
+        val source = sourceFile("MainViewModel.kt")
+
+        assertTrue(source.contains("internal fun parseEmbeddedCharacterBook("))
+        assertTrue(source.contains("internal fun embeddedCharacterBookStatusSuffix("))
+        assertTrue(source.contains("result.error"))
+        assertTrue(source.contains("角色卡已成功导入"))
     }
 
     @Test

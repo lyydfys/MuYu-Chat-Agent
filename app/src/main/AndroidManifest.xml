@@ -61,11 +61,20 @@
             android:name=".LocalImageWorkerService"
             android:exported="false"
             android:foregroundServiceType="specialUse"
-            android:process=":local_image">
+            android:process=":local_image"
+            android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="local_image_generation" />
         </service>
+
+        <!-- Qwen ships a private MNN SONAME. Keep it out of the UI and image-worker
+             processes so native library resolution cannot collide with MCA's MNN. -->
+        <service
+            android:name=".QwenImage21WorkerService"
+            android:exported="false"
+            android:process=":qwen_image21"
+            android:stopWithTask="false" />
 
         <!-- SDXL V75 archive contexts are split into disposable processes.
              Physical HTP transport is selected dynamically; encoder, UNet,
@@ -114,13 +123,42 @@
                 android:value="resident_local_ai_model" />
         </service>
 
+        <!-- LiteRT Qualcomm dispatch must not share a process with GenieX/QAIRT:
+             both stacks publish overlapping QNN SONAMEs and Android's linker
+             retains the first loaded handle for the process lifetime. -->
+        <service
+            android:name=".LiteRtChatWorkerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":litert_chat"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="resident_litert_local_ai_model" />
+        </service>
+
         <service
             android:name=".LocalApiForegroundService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="local_ai_api_server" />
+        </service>
+
+        <!-- Protects user-started cloud/UI chat work while the activity is in
+             the background. Model and image workers keep their own isolated
+             foreground services; this service only owns process priority and
+             the user-visible task notification. -->
+        <service
+            android:name=".McaGenerationForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="mca_user_generation" />
         </service>
 
         <provider
@@ -136,6 +174,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.MuYuChatAgent">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

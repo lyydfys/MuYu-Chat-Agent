@@ -101,8 +101,16 @@ data class ImageEngineBundleComponentSpec(
     val required: Boolean = true,
     val expectedSizeBytes: Long? = null,
     val sha256: String? = null,
-    val relativePath: String = fileName.substringAfterLast('/').substringAfterLast('\\')
+    val relativePath: String = fileName.substringAfterLast('/').substringAfterLast('\\'),
+    /** Optional components can be catalogued without inflating the default download plan. */
+    val downloadByDefault: Boolean = true
 ) {
+    init {
+        require(!required || downloadByDefault) {
+            "Required image bundle components must be included in the default download plan."
+        }
+    }
+
     val integrityMetadataStatus: ImageEngineIntegrityMetadataStatus
         get() = integrityMetadataStatus(expectedSizeBytes, sha256)
 }
@@ -145,6 +153,7 @@ enum class ImageEngineModelVariant {
     Z_IMAGE_TURBO,
     FLUX2_KLEIN,
     QWEN_IMAGE,
+    QWEN_IMAGE_21,
     LONGCAT_IMAGE,
     CONTROLNET_CANNY,
     SANA_EDIT
@@ -211,7 +220,7 @@ enum class ImageEnginePredictionType { EPSILON, V_PREDICTION, FLOW }
 enum class ImageEngineTimestepSpacing { LEADING, TRAILING, LINSPACE }
 enum class ImageEngineNoiseSchedule { SCALED_LINEAR, SIGMA }
 enum class ImageEngineFinalSigmaType { ZERO, SIGMA_MIN }
-enum class ImageEngineTokenizerBackend { TOKENIZERS_CPP, MNN_MTOK, SDCPP_NATIVE }
+enum class ImageEngineTokenizerBackend { TOKENIZERS_CPP, MNN_MTOK, MNN_QWEN_IMAGE, SDCPP_NATIVE }
 enum class ImageEngineClipPadRule { EOS, ZERO, MODEL_DECLARED }
 enum class ImageEngineEmbeddingDataType { FP16, FP32, GRAPH_INTERNAL, RUNTIME_NATIVE }
 enum class ImageEngineEmbeddingConversionStrategy {
@@ -516,7 +525,9 @@ data class ImageEngineGraphContractSpec(
     val configSidecars: List<String> = emptyList(),
     val qnnSdk: String? = null,
     val htpArch: Int? = null,
-    val workerStrategy: ImageEngineWorkerStrategy
+    val workerStrategy: ImageEngineWorkerStrategy,
+    /** Actual graph names inside each context binary, keyed by the declared artifact path. */
+    val graphNames: Map<String, String> = emptyMap()
 )
 
 data class ImageEngineGenerationDefaultsSpec(
@@ -1254,6 +1265,7 @@ enum class RecommendedModelSection {
     CPU_CHAT,
     NPU_CHAT,
     CPU_IMAGE,
+    GPU_IMAGE,
     NPU_IMAGE
 }
 
@@ -1273,6 +1285,13 @@ data class ModelScopeRecommendedModel(
     val status: RecommendedModelStatus = RecommendedModelStatus.RECOMMENDED,
     val visibleInRecommendations: Boolean = true,
     val supportedChipsetCodes: Set<String> = emptySet(),
+    /**
+     * ABI requirements for a bundled native runtime.  This is advisory at
+     * download time: an unmatched device keeps the download/import path, but
+     * the recommendation card must explain that the APK cannot execute the
+     * package on that ABI.
+     */
+    val requiredAbis: Set<String> = emptySet(),
     val downloadPolicy: RecommendedModelDownloadPolicy = RecommendedModelDownloadPolicy.LISTED_CHIPSETS,
     val group: ModelScopeRecommendedGroup = when (kind) {
         ModelScopeRecommendedKind.CHAT -> ModelScopeRecommendedGroup.MAIN_CHAT
@@ -1322,6 +1341,8 @@ data class ModelScopeRecommendedModel(
         get() = when {
             kind == ModelScopeRecommendedKind.IMAGE &&
                 imageEngineBundle?.accelerator == ImageEngineAccelerator.QNN_HTP -> RecommendedModelSection.NPU_IMAGE
+            kind == ModelScopeRecommendedKind.IMAGE &&
+                imageEngineBundle?.accelerator == ImageEngineAccelerator.OPENCL_GPU -> RecommendedModelSection.GPU_IMAGE
             kind == ModelScopeRecommendedKind.IMAGE -> RecommendedModelSection.CPU_IMAGE
             computeBackend == RecommendedComputeBackend.NPU ||
                 chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT ||

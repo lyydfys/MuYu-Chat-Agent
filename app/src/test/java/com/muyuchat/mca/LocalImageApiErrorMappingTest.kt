@@ -8,6 +8,25 @@ import org.junit.Test
 
 class LocalImageApiErrorMappingTest {
     @Test
+    fun `execution contract mismatch does not instruct users to redownload a complete package`() {
+        val detail = "conditioningGraph: expected=model, actual=stable_diffusion_v1_5_text_encoder"
+        listOf(
+            LocalImageWorkerRemoteException(IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID.lowercase(), detail),
+            ImageNativeExecutionContractException(IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID, "conditioningGraph", message = detail)
+        ).forEach { error ->
+            val message = localImageGenerationFailureMessage(error)
+            assertTrue(message.contains("配置不一致"))
+            assertTrue(message.contains("更新应用"))
+            assertTrue(message.contains(detail))
+            assertFalse(message.contains("模型包完整"))
+            assertFalse(message.contains("重新下载"))
+        }
+        val unknown = localImageGenerationFailureMessage(LocalImageWorkerRemoteException("generation_failed", "out of memory"))
+        assertTrue(unknown.contains("out of memory"))
+        assertFalse(unknown.contains("确认模型包完整"))
+    }
+
+    @Test
     fun `ui worker failures explain the problem and the next action`() {
         val disconnected = localImageGenerationFailureMessage(
             LocalImageWorkerDisconnectedException("Local image worker process died.")

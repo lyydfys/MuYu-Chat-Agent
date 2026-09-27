@@ -1,8 +1,12 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.Role
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Base64
@@ -121,6 +125,86 @@ class CharacterCardCodecTest {
         assertEquals(CharacterCardFormat.CC_V2, success.card.format)
         assertEquals("中文 tEXt", success.card.name)
         assertEquals("这是 UTF-8 中文内容。", success.card.description)
+    }
+
+    @Test
+    fun pngFilePickerStreamImportProducesAnAssistantSnapshotWithPersonaText() {
+        val rawCard = """
+            {
+              "spec":"chara_card_v2",
+              "spec_version":"2.0",
+              "data":{
+                "name":"林间旅人",
+                "description":"住在林间小屋的旅行者。",
+                "personality":"温和、好奇。",
+                "scenario":"雨后的森林。",
+                "first_mes":"你也在躲雨吗？",
+                "mes_example":"<START>\n{{char}}：喝杯热茶吧。"
+              }
+            }
+        """.trimIndent()
+        val payload = Base64.getEncoder().encodeToString(rawCard.toByteArray(StandardCharsets.UTF_8))
+        val png = png(
+            chunk("IHDR", ihdr()),
+            chunk("tEXt", textChunk("chara", payload)),
+            chunk("IEND", byteArrayOf())
+        )
+
+        val parsed = assertSuccess(CharacterCardCodec.parse(ByteArrayInputStream(png)))
+        val assistant = parsed.card.toAssistantRecord(AssistantRecord.default(systemPrompt = "默认提示词"))
+        val snapshot = assistant.toConversationSnapshot(capturedAt = 1L)
+
+        assertEquals("林间旅人", assistant.name)
+        assertTrue(assistant.systemPrompt.contains("住在林间小屋的旅行者。"))
+        assertTrue(assistant.systemPrompt.contains("温和、好奇。"))
+        assertTrue(assistant.systemPrompt.contains("雨后的森林。"))
+        assertTrue(assistant.systemPrompt.contains("你也在躲雨吗？"))
+        assertTrue(assistant.systemPrompt.contains("喝杯热茶吧。"))
+        assertEquals(assistant.systemPrompt, snapshot.systemPrompt)
+        assertEquals("林间旅人", snapshot.name)
+        assertEquals(rawCard, assistant.characterCardJson)
+    }
+
+    @Test
+    fun ccv3CharacterBookStaysInTheAssistantExportAndItsPersonaReachesTheSessionSnapshot() {
+        val raw = """
+            {
+              "spec":"chara_card_v3",
+              "spec_version":"3.0",
+              "data":{
+                "name":"海港向导",
+                "description":"熟悉旧港每一条小巷。",
+                "system_prompt":"始终保持角色身份。",
+                "post_history_instructions":"不要替用户决定行动。",
+                "character_book":{
+                  "name":"旧港设定",
+                  "entries":[{"uid":42,"keys":["旧灯塔"],"content":"旧灯塔每晚九点点亮。"}]
+                }
+              }
+            }
+        """.trimIndent()
+
+        val card = assertSuccess(CharacterCardCodec.parseJson(raw)).card
+        val assistant = card.toAssistantRecord(AssistantRecord.default(systemPrompt = "默认提示词"))
+        val snapshot = assistant.toConversationSnapshot(capturedAt = 2L)
+        val importedWorldBook = WorldBookCodec.parse(
+            JSONObject(requireNotNull(assistant.characterCardJson)).getJSONObject("data").getJSONObject("character_book"),
+            scope = WorldBookScope.ASSISTANT,
+            assistantId = assistant.id
+        )
+        val selectedLore = WorldBookResolver.select(
+            books = listOf(importedWorldBook),
+            messages = listOf(ChatMessage(Role.USER, "旧灯塔什么时候点亮？")),
+            assistantId = assistant.id,
+            chatSessionId = "chat",
+            tokenBudget = 128
+        )
+
+        assertTrue(snapshot.systemPrompt.contains("始终保持角色身份。"))
+        assertTrue(snapshot.systemPrompt.contains("熟悉旧港每一条小巷。"))
+        assertTrue(snapshot.systemPrompt.contains("不要替用户决定行动。"))
+        assertEquals(listOf("42"), selectedLore.selectedEntryIds)
+        assertTrue(selectedLore.context.contains("旧灯塔每晚九点点亮。"))
     }
 
     @Test

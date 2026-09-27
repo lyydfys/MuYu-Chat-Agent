@@ -34,14 +34,53 @@ add_test(
 )
 
 add_executable(
+    mca_stq1_0_native_smoke_test
+    stq1_0_native_smoke_test.cpp
+)
+target_compile_features(mca_stq1_0_native_smoke_test PRIVATE cxx_std_17)
+target_link_libraries(mca_stq1_0_native_smoke_test PRIVATE ggml)
+
+add_test(
+    NAME mca_stq1_0_native_smoke
+    COMMAND mca_stq1_0_native_smoke_test
+)
+
+add_executable(
     mca_mnn_embedding_bundle_policy_test
     mnn_embedding_bundle_policy_test.cpp
 )
+
+add_executable(mca_mnn_bundle_path_policy_test mnn_bundle_path_policy_test.cpp)
+target_compile_features(mca_mnn_bundle_path_policy_test PRIVATE cxx_std_17)
+add_test(NAME mca_mnn_bundle_path_policy COMMAND mca_mnn_bundle_path_policy_test)
 target_compile_features(mca_mnn_embedding_bundle_policy_test PRIVATE cxx_std_17)
 
 add_test(
     NAME mca_mnn_embedding_bundle_policy
     COMMAND mca_mnn_embedding_bundle_policy_test
+)
+
+add_executable(
+    mca_mnn_vision_path_policy_test
+    mnn_vision_path_policy_test.cpp
+)
+target_compile_features(mca_mnn_vision_path_policy_test PRIVATE cxx_std_17)
+
+add_test(
+    NAME mca_mnn_vision_path_policy
+    COMMAND mca_mnn_vision_path_policy_test
+)
+
+add_executable(
+    mca_opencl_dispatch_source_contract_test
+    opencl_dispatch_source_contract_test.cpp
+)
+target_compile_features(mca_opencl_dispatch_source_contract_test PRIVATE cxx_std_17)
+
+add_test(
+    NAME mca_opencl_dispatch_source_contract
+    COMMAND mca_opencl_dispatch_source_contract_test
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca_opencl_dispatch.cpp"
 )
 
 add_executable(
@@ -53,6 +92,34 @@ target_compile_features(mca_mnn_diffusion_batch_policy_test PRIVATE cxx_std_17)
 add_test(
     NAME mca_mnn_diffusion_batch_policy
     COMMAND mca_mnn_diffusion_batch_policy_test
+)
+
+add_executable(
+    mca_qwen_mnn_backend_resolution_test
+    qwen_mnn_backend_resolution_test.cpp
+)
+target_compile_features(mca_qwen_mnn_backend_resolution_test PRIVATE cxx_std_17)
+target_include_directories(
+    mca_qwen_mnn_backend_resolution_test
+    PRIVATE "${MCA_REPOSITORY_ROOT}/vendor/qwen-image-2.1/include"
+)
+add_test(
+    NAME mca_qwen_mnn_backend_resolution
+    COMMAND mca_qwen_mnn_backend_resolution_test
+)
+
+add_executable(
+    mca_qnn_soc_htp_mapping_test
+    qnn_soc_htp_mapping_test.cpp
+)
+target_compile_features(mca_qnn_soc_htp_mapping_test PRIVATE cxx_std_17)
+target_include_directories(
+    mca_qnn_soc_htp_mapping_test
+    PRIVATE "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp"
+)
+add_test(
+    NAME mca_qnn_soc_htp_mapping
+    COMMAND mca_qnn_soc_htp_mapping_test
 )
 
 add_executable(
@@ -114,6 +181,18 @@ add_test(
     COMMAND mca_mnn_sampler_source_contract_test
         "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mnn_native_engine.cpp"
         "${MCA_REPOSITORY_ROOT}/third_party/MNN/transformers/llm/engine/src/sampler.cpp"
+)
+
+add_executable(
+    mca_mnn_stop_cancellation_source_contract_test
+    mnn_stop_cancellation_source_contract_test.cpp
+)
+target_compile_features(mca_mnn_stop_cancellation_source_contract_test PRIVATE cxx_std_17)
+
+add_test(
+    NAME mca_mnn_stop_cancellation_source_contract
+    COMMAND mca_mnn_stop_cancellation_source_contract_test
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mnn_native_engine.cpp"
 )
 
 add_executable(

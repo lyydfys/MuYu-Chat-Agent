@@ -161,6 +161,32 @@ class ImageExecutionProfileNativeContractTest {
     }
 
     @Test
+    fun `lower case flow match receipt is normalized without accepting unknown enums`() {
+        val resolution = ImageExecutionProfileResolver.resolve(
+            ImageExecutionProfileResolverInput(
+                modelFingerprint = "b".repeat(64),
+                runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                family = LocalImageModelFamily.QWEN_IMAGE,
+                recommendationId = "qwen_image_2512_q2"
+            )
+        )
+        val native = nativeEcho(resolution).apply {
+            getJSONObject("nativeEffective")
+                .put("scheduler", "flow_match")
+                .put("predictionType", "flow")
+        }
+
+        val parsed = ImageExecutionProfileNativeContract.parseAndValidate(resolution, native)
+        assertEquals(ImageSchedulerAlgorithm.FLOW_MATCH, parsed.nativeEffective.scheduler)
+        assertEquals(ImagePredictionType.FLOW, parsed.nativeEffective.predictionType)
+
+        native.getJSONObject("nativeEffective").put("scheduler", "flow_match_unknown")
+        assertEquals("scheduler", expectFailure {
+            ImageExecutionProfileNativeContract.parseAndValidate(resolution, native)
+        }.field)
+    }
+
+    @Test
     fun `qnn pixel range is strict while other runtimes keep the shared contract unchanged`() {
         val resolution = resolution()
         val missing = nativeEcho(resolution).apply {
@@ -241,9 +267,9 @@ class ImageExecutionProfileNativeContractTest {
         )
         externalNative.getJSONObject("nativeEffective")
             .put("textEncoderExecutionCount", 2)
-        assertTrue(expectFailure {
+        assertEquals("textEncoderExecutionCount", expectFailure {
             ImageExecutionProfileNativeContract.parseAndValidate(external, externalNative)
-        }.field.contains("conditioningExecutionMode"))
+        }.field)
 
         val nativeText = ImageExecutionProfileResolver.resolve(
             ImageExecutionProfileResolverInput(
@@ -274,6 +300,96 @@ class ImageExecutionProfileNativeContractTest {
         assertTrue(expectFailure {
             ImageExecutionProfileNativeContract.parseAndValidate(external, externalNative)
         }.field.contains("conditioningArtifactConsumed"))
+    }
+
+    @Test
+    fun `publisher Gen5 graph receipts pass and the historical model placeholder is diagnosed`() {
+        val publishedGraphs = mapOf(
+            "qualcomm_sd15_gen5_qnn" to "stable_diffusion_v1_5",
+            "qualcomm_sd21_gen5_qnn" to "stable_diffusion_v2_1",
+            "qualcomm_controlnet_canny_gen5_qnn" to "controlnet_canny"
+        )
+        publishedGraphs.forEach { (id, graphPrefix) ->
+            listOf(true, false).forEach { useCfg ->
+                val resolution = ImageExecutionProfileResolver.resolve(
+                    ImageExecutionProfileResolverInput(
+                        modelFingerprint = "b".repeat(64),
+                        runtime = LocalImageRuntime.QNN_HTP,
+                        family = LocalImageModelFamily.CUSTOM,
+                        recommendationId = id,
+                        userOverrides = ImageGenerationOverrides(useCfg = useCfg)
+                    )
+                )
+                // Names observed in the pinned publisher binaries, independently of the profile.
+                val receipt = nativeEcho(resolution).apply {
+                    getJSONObject("nativeEffective")
+                        .put("graphName", "${graphPrefix}_unet")
+                        .put("conditioningGraph", "${graphPrefix}_text_encoder")
+                        .put("conditioningArtifactSha256", "e".repeat(64))
+                        .put("conditioningGraphSha256", "f".repeat(64))
+                        .put("conditioningExecutionMode", "qnn_text_encoder")
+                        .put("conditioningBackend", "QNN")
+                        .put("conditioningOrder", if (useCfg) "negative_then_positive" else "positive_only")
+                        .put("conditioningEncoderExecutionCount", if (useCfg) 2 else 1)
+                        .put("textEncoderExecutionCount", if (useCfg) 2 else 1)
+                        .put("conditioningArtifactConsumed", true)
+                        .put("runtimeSessionMode", if (id.contains("controlnet")) "shared_text_unet_controlnet_vae" else "shared_text_unet_vae")
+                }
+                ImageExecutionProfileNativeContract.parseAndValidate(resolution, receipt)
+                val stale = resolution.copy(profile = resolution.profile.copy(
+                    graph = resolution.profile.graph.copy(
+                        textEncoder = resolution.profile.graph.textEncoder!!.copy(graphName = "model")
+                    )
+                ))
+                val failure = expectFailure {
+                    ImageExecutionProfileNativeContract.parseAndValidate(stale, receipt)
+                }
+                assertEquals("conditioningGraph", failure.field)
+                assertEquals(listOf(ImageExecutionMismatch(
+                    "conditioningGraph", "model", "${graphPrefix}_text_encoder"
+                )), failure.mismatches)
+                assertTrue(failure.message.orEmpty().contains("expected=model, actual=${graphPrefix}_text_encoder"))
+
+                receipt.getJSONObject("nativeEffective").put("conditioningArtifactConsumed", false)
+                assertEquals("conditioningArtifactConsumed", expectFailure {
+                    ImageExecutionProfileNativeContract.parseAndValidate(resolution, receipt)
+                }.field)
+            }
+        }
+    }
+
+    @Test
+    fun `shared SDXL accepts dual CLIP receipt and refuses SD15 encoder mode`() {
+        val base = ImageExecutionProfileResolver.resolve(
+            ImageExecutionProfileResolverInput(
+                modelFingerprint = "a".repeat(64),
+                runtime = LocalImageRuntime.QNN_HTP,
+                family = LocalImageModelFamily.SDXL,
+                recommendationId = "sdxl_base_qnn228"
+            )
+        )
+        val resolution = base.copy(profile = base.profile.copy(
+            graph = base.profile.graph.copy(workerStrategy = ImageWorkerStrategy.SHARED_UNET_VAE)
+        ))
+        val receipt = nativeEcho(resolution).apply {
+            getJSONObject("nativeEffective")
+                .put("promptWeightFingerprint", "e".repeat(64))
+                .put("conditioningArtifactSha256", "e".repeat(64))
+                .put("conditioningGraphSha256", "f".repeat(64))
+                .put("conditioningExecutionMode", "external_mnn_sdxl_embeddings")
+                .put("conditioningBackend", "MNN")
+                .put("conditioningGraph", "clip.mnn+clip_2.mnn")
+                .put("conditioningOrder", "negative_then_positive")
+                .put("conditioningEncoderExecutionCount", 4)
+                .put("textEncoderExecutionCount", 0)
+                .put("conditioningArtifactConsumed", true)
+                .put("runtimeSessionMode", "shared_unet_vae")
+        }
+        ImageExecutionProfileNativeContract.parseAndValidate(resolution, receipt)
+        receipt.getJSONObject("nativeEffective").put("conditioningExecutionMode", "external_mnn_embeddings")
+        assertEquals("conditioningExecutionMode", expectFailure {
+            ImageExecutionProfileNativeContract.parseAndValidate(resolution, receipt)
+        }.field)
     }
 
     @Test

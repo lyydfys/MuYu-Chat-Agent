@@ -603,6 +603,213 @@ class ImageGenerationApiContractTest {
     }
 
     @Test
+    fun `Qwen Image 2 point 1 uses its independent native execution contract`() {
+        val request = ImageGenerationApiContract.parseRequest(
+            """{"model":"qwen-image-21","prompt":"a blue ceramic bird","size":"512x512","steps":20,"cfg_scale":1.0,"seed":7,"sampler":"flow_match"}"""
+        )
+        val response = responseBody(
+            requestId = "qwen-image-21-contract",
+            execution = qwenImage21Execution(),
+            request = request
+        )
+
+        val parsed = ImageGenerationApiContract.parseResponse(
+            "qwen-image-21-contract",
+            request,
+            response.toString()
+        )
+
+        assertEquals("qwen_image_21_mnn_v1", parsed.execution.getString("executionSchema"))
+        assertEquals("mnn.qwen-image-2.1.opencl", parsed.execution.getString("profileId"))
+        assertEquals("MNN_OPENCL", parsed.execution.getString("effectiveBackend"))
+        assertEquals(512, parsed.data.getJSONObject(0).getInt("width"))
+
+        val cpuExecution = qwenImage21Execution()
+            .put("backendConfigured", "MNN_CPU")
+            .put("requestedBackend", "MNN_CPU")
+            .put("effectiveBackend", "MNN_CPU")
+        cpuExecution.getJSONObject("nativeEffective")
+            .put("requestedBackend", "MNN_CPU")
+            .put("effectiveBackend", "MNN_CPU")
+        val cpuParsed = ImageGenerationApiContract.parseResponse(
+            "qwen-image-21-cpu-contract",
+            responseBody("qwen-image-21-cpu-contract", cpuExecution).toString()
+        )
+        assertEquals("MNN_CPU", cpuParsed.execution.getString("effectiveBackend"))
+    }
+
+    @Test
+    fun `Qwen Image 2 point 1 rejects missing conflicting or false native evidence`() {
+        val mutations: List<(JSONObject) -> Unit> = listOf(
+            { it.getJSONObject("nativeEffective").remove("profileId") },
+            { it.getJSONObject("nativeEffective").put("modelFingerprint", "not-a-digest") },
+            { it.getJSONObject("nativeEffective").put("profileRevision", 2) },
+            { it.getJSONObject("nativeEffective").put("nativeRunCompleted", false) },
+            { it.getJSONObject("nativeEffective").put("backendExecutionConfirmedByNative", false) },
+            { it.getJSONObject("nativeEffective").put("effectiveBackend", "MNN_CPU") },
+            { it.put("steps", 1).getJSONObject("nativeEffective").put("steps", 1) },
+            { it.getJSONObject("nativeEffective").put("nativePromptExecutionSha256", "0".repeat(64)) },
+            { it.getJSONObject("nativeEffective").put("outputSha256", "0".repeat(64)) },
+            { it.put("executionSchema", "other_schema") }
+        )
+
+        mutations.forEachIndexed { index, mutate ->
+            val execution = qwenImage21Execution()
+            mutate(execution)
+            assertRejected("invalid_image_execution_evidence") {
+                ImageGenerationApiContract.parseResponse(
+                    "qwen-image-21-invalid-$index",
+                    responseBody("qwen-image-21-invalid-$index", execution).toString()
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `Qwen Image 2 point 1 binds the full request and output payload`() {
+        val matchingRequest = ImageGenerationApiContract.parseRequest(
+            """{"prompt":"a blue ceramic bird","size":"512x512","steps":20,"cfg_scale":1.0,"seed":7,"sampler":"flow_match"}"""
+        )
+        ImageGenerationApiContract.parseResponse(
+            "qwen-image-21-request-ok",
+            matchingRequest,
+            responseBody(
+                "qwen-image-21-request-ok",
+                qwenImage21Execution(),
+                matchingRequest
+            ).toString()
+        )
+
+        val missingNativeResponse = responseBody(
+            "qwen-image-21-missing-native",
+            qwenImage21Execution(),
+            matchingRequest
+        )
+        missingNativeResponse.getJSONObject("execution").remove("nativeEffective")
+        assertRejected("invalid_image_execution_evidence") {
+            ImageGenerationApiContract.parseResponse(
+                "qwen-image-21-missing-native",
+                matchingRequest,
+                missingNativeResponse.toString()
+            )
+        }
+
+        val mismatchRequest = ImageGenerationApiContract.parseRequest(
+            """{"prompt":"a blue ceramic bird","size":"512x512","steps":19,"cfg_scale":1.0,"seed":7,"sampler":"flow_match"}"""
+        )
+        assertRejected("image_control_mismatch") {
+            ImageGenerationApiContract.parseResponse(
+                "qwen-image-21-request-mismatch",
+                mismatchRequest,
+                responseBody(
+                    "qwen-image-21-request-mismatch",
+                    qwenImage21Execution(),
+                    mismatchRequest
+                ).toString()
+            )
+        }
+
+        val wrongOutput = qwenImage21Execution()
+        wrongOutput.put("outputBytes", wrongOutput.getLong("outputBytes") + 1L)
+        wrongOutput.getJSONObject("nativeEffective")
+            .put("outputBytes", wrongOutput.getLong("outputBytes"))
+        assertRejected("invalid_image_execution_evidence") {
+            ImageGenerationApiContract.parseResponse(
+                "qwen-image-21-output-mismatch",
+                responseBody("qwen-image-21-output-mismatch", wrongOutput).toString()
+            )
+        }
+
+        val tamperedPng = responseBody(
+            "qwen-image-21-payload-mismatch",
+            qwenImage21Execution()
+        )
+        tamperedPng.getJSONArray("data").getJSONObject(0)
+            .put("b64_json", Base64.getEncoder().encodeToString(byteArrayOf(
+                0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00
+            )))
+        assertRejected("invalid_image_provider_response") {
+            ImageGenerationApiContract.parseResponse(
+                "qwen-image-21-payload-mismatch",
+                tamperedPng.toString()
+            )
+        }
+    }
+
+    @Test
+    fun `Qwen Image 2 point 1 rejects unsupported controls before SD validators`() {
+        val inputRequest = ImageGenerationApiContract.parseRequest(
+            """{"prompt":"a blue ceramic bird","input_image":"data:image/png;base64,iVBORw0KGgo="}"""
+        )
+        assertRejected("invalid_image_input_execution_evidence") {
+            ImageGenerationApiContract.parseResponse(
+                "qwen-image-21-input",
+                inputRequest,
+                responseBody("qwen-image-21-input", qwenImage21Execution(), inputRequest).toString()
+            )
+        }
+
+        val loraRequest = ImageGenerationApiContract.parseRequest(
+            """{"prompt":"a blue ceramic bird","loras":[{"id":"00000000-0000-0000-0000-000000000001","multiplier":1.0}]}"""
+        )
+        assertRejected("invalid_lora_execution_evidence") {
+            ImageGenerationApiContract.parseResponse(
+                "qwen-image-21-lora",
+                loraRequest,
+                responseBody("qwen-image-21-lora", qwenImage21Execution(), loraRequest).toString()
+            )
+        }
+
+        val textualInversionRequest = ImageGenerationApiContract.parseRequest(
+            """{"prompt":"a blue ceramic bird","textual_inversion_ids":["00000000-0000-0000-0000-000000000002"]}"""
+        )
+        assertRejected("invalid_textual_inversion_execution_evidence") {
+            ImageGenerationApiContract.parseResponse(
+                "qwen-image-21-ti",
+                textualInversionRequest,
+                responseBody("qwen-image-21-ti", qwenImage21Execution(), textualInversionRequest).toString()
+            )
+        }
+
+        val baseRequest = ImageGenerationApiContract.parseRequest(
+            """{"prompt":"a blue ceramic bird"}"""
+        )
+        val ultraFixRequest = baseRequest.copy(
+            ultraFix = ImageGenerationApiUltraFix(
+                targetWidth = 1024,
+                targetHeight = 1024,
+                strength = 0.5,
+                inversionSteps = 5,
+                refinementSteps = 10,
+                tileSize = 512,
+                overlap = 0.25
+            )
+        )
+        assertRejected("invalid_ultrafix_execution_evidence") {
+            ImageGenerationApiContract.parseResponse(
+                "qwen-image-21-ultrafix",
+                ultraFixRequest,
+                responseBody("qwen-image-21-ultrafix", qwenImage21Execution(), ultraFixRequest).toString()
+            )
+        }
+
+        val negativePromptRequest = ImageGenerationApiContract.parseRequest(
+            """{"prompt":"a blue ceramic bird","negative_prompt":"blurry"}"""
+        )
+        assertRejected("image_control_mismatch") {
+            ImageGenerationApiContract.parseResponse(
+                "qwen-image-21-negative-prompt",
+                negativePromptRequest,
+                responseBody(
+                    "qwen-image-21-negative-prompt",
+                    qwenImage21Execution(),
+                    negativePromptRequest
+                ).toString()
+            )
+        }
+    }
+
+    @Test
     fun `response image payload is canonically bound to byte evidence`() {
         val execution = strictExecution("QNN_HTP")
         val response = responseBody("img-output-binding", execution)
@@ -1112,6 +1319,18 @@ class ImageGenerationApiContractTest {
                     .httpStatus
             )
         }
+    }
+
+    @Test
+    fun `missing typed QNN bindings are reported as actionable runtime unavailable`() {
+        val mapped = ImageGenerationProviderException.fromWorkerFailure(
+            code = "generation_failed",
+            message = "QNN typed graph bindings are unavailable in this APK; rebuild with the QAIRT/QNN SDK headers."
+        )
+
+        assertEquals(503, mapped.httpStatus)
+        assertEquals("image_runtime_unavailable", mapped.code)
+        assertTrue(mapped.message.contains("complete MCA build"))
     }
 
     @Test
@@ -1642,6 +1861,57 @@ class ImageGenerationApiContractTest {
                 ).toString()
             )
         }
+    }
+
+    private fun qwenImage21Execution(): JSONObject {
+        val png = Base64.getDecoder().decode(strictImageData().getJSONObject(0).getString("b64_json"))
+        val outputSha256 = MessageDigest.getInstance("SHA-256")
+            .digest(png)
+            .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        val promptSha256 = imagePromptExecutionSha256("a blue ceramic bird", "")
+        val outer = JSONObject()
+        val native = JSONObject()
+        fun pair(name: String, value: Any) {
+            outer.put(name, value)
+            native.put(name, value)
+        }
+
+        pair("executionSchema", "qwen_image_21_mnn_v1")
+        pair("profileId", "mnn.qwen-image-2.1.opencl")
+        pair("profileRevision", 1)
+        pair("modelFingerprint", "b".repeat(64))
+        pair("profileBindingFingerprint", "a".repeat(64))
+        pair("imageProfileBindingFingerprint", "a".repeat(64))
+        pair("promptLanguageBindingFingerprint", "c".repeat(64))
+        pair("runtime", "MNN_DIFFUSION")
+        pair("taskMode", "text_to_image")
+        pair("scheduler", "FLOW_MATCH")
+        pair("nativeExecution", true)
+        pair("fallback", false)
+        pair("nativeRunCompleted", true)
+        pair("backendResolved", true)
+        pair("backendExecutionConfirmedByNative", true)
+        pair("backendExecutionProof", "mnn_runtime_resolution_after_native_run")
+        pair("backendExecutionScope", "primary_runtime")
+        pair("requestedBackend", "MNN_OPENCL")
+        pair("effectiveBackend", "MNN_OPENCL")
+        pair("nativeGenerationSequence", 9L)
+        pair("nativeGenerationCount", 9L)
+        pair("width", 512)
+        pair("height", 512)
+        pair("steps", 20)
+        pair("seed", 7)
+        pair("batchCount", 1)
+        pair("cfgScale", 1.0)
+        pair("nativePromptExecutionSha256", promptSha256)
+        pair("nativePromptBindingStage", "conditioning_consumed")
+        pair("promptExecutionSha256", promptSha256)
+        pair("outputSha256", outputSha256)
+        pair("outputBytes", png.size.toLong())
+        outer.put("backendConfigured", "MNN_OPENCL")
+        outer.put("nativeEffective", native)
+        outer.put("responseOutputEvidence", responseOutputEvidence(strictImageData()))
+        return outer
     }
 
     private fun strictExecution(runtime: String): JSONObject {

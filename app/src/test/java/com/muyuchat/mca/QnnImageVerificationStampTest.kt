@@ -65,6 +65,24 @@ class QnnImageVerificationStampTest {
     }
 
     @Test
+    fun sameSizeContentReplacementInvalidatesOldStampEvenWhenTimestampIsUnchanged() {
+        val bundle = Files.createTempDirectory("qnn-stamp-content-change").toFile()
+        try {
+            val model = File(bundle, "model.ctx").also { it.writeText("aaaa") }
+            val fixedTime = FileTime.fromMillis(1_700_000_000_000L)
+            Files.setLastModifiedTime(model.toPath(), fixedTime)
+            val stamp = QnnImageVerificationStamp.create(DEVICE, RUNTIME, bundle)
+
+            model.writeText("bbbb")
+            Files.setLastModifiedTime(model.toPath(), fixedTime)
+
+            assertFalse(stamp.matchesCurrent(DEVICE, RUNTIME, bundle))
+        } finally {
+            bundle.deleteRecursively()
+        }
+    }
+
+    @Test
     fun stampSurvivesJsonRoundTripAndMatchesCurrentIdentity() {
         val bundle = Files.createTempDirectory("qnn-stamp-json").toFile()
         try {

@@ -10,6 +10,13 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
@@ -21,6 +28,46 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class McaInferenceServiceLoadRecoveryTest {
+    @Test
+    fun blockingNativeStatsDuringChatDoesNotBlockTheCollectorDispatcher() = runBlocking {
+        val collectorThread = Thread.currentThread()
+        val runner = FakeLocalChatRunner()
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(LocalChatRuntime.MNN_CPU to runner)
+        )
+        service.loadModel(
+            "/models/qwen/config.json", LocalChatRuntime.MNN_CPU,
+            LoadParams(nCtx = 32768, nThreads = 4)
+        ).getOrThrow()
+        runner.enqueueGeneration("hello", " world")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val intercepted = AtomicBoolean(false)
+        val timedOut = AtomicBoolean(false)
+        val statsThread = AtomicReference<Thread>()
+        runner.onStatsRead = {
+            if (intercepted.compareAndSet(false, true)) {
+                statsThread.set(Thread.currentThread())
+                entered.countDown()
+                if (!release.await(3, TimeUnit.SECONDS)) timedOut.set(true)
+            }
+        }
+        val events = mutableListOf<GenerateEvent>()
+        val generation = launch { service.streamChat(textRequest()).toList(events) }
+        try {
+            assertTrue(withContext(Dispatchers.IO) { entered.await(3, TimeUnit.SECONDS) })
+            // This continuation runs on the same dispatcher as collect while the native read
+            // is deliberately blocked. Without IO isolation it can only run after timeout.
+            assertFalse(timedOut.get())
+            assertFalse(collectorThread === statsThread.get())
+        } finally {
+            release.countDown()
+            generation.join()
+        }
+        assertTrue(events.any { it is GenerateEvent.Done })
+    }
+
     @Test
     fun truncatedLiteRtLmContainerIsRejectedBeforeNativeLoad() = runBlocking {
         val model = Files.createTempFile("truncated", ".litertlm").toFile()
@@ -1696,6 +1743,7 @@ class McaInferenceServiceLoadRecoveryTest {
         var loadFailure: Throwable? = null
         var lastMessagesJson: String = ""
         var lastBeginParamsJson: String = ""
+        var onStatsRead: (() -> Unit)? = null
         val loadParamsJson = mutableListOf<String>()
         private val queuedBeginReturnCodes = ArrayDeque<Int>()
         private val chunks = ArrayDeque<String>()
@@ -1739,7 +1787,10 @@ class McaInferenceServiceLoadRecoveryTest {
 
         override fun sessionRecoveryMessage(): String? = recoveryMessage
 
-        override fun getRuntimeStatsJson(): String = statsJson
+        override fun getRuntimeStatsJson(): String {
+            onStatsRead?.invoke()
+            return statsJson
+        }
         override fun shutdown() {
             shutdownCalls += 1
             unloadModel()

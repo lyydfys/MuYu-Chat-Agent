@@ -32,7 +32,8 @@ class LocalLlmService : Service() {
             val parsedResult = runCatching {
                 OpenAiApiCompat.parseChatRequestChecked(
                     requestJson,
-                    LocalApiRuntime.generationParamsProvider()
+                    LocalApiRuntime.generationParamsProvider(),
+                    requireNonEmptyMessages = true
                 )
             }.getOrElse { error ->
                 callback.onError(
@@ -152,4 +153,3 @@ class LocalLlmService : Service() {
         super.onDestroy()
     }
 }
-

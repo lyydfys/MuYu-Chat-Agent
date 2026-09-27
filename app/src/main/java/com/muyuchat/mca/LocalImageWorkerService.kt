@@ -153,14 +153,18 @@ class LocalImageWorkerService : Service() {
         override fun cancel(requestJson: String): Boolean {
             val requestedId = runCatching {
                 LocalImageWorkerProtocol.parseCancelRequestId(requestJson)
-            }.getOrNull()
+            }.getOrElse { return false }
+            // Check ownership and signal the provider while holding the same lock used to publish
+            // a replacement activeGeneration. Otherwise an old cancel could select request A,
+            // then call provider.cancel() after request B has taken over the shared provider.
             val active = synchronized(stateLock) {
-                activeGeneration?.takeIf { requestedId == null || it.requestId == requestedId }
+                activeGeneration
+                    ?.takeIf { localImageCancelRequestMatches(requestedId, it.requestId) }
+                    ?.takeIf { it.tryRequestCancellation() }
+                    ?.also { runCatching { provider.cancel() } }
             } ?: return false
-            if (!active.tryRequestCancellation()) return false
             scheduleSelfExit(active)
             requestJournalCancellation(active.requestId)
-            runCatching { provider.cancel() }
             active.job?.cancel(CancellationException("Local image generation was cancelled."))
             publishCancellationTerminal(active, "Local image generation was cancelled.")
             return true
@@ -170,13 +174,18 @@ class LocalImageWorkerService : Service() {
             val requestedId = runCatching {
                 LocalImageWorkerProtocol.parseCancelRequestId(requestJson)
             }.getOrNull() ?: return false
-            val active = synchronized(stateLock) {
-                activeGeneration?.takeIf { it.requestId == requestedId }
+            val cancellation = synchronized(stateLock) {
+                val active = activeGeneration
+                    ?.takeIf { localImageCancelRequestMatches(requestedId, it.requestId) }
+                    ?: return@synchronized null
+                val newlyRequested = active.tryRequestCancellation()
+                if (newlyRequested) runCatching { provider.cancel() }
+                active to newlyRequested
             } ?: return false
+            val active = cancellation.first
             scheduleSelfExit(active)
-            if (active.tryRequestCancellation()) {
+            if (cancellation.second) {
                 requestJournalCancellation(active.requestId)
-                runCatching { provider.cancel() }
                 active.job?.cancel(CancellationException("Local image generation timed out."))
                 publishCancellationTerminal(active, "Local image generation timed out.")
             }
@@ -781,12 +790,17 @@ class LocalImageWorkerService : Service() {
     }
 
     private fun cancelForDeadClient(active: ActiveGeneration) {
-        val isCurrent = synchronized(stateLock) { activeGeneration === active }
-        if (!isCurrent) return
-        if (!active.tryRequestCancellation()) return
+        val isCurrentCancellation = synchronized(stateLock) {
+            if (activeGeneration !== active || !active.tryRequestCancellation()) {
+                false
+            } else {
+                runCatching { provider.cancel() }
+                true
+            }
+        }
+        if (!isCurrentCancellation) return
         scheduleSelfExit(active)
         requestJournalCancellation(active.requestId)
-        runCatching { provider.cancel() }
         active.job?.cancel(CancellationException("Local image client disconnected."))
     }
 

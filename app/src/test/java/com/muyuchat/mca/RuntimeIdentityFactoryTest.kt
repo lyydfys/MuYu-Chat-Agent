@@ -189,6 +189,42 @@ class RuntimeIdentityFactoryTest {
     }
 
     @Test
+    fun llamaIdentityChangesWhenTheStandaloneOpenClBackendIsAddedOrUpdated() {
+        val root = tempDirectory()
+        try {
+            val modelFile = File(root, "model.gguf").apply { writeText("model") }
+            val native = File(root, "native").apply { mkdirs() }
+            File(native, "libmca_native.so").writeBytes(byteArrayOf(1, 2, 3, 4))
+            val model = manifest(modelFile, sha256 = "")
+            val platform = RuntimeIdentityFactory.PlatformSnapshot("mca.test", "1", 1, native)
+
+            val cpuOnly = RuntimeIdentityFactory.buildForTesting(
+                model,
+                LocalChatRuntime.LLAMA_CPP,
+                device(),
+                "scope",
+                platform
+            )
+            // The OpenCL plugin is a separate APK library. Its presence must
+            // invalidate a profile created by a CPU-only package even when
+            // libmca_native.so itself did not change.
+            File(native, "libggml-opencl-mca.so").writeBytes(byteArrayOf(9, 8, 7, 6))
+            val complete = RuntimeIdentityFactory.buildForTesting(
+                model,
+                LocalChatRuntime.LLAMA_CPP,
+                device(),
+                "scope",
+                platform
+            )
+
+            assertNotEquals(cpuOnly.identity.nativeLibrarySha256, complete.identity.nativeLibrarySha256)
+            assertNotEquals(cpuOnly.identity.identityHash, complete.identity.identityHash)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun runtimePolicyEvaluatorCapabilitiesAndProjectorAreExplicit() {
         val root = tempDirectory()
         try {
@@ -205,7 +241,7 @@ class RuntimeIdentityFactoryTest {
                 installationScopeId = "scope"
             )
             assertEquals("b".repeat(64), result.identity.projectorFingerprint)
-            assertTrue(result.identity.runtimeVersion.contains("llama.cpp@6657ded4faa3b8450221119fc6b4d002e35104a2"))
+            assertTrue(result.identity.runtimeVersion.contains("llama.cpp@4ceb1719101f32637b841206c172f3f058ffc182+mca-stq1_0"))
             assertEquals("runtime-parameters-v2-sparse-moe-mmap", result.identity.parameterPolicyVersion)
             assertTrue(result.identity.evaluatorFingerprint.length == 64)
             assertTrue("local_chat" in result.identity.capabilities)

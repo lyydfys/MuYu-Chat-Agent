@@ -27,6 +27,9 @@
 
 #if MCA_WITH_LLAMA_CPP
 #include <unistd.h>
+#if defined(__ANDROID__)
+#include <dlfcn.h>
+#endif
 #include <nlohmann/json.hpp>
 #include "chat.h"
 #include "common.h"
@@ -128,6 +131,15 @@ bool g_mmap_prefetch_enabled = false;
 std::string g_last_error;
 std::string g_load_failure_code;
 std::string g_native_lib_dir;
+// Preserve backend registration diagnostics separately from the user-facing
+// load error.  The latter is cleared before model parsing, but callers still
+// need to know why a requested GPU backend was unavailable.
+std::string g_backend_load_diagnostic;
+// Android does not expose an NDK import library for the platform OpenCL
+// implementation. Keep a process-lifetime preflight handle so availability is
+// known before registration; the backend itself resolves every OpenCL symbol
+// through its local dispatch layer and carries no DT_NEEDED libOpenCL entry.
+void *g_android_opencl_handle = nullptr;
 bool g_backend_initialized = false;
 size_t g_backend_device_count = 0;
 int g_n_threads = 0;
@@ -553,7 +565,32 @@ std::string local_image_path_from_url(const std::string &url) {
     if (starts_with(url, "file://")) {
         return url_decode(url.substr(7));
     }
+    if (starts_with(url, "file:")) {
+        auto path = url_decode(url.substr(5));
+        while (path.rfind("//", 0) == 0) path.erase(path.begin());
+        return path;
+    }
     return url;
+}
+
+// Keep direct native/API callers on the same one-image-per-attachment
+// contract as the Android serializer.  `file:///x/a.png` and `/x/a.png` are
+// equivalent local references after URI decoding; lexical normalization here
+// avoids allocating or opening image files while parsing a request.
+std::string canonical_local_image_reference(std::string value) {
+    value = local_image_path_from_url(value);
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
+    }
+    std::replace(value.begin(), value.end(), '\\', '/');
+    while (value.find("/./") != std::string::npos) {
+        value.replace(value.find("/./"), 3, "/");
+    }
+    while (value.size() > 1 && value.back() == '/') value.pop_back();
+    return value;
 }
 
 size_t find_object_end(const std::string &json, size_t start) {
@@ -610,10 +647,27 @@ void parse_content_parts(const std::string &segment, ParsedMessage &message) {
                 if (!message.content.empty()) message.content += "\n";
                 message.content += text;
             }
-        } else if (type == "image_url") {
-            const auto url = parse_json_string_after(part, "url", 0);
+        } else if (type == "image_url" || type == "input_image" || type == "image") {
+            // Normalize the common OpenAI-compatible image part spellings at
+            // the JNI boundary.  The app serializer emits image_url, while
+            // direct Local API/native callers may use input_image or image.
+            // A nested object is handled by looking for its url first; a
+            // scalar image field is handled by the corresponding fallback.
+            std::string url;
+            for (const auto *key : {"url", "image_url", "image", "input_image"}) {
+                url = parse_json_string_after(part, key, 0);
+                if (!url.empty()) break;
+            }
             if (!url.empty() && !starts_with(url, "data:")) {
-                message.image_paths.push_back(local_image_path_from_url(url));
+                const auto path = local_image_path_from_url(url);
+                const auto key = canonical_local_image_reference(path);
+                const bool duplicate = !key.empty() && std::any_of(
+                        message.image_paths.begin(),
+                        message.image_paths.end(),
+                        [&](const std::string &previous) {
+                            return canonical_local_image_reference(previous) == key;
+                        });
+                if (!duplicate) message.image_paths.push_back(path);
             }
         }
         pos = part_end;
@@ -839,6 +893,7 @@ std::string stats_json(const char *backend) {
         << "\"backendReady\":" << (g_backend_device_count > 0 ? "true" : "false") << ","
         << "\"backendDeviceCount\":" << g_backend_device_count << ","
         << "\"backendDevices\":" << backend_devices_json_array() << ","
+        << "\"backendLoadDiagnostic\":\"" << json_escape(g_backend_load_diagnostic) << "\","
         << "\"requestedConfig\":" << runtime_config_json(g_requested_config) << ","
         << "\"effectiveConfig\":" << runtime_config_json(g_effective_config) << ","
         << "\"backendCapabilities\":{"
@@ -1182,7 +1237,7 @@ std::string load_failure_code_from_llama_error(const std::string &detail) {
 }
 
 bool load_mode_uses_mmap(llama_load_mode mode) {
-    // llama.cpp b10590 defaults to AUTO. AUTO starts with mmap and only
+    // The pinned llama.cpp defaults to AUTO. AUTO starts with mmap and only
     // disables it when a selected backend cannot map the model, so preserve
     // the MCA default mmap policy when deriving the runtime profile.
     return mode == LLAMA_LOAD_MODE_AUTO ||
@@ -1637,12 +1692,83 @@ void load_baseline_cpu_backend_if_needed() {
     }
 }
 
-bool ensure_backends_loaded_locked() {
-    if (!g_native_lib_dir.empty()) {
-        ggml_backend_load_all_from_path(g_native_lib_dir.c_str());
+bool load_android_opencl_runtime_if_available_locked() {
+#if defined(__ANDROID__) && defined(__aarch64__)
+    if (g_android_opencl_handle != nullptr) {
+        using get_platform_ids_fn = int (*)(std::uint32_t, void **, std::uint32_t *);
+        auto get_platform_ids = reinterpret_cast<get_platform_ids_fn>(
+                dlsym(g_android_opencl_handle, "clGetPlatformIDs"));
+        if (get_platform_ids == nullptr) {
+            g_backend_load_diagnostic += "Android OpenCL runtime loaded but clGetPlatformIDs is not exported.";
+            return false;
+        }
+        std::uint32_t count = 0;
+        const int status = get_platform_ids(0, nullptr, &count);
+        if (status != 0 || count == 0) {
+            g_backend_load_diagnostic += "Android OpenCL runtime loaded but reports no usable platform (clGetPlatformIDs status=";
+            g_backend_load_diagnostic += std::to_string(status) + ", count=" + std::to_string(count) + ").";
+            return false;
+        }
+        return true;
     }
-    ggml_backend_load_all();
+    // libOpenCL.so is an optional platform native library on supported
+    // devices. Keep CPU-only devices installable by treating dlopen failure as
+    // a normal accelerator miss. RTLD_LOCAL avoids leaking vendor symbols into
+    // unrelated JNI libraries; mca_opencl_dispatch resolves its own symbols.
+    g_android_opencl_handle = dlopen("libOpenCL.so", RTLD_NOW | RTLD_LOCAL);
+    if (g_android_opencl_handle == nullptr) {
+        const char *diagnostic = dlerror();
+        g_backend_load_diagnostic += "Android OpenCL runtime unavailable: ";
+        g_backend_load_diagnostic += diagnostic == nullptr ? "dlopen(libOpenCL.so) failed." : diagnostic;
+        return false;
+    }
+    using get_platform_ids_fn = int (*)(std::uint32_t, void **, std::uint32_t *);
+    auto get_platform_ids = reinterpret_cast<get_platform_ids_fn>(
+            dlsym(g_android_opencl_handle, "clGetPlatformIDs"));
+    if (get_platform_ids == nullptr) {
+        g_backend_load_diagnostic += "Android OpenCL runtime loaded from libOpenCL.so but clGetPlatformIDs is not exported.";
+        return false;
+    }
+    std::uint32_t count = 0;
+    const int status = get_platform_ids(0, nullptr, &count);
+    if (status != 0 || count == 0) {
+        g_backend_load_diagnostic += "Android OpenCL runtime loaded but reports no usable platform (clGetPlatformIDs status=";
+        g_backend_load_diagnostic += std::to_string(status) + ", count=" + std::to_string(count) + ").";
+        return false;
+    }
+    g_backend_load_diagnostic += "Android OpenCL runtime loaded from libOpenCL.so; platform count=" + std::to_string(count) + ".";
+    return true;
+#else
+    return true;
+#endif
+}
+
+bool ensure_backends_loaded_locked() {
+    g_backend_load_diagnostic.clear();
+    const bool android_opencl_available = load_android_opencl_runtime_if_available_locked();
+    // Load one CPU variant explicitly before the optional accelerator.  The
+    // generic directory scanner would also pick up GenieX's
+    // libggml-opencl.so, which is compiled against a private ggml-base ABI;
+    // that artifact must not decide MCA's capability state.
     load_baseline_cpu_backend_if_needed();
+    // Prefer the backend built from this checkout.  The packaged GenieX
+    // plugin uses the same filename but a different ggml-base ABI and can be
+    // rejected by the dynamic loader before it registers a device.
+    if (!g_native_lib_dir.empty()) {
+        const std::string mca_opencl = join_path(g_native_lib_dir, "libggml-opencl-mca.so");
+        if (file_exists(mca_opencl) && android_opencl_available) {
+            if (ggml_backend_load(mca_opencl.c_str()) == nullptr) {
+                g_backend_load_diagnostic += " MCA OpenCL backend failed to register: " + mca_opencl + ".";
+            } else {
+                g_backend_load_diagnostic += " MCA OpenCL backend registered: " + mca_opencl + ".";
+            }
+        }
+    }
+    // Do not call ggml_backend_load_all_from_path(nativeLibDir): it would
+    // select the same-name GenieX OpenCL plugin before/alongside the MCA
+    // backend.  ggml_backend_load_all() is retained for built-in/default
+    // paths, which never point at the app's extracted JNI directory.
+    ggml_backend_load_all();
     if (!g_backend_initialized) {
         llama_backend_init();
         g_backend_initialized = true;
@@ -1671,6 +1797,9 @@ bool resolve_backend_config(const RuntimeConfig &requested,
     const bool force_gpu = requested.n_gpu_layers == -2 || requested.n_gpu_layers > 0;
     if (force_gpu && !g_gpu_offload_supported) {
         error = "n_gpu_layers requests GPU offload, but this APK has no usable non-CPU llama.cpp backend.";
+        if (!g_backend_load_diagnostic.empty()) {
+            error += " Backend diagnostics: " + g_backend_load_diagnostic;
+        }
         return false;
     }
     // A CPU-only build can still run a sparse-MoE GGUF. CPU MoE placement is
@@ -2228,7 +2357,8 @@ int prefill_multimodal_locked(
             const auto loaded = mtmd_helper_bitmap_init_from_file(
                     g_mtmd_context,
                     path.c_str(),
-                    false);
+                    false,
+                    mtmd_helper_init_opt_default());
             mtmd_bitmap *bitmap = loaded.bitmap;
             if (bitmap == nullptr) {
                 if (loaded.video_ctx != nullptr) mtmd_helper_video_free(loaded.video_ctx);
@@ -3275,7 +3405,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         std::list<std::string> moe_patterns;
         std::vector<llama_model_tensor_buft_override> tensor_overrides;
         for (int i = 0; i < effective.n_cpu_moe; ++i) {
-            moe_patterns.push_back(llm_ffn_exps_block_regex(i));
+            moe_patterns.push_back(llm_ffn_block_regex(i, LLM_FFN_EXPS_REGEX));
             tensor_overrides.push_back({moe_patterns.back().c_str(), ggml_backend_cpu_buffer_type()});
         }
         if (!tensor_overrides.empty()) {

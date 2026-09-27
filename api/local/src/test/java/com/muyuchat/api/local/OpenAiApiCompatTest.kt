@@ -99,6 +99,28 @@ class OpenAiApiCompatTest {
     }
 
     @Test
+    fun acceptsImageImageUrlAndInputImagePartSpellings() {
+        val request = OpenAiApiCompat.parseChatRequest(
+            """
+            {
+              "messages": [
+                {"role": "user", "content": [
+                  {"type": "image", "image": {"url": "/tmp/image-part.png"}},
+                  {"type": "image_url", "image_url": {"url": "/tmp/image-url-part.jpg"}},
+                  {"type": "input_image", "input_image": "data:image/webp;base64,abc123"}
+                ]}
+              ]
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(3, request.messages.single().imageAttachments.size)
+        assertEquals("/tmp/image-part.png", request.messages.single().imageAttachments[0].uriString)
+        assertEquals("/tmp/image-url-part.jpg", request.messages.single().imageAttachments[1].uriString)
+        assertEquals("data:image/webp;base64,abc123", request.messages.single().imageAttachments[2].dataBase64)
+    }
+
+    @Test
     fun decodesPercentEncodedTextFromThirdPartyClients() {
         val request = OpenAiApiCompat.parseChatRequest(
             """
@@ -420,5 +442,71 @@ class OpenAiApiCompatTest {
         assertTrue(result is OpenAiChatParseResult.Rejected)
         val details = (result as OpenAiChatParseResult.Rejected).rejection.detailsJson
         assertTrue(details.contains("extra_body.n_ctx"))
+    }
+
+    @Test
+    fun strictHttpModeRejectsMalformedJsonWithBadRequestDetails() {
+        val result = OpenAiApiCompat.parseChatRequestChecked(
+            body = "not-json",
+            requireJsonObject = true,
+            requireModel = true
+        )
+
+        assertTrue(result is OpenAiChatParseResult.Rejected)
+        val rejection = (result as OpenAiChatParseResult.Rejected).rejection
+        assertEquals("invalid_request", rejection.code)
+        assertEquals(400, rejection.httpStatus)
+        assertEquals("body", org.json.JSONObject(rejection.detailsJson).getString("param"))
+    }
+
+    @Test
+    fun strictHttpModeRejectsMissingOrBlankModelWithBadRequestDetails() {
+        listOf(
+            "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+            "{\"model\":\"   \",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+        ).forEach { body ->
+            val result = OpenAiApiCompat.parseChatRequestChecked(
+                body = body,
+                requireJsonObject = true,
+                requireModel = true
+            )
+            assertTrue(result is OpenAiChatParseResult.Rejected)
+            val rejection = (result as OpenAiChatParseResult.Rejected).rejection
+            assertEquals("invalid_request", rejection.code)
+            assertEquals(400, rejection.httpStatus)
+            assertEquals("model", org.json.JSONObject(rejection.detailsJson).getString("param"))
+        }
+    }
+
+    @Test
+    fun strictHttpModeRejectsEmptyMessagesWithBadRequestDetails() {
+        val result = OpenAiApiCompat.parseChatRequestChecked(
+            body = """{"model":"active-model","messages":[]}""",
+            requireJsonObject = true,
+            requireModel = true,
+            requireNonEmptyMessages = true
+        )
+
+        assertTrue(result is OpenAiChatParseResult.Rejected)
+        val rejection = (result as OpenAiChatParseResult.Rejected).rejection
+        assertEquals("invalid_request", rejection.code)
+        assertEquals(400, rejection.httpStatus)
+        assertEquals("messages", org.json.JSONObject(rejection.detailsJson).getString("param"))
+    }
+
+    @Test
+    fun strictHttpModeRejectsMissingMessagesWithBadRequestDetails() {
+        val result = OpenAiApiCompat.parseChatRequestChecked(
+            body = """{"model":"active-model"}""",
+            requireJsonObject = true,
+            requireModel = true,
+            requireNonEmptyMessages = true
+        )
+
+        assertTrue(result is OpenAiChatParseResult.Rejected)
+        val rejection = (result as OpenAiChatParseResult.Rejected).rejection
+        assertEquals("invalid_request", rejection.code)
+        assertEquals(400, rejection.httpStatus)
+        assertEquals("messages", org.json.JSONObject(rejection.detailsJson).getString("param"))
     }
 }

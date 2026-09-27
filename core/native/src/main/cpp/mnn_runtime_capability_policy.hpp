@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "mnn_vision_path_policy.hpp"
+
 namespace mca::mnn {
 
 // MCA currently accepts text and image attachments only. Do not let a model
@@ -65,7 +67,17 @@ inline void appendMnnRawMediaTagValues(
             malformed = true;
             return;
         }
-        target.push_back(text.substr(valueStart, end - valueStart));
+        const auto value = text.substr(valueStart, end - valueStart);
+        // A client can repeat the same image in both a structured part and a
+        // raw <img> tag. Keep the first occurrence so one user attachment
+        // cannot be fed to Omni twice. This is lexical and intentionally does
+        // not read the file while parsing the request.
+        const auto key = mca::mnn::canonicalMnnImageReference(value);
+        const bool duplicate = !key.empty() && std::any_of(
+            target.begin(), target.end(), [&](const std::string& previous) {
+                return mca::mnn::canonicalMnnImageReference(previous) == key;
+            });
+        if (!duplicate) target.push_back(value);
         cursor = end + closing.size();
     }
 }

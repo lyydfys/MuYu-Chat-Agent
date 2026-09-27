@@ -270,8 +270,7 @@ internal class QnnHtpImageRunner(
             graphExecuted = graphExecuted || smoke.graphExecute
             val compatibilityMessage = qnnContextSocCompatibilityMessage(
                 device = device,
-                binaryMetadata = diagnostics.binaryMetadata,
-                allowKnownForwardCompatibility = true
+                binaryMetadata = diagnostics.binaryMetadata
             )
             if (!smoke.provesNpuExecution) {
                 failureMessage = smoke.message.ifBlank {

@@ -144,6 +144,18 @@ private fun nativeGpuOffloadEvidence(
     )
 }
 
+private fun nativeGpuOffloadSupported(
+    nativeStats: JSONObject?,
+    fallback: RuntimeStats
+): Boolean? {
+    val capabilities = nativeStats?.optJSONObject("backendCapabilities")
+    return if (capabilities?.has("gpuOffloadSupported") == true) {
+        capabilities.optBoolean("gpuOffloadSupported")
+    } else {
+        fallback.gpuOffloadSupported
+    }
+}
+
 /** Opaque, engine-owned exclusive lifecycle lease used by formal candidate evaluation. */
 class EngineLifecycleLease internal constructor(
     internal val service: McaInferenceService,
@@ -198,6 +210,8 @@ class McaInferenceService(
     private val generationStopGate = Any()
     private var generationStopEpoch = 0L
     private var activeGenerationStopTarget: ActiveGenerationStopTarget? = null
+    /** Prevents duplicate stop calls while the original request is still unwinding. */
+    private var stopRequestedToken: GenerationStopToken? = null
     private val telemetry = TelemetryLogger(context.applicationContext)
     private val socInfo = SocDetector.detect()
     private val appContext = context.applicationContext
@@ -513,7 +527,13 @@ class McaInferenceService(
                 "execution profile identity changed during load resolution"
             }
             val effectiveLoadParams = loadParamsForProfile(params, resolvedExecutionProfile)
-            val nativeLoadParamsJson = nativeLoadParamsJson(resolvedExecutionProfile)
+            // mmproj is a load-bound resource owned by the model manifest. Older
+            // execution profiles may predate the binding, so materialize the
+            // resolved projector on every native load boundary.
+            val nativeLoadParamsJson = nativeLoadParamsJson(
+                profile = resolvedExecutionProfile,
+                visionProjectorPath = effectiveLoadParams.visionProjectorPath
+            )
             val admissionMemory = memorySnapshotProvider?.invoke() ?: telemetry.memorySnapshotDetailed()
             val admission = qairtExecutionAdmissionForLoad(
                 modelPath = modelPath,
@@ -927,8 +947,9 @@ class McaInferenceService(
             }
 
             val requestWithVisionFiles = if (incomingHasImageAttachments) {
-                if (!localVisionReady()) {
-                    val message = "当前本地模型未启用识图。请加载 MNN 多模态包，或加载本地多模态 GGUF 并绑定匹配 mmproj 后重新加载模型。"
+                val visionStatsJson = nativeStatsJsonOnIo()
+                if (!localVisionReady(activeRuntime, visionStatsJson)) {
+                    val message = localVisionUnavailableMessage(activeRuntime, visionStatsJson)
                     val errorStats = current.copy(lastError = message)
                     _stats.value = errorStats
                     emit(GenerateEvent.Error(message, errorStats))
@@ -948,7 +969,14 @@ class McaInferenceService(
                     val message = "本地图片预处理失败：${error.message ?: "无法读取图片"}"
                     val errorStats = current.copy(lastError = message)
                     _stats.value = errorStats
-                    emit(GenerateEvent.Error(message, errorStats))
+                    emit(
+                        GenerateEvent.Error(
+                            message = message,
+                            stats = errorStats,
+                            code = (error as? LocalVisionInputException)?.failureCode?.wireCode
+                                ?: "local_vision_input_invalid"
+                        )
+                    )
                     return@lifecycle
                 }
             } else {
@@ -1120,7 +1148,7 @@ class McaInferenceService(
             if (beginRc != 0 && activeRuntime.usesCoordinatedParameters()) {
                 val session = activeLoadSession
                 val nativeError = runCatching {
-                    JSONObject(nativeStatsJson()).optString("lastError").takeIf { it.isNotBlank() }
+                    JSONObject(nativeStatsJsonOnIo()).optString("lastError").takeIf { it.isNotBlank() }
                 }.getOrNull()
                 if (session != null && parameterCoordinator.isLoadSignatureMismatch(
                         session.runtimeIdentity,
@@ -1192,7 +1220,7 @@ class McaInferenceService(
                 }
                 runCatching { runner.requestStop() }
                 val nativeError = runCatching {
-                    JSONObject(nativeStatsJson()).optString("lastError").takeIf { it.isNotBlank() }
+                    JSONObject(nativeStatsJsonOnIo()).optString("lastError").takeIf { it.isNotBlank() }
                 }.getOrNull()
                 val message = buildString {
                     append("Native beginCompletion failed: ").append(beginRc)
@@ -1210,7 +1238,7 @@ class McaInferenceService(
             // generated token arrives, which is especially misleading for large
             // GGUF models with a long first-token latency.
             var promptEndsInsideReasoning = false
-            runCatching { JSONObject(nativeStatsJson()) }.getOrNull()?.let { nativeStats ->
+            runCatching { JSONObject(nativeStatsJsonOnIo()) }.getOrNull()?.let { nativeStats ->
                 promptEndsInsideReasoning = nativeStats.optBoolean("promptEndsInsideReasoning", false)
                 val prefillStats = mergeNativeStats(
                     base = _stats.value,
@@ -1279,7 +1307,10 @@ class McaInferenceService(
                 emitGenerated(GenerateEvent.Phase(GenerationPhase.DECODE, _stats.value))
                 while (true) {
                     val chunk = withContext(io) { runner.generateNextChunk() } ?: break
-                    if (chunk.isBlank()) continue
+                    // A standalone space/newline is a valid model delta. Do
+                    // not drop it here: code indentation, Markdown and word
+                    // boundaries are carried by whitespace-only chunks.
+                    if (chunk.isEmpty()) continue
                     val now = System.currentTimeMillis()
                     if (firstTokenAt == 0L) firstTokenAt = now
                     lastTokenAt = now
@@ -1289,7 +1320,7 @@ class McaInferenceService(
                         now - lastStatsSampleAt >= STATS_SAMPLE_INTERVAL_MS
                     val nativeStats = if (shouldSampleStats) {
                         lastStatsSampleAt = now
-                        runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
+                        runCatching { JSONObject(nativeStatsJsonOnIo()) }.getOrNull()
                             ?.also { cachedNativeStats = it }
                     } else {
                         cachedNativeStats
@@ -1334,6 +1365,10 @@ class McaInferenceService(
                     finalStats = _stats.value.copy(
                         promptTokens = promptTokens,
                         completionTokens = generatedTokens,
+                        promptTokensEstimated = nativePromptTokens == null ||
+                            nativeStats?.optBoolean("promptTokensEstimated", false) == true,
+                        completionTokensEstimated = nativeCompletionTokens == null ||
+                            nativeStats?.optBoolean("completionTokensEstimated", false) == true,
                         ttftMs = ttft,
                         prefillMs = prefillMs,
                         prefillTokens = prefillTokens,
@@ -1397,20 +1432,22 @@ class McaInferenceService(
                         return@lifecycle
                     }
                     val filtered = reasoningFilter.filter(chunk)
-                    if (filtered.visible.isNotBlank()) {
+                    if (filtered.visible.any { !it.isWhitespace() }) {
                         visibleOutputSeen = true
                     }
                     var stopForReasoningLoop = false
-                    if (filtered.reasoning.isNotBlank() && !hideReasoning) {
-                        if (reasoningStartedAt == 0L) reasoningStartedAt = now
-                        reasoningDurationMs = now - reasoningStartedAt
-                        stopForReasoningLoop = reasoningLoopGuard.shouldStop(filtered.reasoning)
-                        if (stopForReasoningLoop) {
-                            mnnGenerationWasInterrupted = shouldRefreshMnnAfterRequest
-                            runner.requestStop()
+                    if (filtered.reasoning.isNotEmpty() && !hideReasoning) {
+                        if (filtered.reasoning.any { !it.isWhitespace() }) {
+                            if (reasoningStartedAt == 0L) reasoningStartedAt = now
+                            reasoningDurationMs = now - reasoningStartedAt
+                            stopForReasoningLoop = reasoningLoopGuard.shouldStop(filtered.reasoning)
+                            if (stopForReasoningLoop) {
+                                mnnGenerationWasInterrupted = shouldRefreshMnnAfterRequest
+                                runner.requestStop()
+                            }
                         }
                     }
-                    if (filtered.visible.isNotBlank() || (filtered.reasoning.isNotBlank() && !hideReasoning)) {
+                    if (filtered.visible.isNotEmpty() || (filtered.reasoning.isNotEmpty() && !hideReasoning)) {
                         emitGenerated(
                             GenerateEvent.Chunk(
                                 text = filtered.visible,
@@ -1430,7 +1467,7 @@ class McaInferenceService(
                     }
                     if (stopForReasoningLoop) break
                 }
-                val finalNativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
+                val finalNativeStats = runCatching { JSONObject(nativeStatsJsonOnIo()) }.getOrNull()
                 finalStats = mergeNativeStats(
                     base = finalStats,
                     nativeStats = finalNativeStats,
@@ -1455,10 +1492,10 @@ class McaInferenceService(
                     if (reasoningStartedAt == 0L) reasoningStartedAt = now
                     reasoningDurationMs = now - reasoningStartedAt
                 }
-                if (remaining.visible.isNotBlank()) {
+                if (remaining.visible.any { !it.isWhitespace() }) {
                     visibleOutputSeen = true
                 }
-                if (remaining.visible.isNotBlank() || (remaining.reasoning.isNotBlank() && !hideReasoning)) {
+                if (remaining.visible.isNotEmpty() || (remaining.reasoning.isNotEmpty() && !hideReasoning)) {
                     emitGenerated(
                         GenerateEvent.Chunk(
                             text = remaining.visible,
@@ -1470,6 +1507,13 @@ class McaInferenceService(
                 }
                 if (!visibleOutputSeen) {
                     val message = "本地模型本轮没有生成可见正文。请重试；若持续发生，请降低上下文或更换模型。"
+                    // Treat a whitespace-only/filtered turn as failed state.
+                    // This prevents LiteRT (and other KV-backed runners) from
+                    // reusing a session whose committed history was rejected
+                    // by the service-level visible-output guard.
+                    withContext(NonCancellable + io) {
+                        runCatching { runner.invalidateConversationContext() }
+                    }
                     val errorStats = finalStats.copy(lastError = message)
                     _stats.value = errorStats
                     emitPersistPhase(errorStats)
@@ -1494,13 +1538,11 @@ class McaInferenceService(
                     ) {
                         val lease = executionContext.lifecycleLease
                             ?: error("deferred pending disposition requires an exclusive lifecycle lease")
-                        synchronized(lease) {
-                            require(lease.deferredAuthorization == null ||
-                                lease.deferredAuthorization === transaction.authorization) {
-                                "lifecycle lease already owns another deferred transaction"
-                            }
-                            lease.deferredAuthorization = transaction.authorization
-                        }
+                        // Keep the monitor operation out of this very large suspend
+                        // state machine.  Kotlin's JVM coroutine transformer can
+                        // otherwise recurse through the inlined synchronized block
+                        // and overflow while compiling streamChat().
+                        deferPendingAuthorization(lease, transaction.authorization)
                         pendingTransactionDeferred = true
                     }
                 }
@@ -1576,8 +1618,25 @@ class McaInferenceService(
         }
     }
 
-    suspend fun stopGeneration() = withContext(io) {
-        runCatching { runnerFor(activeRuntime).requestStop() }
+    /**
+     * Sends cancellation without allowing a wedged native/Binder stop call to
+     * hold the caller forever.  The isolated worker owns the longer recovery
+     * watchdog; this boundary only provides a bounded acknowledgement window
+     * for UI, Local API, and lifecycle callers.
+     */
+    suspend fun stopGeneration() {
+        // Prefer the engine-owned request token. This prevents a delayed stop
+        // from an older UI/API request from reaching a replacement generation.
+        activeGenerationStopToken()?.let { token ->
+            stopGenerationIfActive(token)
+            return
+        }
+        val runner = runCatching { runnerFor(activeRuntime) }.getOrNull() ?: return
+        withContext(io) {
+            withTimeoutOrNull(STOP_REQUEST_TIMEOUT_MS) {
+                runCatching { runner.requestStop() }
+            }
+        }
     }
 
     /** Returns the exact request currently owning native prefill/decode, if any. */
@@ -1597,18 +1656,30 @@ class McaInferenceService(
         // A missing captured owner is a definitive no-op. Avoiding dispatcher suspension here
         // lets lifecycle callers cancel pre-native work immediately.
         if (expected == null) return false
-        return withContext(io) {
-            synchronized(generationStopGate) {
-                val target = activeGenerationStopTarget
-                if (target?.token != expected) {
-                    false
-                } else {
-                    runCatching {
-                        target.runner.requestStop()
-                        true
-                    }.getOrDefault(false)
+        val capture = synchronized(generationStopGate) {
+            val target = activeGenerationStopTarget
+            when {
+                target?.token != expected -> false to null
+                stopRequestedToken == expected -> true to null
+                else -> {
+                    stopRequestedToken = expected
+                    true to target
                 }
             }
+        }
+        if (!capture.first) return false
+        val target = capture.second ?: return true
+        return withContext(io) {
+            withTimeoutOrNull(STOP_REQUEST_TIMEOUT_MS) {
+                // The engine-owned token is the active-operation proof. Do not
+                // perform a second native active-state query here: a damaged
+                // runner may serialize that query behind decode and recreate
+                // the very Binder stall this path is meant to avoid.
+                runCatching {
+                    target.runner.requestStop()
+                    true
+                }.getOrDefault(false)
+            } ?: true
         }
     }
 
@@ -1658,6 +1729,8 @@ class McaInferenceService(
             mutex.unlock()
         }
     }
+
+    internal suspend fun nativeStatsJsonOnIo(): String = withContext(io) { nativeStatsJson() }
 
     fun nativeStatsJson(): String = runCatching { runnerFor(activeRuntime).getRuntimeStatsJson() }.getOrElse {
         JSONObject().put("error", it.message).toString()
@@ -1742,9 +1815,18 @@ class McaInferenceService(
     private fun ChatRequest.hasImageAttachments(): Boolean =
         messages.any { it.imageAttachments.isNotEmpty() }
 
-    private fun localVisionReady(): Boolean =
-        runCatching { JSONObject(nativeStatsJson()).optBoolean("visionReady", false) }
-            .getOrDefault(false)
+    private fun localVisionReady(runtime: LocalChatRuntime, nativeStats: String): Boolean {
+        val stats = runCatching { JSONObject(nativeStats) }.getOrNull() ?: return false
+        if (!stats.optBoolean("loaded", false)) return false
+        return if (runtime == LocalChatRuntime.LITERT_LM) {
+            // Transport alone is not model capability. A known text-only
+            // bundle is rejected before entering LiteRT's native delegate;
+            // unknown bundles remain eligible for a real request.
+            liteRtVisionInputAvailable(stats.toString())
+        } else {
+            stats.optBoolean("visionReady", false)
+        }
+    }
 
     private fun runnerFor(runtime: LocalChatRuntime): LocalChatRunner =
         runners[runtime] ?: error("本地推理后端未注册：${runtime.label}")
@@ -1756,6 +1838,9 @@ class McaInferenceService(
         check(activeGenerationStopTarget == null) {
             "another native generation already owns the stop target"
         }
+        check(stopRequestedToken == null) {
+            "the previous native generation is still unwinding its stop request"
+        }
         generationStopEpoch += 1L
         GenerationStopToken(generationStopEpoch, requestId).also { token ->
             activeGenerationStopTarget = ActiveGenerationStopTarget(token, runner)
@@ -1766,7 +1851,29 @@ class McaInferenceService(
         synchronized(generationStopGate) {
             if (activeGenerationStopTarget?.token == token) {
                 activeGenerationStopTarget = null
+                if (stopRequestedToken == token) stopRequestedToken = null
             }
+        }
+    }
+
+    /**
+     * Records a pending profile disposition while holding the lifecycle lease.
+     * This is intentionally a regular (non-suspend) helper: keeping the
+     * synchronized section out of [streamChat]'s suspend body avoids a Kotlin
+     * compiler coroutine-transformer stack overflow on large builds.
+     */
+    private fun deferPendingAuthorization(
+        lease: EngineLifecycleLease,
+        authorization: LoadAuthorization
+    ) {
+        synchronized(lease) {
+            require(
+                lease.deferredAuthorization == null ||
+                    lease.deferredAuthorization === authorization
+            ) {
+                "lifecycle lease already owns another deferred transaction"
+            }
+            lease.deferredAuthorization = authorization
         }
     }
 
@@ -1800,8 +1907,19 @@ class McaInferenceService(
      * The directory is scoped by the model artifact fingerprint so unrelated
      * models/backends never share compiler output.
      */
-    private fun nativeLoadParamsJson(profile: ModelExecutionProfile): String {
+    private fun nativeLoadParamsJson(
+        profile: ModelExecutionProfile,
+        visionProjectorPath: String? = null
+    ): String {
         val json = JSONObject(parameterCoordinator.nativeLoadJson(profile))
+        // The projector is intentionally hidden from the generation editor and
+        // therefore may be absent from a persisted profile created before a
+        // user bound mmproj. Never let that stale profile drop a valid binding
+        // before the VLM create call.
+        visionProjectorPath
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { json.put("mmproj_path", it) }
         if (profile.runtimeIdentity.runtime != LocalChatRuntime.LITERT_LM) return json.toString()
         val backend = json.optString("backend").trim().lowercase()
         if (backend.isBlank()) return json.toString()
@@ -1840,7 +1958,10 @@ class McaInferenceService(
         activeLoadSession = session.copy(
             runtimeIdentity = profile.runtimeIdentity,
             executionProfile = profile,
-            nativeLoadParamsJson = nativeLoadParamsJson(profile),
+            nativeLoadParamsJson = nativeLoadParamsJson(
+                profile = profile,
+                visionProjectorPath = session.params.visionProjectorPath
+            ),
             params = loadParamsForProfile(session.params, profile)
         )
     }
@@ -1855,7 +1976,10 @@ class McaInferenceService(
             params = loadParamsForProfile(session.params, profile),
             runtimeIdentity = profile.runtimeIdentity,
             executionProfile = profile,
-            nativeLoadParamsJson = nativeLoadParamsJson(profile)
+            nativeLoadParamsJson = nativeLoadParamsJson(
+                profile = profile,
+                visionProjectorPath = session.params.visionProjectorPath
+            )
         )
     }
 
@@ -2052,7 +2176,10 @@ class McaInferenceService(
             // discard any stale pending transaction before publication.
             parameterCoordinator.prepareOrdinaryLoad(target)
         }
-        val nativeLoadJson = nativeLoadParamsJson(target)
+        val nativeLoadJson = nativeLoadParamsJson(
+            profile = target,
+            visionProjectorPath = session.params.visionProjectorPath
+        )
         runCatching { runner.requestStop() }
         runCatching { runner.unloadModel() }
         parameterCoordinator.markUnloaded()
@@ -2187,6 +2314,7 @@ class McaInferenceService(
             maxAllTokens = nativeStats?.optInt("maxAllTokens")?.takeIf { it > 0 } ?: params.nCtx,
             maxNewTokens = nativeStats?.optInt("maxNewTokens")?.takeIf { it > 0 } ?: 0,
             backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: "[]",
+            gpuOffloadSupported = nativeGpuOffloadSupported(nativeStats, RuntimeStats()),
             gpuOffloadActive = gpuEvidence.active,
             gpuOffloadAllocationObserved = gpuEvidence.allocationObserved,
             gpuOffloadExecutionObserved = gpuEvidence.executionObserved,
@@ -2296,6 +2424,12 @@ class McaInferenceService(
             backend = nativeStats?.optString("backend")?.takeIf { it.isNotBlank() } ?: base.backend,
             promptTokens = promptTokens,
             completionTokens = completionTokens,
+            promptTokensEstimated = if ((nativeStats?.optInt("promptTokens") ?: 0) > 0) {
+                nativeStats?.optBoolean("promptTokensEstimated", false) == true
+            } else base.promptTokensEstimated || base.promptTokens <= 0,
+            completionTokensEstimated = if ((nativeStats?.optInt("completionTokens") ?: 0) > 0) {
+                nativeStats?.optBoolean("completionTokensEstimated", false) == true
+            } else base.completionTokensEstimated,
             prefillMs = prefillMs,
             prefillTokens = prefillTokens,
             prefillTps = nativeStats?.optDouble("prefillTps")
@@ -2316,6 +2450,7 @@ class McaInferenceService(
             maxAllTokens = nativeStats?.optInt("maxAllTokens")?.takeIf { it > 0 } ?: base.maxAllTokens,
             maxNewTokens = nativeStats?.optInt("maxNewTokens")?.takeIf { it > 0 } ?: base.maxNewTokens,
             backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: base.backendDevices,
+            gpuOffloadSupported = nativeGpuOffloadSupported(nativeStats, base),
             gpuOffloadActive = gpuEvidence.active,
             gpuOffloadAllocationObserved = gpuEvidence.allocationObserved,
             gpuOffloadExecutionObserved = gpuEvidence.executionObserved,
@@ -2731,6 +2866,7 @@ class McaInferenceService(
         private const val LLAMA_SEQUENCE_STATE_FORMAT = "llama-state-seq-v1"
         private const val MANAGED_PREFIX_COMMIT_FAILED_REASON = "managed_commit_failed"
         private const val PREFILL_PROGRESS_POLL_INTERVAL_MS = 50L
+        private const val STOP_REQUEST_TIMEOUT_MS = 500L
         private const val ISOLATED_WORKER_SESSION_LOST_FIELD = "workerSessionLost"
         private const val CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
         private const val REASONING_INSTRUCTION_ESTIMATE_TOKENS = 96
@@ -2749,4 +2885,16 @@ class McaInferenceService(
         private val VISION_DIAGNOSTIC_TOKEN_PATTERN = Regex("[a-z0-9_.-]{1,64}")
         private val VISION_DIAGNOSTIC_SHA256_PATTERN = Regex("[a-f0-9]{64}")
     }
+}
+
+private fun localVisionUnavailableMessage(runtime: LocalChatRuntime, nativeStatsJson: String): String {
+    val stats = runCatching { JSONObject(nativeStatsJson) }.getOrNull()
+    if (runtime == LocalChatRuntime.LITERT_LM) {
+        return if (stats?.optBoolean("visionModelKnownTextOnly", false) == true) {
+            LITERT_LM_KNOWN_TEXT_ONLY_VISION_UNAVAILABLE_MESSAGE
+        } else {
+            LITERT_LM_VISION_TRANSPORT_UNAVAILABLE_MESSAGE
+        }
+    }
+    return "当前本地模型未启用识图。请加载 MNN 多模态包，或加载本地多模态 GGUF 并绑定匹配 mmproj 后重新加载模型。"
 }

@@ -62,6 +62,28 @@ class LocalImageWorkerWatchdogTest {
     }
 
     @Test
+    fun `automatic mnn backend also receives a deadline because it may fall back to opencl`() {
+        val policy = localImageWorkerWatchdogPolicy(
+            runtime = LocalImageRuntime.MNN_DIFFUSION,
+            family = LocalImageModelFamily.SD15,
+            steps = 4,
+            backendMode = null
+        )
+
+        assertEquals(mnnOpenClWorkerTimeoutMs(4), policy?.timeoutMs)
+        assertEquals(MNN_OPENCL_WORKER_WATCHDOG_TIMEOUT_CODE, policy?.timeoutCode)
+        assertTrue(policy?.runtimeLabel?.contains("automatic") == true)
+        assertNull(
+            localImageWorkerWatchdogPolicy(
+                runtime = LocalImageRuntime.MNN_DIFFUSION,
+                family = LocalImageModelFamily.SD15,
+                steps = 4,
+                backendMode = "cpu"
+            )
+        )
+    }
+
+    @Test
     fun `timeout message preserves last phase and accumulated native stages`() {
         val timeoutMs = sdxlWorkerTimeoutMs(30, true)
         val message = localImageWorkerWatchdogMessage(

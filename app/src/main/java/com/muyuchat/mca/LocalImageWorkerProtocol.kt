@@ -68,12 +68,19 @@ internal object LocalImageWorkerProtocol {
     fun cancelRequest(requestId: String?): String =
         JSONObject()
             .put("version", VERSION)
-            .put("requestId", requestId.orEmpty())
+            .apply { requestId?.let { put("requestId", it) } }
             .toString()
 
-    fun parseCancelRequestId(raw: String): String? =
-        JSONObject(raw).also { it.requireCurrentVersion() }
-            .optString("requestId").takeIf { it.isNotBlank() }
+    /**
+     * Missing requestId is the legacy, explicitly unscoped lifecycle operation. Preserve an
+     * explicitly blank value so the service can reject it instead of treating it as unscoped.
+     */
+    fun parseCancelRequestId(raw: String): String? {
+        val json = JSONObject(raw).also { it.requireCurrentVersion() }
+        if (!json.has("requestId")) return null
+        return json.get("requestId") as? String
+            ?: throw IllegalArgumentException("requestId must be a string when provided.")
+    }
 
     fun generateRequest(
         requestId: String,

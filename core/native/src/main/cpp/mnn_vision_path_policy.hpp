@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,6 +23,72 @@ inline std::string lowerAscii(std::string value) {
         return static_cast<char>(std::tolower(ch));
     });
     return value;
+}
+
+/**
+ * Canonicalizes an image reference for duplicate suppression at the native
+ * multimodal boundary. Android callers normally provide a prepared absolute
+ * file path, but Local API clients may spell the same input as a file URI or
+ * repeat a data/HTTP URL. This helper is lexical and performs no I/O.
+ */
+inline std::string canonicalMnnImageReference(std::string raw) {
+    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front()))) {
+        raw.erase(raw.begin());
+    }
+    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back()))) {
+        raw.pop_back();
+    }
+    if (raw.empty()) return {};
+
+    // URI fragments identify a presentation location, not image bytes. Keep
+    // the scheme separator intact: collapsing every "//" would turn
+    // https://host/image into https:/host/image and could merge distinct
+    // remote references.
+    const auto schemeEnd = raw.find(':');
+    const auto scheme = schemeEnd == std::string::npos
+            ? std::string()
+            : lowerAscii(raw.substr(0, schemeEnd));
+    if (scheme == "data" || scheme == "http" || scheme == "https") {
+        const auto fragment = raw.find('#');
+        if (fragment != std::string::npos) raw.erase(fragment);
+        if (schemeEnd != std::string::npos) raw.replace(0, schemeEnd, scheme);
+        return raw;
+    }
+
+    if (scheme == "file") {
+        // Strip file:// / file: before path normalization. URI decoding is
+        // intentionally left to the Android/JVM side; this function only
+        // needs a stable lexical key at the native boundary.
+        raw.erase(0, schemeEnd + 1);
+        while (raw.rfind("//", 0) == 0) raw.erase(0, 1);
+    }
+
+    std::replace(raw.begin(), raw.end(), '\\', '/');
+    // Normalize repeated separators and '.' path components while retaining
+    // '..' components for the caller's confined-path validation. This makes
+    // /tmp/photo.png, /tmp/./photo.png, and file:///tmp/photo.png share a
+    // key without allowing a lexical escape to be hidden.
+    const bool absolute = !raw.empty() && raw.front() == '/';
+    std::vector<std::string> segments;
+    size_t begin = 0;
+    while (begin <= raw.size()) {
+        const auto end = raw.find('/', begin);
+        const auto segment = raw.substr(
+                begin,
+                end == std::string::npos ? std::string::npos : end - begin);
+        if (!segment.empty() && segment != ".") segments.push_back(segment);
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    std::ostringstream normalized;
+    if (absolute) normalized << '/';
+    for (size_t index = 0; index < segments.size(); ++index) {
+        if (index > 0) normalized << '/';
+        normalized << segments[index];
+    }
+    auto result = normalized.str();
+    if (result.empty() && absolute) result = "/";
+    return result;
 }
 
 inline bool isMnnVisualPathKey(const std::string& rawKey) {

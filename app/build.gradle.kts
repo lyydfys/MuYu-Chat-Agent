@@ -1,5 +1,7 @@
 import java.util.Properties
 import org.gradle.api.tasks.Sync
+import groovy.json.JsonSlurper
+import java.security.MessageDigest
 
 plugins {
     alias(libs.plugins.android.application)
@@ -112,6 +114,85 @@ val syncLiteRtQualcommAssets = tasks.register<Sync>("syncLiteRtQualcommAssets") 
     }
 }
 
+// Qwen-Image-2.1 uses a private MNN SONAME and must be loaded only by its
+// dedicated :qwen_image21 process. Stage these files as assets (not jniLibs),
+// then extract and SHA-verify them in that process before System.load().
+val vendoredQwenImage21RuntimeAssets =
+    rootProject.file("vendor/qwen-image-2.1/arm64-v8a")
+val generatedQwenImage21Assets =
+    layout.buildDirectory.dir("generated/qwen-image-2.1-assets")
+val syncQwenImage21RuntimeAssets = tasks.register<Sync>("syncQwenImage21RuntimeAssets") {
+    from(vendoredQwenImage21RuntimeAssets) {
+        into("qwen-image-2.1/arm64-v8a")
+        include(
+            "runtime-manifest.json",
+            "libc++_shared.so",
+            "libmca_qwenimage21_mnn.so",
+            "libqwenimage21_jni.so"
+        )
+    }
+    into(generatedQwenImage21Assets)
+    doFirst {
+        val expectedFiles = setOf(
+            "runtime-manifest.json",
+            "libc++_shared.so",
+            "libmca_qwenimage21_mnn.so",
+            "libqwenimage21_jni.so"
+        )
+        val actualFiles = vendoredQwenImage21RuntimeAssets.listFiles().orEmpty()
+            .filter { it.isFile }
+            .map { it.name }
+            .toSet()
+        check(actualFiles == expectedFiles) {
+            "Unexpected Qwen-Image-2.1 arm64 runtime asset set: ${actualFiles.sorted()}"
+        }
+    }
+    doLast {
+        val stagedRoot = generatedQwenImage21Assets.get().asFile
+            .resolve("qwen-image-2.1/arm64-v8a")
+        val manifest = stagedRoot.resolve("runtime-manifest.json")
+        check(manifest.isFile && manifest.length() in 1L..16_384L) {
+            "Qwen-Image-2.1 runtime asset manifest is missing or too large."
+        }
+        val parsed = JsonSlurper().parseText(manifest.readText()) as? Map<*, *>
+            ?: error("Qwen-Image-2.1 runtime asset manifest is not a JSON object.")
+        check(parsed["schema"] == "mca.qwen-image-2.1.runtime.v1") {
+            "Unsupported Qwen-Image-2.1 runtime asset schema."
+        }
+        val libraries = parsed["libraries"] as? List<*>
+            ?: error("Qwen-Image-2.1 runtime asset manifest is missing libraries.")
+        val expectedNames = setOf(
+            "libc++_shared.so",
+            "libmca_qwenimage21_mnn.so",
+            "libqwenimage21_jni.so"
+        )
+        check(libraries.size == expectedNames.size) {
+            "Qwen-Image-2.1 runtime asset manifest has the wrong library count."
+        }
+        val seen = mutableSetOf<String>()
+        for (rawEntry in libraries) {
+            val entry = rawEntry as? Map<*, *>
+                ?: error("Qwen-Image-2.1 runtime asset manifest contains an invalid entry.")
+            val name = entry["file"] as? String ?: ""
+            check(name in expectedNames && seen.add(name)) {
+                "Qwen-Image-2.1 runtime asset manifest contains an unexpected/duplicate library: $name"
+            }
+            val file = stagedRoot.resolve(name)
+            val expectedSize = (entry["sizeBytes"] as? Number)?.toLong() ?: -1L
+            check(file.isFile && file.length() == expectedSize) {
+                "Qwen-Image-2.1 runtime asset size does not match its manifest: $name"
+            }
+            val actualSha256 = MessageDigest.getInstance("SHA-256")
+                .digest(file.readBytes())
+                .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+            check(actualSha256 == entry["sha256"]) {
+                "Qwen-Image-2.1 runtime asset SHA-256 does not match its manifest: $name"
+            }
+        }
+        check(seen == expectedNames) { "Qwen-Image-2.1 runtime asset manifest is incomplete." }
+    }
+}
+
 android {
     namespace = "com.muyuchat.mca"
     compileSdk = libs.versions.compileSdk.get().toInt()
@@ -162,6 +243,7 @@ android {
     sourceSets {
         getByName("main") {
             assets.srcDir(generatedLiteRtQualcommAssets)
+            assets.srcDir(generatedQwenImage21Assets)
         }
     }
 
@@ -231,12 +313,14 @@ tasks.configureEach {
 tasks.configureEach {
     if (name.startsWith("merge") && name.endsWith("Assets")) {
         dependsOn(syncLiteRtQualcommAssets)
+        dependsOn(syncQwenImage21RuntimeAssets)
     }
     // Lint model/report tasks also inspect the generated asset source set.
     // Declare the producer dependency explicitly so release validation cannot
     // race asset synchronization.
     if (name.contains("lint", ignoreCase = true)) {
         dependsOn(syncLiteRtQualcommAssets)
+        dependsOn(syncQwenImage21RuntimeAssets)
     }
 }
 

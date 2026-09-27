@@ -60,4 +60,29 @@ class AssistantGenerationParamsTest {
         assertFalse(json.has("advanced_json"))
         assertFalse(json.has("chat_template_mode"))
     }
+
+    @Test
+    fun assistantSamplerAndStopWordPresetValuesRoundTrip() {
+        val source = GenerationParams(
+            topK = 40,
+            minP = 0.05f,
+            repeatPenalty = 1.12f,
+            presencePenalty = 0.1f,
+            frequencyPenalty = 0.2f,
+            stopWords = listOf("<END>", "User:")
+        )
+        val result = assistantGenerationParamsFromJson(
+            source.toAssistantGenerationJson(),
+            GenerationParams(),
+            "keep the current character prompt"
+        )
+
+        assertEquals(40, result.topK)
+        assertEquals(0.05f, result.minP, 0.0001f)
+        assertEquals(1.12f, result.repeatPenalty, 0.0001f)
+        assertEquals(0.1f, result.presencePenalty, 0.0001f)
+        assertEquals(0.2f, result.frequencyPenalty, 0.0001f)
+        assertEquals(listOf("<END>", "User:"), result.stopWords)
+        assertEquals("keep the current character prompt", result.systemPrompt)
+    }
 }

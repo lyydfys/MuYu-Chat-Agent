@@ -1,0 +1,38 @@
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 1a83ac320..4d2cfd092 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -2991,6 +2991,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+             xe_native_sub_group_size = 8;
+         }
+ 
++#if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+         for (auto& it : device->pipeline_xe_fa_decode_dual_phases) {
+             const uint32_t split_p_chunk = 32;
+             auto HdQk = it.first;
+@@ -3011,6 +3012,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+             ggml_vk_create_pipeline(device, pipelines.first, "xe_fa_decode_ph1", fa_decode_ph1_cm1_len, fa_decode_ph1_cm1_data, "main", 5, sizeof(vk_fa_xe_opt_push_constants), { 1, 32, 1 }, { group_sz_ph1, gqa_ratio, head_dim_qk, xe_native_sub_group_size, split_p_chunk, out_per_wg_ph1 }, 1, false, true, xe_native_sub_group_size);
+             ggml_vk_create_pipeline(device, pipelines.second, "xe_fa_decode_ph2", fa_decode_ph2_cm1_len, fa_decode_ph2_cm1_data, "main", 5, sizeof(vk_fa_xe_opt_push_constants), { 1, 1, 1 }, { group_sz_ph2, gqa_ratio, head_dim_pv, out_per_wg_ph2, xe_native_sub_group_size, split_p_per_iter_ph2, split_p_chunk, out_dim_per_wg }, 1, false, true, xe_native_sub_group_size);
+         }
++#endif
+     }
+ 
+     for (auto &it : device->pipeline_fa_mask_opt) {
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index 5b2479da2..81e32b3e8 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -923,8 +923,13 @@ void process_shaders() {
+ 
+     string_to_spv("fa_mask_opt", "flash_attn_mask_opt.comp", {});
+ 
++    // The NDK's glslc may not implement GL_KHR_cooperative_matrix. The
++    // runtime dispatch is compiled out when the compiler cannot produce these
++    // shader variants, so do not try to generate them in that configuration.
++#if defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+     string_to_spv("fa_decode_ph1", "flash_attn_decode_phase_1.comp", {}, true, true, false, false);
+     string_to_spv("fa_decode_ph2", "flash_attn_decode_phase_2.comp", {}, true, true, false, false);
++#endif
+ 
+     string_to_spv("fa_sparse_compact", "flash_attn_sparse_compact.comp", {});
+     string_to_spv("fa_sparse_compact_subgroup", "flash_attn_sparse_compact.comp", {{"USE_SUBGROUPS", "1"}});

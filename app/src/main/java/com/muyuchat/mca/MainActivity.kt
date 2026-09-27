@@ -1,14 +1,26 @@
-﻿package com.muyuchat.mca
+﻿@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
+package com.muyuchat.mca
 
 import android.os.Bundle
+import android.os.SystemClock
+import android.content.Context
+import android.graphics.Rect
+import android.view.inputmethod.InputMethodManager
+import android.view.WindowManager
+import android.view.View
+import android.view.ViewTreeObserver
 import java.io.File
 import androidx.activity.BackEventCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
@@ -20,10 +32,17 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -42,6 +61,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -52,6 +72,7 @@ import com.muyuchat.feature.agent.BenchmarkHistoryItem
 import com.muyuchat.feature.agent.AgentUiState
 import com.muyuchat.feature.agent.TuningTrialItem
 import com.muyuchat.feature.chat.ChatScreen
+import com.muyuchat.feature.chat.InternalBrowserDialog
 import com.muyuchat.feature.chat.AssistantEditorDraft
 import com.muyuchat.feature.chat.AssistantUiItem
 import com.muyuchat.feature.chat.ChatHistoryItem
@@ -71,6 +92,12 @@ import com.muyuchat.feature.chat.ImageTextualInversionUiItem
 import com.muyuchat.feature.chat.ImageUpscalerUiItem
 import com.muyuchat.feature.chat.ImageUpscaleUiJob
 import com.muyuchat.feature.chat.ChatModelChoice
+import com.muyuchat.feature.chat.ChatBackendFamily
+import com.muyuchat.feature.chat.chatBackendFamilyForRuntime
+import com.muyuchat.feature.chat.chatBackendOptionsFor
+import com.muyuchat.feature.chat.npuAvailabilityForChatBackend
+import com.muyuchat.feature.chat.selectedChatBackendId
+import com.muyuchat.feature.chat.withChatBackend
 import com.muyuchat.feature.chat.ChatUiState
 import com.muyuchat.feature.chat.KnowledgeBaseUiItem
 import com.muyuchat.feature.chat.WorldBookImportScope
@@ -96,6 +123,8 @@ import com.muyuchat.core.benchmark.BenchmarkResult
 import com.muyuchat.core.deviceprofile.AccelerationCapabilityStatus
 import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.LlamaAdvancedParams
+import com.muyuchat.core.engine.liteRtVisionInputAvailable
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.telemetry.SocFamily
 import kotlinx.coroutines.launch
@@ -150,13 +179,68 @@ class MainActivity : ComponentActivity() {
     private var pendingVisionProjectorModelId: String? = null
     private var pendingKnowledgeBaseId: String? = null
     private var pendingWorldBookImportScope: WorldBookScope = WorldBookScope.GLOBAL
+    private var pendingModelImportTextOnly: Boolean = false
+    /**
+     * MIUI can dispatch a gesture-back in the small window between hiding the
+     * IME and publishing the next WindowInsets snapshot.  Keep a short-lived
+     * edge-triggered observation so that this first gesture is still consumed
+     * by the keyboard instead of moving the task to the background.
+     */
+    @Volatile
+    private var imeLastVisibleAtMillis: Long = 0L
+    private var imeLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Keep the chat header in the resized viewport while the IME is open.
+        // Some MIUI builds otherwise pan the whole activity upward, which hides
+        // the model selector and makes the top bar impossible to operate.
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        val imeRoot = window.decorView
+        // Capture the platform insets before Compose observes them.  Returning
+        // the original object keeps this listener transparent to Compose.
+        ViewCompat.setOnApplyWindowInsetsListener(imeRoot) { _, insets ->
+            if (insets.isVisible(WindowInsetsCompat.Type.ime())) {
+                imeLastVisibleAtMillis = SystemClock.uptimeMillis()
+            }
+            insets
+        }
+        imeLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+            if (isImeVisibleFromDisplayFrame(imeRoot)) {
+                imeLastVisibleAtMillis = SystemClock.uptimeMillis()
+            }
+        }
+        imeRoot.viewTreeObserver.addOnGlobalLayoutListener(imeLayoutListener)
         onBackPressedDispatcher.addCallback(
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
+                    val root = window.decorView
+                    val imeVisible = ViewCompat.getRootWindowInsets(root)
+                        ?.isVisible(WindowInsetsCompat.Type.ime()) == true
+                    val frameImeVisible = isImeVisibleFromDisplayFrame(root)
+                    val focusedView = currentFocus
+                    val imeManager = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                    val now = SystemClock.uptimeMillis()
+                    val imeRecentlyVisible = now - imeLastVisibleAtMillis in 0L..800L
+                    // MIUI gesture-back can dispatch before the insets tree has
+                    // reported the IME. In that short window the focused
+                    // Compose text field is still active, so use both signals
+                    // before allowing the activity-level back action.
+                    val imeActive = imeVisible || frameImeVisible ||
+                        imeRecentlyVisible ||
+                        (focusedView != null && imeManager?.isActive(focusedView) == true)
+                    if (imeActive) {
+                        ViewCompat.getWindowInsetsController(root)
+                            ?.hide(WindowInsetsCompat.Type.ime())
+                        imeManager?.hideSoftInputFromWindow(
+                            focusedView?.windowToken,
+                            InputMethodManager.HIDE_NOT_ALWAYS
+                        )
+                        focusedView?.clearFocus()
+                        imeLastVisibleAtMillis = 0L
+                        return
+                    }
                     moveTaskToBack(true)
                 }
             }
@@ -164,21 +248,31 @@ class MainActivity : ComponentActivity() {
         pendingWorldBookImportScope = WorldBookScope.fromWireName(
             savedInstanceState?.getString(PENDING_WORLD_BOOK_SCOPE_KEY)
         )
+        pendingModelImportTextOnly = savedInstanceState?.getBoolean("pending_model_import_text_only") ?: false
         val importLauncher = registerForActivityResult(OpenModelDocumentsContract()) { uris ->
-            if (uris.isNotEmpty()) startup.whenReady { it.importModel(uris) }
+            val textOnly = pendingModelImportTextOnly
+            val persistent = persistModelImportAccess(uris)
+            if (uris.isNotEmpty()) startup.whenReady { it.importModel(uris, textOnly, persistent) }
+        }
+        val modelDirectoryLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            val textOnly = pendingModelImportTextOnly
+            if (uri != null) {
+                val persistent = persistModelImportAccess(listOf(uri))
+                startup.whenReady { it.importModelDirectory(uri, textOnly, persistent) }
+            }
         }
         val localImageModelImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) startup.whenReady { it.importLocalImageModel(uri) }
         }
-        val assistantCardImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val assistantCardImportLauncher = registerForActivityResult(OpenAnyDocumentContract()) { uri ->
             if (uri != null) startup.whenReady { it.importAssistantCardFile(uri.toString()) }
         }
-        val worldBookImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val worldBookImportLauncher = registerForActivityResult(OpenAnyDocumentContract()) { uri ->
             val scope = pendingWorldBookImportScope
             pendingWorldBookImportScope = WorldBookScope.GLOBAL
             if (uri != null) startup.whenReady { it.importWorldBookFile(uri.toString(), scope) }
         }
-        val knowledgeDocumentImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val knowledgeDocumentImportLauncher = registerForActivityResult(OpenAnyDocumentContract()) { uri ->
             val knowledgeBaseId = pendingKnowledgeBaseId
             pendingKnowledgeBaseId = null
             if (uri != null && knowledgeBaseId != null) {
@@ -221,8 +315,13 @@ class MainActivity : ComponentActivity() {
                 McaApp(
                     state = state,
                     onTab = viewModel::selectTab,
-                    onImport = {
+                    onImport = { textOnly ->
+                        pendingModelImportTextOnly = textOnly
                         importLauncher.launch(Unit)
+                    },
+                    onImportModelDirectory = { textOnly ->
+                        pendingModelImportTextOnly = textOnly
+                        modelDirectoryLauncher.launch(null)
                     },
                     onImportLocalImageModel = {
                         localImageModelImportLauncher.launch(
@@ -235,9 +334,7 @@ class MainActivity : ComponentActivity() {
                         )
                     },
                     onImportAssistantCardFile = {
-                        assistantCardImportLauncher.launch(
-                            arrayOf("image/png", "application/json", "text/json", "text/plain", "*/*")
-                        )
+                        assistantCardImportLauncher.launch(Unit)
                     },
                     onImportWorldBookFile = { scope ->
                         pendingWorldBookImportScope = when (scope) {
@@ -245,15 +342,11 @@ class MainActivity : ComponentActivity() {
                             WorldBookImportScope.ASSISTANT -> WorldBookScope.ASSISTANT
                             WorldBookImportScope.CHAT -> WorldBookScope.CHAT
                         }
-                        worldBookImportLauncher.launch(
-                            arrayOf("application/json", "text/json", "text/plain", "*/*")
-                        )
+                        worldBookImportLauncher.launch(Unit)
                     },
                     onImportKnowledgeDocument = { knowledgeBaseId ->
                         pendingKnowledgeBaseId = knowledgeBaseId
-                        knowledgeDocumentImportLauncher.launch(
-                            arrayOf("text/*", "application/json", "application/xml", "*/*")
-                        )
+                        knowledgeDocumentImportLauncher.launch(Unit)
                     },
                     onAttachVisionProjector = { modelId ->
                         pendingVisionProjectorModelId = modelId
@@ -277,9 +370,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onDestroy() {
+        val root = window.decorView
+        ViewCompat.setOnApplyWindowInsetsListener(root, null)
+        imeLayoutListener?.let { listener ->
+            if (root.viewTreeObserver.isAlive) {
+                root.viewTreeObserver.removeOnGlobalLayoutListener(listener)
+            }
+        }
+        imeLayoutListener = null
+        super.onDestroy()
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString(PENDING_WORLD_BOOK_SCOPE_KEY, pendingWorldBookImportScope.wireName)
+        outState.putBoolean("pending_model_import_text_only", pendingModelImportTextOnly)
         super.onSaveInstanceState(outState)
+    }
+
+    private fun persistModelImportAccess(uris: List<android.net.Uri>): Boolean {
+        // Some document providers grant only temporary access; import still works while it is valid.
+        return uris.map { uri ->
+            runCatching {
+                contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                true
+            }.getOrDefault(false)
+        }.all { it }
     }
 
 }
@@ -287,7 +403,8 @@ class MainActivity : ComponentActivity() {
 private fun McaApp(
     state: MainUiState,
     onTab: (AppTab) -> Unit,
-    onImport: () -> Unit,
+    onImport: (Boolean) -> Unit,
+    onImportModelDirectory: (Boolean) -> Unit,
     onImportLocalImageModel: () -> Unit,
     onImportAssistantCardFile: () -> Unit,
     onImportWorldBookFile: (WorldBookImportScope) -> Unit,
@@ -297,7 +414,36 @@ private fun McaApp(
     onExportChatSession: (String) -> Unit,
     viewModel: MainViewModel
 ) {
+    var modelImportDialogOpen by rememberSaveable { mutableStateOf(false) }
+    var modelImportTextOnly by rememberSaveable { mutableStateOf(false) }
+    val requestModelImport = { modelImportDialogOpen = true }
+    if (modelImportDialogOpen) {
+        AlertDialog(
+            onDismissRequest = { modelImportDialogOpen = false },
+            title = { Text("导入本地聊天模型") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text("MNN 建议选择完整模型目录或 ZIP，以保留子目录、分词器和权重。GGUF、LiteRT-LM 可直接选择模型文件。导入进度在本地模型页查看。")
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        Checkbox(checked = modelImportTextOnly, onCheckedChange = { modelImportTextOnly = it })
+                        Text("仅导入 MNN 聊天组件（不启用视觉、音频）")
+                    }
+                    Text("默认完整导入。纯聊天模式需要完整的聊天权重和分词器，不会补齐缺失文件。")
+                    TextButton(onClick = {
+                        modelImportDialogOpen = false
+                        onImportModelDirectory(modelImportTextOnly)
+                    }) { Text("选择模型目录") }
+                    TextButton(onClick = {
+                        modelImportDialogOpen = false
+                        onImport(modelImportTextOnly)
+                    }) { Text("选择文件 / ZIP") }
+                }
+            },
+            confirmButton = { TextButton(onClick = { modelImportDialogOpen = false }) { Text("取消") } }
+        )
+    }
     var appMenuOpen by rememberSaveable { mutableStateOf(false) }
+    var internalBrowserUrl by rememberSaveable { mutableStateOf<String?>(null) }
     var startModelsInRecommended by rememberSaveable { mutableStateOf(false) }
     var startSettingsInWebSearch by rememberSaveable { mutableStateOf(false) }
     var dismissedUpdateVersion by rememberSaveable { mutableStateOf<String?>(null) }
@@ -380,9 +526,27 @@ private fun McaApp(
             .fillMaxSize()
 
         Box(modifier = modifier) {
+            val assistantImageToolPermission = remember(
+                state.activeChatSessionId,
+                state.selectedChatBackend,
+                state.selectedCloudChatModelId,
+                state.selectedImageBackend,
+                state.selectedLocalImageModelId,
+                state.selectedCloudImageModelId,
+                state.cloudModels,
+                state.localImageModels,
+                state.statusMessage
+            ) {
+                viewModel.chatImageToolPermissionUiState()
+            }
             ChatScreen(
                 state = ChatUiState(
                     modelLoadMessage = state.modelLoadStage.takeIf { state.busy && state.engineLifecycle == com.muyuchat.feature.agent.AgentEngineLifecycle.LOADING },
+                    modelReadinessLabel = if (state.selectedChatBackend == ChatBackend.CLOUD) {
+                        null
+                    } else {
+                        state.localChatReadinessLabel()
+                    },
                     messages = state.messages,
                     history = state.chatSessions.map { session ->
                         ChatHistoryItem(
@@ -421,13 +585,75 @@ private fun McaApp(
                                         .thenByDescending { it.lastLoadedAt ?: it.createdAt }
                                 )
                                 .map { model ->
+                                    val backendFamily = chatBackendFamilyForRuntime(model.runtime.storageValue)
+                                    val modelIsLoaded = state.isLocalChatModelLoaded(model.id)
+                                    val acceleration = state.deviceProfile?.accelerationProfile
+                                    val npuAvailable: Boolean? = when (backendFamily) {
+                                        // LiteRT Qualcomm assets are staged on
+                                        // first NPU load, so the generic QNN
+                                        // inspector may still be looking at
+                                        // GenieX's APK runtime here.  Treat an
+                                        // exact packaged V73/V75/V79/V81
+                                        // transport as actionable and let the
+                                        // LiteRT native load perform the final
+                                        // graph compatibility check.
+                                        ChatBackendFamily.LITERT_LM,
+                                        ChatBackendFamily.QAIRT -> npuAvailabilityForChatBackend(
+                                            family = backendFamily,
+                                            chipsetCode = acceleration?.chipsetCode,
+                                            qnnRuntimeUsableForSmoke = acceleration?.qnnRuntime?.usableForSmoke,
+                                            packagedLiteRtTransportAvailable =
+                                                backendFamily == ChatBackendFamily.LITERT_LM &&
+                                                    LiteRtQualcommRuntimeStager.variantForSocModel(
+                                                        acceleration?.chipsetCode
+                                                    ) != null
+                                        )
+                                        else -> null
+                                    }
+                                    val backendOptions = chatBackendOptionsFor(
+                                        family = backendFamily,
+                                        npuAvailable = npuAvailable,
+                                        gpuAvailable = if (
+                                            backendFamily == ChatBackendFamily.LLAMA_CPP && modelIsLoaded
+                                        ) {
+                                            state.stats.gpuOffloadSupported
+                                        } else {
+                                            null
+                                        }
+                                    )
+                                    val selectedBackend = selectedChatBackendId(
+                                        family = backendFamily,
+                                        params = if (modelIsLoaded) {
+                                            state.params
+                                        } else {
+                                            viewModel.generationParamsForChatModel(model.id)
+                                        },
+                                        stats = if (model.id == state.loadedModelId) state.stats else com.muyuchat.core.engine.RuntimeStats()
+                                    )
+                                    val customGpuLayers = if (backendFamily == ChatBackendFamily.LLAMA_CPP) {
+                                        LlamaAdvancedParams.parse(
+                                            if (modelIsLoaded) state.params.advancedJson
+                                            else viewModel.generationParamsForChatModel(model.id).advancedJson
+                                        ).params?.nGpuLayers?.takeIf { it >= 0 }
+                                    } else {
+                                        null
+                                    }
                                     ChatModelChoice(
                                         id = model.id,
                                         displayName = model.displayName,
                                         quant = model.quant,
                                         sizeBytes = model.sizeBytes,
-                                        loaded = state.selectedChatBackend == ChatBackend.LOCAL && model.id == state.loadedModelId,
-                                        subtitle = model.runtime.label
+                                        loaded = modelIsLoaded,
+                                        subtitle = listOfNotNull(
+                                            model.runtime.label,
+                                            state.localChatReadinessLabel().takeIf {
+                                                state.selectedChatBackend == ChatBackend.LOCAL &&
+                                                    model.id == state.loadedModelId
+                                            }
+                                        ).joinToString(" · "),
+                                        backendOptions = backendOptions,
+                                        selectedBackendId = selectedBackend,
+                                        customGpuLayers = customGpuLayers
                                     )
                                 }
                         )
@@ -544,7 +770,13 @@ private fun McaApp(
                             webSearchEnabled = assistant.webSearchEnabled,
                             fileContextEnabled = assistant.fileContextEnabled,
                             selected = assistant.id == state.selectedAssistantId,
-                            exportJson = assistant.characterCardJson ?: assistant.toJson().toString(2)
+                            exportJson = assistant.characterCardJson ?: assistant.toJson().toString(2),
+                            topK = assistantParams.topK,
+                            minP = assistantParams.minP,
+                            repeatPenalty = assistantParams.repeatPenalty,
+                            presencePenalty = assistantParams.presencePenalty,
+                            frequencyPenalty = assistantParams.frequencyPenalty,
+                            stopWords = assistantParams.stopWords
                         )
                     },
                     worldBooks = state.worldBooks
@@ -745,7 +977,10 @@ private fun McaApp(
                             modelId = job.modelId,
                             modelName = job.modelName,
                             modelIsCloud = job.backend == ImageBackend.CLOUD,
+                            chatSessionId = job.spec?.chatSessionId,
+                            chatMessageId = job.spec?.chatMessageId,
                             imageAssetId = job.imageAssetId,
+                            imageAssetIds = job.imageAssetIds,
                             previewUriString = job.previewUriString,
                             previewMode = job.previewMode,
                             previewStep = job.previewStep,
@@ -766,6 +1001,8 @@ private fun McaApp(
                     generationPersistProgress = state.generationPersistProgress,
                     generationStats = state.generationStats,
                     promptContextUsage = state.promptContextUsage,
+                    contextCompressionThresholdPercent = state.contextCompressionThresholdPercent,
+                    contextCompressionPending = state.contextCompressionPending,
                     selectedModelId = if (state.selectedChatBackend == ChatBackend.CLOUD) {
                         state.selectedCloudChatModelId?.let { MainViewModel.CLOUD_MODEL_CHOICE_PREFIX + it }
                     } else {
@@ -793,9 +1030,14 @@ private fun McaApp(
                         state.localImageModels.firstOrNull { it.id == state.selectedLocalImageModelId }?.displayName
                     },
                     selectedImageModelIsCloud = state.selectedImageBackend == ImageBackend.CLOUD,
+                    assistantImageToolAvailable = assistantImageToolPermission.available,
+                    assistantImageToolUnavailableReason = assistantImageToolPermission.unavailableReason,
+                    assistantImageToolAutoApproval = assistantImageToolPermission.autoApproval,
+                    assistantImageToolCanChange = assistantImageToolPermission.canChange,
                     stats = state.stats,
                     apiEnabled = state.apiEnabled,
                     restEnabled = state.restEnabled,
+                    generationParams = state.params,
                     reasoningMode = state.params.reasoningMode,
                     webSearchEnabled = state.webSearchConfig.enabled,
                     webSearchConfigured = state.webSearchConfig.realSearchConfigured,
@@ -840,6 +1082,12 @@ private fun McaApp(
                 onInputChange = viewModel::onInputChange,
                 onDismissStatusMessage = viewModel::clearStatusMessage,
                 onSend = viewModel::sendMessage,
+                onSendImagePrompt = viewModel::sendChatImagePrompt,
+                onSetAssistantImageToolAutoApproval = viewModel::setAssistantImageToolAutoApproval,
+                onApproveChatImageRequest = viewModel::approveChatImageRequest,
+                onRejectChatImageRequest = viewModel::rejectChatImageRequest,
+                onCancelChatImageGeneration = viewModel::cancelChatImageGeneration,
+                onContinueAssistantImageTurn = viewModel::continueAssistantImageTurn,
                 onStop = viewModel::stopGeneration,
                 onNewConversation = viewModel::newChat,
                 onSelectConversation = viewModel::selectChatSession,
@@ -925,11 +1173,16 @@ private fun McaApp(
                 },
                 onMeasureImagePromptTokens = viewModel::measureImagePromptTokens,
                 onRetryImageGeneration = viewModel::retryImageGeneration,
+                onRetryChatImageRequest = viewModel::retryChatImageGeneration,
                 onRecreateImageAsset = viewModel::recreateImageAsset,
                 onCancelImageGeneration = viewModel::cancelImageGeneration,
                 releaseGenerationImageGrantsIfCoordinatorIdle =
                     viewModel::releaseGenerationImageGrantsIfCoordinatorIdle,
                 onSelectImageModel = viewModel::selectImageGenerationModel,
+                onModelBackendChange = { modelId, backendId ->
+                    viewModel.updateModelBackendPreference(modelId, backendId)
+                },
+                onGenerationParamsChange = viewModel::updateParams,
                 onReasoningModeChange = viewModel::updateReasoningMode,
                 onCloudReasoningModeLocked = viewModel::showCloudReasoningModeLocked,
                 onToggleWebSearchForTurn = viewModel::toggleWebSearchForNextTurn,
@@ -941,13 +1194,15 @@ private fun McaApp(
                     startModelsInRecommended = true
                     onTab(AppTab.MODELS)
                 },
-                onImportChatModel = onImport,
+                onImportChatModel = requestModelImport,
                 onImportImageModel = onImportLocalImageModel,
                 onOpenApi = { onTab(AppTab.API) },
                 onOpenSettings = {
                     startSettingsInWebSearch = false
                     onTab(AppTab.SETTINGS)
                 },
+                onRequestContextCompression = viewModel::requestContextCompression,
+                onSetContextCompressionThreshold = viewModel::setContextCompressionThreshold,
                 onOpenWebSearchSettings = {
                     startSettingsInWebSearch = true
                     onTab(AppTab.SETTINGS)
@@ -964,6 +1219,12 @@ private fun McaApp(
                         temperature = draft.temperature,
                         topP = draft.topP,
                         nPredict = draft.nPredict,
+                        topK = draft.topK,
+                        minP = draft.minP,
+                        repeatPenalty = draft.repeatPenalty,
+                        presencePenalty = draft.presencePenalty,
+                        frequencyPenalty = draft.frequencyPenalty,
+                        stopWords = draft.stopWords,
                         reasoningMode = draft.reasoningMode,
                         memoryEnabled = draft.memoryEnabled,
                         webSearchEnabled = draft.webSearchEnabled,
@@ -983,6 +1244,19 @@ private fun McaApp(
                 appMenuOpen = appMenuOpen,
                 onAppMenuOpenChange = { appMenuOpen = it },
                 modifier = Modifier.fillMaxSize()
+            )
+
+            // Keep the status indicator compact and out of the app drawer. It samples only
+            // while a model/image job is active; the composable also pauses when the activity
+            // is backgrounded via repeatOnLifecycle.  It is positioned below the chat header
+            // so the overlay cannot intercept the model selector or send controls.
+            SystemLoadCompactCard(
+                visible = state.tab == AppTab.CHAT && !appMenuOpen &&
+                    (state.busy || state.isGenerating || state.imageJobs.any { !it.status.terminal }),
+                nativeStatsJson = state.nativeStatsJson,
+                modifier = Modifier
+                    .align(androidx.compose.ui.Alignment.TopCenter)
+                    .padding(top = 158.dp, start = 12.dp, end = 12.dp)
             )
 
             SwipeBackPage(
@@ -1078,7 +1352,14 @@ private fun McaApp(
                     mnnRuntimeAvailable = state.mnnRuntimeAvailable,
                     localImageModels = state.localImageModels.map { model ->
                         val prepared = preparedImageUi[model.path]
-                        val readiness = if (prepared == null) "正在后台读取模型配置…" else prepared.readiness
+                        // Keep the user-facing loading message separate from
+                        // the nullable readiness result.  The previous code
+                        // replaced null with a non-null message and then used
+                        // that value as `readyForGeneration`, making every
+                        // image model appear unready even after preparation
+                        // succeeded.
+                        val readinessMessage = prepared?.readiness ?: "正在后台读取模型配置…"
+                        val readyForGeneration = prepared != null && prepared.readiness == null
                         val recommendationId = model.recommendationId ?: model.bundleRoot
                             ?.let { root -> runCatching { localImageBundleManifestFromRoot(File(root)) }.getOrNull()?.recommendationId }
                         LocalImageModelUiItem(
@@ -1091,8 +1372,8 @@ private fun McaApp(
                             sizeBytes = model.sizeBytes,
                             imageSize = model.imageSize,
                             componentCount = model.componentCount,
-                            readyForGeneration = readiness == null,
-                            readinessMessage = readiness,
+                            readyForGeneration = readyForGeneration,
+                            readinessMessage = readinessMessage,
                             readinessLabel = prepared?.label ?: "正在检查",
                             selected = state.selectedImageBackend == ImageBackend.LOCAL && model.id == state.selectedLocalImageModelId,
                             recommendationId = recommendationId,
@@ -1117,12 +1398,14 @@ private fun McaApp(
                     downloadIntegrityMessage = state.downloadIntegrityMessage,
                     downloadExecutionStatus = state.downloadExecutionStatus,
                     downloadExecutionMessage = state.downloadExecutionMessage,
+                    importTasks = state.importTasks,
                     deviceTotalRamBytes = state.deviceProfile?.displayTotalRamBytes ?: 0L,
                     deviceAvailableRamBytes = state.deviceProfile?.availableRamBytes ?: 0L,
                     deviceAccelerationSummary = state.deviceProfile?.deviceAccelerationSummary().orEmpty(),
                     deviceImagePolicy = state.deviceProfile?.deviceImagePolicy().orEmpty(),
                     deviceImageTier = state.deviceProfile?.deviceImageTierKey().orEmpty(),
                     deviceChipsetCode = state.deviceProfile?.accelerationProfile?.chipsetCode.orEmpty(),
+                    deviceSupportedAbis = state.deviceProfile?.supportedAbis.orEmpty(),
                     deviceIsSnapdragon = state.deviceProfile?.socFamily == SocFamily.Snapdragon,
                     qairtVerifiedLocalModelIds = state.qairtVerifiedLocalModelIds,
                     qairtVerifiedRecommendationIds = state.qairtVerifiedRecommendationIds,
@@ -1136,6 +1419,8 @@ private fun McaApp(
                         apiKey = state.cloudApiConfig.apiKey,
                         chatModel = state.cloudApiConfig.chatModel,
                         supportsVision = state.cloudApiConfig.supportsVision,
+                        supportsTools = state.cloudApiConfig.supportsTools,
+                        responsesReasoningEnabled = state.cloudApiConfig.responsesReasoningEnabled,
                         imageApiFormat = state.cloudApiConfig.imageApiFormat.name,
                         availableImageFormats = cloudImageApiFormats().map { it.name to it.label },
                         imageModel = state.cloudApiConfig.imageModel,
@@ -1154,6 +1439,7 @@ private fun McaApp(
                                 modelName = model.modelName,
                                 baseUrl = model.baseUrl,
                                 supportsVision = model.supportsVision,
+                                supportsTools = model.supportsTools,
                                 imageSize = if (model.kind == CloudModelKind.IMAGE) model.imageSize else "",
                                 selected = when (model.kind) {
                                     CloudModelKind.CHAT -> state.selectedChatBackend == ChatBackend.CLOUD && model.id == state.selectedCloudChatModelId
@@ -1172,7 +1458,7 @@ private fun McaApp(
                         state.modelLoadStage ?: state.statusMessage
                     } else state.statusMessage
                 ),
-                onImportClick = onImport,
+                onImportClick = requestModelImport,
                 onRepoInputChange = viewModel::onRepoInputChange,
                 onFetchRemoteFiles = viewModel::fetchRemoteFiles,
                 onHubQueryChange = viewModel::onHubQueryChange,
@@ -1204,6 +1490,8 @@ private fun McaApp(
                 onCloudApiKeyChange = viewModel::updateCloudApiKey,
                 onCloudChatModelChange = viewModel::updateCloudChatModel,
                 onCloudSupportsVisionChange = viewModel::updateCloudSupportsVision,
+                onCloudSupportsToolsChange = viewModel::updateCloudSupportsTools,
+                onCloudResponsesReasoningChange = viewModel::updateCloudResponsesReasoning,
                 onCloudImageFormatChange = viewModel::updateCloudImageApiFormat,
                 onCloudImageModelChange = viewModel::updateCloudImageModel,
                 onCloudImageSizeChange = viewModel::updateCloudImageSize,
@@ -1217,6 +1505,9 @@ private fun McaApp(
                 onDeleteCloudModel = viewModel::deleteCloudModel,
                 onRefreshLocal = viewModel::refreshLocalModels,
                 onPauseDownloads = viewModel::pauseManagedDownloads,
+                onResumeDownloads = viewModel::resumeManagedDownloads,
+                onPauseImport = viewModel::pauseManagedImport,
+                onResumeImport = viewModel::resumeManagedImport,
                 onBack = closePage,
                 modifier = pageModifier
             )
@@ -1312,13 +1603,102 @@ private fun McaApp(
                 onInstallUpdate = viewModel::installAppUpdate,
                 onOpenRelease = viewModel::openAppUpdateRelease,
                 onAutoCheckChanged = viewModel::setAppUpdateAutoCheckEnabled,
+                onOpenWebPage = { url -> internalBrowserUrl = url },
                 onBack = closePage,
                 startInWebSearch = startSettingsInWebSearch,
                 modifier = pageModifier
             )
             }
+
+            internalBrowserUrl?.let { url ->
+                InternalBrowserDialog(
+                    initialUrl = url,
+                    onDismiss = { internalBrowserUrl = null }
+                )
+            }
         }
     }
+
+    // Register this handler after the page handlers above so a system gesture
+    // is consumed by the IME first.  MIUI can dispatch the gesture before its
+    // WindowInsets tree reports the keyboard, so this also samples the
+    // visible display frame and InputMethodManager state.
+    ConsumeImeBackHandler()
+}
+
+internal fun shouldConsumeImeBack(
+    composeImeVisible: Boolean,
+    layoutImeVisible: Boolean,
+    inputMethodActive: Boolean,
+    imeVisibleRecently: Boolean = false
+): Boolean = composeImeVisible || layoutImeVisible || inputMethodActive || imeVisibleRecently
+
+@Composable
+private fun ConsumeImeBackHandler() {
+    val hostView = LocalView.current
+    val rootView = hostView.rootView
+    val context = hostView.context
+    val imeManager = remember(context) {
+        context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+    }
+    var layoutImeVisible by remember { mutableStateOf(false) }
+    var imeLastVisibleAtMillis by remember { mutableStateOf(0L) }
+
+    // The visible display frame remains a useful fallback on MIUI builds that
+    // update the InsetsCompat tree after the back gesture has already fired.
+    LaunchedEffect(rootView) {
+        // Trigger an initial sample after the first composition.  Subsequent
+        // samples come from the global-layout listener below.
+        layoutImeVisible = isImeVisibleFromDisplayFrame(rootView)
+    }
+    androidx.compose.runtime.DisposableEffect(rootView) {
+        val observer = rootView.viewTreeObserver
+        val listener = ViewTreeObserver.OnGlobalLayoutListener {
+            val visible = isImeVisibleFromDisplayFrame(rootView)
+            layoutImeVisible = visible
+            if (visible) imeLastVisibleAtMillis = SystemClock.uptimeMillis()
+        }
+        observer.addOnGlobalLayoutListener(listener)
+        onDispose {
+            if (observer.isAlive) observer.removeOnGlobalLayoutListener(listener)
+        }
+    }
+
+    val focusedView = rootView.findFocus()
+    val inputMethodActive = focusedView != null && imeManager?.isActive(focusedView) == true
+    val composeImeVisible = WindowInsets.isImeVisible
+    val compatImeVisible = androidx.core.view.ViewCompat.getRootWindowInsets(rootView)
+        ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
+    val imeVisibleRecently = imeLastVisibleAtMillis > 0L &&
+        (SystemClock.uptimeMillis() - imeLastVisibleAtMillis) in 0L..800L
+    val consumeBack = shouldConsumeImeBack(
+        composeImeVisible = composeImeVisible || compatImeVisible,
+        layoutImeVisible = layoutImeVisible,
+        inputMethodActive = inputMethodActive,
+        imeVisibleRecently = imeVisibleRecently
+    )
+
+    BackHandler(enabled = consumeBack) {
+        val currentFocus = rootView.findFocus() ?: hostView
+        androidx.core.view.ViewCompat.getWindowInsetsController(rootView)
+            ?.hide(androidx.core.view.WindowInsetsCompat.Type.ime())
+        imeManager?.hideSoftInputFromWindow(
+            currentFocus.windowToken ?: hostView.windowToken,
+            InputMethodManager.HIDE_NOT_ALWAYS
+        )
+        currentFocus.clearFocus()
+        layoutImeVisible = false
+        imeLastVisibleAtMillis = 0L
+    }
+}
+
+private fun isImeVisibleFromDisplayFrame(rootView: View): Boolean {
+    if (!rootView.isAttachedToWindow || rootView.height <= 0) return false
+    val frame = Rect()
+    rootView.getWindowVisibleDisplayFrame(frame)
+    val density = rootView.resources.displayMetrics.density.coerceAtLeast(1f)
+    val keyboardThreshold = (160f * density).toInt()
+    return rootView.height - frame.bottom > keyboardThreshold
 }
 
 @Composable
@@ -1665,37 +2045,45 @@ private fun DeviceProfile.deviceAccelerationSummary(): String {
 private fun DeviceProfile.deviceImagePolicy(): String {
     val acceleration = accelerationProfile
     val image = acceleration.localImage
-    val runtimeText = when (image.status) {
-        AccelerationCapabilityStatus.EXPERIMENTAL_READY ->
-            "QNN 生图入口已开放；1-step graph smoke 用于报告真实运行结果。"
-        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_MISSING ->
-            "QNN 生图入口保持可见；加载完整 QNN/QAIRT runtime 与模型包后可直接尝试。"
-        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED ->
-            "已找到 QNN runtime 文件；可直接尝试，原生加载与 graph smoke 结果会如实显示。"
-        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_LOAD_FAILED ->
-            "QNN runtime 原生加载探测失败；入口不封禁，修复包后可再次直接尝试。"
-        AccelerationCapabilityStatus.DEVICE_CAPABLE_HTP_TRANSPORT_BLOCKED ->
-            "设备通信依赖当前受限；QNN 生图入口保持可见并报告真实 graph 执行结果。"
-        AccelerationCapabilityStatus.READY ->
-            "当前稳定路径为 stable-diffusion.cpp / MNN CPU，NPU 生图不会被宣传为已启用。"
-        AccelerationCapabilityStatus.UNSUPPORTED ->
-            "未识别到已知 QNN 能力档案；入口仍开放，默认也保留 CPU 兼容生图。"
+    val runtimeText = when {
+        acceleration.qnnRuntime.ready && !acceleration.qnnRuntime.exactArchMatch ->
+            "已发现 HTP V${acceleration.qnnRuntime.htpArchVersion} runtime，但设备需要 HTP V${acceleration.qnnRuntime.preferredHtpArchVersion}；不会把它标记为可用 NPU。"
+        else -> when (image.status) {
+            AccelerationCapabilityStatus.EXPERIMENTAL_READY ->
+                "QNN 生图运行包已就绪；是否成功以当前模型的实际执行结果为准。"
+            AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_MISSING ->
+                "QNN 生图需要匹配的 runtime 与模型文件；下载后可直接加载验证。"
+            AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED ->
+                "已找到 QNN runtime 文件；可直接尝试，原生加载与 graph smoke 结果会如实显示。"
+            AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_LOAD_FAILED ->
+                "QNN runtime 原生加载探测失败；入口不封禁，修复包后可再次直接尝试。"
+            AccelerationCapabilityStatus.DEVICE_CAPABLE_HTP_TRANSPORT_BLOCKED ->
+                "设备通信依赖当前受限；QNN 生图入口保持可见并报告真实 graph 执行结果。"
+            AccelerationCapabilityStatus.READY ->
+                "当前稳定路径为 stable-diffusion.cpp / MNN CPU，NPU 生图不会被宣传为已启用。"
+            AccelerationCapabilityStatus.UNSUPPORTED ->
+                "未识别到已知 QNN 能力档案；入口仍开放，默认也保留 CPU 兼容生图。"
+        }
     }
-    val visionText = when (acceleration.localVision.status) {
-        AccelerationCapabilityStatus.EXPERIMENTAL_READY ->
-            "本地识图可尝试 LiteRT-LM / QNN NPU 包。"
-        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_MISSING ->
-            "本地视觉 NPU 仍属 LiteRT-LM / QNN 实验路线，当前等待 runtime 和模型包。"
-        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED ->
-            "本地识图已找到 QNN runtime 文件；入口开放并以真实 NPU smoke 为准。"
-        AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_LOAD_FAILED ->
-            "本地识图 QNN runtime 原生加载探测失败；入口不封禁，可在修复包后重试。"
-        AccelerationCapabilityStatus.DEVICE_CAPABLE_HTP_TRANSPORT_BLOCKED ->
-            "本地识图设备通信依赖受限；入口保持开放并报告真实 NPU 执行结果。"
-        AccelerationCapabilityStatus.READY ->
-            "本地识图使用 GGUF mmproj / MNN 兼容路径。"
-        AccelerationCapabilityStatus.UNSUPPORTED ->
-            "未识别到已知 NPU 档案；本地识图入口仍开放。"
+    val visionText = when {
+        acceleration.qnnRuntime.ready && !acceleration.qnnRuntime.exactArchMatch ->
+            "识别到的 QNN HTP V${acceleration.qnnRuntime.htpArchVersion} 与设备要求的 HTP V${acceleration.qnnRuntime.preferredHtpArchVersion} 不匹配；请安装对应 runtime。"
+        else -> when (acceleration.localVision.status) {
+            AccelerationCapabilityStatus.EXPERIMENTAL_READY ->
+                "本地识图可使用 LiteRT-LM / QNN NPU 包；结果以实际模型执行为准。"
+            AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_MISSING ->
+                "本地识图需要匹配的 LiteRT-LM / QNN runtime 和模型文件；下载后可直接加载验证。"
+            AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED ->
+                "本地识图已找到 QNN runtime 文件；入口开放并以真实 NPU smoke 为准。"
+            AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_LOAD_FAILED ->
+                "本地识图 QNN runtime 原生加载探测失败；入口不封禁，可在修复包后重试。"
+            AccelerationCapabilityStatus.DEVICE_CAPABLE_HTP_TRANSPORT_BLOCKED ->
+                "本地识图设备通信依赖受限；入口保持开放并报告真实 NPU 执行结果。"
+            AccelerationCapabilityStatus.READY ->
+                "本地识图使用 GGUF mmproj / MNN 兼容路径。"
+            AccelerationCapabilityStatus.UNSUPPORTED ->
+                "未识别到已知 NPU 档案；本地识图入口仍开放。"
+        }
     }
     return "$visionText $runtimeText"
 }
@@ -1716,6 +2104,14 @@ private data class VisionCapabilityUi(
     val detail: String,
     val ready: Boolean
 )
+
+/** Keep LiteRT's chat affordance in lockstep with the actual image-send gate. */
+internal fun liteRtVisionInputReadyForUi(nativeStats: org.json.JSONObject?): Boolean =
+    nativeStats?.let { liteRtVisionInputAvailable(it.toString()) } == true
+
+internal fun liteRtVisionVerifiedReadyForUi(nativeStats: org.json.JSONObject?): Boolean =
+    liteRtVisionInputReadyForUi(nativeStats) &&
+        nativeStats?.optBoolean("visionReady", false) == true
 
 private fun MainUiState.chatVisionCapability(): VisionCapabilityUi {
     if (selectedChatBackend == ChatBackend.CLOUD) {
@@ -1746,16 +2142,31 @@ private fun MainUiState.chatVisionCapability(): VisionCapabilityUi {
     }
 
     val loadedModel = models.firstOrNull { it.id == loadedModelId }
-    val nativeVisionReady = runCatching {
-        org.json.JSONObject(nativeStatsJson).optBoolean("visionReady", false)
-    }.getOrDefault(false)
+    val nativeStats = runCatching { org.json.JSONObject(nativeStatsJson) }.getOrNull()
+    val nativeVisionReady = nativeStats?.optBoolean("visionReady", false) == true
+    // Use the same admission predicate as the actual send path. Transport
+    // readiness alone only proves that the SDK can serialize ImageFile; a
+    // LiteRT package whose metadata explicitly says it has no visual encoder
+    // must not appear ready in the chat UI.
+    val liteRtImageTransportReady = liteRtVisionInputReadyForUi(nativeStats)
+    val visionReadyForUi = if (loadedModel?.runtime == ChatModelRuntime.LITERT_LM) {
+        liteRtVisionVerifiedReadyForUi(nativeStats)
+    } else {
+        nativeVisionReady
+    }
+    val liteRtKnownTextOnly = nativeStats?.optBoolean("visionModelKnownTextOnly", false) == true
     return when {
         loadedModel == null -> VisionCapabilityUi(
             label = "未加载本地模型",
             detail = "请加载 MNN 多模态包，或加载多模态 GGUF 并绑定匹配 mmproj。",
             ready = false
         )
-        loadedModel.acceptsImageInput(nativeVisionReady) -> VisionCapabilityUi(
+        loadedModel.runtime == ChatModelRuntime.LITERT_LM && liteRtKnownTextOnly -> VisionCapabilityUi(
+            label = "当前模型不支持识图",
+            detail = "这是纯文本 LiteRT-LM 包，不含图像视觉权重。请更换视觉版模型，或改用完整 MNN/GGUF 多模态模型。",
+            ready = false
+        )
+        loadedModel.acceptsImageInput(visionReadyForUi) -> VisionCapabilityUi(
             label = "本地识图已就绪",
             detail = if (loadedModel.runtime == ChatModelRuntime.MNN) {
                 "MNN 视觉组件已加载；所有兼容 ARM64 机型默认开放图片输入。"
@@ -1763,6 +2174,16 @@ private fun MainUiState.chatVisionCapability(): VisionCapabilityUi {
                 "当前本地模型已启用视觉模块。"
             },
             ready = true
+        )
+        loadedModel.runtime == ChatModelRuntime.LITERT_LM && liteRtImageTransportReady -> VisionCapabilityUi(
+            label = "LiteRT 图像传输可用",
+            detail = "图片输入已接通；当前模型尚未通过真实图片验证，首次请求会检查模型视觉能力。",
+            ready = true
+        )
+        loadedModel.runtime == ChatModelRuntime.LITERT_LM -> VisionCapabilityUi(
+            label = "LiteRT 图像通道未就绪",
+            detail = "请重新加载模型后重试图片输入；若仍失败，请切换到支持视觉的 GGUF/MNN/QNN。",
+            ready = false
         )
         loadedModel.runtime == ChatModelRuntime.MNN -> VisionCapabilityUi(
             label = "MNN 视觉组件未就绪",
@@ -1806,13 +2227,14 @@ private fun imageModelPresetsFor(format: CloudImageApiFormat): List<String> =
     }
 
 private fun cloudApiFormats(): List<CloudApiFormat> =
-    listOf(CloudApiFormat.OPENAI_COMPATIBLE, CloudApiFormat.ANTHROPIC)
+    CloudApiFormat.entries.toList()
 
 private fun cloudImageApiFormats(): List<CloudImageApiFormat> =
     listOf(CloudImageApiFormat.OPENAI_IMAGES, CloudImageApiFormat.DASHSCOPE_IMAGE, CloudImageApiFormat.CUSTOM_PATH)
 
 private fun cloudProviderPresets(): List<CloudProviderPresetUi> = listOf(
     CloudProviderPresetUi("openai", "OpenAI 协议", "自定义 OpenAI-compatible 接口"),
+    CloudProviderPresetUi("responses", "OpenAI Responses", "自定义 Responses 接口"),
     CloudProviderPresetUi("anthropic", "Anthropic 协议", "自定义 Anthropic Messages 接口")
 )
 

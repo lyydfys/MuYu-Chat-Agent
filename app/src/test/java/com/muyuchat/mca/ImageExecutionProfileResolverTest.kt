@@ -32,7 +32,7 @@ class ImageExecutionProfileResolverTest {
     )
 
     @Test
-    fun `all eighteen recommendation ids resolve to their target profiles`() {
+    fun `all nineteen recommendation ids resolve to their target profiles`() {
         val expected = linkedMapOf(
             "cyberrealistic_sd15_qnn228" to "community.sd15.qnn228",
             "realisticvisionhyper_sd15_qnn228" to "community.sd15.hyper.qnn228",
@@ -51,6 +51,7 @@ class ImageExecutionProfileResolverTest {
             "z_image_turbo_q4" to "sdcpp.z-image-turbo",
             "flux2_klein_4b_q4" to "sdcpp.flux2-klein",
             "qwen_image_2512_q2" to "sdcpp.qwen-image",
+            "qwen_image_21_mnn_opencl" to "mnn.qwen-image-2.1.opencl",
             "longcat_image_q4" to "sdcpp.longcat-image"
         )
 
@@ -70,7 +71,7 @@ class ImageExecutionProfileResolverTest {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
 
-        assertEquals(18, models.size)
+        assertEquals(19, models.size)
         models.forEach { model ->
             val catalogProfile = requireNotNull(
                 materializeDownloadedImageExecutionProfile(
@@ -113,9 +114,10 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
-    fun `every recommended image profile fixes capabilities to its configured default size`() {
+    fun `every fixed recommended image profile fixes capabilities to its configured default size`() {
         ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+            .filterNot { it.id == "qwen_image_21_mnn_opencl" }
             .forEach { model ->
                 val profile = resolve(model.id).profile
                 assertEquals("${model.id} fixed width", profile.defaults.width, profile.capabilities.minWidth)
@@ -126,11 +128,22 @@ class ImageExecutionProfileResolverTest {
     }
 
     @Test
+    fun `qwen image profile exposes bounded dynamic capability range`() {
+        val profile = resolve("qwen_image_21_mnn_opencl").profile
+        assertEquals(256, profile.capabilities.minWidth)
+        assertEquals(672, profile.capabilities.maxWidth)
+        assertEquals(256, profile.capabilities.minHeight)
+        assertEquals(672, profile.capabilities.maxHeight)
+        assertEquals(32, profile.capabilities.widthMultiple)
+        assertEquals(32, profile.capabilities.heightMultiple)
+    }
+
+    @Test
     fun `all catalog primary fingerprints recover their exact profile despite a stale card id`() {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
 
-        assertEquals(18, models.size)
+        assertEquals(19, models.size)
         models.forEach { model ->
             val bundle = requireNotNull(model.imageEngineBundle)
             val primary = bundle.requiredComponents.first {
@@ -1099,7 +1112,7 @@ class ImageExecutionProfileResolverTest {
             assertFalse(resolution.profile.capabilities.supportsUltraFix)
             assertFalse(resolution.profile.hasExecutableSharedQnnUltraFixTopology())
             assertTrue(resolution.profile.capabilities.supportsLivePreview)
-            assertEquals(2, resolution.profile.profileRevision)
+            assertEquals(3, resolution.profile.profileRevision)
             assertFalse(resolution.profile.capabilities.supportsLora)
             assertEquals(1, resolution.profile.capabilities.maxBatchCount)
             assertFalse(resolution.layers.resolved.promptWeightingSupported)
@@ -1438,6 +1451,212 @@ class ImageExecutionProfileResolverTest {
                 resolved
             )
             assertEquals(ImageProfileSource.MANIFEST, resolved.provenance.primarySource)
+        }
+    }
+
+    @Test
+    fun `Qwen Image 2_1 declares its packed native VAE shape and tokenizer asset separately`() {
+        val recommendation = ModelScopeClient().recommendedModels()
+            .single { it.id == "qwen_image_21_mnn_opencl" }
+        val profile = resolve(recommendationId = recommendation.id).profile
+
+        assertEquals(listOf(1, 64, 32, 32), profile.vae.inputShape)
+        assertNull(profile.graph.tokenizerSidecar)
+        assertTrue(profile.tokenizer.assets.any { asset ->
+            asset.relativePath == "text_encoder/tokenizer.txt"
+        })
+        assertEquals(2, profile.scheduler.minSteps)
+        assertEquals(20, profile.scheduler.defaultSteps)
+        assertEquals(2, profile.profileRevision)
+    }
+
+    @Test
+    fun `Qwen Image 2_1 migrates only its exact pinned direct Hugging Face bundle`() {
+        val model = ModelScopeClient().recommendedModels()
+            .single { it.id == "qwen_image_21_mnn_opencl" }
+        val bundle = requireNotNull(model.imageEngineBundle)
+        val primary = bundle.requiredComponents.single { component ->
+            component.role == ImageEngineBundleComponentRole.DIFFUSION &&
+                component.fileName.equals("dit.mnn", ignoreCase = true)
+        }
+        val fingerprint = requireNotNull(primary.sha256)
+        val legacyVaeFingerprint = requireNotNull(
+            bundle.requiredComponents.single { component ->
+                component.role == ImageEngineBundleComponentRole.VAE &&
+                    component.fileName.equals("vae_decoder.mnn", ignoreCase = true)
+            }.sha256
+        )
+        assertEquals(
+            "2525485bba44d4d8176d05522fa7e8b4b1080c9e7b7df18dfde7d58e667ff055",
+            legacyVaeFingerprint
+        )
+        val current = requireNotNull(materializeDownloadedImageExecutionProfile(bundle, fingerprint))
+        val old = current.copy(
+            profileRevision = 1,
+            // Real device manifest evidence: the old installer stored the VAE SHA as the profile
+            // fingerprint even though the local model record's primary file is dit.mnn.
+            modelFingerprint = legacyVaeFingerprint,
+            scheduler = current.scheduler.copy(minSteps = 1)
+        )
+        val evidence = qwenDirectFileRecommendationEvidence(model.id)
+
+        fun resolveOld(
+            persisted: ImageExecutionProfile = old,
+            evidenceOverride: ImageRecommendationEvidence = evidence,
+            requestedFingerprint: String = fingerprint,
+            requestedId: String? = model.id,
+            requestedRevision: String? = model.revision
+        ) = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = requestedId,
+                fingerprint = requestedFingerprint,
+                runtime = LocalImageRuntime.MNN_DIFFUSION,
+                family = LocalImageModelFamily.QWEN_IMAGE,
+                manifestProfile = persisted,
+                recommendationEvidence = evidenceOverride
+            ).copy(recommendationRevision = requestedRevision)
+        ).profile
+
+        fun assertNotMigrated(result: Result<ImageExecutionProfile>) {
+            val actual = result.getOrNull()
+            if (actual != null) {
+                assertEquals(1, actual.profileRevision)
+                assertEquals(1, actual.scheduler.minSteps)
+            } else {
+                val failure = result.exceptionOrNull()
+                assertTrue(failure is ImageProfileResolutionException)
+                assertTrue((failure as ImageProfileResolutionException).validation.issues.any { issue ->
+                    issue.code == "MODEL_FINGERPRINT_MISMATCH"
+                })
+            }
+        }
+
+        val migrated = resolveOld()
+        assertEquals(2, migrated.profileRevision)
+        assertEquals(2, migrated.scheduler.minSteps)
+        assertEquals(current.profileId, migrated.profileId)
+        assertEquals(LocalImageRuntime.MNN_DIFFUSION, migrated.runtime)
+        assertEquals(LocalImageModelFamily.QWEN_IMAGE, migrated.family)
+        assertEquals(ImageTask.TEXT_TO_IMAGE, migrated.task)
+        assertEquals(model.id, migrated.provenance.recommendationId)
+        assertEquals(model.revision, migrated.provenance.recommendationRevision)
+
+        // Manifest readiness resolves before the large DIFFUSION graph is hashed, so this
+        // code path receives the persisted profile fingerprint. The exact known VAE fingerprint
+        // is accepted only when it agrees with both the old manifest and the pinned VAE entry;
+        // actual generation later rebinds the profile to the verified DIFFUSION SHA above.
+        val readinessMigrated = resolveOld(requestedFingerprint = legacyVaeFingerprint)
+        assertEquals(2, readinessMigrated.profileRevision)
+        assertEquals(2, readinessMigrated.scheduler.minSteps)
+        assertEquals(legacyVaeFingerprint, readinessMigrated.modelFingerprint)
+
+        val missingRevisionMetadata = resolveOld(requestedRevision = null)
+        assertEquals(2, missingRevisionMetadata.profileRevision)
+        assertEquals(2, missingRevisionMetadata.scheduler.minSteps)
+
+        val wrongFingerprint = runCatching { resolveOld(
+            persisted = old.copy(modelFingerprint = OTHER_FINGERPRINT),
+            requestedFingerprint = OTHER_FINGERPRINT
+        ) }
+        assertNotMigrated(wrongFingerprint)
+
+        val wrongRepository = runCatching { resolveOld(
+            evidenceOverride = evidence.copy(sourceRepositories = listOf("attacker/unrelated-repo"))
+        ) }
+        assertNotMigrated(wrongRepository)
+
+        val wrongSourcePath = runCatching { resolveOld(
+            evidenceOverride = evidence.copy(
+                artifactPaths = evidence.artifactPaths.map { path ->
+                    if (path == primary.fileName) "mirror/dit-repacked.mnn" else path
+                }
+            )
+        ) }
+        assertNotMigrated(wrongSourcePath)
+
+        val wrongProvenance = runCatching { resolveOld(
+            persisted = old.copy(
+                provenance = old.provenance.copy(recommendationId = "qwen_image_2512_q2")
+            )
+        ) }
+        assertNotMigrated(wrongProvenance)
+
+        val wrongRequestRevision = runCatching {
+            resolveOld(requestedRevision = "different-pinned-revision")
+        }
+        assertNotMigrated(wrongRequestRevision)
+
+        val wrongPersistedRevision = runCatching { resolveOld(
+            persisted = old.copy(
+                provenance = old.provenance.copy(recommendationRevision = "different-pinned-revision")
+            )
+        ) }
+        assertNotMigrated(wrongPersistedRevision)
+
+        val archiveSource = runCatching { resolveOld(
+            evidenceOverride = evidence.copy(
+                artifactPaths = evidence.artifactPaths.map { path ->
+                    if (path == primary.fileName) "${primary.fileName}!/dit.mnn" else path
+                }
+            )
+        ) }
+        assertNotMigrated(archiveSource)
+    }
+
+    @Test
+    fun `Qwen Image 2_1 rejects one-step sigma schedule before native execution`() {
+        val failure = runCatching {
+            ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = "qwen_image_21_mnn_opencl",
+                    runtime = LocalImageRuntime.MNN_DIFFUSION,
+                    family = LocalImageModelFamily.QWEN_IMAGE,
+                    userOverrides = ImageGenerationOverrides(steps = 1)
+                )
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is ImageProfileResolutionException)
+        assertTrue((failure as ImageProfileResolutionException).validation.issues.any { issue ->
+            issue.code == "GENERATION_DEFAULTS_INVALID" && issue.field == "defaults"
+        })
+    }
+
+    @Test
+    fun `Gen5 v2 pinned manifests migrate graph names while unrelated imports keep their own contract`() {
+        val prefixes = mapOf(
+            "qualcomm_sd15_gen5_qnn" to "stable_diffusion_v1_5",
+            "qualcomm_sd21_gen5_qnn" to "stable_diffusion_v2_1",
+            "qualcomm_controlnet_canny_gen5_qnn" to "controlnet_canny"
+        )
+        prefixes.forEach { (id, prefix) ->
+            val model = ModelScopeClient().recommendedModels().single { it.id == id }
+            val bundle = requireNotNull(model.imageEngineBundle)
+            val current = requireNotNull(materializeDownloadedImageExecutionProfile(bundle, FINGERPRINT))
+            fun ImageGraphArtifactContract?.oldGraph() = this?.copy(graphName = "model")
+            val old = current.copy(profileRevision = 2, graph = current.graph.copy(
+                textEncoder = current.graph.textEncoder.oldGraph(),
+                unet = current.graph.unet.oldGraph(),
+                vae = current.graph.vae.oldGraph(),
+                controlNet = current.graph.controlNet.oldGraph()
+            ))
+            val evidence = pinnedRecommendationEvidence(id)
+            val repaired = ImageExecutionProfileResolver.resolve(input(
+                recommendationId = id, manifestProfile = old, recommendationEvidence = evidence
+            )).profile
+            assertEquals(3, repaired.profileRevision)
+            assertEquals("${prefix}_text_encoder", repaired.graph.textEncoder!!.graphName)
+            assertEquals("${prefix}_unet", repaired.graph.unet!!.graphName)
+            assertEquals("${prefix}_vae", repaired.graph.vae!!.graphName)
+            if (id.contains("controlnet")) assertEquals("controlnet_canny_controlnet", repaired.graph.controlNet!!.graphName)
+
+            // An undeclared source must not opt an unrelated import into a catalog migration.
+            val unrelated = ImageExecutionProfileResolver.resolve(input(
+                recommendationId = id, manifestProfile = old,
+                recommendationEvidence = evidence.copy(sourceRepositories = evidence.sourceRepositories + "someone/unrelated")
+            )).profile
+            assertEquals(2, unrelated.profileRevision)
+            assertEquals("model", unrelated.graph.textEncoder!!.graphName)
         }
     }
 
@@ -1838,6 +2057,18 @@ class ImageExecutionProfileResolverTest {
                 )
             )
         return localImageRecommendationEvidence(record, bundleRoot, manifest)
+    }
+
+    private fun qwenDirectFileRecommendationEvidence(recommendationId: String): ImageRecommendationEvidence {
+        val model = ModelScopeClient().recommendedModels().single { it.id == recommendationId }
+        val bundle = requireNotNull(model.imageEngineBundle)
+        return ImageRecommendationEvidence(
+            aliases = listOf(model.id, bundle.id),
+            sourceRepositories = listOf(model.repoId),
+            // The installed Qwen manifest records every sourcePath directly. There is no archive
+            // delimiter here; the exact SHA-256 pins the primary file to the immutable revision.
+            artifactPaths = bundle.requiredComponents.map { component -> component.fileName }
+        )
     }
 
     private fun String.sha256TestFingerprint(): String =

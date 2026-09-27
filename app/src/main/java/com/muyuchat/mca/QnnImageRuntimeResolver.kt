@@ -190,7 +190,17 @@ internal fun qnnRequiredBundleRuntimeResolution(
         ?: return QnnRequiredBundleRuntimeResolution(
             error = "$publicRuntime 缺少 QNN 运行库的 SHA-256 校验清单。请重新下载完整模型包。"
         )
-    qnnImageRuntimeFileNames(required.htpArch).forEach { name ->
+    // The metadata sidecar is the readiness gate for a downloaded QNN bundle.
+    // QAIRT 2.39+ needs the versioned host transport (for example
+    // libQnnHtpV79.so) in addition to the common System/HTP pair and the
+    // Skel/Stub files.  Verifying only the four generic files lets an archive
+    // with a missing versioned transport appear complete, then fail later
+    // during native staging.  Use the declared SDK to validate the exact
+    // transport set before advertising the bundle as ready.
+    (qnnImageRuntimeFileNames(required.htpArch) +
+        qnnImageTransportRuntimeFileNames(required.htpArch, actualSdk))
+        .distinct()
+        .forEach { name ->
         val declared = when (val entry = hashes.opt(name)) {
             is String -> entry
             is JSONObject -> entry.optString("sha256")
@@ -198,10 +208,18 @@ internal fun qnnRequiredBundleRuntimeResolution(
         }.trim().lowercase()
         if (!QNN_SHA256.matches(declared)) {
             return QnnRequiredBundleRuntimeResolution(
-                error = "$publicRuntime 的 QNN 运行库校验信息无效。请重新下载完整模型包。"
+                error = "$publicRuntime 缺少 QNN 运行库文件 $name 的有效校验信息。" +
+                    "请重新下载完整模型包。"
             )
         }
-        val actual = File(runtimeProfile.directory, name).qnnRuntimeSha256()
+        val file = File(runtimeProfile.directory, name)
+        if (!file.isFile || file.length() <= 0L) {
+            return QnnRequiredBundleRuntimeResolution(
+                error = "$publicRuntime 缺少必要的 QNN 运行库文件 $name。" +
+                    "请重新下载包含完整运行库的模型包。"
+            )
+        }
+        val actual = file.qnnRuntimeSha256()
         if (actual != declared) {
             return QnnRequiredBundleRuntimeResolution(
                 error = "$publicRuntime 的 QNN 运行库完整性校验失败（SHA-256 不一致）。" +
@@ -231,7 +249,14 @@ internal fun writePinnedQnnRuntimeMetadata(
     val profile = qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, contextHtpArch)
         ?: error("The downloaded QNN package is missing its generic context runtime profile.")
     val files = JSONObject()
-    qnnImageRuntimeFileNames(contextHtpArch).forEach { name ->
+    // Keep the generated sidecar in sync with the staging contract.  In
+    // particular, a 2.39+ package is not complete without its versioned host
+    // transport library; emitting metadata without that file would defer a
+    // deterministic integrity error until after download/import.
+    (qnnImageRuntimeFileNames(contextHtpArch) +
+        qnnImageTransportRuntimeFileNames(contextHtpArch, qnnSdk))
+        .distinct()
+        .forEach { name ->
         val file = File(profile.directory, name)
         require(file.isFile && file.length() > 0L) { "Missing QNN runtime file: $name" }
         files.put(name, file.qnnRuntimeSha256())
@@ -384,7 +409,7 @@ internal fun qnnPublicNpuRuntimeName(htpArchVersion: Int): String = when (htpArc
     69 -> "骁龙 8 Gen 1 / 骁龙 8+ Gen 1 NPU 运行环境"
     73 -> "骁龙 8 Gen 2 NPU 运行环境"
     75 -> "骁龙 8 Gen 3 NPU 运行环境"
-    79 -> "骁龙 8 Elite NPU 运行环境"
+    79 -> "骁龙 8 Elite / 8s Gen 4 NPU 运行环境"
     81 -> "骁龙 8 Elite Gen 5 NPU 运行环境"
     else -> "当前设备的骁龙 NPU 运行环境"
 }

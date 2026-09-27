@@ -354,7 +354,11 @@ internal object ImageExecutionProfileNativeContract {
         // is distilled to a positive-only sampling pass.
         val sharedSdxlExternalConditioning =
             resolution.profile.family == LocalImageModelFamily.SDXL && !qnnTextEncoder
-        val expectedMode = if (qnnTextEncoder) "qnn_text_encoder" else "external_mnn_embeddings"
+        val expectedMode = when {
+            qnnTextEncoder -> "qnn_text_encoder"
+            sharedSdxlExternalConditioning -> "external_mnn_sdxl_embeddings"
+            else -> "external_mnn_embeddings"
+        }
         val expectedBackend = if (qnnTextEncoder) "QNN" else "MNN"
         val hasVerifiedChineseTextEncoderEvidence = qnnTextEncoder &&
             resolution.profile.hasVerifiedNativeSimplifiedChineseTextEncoder()
@@ -404,26 +408,35 @@ internal object ImageExecutionProfileNativeContract {
             qnnTextEncoder && expectedGraph.isBlank() -> true
             else -> nativeEffective.requiredString("conditioningGraph") == expectedGraph
         }
-        if (!SHA256.matches(artifactSha256) ||
-            !SHA256.matches(graphSha256) ||
-            (!qnnTextEncoder && promptWeightFingerprint != artifactSha256) ||
-            nativeEffective.requiredString("conditioningExecutionMode") != expectedMode ||
-            nativeEffective.requiredString("conditioningBackend") != expectedBackend ||
-            !conditioningGraphMatches ||
-            nativeEffective.requiredString("conditioningOrder") != expectedOrder ||
-            nativeEffective.requiredInt("conditioningEncoderExecutionCount") !=
-            expectedExecutionCount ||
-            nativeEffective.requiredInt("textEncoderExecutionCount") !=
-            (if (qnnTextEncoder) expectedExecutionCount else 0) ||
-            !nativeEffective.requiredBoolean("conditioningArtifactConsumed") ||
-            nativeEffective.requiredString("runtimeSessionMode") != expectedRuntimeSessionMode
-        ) {
-            invalid(
-                "conditioningExecutionMode,conditioningBackend,conditioningGraph," +
-                    "conditioningGraphSha256,promptWeightFingerprint,conditioningOrder," +
-                    "conditioningEncoderExecutionCount,textEncoderExecutionCount," +
-                    "conditioningArtifactConsumed,runtimeSessionMode",
-                "QNN conditioning and runtime-session evidence differs from the selected worker strategy."
+        val mismatches = buildList {
+            fun compare(field: String, expected: Any, actual: Any) {
+                if (expected != actual) add(ImageExecutionMismatch(field, expected.toString(), actual.toString()))
+            }
+            if (!SHA256.matches(artifactSha256)) {
+                add(ImageExecutionMismatch("conditioningArtifactSha256", "SHA-256", artifactSha256))
+            }
+            if (!SHA256.matches(graphSha256)) {
+                add(ImageExecutionMismatch("conditioningGraphSha256", "SHA-256", graphSha256))
+            }
+            if (!qnnTextEncoder) compare("promptWeightFingerprint", artifactSha256, promptWeightFingerprint)
+            compare("conditioningExecutionMode", expectedMode, nativeEffective.requiredString("conditioningExecutionMode"))
+            compare("conditioningBackend", expectedBackend, nativeEffective.requiredString("conditioningBackend"))
+            if (!conditioningGraphMatches) {
+                compare("conditioningGraph", expectedGraph, nativeEffective.requiredString("conditioningGraph"))
+            }
+            compare("conditioningOrder", expectedOrder, nativeEffective.requiredString("conditioningOrder"))
+            compare("conditioningEncoderExecutionCount", expectedExecutionCount, nativeEffective.requiredInt("conditioningEncoderExecutionCount"))
+            compare("textEncoderExecutionCount", if (qnnTextEncoder) expectedExecutionCount else 0, nativeEffective.requiredInt("textEncoderExecutionCount"))
+            compare("conditioningArtifactConsumed", true, nativeEffective.requiredBoolean("conditioningArtifactConsumed"))
+            compare("runtimeSessionMode", expectedRuntimeSessionMode, nativeEffective.requiredString("runtimeSessionMode"))
+        }
+        if (mismatches.isNotEmpty()) {
+            throw ImageNativeExecutionContractException(
+                code = IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID,
+                field = mismatches.joinToString(",") { it.field },
+                mismatches = mismatches,
+                message = "QNN conditioning and runtime-session evidence differs from the selected worker strategy: " +
+                    mismatches.joinToString("; ") { "${it.field}: expected=${it.resolved}, actual=${it.nativeEffective}" }
             )
         }
     }
@@ -803,7 +816,15 @@ internal object ImageExecutionProfileNativeContract {
 
     private fun <T : Enum<T>> JSONObject.requiredEnum(field: String, values: List<T>): T {
         val wireValue = requiredString(field)
-        return values.firstOrNull { it.name == wireValue }
+        // Native bridges historically emitted product names in lower-case
+        // (`flow_match`) while the shared contract uses enum names
+        // (`FLOW_MATCH`). Accept the canonical spelling and a normalized
+        // case/spacing variant, but keep unknown values strict.
+        val normalized = wireValue.trim()
+            .uppercase()
+            .replace('-', '_')
+            .replace(' ', '_')
+        return values.firstOrNull { it.name == wireValue || it.name == normalized }
             ?: invalid(field, "Unknown native execution enum value: $wireValue")
     }
 

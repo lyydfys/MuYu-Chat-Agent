@@ -3,6 +3,7 @@
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.provider.DocumentsContract
 import android.util.Log
 import org.json.JSONArray
 import java.io.File
@@ -11,6 +12,10 @@ import java.io.InputStream
 import java.io.PushbackInputStream
 import java.security.MessageDigest
 import java.util.UUID
+
+private val CANONICAL_SHA256 = Regex("^[0-9a-fA-F]{64}$")
+
+private fun String.isCanonicalSha256(): Boolean = CANONICAL_SHA256.matches(trim())
 
 class ModelStoreRepository(private val context: Context) {
     private val appContext = context.applicationContext
@@ -30,17 +35,35 @@ class ModelStoreRepository(private val context: Context) {
             when (model.runtime) {
                 ChatModelRuntime.MNN -> isCompleteMnnBundleDirectory(File(model.path))
                 ChatModelRuntime.GENIEX_QAIRT -> isCompleteQairtBundleDirectory(File(model.path))
-                ChatModelRuntime.LLAMA_CPP -> true
+                // GGUF records used to be treated as loadable solely because
+                // they were persisted.  A deleted/zero-byte/corrupt retry then
+                // remained visible as an available model until a manual load
+                // failed.  Keep discovery device-agnostic, but require the
+                // concrete file/header condition that the native loader needs.
+                ChatModelRuntime.LLAMA_CPP -> isReadableGgufFile(File(model.path))
                 ChatModelRuntime.LITERT_LM -> isLiteRtLmFile(File(model.path))
             }
         }
-        val recoveredMnn = recoverManagedMnnBundles(loadablePersisted)
-        val recoveredGguf = recoverManagedGgufModels(loadablePersisted + recoveredMnn)
-        val recoveredLiteRtLm = recoverManagedLiteRtLmModels(loadablePersisted + recoveredMnn + recoveredGguf)
-        val merged = (loadablePersisted + recoveredMnn + recoveredGguf + recoveredLiteRtLm).distinctByPathKeepingNewest()
+        // A model can be registered once by the download worker and once again by
+        // directory recovery (or by a retry that created a suffixed copy).  Path
+        // based de-duplication alone leaves two cards for the same GGUF.  Collapse
+        // exact-content duplicates before recovery, while merging a bound mmproj
+        // into the surviving record so a multimodal model is never downgraded to a
+        // text-only card.
+        val pathDistinct = loadablePersisted.distinctByPathKeepingNewest()
+        val contentDistinct = pathDistinct.deduplicateEquivalentModelRecords()
+        cleanupDuplicateManagedModelFiles(pathDistinct, contentDistinct)
+        val recoveredMnn = recoverManagedMnnBundles(contentDistinct)
+        val recoveredGguf = recoverManagedGgufModels(contentDistinct + recoveredMnn)
+        val recoveredLiteRtLm = recoverManagedLiteRtLmModels(contentDistinct + recoveredMnn + recoveredGguf)
+        val merged = (contentDistinct + recoveredMnn + recoveredGguf + recoveredLiteRtLm)
+            .distinctByPathKeepingNewest()
+            .deduplicateEquivalentModelRecords()
         if (
             normalized != persisted ||
             loadablePersisted != normalized ||
+            pathDistinct != contentDistinct ||
+            merged.size != loadablePersisted.size + recoveredMnn.size + recoveredGguf.size + recoveredLiteRtLm.size ||
             recoveredMnn.isNotEmpty() ||
             recoveredGguf.isNotEmpty() ||
             recoveredLiteRtLm.isNotEmpty()
@@ -62,28 +85,194 @@ class ModelStoreRepository(private val context: Context) {
 
     fun getModel(id: String): ModelManifest? = listModels().firstOrNull { it.id == id }
 
-    fun importFromUris(uris: List<Uri>, displayNameOverride: String? = null): ModelManifest =
-        synchronized(MODEL_IMPORT_LOCK) {
+    fun importFromUris(
+        uris: List<Uri>,
+        displayNameOverride: String? = null,
+        options: ModelImportOptions = ModelImportOptions(),
+        onProgress: (ModelImportProgress) -> Unit = {},
+        checkCancelled: () -> Unit = {}
+    ): ModelManifest = synchronized(MODEL_IMPORT_TASK_LOCK) {
             val validUris = uris.distinct()
             require(validUris.isNotEmpty()) { "请选择本地推理模型文件。" }
-            if (validUris.size == 1) {
-                return@synchronized importSingleUriLocked(
-                    uri = validUris.single(),
-                    displayNameOverride = displayNameOverride,
-                    allowMnnZip = true
-                )
+            checkCancelled()
+            onProgress(ModelImportProgress("inspecting"))
+            val sources = validUris.mapIndexed { index, uri ->
+                modelImportSource(uri, queryDisplayName(uri)?.takeIf(String::isNotBlank) ?: "component-$index")
             }
-            importMnnBundleFromUris(validUris, displayNameOverride)
+            val kind = if (sources.size == 1) sources.single().open().use { input ->
+                classifyModelImport(sources.single().path, input.readPrefix(IMPORT_MAGIC_BYTES))
+            } else ModelImportKind.MNN_COMPONENT
+            if (sources.size == 1 && kind == ModelImportKind.MNN_COMPONENT) {
+                error("MNN 需要完整模型目录、ZIP 或全部组件；单个 .mnn 文件不能运行。请选择文件夹导入。")
+            }
+            require(kind != ModelImportKind.UNKNOWN) { "无法识别模型，请选择 GGUF、LiteRT-LM、完整 MNN 目录或 ZIP。" }
+            val mapped = if (sources.size > 1) mapMnnSelectedComponents(sources, options.mnnMode) else sources
+            importPreparedSources(mapped, "documents:${validUris.map(Uri::toString).sorted().joinToString("\n")}",
+                kind, displayNameOverride, options, onProgress, checkCancelled)
         }
 
-    fun importFromUri(uri: Uri, displayNameOverride: String? = null): ModelManifest =
-        synchronized(MODEL_IMPORT_LOCK) {
-            importSingleUriLocked(
-                uri = uri,
-                displayNameOverride = displayNameOverride,
-                allowMnnZip = false
-            )
+    /** SAF tree access keeps nested component names intact; the caller owns persisted URI permission. */
+    fun importFromTreeUri(
+        treeUri: Uri,
+        displayNameOverride: String? = null,
+        options: ModelImportOptions = ModelImportOptions(),
+        onProgress: (ModelImportProgress) -> Unit = {},
+        checkCancelled: () -> Unit = {}
+    ): ModelManifest = synchronized(MODEL_IMPORT_TASK_LOCK) {
+        checkCancelled()
+        onProgress(ModelImportProgress("inspecting"))
+        val pending = ArrayDeque<Pair<String, String>>().apply { add(DocumentsContract.getTreeDocumentId(treeUri) to "") }
+        val seen = mutableSetOf<String>()
+        val sources = mutableListOf<ModelImportSource>()
+        while (pending.isNotEmpty()) {
+            checkCancelled()
+            val (documentId, prefix) = pending.removeFirst()
+            require(seen.add(documentId)) { "模型文件夹包含循环目录。" }
+            val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId)
+            val columns = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+            val cursor = appContext.contentResolver.query(children, columns, null, null, null)
+                ?: error("无法读取模型文件夹，请重新选择并授予访问权限。")
+            cursor.use {
+                while (it.moveToNext()) {
+                    checkCancelled()
+                    val childId = it.getString(0)
+                    val name = it.getString(1)
+                    require(name.isNotBlank() && '/' !in name && '\\' !in name && name !in setOf(".", "..")) {
+                        "模型组件名称无效：$name"
+                    }
+                    val path = normalizeMnnImportPath(if (prefix.isEmpty()) name else "$prefix/$name")
+                    if (it.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) pending += childId to path
+                    else {
+                        val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
+                        sources += ModelImportSource(uri.toString(), path,
+                            it.takeUnless { c -> c.isNull(3) }?.getLong(3),
+                            it.takeUnless { c -> c.isNull(4) }?.getLong(4)) {
+                            requireNotNull(appContext.contentResolver.openInputStream(uri)) { "无法读取组件：$path" }
+                        }
+                    }
+                    require(sources.size + pending.size + seen.size <= 32_768) { "模型目录文件数量超过 32768。" }
+                    onProgress(ModelImportProgress("inspecting", path, sources.size, 0))
+                }
+            }
         }
+        require(sources.isNotEmpty()) { "所选模型文件夹为空。" }
+        val directoryName = displayNameOverride ?: queryDisplayName(
+            DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri)))
+        importPreparedSources(sources.sortedBy { it.path }, "tree:$treeUri", ModelImportKind.MNN_COMPONENT,
+            directoryName, options, onProgress, checkCancelled)
+    }
+
+    private fun isReadableGgufFile(file: File): Boolean {
+        if (!file.isFile || !file.canRead() || file.length() <= 0L) return false
+        if (!file.name.endsWith(".gguf", ignoreCase = true)) return false
+        return runCatching { GgufMetadataReader.read(file).isGguf }.getOrDefault(false)
+    }
+
+    private fun modelImportSource(uri: Uri, name: String): ModelImportSource =
+        ModelImportSource(uri.toString(), name, querySize(uri), runCatching {
+            appContext.contentResolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_LAST_MODIFIED), null, null, null)?.use {
+                if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null
+            }
+        }.getOrNull()) { requireNotNull(appContext.contentResolver.openInputStream(uri)) { "无法读取组件：$name" } }
+
+    private fun importPreparedSources(
+        sources: List<ModelImportSource>, identity: String, kind: ModelImportKind,
+        displayNameOverride: String?, options: ModelImportOptions,
+        onProgress: (ModelImportProgress) -> Unit, checkCancelled: () -> Unit
+    ): ModelManifest {
+        val name = displayNameOverride?.takeIf(String::isNotBlank) ?: sources.first().path.substringAfterLast('/')
+        val transaction = ResumableModelImport(managedModelDir, "$identity\n${options.mnnMode}", options.resumeKey,
+            newDestination = {
+                when (kind) {
+                    ModelImportKind.GGUF -> uniqueTarget(normalizedGgufImportName(name))
+                    ModelImportKind.LITERT_LM -> uniqueTarget(normalizedLiteRtLmImportName(name))
+                    else -> uniqueBundleTarget(stripKnownExtension(name, ".zip").ifBlank { "mnn-bundle" })
+                }
+            }, onProgress, checkCancelled)
+        transaction.completedModel()?.let { completed ->
+            checkCancelled()
+            if (completed.runtime == ChatModelRuntime.MNN) {
+                val readiness = MnnBundleReadinessAnalyzer.analyze(File(completed.path))
+                require(readiness.canLoad) { readiness.diagnosticSummary() }
+                require(sha256MnnBundle(File(completed.path), readiness.requiredComponentPaths,
+                    checkCancelled, onProgress) == completed.sha256) { "已导入模型的组件已变更，请重新导入或重新校验。" }
+            }
+            upsert(completed)
+            return transaction.complete(completed)
+        }
+        val destination = transaction.destination
+        transaction.requireOwnedDestination()
+        // A crash after atomic commit but before catalog publication resumes registration here.
+        if (!destination.exists()) {
+            val staged = transaction.copySources(sources)
+            checkCancelled()
+            when (kind) {
+                ModelImportKind.GGUF -> {
+                    val metadata = GgufMetadataReader.read(staged.single())
+                    val compatibility = ModelCompatibility.check(staged.single(), metadata)
+                    require(metadata.isGguf && compatibility.canLoad) { compatibility.message }
+                    transaction.commit(staged.single())
+                }
+                ModelImportKind.LITERT_LM -> {
+                    val file = staged.single()
+                    val compatibility = validateLiteRtLmLoadPreflight(file, file.length())
+                    require(compatibility.canLoad) { compatibility.message }
+                    transaction.commit(file)
+                }
+                ModelImportKind.MNN_ZIP -> {
+                    val extracted = File(transaction.contentRoot, ".mnn-extracted")
+                    if (extracted.exists()) extracted.deleteRecursively()
+                    staged.single().inputStream().use { input ->
+                        MnnZipBundleInstaller().install(input, extracted, staged.single().length(),
+                            options.mnnMode, onProgress, checkCancelled)
+                    }
+                    transaction.commit(extracted)
+                }
+                else -> {
+                    staged.forEach { file ->
+                        val importedKind = file.inputStream().use { classifyModelImport(file.name, it.readPrefix(IMPORT_MAGIC_BYTES)) }
+                        require(importedKind !in setOf(ModelImportKind.GGUF, ModelImportKind.LITERT_LM, ModelImportKind.MNN_ZIP)) {
+                            "MNN 组件目录中混入其他主模型或压缩包，请只选择一个完整 MNN 模型。"
+                        }
+                    }
+                    val root = findMnnImportBundleRoot(transaction.contentRoot, options.mnnMode, checkCancelled)
+                    prepareImportedMnnConfiguration(root, options.mnnMode, checkCancelled)
+                    transaction.commit(root)
+                }
+            }
+        }
+        checkCancelled()
+        val alreadyRegistered = synchronized(MODEL_IMPORT_LOCK) {
+            readPersistedModels().firstOrNull { File(it.path).canonicalFile == destination && !isFastRecoveryFingerprint(it.sha256) }
+        }
+        val model = alreadyRegistered ?: when (kind) {
+            ModelImportKind.GGUF, ModelImportKind.LITERT_LM -> {
+                val metadata = if (kind == ModelImportKind.GGUF) GgufMetadataReader.read(destination) else null
+                val compatibility = if (metadata != null) ModelCompatibility.check(destination, metadata)
+                    else validateLiteRtLmLoadPreflight(destination, destination.length())
+                require(compatibility.canLoad) { compatibility.message }
+                ModelManifest(UUID.randomUUID().toString(), stripKnownExtension(name, if (metadata == null) ".litertlm" else ".gguf"),
+                    destination.absolutePath, if (metadata == null) ChatModelRuntime.LITERT_LM else ChatModelRuntime.LLAMA_CPP,
+                    ModelSource.LOCAL, fileName = destination.name, sizeBytes = destination.length(),
+                    sha256 = cancellableImportSha256(destination, checkCancelled) { bytes ->
+                        onProgress(ModelImportProgress("verifying", destination.name, 1, 1, bytes, destination.length()))
+                    }, quant = metadata?.quant ?: "LiteRT-LM", architecture = metadata?.architecture).also {
+                        checkCancelled()
+                        upsert(it)
+                    }
+            }
+            else -> registerDownloadedMnnBundle(
+                displayNameOverride ?: inferMnnDisplayName(destination.name), destination, null, null,
+                source = ModelSource.LOCAL, requiredFiles = requiredMnnFilesForDirectory(destination),
+                checkCancelled = checkCancelled, onProgress = onProgress)
+        }
+        return transaction.complete(model)
+    }
+
+    fun importFromUri(uri: Uri, displayNameOverride: String? = null): ModelManifest =
+        importFromUris(listOf(uri), displayNameOverride)
 
     private fun importSingleUriLocked(
         uri: Uri,
@@ -398,7 +587,9 @@ class ModelStoreRepository(private val context: Context) {
         source: ModelSource = ModelSource.MODELSCOPE,
         quant: String? = "MNN",
         architecture: String? = null,
-        requiredFiles: List<String> = emptyList()
+        requiredFiles: List<String> = emptyList(),
+        checkCancelled: () -> Unit = {},
+        onProgress: (ModelImportProgress) -> Unit = {}
     ): ModelManifest {
         val declaredRequiredFiles = requiredFiles.map(::normalizeMnnComponentPath).distinct()
         val readiness = MnnBundleReadinessAnalyzer.analyze(
@@ -408,7 +599,7 @@ class ModelStoreRepository(private val context: Context) {
         require(readiness.canLoad) { "MNN 模型包不完整：${readiness.diagnosticSummary()}" }
         val fingerprintFiles = (readiness.requiredComponentPaths + declaredRequiredFiles).distinct()
         val coreSizeBytes = mnnBundleSize(bundleDir, fingerprintFiles)
-        val coreSha256 = sha256MnnBundle(bundleDir, fingerprintFiles)
+        val coreSha256 = sha256MnnBundle(bundleDir, fingerprintFiles, checkCancelled, onProgress)
         val manifest = ModelManifest(
             id = UUID.randomUUID().toString(),
             displayName = displayName.ifBlank { bundleDir.name },
@@ -425,6 +616,7 @@ class ModelStoreRepository(private val context: Context) {
                 ?: inferArchitectureLabel(bundleDir.name, ChatModelRuntime.MNN),
             license = license
         )
+        checkCancelled()
         upsert(manifest)
         return manifest
     }
@@ -677,7 +869,12 @@ class ModelStoreRepository(private val context: Context) {
 
     fun managedBundleDirFor(bundleId: String): File {
         managedModelDir.mkdirs()
-        return File(managedModelDir, safeFileName(bundleId)).also { it.mkdirs() }
+        // Bundle installers stage components beside this public path and only
+        // atomically publish the directory after validation. Creating the
+        // destination here made interrupted downloads look like installed
+        // models with an empty folder. Direct-file flows still create it via
+        // managedBundleFileFor when they are ready to write a file.
+        return File(managedModelDir, safeFileName(bundleId))
     }
 
     fun managedBundleFileFor(bundleDir: File, fileName: String): File {
@@ -685,10 +882,72 @@ class ModelStoreRepository(private val context: Context) {
         return File(bundleDir, safeFileName(fileName.substringAfterLast('/')))
     }
 
+    /**
+     * Persist one model without manufacturing a new logical id for an
+     * already-installed artifact.  Download retries can land in a different
+     * managed directory (or a suffixed filename); runtime selection and the
+     * API must continue to refer to the same model id in that case.
+     */
     private fun upsert(model: ModelManifest) = synchronized(MODEL_IMPORT_LOCK) {
-        val modelPath = File(model.path).absolutePath
-        val without = listModels().filterNot { it.id == model.id || File(it.path).absolutePath == modelPath }
-        save(without + model)
+        val existingModels = listModels()
+        val modelPath = runCatching { File(model.path).canonicalPath }
+            .getOrElse { File(model.path).absolutePath }
+        val exact = existingModels.firstOrNull { candidate ->
+            candidate.id != model.id &&
+                candidate.runtime == model.runtime &&
+                candidate.sizeBytes == model.sizeBytes &&
+                candidate.sha256.isCanonicalSha256() &&
+                model.sha256.isCanonicalSha256() &&
+                candidate.sha256.equals(model.sha256, ignoreCase = true)
+        }
+        val stable = if (exact == null) {
+            model
+        } else {
+            // Keep a previously readable path when possible.  A retry should
+            // not silently move the user's selected model to a transient copy;
+            // if the old path disappeared, the newly downloaded path wins.
+            val existingPath = File(exact.path)
+            val preferredPath = if (existingPath.exists()) exact.path else model.path
+            model.copy(
+                id = exact.id,
+                path = preferredPath,
+                fileName = if (preferredPath == exact.path) exact.fileName else model.fileName,
+                createdAt = exact.createdAt,
+                lastLoadedAt = exact.lastLoadedAt ?: model.lastLoadedAt,
+                visionProjectorPath = exact.visionProjectorPath ?: model.visionProjectorPath,
+                visionProjectorFileName = exact.visionProjectorFileName ?: model.visionProjectorFileName,
+                visionProjectorSizeBytes = if (exact.visionProjectorPath != null) {
+                    exact.visionProjectorSizeBytes
+                } else model.visionProjectorSizeBytes,
+                visionProjectorSha256 = exact.visionProjectorSha256 ?: model.visionProjectorSha256,
+                visionValidated = exact.visionValidated || model.visionValidated
+            )
+        }
+        val without = existingModels.filterNot { candidate ->
+            candidate.id == model.id ||
+                runCatching { File(candidate.path).canonicalPath == modelPath }.getOrDefault(
+                    File(candidate.path).absolutePath == modelPath
+                ) ||
+                (exact != null && candidate.id == exact.id)
+        }
+        save(without + stable)
+        // A duplicate downloaded into the app-owned managed directory is no
+        // longer referenced after the stable record wins.  Never touch an
+        // imported user path outside this repository's managed root.
+        if (exact != null && stable.path != model.path) {
+            deleteManagedDuplicate(File(model.path))
+        }
+    }
+
+    private fun deleteManagedDuplicate(file: File) {
+        val managedRoot = runCatching { managedModelDir.canonicalFile }.getOrNull() ?: return
+        val candidate = runCatching { file.canonicalFile }.getOrNull() ?: return
+        if (candidate.path == managedRoot.path ||
+            !candidate.path.startsWith(managedRoot.path + File.separator)
+        ) return
+        runCatching {
+            if (candidate.isDirectory) candidate.deleteRecursively() else candidate.delete()
+        }
     }
 
     private fun save(models: List<ModelManifest>) = synchronized(MODEL_IMPORT_LOCK) {
@@ -1023,8 +1282,100 @@ class ModelStoreRepository(private val context: Context) {
     }
 
     private fun List<ModelManifest>.distinctByPathKeepingNewest(): List<ModelManifest> =
-        sortedByDescending { it.createdAt }
-            .distinctBy { File(it.path).absolutePath }
+        deduplicateModelRecordsByCanonicalPath(this)
+
+    /**
+     * Collapse records that point at different copies of the exact same model
+     * bytes.  A retry can leave `model.gguf` and `model-1.gguf` side by side;
+     * the old path-only check then rendered both as separate local models.  The
+     * merge deliberately carries a projector binding across the surviving
+     * record, so deduplication can never turn a usable multimodal model into a
+     * text-only one.
+     */
+    private fun List<ModelManifest>.deduplicateEquivalentModelRecords(): List<ModelManifest> {
+        val exact = deduplicateEquivalentModelRecordsForCatalog(this)
+        return mergeFastRecoveryDuplicates(exact)
+    }
+
+    /**
+     * Recovery records intentionally carry a bounded-I/O fingerprint instead
+     * of a full SHA-256.  When a previous exact manifest and an unregistered
+     * copy coexist, compare a bounded GGUF prefix plus size/metadata before
+     * deciding that the recovery record is the same file.  This avoids hashing
+     * multi-gigabyte models at startup while still fixing crash-recovery
+     * duplicates that the exact-digest pass cannot see.
+     */
+    private fun mergeFastRecoveryDuplicates(models: List<ModelManifest>): List<ModelManifest> {
+        val exactByPrefix = models.asSequence()
+            .filter { !isFastRecoveryFingerprint(it.sha256) }
+            .mapNotNull { model -> fastContentDedupKey(model)?.let { key -> key to model } }
+            .groupBy({ it.first }, { it.second })
+        val consumed = mutableSetOf<String>()
+        val output = mutableListOf<ModelManifest>()
+        models.forEach { model ->
+            if (!isFastRecoveryFingerprint(model.sha256)) {
+                if (!consumed.contains(model.id)) output += model
+                return@forEach
+            }
+            val matches = fastContentDedupKey(model)?.let { exactByPrefix[it].orEmpty() }.orEmpty()
+            if (matches.size == 1) {
+                val exact = matches.single()
+                if (consumed.add(exact.id)) {
+                    output.removeAll { it.id == exact.id }
+                    output += mergeEquivalentModelRecords(exact, model)
+                }
+            } else {
+                output += model
+            }
+        }
+        return output.sortedByDescending { it.createdAt }
+    }
+
+    private fun fastContentDedupKey(model: ModelManifest): String? {
+        if (model.runtime != ChatModelRuntime.LLAMA_CPP) return null
+        val file = File(model.path)
+        if (!file.isFile || file.length() != model.sizeBytes || file.length() <= 0L) return null
+        val prefixHash = runCatching { boundedFilePrefixSha256(file) }.getOrNull() ?: return null
+        return listOf(
+            model.runtime.storageValue,
+            model.sizeBytes.toString(),
+            model.architecture.orEmpty().lowercase(),
+            model.quant.orEmpty().lowercase(),
+            prefixHash
+        ).joinToString(":")
+    }
+
+    private fun cleanupDuplicateManagedModelFiles(
+        before: List<ModelManifest>,
+        after: List<ModelManifest>
+    ) {
+        val managedRoot = runCatching { managedModelDir.canonicalFile }.getOrNull() ?: return
+        val rootPrefix = managedRoot.path + File.separator
+        val kept = buildSet {
+            after.mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }.forEach(::add)
+            // A projector can legally live beside a duplicate main file.  Do
+            // not remove that path while cleaning the redundant main record.
+            after.mapNotNull { model ->
+                model.visionProjectorPath?.let { path -> runCatching { File(path).canonicalPath }.getOrNull() }
+            }.forEach(::add)
+        }
+        before.asSequence()
+            .mapNotNull { runCatching { File(it.path).canonicalFile }.getOrNull() }
+            .filter { it.path.startsWith(rootPrefix) && it.path !in kept && it.isFile }
+            .distinctBy { it.path }
+            .forEach { duplicate ->
+                // Only remove files in the app-owned model directory.  An
+                // imported URI outside this root is never touched by catalog
+                // cleanup, even when its bytes match another record.
+                runCatching {
+                    if (duplicate.delete()) {
+                        duplicate.parentFile
+                            ?.takeIf { parent -> parent != managedRoot && parent.isDirectory && parent.listFiles().isNullOrEmpty() }
+                            ?.delete()
+                    }
+                }
+            }
+    }
 
     private fun stripKnownExtension(value: String, extension: String): String =
         if (value.endsWith(extension, ignoreCase = true)) value.dropLast(extension.length) else value
@@ -1236,8 +1587,12 @@ class ModelStoreRepository(private val context: Context) {
     private fun directorySize(directory: File): Long =
         directory.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
-    private fun sha256MnnBundle(directory: File, requiredFiles: List<String>): String {
+    private fun sha256MnnBundle(
+        directory: File, requiredFiles: List<String>, checkCancelled: () -> Unit = {},
+        onProgress: (ModelImportProgress) -> Unit = {}
+    ): String {
         val digest = MessageDigest.getInstance("SHA-256")
+        var copied = 0L
         requiredFiles
             .map(::normalizeMnnComponentPath)
             .distinct()
@@ -1249,9 +1604,12 @@ class ModelStoreRepository(private val context: Context) {
                 file.inputStream().use { input ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     while (true) {
+                        checkCancelled()
                         val read = input.read(buffer)
                         if (read <= 0) break
                         digest.update(buffer, 0, read)
+                        copied += read
+                        onProgress(ModelImportProgress("verifying", path, copiedBytes = copied))
                     }
                 }
             }
@@ -1264,20 +1622,7 @@ class ModelStoreRepository(private val context: Context) {
             .distinct()
             .sumOf { path -> File(directory, path).length() }
 
-    private fun normalizeMnnComponentPath(rawPath: String): String {
-        val normalized = rawPath.trim().replace('\\', '/')
-        require(normalized.isNotBlank()) { "MNN component path must not be blank." }
-        require('\u0000' !in normalized) { "MNN component path contains a NUL character." }
-        require(!normalized.startsWith('/')) { "MNN component path must be relative: $rawPath" }
-        require(!WINDOWS_DRIVE_PREFIX.containsMatchIn(normalized)) {
-            "MNN component path must be relative: $rawPath"
-        }
-        val segments = normalized.split('/')
-        require(segments.none { it.isEmpty() || it == "." || it == ".." }) {
-            "MNN component path contains an invalid segment: $rawPath"
-        }
-        return segments.joinToString("/")
-    }
+    private fun normalizeMnnComponentPath(rawPath: String): String = normalizeMnnImportPath(rawPath)
 
     private fun safeFileName(fileName: String): String =
         fileName.replace(Regex("[^A-Za-z0-9._-]"), "_")
@@ -1313,6 +1658,7 @@ class ModelStoreRepository(private val context: Context) {
 
     private companion object {
         private val MODEL_IMPORT_LOCK = Any()
+        private val MODEL_IMPORT_TASK_LOCK = Any()
         private const val IMPORT_MAGIC_BYTES = LITERT_LM_MAGIC_SIZE
         private const val MB = 1024L * 1024L
         private const val GB = 1024L * MB
@@ -1447,6 +1793,119 @@ internal fun parsePersistedModelManifest(contents: String): List<ModelManifest> 
                 ?.let(::add)
         }
     }
+}
+
+/**
+ * Canonical path is a stronger identity than a display name: two persisted
+ * rows for one physical model file must become one catalog entry.  Keep the
+ * newest primary record (so its integrity metadata stays authoritative), but
+ * merge a visual projector from any duplicate row before discarding it.
+ */
+internal fun deduplicateModelRecordsByCanonicalPath(models: List<ModelManifest>): List<ModelManifest> {
+    val byPath = linkedMapOf<String, ModelManifest>()
+    models.sortedByDescending { it.createdAt }.forEach { candidate ->
+        val key = runCatching { File(candidate.path).canonicalPath }
+            .getOrElse { File(candidate.path).absolutePath }
+        val existing = byPath[key]
+        if (existing == null) {
+            byPath[key] = candidate
+            return@forEach
+        }
+        val primary = when {
+            candidate.lastLoadedAt != null && existing.lastLoadedAt == null -> candidate
+            existing.lastLoadedAt != null && candidate.lastLoadedAt == null -> existing
+            candidate.createdAt > existing.createdAt -> candidate
+            else -> existing
+        }
+        val other = if (primary === existing) candidate else existing
+        val projector = when {
+            primary.hasVisionProjector -> primary
+            other.hasVisionProjector -> other
+            else -> primary
+        }
+        byPath[key] = primary.copy(
+            repoId = primary.repoId ?: other.repoId,
+            revision = primary.revision ?: other.revision,
+            quant = primary.quant ?: other.quant,
+            architecture = primary.architecture ?: other.architecture,
+            license = primary.license ?: other.license,
+            visionProjectorPath = projector.visionProjectorPath,
+            visionProjectorFileName = projector.visionProjectorFileName,
+            visionProjectorSizeBytes = projector.visionProjectorSizeBytes,
+            visionProjectorSha256 = projector.visionProjectorSha256,
+            visionValidated = primary.visionValidated || other.visionValidated,
+            createdAt = maxOf(existing.createdAt, candidate.createdAt),
+            lastLoadedAt = listOfNotNull(existing.lastLoadedAt, candidate.lastLoadedAt).maxOrNull()
+        )
+    }
+    return byPath.values.sortedByDescending { it.createdAt }
+}
+
+/**
+ * Pure catalog merge used by [ModelStoreRepository].  Exact SHA-256 matches
+ * are safe to collapse; records without a complete content digest are left
+ * alone because same-name/size heuristics can hide genuinely different model
+ * files.  The record that was most recently loaded wins the primary identity,
+ * followed by a record with a visual projector, then the newest record.  Any
+ * projector and useful metadata on the other record are merged into it.
+ */
+internal fun deduplicateEquivalentModelRecordsForCatalog(models: List<ModelManifest>): List<ModelManifest> {
+    val output = mutableListOf<ModelManifest>()
+    val keyToIndex = linkedMapOf<String, Int>()
+    models.sortedByDescending { it.createdAt }.forEach { candidate ->
+        val key = candidate.exactContentDedupKey()
+        if (key == null) {
+            output += candidate
+            return@forEach
+        }
+        val existingIndex = keyToIndex[key]
+        if (existingIndex == null) {
+            keyToIndex[key] = output.size
+            output += candidate
+            return@forEach
+        }
+        val merged = mergeEquivalentModelRecords(output[existingIndex], candidate)
+        output[existingIndex] = merged
+    }
+    return output.sortedByDescending { it.createdAt }
+}
+
+private fun ModelManifest.exactContentDedupKey(): String? {
+    val digest = sha256.trim().lowercase()
+    if (digest.length != 64 || digest.any { it !in "0123456789abcdef" }) return null
+    if (isFastRecoveryFingerprint(digest)) return null
+    return "${runtime.storageValue}:$sizeBytes:$digest"
+}
+
+private fun mergeEquivalentModelRecords(
+    first: ModelManifest,
+    second: ModelManifest
+): ModelManifest {
+    val preferred = when {
+        first.lastLoadedAt != null && second.lastLoadedAt == null -> first
+        second.lastLoadedAt != null && first.lastLoadedAt == null -> second
+        first.hasVisionProjector && !second.hasVisionProjector -> first
+        second.hasVisionProjector && !first.hasVisionProjector -> second
+        second.createdAt > first.createdAt -> second
+        else -> first
+    }
+    val other = if (preferred === first) second else first
+    val projector = if (preferred.hasVisionProjector) preferred else other
+    return preferred.copy(
+        displayName = preferred.displayName.ifBlank { other.displayName },
+        repoId = preferred.repoId ?: other.repoId,
+        revision = preferred.revision ?: other.revision,
+        quant = preferred.quant ?: other.quant,
+        architecture = preferred.architecture ?: other.architecture,
+        license = preferred.license ?: other.license,
+        visionProjectorPath = projector.visionProjectorPath,
+        visionProjectorFileName = projector.visionProjectorFileName,
+        visionProjectorSizeBytes = projector.visionProjectorSizeBytes,
+        visionProjectorSha256 = projector.visionProjectorSha256,
+        visionValidated = preferred.visionValidated || other.visionValidated,
+        createdAt = maxOf(first.createdAt, second.createdAt),
+        lastLoadedAt = listOfNotNull(first.lastLoadedAt, second.lastLoadedAt).maxOrNull()
+    )
 }
 
 internal data class RecoverableManagedGgufFile(
@@ -1641,7 +2100,8 @@ internal fun findRecoverableManagedLiteRtLmFiles(
 }
 
 private fun File.isManagedImportStagingDirectory(): Boolean =
-    CURRENT_IMPORT_DIRECTORY.matches(name) || LEGACY_NAMED_IMPORT_ARTIFACT.matches(name)
+    CURRENT_IMPORT_DIRECTORY.matches(name) || LEGACY_NAMED_IMPORT_ARTIFACT.matches(name) ||
+        name.startsWith(".mca-import-resume-")
 
 private fun File.isPrimaryGgufShard(): Boolean {
     val match = GGUF_SHARD_FILE.matchEntire(name) ?: return true

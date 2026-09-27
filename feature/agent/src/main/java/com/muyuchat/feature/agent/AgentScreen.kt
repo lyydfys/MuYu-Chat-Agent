@@ -1,4 +1,6 @@
-﻿package com.muyuchat.feature.agent
+﻿@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
+package com.muyuchat.feature.agent
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -18,6 +20,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -439,7 +443,7 @@ private fun SmoothRightToLeftPage(
                 }
             }
 
-            BackHandler(enabled = visible) {
+            BackHandler(enabled = visible && !WindowInsets.isImeVisible) {
                 closeWithMotion()
             }
 

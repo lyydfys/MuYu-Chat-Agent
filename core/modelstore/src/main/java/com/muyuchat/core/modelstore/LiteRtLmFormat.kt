@@ -30,6 +30,17 @@ private const val LITERT_LM_TEXT_MODEL_TYPE: String = "TF_LITE_PREFILL_DECODE"
 // preflight strict while avoiding a false rejection of a runnable GPU model.
 private const val LITERT_LM_ARTISAN_TEXT_MODEL_TYPE: String = "TF_LITE_ARTISAN_TEXT_DECODER"
 
+/**
+ * Model-type markers emitted by LiteRT-LM packages that carry an image
+ * encoder/adapter.  The metadata is part of the bounded header, so inspecting
+ * it is safe during load admission and does not map the model payload.
+ */
+private val LITERT_LM_VISION_MODEL_TYPE_MARKERS = setOf(
+    "tf_lite_vision_encoder",
+    "tf_lite_vision_adapter",
+    "tf_lite_end_of_vision"
+)
+
 internal fun ByteArray.hasLiteRtLmMagic(): Boolean =
     size >= LITERT_LM_MAGIC_SIZE &&
         indices.take(LITERT_LM_MAGIC_SIZE).all { index -> this[index] == LITERT_LM_MAGIC_BYTES[index] }
@@ -98,6 +109,40 @@ internal fun isLiteRtLmFile(file: File): Boolean =
             true
         }
     }.getOrDefault(false)
+
+/**
+ * Reads the model-type strings from a structurally valid LiteRT-LM header.
+ *
+ * This intentionally returns an empty set for malformed, truncated, or
+ * unreadable files.  Callers use the result as a capability hint only; the
+ * normal [validateLiteRtLmLoadPreflight] gate remains authoritative for model
+ * admission.  The verifier reads at most [LITERT_LM_HEADER_MAX_SIZE] bytes.
+ */
+fun liteRtLmModelTypes(file: File): Set<String> = runCatching {
+    val size = file.length()
+    if (!file.isFile || !file.canRead() || size < LITERT_LM_FIXED_HEADER_SIZE) {
+        emptySet()
+    } else {
+        readAndVerifyHeader(file, size, requireTextModel = false).modelTypes
+    }
+}.getOrDefault(emptySet())
+
+/**
+ * Returns whether the LiteRT-LM package includes the visual encoder/adapter
+ * sections needed for image understanding.  A text-only decoder package must
+ * be rejected before an image request reaches the native delegate; otherwise
+ * some delegates abort the process instead of returning a useful error.
+ */
+fun isLiteRtLmVisionModel(file: File): Boolean {
+    val modelTypes = liteRtLmModelTypes(file)
+    if (modelTypes.isEmpty()) return false
+    return modelTypes.any { type ->
+        val normalized = type.trim().lowercase(java.util.Locale.ROOT)
+        normalized in LITERT_LM_VISION_MODEL_TYPE_MARKERS ||
+            ("vision" in normalized &&
+                ("encoder" in normalized || "adapter" in normalized || "end" in normalized))
+    }
+}
 
 private data class HeaderVerification(
     val headerEnd: Long,

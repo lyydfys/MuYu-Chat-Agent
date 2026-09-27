@@ -452,7 +452,7 @@ internal class RemoteLocalChatRunner(
     }
 
     private fun startBinding(attempt: BindingAttempt) {
-        val serviceIntent = Intent(appContext, LocalChatWorkerService::class.java)
+        val serviceIntent = Intent(appContext, workerServiceClass())
         val didBind = try {
             appContext.bindService(
                 serviceIntent,
@@ -485,8 +485,20 @@ internal class RemoteLocalChatRunner(
         if (unbindStale) unbindQuietly(attempt.connection)
     }
 
+    /**
+     * Keep LiteRT-LM in its dedicated worker process/service so its Qualcomm dispatch
+     * preloading and native lifecycle cannot collide with the generic local-chat worker.
+     * All other runtimes continue to use the shared worker implementation.
+     */
+    private fun workerServiceClass(): Class<out LocalChatWorkerService> =
+        if (runtime == LocalChatRuntime.LITERT_LM) {
+            LiteRtChatWorkerService::class.java
+        } else {
+            LocalChatWorkerService::class.java
+        }
+
     private fun startResidentService() {
-        val serviceIntent = Intent(appContext, LocalChatWorkerService::class.java)
+        val serviceIntent = Intent(appContext, workerServiceClass())
         runCatching {
             ContextCompat.startForegroundService(appContext, serviceIntent)
         }.onFailure { error ->

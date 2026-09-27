@@ -176,11 +176,19 @@ internal object LiteRtQualcommRuntimeStager {
      */
     internal fun variantForSocModel(rawSocModel: String?): String? {
         val model = rawSocModel.orEmpty().trim().uppercase(Locale.US)
+        // A few OEM builds expose Build.SOC_MODEL as the numeric QNN SoC id
+        // instead of the marketing name (for example 69=SM8750, 85=SM8735,
+        // 87=SM8850). Keep both forms exact; do not match arbitrary numeric
+        // substrings from an unrelated property value.
+        val numericSocModel = model.toIntOrNull()
         return when {
-            model.contains("SM8550") || model.contains("QCS8550") || model.contains("QCM8550") -> V73
-            model.contains("SM8635") || model.contains("SM8650") -> V75
-            model.contains("SM8750") -> V79
-            model.contains("SM8850") -> V81
+            numericSocModel == 43 || numericSocModel == 66 ||
+                model.contains("SM8550") || model.contains("QCS8550") || model.contains("QCM8550") -> V73
+            numericSocModel == 57 || numericSocModel == 68 ||
+                model.contains("SM8635") || model.contains("SM8650") -> V75
+            numericSocModel == 69 || numericSocModel == 85 ||
+                model.contains("SM8735") || model.contains("SM8750") -> V79
+            numericSocModel == 87 || model.contains("SM8850") -> V81
             else -> null
         }
     }

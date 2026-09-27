@@ -4,11 +4,17 @@ import java.io.File
 import java.io.IOException
 import java.util.UUID
 
+internal fun imageBundleCandidateDirectory(bundleDir: File): File {
+    val destination = bundleDir.canonicalFile
+    val parent = requireNotNull(destination.parentFile) { "模型目录必须有父目录。" }
+    return File(parent, ".${destination.name}.candidate")
+}
+
 internal fun promoteImageBundleCandidate(candidateDir: File, bundleDir: File): File? {
     val candidate = candidateDir.canonicalFile
     val destination = bundleDir.canonicalFile
     val parent = requireNotNull(destination.parentFile)
-    require(candidate.isDirectory && candidate.parentFile == parent && candidate != destination) {
+    require(candidate.isDirectory && candidate == imageBundleCandidateDirectory(destination).canonicalFile) {
         "模型候选目录不存在或不在目标目录旁。"
     }
     val backup = File(parent, ".${destination.name}.backup")
@@ -33,7 +39,7 @@ internal fun promoteImageBundleCandidate(candidateDir: File, bundleDir: File): F
 
 internal fun restoreImageBundleBackup(bundleDir: File, backup: File?) {
     val destination = bundleDir.canonicalFile
-    val candidate = File(destination.parentFile, ".${destination.name}.candidate")
+    val candidate = imageBundleCandidateDirectory(destination)
     if (destination.exists()) {
         val retained = if (!candidate.exists()) candidate
             else File(destination.parentFile, ".${destination.name}.recovery-${UUID.randomUUID()}")

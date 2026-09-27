@@ -32,6 +32,24 @@ class LiteRtLmFormatTest {
     }
 
     @Test
+    fun visualSectionIsDetectedFromBoundedMetadata() {
+        val file = Files.createTempDirectory("litertlm-vision-format").toFile()
+            .resolve("vision.litertlm")
+            .apply { writeBytes(validLiteRtLmBytes("tf_lite_vision_encoder")) }
+
+        assertEquals(setOf("tf_lite_vision_encoder"), liteRtLmModelTypes(file))
+        assertTrue(isLiteRtLmVisionModel(file))
+    }
+
+    @Test
+    fun textDecoderWithoutVisualSectionIsNotMarkedAsVisionModel() {
+        val file = liteRtLmFile("text-only.litertlm")
+
+        assertTrue(liteRtLmModelTypes(file).contains("tf_lite_prefill_decode"))
+        assertFalse(isLiteRtLmVisionModel(file))
+    }
+
+    @Test
     fun wrongMagicAndSizeAreRejected() {
         val file = liteRtLmFile("model.litertlm")
         val wrongSize = validateLiteRtLmLoadPreflight(file, file.length() + 1L)

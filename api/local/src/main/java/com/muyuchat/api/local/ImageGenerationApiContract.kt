@@ -320,6 +320,19 @@ class ImageGenerationProviderException(
     companion object {
         fun fromWorkerFailure(code: String, message: String): ImageGenerationProviderException {
             val normalized = normalizeProviderErrorCode(code)
+            val normalizedMessage = message.trim().lowercase()
+            if (
+                normalizedMessage.contains("typed graph bindings") ||
+                normalizedMessage.contains("qnn sdk headers") ||
+                normalizedMessage.contains("sdk headers were not available")
+            ) {
+                return ImageGenerationProviderException(
+                    code = "image_runtime_unavailable",
+                    httpStatus = 503,
+                    message = "The installed APK does not contain the typed QNN image runtime. " +
+                        "Install a complete MCA build made with the QAIRT/QNN SDK, then retry."
+                )
+            }
             return ImageGenerationProviderException(
                 code = normalized,
                 httpStatus = workerFailureHttpStatus(normalized),
@@ -607,23 +620,42 @@ object ImageGenerationApiContract {
                 "Image provider response is missing prompt_processing evidence."
             )
         }
+        // Identify the Qwen-Image-2.1 profile before validating the generic execution proof.
+        // Its request contract has intentionally more specific error classes (for example a
+        // negative prompt is an image_control_mismatch).  Running the generic evidence checks
+        // first can mask that actionable request error when the provider response is otherwise
+        // malformed or incomplete.  The full native evidence validation still runs below after
+        // the request has been classified.
+        val qwenImage21 = isQwenImage21Execution(execution)
+        if (qwenImage21) {
+            expectedRequest?.let { validateQwenImage21RequestedControls(it, execution) }
+        }
         validateExecutionEvidence(execution, promptProcessing)
-        expectedRequest?.let {
-            validateRequestedControlEvidence(it, execution)
-            validateRequestedInputEvidence(it, execution)
-            validateRequestedLoraEvidence(it, execution)
-            validateRequestedTextualInversionEvidence(it, execution, promptProcessing)
+        if (qwenImage21) {
+            validateQwenImage21ImageData(
+                data = data,
+                execution = execution,
+                nativeEffective = execution.getJSONObject("nativeEffective"),
+                expectedCount = expectedRequest?.imageCount ?: 1
+            )
+        } else {
+            expectedRequest?.let {
+                validateRequestedControlEvidence(it, execution)
+                validateRequestedInputEvidence(it, execution)
+                validateRequestedLoraEvidence(it, execution)
+                validateRequestedTextualInversionEvidence(it, execution, promptProcessing)
+            }
+            expectedRequest?.let { request ->
+                validateRequestedUltraFixEvidence(request, execution, data)
+            }
+            validateImageData(
+                data = data,
+                execution = execution,
+                nativeEffective = execution.getJSONObject("nativeEffective"),
+                expectedCount = expectedRequest?.imageCount ?: 1,
+                requireSeedEvidence = expectedRequest != null
+            )
         }
-        expectedRequest?.let { request ->
-            validateRequestedUltraFixEvidence(request, execution, data)
-        }
-        validateImageData(
-            data = data,
-            execution = execution,
-            nativeEffective = execution.getJSONObject("nativeEffective"),
-            expectedCount = expectedRequest?.imageCount ?: 1,
-            requireSeedEvidence = expectedRequest != null
-        )
         return ImageGenerationApiResponse(
             rawBody = rawBody,
             requestId = requestId,
@@ -1083,6 +1115,10 @@ object ImageGenerationApiContract {
         promptProcessing: ImageGenerationApiPromptProcessing?
     ) {
         rejectPrivateInputPaths(execution)
+        if (isQwenImage21Execution(execution)) {
+            validateQwenImage21ExecutionEvidence(execution, promptProcessing)
+            return
+        }
         if (!execution.requiredBoolean("nativeExecution")) {
             reject("invalid_image_execution_evidence", "Image execution must prove nativeExecution=true.")
         }
@@ -1167,6 +1203,298 @@ object ImageGenerationApiContract {
                 )
             }
         }
+    }
+
+    /**
+     * Qwen-Image-2.1 uses MNN's integrated text encoder, flow sampler, and VAE path. Its audit is
+     * deliberately versioned separately from the SD/CLIP contract below: it must prove the actual
+     * native run, selected backend, resolved profile, consumed prompt, request parameters, and
+     * published output without fabricating CLIP/UNet/VAE metadata it does not produce.
+     */
+    private fun validateQwenImage21ExecutionEvidence(
+        execution: JSONObject,
+        promptProcessing: ImageGenerationApiPromptProcessing?
+    ) {
+        val native = execution.optJSONObject("nativeEffective")
+            ?: reject(
+                "invalid_image_execution_evidence",
+                "Qwen-Image-2.1 execution is missing nativeEffective evidence."
+            )
+
+        fun invalid(message: String): Nothing =
+            reject("invalid_image_execution_evidence", message)
+
+        fun pairedString(field: String): String {
+            val outer = execution.requiredNonBlankString(field)
+            val inner = native.requiredNonBlankString(field)
+            if (outer != inner) invalid("Outer and nativeEffective Qwen $field evidence do not match.")
+            return outer
+        }
+
+        fun pairedPositiveLong(field: String): Long {
+            val outer = execution.requiredPositiveLong(field)
+            val inner = native.requiredPositiveLong(field)
+            if (outer != inner) invalid("Outer and nativeEffective Qwen $field evidence do not match.")
+            return outer
+        }
+
+        fun pairedInteger(field: String, minimum: Long = 0L): Long {
+            val outer = execution.requiredInteger(field, minimum)
+            val inner = native.requiredInteger(field, minimum)
+            if (outer != inner) invalid("Outer and nativeEffective Qwen $field evidence do not match.")
+            return outer
+        }
+
+        fun pairedBoolean(field: String): Boolean {
+            val outer = execution.requiredBoolean(field)
+            val inner = native.requiredBoolean(field)
+            if (outer != inner) invalid("Outer and nativeEffective Qwen $field evidence do not match.")
+            return outer
+        }
+
+        fun pairedFiniteNumber(field: String): Double {
+            val outer = execution.requiredFiniteNumber(field)
+            val inner = native.requiredFiniteNumber(field)
+            if (!numbersMatch(outer, inner)) invalid("Outer and nativeEffective Qwen $field evidence do not match.")
+            return outer
+        }
+
+        if (pairedString("executionSchema") != QWEN_IMAGE_21_EXECUTION_SCHEMA ||
+            pairedString("profileId") != QWEN_IMAGE_21_PROFILE_ID ||
+            pairedString("runtime") != QWEN_IMAGE_21_RUNTIME ||
+            pairedString("taskMode") != ImageGenerationApiTaskMode.TEXT_TO_IMAGE.wireName
+        ) {
+            invalid("Qwen-Image-2.1 execution schema, profile, runtime, or task mode is invalid.")
+        }
+
+        val modelFingerprint = pairedString("modelFingerprint")
+        if (!SHA256_PATTERN.matches(modelFingerprint)) {
+            invalid("Qwen modelFingerprint must be a lowercase SHA-256 digest.")
+        }
+        pairedPositiveLong("profileRevision")
+        val profileBinding = pairedString("profileBindingFingerprint")
+        val imageProfileBinding = pairedString("imageProfileBindingFingerprint")
+        if (!SHA256_PATTERN.matches(profileBinding) || profileBinding != imageProfileBinding) {
+            invalid("Qwen profile binding fingerprints are invalid or inconsistent.")
+        }
+        val promptLanguageBinding = pairedString("promptLanguageBindingFingerprint")
+        if (!SHA256_PATTERN.matches(promptLanguageBinding)) {
+            invalid("Qwen prompt language binding must be a lowercase SHA-256 digest.")
+        }
+        promptProcessing?.let { prompt ->
+            if (prompt.imageProfileBindingFingerprint != imageProfileBinding ||
+                prompt.promptLanguageBindingFingerprint != promptLanguageBinding
+            ) {
+                invalid("Qwen profile and language bindings do not match prompt_processing.")
+            }
+        }
+
+        if (!pairedBoolean("nativeExecution") || pairedBoolean("fallback") ||
+            !pairedBoolean("nativeRunCompleted") || !pairedBoolean("backendResolved") ||
+            !pairedBoolean("backendExecutionConfirmedByNative")
+        ) {
+            invalid("Qwen execution did not prove a completed native run on the resolved backend.")
+        }
+        if (pairedString("backendExecutionProof") != QWEN_IMAGE_21_BACKEND_PROOF ||
+            pairedString("backendExecutionScope") != QWEN_IMAGE_21_BACKEND_SCOPE
+        ) {
+            invalid("Qwen native backend execution proof is missing or unsupported.")
+        }
+        val requestedBackend = pairedString("requestedBackend")
+        val effectiveBackend = pairedString("effectiveBackend")
+        if (requestedBackend !in QWEN_IMAGE_21_BACKENDS ||
+            effectiveBackend !in QWEN_IMAGE_21_BACKENDS || requestedBackend != effectiveBackend
+        ) {
+            invalid("Qwen requested and effective native backends do not match a supported backend.")
+        }
+        execution.optString("backendConfigured")
+            .takeIf(String::isNotBlank)
+            ?.let { configured ->
+                if (configured != effectiveBackend) {
+                    invalid("Qwen configured backend does not match native backend evidence.")
+                }
+            }
+
+        val generationSequence = pairedPositiveLong("nativeGenerationSequence")
+        val generationCount = pairedPositiveLong("nativeGenerationCount")
+        if (generationSequence != generationCount) {
+            invalid("Qwen generation sequence does not match the completed native generation count.")
+        }
+
+        val width = pairedPositiveLong("width")
+        val height = pairedPositiveLong("height")
+        if (width != QWEN_IMAGE_21_WIDTH.toLong() || height != QWEN_IMAGE_21_HEIGHT.toLong()) {
+            invalid("Qwen-Image-2.1 schema v1 only supports its packaged 512x512 output graph.")
+        }
+        val steps = pairedPositiveLong("steps")
+        if (steps !in QWEN_IMAGE_21_MIN_STEPS..QWEN_IMAGE_21_MAX_STEPS) {
+            invalid("Qwen-Image-2.1 schema v1 requires between 2 and 40 sampling steps.")
+        }
+        val seed = pairedInteger("seed")
+        if (pairedPositiveLong("batchCount") != 1L) {
+            invalid("Qwen-Image-2.1 schema v1 must bind exactly one generated image.")
+        }
+        if (!numbersMatch(pairedFiniteNumber("cfgScale"), 1.0)) {
+            invalid("Qwen-Image-2.1 execution must use the model-native guidance value 1.0.")
+        }
+        if (canonicalSampler(pairedString("scheduler")) != "flow_match") {
+            invalid("Qwen-Image-2.1 execution must use its native flow-matching scheduler.")
+        }
+
+        val promptSha256 = pairedString("nativePromptExecutionSha256")
+        if (!SHA256_PATTERN.matches(promptSha256)) {
+            invalid("Qwen native prompt execution evidence is not a lowercase SHA-256 digest.")
+        }
+        if (pairedString("nativePromptBindingStage") != "conditioning_consumed") {
+            invalid("Qwen prompt evidence must be published after conditioning consumption.")
+        }
+        if (pairedString("promptExecutionSha256") != promptSha256) {
+            invalid("Qwen provider prompt binding does not match the native consumed prompt.")
+        }
+        validateNativePromptExecutionEvidence(execution, native, promptProcessing)
+
+        val outputSha256 = pairedString("outputSha256")
+        if (!SHA256_PATTERN.matches(outputSha256)) {
+            invalid("Qwen outputSha256 must be a lowercase SHA-256 digest.")
+        }
+        pairedPositiveLong("outputBytes")
+
+        // The worker has no support for SD/CLIP editing or conditioning controls. Reject such
+        // evidence if present; do not route Qwen through validators that require those schemas.
+        val sdOnlyEvidenceFields = setOf(
+            "imageInput",
+            "loras",
+            "loraEvidence",
+            "textualInversions",
+            "textualInversionEvidence",
+            "textualInversionExecutionAssets",
+            "ultraFix",
+            "vaeTiling"
+        )
+        if (sdOnlyEvidenceFields.any { execution.has(it) || native.has(it) }) {
+            invalid("Qwen response contains unsupported image-input, LoRA, textual-inversion, or tiling evidence.")
+        }
+        if (seed < 0L) invalid("Qwen native seed must be non-negative.")
+    }
+
+    private fun validateQwenImage21RequestedControls(
+        request: ImageGenerationApiRequest,
+        execution: JSONObject
+    ) {
+        fun rejectInput(message: String): Nothing =
+            reject("invalid_image_input_execution_evidence", message)
+        fun rejectControl(message: String): Nothing =
+            reject("image_control_mismatch", message)
+
+        if (request.taskMode != ImageGenerationApiTaskMode.TEXT_TO_IMAGE ||
+            request.inputImage != null || request.maskImage != null || request.controlImage != null ||
+            request.strength != null || request.controlStrength != null
+        ) {
+            rejectInput("Qwen-Image-2.1 only accepts text-to-image requests without image inputs.")
+        }
+        if (request.imageCount != 1) {
+            reject("invalid_image_provider_response", "Qwen-Image-2.1 returns exactly one image per request.")
+        }
+        if (!request.negativePrompt.isNullOrBlank()) {
+            rejectControl("Qwen-Image-2.1 does not accept a separate negative prompt.")
+        }
+        if (request.loras.isNotEmpty()) {
+            reject("invalid_lora_execution_evidence", "Qwen-Image-2.1 does not support LoRA requests.")
+        }
+        if (request.textualInversionIds.isNotEmpty()) {
+            reject(
+                "invalid_textual_inversion_execution_evidence",
+                "Qwen-Image-2.1 does not support textual-inversion requests."
+            )
+        }
+        if (request.ultraFix != null) {
+            reject("invalid_ultrafix_execution_evidence", "Qwen-Image-2.1 does not support UltraFix requests.")
+        }
+        if (request.vaeTiling != null || request.preview != null || request.clipSkip != null) {
+            rejectControl("Qwen-Image-2.1 does not support VAE tiling, previews, or CLIP skip controls.")
+        }
+
+        val native = execution.optJSONObject("nativeEffective")
+            ?: reject(
+                "invalid_image_execution_evidence",
+                "Qwen-Image-2.1 execution is missing nativeEffective evidence."
+            )
+        fun checkInt(field: String, expected: Int?, label: String) {
+            expected ?: return
+            if (native.requiredInteger(field, 0L) != expected.toLong()) {
+                rejectControl("Native Qwen $label does not match the request.")
+            }
+        }
+        checkInt("width", request.width, "width")
+        checkInt("height", request.height, "height")
+        checkInt("steps", request.steps, "steps")
+        request.seed?.takeIf { it >= 0 }?.let { expected ->
+            if (native.requiredInteger("seed", 0L) != expected.toLong()) {
+                rejectControl("Native Qwen seed does not match the request.")
+            }
+        }
+        request.cfgScale?.let { expected ->
+            if (!numbersMatch(native.requiredFiniteNumber("cfgScale"), expected)) {
+                rejectControl("Native Qwen cfg_scale does not match the request.")
+            }
+        }
+        request.sampler?.let { expected ->
+            if (canonicalSampler(native.requiredNonBlankString("scheduler")) != canonicalSampler(expected)) {
+                rejectControl("Native Qwen sampler does not match the request.")
+            }
+        }
+    }
+
+    private fun validateQwenImage21ImageData(
+        data: JSONArray,
+        execution: JSONObject,
+        nativeEffective: JSONObject,
+        expectedCount: Int
+    ) {
+        if (expectedCount != 1) {
+            reject("invalid_image_provider_response", "Qwen-Image-2.1 schema v1 must return one image.")
+        }
+        validateImageData(
+            data = data,
+            execution = execution,
+            nativeEffective = nativeEffective,
+            expectedCount = 1,
+            requireSeedEvidence = true
+        )
+        val item = data.optJSONObject(0)
+            ?: reject("invalid_image_provider_response", "Qwen image data item must be an object.")
+        val responseOutput = execution.optJSONArray("responseOutputEvidence")
+            ?.optJSONObject(0)
+            ?: reject("invalid_image_provider_response", "Qwen output byte evidence is missing.")
+        val sha256 = item.requiredNonBlankString("b64_json").let { encoded ->
+            val bytes = try {
+                Base64.getDecoder().decode(encoded)
+            } catch (_: IllegalArgumentException) {
+                reject("invalid_image_provider_response", "Qwen image data Base64 is malformed.")
+            }
+            MessageDigest.getInstance("SHA-256")
+                .digest(bytes)
+                .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        }
+        val sizeBytes = responseOutput.requiredPositiveLong("sizeBytes")
+        if (execution.requiredNonBlankString("outputSha256") != sha256 ||
+            nativeEffective.requiredNonBlankString("outputSha256") != sha256 ||
+            execution.requiredPositiveLong("outputBytes") != sizeBytes ||
+            nativeEffective.requiredPositiveLong("outputBytes") != sizeBytes
+        ) {
+            reject(
+                "invalid_image_execution_evidence",
+                "Qwen output hash/size evidence does not match the returned PNG bytes."
+            )
+        }
+    }
+
+    private fun isQwenImage21Execution(execution: JSONObject): Boolean {
+        val native = execution.optJSONObject("nativeEffective")
+        return execution.optString("executionSchema") == QWEN_IMAGE_21_EXECUTION_SCHEMA ||
+            native?.optString("executionSchema") == QWEN_IMAGE_21_EXECUTION_SCHEMA ||
+            execution.optString("profileId") == QWEN_IMAGE_21_PROFILE_ID ||
+            native?.optString("profileId") == QWEN_IMAGE_21_PROFILE_ID
     }
 
     private fun validateNativePromptExecutionEvidence(
@@ -3486,6 +3814,16 @@ object ImageGenerationApiContract {
     private const val PROMPT_METHOD_LOCAL_LLM = "LOCAL_LLM_ZH_TO_EN"
     private const val PROMPT_LANGUAGE_ENGLISH_DOMINANT = "ENGLISH_DOMINANT"
     private const val PROMPT_LANGUAGE_NATIVE_MULTILINGUAL = "NATIVE_MULTILINGUAL"
+    private const val QWEN_IMAGE_21_EXECUTION_SCHEMA = "qwen_image_21_mnn_v1"
+    private const val QWEN_IMAGE_21_PROFILE_ID = "mnn.qwen-image-2.1.opencl"
+    private const val QWEN_IMAGE_21_RUNTIME = "MNN_DIFFUSION"
+    private const val QWEN_IMAGE_21_BACKEND_PROOF = "mnn_runtime_resolution_after_native_run"
+    private const val QWEN_IMAGE_21_BACKEND_SCOPE = "primary_runtime"
+    private const val QWEN_IMAGE_21_WIDTH = 512
+    private const val QWEN_IMAGE_21_HEIGHT = 512
+    private const val QWEN_IMAGE_21_MIN_STEPS = 2L
+    private const val QWEN_IMAGE_21_MAX_STEPS = 40L
+    private val QWEN_IMAGE_21_BACKENDS = setOf("MNN_OPENCL", "MNN_CPU")
     private const val NEGATIVE_PROMPT_SOURCE_USER = "USER"
     private const val NEGATIVE_PROMPT_SOURCE_MODEL_DEFAULT = "MODEL_DEFAULT"
     private const val NEGATIVE_PROMPT_SOURCE_EMPTY = "EMPTY"

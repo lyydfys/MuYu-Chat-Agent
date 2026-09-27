@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import android.content.Context
+import android.net.Uri
 import android.database.sqlite.SQLiteDatabase
 import androidx.room.Dao
 import androidx.room.Database
@@ -19,6 +20,10 @@ import androidx.room.Upsert
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.muyuchat.core.engine.ChatImageAttachment
+import com.muyuchat.core.engine.deduplicateVisionAttachments
+import com.muyuchat.core.engine.visionDeduplicationKey
+import com.muyuchat.core.engine.ChatGeneratedImageRequest
+import com.muyuchat.core.engine.ChatGenerationMetrics
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
@@ -29,9 +34,12 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 
 private const val MAX_KNOWLEDGE_BASE_IDS_PER_ROOM_OPERATION = 32
 private const val MAX_KNOWLEDGE_CHUNKS_PER_ROOM_PAGE = 256
+private const val MAX_PERSISTED_VISION_HASH_BYTES = 64L * 1024L * 1024L
+private const val DEFAULT_HASH_BUFFER_BYTES = 32 * 1024
 
 /** Hard caps for persisted chat history, independent of the live conversation buffer. */
 internal data class ChatHistoryPersistenceLimits(
@@ -116,6 +124,31 @@ internal object ChatHistoryPersistenceBounds {
         current <= limit && next <= limit - current
 }
 
+internal object GeneratedImagePersistenceAssociation {
+    /**
+     * A batch is persisted only when one retained request references its whole
+     * asset set. This prevents committing a partial batch beside a message that
+     * claims the complete batch is available.
+     */
+    fun snapshotReferencesCompleteAssetSet(
+        records: List<ChatSessionRecord>,
+        assetIds: List<String>
+    ): Boolean {
+        if (assetIds.isEmpty() || assetIds.any(String::isBlank)) return false
+        val requestedIds = assetIds.toSet()
+        if (requestedIds.size != assetIds.size) return false
+
+        return records.asSequence()
+            .flatMap { it.messages.asSequence() }
+            .mapNotNull { it.generatedImageRequest }
+            .any { request ->
+                request.imageAssetIds.isNotEmpty() &&
+                    request.imageAssetIds.none(String::isBlank) &&
+                    request.imageAssetIds.toSet() == requestedIds
+            }
+    }
+}
+
 class ChatSessionStore(context: Context) {
     private val appContext = context.applicationContext
     private val database = McaRoomDatabase.get(appContext)
@@ -185,6 +218,38 @@ class ChatSessionStore(context: Context) {
         }
     }
 
+    /**
+     * Persists all generated image assets and the chat snapshot that references them
+     * in one Room transaction. Call from a coroutine so Room I/O does not block
+     * the caller thread while waiting for the transaction.
+     *
+     * Returns false when persistence bounds would discard the request or the
+     * retained request does not reference the complete batch; in that case no
+     * rows are written.
+     */
+    suspend fun saveGeneratedImageResult(
+        sessions: List<ChatSessionRecord>,
+        images: List<ImageAssetRecord>
+    ): Boolean = withContext(Dispatchers.IO) {
+        val boundedSessions = ChatHistoryPersistenceBounds.bound(sessions)
+        if (!GeneratedImagePersistenceAssociation.snapshotReferencesCompleteAssetSet(
+                records = boundedSessions,
+                assetIds = images.map { it.id }
+            )
+        ) return@withContext false
+
+        database.chatSessionDao().reconcileSnapshotWithImageAsset(
+            records = boundedSessions,
+            images = images.map { it.toEntity() }
+        )
+        true
+    }
+
+    suspend fun saveGeneratedImageResult(
+        sessions: List<ChatSessionRecord>,
+        image: ImageAssetRecord
+    ): Boolean = saveGeneratedImageResult(sessions, listOf(image))
+
     fun deleteImages(imageIds: List<String>) = runBlocking(Dispatchers.IO) {
         if (imageIds.isNotEmpty()) {
             database.chatSessionDao().deleteImages(imageIds.distinct())
@@ -238,11 +303,81 @@ class ChatSessionStore(context: Context) {
     private suspend fun normalizePersistedHistory(
         records: List<ChatSessionRecord>
     ): List<ChatSessionRecord> {
-        val boundedRecords = ChatHistoryPersistenceBounds.bound(records)
+        // load() invokes this on Dispatchers.IO. Normalize old JSON snapshots
+        // here as well as Room rows so a legacy history never returns one
+        // frame with duplicate attachments before the migrated DB is reread.
+        // A persisted content:// URI cannot be compared by the shared cheap
+        // deduplicator alone: pickers and document providers commonly expose
+        // the same bytes through different URI instances. Resolve and hash
+        // those streams once per load so old rows are repaired in the database
+        // before the first frame is rendered or sent to a vision runner.
+        val contentKeyCache = HashMap<String, String?>()
+        val normalizedRecords = records.map { session ->
+            session.copy(
+                messages = session.messages.map { message ->
+                    val attachments = deduplicatePersistedVisionAttachments(
+                        message.imageAttachments,
+                        contentKeyCache
+                    )
+                    if (attachments == message.imageAttachments) message
+                    else message.copy(imageAttachments = attachments)
+                }
+            )
+        }
+        val boundedRecords = ChatHistoryPersistenceBounds.bound(normalizedRecords)
         if (boundedRecords != records) {
             database.chatSessionDao().replaceAll(boundedRecords)
         }
         return boundedRecords
+    }
+
+    private fun deduplicatePersistedVisionAttachments(
+        attachments: List<ChatImageAttachment>,
+        contentKeyCache: MutableMap<String, String?>
+    ): List<ChatImageAttachment> {
+        if (attachments.size < 2) return attachments
+        val seen = LinkedHashSet<String>(attachments.size)
+        return attachments.filter { attachment ->
+            val source = attachment.uriString.trim()
+            val key = if (source.startsWith("content:", ignoreCase = true)) {
+                val resolved = if (contentKeyCache.containsKey(source)) {
+                    contentKeyCache[source]
+                } else {
+                    contentUriVisionKey(source).also { contentKeyCache[source] = it }
+                }
+                resolved ?: attachment.visionDeduplicationKey()
+            } else {
+                attachment.visionDeduplicationKey()
+            }
+            seen.add(key)
+        }
+    }
+
+    /**
+     * Returns a byte-identity key for a readable content URI. A null result
+     * deliberately falls back to the URI identity: unreadable or oversized
+     * providers must never make an attachment disappear silently.
+     */
+    private fun contentUriVisionKey(source: String): String? {
+        val uri = runCatching { Uri.parse(source) }.getOrNull() ?: return null
+        if (!uri.scheme.equals("content", ignoreCase = true)) return null
+        return runCatching {
+            val digest = MessageDigest.getInstance("SHA-256")
+            var total = 0L
+            val buffer = ByteArray(DEFAULT_HASH_BUFFER_BYTES)
+            appContext.contentResolver.openInputStream(uri)?.use { input ->
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    total += read
+                    if (total > MAX_PERSISTED_VISION_HASH_BYTES) return@runCatching null
+                    digest.update(buffer, 0, read)
+                }
+            } ?: return@runCatching null
+            "bytes:" + digest.digest().joinToString("") { byte ->
+                "%02x".format(byte.toInt() and 0xff)
+            }
+        }.getOrNull()
     }
 
     private fun JSONObject.toChatSessionRecord(): ChatSessionRecord =
@@ -280,7 +415,11 @@ class ChatSessionStore(context: Context) {
                 reasoningDurationMs = json.optLong("reasoningDurationMs", 0L),
                 imageAttachments = json.optJSONArray("imageAttachments").toImageAttachments(),
                 sourceReferences = json.optJSONArray("sourceReferences").toSourceReferences(),
-                webSearchTrace = json.optJSONObject("webSearchTrace").toWebSearchTrace()
+                webSearchTrace = json.optJSONObject("webSearchTrace").toWebSearchTrace(),
+                generationMetrics = ChatGenerationMetrics.fromJson(json.optJSONObject("generationMetrics")),
+                generatedImageRequest = ChatGeneratedImageRequest.fromJsonOrNull(
+                    json.optJSONObject("generatedImageRequest")
+                )
             )
         }
     }
@@ -303,7 +442,7 @@ class ChatSessionStore(context: Context) {
         KnowledgeChunkEntity::class,
         ChatKnowledgeBaseBindingEntity::class
     ],
-    version = 21,
+    version = 23,
     exportSchema = false
 )
 abstract class McaRoomDatabase : RoomDatabase() {
@@ -333,7 +472,9 @@ abstract class McaRoomDatabase : RoomDatabase() {
                         MIGRATION_17_18,
                         MIGRATION_18_19,
                         MIGRATION_19_20,
-                        MIGRATION_20_21
+                        MIGRATION_20_21,
+                        MIGRATION_21_22,
+                        MIGRATION_22_23
                     )
                     .build()
                     .also { instance = it }
@@ -479,6 +620,34 @@ abstract class McaRoomDatabase : RoomDatabase() {
         private val MIGRATION_20_21 = object : Migration(20, 21) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 addChatAppearanceColumnsIfMissing(db)
+            }
+        }
+
+        private val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                val exists = db.query("PRAGMA table_info(`chat_messages`)").use { cursor ->
+                    val nameIndex = cursor.getColumnIndexOrThrow("name")
+                    var found = false
+                    while (cursor.moveToNext()) {
+                        if (cursor.getString(nameIndex) == "generationMetricsJson") found = true
+                    }
+                    found
+                }
+                if (!exists) db.execSQL("ALTER TABLE chat_messages ADD COLUMN generationMetricsJson TEXT")
+            }
+        }
+
+        private val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                val exists = db.query("PRAGMA table_info(`chat_messages`)").use { cursor ->
+                    val nameIndex = cursor.getColumnIndexOrThrow("name")
+                    var found = false
+                    while (cursor.moveToNext()) {
+                        if (cursor.getString(nameIndex) == "generatedImageJson") found = true
+                    }
+                    found
+                }
+                if (!exists) db.execSQL("ALTER TABLE chat_messages ADD COLUMN generatedImageJson TEXT")
             }
         }
 
@@ -1065,6 +1234,7 @@ abstract class McaRoomDatabase : RoomDatabase() {
                     imageAttachmentsJson TEXT NOT NULL DEFAULT '[]',
                     sourceReferencesJson TEXT NOT NULL DEFAULT '[]',
                     webSearchTraceJson TEXT NOT NULL DEFAULT '{}',
+                    generationMetricsJson TEXT,
                     PRIMARY KEY(sessionId, position)
                 )
                 """.trimIndent()
@@ -1073,7 +1243,8 @@ abstract class McaRoomDatabase : RoomDatabase() {
                 """
                 INSERT OR REPLACE INTO chat_messages_new (
                     sessionId, position, role, content, createdAt, tokenCount,
-                    reasoningContent, reasoningDurationMs, imageAttachmentsJson, sourceReferencesJson, webSearchTraceJson
+                    reasoningContent, reasoningDurationMs, imageAttachmentsJson, sourceReferencesJson, webSearchTraceJson,
+                    generationMetricsJson
                 )
                 SELECT
                     ${legacyColumnOrDefault(columns, "sessionId", "''")},
@@ -1086,7 +1257,8 @@ abstract class McaRoomDatabase : RoomDatabase() {
                     ${legacyColumnOrDefault(columns, "reasoningDurationMs", "0")},
                     ${legacyColumnOrDefault(columns, "imageAttachmentsJson", "'[]'")},
                     ${legacyColumnOrDefault(columns, "sourceReferencesJson", "'[]'")},
-                    ${legacyColumnOrDefault(columns, "webSearchTraceJson", "'{}'")}
+                    ${legacyColumnOrDefault(columns, "webSearchTraceJson", "'{}'")},
+                    ${legacyNullableColumn(columns, "generationMetricsJson")}
                 FROM chat_messages
                 """.trimIndent()
             )
@@ -1387,6 +1559,16 @@ interface ChatSessionDao {
         pruneMessages(liveSessionIds)
         pruneKnowledgeBindings(liveSessionIds)
         pruneSessions(liveSessionIds)
+    }
+
+    /** Keeps the chat's asset reference and image-library row in the same commit. */
+    @Transaction
+    suspend fun reconcileSnapshotWithImageAsset(
+        records: List<ChatSessionRecord>,
+        images: List<ImageAssetEntity>
+    ) {
+        reconcileSnapshot(records)
+        if (images.isNotEmpty()) insertImages(images)
     }
 
     /** Session snapshot plus binding writes used by the first-message path. */
@@ -1775,7 +1957,9 @@ data class ChatMessageEntity(
     @ColumnInfo(defaultValue = "[]")
     val sourceReferencesJson: String = "[]",
     @ColumnInfo(defaultValue = "{}")
-    val webSearchTraceJson: String = "{}"
+    val webSearchTraceJson: String = "{}",
+    val generationMetricsJson: String? = null,
+    val generatedImageJson: String? = null
 )
 
 private const val SERIALIZED_ROW_OVERHEAD_BYTES = 16L
@@ -1814,6 +1998,8 @@ private fun ChatMessageEntity.serializedByteCount(): Long =
         .saturatingAdd(imageAttachmentsJson.serializedFieldByteCount())
         .saturatingAdd(sourceReferencesJson.serializedFieldByteCount())
         .saturatingAdd(webSearchTraceJson.serializedFieldByteCount())
+        .saturatingAdd(generationMetricsJson.nullableSerializedFieldByteCount())
+        .saturatingAdd(generatedImageJson.nullableSerializedFieldByteCount())
 
 private fun String.serializedFieldByteCount(): Long =
     SERIALIZED_STRING_LENGTH_BYTES.saturatingAdd(serializedUtf8ByteCount())
@@ -1924,7 +2110,7 @@ private fun AssistantRecord.toEntity(): AssistantEntity =
         updatedAt = updatedAt
     )
 
-private fun ChatMessage.toEntity(sessionId: String, position: Int): ChatMessageEntity =
+internal fun ChatMessage.toEntity(sessionId: String, position: Int): ChatMessageEntity =
     ChatMessageEntity(
         sessionId = sessionId,
         position = position,
@@ -1934,12 +2120,16 @@ private fun ChatMessage.toEntity(sessionId: String, position: Int): ChatMessageE
         tokenCount = tokenCount,
         reasoningContent = reasoningContent,
         reasoningDurationMs = reasoningDurationMs,
-        imageAttachmentsJson = imageAttachments.toJsonArrayString(includeInlineData = false),
+        imageAttachmentsJson = imageAttachments
+            .deduplicateVisionAttachments()
+            .toJsonArrayString(includeInlineData = false),
         sourceReferencesJson = sourceReferences.toJsonArrayString(),
-        webSearchTraceJson = webSearchTrace.toJsonString()
+        webSearchTraceJson = webSearchTrace.toJsonString(),
+        generationMetricsJson = generationMetrics?.toJson()?.toString(),
+        generatedImageJson = generatedImageRequest?.toJson()?.toString()
     )
 
-private fun ChatMessageEntity.toChatMessage(): ChatMessage =
+internal fun ChatMessageEntity.toChatMessage(): ChatMessage =
     ChatMessage(
         role = runCatching { Role.valueOf(role) }.getOrDefault(Role.USER),
         content = content,
@@ -1947,9 +2137,19 @@ private fun ChatMessageEntity.toChatMessage(): ChatMessage =
         tokenCount = tokenCount,
         reasoningContent = reasoningContent,
         reasoningDurationMs = reasoningDurationMs,
-        imageAttachments = runCatching { JSONArray(imageAttachmentsJson).toImageAttachments() }.getOrDefault(emptyList()),
+        imageAttachments = runCatching {
+            JSONArray(imageAttachmentsJson)
+                .toImageAttachments()
+                .deduplicateVisionAttachments()
+        }.getOrDefault(emptyList()),
         sourceReferences = runCatching { JSONArray(sourceReferencesJson).toSourceReferences() }.getOrDefault(emptyList()),
-        webSearchTrace = runCatching { JSONObject(webSearchTraceJson).toWebSearchTrace() }.getOrNull()
+        webSearchTrace = runCatching { JSONObject(webSearchTraceJson).toWebSearchTrace() }.getOrNull(),
+        generationMetrics = runCatching {
+            generationMetricsJson?.let { ChatGenerationMetrics.fromJson(JSONObject(it)) }
+        }.getOrNull(),
+        generatedImageRequest = runCatching {
+            generatedImageJson?.let { ChatGeneratedImageRequest.fromJsonOrNull(JSONObject(it)) }
+        }.getOrNull()
     )
 
 private fun ImageAssetEntity.toImageAssetRecord(): ImageAssetRecord =

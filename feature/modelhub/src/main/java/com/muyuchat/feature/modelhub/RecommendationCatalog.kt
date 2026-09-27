@@ -3,13 +3,17 @@ package com.muyuchat.feature.modelhub
 import com.muyuchat.core.download.ModelScopeRecommendedGroup
 import com.muyuchat.core.download.ModelScopeRecommendedKind
 import com.muyuchat.core.download.ModelScopeRecommendedModel
+import com.muyuchat.core.download.RemoteModelFile
 import com.muyuchat.core.download.RecommendedModelSection
 import com.muyuchat.core.download.RecommendedModelDownloadPolicy
 import com.muyuchat.core.download.RecommendedModelStatus
 import com.muyuchat.core.download.RecommendedChatRuntime
 import com.muyuchat.core.download.RecommendedComputeBackend
 import com.muyuchat.core.download.downloadEligibilityFor
+import com.muyuchat.core.download.fileKind
+import com.muyuchat.core.download.kindLabel
 import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
+import com.muyuchat.core.modelstore.ModelManifest
 import java.util.Locale
 
 internal data class RecommendationCatalog(
@@ -20,6 +24,7 @@ internal data class RecommendationCatalog(
     /** LiteRT-LM NPU cards are kept separate from the legacy NPU chat section. */
     val litertNpuModels: List<ModelScopeRecommendedModel> = emptyList(),
     val cpuImage: List<ModelScopeRecommendedModel>,
+    val gpuImage: List<ModelScopeRecommendedModel>,
     val npuImageSd15: List<ModelScopeRecommendedModel>,
     val npuImageSdxl: List<ModelScopeRecommendedModel>,
     val npuImageGen5: List<ModelScopeRecommendedModel>
@@ -72,6 +77,7 @@ internal fun buildRecommendationCatalog(
                 it.computeBackend == RecommendedComputeBackend.NPU
         },
         cpuImage = modelsIn(RecommendedModelSection.CPU_IMAGE),
+        gpuImage = modelsIn(RecommendedModelSection.GPU_IMAGE),
         npuImageSd15 = npuImage.filterNot { it.id in SDXL_QNN_MODEL_IDS || it.id in GEN5_QNN_MODEL_IDS },
         npuImageSdxl = npuImage.filter { it.id in SDXL_QNN_MODEL_IDS },
         npuImageGen5 = npuImage.filter { it.id in GEN5_QNN_MODEL_IDS }
@@ -134,11 +140,11 @@ internal data class RecommendationDownloadAccess(
  * Native model loading remains the authority on whether a package runs.
  */
 internal enum class RecommendationDeviceFit(val label: String) {
-    UNIVERSAL("通用路径"),
-    EXACT("精确适配"),
-    VENDOR_GENERIC("骁龙通用尝试"),
-    CROSS_VENDOR("跨厂商尝试"),
-    UNKNOWN("未知设备尝试")
+    UNIVERSAL("通用设备"),
+    EXACT("芯片匹配"),
+    VENDOR_GENERIC("骁龙设备"),
+    CROSS_VENDOR("其他芯片平台"),
+    UNKNOWN("设备信息未识别")
 }
 
 /**
@@ -149,7 +155,8 @@ internal enum class RecommendationDeviceFit(val label: String) {
 internal fun recommendationDownloadAccess(
     model: ModelScopeRecommendedModel,
     deviceChipsetCode: String,
-    deviceIsSnapdragon: Boolean = false
+    deviceIsSnapdragon: Boolean = false,
+    deviceSupportedAbis: List<String> = emptyList()
 ): RecommendationDownloadAccess {
     val normalizedDevice = deviceChipsetCode.trim().uppercase(Locale.ROOT)
     val exactChipsetMatch = model.matchesChipset(normalizedDevice)
@@ -167,8 +174,19 @@ internal fun recommendationDownloadAccess(
     val declaredHtpArch = model.imageEngineBundle?.requiredRuntimeProfile?.htpArch
     val imageRuntimeMismatch = model.section == RecommendedModelSection.NPU_IMAGE &&
         declaredHtpArch != null && expectedHtpArch != null && declaredHtpArch != expectedHtpArch
+    val normalizedAbis = deviceSupportedAbis
+        .map { it.trim().lowercase(Locale.ROOT) }
+        .filter { it.isNotBlank() }
+        .toSet()
+    val normalizedRequiredAbis = model.requiredAbis
+        .map { it.trim().lowercase(Locale.ROOT) }
+        .filter { it.isNotBlank() }
+        .toSet()
+    val runtimeAbiMismatch = normalizedRequiredAbis.isNotEmpty() &&
+        normalizedAbis.isNotEmpty() && normalizedRequiredAbis.intersect(normalizedAbis).isEmpty()
     val experimental = model.status != RecommendedModelStatus.RECOMMENDED ||
         imageRuntimeMismatch ||
+        runtimeAbiMismatch ||
         (model.section in setOf(RecommendedModelSection.NPU_CHAT, RecommendedModelSection.NPU_IMAGE) &&
             deviceFit !in setOf(RecommendationDeviceFit.EXACT, RecommendationDeviceFit.UNIVERSAL))
     return RecommendationDownloadAccess(
@@ -184,28 +202,17 @@ private fun String.isSnapdragonChipsetCodeForRecommendation(): Boolean {
     return matches(Regex("^(?:SM|SDM|MSM|APQ|QCS|QCM)[A-Z0-9_-]+$"))
 }
 
-internal fun recommendationDeviceFitLine(access: RecommendationDownloadAccess): String =
-    "设备路径：${access.deviceFit.label}；以本机 native load 和首轮推理结果为准"
-
 internal fun recommendationQnnCompatibilityLine(
     model: ModelScopeRecommendedModel,
     deviceChipsetCode: String
 ): String? {
     val profile = model.imageEngineBundle?.requiredRuntimeProfile ?: return null
     val deviceArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(deviceChipsetCode)
-    val target = "包目标：QNN ${profile.qnnSdk} / HTP V${profile.htpArch}"
-    return when {
-        deviceArch == null -> "$target；当前设备 HTP 未知，下载后由 native load 决定"
-        deviceArch == profile.htpArch -> "$target；当前设备匹配 HTP V$deviceArch"
-        else -> "$target；当前设备 HTP V$deviceArch 未找到匹配 context/runtime，标为实验包"
-    }
+        ?: return null
+    if (deviceArch == profile.htpArch) return null
+    return "模型包使用 QNN ${profile.qnnSdk} / HTP V${profile.htpArch}，当前设备为 HTP V$deviceArch。" +
+        "若加载失败，可选择其他运行包或 CPU/GPU 模型。"
 }
-
-/**
- * Keep the recommendation card honest about where the app will try to get a
- * package without asserting that a particular mirror is currently serving it.
- */
-internal const val RECOMMENDATION_DOWNLOAD_SOURCE_POLICY = "下载策略：ModelScope / 国内镜像优先"
 
 /**
  * Hardware fit is advisory only.  It is intentionally kept separate from the
@@ -215,86 +222,13 @@ internal const val RECOMMENDATION_DOWNLOAD_SOURCE_POLICY = "下载策略：Model
 internal fun recommendationHardwareLine(
     model: ModelScopeRecommendedModel,
     fitLabel: String
-): String = "硬件适配：建议 ${model.minRamGb}GB+ · $fitLabel"
+): String = "建议内存：${model.minRamGb} GB 及以上 · $fitLabel"
 
-/**
- * A compact, non-marketing explanation that remains visible even when a
- * model's longer catalog description is collapsed on a narrow phone.
- */
-internal fun recommendationVerificationLine(
-    model: ModelScopeRecommendedModel,
-    qairtVerified: Boolean
-): String = when {
-    model.id in LITERT_LM_NPU_UNAVAILABLE_MODEL_IDS ->
-        "当前无可确认的 Qualcomm LiteRT-LM 专版；请使用同尺寸 CPU/GPU 文件，或单独接入 GenieX QAIRT"
-    model.id in COMMUNITY_LOW_REFUSAL_MODEL_IDS ->
-        "工程状态：社区低拒答实验包，发布者声明已降低拒答；尚无 MCA 生产设备验收，实际兼容性以完整包、native load 与真实执行为准"
-    model.id in TEXT_VERIFIED_MNN_MODEL_IDS ->
-        "验证状态：MNN 文本与图文链路已通过代表机型回归；兼容 ARM64 设备默认开放"
-    model.id == "minicpm_v46_q4" ->
-        "验证状态：三次冷启动、Local API、取消恢复与基础图文样例已通过"
-    model.id == "qwen3_vl_4b_qairt_w4a16" && qairtVerified ->
-        "验证状态：当前设备冷态、连续图文、Local API 与取消恢复已通过"
-    model.id == "qwen3_vl_4b_qairt_w4a16" ->
-        "验证状态：已有骁龙 8 Elite 完整图文回归证据；兼容设备默认开放并以真实运行结果为准"
-    model.id == "qwen3_4b_2507_qairt_w4a16" && qairtVerified ->
-        "验证状态：当前设备十轮文本、Local API 与二次加载已通过"
-    model.id == "qwen3_4b_2507_qairt_w4a16" ->
-        "验证状态：已有骁龙 8 Elite 正式文本回归证据；兼容设备默认开放并以真实运行结果为准"
-    model.id in SDXL_QNN_MODEL_IDS ->
-        "工程状态：已接真实 VAE encoder + 隔离 encoder→UNet→VAE 的 IMG2IMG、Inpaint、UltraFix 与 Textual Inversion 产品链；尚需代表 ARM64 设备的生产 UI/API 真机验证"
-    model.id in SHARED_QNN_SD15_IMG2IMG_MODEL_IDS ->
-        "工程状态：已接真实 VAE encoder→共享 UNet/VAE 的 IMG2IMG、Inpaint、UltraFix、Textual Inversion 与 VAE 预览产品链；历史文生图证据不代表这些链路已验收，尚需代表性 ARM64 生产 UI/API 真机验证"
-    model.id == "sd15_mnn_512_quality" ->
-        "验证状态：历史 debug worker 的 OpenCL/Euler 路径可出图；当前 DPM++ 2M 预设待生产复验"
-    model.id == "qualcomm_controlnet_canny_gen5_qnn" ->
-        "工程状态：目录已声明 Canny 与 ControlNet graph；产品输入链尚无生产 UI/API 真机证据"
-    model.id.startsWith("gemma4_") ->
-        "验证状态：文本隔离方案待产品验收；完整图文包兼容性待验证"
-    model.kind == ModelScopeRecommendedKind.IMAGE ->
-        "验证状态：目录与执行 profile 已接线；当前版本尚无生产双入口证据，下载保持开放"
-    model.status == RecommendedModelStatus.RECOMMENDED ->
-        "验证状态：代表设备已验证；兼容设备默认开放"
-    model.status == RecommendedModelStatus.PENDING_INTEGRATION ->
-        "工程状态：待接入；组件包开放实验下载，当前版本未验证可运行"
-    else ->
-        "验证状态：实验下载，需本机验证，不会自动设为默认"
-}
-
-private val TEXT_VERIFIED_MNN_MODEL_IDS = setOf(
-    "qwen35_2b_q4"
-)
-
-private val COMMUNITY_LOW_REFUSAL_MODEL_IDS = setOf(
-    "qwen35_08b_uncensored_mnn",
-    "qwen35_2b_abliterated_gguf",
-    "gemma4_e2b_uncensored_gguf",
-    "qwen35_4b_uncensored_mnn",
-    "gemma4_e4b_uncensored_gguf",
-    "qwen35_9b_uncensored_mnn",
-    "gemma4_26b_a4b_abliterated_gguf"
-)
-
-/** Visible matrix entries whose concrete Qualcomm LiteRT-LM artifact is absent. */
-private val LITERT_LM_NPU_UNAVAILABLE_MODEL_IDS = setOf(
-    "gemma4_e4b_litertlm_npu",
-    "gemma4_12b_litertlm_npu"
-)
-
-private val SHARED_QNN_SD15_IMG2IMG_MODEL_IDS = setOf(
-    "cyberrealistic_sd15_qnn228",
-    "realisticvisionhyper_sd15_qnn228",
-    "dreamshaper_sd15_qnn228",
-    "meinamix_sd15_qnn228"
-)
-
+/** Download access is independent of internal engineering acceptance. */
 internal fun recommendationDownloadCtaLabel(
-    model: ModelScopeRecommendedModel,
-    canDownload: Boolean,
-    experimental: Boolean = model.status != RecommendedModelStatus.RECOMMENDED
+    canDownload: Boolean
 ): String = when {
     !canDownload -> "暂不可下载"
-    experimental -> "实验下载"
     else -> "下载"
 }
 
@@ -321,16 +255,74 @@ internal fun recommendedLocalBundleStatus(
     }
 }
 
-internal fun recommendationStatusLabel(status: RecommendedModelStatus): String = when (status) {
-    RecommendedModelStatus.RECOMMENDED -> "已验证"
-    RecommendedModelStatus.EXPERIMENTAL,
-    RecommendedModelStatus.NOT_RECOMMENDED -> "实验"
-    RecommendedModelStatus.PENDING_INTEGRATION -> "待接入"
+/**
+ * Match a downloaded chat bundle to its catalog card using persisted source
+ * identity. Display names and directory names are user-controlled and are not
+ * strong enough to identify a recommendation.
+ */
+internal fun recommendedLocalChatModel(
+    model: ModelScopeRecommendedModel,
+    localModels: List<ModelManifest>
+): ModelManifest? {
+    val mnnBundle = model.mnnModelBundle
+    val visionMain = model.visionModelBundle?.components?.firstOrNull {
+        it.role == com.muyuchat.core.download.VisionModelBundleComponentRole.MAIN_MODEL
+    }
+    val sourceRepo = mnnBundle?.repoId ?: visionMain?.repoId ?: model.repoId
+    val sourceRevision = mnnBundle?.revision ?: visionMain?.revision ?: model.revision
+    val expectedFileName = model.recommendedFileName.normalizedModelFileName()
+    val expectedFileStem = expectedFileName.removeSuffix(".zip")
+    return localModels.firstOrNull { local ->
+        val repoMatches = sourceRepo.isNotBlank() && local.repoId.equals(sourceRepo, ignoreCase = true)
+        val revisionMatches = sourceRevision.isNotBlank() && local.revision.equals(sourceRevision, ignoreCase = true)
+        val localFileName = local.fileName.normalizedModelFileName()
+        val localFileStem = localFileName.removeSuffix(".zip")
+        val fileMatches = localFileName == expectedFileName || localFileStem == expectedFileStem
+        val exactSource = repoMatches && revisionMatches && (mnnBundle != null || fileMatches)
+        val directFileMatch = fileMatches &&
+            local.runtimeMatchesRecommendation(model)
+        exactSource && local.runtimeMatchesRecommendation(model) || directFileMatch &&
+            local.source != com.muyuchat.core.modelstore.ModelSource.LOCAL
+    }
 }
 
-internal const val EXPERIMENTAL_DOWNLOAD_NOTICE = "实验下载不代表已验证可运行，请自行测试并反馈结果。"
+private fun ModelManifest.runtimeMatchesRecommendation(model: ModelScopeRecommendedModel): Boolean = when {
+    model.mnnModelBundle != null -> runtime == com.muyuchat.core.modelstore.ChatModelRuntime.MNN
+    model.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT ->
+        runtime == com.muyuchat.core.modelstore.ChatModelRuntime.GENIEX_QAIRT
+    model.chatRuntime == RecommendedChatRuntime.LITERT_LM ->
+        runtime == com.muyuchat.core.modelstore.ChatModelRuntime.LITERT_LM
+    model.visionModelBundle?.runtime == com.muyuchat.core.download.VisionModelBundleRuntime.MNN_MULTIMODAL ->
+        runtime == com.muyuchat.core.modelstore.ChatModelRuntime.MNN
+    else -> runtime == com.muyuchat.core.modelstore.ChatModelRuntime.LLAMA_CPP
+}
 
-/** One sentence is enough for the card; verification-critical copy lives above it. */
+private fun String.normalizedModelFileName(): String = trim()
+    .replace('\\', '/')
+    .substringAfterLast('/')
+    .lowercase(Locale.ROOT)
+
+/** Filters only the already loaded file list; remote repository queries stay unchanged. */
+internal fun filterRemoteModelFiles(
+    files: List<RemoteModelFile>,
+    query: String
+): List<RemoteModelFile> {
+    val needle = query.trim().lowercase(Locale.ROOT)
+    if (needle.isBlank()) return files
+    return files.filter { file ->
+        listOf(
+            file.name,
+            file.path,
+            file.repoId,
+            file.revision,
+            file.provider.label,
+            file.fileKind().name,
+            file.kindLabel()
+        ).any { value -> value.lowercase(Locale.ROOT).contains(needle) }
+    }
+}
+
+/** Keep the compact card focused on the model's purpose. */
 internal fun ModelScopeRecommendedModel.recommendationShortDescription(): String {
     val body = description.trim()
     val end = body.indexOfFirst { it == '。' || it == '；' || it == '\n' }

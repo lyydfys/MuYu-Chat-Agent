@@ -115,7 +115,8 @@ object MnnBundleReadinessAnalyzer {
          * chat contract. This keeps the validator forward-compatible with
          * future config-driven visual/audio package layouts.
          */
-        additionalRequiredComponents: List<String> = emptyList()
+        additionalRequiredComponents: List<String> = emptyList(),
+        importMode: MnnImportMode = MnnImportMode.FULL
     ): MnnBundleReadiness {
         if (scope != MnnBundleLoadScope.CHAT_LLM) return notApplicable(scope)
         if (!bundleDir.exists()) {
@@ -144,13 +145,13 @@ object MnnBundleReadinessAnalyzer {
         val diagnostics = mutableListOf<MnnBundleDiagnostic>()
         val usable = mutableListOf<String>()
         val requirements = (
-            configDrivenChatLlmRequirements(bundleDir, invalid, diagnostics) +
+            configDrivenChatLlmRequirements(bundleDir, invalid, diagnostics, importMode) +
                 additionalRequiredComponents.map(::declaredRequirement)
             ).distinctBy { requirement -> requirement.paths }
         requirements.forEach { requirement ->
             inspectRequirement(bundleDir, requirement, usable, missing, invalid, diagnostics)
         }
-        legacyVisualGraphRuntimeDiagnostic(bundleDir)?.let(diagnostics::add)
+        if (importMode == MnnImportMode.FULL) legacyVisualGraphRuntimeDiagnostic(bundleDir)?.let(diagnostics::add)
         return if (diagnostics.isEmpty()) {
             MnnBundleReadiness(
                 scope = MnnBundleLoadScope.CHAT_LLM,
@@ -258,17 +259,28 @@ object MnnBundleReadinessAnalyzer {
     private fun configDrivenChatLlmRequirements(
         bundleDir: File,
         invalid: MutableList<String>,
-        diagnostics: MutableList<MnnBundleDiagnostic>
+        diagnostics: MutableList<MnnBundleDiagnostic>,
+        importMode: MnnImportMode
     ): List<MnnBundleRequirement> {
         val configFile = File(bundleDir, "config.json")
-        val config = runCatching {
-            JSONObject(configFile.readText(Charsets.UTF_8))
+        val sourceConfig = runCatching {
+            readBoundedMnnJson(configFile)
         }.getOrNull()
         val requirements = mutableListOf(MnnBundleRequirement.single("config.json"))
-        if (config == null) {
+        if (sourceConfig == null) {
             requirements += defaultChatLlmRequirements()
             return requirements
         }
+
+        val configuration = runCatching { readMnnImportConfiguration(bundleDir, importMode, lenient = true) }.getOrElse { error ->
+            invalid += "config.json"
+            diagnostics += MnnBundleDiagnostic(
+                MnnBundleDiagnosticCode.CONFIG_DECLARED_COMPONENT_PATH_INVALID,
+                MnnBundleDiagnosticSeverity.ERROR, "config.json", error.message.orEmpty()
+            )
+            null
+        }
+        val config = configuration?.root ?: sourceConfig
 
         var modelConfig: JSONObject? = null
 
@@ -315,7 +327,7 @@ object MnnBundleReadinessAnalyzer {
         }
 
         configuredPath("llm_config", defaultPath = "llm_config.json", rootConfigOnly = true)
-        modelConfig = readModelConfig(bundleDir, config)
+        modelConfig = configuration?.model ?: readModelConfig(bundleDir, config)
         configuredPath("llm_model", defaultPath = "llm.mnn")
         configuredPath("llm_weight", defaultPath = "llm.mnn.weight")
         collectEmbeddingRequirement(
@@ -341,7 +353,8 @@ object MnnBundleReadinessAnalyzer {
             rootConfig = config,
             requirements = requirements,
             invalid = invalid,
-            diagnostics = diagnostics
+            diagnostics = diagnostics,
+            normalizedModelConfig = modelConfig
         )
 
         // These components have no universal default requirement. Their explicit
@@ -633,8 +646,9 @@ object MnnBundleReadinessAnalyzer {
      */
     private fun legacyVisualGraphRuntimeDiagnostic(bundleDir: File): MnnBundleDiagnostic? {
         val config = runCatching {
-            JSONObject(File(bundleDir, "config.json").readText(Charsets.UTF_8))
+            readMnnImportConfiguration(bundleDir, lenient = true).root
         }.getOrNull()
+        if (config?.optString("mca_import_mode") == "text_only") return null
         val configuredVisual = config?.optString("visual_model").orEmpty().trim()
         val configuredVisualFile = configuredVisual
             .takeIf(String::isNotBlank)
@@ -722,14 +736,15 @@ object MnnBundleReadinessAnalyzer {
         rootConfig: JSONObject,
         requirements: MutableList<MnnBundleRequirement>,
         invalid: MutableList<String>,
-        diagnostics: MutableList<MnnBundleDiagnostic>
+        diagnostics: MutableList<MnnBundleDiagnostic>,
+        normalizedModelConfig: JSONObject? = null
     ) {
         val rawLlmConfigPath = rootConfig.optString("llm_config").trim()
             .ifBlank { "llm_config.json" }
         val llmConfigPath = runCatching {
             normalizeRelativeComponentPath(rawLlmConfigPath)
         }.getOrNull() ?: return
-        val llmConfig = runCatching {
+        val llmConfig = normalizedModelConfig ?: runCatching {
             JSONObject(File(bundleDir, llmConfigPath).readText(Charsets.UTF_8))
         }.getOrNull() ?: return
         val pleEmbedFile = llmConfig.optString("ple_embed_file").trim()
@@ -780,20 +795,7 @@ object MnnBundleReadinessAnalyzer {
     private fun declaredRequirement(rawPath: String): MnnBundleRequirement =
         MnnBundleRequirement.single(normalizeRelativeComponentPath(rawPath))
 
-    private fun normalizeRelativeComponentPath(rawPath: String): String {
-        val normalized = rawPath.trim().replace('\\', '/')
-        require(normalized.isNotBlank()) { "MNN component path must not be blank." }
-        require('\u0000' !in normalized) { "MNN component path contains a NUL character." }
-        require(!normalized.startsWith('/')) { "MNN component path must be relative: $rawPath" }
-        require(!WINDOWS_DRIVE_PREFIX.containsMatchIn(normalized)) {
-            "MNN component path must be relative: $rawPath"
-        }
-        val segments = normalized.split('/')
-        require(segments.none { it.isEmpty() || it == "." || it == ".." }) {
-            "MNN component path contains an invalid segment: $rawPath"
-        }
-        return segments.joinToString("/")
-    }
+    private fun normalizeRelativeComponentPath(rawPath: String): String = normalizeMnnImportPath(rawPath)
 
     private data class MnnBundleRequirement(
         val paths: List<String>,

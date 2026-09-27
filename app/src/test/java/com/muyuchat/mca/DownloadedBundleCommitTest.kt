@@ -30,4 +30,38 @@ class DownloadedBundleCommitTest {
         assertEquals("previous", File(requireNotNull(backup), "model").readText())
         assertEquals("new", File(destination, "model").readText())
     }
+
+    @Test fun stagedVisionBundleStaysPrivateUntilCompleteAndCanRecoverAfterRegistrationFailure() {
+        val destination = File(temp.root, "models/vision-bundle")
+        val candidate = imageBundleCandidateDirectory(destination)
+        assertFalse(destination.exists())
+
+        candidate.mkdirs()
+        File(candidate, "model.gguf").writeText("complete main model")
+        File(candidate, ".mmproj.gguf.part").writeText("partial projector")
+        assertFalse("A partial multi-file download must not expose a public bundle folder", destination.exists())
+
+        File(candidate, "mmproj.gguf").writeText("complete projector")
+        File(candidate, ".mmproj.gguf.part").delete()
+        File(candidate, "manifest.json").writeText("complete bundle manifest")
+        promoteImageBundleCandidate(candidate, destination)
+
+        assertTrue(File(destination, "model.gguf").isFile)
+        assertEquals("complete projector", File(destination, "mmproj.gguf").readText())
+
+        // Simulate a failure while registering the main GGUF and binding its
+        // projector. Rollback hides the public directory but preserves every
+        // completed component so the same install can be retried.
+        restoreImageBundleBackup(destination, backup = null)
+        assertFalse(destination.exists())
+        val recoveredCandidate = imageBundleCandidateDirectory(destination)
+        assertEquals("complete main model", File(recoveredCandidate, "model.gguf").readText())
+        assertEquals("complete projector", File(recoveredCandidate, "mmproj.gguf").readText())
+
+        promoteImageBundleCandidate(recoveredCandidate, destination)
+
+        assertTrue(File(destination, "model.gguf").isFile)
+        assertTrue(File(destination, "mmproj.gguf").isFile)
+        assertEquals("complete bundle manifest", File(destination, "manifest.json").readText())
+    }
 }

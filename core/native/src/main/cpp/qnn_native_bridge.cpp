@@ -48,6 +48,7 @@
 #include "qnn_image_pixel_range.hpp"
 #include "qnn_image_stage_trace.hpp"
 #include "qnn_inpaint_contract.hpp"
+#include "qnn_soc_htp_mapping.hpp"
 #include "qnn_shared_preview.hpp"
 #include "../../../../../third_party/llama.cpp/vendor/nlohmann/json.hpp"
 
@@ -895,29 +896,27 @@ int htp_library_version(const std::string& name) {
 // Keep this numeric helper outside the optional QNN-header build block so the
 // runtime inspector can report a missing exact profile before graph execution.
 int htp_arch_version_for_soc_model(uint32_t soc_model) {
-    switch (soc_model) {
-        case 30: return 68;  // SM8350 / Snapdragon 888
-        case 36:             // SM8450 / Snapdragon 8 Gen 1
-        case 42: return 69;  // SM8475 / Snapdragon 8+ Gen 1
-        case 43: return 73;  // SM8550 / Snapdragon 8 Gen 2
-        case 57: return 75;  // SM8650 / Snapdragon 8 Gen 3
-        case 69: return 79;  // SM8750 / Snapdragon 8 Elite
-        case 87: return 81;  // SM8850 / Snapdragon 8 Elite Gen 5
-        default: return 0;
-    }
+    return mca::qnn::htp_arch_version_for_soc_model(soc_model);
 }
 
 int physical_device_htp_arch_version() {
     char value[PROP_VALUE_MAX] = {};
-    if (__system_property_get("ro.soc.model", value) <= 0) return 0;
-    const std::string model(value);
-    if (contains_lower(model, "sm8850")) return 81;
-    if (contains_lower(model, "sm8750")) return 79;
-    if (contains_lower(model, "sm8650")) return 75;
-    if (contains_lower(model, "sm8550")) return 73;
-    if (contains_lower(model, "sm8475") || contains_lower(model, "sm8450")) return 69;
-    if (contains_lower(model, "sm8350")) return 68;
-    return 0;
+    // OEM builds sometimes omit ro.soc.model or expose only a board/platform
+    // identifier. Probe the read-only properties without turning the result
+    // into an admission decision; the exact context/runtime check still wins.
+    const char* properties[] = {"ro.soc.model", "ro.board.platform", "ro.hardware"};
+    std::string model;
+    for (const char* property : properties) {
+        std::memset(value, 0, sizeof(value));
+        if (__system_property_get(property, value) > 0 && value[0] != '\0') {
+            if (const int arch = mca::qnn::htp_arch_version_for_soc_hint(value); arch > 0) {
+                return arch;
+            }
+            model += " ";
+            model += value;
+        }
+    }
+    return mca::qnn::htp_arch_version_for_soc_hint(model);
 }
 
 std::string htp_library_for_arch_in_dir(
@@ -1411,12 +1410,13 @@ bool select_qnn_runtime_profile_for_context(
         }
     }
 
-    // An explicit phase preference and device detection only rank transports;
-    // neither is an admission list. Try the phase preference first, then the
-    // physical transport, the context's declared transport, the coherent
-    // profile selected by the generic runtime probe, and finally every complete
-    // packaged profile. A missing preferred/device profile therefore still
-    // reaches real context/graph load through the remaining compatible paths.
+    // A context compiled for a known HTP generation is an admission constraint,
+    // not merely a preference. Likewise, a known physical SoC must never load a
+    // newer packaged Skel/Stub as a generic fallback: QNN can fail late in graph
+    // creation or, worse, poison the process. Only an exact context/device
+    // generation (or an OEM platform runtime for that same generation) may be
+    // selected. Generic packaged fallback is retained only when both the device
+    // and the context are genuinely unknown.
     std::vector<int> candidate_arches;
     auto append_arch = [&](int arch) {
         if (arch <= 0) return;
@@ -1424,10 +1424,25 @@ bool select_qnn_runtime_profile_for_context(
             candidate_arches.push_back(arch);
         }
     };
-    append_arch(preferred_htp_arch);
-    append_arch(device_htp_arch);
-    append_arch(context_htp_arch);
-    append_arch(runtime->htp_arch_version);
+    const bool context_arch_known = context_htp_arch > 0;
+    const bool device_arch_known = device_htp_arch > 0;
+    if (context_arch_known && device_arch_known && context_htp_arch != device_htp_arch) {
+        runtime->message =
+                "QNN context target HTP V" + std::to_string(context_htp_arch) +
+                " is incompatible with the physical device HTP V" +
+                std::to_string(device_htp_arch) + ". Install a context built for this SoC.";
+        return false;
+    }
+    const int required_arch = context_arch_known ? context_htp_arch : device_htp_arch;
+    if (required_arch > 0) {
+        // Ignore a caller preference that would violate the exact target.
+        if (preferred_htp_arch <= 0 || preferred_htp_arch == required_arch) {
+            append_arch(required_arch);
+        }
+    } else {
+        append_arch(preferred_htp_arch);
+        append_arch(runtime->htp_arch_version);
+    }
 
     std::vector<int> packaged_arches;
     for (const auto& dir : runtime->search_directories) {
@@ -1449,7 +1464,9 @@ bool select_qnn_runtime_profile_for_context(
     std::sort(packaged_arches.begin(), packaged_arches.end(), [](int left, int right) {
         return left > right;
     });
-    for (const int arch : packaged_arches) append_arch(arch);
+    if (required_arch <= 0) {
+        for (const int arch : packaged_arches) append_arch(arch);
+    }
 
     auto select_profile = [&](const HostCandidate& host, const DspCandidate& dsp, int htp_arch) {
         runtime->system_present = true;
@@ -2202,16 +2219,13 @@ std::string append_diagnostic_note(std::string message, const std::string& note)
 // Never use a newer architecture as a generic fallback: QNN rejects an incompatible
 // ARCH custom config before it can create the device on older Snapdragon hardware.
 QnnHtpDevice_Arch_t htp_arch_for_soc_model(uint32_t soc_model) {
-    switch (soc_model) {
-        // Snapdragon 888 / 8 Gen 1 / 8+ Gen 1.
-        case 30: return QNN_HTP_DEVICE_ARCH_V68;  // SM8350
-        case 36:                                  // SM8450
-        case 42: return QNN_HTP_DEVICE_ARCH_V69;  // SM8475
-        // Snapdragon 8 Gen 2 / 8 Gen 3 / 8 Elite / 8 Elite Gen 5.
-        case 43: return QNN_HTP_DEVICE_ARCH_V73;  // SM8550
-        case 57: return QNN_HTP_DEVICE_ARCH_V75;  // SM8650
-        case 69: return QNN_HTP_DEVICE_ARCH_V79;  // SM8750
-        case 87: return QNN_HTP_DEVICE_ARCH_V81;  // SM8850
+    switch (mca::qnn::htp_arch_version_for_soc_model(soc_model)) {
+        case 68: return QNN_HTP_DEVICE_ARCH_V68;
+        case 69: return QNN_HTP_DEVICE_ARCH_V69;
+        case 73: return QNN_HTP_DEVICE_ARCH_V73;
+        case 75: return QNN_HTP_DEVICE_ARCH_V75;
+        case 79: return QNN_HTP_DEVICE_ARCH_V79;
+        case 81: return QNN_HTP_DEVICE_ARCH_V81;
         default: return QNN_HTP_DEVICE_ARCH_NONE;
     }
 }

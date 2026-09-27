@@ -191,7 +191,7 @@ class KnowledgeBaseRoomContractTest {
         assertTrue(persistBody.contains("pendingKnowledgeBindings[sessionId] = knowledgeBaseIds.toSet()"))
         assertTrue(persistBody.contains("chatSessionStore.save(snapshot, knowledgeBindingsForSave)"))
         assertFalse(persistBody.contains("knowledgeBaseStore.setSelectedKnowledgeBaseIds"))
-        val sendBody = functionBody(source, "sendMessage")
+        val sendBody = functionBody(source, "sendPreparedMessage")
         assertTrue(sendBody.contains("knowledgeBinding = chatSessionIdForKnowledgeBinding"))
         assertFalse(sendBody.contains("persistKnowledgeBaseBindings(sessionId, selectedKnowledgeBaseIdsForBinding)"))
     }
@@ -269,10 +269,14 @@ class KnowledgeBaseRoomContractTest {
     }
 
     @Test
-    fun migrationChainFrom16To21CreatesKnowledgeTablesWithoutReplacingExistingData() {
+    fun migrationChainFrom16To22CreatesKnowledgeTablesWithoutReplacingExistingData() {
         val source = chatSessionStoreSource()
 
-        assertTrue(Regex("""version\s*=\s*21""").containsMatchIn(source))
+        // Version 22 adds persisted generation metrics; the 16→21 knowledge
+        // base migrations remain part of the same non-destructive chain.
+        // Generated image requests are persisted in schema 23.  The 22 -> 23
+        // migration is part of the same non-destructive chain under test.
+        assertTrue(Regex("""version\s*=\s*23""").containsMatchIn(source))
         val builder = source.substring(
             source.indexOf("Room.databaseBuilder"),
             source.indexOf(".build()", source.indexOf("Room.databaseBuilder"))

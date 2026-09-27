@@ -28,11 +28,28 @@ internal fun localImageWorkerWatchdogPolicy(
         )
 
     runtime == LocalImageRuntime.MNN_DIFFUSION &&
-        backendMode?.trim()?.lowercase() in setOf("opencl", "gpu") ->
+        // SDXL is not an MNN-Diffusion product profile today; keep its
+        // dedicated QNN policy authoritative if a malformed record reaches
+        // this boundary.
+        family != LocalImageModelFamily.SDXL &&
+        // An omitted/"auto" backend starts on CPU and may fall back to
+        // OpenCL after a proven NOT_SUPPORT result.  Keep the same disposable
+        // deadline for that request: the effective backend is only known
+        // after the first native attempt, while an OpenCL kernel can still
+        // block the worker indefinitely.  Explicit CPU remains unbounded so
+        // long CPU generations are not killed by a GPU-oriented watchdog.
+        (
+            backendMode?.trim()?.lowercase() in setOf("opencl", "gpu", "auto") ||
+                backendMode == null
+            ) ->
         LocalImageWorkerWatchdogPolicy(
             timeoutMs = mnnOpenClWorkerTimeoutMs(steps ?: MNN_OPENCL_WATCHDOG_DEFAULT_STEPS),
             timeoutCode = MNN_OPENCL_WORKER_WATCHDOG_TIMEOUT_CODE,
-            runtimeLabel = "MNN OpenCL"
+            runtimeLabel = if (backendMode == null || backendMode.trim().equals("auto", ignoreCase = true)) {
+                "MNN automatic backend"
+            } else {
+                "MNN OpenCL"
+            }
         )
 
     else -> null

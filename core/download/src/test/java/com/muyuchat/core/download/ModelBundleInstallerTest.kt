@@ -1,6 +1,9 @@
 package com.muyuchat.core.download
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -239,6 +242,8 @@ class ModelBundleInstallerTest {
                 assertNull(audit.sourceSizeBytes)
                 assertNull(audit.sourceSha256)
                 assertEquals(ImageEngineIntegrityMetadataStatus.UNKNOWN, audit.sourceMetadataStatus)
+                assertEquals(sha256(File(bundleRoot, path).readText()), audit.observedSha256)
+                assertFalse(audit.observedSha256 == sha256(payloads.getValue(path)))
             }
             val modelAudit = audits.getValue("llm.mnn")
             assertFalse(modelAudit.transformed)
@@ -263,6 +268,48 @@ class ModelBundleInstallerTest {
                 .first { it.getString("path") == "config.json" }
             assertTrue(derivedConfigAudit.getBoolean("transformed"))
             assertTrue(derivedConfigAudit.isNull("sourceSha256"))
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun transformerCannotHideSameSizeSourceDigestMismatch() = runBlocking {
+        val tempDir = Files.createTempDirectory("mca-transform-source-integrity-test").toFile()
+        try {
+            val bundleRoot = File(tempDir, "bundle").apply { mkdirs() }
+            File(bundleRoot, "old-marker.txt").writeText("old")
+            val publisherSource = """{"value":1}"""
+            val corruptSource = """{"value":2}"""
+            assertEquals(publisherSource.toByteArray().size, corruptSource.toByteArray().size)
+            val component = remote("config.json", publisherSource).copy(sha256 = sha256(publisherSource))
+            var transformCalled = false
+            val installer = ModelBundleInstaller(
+                BundleComponentDownloader { remote, tempFile, finalFile, onProgress ->
+                    finalFile.parentFile?.mkdirs()
+                    finalFile.writeText(corruptSource)
+                    snapshot(remote, tempFile, finalFile).also(onProgress)
+                }
+            )
+
+            val error = runCatching {
+                installer.install(
+                    bundleRoot = bundleRoot,
+                    components = listOf(component),
+                    stagedTransformer = ModelBundleStagedTransformer { _, stagedFiles ->
+                        transformCalled = true
+                        stagedFiles.getValue("config.json").writeText("""{"value":3,"derived":true}""")
+                        ModelBundleStagedTransformResult(setOf("config.json"))
+                    }
+                )
+            }.exceptionOrNull()
+
+            assertTrue(error is IllegalArgumentException)
+            assertTrue(error?.message.orEmpty().contains("SHA-256"))
+            assertFalse("Reject the corrupted source before running its transformer", transformCalled)
+            assertEquals("old", File(bundleRoot, "old-marker.txt").readText())
+            assertFalse(File(bundleRoot, "config.json").exists())
+            assertFalse(File(bundleRoot, ModelBundleInstaller.AUDIT_FILE_NAME).exists())
         } finally {
             tempDir.deleteRecursively()
         }
@@ -318,6 +365,142 @@ class ModelBundleInstallerTest {
             assertEquals(
                 ModelBundleComponentVerificationStatus.SIZE_MISMATCH,
                 verification.components.single().status
+            )
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun completedBundleIsReusedWithoutDownloadingAgain() = runBlocking {
+        val tempDir = Files.createTempDirectory("mca-bundle-reuse-test").toFile()
+        try {
+            val bundleRoot = File(tempDir, "bundle")
+            var downloadCount = 0
+            val installer = ModelBundleInstaller(
+                BundleComponentDownloader { remote, tempFile, finalFile, onProgress ->
+                    downloadCount++
+                    tempFile.parentFile?.mkdirs()
+                    finalFile.parentFile?.mkdirs()
+                    tempFile.writeText(remote.downloadUrl.substringAfterLast('/'))
+                    check(tempFile.renameTo(finalFile))
+                    snapshot(remote, tempFile, finalFile).also(onProgress)
+                }
+            )
+            val components = listOf(remote("config.json", payload = "config"))
+
+            val first = installer.install(bundleRoot, components)
+            val second = installer.install(bundleRoot, components)
+
+            assertEquals(1, downloadCount)
+            assertEquals(first.bundleRoot.canonicalFile, second.bundleRoot.canonicalFile)
+            assertEquals(first.files.single().audit?.observedSha256, second.files.single().audit?.observedSha256)
+            assertTrue(second.auditManifest?.isFile == true)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun damagedDestinationRestoresVerifiedBackupAndPreservesDamagedCopy() = runBlocking {
+        val tempDir = Files.createTempDirectory("mca-bundle-safe-recovery-test").toFile()
+        try {
+            val components = listOf(remote("model.mnn", payload = "known-good"))
+            val installer = ModelBundleInstaller(fakeDownloader())
+            val sourceBundle = File(tempDir, "source")
+            installer.install(sourceBundle, components)
+
+            val bundleRoot = File(tempDir, "bundle").apply { mkdirs() }
+            File(bundleRoot, "model.mnn").writeText("damaged")
+            val backupRoot = File(tempDir, ".bundle.backup")
+            assertTrue(sourceBundle.renameTo(backupRoot))
+
+            val recovered = installer.install(bundleRoot, components)
+
+            assertEquals("known-good", File(bundleRoot, "model.mnn").readText())
+            assertTrue(recovered.auditManifest?.isFile == true)
+            assertTrue(
+                "The damaged destination must remain available for diagnosis",
+                tempDir.listFiles()?.any { it.name.startsWith(".bundle.recovery-") } == true
+            )
+            assertFalse(backupRoot.exists())
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun emptyStagedComponentIsRejectedAndRetryReplacesItBeforeCommit() = runBlocking {
+        val tempDir = Files.createTempDirectory("mca-empty-bundle-component-test").toFile()
+        try {
+            val bundleRoot = File(tempDir, "bundle").apply { mkdirs() }
+            File(bundleRoot, "old-marker.txt").writeText("old")
+            val remote = remote("weights.mnn", payload = "")
+                .copy(sizeBytes = null, sha256 = null)
+            var downloadCount = 0
+            val installer = ModelBundleInstaller(
+                BundleComponentDownloader { _, tempFile, stagedFile, onProgress ->
+                    downloadCount++
+                    tempFile.parentFile?.mkdirs()
+                    stagedFile.parentFile?.mkdirs()
+                    if (downloadCount == 1) {
+                        tempFile.writeBytes(byteArrayOf())
+                    } else {
+                        tempFile.writeText("valid-weights")
+                    }
+                    check(tempFile.renameTo(stagedFile))
+                    snapshot(remote, tempFile, stagedFile).also(onProgress)
+                }
+            )
+
+            val firstError = runCatching {
+                installer.install(bundleRoot, listOf(remote))
+            }.exceptionOrNull()
+
+            assertTrue(firstError?.message.orEmpty().contains("empty"))
+            assertEquals("old", File(bundleRoot, "old-marker.txt").readText())
+            assertTrue("Failed empty output remains isolated in staging", File(tempDir, ".bundle.installing/content/weights.mnn").isFile)
+            assertFalse(File(bundleRoot, "weights.mnn").exists())
+            assertFalse(installer.verifyInstalledBundle(bundleRoot).isVerified)
+
+            installer.install(bundleRoot, listOf(remote))
+
+            assertEquals(2, downloadCount)
+            assertEquals("valid-weights", File(bundleRoot, "weights.mnn").readText())
+            assertFalse(File(bundleRoot, "old-marker.txt").exists())
+            assertTrue(installer.verifyInstalledBundle(bundleRoot).isVerified)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cancellationDuringSynchronousTransformNeverCommitsBundle() = runBlocking {
+        val tempDir = Files.createTempDirectory("mca-bundle-cancel-tail-test").toFile()
+        try {
+            val bundleRoot = File(tempDir, "bundle")
+            val installer = ModelBundleInstaller(fakeDownloader())
+            val job = launch(Dispatchers.Default) {
+                installer.install(
+                    bundleRoot = bundleRoot,
+                    components = listOf(remote("model.mnn", payload = "model-data")),
+                    stagedTransformer = ModelBundleStagedTransformer { _, _ ->
+                        // Simulate a synchronous transform that cannot observe
+                        // coroutine cancellation itself. The installer must
+                        // check cancellation again before writing/committing.
+                        Thread.sleep(150)
+                        ModelBundleStagedTransformResult()
+                    }
+                )
+            }
+            delay(20)
+            job.cancel()
+            job.join()
+
+            assertFalse("Canceled install must not publish a bundle", bundleRoot.exists())
+            assertTrue(
+                "Canceled install should remain resumable until explicitly discarded",
+                File(tempDir, ".bundle.installing").exists()
             )
         } finally {
             tempDir.deleteRecursively()

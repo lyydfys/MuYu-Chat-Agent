@@ -104,10 +104,39 @@ class ChatContextComposerTest {
     fun assistantFileContextSettingIsPassedToPreflightAndGenerationComposition() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
 
-        listOf("sendMessage", "startGeneration").forEach { function ->
+        listOf("sendPreparedMessage", "startGeneration").forEach { function ->
             val body = functionBody(source, "fun $function")
             assertTrue(body.contains("fileContextEnabled = assistantSnapshot?.fileContextEnabled"))
         }
+    }
+
+    @Test
+    fun sendMessageCompressesAndRebuildsRuntimeContextBeforeFinalAdmission() {
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        // The public sendMessage entry point performs the asynchronous attachment preflight;
+        // the request admission/compression and persistence live in the synchronous handoff it
+        // calls so the final request uses the exact deduplicated attachment snapshot.
+        val sendMessage = functionBody(source, "fun sendMessage")
+        val sendPreparedMessage = functionBody(source, "fun sendPreparedMessage")
+        val request = sendPreparedMessage.indexOf("val preflightRequest = ChatRequest(")
+        val initialAdmission = sendPreparedMessage.indexOf("val initialAdmission = localContextWindowAdmission(", request)
+        val compression = sendPreparedMessage.indexOf("val preflightCompression = compressChatRequestContext(", initialAdmission)
+        val rebuiltContext = sendPreparedMessage.indexOf("val rebuiltPreflightContext = chatContextComposer.compose(", compression)
+        val finalRequest = sendPreparedMessage.indexOf("val finalPreflightRequest = preflightCompression.request.copy(", rebuiltContext)
+        val finalAdmission = sendPreparedMessage.indexOf("val admission = localContextWindowAdmission(finalPreflightRequest)", finalRequest)
+        val persistedMessages = sendPreparedMessage.indexOf("val messages = it.messages + user + assistant", finalAdmission)
+
+        assertTrue(request >= 0)
+        assertTrue(initialAdmission > request)
+        assertTrue(compression > initialAdmission)
+        assertTrue(rebuiltContext > compression)
+        assertTrue(finalRequest > rebuiltContext)
+        assertTrue(finalAdmission > finalRequest)
+        assertTrue(persistedMessages > finalAdmission)
+        assertTrue(sendPreparedMessage.contains("trigger = if (initialAdmission.isAccepted)"))
+        assertTrue(sendPreparedMessage.contains("ContextCompressionTrigger.MANUAL"))
+        assertTrue(sendPreparedMessage.contains("runtimeSystemContext = rebuiltPreflightContext.runtimeSystemContext"))
+        assertTrue(sendMessage.contains("deduplicateVisionAttachmentsForSend"))
     }
 
     private fun sourceFile(relativePath: String): String {

@@ -17,7 +17,7 @@ class LocalImageProductClosureTest {
         val localAsset = functionBody(source, "private suspend fun createLocalGeneratedImageAsset(")
         val api = functionBody(source, "private suspend fun generateLocalApiImage(")
 
-        assertTrue(ui.contains("val jobId = \"ui-img-\${UUID.randomUUID()}\""))
+        assertTrue(ui.contains("val jobId = requestedJobId ?: \"ui-img-\${UUID.randomUUID()}\""))
         assertTrue(ui.contains("tryAcquireObservedImageGenerationLease(jobId)"))
         assertTrue(ui.contains("parentRequestId = jobId"))
         assertTrue(ui.contains("requestId = child.requestId"))
@@ -178,10 +178,12 @@ class LocalImageProductClosureTest {
         assertTrue(coordinator.contains("SDXL_ISOLATED_ENCODER_UNET_VAE_MODE"))
         assertFalse(coordinator.contains("same_transport"))
         assertTrue(runtimeSelector.contains("int preferred_htp_arch"))
-        assertTrue(
-            runtimeSelector.indexOf("append_arch(preferred_htp_arch)") <
-                runtimeSelector.indexOf("append_arch(device_htp_arch)")
-        )
+        // A known context/device pair is an exact admission constraint.  A
+        // caller preference may only be used when it matches the required
+        // architecture; the selector then appends that required arch.
+        assertTrue(runtimeSelector.contains("const int required_arch"))
+        assertTrue(runtimeSelector.contains("preferred_htp_arch == required_arch"))
+        assertTrue(runtimeSelector.contains("append_arch(required_arch)"))
         assertTrue(isolatedSdxl.contains("expected_profile"))
         assertEquals(3, Regex("expected_profile\\)\\)").findAll(isolatedSdxl).count())
     }
@@ -393,7 +395,8 @@ class LocalImageProductClosureTest {
         assertTrue(viewModel.contains("publishLocalImagePreview(jobId, progress)"))
         assertTrue(protocol.contains(".put(\"previewPath\", progress.previewPath)"))
         assertTrue(protocol.contains("previewRevision = progress.optLong(\"previewRevision\")"))
-        assertTrue(chat.contains("previewUriString?.let { loadImageBitmap(context, it) }"))
+        assertTrue(chat.contains("uriString = previewUriString.orEmpty()"))
+        assertTrue(chat.contains("rememberChatImageBitmap("))
         assertTrue(chat.contains("实时预览 · 第 \$previewStep 步"))
         assertTrue(api.contains("code = \"unsupported_preview_transport\""))
         assertTrue(

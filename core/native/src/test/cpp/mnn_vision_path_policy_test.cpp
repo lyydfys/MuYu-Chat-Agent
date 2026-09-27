@@ -43,5 +43,20 @@ int main() {
         if (candidate == "vision/encoder.mnn") ++duplicateCount;
     }
     assert(duplicateCount == 1);
+
+    // Native multimodal parsing uses the same lexical key for equivalent
+    // spellings, preventing one image from being assigned two Omni slots.
+    assert(mca::mnn::canonicalMnnImageReference(" file:///tmp/photo.png#preview") ==
+           "/tmp/photo.png");
+    assert(mca::mnn::canonicalMnnImageReference("/tmp/./photo.png") ==
+           "/tmp/photo.png");
+    assert(mca::mnn::canonicalMnnImageReference("https://example.test/a.png#preview") ==
+           "https://example.test/a.png");
+    assert(mca::mnn::canonicalMnnImageReference("https://example.test/a.png") !=
+           mca::mnn::canonicalMnnImageReference("https:/example.test/a.png"));
+    assert(mca::mnn::canonicalMnnImageReference("data:image/png;base64,AAE=#a") ==
+           "data:image/png;base64,AAE=");
+    assert(mca::mnn::canonicalMnnImageReference("/tmp/a.png") !=
+           mca::mnn::canonicalMnnImageReference("/tmp/b.png"));
     return 0;
 }

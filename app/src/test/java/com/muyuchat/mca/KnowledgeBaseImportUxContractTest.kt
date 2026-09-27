@@ -17,7 +17,7 @@ class KnowledgeBaseImportUxContractTest {
 
     @Test
     fun oversizedInlineFileGetsKnowledgeBaseRecoveryAdvice() {
-        val body = functionBody(mainViewModelSource(), "sendMessage")
+        val body = functionBody(mainViewModelSource(), "sendPreparedMessage")
 
         assertTrue(body.contains("FILE_ATTACHMENT_MARKER"))
         assertTrue(body.contains("请将长文件导入知识库后再提问"))

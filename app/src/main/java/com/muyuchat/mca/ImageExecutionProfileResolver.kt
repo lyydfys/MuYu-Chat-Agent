@@ -4,6 +4,7 @@ import com.muyuchat.core.download.ImageEngineBundleComponentRole
 import com.muyuchat.core.download.ImageEngineBundleSpec
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.download.ModelScopeRecommendedKind
+import com.muyuchat.core.download.ModelRepositoryProvider
 import com.muyuchat.core.download.RecommendedImageDefaults
 
 internal data class ImageProfileSidecar(
@@ -173,7 +174,11 @@ internal object ImageExecutionProfileResolver {
     private const val QNN_DREAMSHAPER_SD15_EXECUTION_PROFILE_REVISION = 6
     private const val QNN_REALISTICVISIONHYPER_SD15_EXECUTION_PROFILE_REVISION = 6
     private const val QNN_SDXL_EXECUTION_PROFILE_REVISION = 7
-    private const val QNN_GEN5_EXECUTION_PROFILE_REVISION = 2
+    private const val QNN_GEN5_EXECUTION_PROFILE_REVISION = 3
+    private const val QWEN_IMAGE_21_EXECUTION_PROFILE_REVISION = 2
+    private const val QWEN_IMAGE_21_RECOMMENDATION_ID = "qwen_image_21_mnn_opencl"
+    private const val QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT =
+        "2525485bba44d4d8176d05522fa7e8b4b1080c9e7b7df18dfde7d58e667ff055"
     private val QNN_SD15_CONDITIONING_RUNTIME_ASSETS = listOf(
         "tokenizer.json",
         "token_emb.bin",
@@ -191,7 +196,8 @@ internal object ImageExecutionProfileResolver {
         "realismsdxl_dmd2_alt_qnn228",
         "animagine_xl_v4_qnn228",
         "cyberrealisticxl_qnn228",
-        "sd_turbo_512_experimental"
+        "sd_turbo_512_experimental",
+        QWEN_IMAGE_21_RECOMMENDATION_ID
     )
     val builtInTargets: List<BuiltInImageProfileTarget> = listOf(
         BuiltInImageProfileTarget("cyberrealistic_sd15_qnn228", "community.sd15.qnn228"),
@@ -211,6 +217,7 @@ internal object ImageExecutionProfileResolver {
         BuiltInImageProfileTarget("z_image_turbo_q4", "sdcpp.z-image-turbo"),
         BuiltInImageProfileTarget("flux2_klein_4b_q4", "sdcpp.flux2-klein"),
         BuiltInImageProfileTarget("qwen_image_2512_q2", "sdcpp.qwen-image"),
+        BuiltInImageProfileTarget("qwen_image_21_mnn_opencl", "mnn.qwen-image-2.1.opencl"),
         BuiltInImageProfileTarget("longcat_image_q4", "sdcpp.longcat-image")
     )
 
@@ -362,6 +369,10 @@ internal object ImageExecutionProfileResolver {
             repositories = setOf("unsloth/Qwen-Image-2512-GGUF"),
             artifacts = setOf("qwen-image-2512-Q2_K.gguf"),
             fingerprints = setOf("176678f0d4e6c613c5a318014f16d829438b8feec9454bde7b3070a520bf1728")
+        ),
+        identityRule(
+            "qwen_image_21_mnn_opencl",
+            repositories = setOf("evankuo/Qwen-Image-2.1-MNN")
         ),
         identityRule(
             "longcat_image_q4",
@@ -1155,22 +1166,38 @@ internal object ImageExecutionProfileResolver {
 
     /**
      * Revision migration is deliberately narrower than normal recommendation
-     * resolution. It only repairs an older persisted contract for the exact
-     * pinned archive that authored it; aliases, device hints and profile names
-     * alone can never select a migration target.
+     * resolution. It only repairs an older persisted contract for its exact
+     * pinned catalog bundle (archives require their pinned `sourcePath!/member`
+     * proof; Qwen direct-file bundles have a separate exact-file proof). Aliases,
+     * device hints and profile names alone can never select a migration target.
      */
     private fun migratePinnedCatalogManifestProfile(
         input: ImageExecutionProfileResolverInput,
         fingerprint: String
     ): ImageExecutionProfile? {
         val persisted = input.manifestProfile ?: return null
-        if (persisted.modelFingerprint.trim().lowercase() != fingerprint) return persisted
+        val persistedFingerprint = persisted.modelFingerprint.trim().lowercase()
+        if (persistedFingerprint != fingerprint) {
+            // A known Qwen bundle revision wrote the VAE decoder SHA into the profile identity
+            // even though the registered model row points at the DIFFUSION primary. Permit only
+            // that observed legacy value, and only after the Qwen-specific check below proves the
+            // current input is the exact pinned DIFFUSION primary. Do not generalize this exception
+            // to other models or unknown legacy hashes.
+            val qwenCandidate = resolveBuiltInTarget(input)
+                ?.recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID
+            if (!qwenCandidate || persistedFingerprint != QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT) {
+                return persisted
+            }
+        }
         val target = resolveBuiltInTarget(input)
             ?.takeIf { it.recommendationId in MIGRATABLE_PINNED_RECOMMENDATIONS }
             ?: return persisted
         val recommendationId = target.recommendationId
         val contract = catalogProfileContractsByRecommendationId[recommendationId]
             ?: return persisted
+        if (recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID) {
+            if (!qwenImage21MigrationMetadataAgrees(input, persisted, contract)) return persisted
+        }
         if (!manifestMigrationIdentityAgrees(input, persisted, recommendationId)) return persisted
         if (!manifestMigrationSourceEvidenceAgrees(input, recommendationId)) return persisted
 
@@ -1180,8 +1207,12 @@ internal object ImageExecutionProfileResolver {
         ) ?: return persisted
         if (
             persisted.profileId != catalogProfile.profileId ||
-            persisted.profileRevision <= 0 ||
-            persisted.profileRevision >= catalogProfile.profileRevision ||
+            (if (recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID) {
+                persisted.profileRevision != 1
+            } else {
+                persisted.profileRevision <= 0 ||
+                    persisted.profileRevision >= catalogProfile.profileRevision
+            }) ||
             persisted.runtime != catalogProfile.runtime ||
             persisted.family != catalogProfile.family ||
             persisted.task != catalogProfile.task
@@ -1194,11 +1225,113 @@ internal object ImageExecutionProfileResolver {
                 sources = listOf(ImageProfileSource.MANIFEST),
                 recommendationId = recommendationId,
                 recommendationRevision = persisted.provenance.recommendationRevision
-                    ?: input.recommendationRevision,
+                    ?: input.recommendationRevision
+                    ?: contract.bundle.requiredComponents
+                        .firstOrNull { component -> component.role == ImageEngineBundleComponentRole.DIFFUSION }
+                        ?.revision,
                 notes = persisted.provenance.notes
             )
         )
     }
+
+    /**
+     * Qwen's package is a pinned set of direct Hugging Face files, not an archive. Older manifests
+     * do not persist the source revision in the top-level metadata, so the primary file's exact
+     * catalog SHA-256, repository, direct source path and the catalog's immutable revision jointly
+     * bind it. If either old provenance or the current request does declare a revision, require it
+     * to match that same pinned revision.
+     */
+    private fun qwenImage21MigrationMetadataAgrees(
+        input: ImageExecutionProfileResolverInput,
+        persisted: ImageExecutionProfile,
+        contract: CatalogImageProfileContract
+    ): Boolean {
+        val bundle = contract.bundle
+        val primary = bundle.requiredComponents.singleOrNull { component ->
+            component.role == ImageEngineBundleComponentRole.DIFFUSION &&
+                component.fileName.equals("dit.mnn", ignoreCase = true)
+        } ?: return false
+        val pinnedRevision = primary.revision.trim().takeIf(String::isNotEmpty) ?: return false
+        val pinnedRepository = normalizeRepositoryIdentity(primary.repoId)
+        val pinnedFingerprint = primary.sha256?.trim()?.lowercase() ?: return false
+        val pinnedLegacyVaeFingerprint = bundle.requiredComponents
+            .singleOrNull { component ->
+                component.role == ImageEngineBundleComponentRole.VAE &&
+                    component.fileName.equals("vae_decoder.mnn", ignoreCase = true)
+            }
+            ?.sha256
+            ?.trim()
+            ?.lowercase()
+        val inputFingerprint = input.modelFingerprint.trim().lowercase()
+        val persistedFingerprint = persisted.modelFingerprint.trim().lowercase()
+        val readinessUsesKnownLegacyIdentity =
+            inputFingerprint == QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT &&
+                persistedFingerprint == QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT &&
+                pinnedLegacyVaeFingerprint == QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT
+        if (
+            bundle.recommendationId != QWEN_IMAGE_21_RECOMMENDATION_ID ||
+            bundle.requiredComponents.isEmpty() ||
+            bundle.requiredComponents.any { component ->
+                component.provider != ModelRepositoryProvider.HUGGING_FACE ||
+                    normalizeRepositoryIdentity(component.repoId) != pinnedRepository ||
+                    component.revision.trim() != pinnedRevision ||
+                    component.fileName.isBlank() ||
+                    component.fileName.endsWith(".zip", ignoreCase = true) ||
+                    component.fileName.contains("!/")
+            } ||
+            contract.modelFingerprint != pinnedFingerprint ||
+            (inputFingerprint != pinnedFingerprint && !readinessUsesKnownLegacyIdentity) ||
+            (persistedFingerprint != pinnedFingerprint &&
+                (persistedFingerprint != QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT ||
+                    pinnedLegacyVaeFingerprint != QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT)) ||
+            input.recommendationId?.trim() != QWEN_IMAGE_21_RECOMMENDATION_ID ||
+            persisted.provenance.recommendationId?.trim() != QWEN_IMAGE_21_RECOMMENDATION_ID ||
+            input.recommendationRevision?.trim()?.takeIf(String::isNotEmpty)
+                ?.let { it != pinnedRevision } == true ||
+            persisted.provenance.recommendationRevision?.trim()?.takeIf(String::isNotEmpty)
+                ?.let { it != pinnedRevision } == true
+        ) {
+            return false
+        }
+        return qwenImage21DirectFileSourceEvidenceAgrees(input, contract, pinnedRepository)
+    }
+
+    private fun qwenImage21DirectFileSourceEvidenceAgrees(
+        input: ImageExecutionProfileResolverInput,
+        contract: CatalogImageProfileContract,
+        pinnedRepository: String = normalizeRepositoryIdentity(
+            contract.bundle.requiredComponents.firstOrNull { component ->
+                component.role == ImageEngineBundleComponentRole.DIFFUSION &&
+                    component.fileName.equals("dit.mnn", ignoreCase = true)
+            }?.repoId.orEmpty()
+        )
+    ): Boolean {
+        val requiredComponents = contract.bundle.requiredComponents
+        val pinnedPaths = requiredComponents.map { component ->
+            normalizeDirectSourcePath(component.fileName)
+        }.toSet()
+        if (pinnedPaths.isEmpty() || pinnedPaths.any(String::isBlank)) return false
+        val evidenceRepositories = input.recommendationEvidence.sourceRepositories
+            .asSequence()
+            .filter(String::isNotBlank)
+            .map(::normalizeRepositoryIdentity)
+            .filter { repository -> '/' in repository }
+            .toSet()
+        val directPaths = input.recommendationEvidence.artifactPaths
+            .asSequence()
+            .filter(String::isNotBlank)
+            .map(::normalizeDirectSourcePath)
+            .toSet()
+        return evidenceRepositories == setOf(pinnedRepository) &&
+            directPaths.none { path -> "!/" in path || path.endsWith(".zip") } &&
+            pinnedPaths.all(directPaths::contains)
+    }
+
+    private fun normalizeDirectSourcePath(value: String): String = value
+        .trim()
+        .replace('\\', '/')
+        .trimStart('/')
+        .lowercase()
 
     private fun manifestMigrationIdentityAgrees(
         input: ImageExecutionProfileResolverInput,
@@ -1262,6 +1395,11 @@ internal object ImageExecutionProfileResolver {
     ): Boolean {
         val contract = catalogProfileContractsByRecommendationId[recommendationId]
             ?: return false
+        if (recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID) {
+            // Direct-file Qwen bundle evidence is checked separately. Keep the existing strict
+            // `archive!/member` rule unchanged for archive-backed recommendations.
+            return qwenImage21DirectFileSourceEvidenceAgrees(input, contract)
+        }
         val primaryComponents = contract.bundle.requiredComponents
             .filter { component -> component.role == ImageEngineBundleComponentRole.DIFFUSION }
         val pinnedRepositories = primaryComponents
@@ -1390,6 +1528,7 @@ internal object ImageExecutionProfileResolver {
         "qualcomm.controlnet-canny.gen5.qnn245" -> qnnControlNetProfile(profileId, fingerprint)
         "mnn.sd15.official.512" -> mnnSd15Profile(profileId, fingerprint)
         "mnn.sana-edit.v2" -> sanaEditProfile(profileId, fingerprint)
+        "mnn.qwen-image-2.1.opencl" -> qwenImage21MnnProfile(profileId, fingerprint)
         "sdcpp.sd-turbo" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.SD_TURBO, ImageModelVariant.SD_TURBO, 4, 1.0, ImageSchedulerAlgorithm.EULER_A, supportsNegativePrompt = false)
         "sdcpp.z-image-turbo" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.Z_IMAGE, ImageModelVariant.Z_IMAGE_TURBO, 8, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, supportsNegativePrompt = false, maxPromptTokens = 512)
         "sdcpp.flux2-klein" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.FLUX, ImageModelVariant.FLUX2_KLEIN, 4, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, supportsNegativePrompt = false, maxPromptTokens = 512)
@@ -1590,7 +1729,7 @@ internal object ImageExecutionProfileResolver {
         ),
         conditioning = conditioning(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, ImageEmbeddingConversionStrategy.GRAPH_EXECUTION, if (sd21) 1_024 else 768),
         vae = vae(ImageVaeScalingLocation.GRAPH_INTERNAL, 0.18215, 512),
-        graph = qnnGraph("text_encoder.bin", "unet.bin", "vae.bin", "2.45.0.260326154327", 81, ImageWorkerStrategy.SHARED_TEXT_UNET_VAE),
+        graph = qnnGen5Graph(if (sd21) "stable_diffusion_v2_1" else "stable_diffusion_v1_5"),
         defaults = defaults(
             512,
             20,
@@ -1612,10 +1751,18 @@ internal object ImageExecutionProfileResolver {
         return base.copy(
             variant = ImageModelVariant.CONTROLNET_CANNY,
             task = ImageTask.CONTROL_IMAGE,
-            graph = base.graph.copy(controlNet = ImageGraphArtifactContract("controlnet.bin")),
+            graph = qnnGen5Graph("controlnet_canny", controlNet = true),
             capabilities = base.capabilities.copy(requiresControlImage = true)
         )
     }
+
+    private fun qnnGen5Graph(prefix: String, controlNet: Boolean = false): ImageGraphContract =
+        qnnGraph("text_encoder.bin", "unet.bin", "vae.bin", "2.45.0.260326154327", 81).copy(
+            textEncoder = ImageGraphArtifactContract("text_encoder.bin", "${prefix}_text_encoder"),
+            unet = ImageGraphArtifactContract("unet.bin", "${prefix}_unet"),
+            vae = ImageGraphArtifactContract("vae.bin", "${prefix}_vae"),
+            controlNet = if (controlNet) ImageGraphArtifactContract("controlnet.bin", "${prefix}_controlnet") else null
+        )
 
     private fun mnnSd15Profile(profileId: String, fingerprint: String): ImageExecutionProfile = profile(
         profileId = profileId,
@@ -1710,6 +1857,85 @@ internal object ImageExecutionProfileResolver {
             setOf(ImageSchedulerAlgorithm.FLOW_MATCH),
             supportsPromptWeighting = false
         ).copy(requiresInputImage = true, supportsMask = false)
+    )
+
+    private fun qwenImage21MnnProfile(profileId: String, fingerprint: String): ImageExecutionProfile = profile(
+        profileId = profileId,
+        fingerprint = fingerprint,
+        runtime = LocalImageRuntime.MNN_DIFFUSION,
+        family = LocalImageModelFamily.QWEN_IMAGE,
+        variant = ImageModelVariant.QWEN_IMAGE_21,
+        scheduler = scheduler(
+            ImageSchedulerAlgorithm.FLOW_MATCH,
+            ImagePredictionType.FLOW,
+            20,
+            2,
+            40
+        ),
+        tokenizer = ImageTokenizerContract(
+            backend = ImageTokenizerBackend.MNN_QWEN_IMAGE,
+            maxLength = 512,
+            clip1PadRule = ImageClipPadRule.MODEL_DECLARED,
+            supportsPromptWeighting = false,
+            supportsTextualInversion = false,
+            separateNegativePrompt = false
+        ),
+        conditioning = conditioning(
+            ImageEmbeddingDiskDataType.GRAPH_INTERNAL,
+            ImageEmbeddingConversionStrategy.GRAPH_EXECUTION,
+            width = 4_096,
+            maxLength = 512,
+            separateNegativePrompt = false
+        ),
+        vae = ImageVaeContract(
+            scalingLocation = ImageVaeScalingLocation.RUNTIME_NATIVE,
+            scalingFactor = 1.0,
+            inputShape = listOf(1, 64, 32, 32),
+            outputShape = listOf(1, 4, 512, 512),
+            inputLayout = ImageTensorLayout.RUNTIME_NATIVE,
+            outputLayout = ImageTensorLayout.RUNTIME_NATIVE,
+            outputRange = ImagePixelRange.RUNTIME_NATIVE,
+            channelOrder = ImageChannelOrder.RUNTIME_NATIVE
+        ),
+        graph = ImageGraphContract(
+            textEncoder = ImageGraphArtifactContract("text_encoder/llm.mnn"),
+            unet = ImageGraphArtifactContract("dit.mnn"),
+            vae = ImageGraphArtifactContract("vae_decoder.mnn"),
+            // This is an MNN runtime tokenizer table, not a JSON tokenizer config sidecar.
+            tokenizerSidecar = null,
+            configSidecars = listOf(
+                "text_encoder/te_config.json",
+                "text_encoder/te_llm_config.json",
+                "text_encoder/llm_config.json",
+                "text_encoder/embeddings_int4.bin",
+                "txt_in.mnn",
+                "txt_in.mnn.weight",
+                "img_in.mnn",
+                "img_in.mnn.weight"
+            ),
+            workerStrategy = ImageWorkerStrategy.DEDICATED_WORKER
+        ),
+        defaults = defaults(512, 20, 1.0, useCfg = false),
+        capabilities = ImageGenerationCapabilities(
+            // The pinned MNN port resizes the DiT/VAE graph. Only the explicit
+            // QwenImage21SizeContract grid is product-verified; provider and
+            // worker admission reject other aligned pairs inside these bounds.
+            minWidth = 256,
+            maxWidth = 672,
+            minHeight = 256,
+            maxHeight = 672,
+            widthMultiple = 32,
+            heightMultiple = 32,
+            supportedSchedulers = setOf(ImageSchedulerAlgorithm.FLOW_MATCH),
+            supportsNegativePrompt = false,
+            supportsPromptWeighting = false,
+            supportsTextualInversion = false,
+            supportsVaeTiling = false,
+            supportsLivePreview = false,
+            supportsLora = false,
+            maxBatchCount = 1
+        ),
+        profileRevision = QWEN_IMAGE_21_EXECUTION_PROFILE_REVISION
     )
 
     private fun sdcppProfile(

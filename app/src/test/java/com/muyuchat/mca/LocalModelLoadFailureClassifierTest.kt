@@ -19,6 +19,40 @@ class LocalModelLoadFailureClassifierTest {
     }
 
     @Test
+    fun gpuDiagnosticExplainsMissingOpenClInsteadOfCallingApkCpuOnly() {
+        val result = LocalModelLoadFailureClassifier.classify(
+            "n_gpu_layers requests GPU offload, but this APK has no usable non-CPU llama.cpp backend.",
+            """
+                {
+                  "backendReady": true,
+                  "backendLoadDiagnostic": "Android OpenCL runtime unavailable: dlopen(libOpenCL.so) failed",
+                  "backendCapabilities": {"gpuOffloadSupported": false, "gpuDeviceCount": 0}
+                }
+            """.trimIndent()
+        )
+
+        assertEquals(LocalModelLoadFailureKind.UNSUPPORTED_RUNTIME_CONFIG, result.kind)
+        assertTrue(result.userMessage.contains("libOpenCL.so"))
+        assertFalse(result.userMessage.contains("CPU-only APK"))
+    }
+
+    @Test
+    fun gpuDiagnosticExplainsBackendRegistrationFailure() {
+        val result = LocalModelLoadFailureClassifier.classify(
+            "n_gpu_layers requests GPU offload, but this APK has no usable non-CPU llama.cpp backend.",
+            """
+                {
+                  "backendLoadDiagnostic": "MCA OpenCL backend failed to register",
+                  "backendCapabilities": {"gpuOffloadSupported": false, "gpuDeviceCount": 0}
+                }
+            """.trimIndent()
+        )
+
+        assertEquals(LocalModelLoadFailureKind.UNSUPPORTED_RUNTIME_CONFIG, result.kind)
+        assertTrue(result.userMessage.contains("注册失败"))
+    }
+
+    @Test
     fun explicitContextCreationFailureDoesNotImplyFileCorruption() {
         val result = LocalModelLoadFailureClassifier.classify(
             "GGUF load failed: llama_init_from_model returned null",

@@ -54,6 +54,7 @@ class LocalChatWorkerIsolationContractTest {
         assertTrue(client.contains("ILocalChatWorker.Stub.asInterface"))
         assertTrue(client.contains("RemoteLocalChatRunnerException"))
         assertTrue(aidl.contains("in ParcelFileDescriptor requestPayload"))
+        assertTrue(aidl.contains("oneway void requestStop();"))
         assertTrue(client.contains("LocalChatWorkerRequestTransport.write"))
         assertFalse(runners.contains("defaultLocalChatRunners(context)"))
         assertTrue(runners.contains("RemoteLocalChatRunner(context, LocalChatRuntime.GENIEX_LLAMA_CPP)"))
@@ -80,6 +81,10 @@ class LocalChatWorkerIsolationContractTest {
         assertTrue(service.contains("mnn_opencl_prefill_timeout"))
         assertTrue(service.contains("litert_gpu_prefill_timeout"))
         assertTrue(service.contains("scheduleForcedRecoveryAfterStop"))
+        val stopBody = functionBody(service, "override fun requestStop()")
+        assertTrue(stopBody.contains("dispatchRunnerStop()"))
+        assertTrue(stopBody.indexOf("scheduleForcedRecoveryAfterStop()") < stopBody.indexOf("dispatchRunnerStop()"))
+        assertFalse(stopBody.contains("activeRunner?.requestStop()"))
         assertTrue(aidl.contains("void resetPrefillProgress()"))
         assertTrue(service.contains("override fun resetPrefillProgress()"))
         assertTrue(client.contains("service.resetPrefillProgress()"))
@@ -87,6 +92,18 @@ class LocalChatWorkerIsolationContractTest {
             client.indexOf("catch (error: DeadObjectException)") <
                 client.indexOf("catch (error: RemoteException)")
         )
+    }
+
+    @Test
+    fun litertCpuKeepsLongOperationBudgetButRecoversAStuckCancellation() {
+        val target = localChatWorkerOperationTarget(
+            LocalChatRuntime.LITERT_LM,
+            "{\"backend\":\"cpu\"}"
+        )
+        val prefill = localChatWorkerOperationPolicy(target, "prefill")
+        assertEquals(30L * 60L * 1_000L, prefill.timeoutMs)
+        assertTrue(prefill.forceProcessRecoveryOnCancel)
+        assertEquals("litert_cpu_cancel_timeout", prefill.timeoutFailureCode)
     }
 
     private fun sourceFile(relativePath: String): String {

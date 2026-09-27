@@ -101,7 +101,11 @@ class RemoteLocalChatRunnerStateTest {
         val cpu = localChatWorkerOperationTarget(LocalChatRuntime.MNN_CPU, "{\"backend_type\":\"cpu\"}")
         val cpuPolicy = localChatWorkerOperationPolicy(cpu, "prefill")
         assertEquals(30L * 60L * 1_000L, cpuPolicy.timeoutMs)
-        assertFalse(cpuPolicy.forceProcessRecoveryOnCancel)
+        // CPU keeps the generous normal-operation budget, but a cancellation
+        // that wedges native code must still be recoverable by the isolated
+        // worker watchdog.  This prevents the Binder/UI state from remaining
+        // stuck in "generating" indefinitely.
+        assertTrue(cpuPolicy.forceProcessRecoveryOnCancel)
     }
 
     private fun functionBody(source: String, signature: String): String {

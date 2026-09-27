@@ -162,7 +162,13 @@ internal fun resolveLocalImageExecutionProfile(
     require(effectiveFamily == LocalImageModelFamily.CUSTOM || resolution.profile.family == effectiveFamily) {
         "Image execution profile family ${resolution.profile.family} does not match $effectiveFamily."
     }
-    val scheduled = resolution.withProductDenoisingSchedule(options)
+    // Catalog revision migration can replace a persisted graph contract with root-relative
+    // catalog paths. Rebind after resolution too: publisher ZIPs keep graphs in a wrapper
+    // directory, and an upgraded installed bundle must not suddenly look incomplete.
+    val installedResolution = canonicalRoot?.let { root ->
+        resolution.copy(profile = resolution.profile.rebindInstalledArtifactPaths(root))
+    } ?: resolution
+    val scheduled = installedResolution.withProductDenoisingSchedule(options)
     return if (!captureTextualInversionExecutionAssets || options.textualInversionIds.isEmpty()) {
         scheduled
     } else {
@@ -675,10 +681,18 @@ internal fun parseLocalImageExecutionProfileSidecars(
             .filter(::isJsonImageBehaviorSidecar)
             .forEach(::add)
     }
+    val tokenizerSidecar = graph?.tokenizerSidecar
+    val tokenizerJsonPath = when {
+        tokenizerSidecar != null -> tokenizerSidecar.takeIf { path ->
+            path.substringAfterLast('/').substringAfterLast('\\').endsWith(".json", ignoreCase = true)
+        }
+        manifestProfile?.tokenizer?.backend == ImageTokenizerBackend.MNN_QWEN_IMAGE -> null
+        else -> DEFAULT_IMAGE_TOKENIZER_SIDECAR
+    }
     return ImageExecutionProfileJson.parseSidecars(
         bundleRoot = bundleRoot,
         schedulerRelativePath = graph?.schedulerSidecar ?: DEFAULT_IMAGE_SCHEDULER_SIDECAR,
-        tokenizerRelativePath = graph?.tokenizerSidecar ?: DEFAULT_IMAGE_TOKENIZER_SIDECAR,
+        tokenizerRelativePath = tokenizerJsonPath,
         behaviorRelativePaths = behaviorSidecars
     )
 }

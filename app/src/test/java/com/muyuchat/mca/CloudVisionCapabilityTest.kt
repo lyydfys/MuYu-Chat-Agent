@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import android.content.SharedPreferences
 import com.muyuchat.core.engine.ChatImageAttachment
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
@@ -11,6 +12,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.lang.reflect.Proxy
 
 class CloudVisionCapabilityTest {
     @Test
@@ -28,6 +30,66 @@ class CloudVisionCapabilityTest {
 
         assertTrue(record.toChatConfig().supportsVision)
         assertFalse(record.toImageConfig().supportsVision)
+    }
+
+    @Test
+    fun cloudToolCapabilityDefaultsFalseAndPersistsOnlyForChatModels() {
+        val legacyStore = CloudApiStore(memoryPreferences())
+        assertFalse(legacyStore.load().supportsTools)
+        val legacyModelStore = CloudApiStore(
+            memoryPreferences(
+                mapOf(
+                    "cloud_models_json" to """[{"kind":"CHAT","apiFormat":"OPENAI_RESPONSES","modelName":"legacy"}]"""
+                )
+            )
+        )
+        assertFalse(legacyModelStore.loadModels().single().supportsTools)
+
+        val prefs = memoryPreferences()
+        val store = CloudApiStore(prefs)
+        store.save(
+            CloudApiConfig(
+                enabled = true,
+                apiFormat = CloudApiFormat.OPENAI_RESPONSES,
+                baseUrl = "https://example.com/v1",
+                chatModel = "responses-model",
+                supportsTools = true
+            )
+        )
+        assertTrue(store.load().supportsTools)
+
+        val chat = CloudModelRecord(
+            id = "responses-chat",
+            kind = CloudModelKind.CHAT,
+            apiFormat = CloudApiFormat.OPENAI_RESPONSES,
+            providerName = "OpenAI Responses",
+            displayName = "Responses model",
+            baseUrl = "https://example.com/v1",
+            apiKey = "",
+            modelName = "responses-model",
+            supportsTools = true
+        )
+        val image = CloudModelRecord(
+            id = "image-model",
+            kind = CloudModelKind.IMAGE,
+            apiFormat = CloudApiFormat.OPENAI_RESPONSES,
+            providerName = "OpenAI Responses",
+            displayName = "Image model",
+            baseUrl = "https://example.com/v1",
+            apiKey = "",
+            modelName = "image-model",
+            supportsTools = true
+        )
+        store.saveModels(listOf(chat, image))
+
+        val restored = store.loadModels().associateBy { it.id }
+        val restoredChat = requireNotNull(restored[chat.id])
+        val restoredImage = requireNotNull(restored[image.id])
+        assertTrue(restoredChat.supportsTools)
+        assertTrue(restoredChat.toChatConfig().supportsTools)
+        assertFalse(restoredImage.supportsTools)
+        assertFalse(restoredImage.toImageConfig().supportsTools)
+        assertFalse(image.toImageConfig().supportsTools)
     }
 
     @Test
@@ -76,6 +138,33 @@ class CloudVisionCapabilityTest {
         assertEquals(2, coalesced.size)
         assertEquals("First text\n\nSecond text", coalesced.first().content)
         assertEquals(listOf(image), coalesced.first().imageAttachments)
+    }
+
+    @Test
+    fun coalescingAdjacentUserTurnsDeduplicatesSameImageAcrossMessages() {
+        val bytes = "same-image".toByteArray()
+        val encoded = java.util.Base64.getEncoder().encodeToString(bytes)
+        val first = ChatImageAttachment(
+            name = "first.png",
+            mimeType = "image/png",
+            dataBase64 = encoded
+        )
+        val second = ChatImageAttachment(
+            name = "renamed.png",
+            mimeType = "image/png",
+            dataBase64 = encoded
+        )
+
+        val coalesced = coalesceCloudChatMessagesByRole(
+            listOf(
+                ChatMessage(Role.USER, "first", imageAttachments = listOf(first)),
+                ChatMessage(Role.USER, "retry", imageAttachments = listOf(second)),
+                ChatMessage(Role.ASSISTANT, "reply")
+            )
+        )
+
+        assertEquals(2, coalesced.size)
+        assertEquals(1, coalesced.first().imageAttachments.size)
     }
 
     @Test
@@ -166,5 +255,38 @@ class CloudVisionCapabilityTest {
         assertEquals("text", content.getJSONObject(1).getString("type"))
         assertEquals("识别这张图片", content.getJSONObject(1).getString("text"))
         assertEquals("enabled", root.getJSONObject("thinking").getString("type"))
+    }
+
+    private fun memoryPreferences(initialValues: Map<String, Any?> = emptyMap()): SharedPreferences {
+        val values = initialValues.toMutableMap()
+        val editor = Proxy.newProxyInstance(
+            javaClass.classLoader,
+            arrayOf(SharedPreferences.Editor::class.java)
+        ) { proxy, method, args ->
+            when {
+                method.name.startsWith("put") -> {
+                    values[args!![0] as String] = args[1]
+                    proxy
+                }
+                method.name == "remove" -> {
+                    values.remove(args!![0] as String)
+                    proxy
+                }
+                method.name == "apply" -> null
+                method.name == "commit" -> true
+                else -> error(method.name)
+            }
+        }
+        return Proxy.newProxyInstance(
+            javaClass.classLoader,
+            arrayOf(SharedPreferences::class.java)
+        ) { _, method, args ->
+            when {
+                method.name == "edit" -> editor
+                method.name == "contains" -> values.containsKey(args!![0] as String)
+                method.name.startsWith("get") -> values[args!![0] as String] ?: args[1]
+                else -> error(method.name)
+            }
+        } as SharedPreferences
     }
 }

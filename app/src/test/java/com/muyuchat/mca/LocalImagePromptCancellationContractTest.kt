@@ -384,8 +384,8 @@ class LocalImagePromptCancellationContractTest {
         assertTrue(postBeginCancellationCheck > workerBegin)
         assertTrue(nativeBatch > postBeginCancellationCheck)
 
-        val cancel = functionBody(source, "fun cancelImageGeneration()")
-        val clientCancel = cancel.indexOf("localImageWorkerClient.cancel()")
+        val cancel = functionBody(source, "private fun cancelImageGenerationForJob(")
+        val clientCancel = cancel.indexOf("localImageWorkerClient.cancel(")
         val callerOwnedBranch = cancel.indexOf("if (!(localGeneration && nativeCancelRequested))")
         val coroutineCancel = cancel.indexOf("?.cancel()", callerOwnedBranch)
         assertTrue(clientCancel >= 0)
@@ -437,14 +437,14 @@ class LocalImagePromptCancellationContractTest {
     fun `preparation-only worker cancellation cannot claim a native request`() {
         val client = localImageWorkerClientSource()
         val begin = functionBody(client, "fun begin(runtime: LocalImageRuntime)")
-        val cancel = functionBody(client, "fun cancel(): Boolean")
+        val cancel = functionBody(client, "private fun cancelInternal(")
         val noRequest = cancel.indexOf("if (request == null) {")
         val remotePreparationCancel = cancel.indexOf(
             "endpoint.service.cancel(LocalImageWorkerProtocol.cancelRequest(null))",
             noRequest
         )
         val callerOwned = cancel.indexOf("return false", remotePreparationCancel)
-        val registeredRequest = cancel.indexOf("return when (request.handshake.requestCancel())")
+        val registeredRequest = cancel.indexOf("return when (snapshot.third)")
 
         assertTrue(noRequest >= 0)
         assertTrue(remotePreparationCancel > noRequest)

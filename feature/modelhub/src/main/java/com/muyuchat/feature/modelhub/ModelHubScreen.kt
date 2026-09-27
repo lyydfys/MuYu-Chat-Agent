@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.muyuchat.feature.modelhub
 
 import androidx.activity.compose.BackHandler
@@ -25,6 +27,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -38,6 +42,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.OpenInBrowser
@@ -85,7 +91,6 @@ import com.muyuchat.core.download.DownloadStatus
 import com.muyuchat.core.download.ModelScopeHubModel
 import com.muyuchat.core.download.ModelScopeRecommendedKind
 import com.muyuchat.core.download.ModelScopeRecommendedModel
-import com.muyuchat.core.download.RecommendedModelStatus
 import com.muyuchat.core.download.RemoteModelFile
 import com.muyuchat.core.download.RemoteModelFileKind
 import com.muyuchat.core.download.fileKind
@@ -121,12 +126,14 @@ data class ModelHubUiState(
     val downloadIntegrityMessage: String? = null,
     val downloadExecutionStatus: String = "UNKNOWN",
     val downloadExecutionMessage: String? = null,
+    val importTasks: List<ModelImportTaskUi> = emptyList(),
     val deviceTotalRamBytes: Long = 0L,
     val deviceAvailableRamBytes: Long = 0L,
     val deviceAccelerationSummary: String = "",
     val deviceImagePolicy: String = "",
     val deviceImageTier: String = "",
     val deviceChipsetCode: String = "",
+    val deviceSupportedAbis: List<String> = emptyList(),
     val deviceIsSnapdragon: Boolean = false,
     val qairtVerifiedLocalModelIds: Set<String> = emptySet(),
     val qairtVerifiedRecommendationIds: Set<String> = emptySet(),
@@ -134,6 +141,16 @@ data class ModelHubUiState(
     val isBusy: Boolean = false,
     val loadedModelId: String? = null,
     val statusMessage: String? = null
+)
+
+data class ModelImportTaskUi(
+    val id: String,
+    val message: String,
+    val file: String? = null,
+    val bytes: Long = 0,
+    val totalBytes: Long = 0,
+    val active: Boolean = false,
+    val resumable: Boolean = false
 )
 
 data class LocalImageModelUiItem(
@@ -160,6 +177,7 @@ data class CloudApiUiState(
     val apiFormat: String = "OPENAI_COMPATIBLE",
     val availableFormats: List<Pair<String, String>> = listOf(
         "OPENAI_COMPATIBLE" to "OpenAI-compatible",
+        "OPENAI_RESPONSES" to "OpenAI Responses",
         "ANTHROPIC" to "Anthropic Messages"
     ),
     val providerName: String = "OpenAI-compatible",
@@ -168,6 +186,8 @@ data class CloudApiUiState(
     val apiKey: String = "",
     val chatModel: String = "",
     val supportsVision: Boolean = false,
+    val supportsTools: Boolean = false,
+    val responsesReasoningEnabled: Boolean = false,
     val imageApiFormat: String = "OPENAI_IMAGES",
     val availableImageFormats: List<Pair<String, String>> = listOf(
         "OPENAI_IMAGES" to "OpenAI Images",
@@ -202,9 +222,29 @@ data class CloudModelUiItem(
     val modelName: String,
     val baseUrl: String,
     val supportsVision: Boolean = false,
+    val supportsTools: Boolean = false,
     val imageSize: String = "",
     val selected: Boolean = false
 )
+
+@Composable
+private fun ModelImportProgressCard(task: ModelImportTaskUi, onPause: (String) -> Unit, onResume: (String) -> Unit) {
+    CardBox {
+        Text(task.message, style = MaterialTheme.typography.bodyMedium)
+        task.file?.let { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+        if (task.active) {
+            if (task.totalBytes > 0) {
+                LinearProgressIndicator(progress = { (task.bytes.toDouble() / task.totalBytes).coerceIn(0.0, 1.0).toFloat() }, modifier = Modifier.fillMaxWidth())
+            } else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
+        if (task.active || task.resumable) {
+            TextButton(onClick = { if (task.active) onPause(task.id) else onResume(task.id) }) {
+                Text(if (task.active) "暂停导入" else "继续 / 重试导入")
+            }
+            Text("已完成组件经校验后可复用；未完成或源信息不明的组件重新复制。若源文件权限失效，请重新选择。", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
 
 private enum class ModelHubSection(val title: String) {
     LOCAL("本地"),
@@ -259,6 +299,8 @@ fun ModelHubScreen(
     onCloudApiKeyChange: (String) -> Unit,
     onCloudChatModelChange: (String) -> Unit,
     onCloudSupportsVisionChange: (Boolean) -> Unit,
+    onCloudSupportsToolsChange: (Boolean) -> Unit = {},
+    onCloudResponsesReasoningChange: (Boolean) -> Unit = {},
     onCloudImageFormatChange: (String) -> Unit,
     onCloudImageModelChange: (String) -> Unit,
     onCloudImageSizeChange: (String) -> Unit,
@@ -273,6 +315,9 @@ fun ModelHubScreen(
     onRefreshLocal: () -> Unit,
     onBack: () -> Unit,
     onPauseDownloads: () -> Unit = {},
+    onResumeDownloads: () -> Unit = {},
+    onPauseImport: (String) -> Unit = {},
+    onResumeImport: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var section by rememberSaveable(startInRecommended) {
@@ -294,16 +339,19 @@ fun ModelHubScreen(
                 onSection = { section = it },
                 onBack = onBack,
                 onRefreshLocal = onRefreshLocal,
-                onPauseDownloads = onPauseDownloads
+                onPauseDownloads = onPauseDownloads,
+                onResumeDownloads = onResumeDownloads
             )
 
             if (startInRecommended && section == ModelHubSection.RECOMMENDED) {
-                Text("推荐聊天模型下载后自动加载；实验模型需手动加载。", style = MaterialTheme.typography.bodySmall)
+                Text("下载完成后自动加入本地模型；是否可加载以完整性、兼容性和首次真实执行状态为准。", style = MaterialTheme.typography.bodySmall)
             }
             when (section) {
                 ModelHubSection.LOCAL -> LocalModelsSection(
                     state = state,
                     onImportClick = onImportClick,
+                    onPauseImport = onPauseImport,
+                    onResumeImport = onResumeImport,
                     onLoad = onLoad,
                     onUnload = onUnload,
                     onVerify = onVerify,
@@ -343,6 +391,11 @@ fun ModelHubScreen(
                         onOpenLocalModel(modelId)
                     },
                     onVerifyLocalModel = onVerifyLocalModel,
+                    onLoadLocalChatModel = { model ->
+                        section = ModelHubSection.LOCAL
+                        onLoad(model)
+                    },
+                    onVerifyLocalChatModel = onVerify,
                     modifier = Modifier.weight(1f)
                 )
                 ModelHubSection.MARKET -> MarketSection(
@@ -359,6 +412,8 @@ fun ModelHubScreen(
                 ModelHubSection.FILES -> RemoteFilesSection(
                     state = state,
                     onImportClick = onImportClick,
+                    onPauseImport = onPauseImport,
+                    onResumeImport = onResumeImport,
                     onRepoInputChange = onRepoInputChange,
                     onFetchRemoteFiles = onFetchRemoteFiles,
                     onDownload = onDownload,
@@ -384,6 +439,8 @@ fun ModelHubScreen(
                 onApiKeyChange = onCloudApiKeyChange,
                 onChatModelChange = onCloudChatModelChange,
                 onSupportsVisionChange = onCloudSupportsVisionChange,
+                onSupportsToolsChange = onCloudSupportsToolsChange,
+                onResponsesReasoningChange = onCloudResponsesReasoningChange,
                 onImageModelChange = onCloudImageModelChange,
                 onImageSizeChange = onCloudImageSizeChange,
                 onImageEndpointPathChange = onCloudImageEndpointPathChange,
@@ -437,7 +494,7 @@ private fun SmoothRightToLeftPage(
                 }
             }
 
-            BackHandler(enabled = visible) {
+            BackHandler(enabled = visible && !WindowInsets.isImeVisible) {
                 closeWithMotion()
             }
 
@@ -457,7 +514,8 @@ private fun ModelHubHeader(
     onSection: (ModelHubSection) -> Unit,
     onBack: () -> Unit,
     onRefreshLocal: () -> Unit,
-    onPauseDownloads: () -> Unit
+    onPauseDownloads: () -> Unit,
+    onResumeDownloads: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(
@@ -490,21 +548,42 @@ private fun ModelHubHeader(
         }
 
         state.statusMessage?.let {
-            StatusMessageCard(message = it)
-            if (it.contains("失败") || it.contains("不完整") || it.contains("无法")) {
-                Row {
-                    TextButton(onClick = { onSection(ModelHubSection.LOCAL) }) { Text("检查本地模型") }
-                    TextButton(onClick = { onSection(ModelHubSection.RECOMMENDED) }) { Text("选择其他模型") }
+            // A download already has its own compact status row. Avoid stacking
+            // the generic operation card above it, which used to consume most
+            // of the viewport while a large model was downloading.
+            val showStatusCard = state.downloadFileName == null ||
+                it.contains("失败") || it.contains("不完整") || it.contains("无法")
+            if (showStatusCard) {
+                StatusMessageCard(message = it)
+                if (it.contains("失败") || it.contains("不完整") || it.contains("无法")) {
+                    Row {
+                        TextButton(onClick = { onSection(ModelHubSection.LOCAL) }) { Text("检查本地模型") }
+                        TextButton(onClick = { onSection(ModelHubSection.RECOMMENDED) }) { Text("选择其他模型") }
+                    }
                 }
             }
         }
         if (state.downloadFileName != null) {
-            DownloadProgressPanel(state)
-            if (state.downloadStatus == DownloadStatus.RUNNING || state.downloadStatus == DownloadStatus.QUEUED) {
-                TextButton(onClick = onPauseDownloads) { Text("暂停下载（保留进度）") }
+            // Keep the search viewport stable. Detailed diagnostics open in a
+            // dialog instead of expanding the page and pushing results away.
+            var downloadDetailsOpen by rememberSaveable(state.downloadFileName) {
+                mutableStateOf(false)
             }
-            if (state.downloadStatus == DownloadStatus.DONE && !state.isBusy) {
-                TextButton(onClick = { onSection(ModelHubSection.LOCAL) }) { Text("已自动导入 · 查看本地模型") }
+            DownloadProgressPanel(
+                state = state,
+                onShowDetails = { downloadDetailsOpen = true },
+                onPauseDownloads = onPauseDownloads,
+                onResumeDownloads = onResumeDownloads
+            )
+            if (downloadDetailsOpen) {
+                DownloadDetailsDialog(
+                    state = state,
+                    onDismiss = { downloadDetailsOpen = false },
+                    onOpenLocalModels = {
+                        downloadDetailsOpen = false
+                        onSection(ModelHubSection.LOCAL)
+                    }
+                )
             }
         } else if (state.isBusy) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -554,6 +633,8 @@ private fun ModelHubSegmentedTabs(
 private fun LocalModelsSection(
     state: ModelHubUiState,
     onImportClick: () -> Unit,
+    onPauseImport: (String) -> Unit,
+    onResumeImport: (String) -> Unit,
     onLoad: (ModelManifest) -> Unit,
     onUnload: (ModelManifest) -> Unit,
     onVerify: (ModelManifest) -> Unit,
@@ -616,6 +697,9 @@ private fun LocalModelsSection(
             FilterChip(selected = imageOnly, onClick = { imageOnly = true }, label = { Text("生图 (${state.localImageModels.size})") })
         }
     LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        items(state.importTasks, key = { "import-${it.id}" }) { task ->
+            ModelImportProgressCard(task, onPauseImport, onResumeImport)
+        }
         if (!imageOnly) {
             item {
                 CardBox {
@@ -640,7 +724,6 @@ private fun LocalModelsSection(
                             model = model,
                             isLoaded = model.id == state.loadedModelId,
                             mnnRuntimeAvailable = state.mnnRuntimeAvailable,
-                            qairtVerified = model.id in state.qairtVerifiedLocalModelIds,
                             enabled = !state.isBusy && pendingAction == null,
                             pendingAction = pendingAction
                                 ?.takeIf { it.modelId == model.id }
@@ -752,6 +835,8 @@ private fun CloudModelEditorPage(
     onApiKeyChange: (String) -> Unit,
     onChatModelChange: (String) -> Unit,
     onSupportsVisionChange: (Boolean) -> Unit,
+    onSupportsToolsChange: (Boolean) -> Unit,
+    onResponsesReasoningChange: (Boolean) -> Unit = {},
     onImageModelChange: (String) -> Unit,
     onImageSizeChange: (String) -> Unit,
     onImageEndpointPathChange: (String) -> Unit,
@@ -844,6 +929,32 @@ private fun CloudModelEditorPage(
                         }
                     )
                     if (!isImage) {
+                        if (cloud.apiFormat == "OPENAI_RESPONSES") {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("支持工具调用", fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "仅在此模型和服务端实际支持 Responses 工具调用时开启。开启后角色可请求生图；每次调用前仍会向你确认。",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = cloud.supportsTools,
+                                    onCheckedChange = onSupportsToolsChange,
+                                    enabled = enabled
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("推理模型", fontWeight = FontWeight.SemiBold)
+                                    Text("仅对支持 reasoning 的模型开启。开启后请求推理摘要，并停用温度与 Top P 参数。",
+                                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                Switch(checked = cloud.responsesReasoningEnabled,
+                                    onCheckedChange = onResponsesReasoningChange, enabled = enabled)
+                            }
+                        }
                         Surface(
                             modifier = Modifier.fillMaxWidth(),
                             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f),
@@ -1123,6 +1234,9 @@ private fun CloudModelRow(
                     append("协议：").append(model.protocolLabel)
                     if (model.imageSize.isNotBlank()) append(" · 尺寸：").append(model.imageSize)
                     if (model.kind == "CHAT" && model.supportsVision) append(" · 图片输入")
+                    if (model.kind == "CHAT" && model.protocolLabel == "OpenAI Responses" && model.supportsTools) {
+                        append(" · 工具调用")
+                    }
                 }
                 Text(meta, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(model.baseUrl, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1234,6 +1348,7 @@ private fun cloudDialogStatusMessage(message: String?): String? {
 private fun chatBaseUrlPlaceholder(format: String): String =
     when (format) {
         "ANTHROPIC" -> "例如 https://api.anthropic.com/v1"
+        "OPENAI_RESPONSES" -> "例如 https://api.example.com/v1 或完整 /responses 地址"
         else -> "例如 https://api.example.com/v1"
     }
 
@@ -1277,11 +1392,14 @@ private fun RecommendedModelsSection(
     onOpenPage: (String) -> Unit,
     onOpenLocalModel: (String) -> Unit,
     onVerifyLocalModel: (String) -> Unit,
+    onLoadLocalChatModel: (ModelManifest) -> Unit,
+    onVerifyLocalChatModel: (ModelManifest) -> Unit,
     modifier: Modifier
 ) {
     val catalog = remember(
         state.recommendedRemoteModels,
         state.deviceChipsetCode,
+        state.deviceSupportedAbis,
         state.deviceIsSnapdragon,
         state.deviceTotalRamBytes
     ) {
@@ -1314,6 +1432,7 @@ private fun RecommendedModelsSection(
         catalog.npuChat.isNotEmpty() ||
         litertGroups.any { it.third.isNotEmpty() } ||
         catalog.cpuImage.isNotEmpty() ||
+        catalog.gpuImage.isNotEmpty() ||
         catalog.npuImage.isNotEmpty()
 
     LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1324,8 +1443,7 @@ private fun RecommendedModelsSection(
                 buildString {
                     append("当前设备：").append(deviceLabel)
                     if (ramGb > 0.0) append(" · ").append(ramGb.roundToInt()).append("GB")
-                    append("。内存仅作建议，不限制下载；实验模型不会自动设为默认。")
-                    append(EXPERIMENTAL_DOWNLOAD_NOTICE)
+                    append("。请选择适合用途与内存的模型，下载后可在本地页管理。")
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1354,11 +1472,15 @@ private fun RecommendedModelsSection(
                             deviceTotalRamBytes = state.deviceTotalRamBytes,
                             deviceAvailableRamBytes = state.deviceAvailableRamBytes,
                             deviceChipsetCode = state.deviceChipsetCode,
+                            deviceSupportedAbis = state.deviceSupportedAbis,
                             deviceIsSnapdragon = state.deviceIsSnapdragon,
-                            qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                            localModels = state.localModels,
+                            qairtVerifiedLocalModelIds = state.qairtVerifiedLocalModelIds,
                             localImageModels = state.localImageModels,
                             onOpenLocalModel = onOpenLocalModel,
                             onVerifyLocalModel = onVerifyLocalModel,
+                            onLoadLocalChatModel = onLoadLocalChatModel,
+                            onVerifyLocalChatModel = onVerifyLocalChatModel,
                             enabled = !state.isBusy,
                             onShowFiles = { onShowFiles(model) },
                             onDownload = { onDownload(model) },
@@ -1383,23 +1505,27 @@ private fun RecommendedModelsSection(
                 item(key = "npu-chat-header") {
                     RecommendationSectionHeader(
                         title = "NPU 图文聊天",
-                        body = "全部机型开放下载；芯片识别只用于优先选择 QAIRT 包，未知机型使用确定性兼容回退。"
+                    body = "使用 Qualcomm NPU 运行聊天模型，默认展示首选，可展开更多模型。"
                     )
                 }
                 val key = "npu-chat"
                 val expanded = key in expandedGroups
                 val visibleModels = if (expanded) catalog.npuChat else collapsedRecommendationModels(catalog.npuChat)
                 items(visibleModels, key = { "$key-${it.id}" }) { model ->
-                    RecommendedModelCard(
-                        model = model,
-                        deviceTotalRamBytes = state.deviceTotalRamBytes,
-                        deviceAvailableRamBytes = state.deviceAvailableRamBytes,
-                        deviceChipsetCode = state.deviceChipsetCode,
-                        deviceIsSnapdragon = state.deviceIsSnapdragon,
-                        qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
-                        localImageModels = state.localImageModels,
-                        onOpenLocalModel = onOpenLocalModel,
-                        onVerifyLocalModel = onVerifyLocalModel,
+                            RecommendedModelCard(
+                                model = model,
+                                deviceTotalRamBytes = state.deviceTotalRamBytes,
+                                deviceAvailableRamBytes = state.deviceAvailableRamBytes,
+                                deviceChipsetCode = state.deviceChipsetCode,
+                                deviceSupportedAbis = state.deviceSupportedAbis,
+                                deviceIsSnapdragon = state.deviceIsSnapdragon,
+                                localModels = state.localModels,
+                                qairtVerifiedLocalModelIds = state.qairtVerifiedLocalModelIds,
+                                localImageModels = state.localImageModels,
+                                onLoadLocalChatModel = onLoadLocalChatModel,
+                                onVerifyLocalChatModel = onVerifyLocalChatModel,
+                                onOpenLocalModel = onOpenLocalModel,
+                                onVerifyLocalModel = onVerifyLocalModel,
                         enabled = !state.isBusy,
                         onShowFiles = { onShowFiles(model) },
                         onDownload = { onDownload(model) },
@@ -1437,9 +1563,13 @@ private fun RecommendedModelsSection(
                                 deviceTotalRamBytes = state.deviceTotalRamBytes,
                                 deviceAvailableRamBytes = state.deviceAvailableRamBytes,
                                 deviceChipsetCode = state.deviceChipsetCode,
+                                deviceSupportedAbis = state.deviceSupportedAbis,
                                 deviceIsSnapdragon = state.deviceIsSnapdragon,
-                                qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                                localModels = state.localModels,
+                                qairtVerifiedLocalModelIds = state.qairtVerifiedLocalModelIds,
                                 localImageModels = state.localImageModels,
+                        onLoadLocalChatModel = onLoadLocalChatModel,
+                        onVerifyLocalChatModel = onVerifyLocalChatModel,
                                 onOpenLocalModel = onOpenLocalModel,
                                 onVerifyLocalModel = onVerifyLocalModel,
                                 enabled = !state.isBusy,
@@ -1466,12 +1596,12 @@ private fun RecommendedModelsSection(
             item(key = "cpu-image-header") {
                 RecommendationSectionHeader(
                     title = "CPU 生图",
-                    body = "所有机型均可下载；默认展示首选，其余实验模型折叠。"
+                    body = "在手机上生成或编辑图片，默认展示首选，可展开更多模型。"
                 )
             }
             if (catalog.cpuImage.isEmpty()) {
                 item(key = "cpu-image-empty") {
-                    Text("暂无可展示的 CPU 生图实验模型。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("暂无可展示的 CPU 生图模型。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {
                 val key = "cpu-image"
@@ -1483,9 +1613,12 @@ private fun RecommendedModelsSection(
                         deviceTotalRamBytes = state.deviceTotalRamBytes,
                         deviceAvailableRamBytes = state.deviceAvailableRamBytes,
                         deviceChipsetCode = state.deviceChipsetCode,
+                        deviceSupportedAbis = state.deviceSupportedAbis,
                         deviceIsSnapdragon = state.deviceIsSnapdragon,
-                        qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                        localModels = state.localModels,
                         localImageModels = state.localImageModels,
+                        onLoadLocalChatModel = onLoadLocalChatModel,
+                        onVerifyLocalChatModel = onVerifyLocalChatModel,
                         onOpenLocalModel = onOpenLocalModel,
                         onVerifyLocalModel = onVerifyLocalModel,
                         enabled = !state.isBusy,
@@ -1499,8 +1632,51 @@ private fun RecommendedModelsSection(
                         RecommendationExpandButton(
                             expanded = expanded,
                             hiddenCount = catalog.cpuImage.size - 1,
-                            collapsedLabel = "查看实验模型（${catalog.cpuImage.size - 1}）",
-                            expandedLabel = "收起实验模型",
+                            collapsedLabel = "查看更多模型（${catalog.cpuImage.size - 1}）",
+                            expandedLabel = "收起模型",
+                            onClick = { expandedGroups = expandedGroups.toggle(key, expanded) }
+                        )
+                    }
+                }
+            }
+
+            if (catalog.gpuImage.isNotEmpty()) {
+                item(key = "gpu-image-header") {
+                    RecommendationSectionHeader(
+                        title = "GPU 生图",
+                        body = "DiT 使用 OpenCL GPU；文本编码器和 VAE 可由 CPU 执行。"
+                    )
+                }
+                val key = "gpu-image"
+                val expanded = key in expandedGroups
+                val visibleModels = if (expanded) catalog.gpuImage else collapsedRecommendationModels(catalog.gpuImage)
+                items(visibleModels, key = { "$key-${it.id}" }) { model ->
+                    RecommendedModelCard(
+                        model = model,
+                        deviceTotalRamBytes = state.deviceTotalRamBytes,
+                        deviceAvailableRamBytes = state.deviceAvailableRamBytes,
+                        deviceChipsetCode = state.deviceChipsetCode,
+                        deviceSupportedAbis = state.deviceSupportedAbis,
+                        deviceIsSnapdragon = state.deviceIsSnapdragon,
+                        localModels = state.localModels,
+                        localImageModels = state.localImageModels,
+                        onLoadLocalChatModel = onLoadLocalChatModel,
+                        onVerifyLocalChatModel = onVerifyLocalChatModel,
+                        onOpenLocalModel = onOpenLocalModel,
+                        onVerifyLocalModel = onVerifyLocalModel,
+                        enabled = !state.isBusy,
+                        onShowFiles = { onShowFiles(model) },
+                        onDownload = { onDownload(model) },
+                        onOpenPage = { onOpenPage(model.modelPageUrl) }
+                    )
+                }
+                if (catalog.gpuImage.size > 1) {
+                    item(key = "$key-more") {
+                        RecommendationExpandButton(
+                            expanded = expanded,
+                            hiddenCount = catalog.gpuImage.size - 1,
+                            collapsedLabel = "查看更多模型（${catalog.gpuImage.size - 1}）",
+                            expandedLabel = "收起模型",
                             onClick = { expandedGroups = expandedGroups.toggle(key, expanded) }
                         )
                     }
@@ -1508,12 +1684,12 @@ private fun RecommendedModelsSection(
             }
 
             if (catalog.npuImage.isNotEmpty()) {
-                item(key = "npu-image-header") {
-                    RecommendationSectionHeader(
-                        title = "NPU 生图",
-                        body = "全部机型开放下载和尝试运行；芯片识别只用于推荐合适包，不作为使用门槛。"
-                    )
-                }
+            item(key = "npu-image-header") {
+                RecommendationSectionHeader(
+                    title = "NPU 生图",
+                    body = recommendationNpuImageSectionDescription()
+                )
+            }
                 npuImageGroups.forEach { (key, title, models) ->
                     if (models.isNotEmpty()) {
                         item(key = "$key-header") {
@@ -1527,9 +1703,12 @@ private fun RecommendedModelsSection(
                                 deviceTotalRamBytes = state.deviceTotalRamBytes,
                                 deviceAvailableRamBytes = state.deviceAvailableRamBytes,
                                 deviceChipsetCode = state.deviceChipsetCode,
+                                deviceSupportedAbis = state.deviceSupportedAbis,
                                 deviceIsSnapdragon = state.deviceIsSnapdragon,
-                                qairtVerified = model.id in state.qairtVerifiedRecommendationIds,
+                                localModels = state.localModels,
                                 localImageModels = state.localImageModels,
+                                onLoadLocalChatModel = onLoadLocalChatModel,
+                                onVerifyLocalChatModel = onVerifyLocalChatModel,
                                 onOpenLocalModel = onOpenLocalModel,
                                 onVerifyLocalModel = onVerifyLocalModel,
                                 enabled = !state.isBusy,
@@ -1641,12 +1820,19 @@ private fun MarketSection(
 private fun RemoteFilesSection(
     state: ModelHubUiState,
     onImportClick: () -> Unit,
+    onPauseImport: (String) -> Unit,
+    onResumeImport: (String) -> Unit,
     onRepoInputChange: (String) -> Unit,
     onFetchRemoteFiles: () -> Unit,
     onDownload: (RemoteModelFile) -> Unit,
     modifier: Modifier
 ) {
+    var fileFilter by rememberSaveable { mutableStateOf("") }
+    val visibleFiles = filterRemoteModelFiles(state.remoteFiles, fileFilter)
     LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        items(state.importTasks, key = { "import-${it.id}" }) { task ->
+            ModelImportProgressCard(task, onPauseImport, onResumeImport)
+        }
         item {
             Button(onClick = onImportClick, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(999.dp)) {
                 Icon(Icons.Default.UploadFile, contentDescription = "导入本地推理引擎", modifier = Modifier.size(18.dp))
@@ -1655,7 +1841,7 @@ private fun RemoteFilesSection(
             }
         }
         item {
-            Text("支持单个 GGUF / LiteRT-LM 模型，也支持多选完整 MNN 组件或导入 MNN zip 包。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("支持 GGUF / LiteRT-LM 文件、MNN 完整目录或 ZIP。多选 MNN 文件时请包含配置引用的全部组件。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1666,15 +1852,36 @@ private fun RemoteFilesSection(
                     singleLine = true,
                     label = { Text("模型 ID 或链接") }
                 )
-                IconButton(onClick = onImportClick, enabled = !state.isBusy) {
-                    Icon(Icons.Default.Search, contentDescription = "查找本地推理文件")
+                IconButton(onClick = onFetchRemoteFiles, enabled = !state.isBusy) {
+                    Icon(Icons.Default.Search, contentDescription = "查找远程推理文件")
                 }
+            }
+        }
+        if (state.remoteFiles.isNotEmpty()) {
+            item {
+                OutlinedTextField(
+                    value = fileFilter,
+                    onValueChange = { fileFilter = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("筛选当前文件") },
+                    placeholder = { Text("文件名、路径、类型或来源") },
+                    trailingIcon = {
+                        if (fileFilter.isNotEmpty()) {
+                            IconButton(onClick = { fileFilter = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "清除筛选")
+                            }
+                        }
+                    }
+                )
             }
         }
         if (state.remoteFiles.isEmpty()) {
             item { EmptyCard("暂无文件", "可从推荐或广场读取文件列表。") }
+        } else if (visibleFiles.isEmpty()) {
+            item { EmptyCard("没有匹配文件", "清除筛选或换一个文件名、路径、类型关键词。") }
         } else {
-            items(state.remoteFiles, key = { it.path }) { file ->
+            items(visibleFiles, key = { it.path }) { file ->
                 RemoteFileCard(file = file, enabled = !state.isBusy, onDownload = { onDownload(file) })
             }
         }
@@ -1682,7 +1889,12 @@ private fun RemoteFilesSection(
 }
 
 @Composable
-private fun DownloadProgressPanel(state: ModelHubUiState) {
+private fun DownloadProgressPanel(
+    state: ModelHubUiState,
+    onShowDetails: () -> Unit,
+    onPauseDownloads: () -> Unit,
+    onResumeDownloads: () -> Unit
+) {
     val total = state.downloadTotalBytes
     val downloaded = state.downloadedBytes
     val progress = if (total > 0L) (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
@@ -1693,46 +1905,142 @@ private fun DownloadProgressPanel(state: ModelHubUiState) {
     )
     val percentText = if (total > 0L) "%.1f%%".format(progress * 100f) else "准备中"
     val totalText = if (total > 0L) formatBytes(total) else "未知大小"
-
-    CardBox {
-        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-            Text(state.downloadFileName.orEmpty(), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            Text(percentText, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(start = 8.dp, end = 2.dp, top = 2.dp, bottom = 3.dp),
+            verticalArrangement = Arrangement.spacedBy(1.dp)
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    state.downloadFileName.orEmpty(),
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(percentText, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                if (state.downloadStatus == DownloadStatus.RUNNING || state.downloadStatus == DownloadStatus.QUEUED) {
+                    TextButton(
+                        onClick = onPauseDownloads,
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) { Text("暂停", style = MaterialTheme.typography.labelMedium) }
+                }
+                if (state.downloadStatus == DownloadStatus.PAUSED || state.downloadStatus == DownloadStatus.FAILED) {
+                    TextButton(
+                        onClick = onResumeDownloads,
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) { Text("继续", style = MaterialTheme.typography.labelMedium) }
+                }
+                IconButton(
+                    onClick = onShowDetails,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ExpandMore,
+                        contentDescription = "查看下载详情",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+            if (total > 0L) {
+                LinearProgressIndicator(
+                    progress = { animatedProgress },
+                    modifier = Modifier.fillMaxWidth().height(2.dp)
+                )
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(2.dp))
+            }
         }
-        if (total > 0L) {
-            LinearProgressIndicator(progress = { animatedProgress }, modifier = Modifier.fillMaxWidth())
-        } else {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-        }
-        Text("${formatBytes(downloaded)} / $totalText · ${state.downloadStatus.downloadStatusLabel()}", style = MaterialTheme.typography.bodySmall)
-        if (state.downloadSpeedBytesPerSecond > 0L || state.downloadRemainingSeconds != null) {
-            Text(
-                buildString {
-                    if (state.downloadSpeedBytesPerSecond > 0L) append("速度 ").append(formatBytes(state.downloadSpeedBytesPerSecond)).append("/s")
-                    state.downloadRemainingSeconds?.let { seconds ->
-                        if (isNotEmpty()) append(" · ")
-                        append("剩余约 ").append(formatDuration(seconds))
-                    }
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        DownloadCheckLine("文件完整性", state.downloadIntegrityStatus, state.downloadIntegrityMessage)
-        DownloadCheckLine("本机执行兼容性", state.downloadExecutionStatus, state.downloadExecutionMessage)
     }
+}
+
+@Composable
+private fun DownloadDetailsDialog(
+    state: ModelHubUiState,
+    onDismiss: () -> Unit,
+    onOpenLocalModels: () -> Unit
+) {
+    val total = state.downloadTotalBytes
+    val downloaded = state.downloadedBytes
+    val totalText = if (total > 0L) formatBytes(total) else "未知大小"
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                state.downloadFileName.orEmpty(),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                fontWeight = FontWeight.SemiBold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    "${state.downloadStatus.downloadStatusLabel()} · 已下载 ${formatBytes(downloaded)} / $totalText",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (state.downloadStatus == DownloadStatus.FAILED) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+                if (state.downloadSpeedBytesPerSecond > 0L || state.downloadRemainingSeconds != null) {
+                    Text(
+                        buildString {
+                            if (state.downloadSpeedBytesPerSecond > 0L) {
+                                append(formatBytes(state.downloadSpeedBytesPerSecond)).append("/s")
+                            }
+                            state.downloadRemainingSeconds?.let { seconds ->
+                                if (isNotEmpty()) append(" · ")
+                                append("剩余约 ").append(formatDuration(seconds))
+                            }
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                DownloadCheckLine("文件完整性", state.downloadIntegrityStatus, state.downloadIntegrityMessage)
+                DownloadCheckLine("本机执行兼容性", state.downloadExecutionStatus, state.downloadExecutionMessage)
+            }
+        },
+        confirmButton = {
+            if (state.downloadStatus == DownloadStatus.DONE && !state.isBusy) {
+                TextButton(onClick = onOpenLocalModels) { Text("查看本地模型") }
+            } else {
+                TextButton(onClick = onDismiss) { Text("完成") }
+            }
+        },
+        dismissButton = {
+            if (state.downloadStatus == DownloadStatus.DONE && !state.isBusy) {
+                TextButton(onClick = onDismiss) { Text("关闭") }
+            }
+        }
+    )
 }
 
 @Composable
 private fun DownloadCheckLine(title: String, status: String, message: String?) {
     val normalized = status.uppercase()
+    // Missing acceptance/metadata alone is internal state, not a user warning.
+    if (normalized == "EXPERIMENTAL" && message.isNullOrBlank()) return
     val label = when (normalized) {
         "PASSED" -> "通过"
         "PREFLIGHT_PASSED" -> "预检通过"
         "FAILED" -> "失败"
         "PENDING" -> "检查中"
         "RUNNING" -> "校验中"
-        "EXPERIMENTAL" -> "实验包"
+        "EXPERIMENTAL" -> "运行提示"
         "NOT_APPLICABLE" -> "不适用"
         else -> "待检查"
     }
@@ -1757,112 +2065,72 @@ private fun DownloadCheckLine(title: String, status: String, message: String?) {
 @Composable
 private fun RecommendedModelCard(
     model: ModelScopeRecommendedModel,
+    localModels: List<ModelManifest> = emptyList(),
     localImageModels: List<LocalImageModelUiItem> = emptyList(),
+    qairtVerifiedLocalModelIds: Set<String> = emptySet(),
     deviceTotalRamBytes: Long,
     deviceAvailableRamBytes: Long,
     deviceChipsetCode: String,
+    deviceSupportedAbis: List<String> = emptyList(),
     deviceIsSnapdragon: Boolean = false,
-    qairtVerified: Boolean,
     enabled: Boolean,
     onShowFiles: () -> Unit,
     onDownload: () -> Unit,
     onOpenPage: () -> Unit,
     onOpenLocalModel: (String) -> Unit = {},
-    onVerifyLocalModel: (String) -> Unit = {}
+    onVerifyLocalModel: (String) -> Unit = {},
+    onLoadLocalChatModel: (ModelManifest) -> Unit = {},
+    onVerifyLocalChatModel: (ModelManifest) -> Unit = {}
 ) {
     val hasModelPage = !model.repoId.startsWith("pending/", ignoreCase = true)
-    val downloadAccess = recommendationDownloadAccess(model, deviceChipsetCode, deviceIsSnapdragon)
+    val downloadAccess = recommendationDownloadAccess(
+        model,
+        deviceChipsetCode,
+        deviceIsSnapdragon,
+        deviceSupportedAbis
+    )
     val fitLabel = deviceFitLabel(model, deviceTotalRamBytes, deviceAvailableRamBytes)
     val hardwareLine = recommendationHardwareLine(model, fitLabel)
-    val devicePathLine = recommendationDeviceFitLine(downloadAccess)
     val qnnCompatibilityLine = recommendationQnnCompatibilityLine(model, deviceChipsetCode)
-    val verificationLine = recommendationVerificationLine(model, qairtVerified)
+    val runtimeCompatibilityLine = recommendationRuntimeCompatibilityLine(model, deviceSupportedAbis)
     val shortDescription = model.recommendationShortDescription()
-    val localModel = localImageModels.firstOrNull { local ->
+    val imageSizeLine = recommendationImageSizeLine(model)
+    var detailsExpanded by rememberSaveable(model.id) { mutableStateOf(false) }
+    val downloadSize = recommendationDownloadSizeBytes(model)
+    val localImageModel = localImageModels.firstOrNull { local ->
         local.recommendationId == model.id || local.id == model.imageEngineBundle?.id
     }
-    val localVerificationPassed = localModel != null && localModel.verificationStatus in setOf(
+    val localChatModel = recommendedLocalChatModel(model, localModels)
+    val localImageVerificationPassed = localImageModel != null && localImageModel.verificationStatus in setOf(
         "PASSED", "MNN_SMOKE_PASSED", "QNN_IMAGE_SMOKE_PASSED", "QNN_SMOKE_PASSED", "QNN_PIPELINE_PROBE_PASSED"
     )
-    val localStatusLine = localModel?.let {
+    val localChatVerificationPassed = localChatModel != null && (
+        localChatModel.runtime != ChatModelRuntime.GENIEX_QAIRT ||
+            localChatModel.id in qairtVerifiedLocalModelIds
+    )
+    val localStatusLine = when {
+        localImageModel != null -> localImageModel.let {
         when {
-            localVerificationPassed -> "本地 bundle：已安装 · 已校验"
-            it.verificationStatus == "FAILED" -> "本地 bundle：校验失败 · ${it.verificationMessage.ifBlank { "可重新校验" }}"
-            else -> "本地 bundle：已安装 · 尚未完成本机校验"
+            localImageVerificationPassed -> "已安装 · ${formatBytes(it.sizeBytes)}"
+            it.verificationStatus == "FAILED" -> "校验失败 · ${it.verificationMessage.ifBlank { "请重新校验" }}"
+            else -> "已安装 · ${formatBytes(it.sizeBytes)}"
         }
+        }
+        localChatModel != null -> when {
+            localChatModel.runtime == ChatModelRuntime.GENIEX_QAIRT &&
+                localChatModel.id !in qairtVerifiedLocalModelIds ->
+                "已安装 · 待本机 QNN 诊断 · ${formatBytes(localChatModel.sizeBytes)}"
+            else -> "已安装 · ${formatBytes(localChatModel.sizeBytes)}"
+        }
+        else -> null
     }
-    val experimentalDownload = model.status == RecommendedModelStatus.EXPERIMENTAL &&
-        downloadAccess.canDownload
-    val fitColor = if (fitLabel == "不建议本机运行") {
+    val fitColor = if (fitLabel == "低于建议内存") {
         MaterialTheme.colorScheme.error
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant
     }
-    val verificationColor = when (model.status) {
-        RecommendedModelStatus.EXPERIMENTAL -> MaterialTheme.colorScheme.secondary
-        RecommendedModelStatus.PENDING_INTEGRATION,
-        RecommendedModelStatus.NOT_RECOMMENDED -> MaterialTheme.colorScheme.error
-        RecommendedModelStatus.RECOMMENDED -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
     CardBox {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.Top
-        ) {
-            Text(
-                model.title,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f)
-            )
-            RecommendationStatusBadge(model.status, experimental = downloadAccess.experimental)
-        }
-        Text(
-            "${recommendedRouteLabel(model)} · ${model.parameterScale} · ${model.quant}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Text(
-            hardwareLine,
-            style = MaterialTheme.typography.bodySmall,
-            color = fitColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Text(
-            devicePathLine,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Text(
-            verificationLine,
-            style = MaterialTheme.typography.bodySmall,
-            color = verificationColor,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
-        qnnCompatibilityLine?.let {
-            Text(
-                it,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (it.contains("实验包")) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        localStatusLine?.let {
-            Text(
-                it,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (localVerificationPassed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
+        Text(model.title, fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth())
         Text(
             shortDescription,
             style = MaterialTheme.typography.bodySmall,
@@ -1870,52 +2138,138 @@ private fun RecommendedModelCard(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
-        if (downloadAccess.canDownload) {
+        Text(
+            recommendationSpecificationLine(model),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            "后端：${recommendedRouteLabel(model)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        runtimeCompatibilityLine?.let {
             Text(
-                RECOMMENDATION_DOWNLOAD_SOURCE_POLICY,
+                it,
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
+                color = MaterialTheme.colorScheme.error,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis
             )
         }
+        qnnCompatibilityLine?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.secondary,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Text(
+            "功能：${recommendationCapabilityLine(model)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        imageSizeLine?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = if (detailsExpanded) 8 else 3,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Text(
+            hardwareLine,
+            style = MaterialTheme.typography.bodySmall,
+            color = fitColor,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            downloadSize?.let { "下载大小：约 ${formatBytes(it)}" } ?: "下载大小：见文件列表",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        localStatusLine?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (localImageVerificationPassed || localChatVerificationPassed) {
+                    MaterialTheme.colorScheme.primary
+                } else MaterialTheme.colorScheme.secondary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (!downloadAccess.canDownload) {
+            Text(
+                recommendationDownloadBlockLine(model.downloadBlockReason),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        TextButton(onClick = { detailsExpanded = !detailsExpanded }) {
+            Text(if (detailsExpanded) "收起介绍" else "完整介绍")
+        }
+        if (detailsExpanded) {
+            Text(model.description, style = MaterialTheme.typography.bodySmall)
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (localModel != null) {
+            if (localImageModel != null) {
                 OutlinedButton(
                     onClick = {
-                        if (localVerificationPassed) onOpenLocalModel(localModel.id)
-                        else onVerifyLocalModel(localModel.id)
+                        if (localImageVerificationPassed) onOpenLocalModel(localImageModel.id)
+                        else onVerifyLocalModel(localImageModel.id)
                     },
                     enabled = enabled,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(999.dp)
                 ) {
                     Icon(
-                        if (localVerificationPassed) Icons.Default.Image else Icons.Default.CheckCircle,
+                        if (localImageVerificationPassed) Icons.Default.Image else Icons.Default.CheckCircle,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
                         when {
-                            localVerificationPassed -> "打开本地模型"
-                            localModel.verificationStatus == "FAILED" -> "校验失败 · 重试"
+                            localImageVerificationPassed -> "打开本地模型"
+                            localImageModel.verificationStatus == "FAILED" -> "校验失败 · 重试"
                             else -> "已安装 · 重新校验"
                         },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-            } else if (experimentalDownload) {
+            } else if (localChatModel != null) {
                 OutlinedButton(
-                    onClick = onDownload,
+                    onClick = {
+                        if (localChatVerificationPassed) onLoadLocalChatModel(localChatModel)
+                        else onVerifyLocalChatModel(localChatModel)
+                    },
                     enabled = enabled,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(999.dp)
                 ) {
-                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(
+                        if (localChatVerificationPassed) Icons.Default.PlayArrow else Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
                     Spacer(Modifier.width(6.dp))
-                    Text(recommendationDownloadCtaLabel(model, canDownload = true, experimental = true))
+                    Text(
+                        if (localChatVerificationPassed) "打开本地模型" else "已安装 · 重新校验",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             } else {
                 Button(
@@ -1927,11 +2281,7 @@ private fun RecommendedModelCard(
                     Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        recommendationDownloadCtaLabel(
-                            model,
-                            canDownload = downloadAccess.canDownload,
-                            experimental = downloadAccess.experimental
-                        )
+                        recommendationDownloadCtaLabel(canDownload = downloadAccess.canDownload)
                     )
                 }
             }
@@ -2042,7 +2392,6 @@ private fun LocalModelCard(
     model: ModelManifest,
     isLoaded: Boolean,
     mnnRuntimeAvailable: Boolean,
-    qairtVerified: Boolean,
     enabled: Boolean,
     pendingAction: LocalModelPendingAction?,
     onLoad: () -> Unit,
@@ -2094,11 +2443,10 @@ private fun LocalModelCard(
             )
             Text(
                 when {
-                    isMnnRuntime -> "MNN CPU 高速路径"
-                    isQairtRuntime && qairtVerified -> "已有当前设备 QAIRT 隔离运行诊断证据"
-                    isQairtRuntime -> "QAIRT 使用隔离 native worker；实际加载结果决定兼容性"
-                    model.runtime == ChatModelRuntime.LITERT_LM -> "LiteRT-LM 独立运行时；CPU/GPU/NPU 由实际 native load 决定"
-                    else -> "GGUF / llama.cpp 兼容路径"
+                    isMnnRuntime -> "MNN · CPU / OpenCL GPU"
+                    isQairtRuntime -> "GenieX QAIRT · Qualcomm NPU"
+                    model.runtime == ChatModelRuntime.LITERT_LM -> "LiteRT-LM · CPU / GPU / Qualcomm NPU，需对应后端的模型文件"
+                    else -> "GGUF · llama.cpp"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2264,30 +2612,6 @@ private fun LocalModelDeleteDialog(
     )
 }
 
-@Composable
-private fun RecommendationStatusBadge(status: RecommendedModelStatus, experimental: Boolean = false) {
-    val effectiveStatus = if (experimental && status == RecommendedModelStatus.RECOMMENDED) {
-        RecommendedModelStatus.EXPERIMENTAL
-    } else status
-    val (containerColor, contentColor) = when (effectiveStatus) {
-        RecommendedModelStatus.RECOMMENDED ->
-            MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
-        RecommendedModelStatus.EXPERIMENTAL ->
-            MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
-        RecommendedModelStatus.PENDING_INTEGRATION ->
-            MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
-        RecommendedModelStatus.NOT_RECOMMENDED ->
-            MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
-    }
-    Surface(color = containerColor, shape = RoundedCornerShape(999.dp)) {
-        Text(
-            if (experimental && status == RecommendedModelStatus.RECOMMENDED) "实验包" else recommendationStatusLabel(status),
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-            style = MaterialTheme.typography.labelSmall,
-            color = contentColor
-        )
-    }
-}
 @Composable
 private fun LocalImageModelCard(
     model: LocalImageModelUiItem,
@@ -2518,14 +2842,13 @@ private fun recommendedRouteLabel(model: ModelScopeRecommendedModel): String {
     val visionBundle = model.visionModelBundle
     return when {
         imageBundle != null -> imageBundle.runtimeSummary
-        model.mnnModelBundle != null -> RecommendedRoute.MNN
+        model.mnnModelBundle != null -> "MNN · CPU / OpenCL GPU"
         visionBundle != null -> visionBundle.runtimeSummary
+        model.chatRuntime == com.muyuchat.core.download.RecommendedChatRuntime.LITERT_LM ->
+            "LiteRT-LM · ${model.computeBackend.label}"
+        model.chatRuntime == com.muyuchat.core.download.RecommendedChatRuntime.GGUF -> "llama.cpp · CPU"
         else -> model.chatRuntime.label
     }
-}
-
-private object RecommendedRoute {
-    const val MNN = "MNN 高速引擎"
 }
 
 private fun deviceFitLabel(
@@ -2536,11 +2859,10 @@ private fun deviceFitLabel(
     val ramGb = totalRamGb(totalRamBytes)
     val availableGb = totalRamGb(availableRamBytes)
     return when {
-        ramGb <= 0.0 -> "等待设备体检"
-        model.minRamGb <= ramGb && availableGb >= 1.5 -> "适合本机"
-        model.minRamGb <= ramGb -> "建议关闭后台"
-        model.minRamGb <= ramGb + 2.0 -> "勉强可试"
-        else -> "不建议本机运行"
+        ramGb <= 0.0 -> "按设备内存选择"
+        model.minRamGb <= ramGb && availableGb >= 1.5 -> "达到建议内存"
+        model.minRamGb <= ramGb -> "当前空闲内存较少"
+        else -> "低于建议内存"
     }
 }
 

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cctype>
 #include <chrono>
@@ -41,6 +42,7 @@
 #include "mnn_diffusion_batch_policy.hpp"
 #include "mnn_legacy_chat_template_policy.hpp"
 #include "mnn_embedding_bundle_policy.hpp"
+#include "mnn_bundle_path_policy.hpp"
 #include "mnn_qnn_prompt_handoff.hpp"
 #include "native_prompt_language_contract.hpp"
 #include "mnn_runtime_capability_policy.hpp"
@@ -117,6 +119,10 @@ std::mutex g_mnn_mutex;
 bool g_loaded = false;
 bool g_generation_active = false;
 bool g_stop_requested = false;
+// Stop is published independently of g_mnn_mutex. MNN's generate(1) call can
+// hold that mutex for a long time; the UI cancellation path must still be able
+// to signal the in-flight call without waiting behind the same mutex.
+std::atomic_bool g_stop_signal{false};
 bool g_runner_ready =
 #if MCA_WITH_MNN_LLM
         true;
@@ -635,6 +641,106 @@ void merge_mnn_config(json& target, const json& source) {
     }
 }
 
+void relocate_mnn_component_declarations(
+        json& config, const std::string& root, const std::string& prefix, size_t depth = 0) {
+    if (depth > 32U) throw std::invalid_argument("MNN configuration nesting exceeds the safe path inspection limit.");
+    if (config.is_array()) {
+        for (auto& child : config) relocate_mnn_component_declarations(child, root, prefix, depth + 1);
+        return;
+    }
+    if (!config.is_object()) return;
+    for (const auto* key : {
+             "llm_config", "llm_model", "llm_weight", "block_model", "lm_model",
+             "embedding_model", "embedding_file", "tokenizer_file", "visual_model",
+             "vision_model", "visual_encoder", "vision_encoder", "audio_model",
+             "visual_weight", "audio_weight", "projector_model", "projector_weight",
+             "context_file", "ple_model", "ple_weight", "ple_embed_file", "talker_model", "talker_weight",
+             "talker_embedding_file", "predit_model", "dit_model", "bigvgan_model",
+             "spk_dict", "lookup_file", "draft_model", "mtp_model", "eagle_model",
+             "eagle_fc", "eagle_d2t", "dflash_model", "dflash_fc", "dflash_lmhead"}) {
+        const auto it = config.find(key);
+        if (it == config.end()) continue;
+        if (!it->is_string()) {
+            throw std::invalid_argument(std::string("MNN config field '") + key + "' must be a relative path.");
+        }
+        if (it->get<std::string>().empty()) continue; // Optional upstream paths may be disabled with "".
+        const auto relative = mca::mnn::mnnBundleRelativeComponent(prefix, it->get<std::string>());
+        mca::mnn::confinedMnnBundlePath(root, relative);
+        *it = relative;
+    }
+    const auto npuDir = config.find("npu_model_dir");
+    if (npuDir != config.end()) {
+        if (!npuDir->is_string()) throw std::invalid_argument("MNN npu_model_dir must be a relative path.");
+        const auto relative = mca::mnn::normalizeMnnBundleRelativePath(npuDir->get<std::string>(), true);
+        *npuDir = prefix.empty() ? relative : prefix + (relative.empty() ? "" : "/" + relative);
+        mca::mnn::confinedMnnBundlePath(root, npuDir->get<std::string>(), true);
+    }
+    config.erase("base_dir");
+    for (auto& child : config) {
+        if (child.is_object() || child.is_array()) {
+            relocate_mnn_component_declarations(child, root, prefix, depth + 1);
+        }
+    }
+}
+
+void read_relocated_mnn_configs(const std::string& configPath, json& config, json& modelConfig) {
+    const auto root = parent_dir(configPath);
+    std::string error;
+    if (!read_mnn_config_object(configPath, "MNN config.json", config, error)) {
+        throw std::invalid_argument(error);
+    }
+    const auto base = config.find("base_dir");
+    if (base != config.end() && !base->is_null() && !base->is_string()) {
+        throw std::invalid_argument("MNN base_dir must be a directory path.");
+    }
+    const auto prefix = mca::mnn::relocatedMnnBasePrefix(
+            base == config.end() || base->is_null() ? std::string() : base->get<std::string>());
+    mca::mnn::confinedMnnBundlePath(root, prefix, true);
+    if (!config.contains("llm_config")) config["llm_config"] = "llm_config.json";
+    relocate_mnn_component_declarations(config, root, prefix);
+    const auto llmPath = mca::mnn::confinedMnnBundlePath(root, config["llm_config"].get<std::string>());
+    if (!read_mnn_config_object(llmPath.string(), "MNN llm_config", modelConfig, error)) {
+        throw std::invalid_argument(error);
+    }
+    // Upstream fixes base_dir_ from the root before merging llm_config. Use
+    // that same prefix for both documents; do not let a model-side base_dir
+    // revive the export machine's directory when creating the runtime copy.
+    relocate_mnn_component_declarations(modelConfig, root, prefix);
+    for (const auto& entry : {
+             std::pair<const char*, const char*>{"llm_model", "llm.mnn"},
+             {"llm_weight", "llm.mnn.weight"}, {"embedding_file", "embeddings_bf16.bin"},
+             {"block_model", "block_"}, {"lm_model", "lm.mnn"}, {"embedding_model", "embedding.mnn"},
+             {"context_file", "context.json"}, {"talker_model", "talker.mnn"},
+             {"talker_weight", "talker.mnn.weight"}, {"talker_embedding_file", "talker_embeddings_bf16.bin"},
+             {"predit_model", "predit.mnn"}, {"dit_model", "dit.mnn"}, {"bigvgan_model", "bigvgan.mnn"},
+             {"spk_dict", "spk_dict.mnn"}, {"lookup_file", "lookup_file.txt"}, {"mtp_model", "mtp.mnn"},
+             {"eagle_model", "eagle.mnn"}, {"eagle_fc", "eagle_fc.mnn"}, {"eagle_d2t", "eagle_d2t.mnn"},
+             {"dflash_model", "dflash.mnn"}, {"dflash_fc", "dflash_fc.mnn"}}) {
+        if (!config.contains(entry.first) && !modelConfig.contains(entry.first)) {
+            config[entry.first] = mca::mnn::mnnBundleRelativeComponent(prefix, entry.second);
+        }
+    }
+    if (!prefix.empty() && !config.contains("npu_model_dir") && !modelConfig.contains("npu_model_dir")) {
+        config["npu_model_dir"] = prefix;
+    }
+    if (!config.contains("tokenizer_file") && !modelConfig.contains("tokenizer_file")) {
+        const auto txt = mca::mnn::mnnBundleRelativeComponent(prefix, "tokenizer.txt");
+        const auto mtok = mca::mnn::mnnBundleRelativeComponent(prefix, "tokenizer.mtok");
+        config["tokenizer_file"] = !nonempty_regular_file_exists(
+                mca::mnn::confinedMnnBundlePath(root, txt).string()) && nonempty_regular_file_exists(
+                mca::mnn::confinedMnnBundlePath(root, mtok).string()) ? mtok : txt;
+    }
+    for (const auto& entry : {
+             std::pair<const char*, const char*>{"visual_model", "is_visual"}, {"audio_model", "is_audio"}}) {
+        const bool enabled = modelConfig.contains(entry.second)
+                ? modelConfig.value(entry.second, false) : config.value(entry.second, false);
+        if (enabled && !config.contains(entry.first) && !modelConfig.contains(entry.first)) {
+            config[entry.first] = mca::mnn::mnnBundleRelativeComponent(
+                    prefix, std::string(entry.first) == "visual_model" ? "visual.mnn" : "audio.mnn");
+        }
+    }
+}
+
 bool mnn_configured_component_path(
         const json& config,
         const std::string& root,
@@ -652,13 +758,14 @@ bool mnn_configured_component_path(
         }
         raw = value->get<std::string>();
     }
-    relative = mca::mnn::normalizeMnnVisualRelativePath(raw);
-    if (relative.empty()) {
+    try {
+        relative = mca::mnn::normalizeMnnBundleRelativePath(raw);
+        absolute = mca::mnn::confinedMnnBundlePath(root, relative).string();
+    } catch (const std::exception& e) {
         error = std::string("MNN config field '") + key +
-                "' contains an unsafe component path: " + raw;
+                "' contains an unsafe component path: " + raw + ". " + e.what();
         return false;
     }
-    absolute = join_path(root, relative);
     return true;
 }
 
@@ -1071,6 +1178,7 @@ std::string incompatible_legacy_mnn_visual_graph_message(const std::string& requ
     const auto root = parent_dir(configPath);
     const auto config = read_json_file_or_empty(configPath);
     if (!config.is_object()) return "";
+    if (config.value("mca_import_mode", std::string()) == "text_only") return "";
 
     std::string configuredVisual;
     bool configuredVisualDeclared = false;
@@ -1191,54 +1299,42 @@ bool inject_legacy_mnn_chat_template(json& runtimeConfig, const json& modelConfi
 std::string prepare_mnn_runtime_config(const std::string& requestedPath) {
     const auto configPath = resolve_mnn_config_path(requestedPath);
     const auto root = parent_dir(configPath);
-    auto config = read_json_file_or_empty(configPath);
+    json config;
+    json modelConfig;
     g_visual_model_path.clear();
     g_vision_ready = false;
-    if (!config.is_object()) return configPath;
-
-    const auto configuredLlmConfig = config.value("llm_config", std::string("llm_config.json"));
-    const auto safeLlmConfig = mca::mnn::normalizeMnnVisualRelativePath(configuredLlmConfig);
-    const auto modelConfig = safeLlmConfig.empty()
-            ? json::object()
-            : read_json_file_or_empty(join_path(root, safeLlmConfig));
-    bool configChanged = inject_legacy_mnn_chat_template(config, modelConfig);
-
-    // Upstream defaults to tokenizer.txt even though current exporters may
-    // emit tokenizer.mtok. Keep directory loads compatible by making the
-    // selected fallback explicit in the generated runtime config.
-    const auto tokenizerIt = config.find("tokenizer_file");
-    const bool tokenizerDeclared = tokenizerIt != config.end() &&
-            tokenizerIt->is_string() && !tokenizerIt->get<std::string>().empty();
-    const bool modelTokenizerDeclared = modelConfig.is_object() &&
-            modelConfig.find("tokenizer_file") != modelConfig.end() &&
-            modelConfig["tokenizer_file"].is_string() &&
-            !modelConfig["tokenizer_file"].get<std::string>().empty();
-    if (!tokenizerDeclared && !modelTokenizerDeclared &&
-        !nonempty_regular_file_exists(join_path(root, "tokenizer.txt")) &&
-        nonempty_regular_file_exists(join_path(root, "tokenizer.mtok"))) {
-        config["tokenizer_file"] = "tokenizer.mtok";
-        configChanged = true;
-    }
+    read_relocated_mnn_configs(configPath, config, modelConfig);
+    inject_legacy_mnn_chat_template(config, modelConfig);
+    json effective = config;
+    merge_mnn_config(effective, modelConfig);
+    const bool textOnlyImport = effective.value("mca_import_mode", std::string()) == "text_only";
 
     std::string configuredVisual;
     bool configuredVisualDeclared = false;
-    auto visualIt = config.find("visual_model");
-    if (visualIt != config.end() && visualIt->is_string()) {
+    auto visualIt = effective.find("visual_model");
+    if (visualIt != effective.end() && visualIt->is_string()) {
         configuredVisualDeclared = true;
         configuredVisual = mca::mnn::normalizeMnnVisualRelativePath(visualIt->get<std::string>());
     }
-    const auto selectedVisual = select_mnn_visual_model_path(root, config, configuredVisual);
+    std::vector<std::string> declaredVisualPaths;
+    collect_mnn_visual_path_declarations(config, declaredVisualPaths);
+    collect_mnn_visual_path_declarations(modelConfig, declaredVisualPaths);
+    const auto selectedVisual = textOnlyImport ? std::string() : mca::mnn::selectMnnVisualModelPath(
+            configuredVisual, declaredVisualPaths, [&root](const std::string& relative) {
+                return nonempty_regular_file_exists(mca::mnn::confinedMnnBundlePath(root, relative).string());
+            });
     const bool visualExists = !selectedVisual.empty();
-    const bool shouldEnableVision = visualExists || config.value("is_visual", false) ||
-            configuredVisualDeclared;
+    const bool shouldEnableVision = !textOnlyImport && (visualExists || effective.value("is_visual", false) ||
+            configuredVisualDeclared);
     if (shouldEnableVision) {
-        configChanged = true;
         config["is_visual"] = true;
+        modelConfig["is_visual"] = true;
         if (visualExists) {
             // Always persist the resolved relative path.  This makes nested
             // exporter layouts visible to MNN's Omni loader and keeps the
             // g_vision_ready flag truthful for the Java/UI/API layers.
             config["visual_model"] = selectedVisual;
+            modelConfig["visual_model"] = selectedVisual;
             g_visual_model_path = join_path(root, selectedVisual);
         } else if (configuredVisual.empty()) {
             config["visual_model"] = "visual.mnn";
@@ -1248,10 +1344,26 @@ std::string prepare_mnn_runtime_config(const std::string& requestedPath) {
         }
         g_vision_ready = visualExists;
     }
+    if (textOnlyImport) {
+        for (auto* document : {&config, &modelConfig}) {
+            (*document)["mca_import_mode"] = "text_only";
+            (*document)["is_visual"] = false;
+            (*document)["is_audio"] = false;
+            (*document)["is_talker"] = false;
+        }
+    }
 
-    if (!configChanged) return configPath;
-
-    const auto runtimeConfigPath = join_path(root, "mca_runtime_config.json");
+    // LlmConfig reads and merges llm_config inside createLLM(), before any
+    // set_config call. Generate both documents so that second merge cannot
+    // reintroduce export-machine base_dir or unnormalised component paths.
+    const auto runtimeLlmName = "mca_runtime_llm_config.json";
+    const auto runtimeLlmPath = mca::mnn::confinedMnnBundlePath(root, runtimeLlmName).string();
+    modelConfig.erase("llm_config");
+    if (!write_json_file(runtimeLlmPath, modelConfig)) {
+        throw std::runtime_error("MNN relocated model config could not be written: " + runtimeLlmPath);
+    }
+    config["llm_config"] = runtimeLlmName;
+    const auto runtimeConfigPath = mca::mnn::confinedMnnBundlePath(root, "mca_runtime_config.json").string();
     if (!write_json_file(runtimeConfigPath, config)) {
         throw std::runtime_error(
                 "MNN compatibility runtime config could not be written: " + runtimeConfigPath);
@@ -1527,6 +1639,25 @@ struct MnnChatImageInput {
     std::string path;
 };
 
+std::string image_url_from_content_part(const json& part) {
+    for (const auto* key : {"image_url", "image", "input_image", "url"}) {
+        const auto value = part.find(key);
+        if (value == part.end()) continue;
+        if (value->is_string()) {
+            const auto text = value->get<std::string>();
+            if (!text.empty()) return text;
+            continue;
+        }
+        if (!value->is_object()) continue;
+        const auto url = value->find("url");
+        if (url != value->end() && url->is_string()) {
+            const auto text = url->get<std::string>();
+            if (!text.empty()) return text;
+        }
+    }
+    return {};
+}
+
 std::string text_from_content(
         const json& content,
         std::vector<MnnChatImageInput>* imageInputs = nullptr) {
@@ -1539,24 +1670,25 @@ std::string text_from_content(
         const auto type = part.value("type", "");
         if (type == "text") {
             textParts.push_back(part.value("text", ""));
-        } else if (type == "image_url") {
-            std::string url;
-            const auto image_url = part.find("image_url");
-            if (image_url != part.end()) {
-                if (image_url->is_string()) {
-                    url = image_url->get<std::string>();
-                } else if (image_url->is_object()) {
-                    const auto urlIt = image_url->find("url");
-                    if (urlIt != image_url->end() && urlIt->is_string()) {
-                        url = urlIt->get<std::string>();
-                    }
-                }
-            }
+        } else if (type == "image_url" || type == "input_image" || type == "image") {
+            const auto url = image_url_from_content_part(part);
             if (!url.empty()) {
                 if (imageInputs == nullptr) {
                     imageTags.push_back("<img>" + url + "</img>");
                     continue;
                 }
+                // Structured OpenAI parts and raw MNN tags can describe one
+                // attachment more than once (for example a file URI and an
+                // absolute path).  Do not allocate a second Omni image slot
+                // for the same lexical reference; duplicate slots were a
+                // common source of "one image becomes two" and unstable MNN
+                // visual prefill on older exporters.
+                const auto imageKey = mca::mnn::canonicalMnnImageReference(url);
+                const bool duplicate = !imageKey.empty() && std::any_of(
+                    imageInputs->begin(), imageInputs->end(), [&](const MnnChatImageInput& previous) {
+                        return mca::mnn::canonicalMnnImageReference(previous.path) == imageKey;
+                    });
+                if (duplicate) continue;
                 const auto key = "mca_image_" + std::to_string(imageInputs->size());
                 imageInputs->push_back({key, url});
                 imageTags.push_back("<img>" + key + "</img>");
@@ -1569,6 +1701,7 @@ std::string text_from_content(
 void reset_generation_state_locked() {
     g_generation_active = false;
     g_stop_requested = false;
+    g_stop_signal.store(false, std::memory_order_release);
     g_pending_chunk.clear();
     g_pending_utf8_tail.clear();
     g_stream_protocol_filter.reset(g_active_stop_markers);
@@ -8100,6 +8233,67 @@ ParsedMnnChatMessages parse_chat_messages(const std::string& messages_json) {
             parsed.messages.emplace_back(role, content);
         }
     }
+    if (!parsed.images.empty() && !parsed.rawMediaTags.images.empty()) {
+        // Structured image parts are the canonical transport. If the same
+        // request also contains an equivalent raw <img> tag, drop that raw
+        // duplicate before Omni prompt normalization so one user image maps
+        // to exactly one visual slot.
+        parsed.rawMediaTags.images.erase(
+                std::remove_if(
+                        parsed.rawMediaTags.images.begin(),
+                        parsed.rawMediaTags.images.end(),
+                        [&](const std::string& rawPath) {
+                            const auto key = mca::mnn::canonicalMnnImageReference(rawPath);
+                            return !key.empty() && std::any_of(
+                                    parsed.images.begin(),
+                                    parsed.images.end(),
+                                    [&](const MnnChatImageInput& input) {
+                                        return mca::mnn::canonicalMnnImageReference(input.path) == key;
+                                    });
+                        }),
+                parsed.rawMediaTags.images.end());
+
+        // A few clients serialize one attachment twice in the same content
+        // array: once as a structured image part and once as a literal
+        // `<img>...</img>` marker inside the text part.  The structured part
+        // already owns the Omni image slot; leaving the literal marker in the
+        // message would make the native prompt contain two visual slots even
+        // though the user selected one image.  Remove only markers whose
+        // lexical identity matches a structured image and preserve all other
+        // prompt text/markers verbatim.
+        for (auto& message : parsed.messages) {
+            std::string cleaned;
+            cleaned.reserve(message.second.size());
+            size_t cursor = 0;
+            while (cursor < message.second.size()) {
+                const size_t start = message.second.find("<img>", cursor);
+                if (start == std::string::npos) {
+                    cleaned.append(message.second, cursor, std::string::npos);
+                    break;
+                }
+                cleaned.append(message.second, cursor, start - cursor);
+                const size_t valueStart = start + 5;
+                const size_t end = message.second.find("</img>", valueStart);
+                if (end == std::string::npos) {
+                    cleaned.append(message.second, start, std::string::npos);
+                    break;
+                }
+                const auto rawPath = message.second.substr(valueStart, end - valueStart);
+                const auto rawKey = mca::mnn::canonicalMnnImageReference(rawPath);
+                const bool matchesStructured = !rawKey.empty() && std::any_of(
+                    parsed.images.begin(),
+                    parsed.images.end(),
+                    [&](const MnnChatImageInput& input) {
+                        return mca::mnn::canonicalMnnImageReference(input.path) == rawKey;
+                    });
+                if (!matchesStructured) {
+                    cleaned.append(message.second, start, end + 6 - start);
+                }
+                cursor = end + 6;
+            }
+            message.second = std::move(cleaned);
+        }
+    }
     if (parsed.messages.empty()) {
         throw std::runtime_error("No valid chat messages for MNN generation.");
     }
@@ -8837,12 +9031,12 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_loadModel(
             set_error("MNN model path does not exist: " + g_original_model_path);
             return kMnnLoadFailed;
         }
-        if (const auto incompatibility = incompatible_legacy_mnn_visual_graph_message(g_original_model_path);
+        g_model_path = prepare_mnn_runtime_config(g_original_model_path);
+        if (const auto incompatibility = incompatible_legacy_mnn_visual_graph_message(g_model_path);
                 !incompatibility.empty()) {
             set_error(incompatibility);
             return kMnnLoadFailed;
         }
-        g_model_path = prepare_mnn_runtime_config(g_original_model_path);
         if (g_model_path.empty() || !file_exists(g_model_path)) {
             set_error("MNN config path does not exist: " + g_model_path);
             return kMnnLoadFailed;
@@ -9011,6 +9205,7 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
         g_last_config_json = config.dump();
         g_generated_steps = 0;
         g_stop_requested = false;
+        g_stop_signal.store(false, std::memory_order_release);
         g_generation_active = true;
         g_eop_seen = false;
         g_streamed_bytes = 0;
@@ -9138,6 +9333,16 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk(JNIEnv* env, jobject) {
     std::lock_guard<std::mutex> lock(g_mnn_mutex);
 #if MCA_WITH_MNN_LLM
+    // requestStop() publishes g_stop_signal without taking g_mnn_mutex. Consume
+    // it at the next safe native boundary before protocol filtering or another
+    // decoder step can commit output/cache state.
+    if (g_stop_signal.exchange(false, std::memory_order_acq_rel)) {
+        g_stop_requested = true;
+        g_generation_active = false;
+        g_generation_stop_reason = "stop_requested";
+        rollback_mnn_text_prompt_cache_locked("stop_requested", false);
+        return nullptr;
+    }
     if (!g_pending_chunk.empty() ||
             !g_pending_utf8_tail.empty() ||
             g_stream_protocol_filter.has_pending_protocol()) {
@@ -9168,6 +9373,16 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk(JNIEnv* en
     }
     try {
         g_llm->generate(1);
+        // A stop may arrive while MNN is inside generate(1). Do not publish the
+        // token that was produced after the cancellation request; mark the
+        // transaction rolled back on this same owning thread.
+        if (g_stop_signal.exchange(false, std::memory_order_acq_rel)) {
+            g_stop_requested = true;
+            g_generation_active = false;
+            g_generation_stop_reason = "stop_requested";
+            rollback_mnn_text_prompt_cache_locked("stop_requested", false);
+            return nullptr;
+        }
         if (g_llm->getContext() != nullptr &&
                 g_llm->getContext()->status == MNN::Transformer::LlmStatus::INTERNAL_ERROR) {
             g_generation_active = false;
@@ -9217,21 +9432,10 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk(JNIEnv* en
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStop(JNIEnv*, jobject) {
-    std::lock_guard<std::mutex> lock(g_mnn_mutex);
-#if MCA_WITH_MNN_LLM
-    if (g_generation_active && context_finished_locked()) {
-        g_generation_active = false;
-        g_generation_stop_reason = generation_stop_reason_locked();
-        settle_mnn_text_prompt_cache_locked(g_generation_stop_reason);
-        return;
-    }
-#endif
-    g_stop_requested = true;
-    g_generation_active = false;
-    g_generation_stop_reason = "stop_requested";
-#if MCA_WITH_MNN_LLM
-    rollback_mnn_text_prompt_cache_locked("stop_requested", false);
-#endif
+    // Deliberately lock-free: generateNextChunk() may own g_mnn_mutex while
+    // MNN is executing a long native step. The owning thread consumes this
+    // signal and performs the cache/protocol rollback at a safe boundary.
+    g_stop_signal.store(true, std::memory_order_release);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

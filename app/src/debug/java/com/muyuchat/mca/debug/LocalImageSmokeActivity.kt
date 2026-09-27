@@ -821,8 +821,7 @@ class LocalImageSmokeActivity : Activity() {
         val compatibilityMessage = runCatching {
             qnnContextSocCompatibilityMessage(
                 device = DeviceProfileReader(applicationContext).read(),
-                binaryMetadata = diagnostics.binaryMetadata,
-                allowKnownForwardCompatibility = true
+                binaryMetadata = diagnostics.binaryMetadata
             )
         }.getOrNull()
         compatibilityMessage?.let { message ->

@@ -30,6 +30,9 @@ internal class ProcessUiLifecycleEventRelay {
         check(mutableEvents.tryEmit(event)) { "Unable to publish process UI lifecycle state." }
         return true
     }
+
+    @Synchronized
+    fun current(): ProcessUiLifecycleEvent? = currentEvent
 }
 
 internal object ProcessUiLifecycleEvents {
@@ -39,6 +42,8 @@ internal object ProcessUiLifecycleEvents {
     fun publish(event: ProcessUiLifecycleEvent) {
         relay.publish(event)
     }
+
+    fun current(): ProcessUiLifecycleEvent? = relay.current()
 }
 
 internal object BackgroundDownloadHealth {

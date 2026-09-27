@@ -177,6 +177,80 @@ class WorldBookStoreTest {
     }
 
     @Test
+    fun importsTavernWorldInfoWrapperAndMapsDisabledAndInsertionOrderAliases() {
+        val result = WorldBookCodec.parse(
+            rawJson = """
+                {
+                  "name":"酒馆世界信息",
+                  "world_info":{
+                    "entries":{
+                      "0":{"id":7,"key":["龙门"],"content":"龙门设定。","insertion_order":19},
+                      "1":{"uid":8,"key":"客栈","content":"已禁用的内容","disable":true}
+                    }
+                  }
+                }
+            """.trimIndent(),
+            scope = WorldBookScope.GLOBAL
+        )
+
+        assertTrue(result.isSuccess)
+        val book = requireNotNull(result.book)
+        assertEquals("酒馆世界信息", book.name)
+        assertEquals("7", book.entries.first().id)
+        assertEquals(19, book.entries.first().priority)
+        assertFalse(book.entries.last().enabled)
+
+        val selected = WorldBookResolver.select(
+            books = listOf(book),
+            messages = listOf(ChatMessage(Role.USER, "龙门和客栈在哪里？")),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 128
+        )
+        assertEquals(listOf("7"), selected.selectedEntryIds)
+        assertTrue(selected.context.contains("龙门设定。"))
+        assertFalse(selected.context.contains("已禁用的内容"))
+    }
+
+    @Test
+    fun importsEntryArraysAndNewlineDelimitedJsonExports() {
+        val array = WorldBookCodec.parse(
+            rawJson = """
+                [
+                  {"uid":"array-entry","keys":["杭州"],"content":"杭州条目。"},
+                  {"uid":"array-constant","constant":true,"content":"始终注入。"}
+                ]
+            """.trimIndent(),
+            scope = WorldBookScope.GLOBAL
+        )
+        assertTrue(array.isSuccess)
+        assertEquals(2, requireNotNull(array.book).entries.size)
+
+        val jsonl = WorldBookCodec.parse(
+            rawJson = """
+                {"name":"逐行导出"}
+                {"uid":"city","key":["苏州","姑苏"],"content":"苏州有园林。","order":5}
+                {"uid":"always","constant":true,"content":"回答使用简体中文。"}
+            """.trimIndent(),
+            scope = WorldBookScope.CHAT,
+            chatSessionId = "chat-1"
+        )
+        assertTrue("JSONL should import: ${jsonl.error}", jsonl.isSuccess)
+        assertEquals("逐行导出", requireNotNull(jsonl.book).name)
+        assertEquals(listOf("city", "always"), jsonl.book?.entries?.map { it.id })
+
+        val selected = WorldBookResolver.select(
+            books = listOf(requireNotNull(jsonl.book)),
+            messages = listOf(ChatMessage(Role.USER, "我想了解姑苏。")),
+            assistantId = "assistant",
+            chatSessionId = "chat-1",
+            tokenBudget = 128
+        )
+        assertEquals(listOf("always", "city"), selected.selectedEntryIds)
+        assertTrue(selected.context.contains("苏州有园林。"))
+    }
+
+    @Test
     fun matchesChineseAndUnicodeNormalizedKeywords() {
         val book = worldBook(
             name = "Unicode",
@@ -204,7 +278,7 @@ class WorldBookStoreTest {
     }
 
     @Test
-    fun supportsSecondaryKeysAndRegexTriggers() {
+    fun keepsSelectiveKeywordTriggersAndIgnoresLegacyRegexTriggers() {
         val book = worldBook(
             name = "advanced",
             entries = listOf(
@@ -232,7 +306,27 @@ class WorldBookStoreTest {
             tokenBudget = 128
         )
 
-        assertEquals(listOf("regex", "selective"), selection.selectedEntryIds)
+        assertEquals(listOf("selective"), selection.selectedEntryIds)
+    }
+
+    @Test
+    fun tavernImportSkipsRegexOnlyEntriesAndReportsTheSkippedCount() {
+        val result = WorldBookCodec.parse(
+            rawJson = """
+                {
+                  "name":"safe import",
+                  "entries":{
+                    "regex":{"key":"^(a+)+$","content":"pattern entry","use_regex":true},
+                    "keyword":{"key":"dragon","content":"ordinary entry"}
+                  }
+                }
+            """.trimIndent(),
+            scope = WorldBookScope.GLOBAL
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(listOf("keyword"), requireNotNull(result.book).entries.map { it.id })
+        assertTrue(result.warnings.single().contains("1 条正则触发条目未导入"))
     }
 
     @Test

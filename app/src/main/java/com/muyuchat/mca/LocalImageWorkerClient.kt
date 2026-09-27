@@ -24,6 +24,19 @@ import kotlinx.coroutines.withContext
 
 private const val LOCAL_IMAGE_WORKER_REBIND_COOLDOWN_MS = 500L
 
+/**
+ * A missing request ID is reserved for legacy lifecycle cancellation. An explicitly blank ID is
+ * never allowed to match a live request: callers that own a request must carry its exact ID.
+ */
+internal fun localImageCancelRequestMatches(
+    expectedRequestId: String?,
+    activeRequestId: String?
+): Boolean {
+    if (activeRequestId.isNullOrBlank()) return false
+    return expectedRequestId == null ||
+        (expectedRequestId.isNotBlank() && expectedRequestId == activeRequestId)
+}
+
 class LocalImageWorkerClient(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val inputDispatcher = LocalImageInputDispatcher(appContext)
@@ -98,11 +111,27 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
         }
     }
 
+    /** Lifecycle fallback for owners that intentionally cancel whichever operation is active. */
     fun cancel(): Boolean {
+        return cancelInternal(expectedRequestId = null, scoped = false)
+    }
+
+    /** Cancel only the request that the caller still owns. A stale ID is a no-op. */
+    fun cancel(expectedRequestId: String): Boolean {
+        if (expectedRequestId.isBlank()) return false
+        return cancelInternal(expectedRequestId = expectedRequestId, scoped = true)
+    }
+
+    private fun cancelInternal(expectedRequestId: String?, scoped: Boolean): Boolean {
         val snapshot = synchronized(stateLock) {
+            val request = activeRequest?.takeIf {
+                localImageCancelRequestMatches(expectedRequestId, it.requestId)
+            }
+            if (scoped && request == null) return@synchronized null
             preparation?.also { it.cancelRequested = true }
-            activeRequest to preparation
-        }
+            val cancelAction = request?.handshake?.requestCancel()
+            Triple(request, preparation, cancelAction)
+        } ?: return false
         val request = snapshot.first
         val pendingPreparation = snapshot.second
         val runtime = request?.runtime ?: pendingPreparation?.runtime
@@ -111,7 +140,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP
         if (request == null) {
             pendingPreparation?.ready?.completeExceptionally(LocalImageWorkerCancelledException())
-            currentEndpoint()?.let { endpoint ->
+            if (!scoped) currentEndpoint()?.let { endpoint ->
                 runRemoteCall(endpoint) {
                     endpoint.service.cancel(LocalImageWorkerProtocol.cancelRequest(null))
                 }
@@ -120,7 +149,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             // Report false so the owner cancels prompt preprocessing or other caller-side work.
             return false
         }
-        return when (request.handshake.requestCancel()) {
+        return when (snapshot.third) {
             LocalImageStartHandshake.CancelAction.COMPLETE_LOCALLY -> {
                 val cancellation = LocalImageWorkerCancelledException()
                 pendingPreparation?.ready?.completeExceptionally(cancellation)
@@ -130,6 +159,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             LocalImageStartHandshake.CancelAction.DEFER_UNTIL_REGISTERED -> supportsNativeCancel
             LocalImageStartHandshake.CancelAction.CANCEL_REMOTE -> cancelRemote(request)
             LocalImageStartHandshake.CancelAction.NONE -> false
+            null -> false
         }
     }
 
@@ -885,6 +915,28 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
 
     private fun LocalImageWorkerProtocol.ResultEnvelope.consumeResult(): LocalImageResult {
         if (workerPid > 0) lastWorkerPid = workerPid
+        // Do not let a malformed/empty terminal escape as NoSuchElementException
+        // from `first()`.  Native image runtimes can terminate without writing
+        // an artifact (for example after a delegate abort or a partial bundle),
+        // and that exception used to surface as an app crash instead of a
+        // recoverable generation error.  Validate the complete envelope before
+        // touching any output file and keep the error code stable for UI/API
+        // mapping.
+        if (outputs.isEmpty()) {
+            throw LocalImageWorkerRemoteException(
+                code = "empty_result",
+                message = "Local image worker returned no image outputs. The model did not produce a readable image; retry or reload the model."
+            )
+        }
+        require(outputs.map { it.index } == outputs.indices.toList()) {
+            "Local image worker returned non-contiguous output indices."
+        }
+        require(outputs.all { it.outputPath.isNotBlank() }) {
+            "Local image worker returned a blank output path."
+        }
+        require(outputs.all { it.mimeType.startsWith("image/", ignoreCase = true) }) {
+            "Local image worker returned a non-image MIME type."
+        }
         val files = outputs.map { output -> output to validatedResultFile(output.outputPath) }
         require(files.map { it.second.canonicalPath }.distinct().size == files.size) {
             "Local image worker returned duplicate output paths."

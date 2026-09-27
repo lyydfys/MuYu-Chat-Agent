@@ -108,12 +108,21 @@ val mcaQnnRuntimeOverrideGenieX = strictBooleanProperty(
         .orNull,
     "mcaQnnRuntimeOverrideGenieX",
 ) ?: false
-val mcaQnnTypedBindingsRequired = strictBooleanProperty(
+val mcaQnnTypedBindingsRequiredOverride = strictBooleanProperty(
     providers.gradleProperty("mcaQnnTypedBindingsRequired")
         .orElse(providers.environmentVariable("MCA_QNN_TYPED_BINDINGS_REQUIRED"))
         .orNull,
     "mcaQnnTypedBindingsRequired",
 )
+// A normal APK must not silently package a QNN JNI stub that can only fail at
+// runtime when the user selects a QNN image model. Keep an explicit opt-out for
+// isolated Debug builds, but make typed graph bindings the product default.
+val mcaQnnTypedBindingsRequired = mcaQnnTypedBindingsRequiredOverride ?: true
+if (!mcaQnnTypedBindingsRequired && !mcaDebugOnlyInvocation) {
+    throw GradleException(
+        "mcaQnnTypedBindingsRequired=false is only permitted for an isolated Debug native experiment."
+    )
+}
 val mcaWithLlamaCpp = strictBooleanProperty(
     providers.gradleProperty("mcaWithLlamaCpp")
         .orElse(providers.environmentVariable("MCA_WITH_LLAMA_CPP"))
@@ -272,7 +281,9 @@ val verifyMcaQnnSdkHeaders = tasks.register("verifyMcaQnnSdkHeaders") {
                 Configure -PmcaQnnSdkRoot=<QAIRT SDK root> (or MCA_QNN_SDK_ROOT/QNN_SDK_ROOT/QAIRT_SDK_ROOT).
                 Inspected SDK roots:
                 $inspected
-                Debug builds may intentionally use the native stub; release builds may not.
+                A stub is only allowed for an explicitly opted-in isolated Debug build
+                using -PmcaQnnTypedBindingsRequired=false; product builds must include
+                the typed graph runner.
                 """.trimIndent()
             )
         }
@@ -471,6 +482,51 @@ val verifyMcaMnnRuntimeStamp = tasks.register("verifyMcaMnnRuntimeStamp") {
     }
 }
 
+val mcaLlamaSourceRoot = rootProject.file("third_party/llama.cpp")
+val mcaLlamaStqPatch = rootProject.file("vendor/llama/llama-stq1_0.patch")
+val applyMcaLlamaStqPatch = tasks.register("applyMcaLlamaStqPatch") {
+    group = "verification"
+    description = "Applies the audited STQ1_0 compatibility patch to the pinned llama.cpp checkout."
+    inputs.file(mcaLlamaStqPatch)
+    outputs.upToDateWhen { false }
+    doLast {
+        if (!mcaWithLlamaCpp) return@doLast
+        if (!mcaLlamaSourceRoot.resolve("CMakeLists.txt").isFile) {
+            throw GradleException("llama.cpp checkout is missing: ${mcaLlamaSourceRoot.absolutePath}")
+        }
+        if (!mcaLlamaStqPatch.isFile) {
+            throw GradleException("llama.cpp STQ1_0 patch is missing: ${mcaLlamaStqPatch.absolutePath}")
+        }
+        val git = providers.gradleProperty("mcaGitExecutable")
+            .orElse(providers.environmentVariable("MCA_GIT_EXECUTABLE"))
+            .orElse("git")
+            .get()
+        fun gitResult(vararg arguments: String): McaCommandResult = runMcaCommand(
+            listOf(git, "-C", mcaLlamaSourceRoot.absolutePath) + arguments
+        )
+        val reverse = gitResult("apply", "--reverse", "--check", "--whitespace=nowarn", mcaLlamaStqPatch.absolutePath)
+        if (reverse.exitCode == 0) {
+            logger.lifecycle("MCA llama.cpp STQ1_0 patch already applied")
+            return@doLast
+        }
+        val forward = gitResult("apply", "--check", "--whitespace=nowarn", mcaLlamaStqPatch.absolutePath)
+        if (forward.exitCode != 0) {
+            throw GradleException(
+                "llama.cpp STQ1_0 patch cannot be applied to the pinned checkout:\n" +
+                    forward.stderr.trim().ifEmpty { "git apply check failed" }
+            )
+        }
+        val applied = gitResult("apply", "--whitespace=nowarn", mcaLlamaStqPatch.absolutePath)
+        if (applied.exitCode != 0) {
+            throw GradleException(
+                "Unable to apply llama.cpp STQ1_0 patch (exit ${applied.exitCode}): " +
+                    applied.stderr.trim().ifEmpty { "no diagnostic output" }
+            )
+        }
+        logger.lifecycle("Applied MCA llama.cpp STQ1_0 patch from ${mcaLlamaStqPatch.name}")
+    }
+}
+
 android {
     namespace = "com.muyuchat.core.nativebridge"
     compileSdk = libs.versions.compileSdk.get().toInt()
@@ -496,9 +552,11 @@ android {
                     "-DGGML_NATIVE=OFF",
                     "-DGGML_BACKEND_DL=ON",
                     "-DGGML_CPU_ALL_VARIANTS=ON",
+                    "-DMCA_WITH_LLAMA_OPENCL=ON",
                     "-DGGML_LLAMAFILE=OFF",
                     "-DMCA_WITH_LLAMA_CPP=${if (mcaWithLlamaCpp) "ON" else "OFF"}",
-                    "-DMCA_WITH_MNN_DIFFUSION=${if (mcaWithMnnDiffusion) "ON" else "OFF"}"
+                    "-DMCA_WITH_MNN_DIFFUSION=${if (mcaWithMnnDiffusion) "ON" else "OFF"}",
+                    "-DMCA_QNN_TYPED_BINDINGS_REQUIRED=${if (mcaQnnTypedBindingsRequired) "ON" else "OFF"}"
                 )
                 mcaMnnSourceRoot?.absolutePath?.let {
                     cmakeArgs += "-DMCA_MNN_SOURCE_ROOT=$it"
@@ -535,10 +593,9 @@ android {
 }
 
 // Product builds require both the typed QNN SDK and the exact pinned MNN overlay.
-// Debug builds keep the existing stub-friendly workflow unless an explicit
-// typed/vendor property opts into the corresponding gate. A debug-only runtime
-// compatibility experiment may explicitly set mcaMnnVendorRequired=false; it
-// must never weaken a top-level release invocation.
+// QNN graph bindings are strict by default for every APK build: a silently
+// packaged JNI stub fails only after a user selects QNN image generation. An
+// isolated Debug experiment may explicitly opt out; release builds cannot.
 tasks.configureEach {
     val lowerName = name.lowercase()
     val isProductNativeBuildTask =
@@ -550,6 +607,7 @@ tasks.configureEach {
             lowerName.startsWith("buildcmake")
     val isReleaseProductBuild = "release" in lowerName && !mcaDebugOnlyInvocation
     if (isProductNativeBuildTask) {
+        dependsOn(applyMcaLlamaStqPatch)
         if (isReleaseProductBuild && !mcaMnnDebugRuntimeExperiment) {
             dependsOn(verifyMcaQnnSdkHeaders)
             dependsOn(verifyMcaMnnVendor)

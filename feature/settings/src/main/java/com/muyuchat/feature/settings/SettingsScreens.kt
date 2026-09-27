@@ -44,8 +44,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -60,9 +62,13 @@ import androidx.compose.ui.unit.dp
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.telemetry.RuntimeMetrics
+import com.muyuchat.core.telemetry.SystemLoadReader
+import com.muyuchat.core.telemetry.SystemLoadSnapshot
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
@@ -233,7 +239,8 @@ fun SettingsHubScreen(
     onDownloadUpdate: () -> Unit = {},
     onInstallUpdate: () -> Unit = {},
     onOpenRelease: () -> Unit = {},
-    onAutoCheckChanged: (Boolean) -> Unit = {}
+    onAutoCheckChanged: (Boolean) -> Unit = {},
+    onOpenWebPage: (String) -> Unit = {}
 ) {
     val startSection = if (startInWebSearch) SettingsSection.SEARCH else SettingsSection.RUNTIME
     var section by rememberSaveable(startInWebSearch) { mutableStateOf(startSection) }
@@ -310,6 +317,7 @@ fun SettingsHubScreen(
                 onTest = onTestWebSearch,
                 onTestTurn = onTestWebSearchTurn,
                 onClearDiagnostics = onClearWebSearchDiagnostics,
+                onOpenWebPage = onOpenWebPage,
                 modifier = Modifier.weight(1f)
             )
             SettingsSection.EXPERIMENTS -> ExperimentsScreen(
@@ -330,6 +338,15 @@ fun RuntimeScreen(
     onOpenRelease: () -> Unit = {},
     onAutoCheckChanged: (Boolean) -> Unit = {}
 ) {
+    val context = LocalContext.current
+    var systemLoad by remember { mutableStateOf(SystemLoadSnapshot()) }
+    LaunchedEffect(Unit) {
+        val reader = SystemLoadReader(context.applicationContext)
+        while (true) {
+            systemLoad = withContext(Dispatchers.IO) { reader.read() }
+            delay(1000L)
+        }
+    }
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -368,6 +385,26 @@ fun RuntimeScreen(
                 "内存",
                 "RSS ${formatKb(rssKb ?: state.stats.nativePssKb)} · PSS ${formatKb(state.stats.nativePssKb)}",
                 "Native 堆 ${formatKb(state.stats.nativeHeapKb)} · Java 堆 ${formatKb(state.stats.javaHeapKb)} · 系统可用 ${formatKb(state.stats.availMemKb)} · 运行预算 ${formatKb(state.stats.modelMemoryBudgetKb)}"
+            )
+        }
+        item {
+            val cpu = systemLoad.systemCpuPercent?.let { "$it%" } ?: "不可用"
+            val processCpu = systemLoad.processCpuPercent?.let { "$it%" } ?: "不可用"
+            val memory = if (systemLoad.memoryTotalBytes > 0L) {
+                "${formatBytes(systemLoad.memoryUsedBytes)} / ${formatBytes(systemLoad.memoryTotalBytes)}"
+            } else {
+                "不可用"
+            }
+            val gpu = systemLoad.gpuPercent?.let { "$it%" } ?: "不可用"
+            val npuExecutionProven = runCatching {
+                JSONObject(state.nativeStatsJson).optBoolean("npuExecutionProven", false)
+            }.getOrDefault(false)
+            val npu = systemLoad.npuPercent?.let { "$it%" } ?:
+                if (npuExecutionProven) "已执行（无公开占用率）" else "不可用"
+            InfoCard(
+                "实时负载",
+                "CPU $cpu · 进程 $processCpu · 内存 $memory",
+                "GPU $gpu${systemLoad.gpuSource?.let { " ($it)" }.orEmpty()} · NPU $npu"
             )
         }
         item {
@@ -853,6 +890,7 @@ fun SearchSettingsScreen(
     onTest: (String, WebSearchSettingsDraft) -> Unit,
     onTestTurn: (String, WebSearchSettingsDraft, Boolean) -> Unit,
     onClearDiagnostics: () -> Unit,
+    onOpenWebPage: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -1316,7 +1354,7 @@ fun SearchSettingsScreen(
                     )
                 } else {
                     state.diagnostics.take(8).forEach { diagnostic ->
-                        WebSearchDiagnosticCard(diagnostic)
+                        WebSearchDiagnosticCard(diagnostic, onOpenWebPage)
                     }
                 }
             }
@@ -1571,8 +1609,10 @@ private fun BackupProviderEditor(
 }
 
 @Composable
-private fun WebSearchDiagnosticCard(item: WebSearchDiagnosticUiItem) {
-    val context = LocalContext.current
+private fun WebSearchDiagnosticCard(
+    item: WebSearchDiagnosticUiItem,
+    onOpenWebPage: (String) -> Unit = {}
+) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val citationChecks = item.closedLoopChecks.filter { it.startsWith("引用审计") }
@@ -1696,9 +1736,7 @@ private fun WebSearchDiagnosticCard(item: WebSearchDiagnosticUiItem) {
                             .fillMaxWidth()
                             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f), RoundedCornerShape(8.dp))
                             .clickable {
-                                runCatching {
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(source.url)))
-                                }
+                                onOpenWebPage(source.url)
                             }
                             .padding(10.dp),
                         verticalArrangement = Arrangement.spacedBy(3.dp)
@@ -1719,6 +1757,11 @@ private fun WebSearchDiagnosticCard(item: WebSearchDiagnosticUiItem) {
                             source.url.removePrefix("https://").removePrefix("http://"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "点击在应用内查看",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
                         )
                         if (source.provider.isNotBlank()) {
                             Text(

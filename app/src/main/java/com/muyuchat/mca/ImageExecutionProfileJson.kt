@@ -234,16 +234,17 @@ internal object ImageExecutionProfileJson {
     fun parseSidecars(
         bundleRoot: File,
         schedulerRelativePath: String = DEFAULT_SCHEDULER_SIDECAR,
-        tokenizerRelativePath: String = DEFAULT_TOKENIZER_SIDECAR,
+        tokenizerRelativePath: String? = DEFAULT_TOKENIZER_SIDECAR,
         behaviorRelativePaths: List<String> = listOf(DEFAULT_BEHAVIOR_SIDECAR)
     ): ImageProfileSidecar? {
         val schedulerFile = safeBundleFile(bundleRoot, schedulerRelativePath, "schedulerSidecar")
-        val tokenizerFile = safeBundleFile(bundleRoot, tokenizerRelativePath, "tokenizerSidecar")
         val scheduler = schedulerFile.takeIf(File::isFile)?.let { file ->
             parseSchedulerConfig(readJsonFile(file, schedulerRelativePath))
         }
-        val tokenizer = tokenizerFile.takeIf(File::isFile)?.let { file ->
-            parseTokenizerConfig(readJsonFile(file, tokenizerRelativePath))
+        val tokenizer = tokenizerRelativePath?.let { relativePath ->
+            safeBundleFile(bundleRoot, relativePath, "tokenizerSidecar")
+                .takeIf(File::isFile)
+                ?.let { file -> parseTokenizerConfig(readJsonFile(file, relativePath)) }
         }
         var behavior: ImagePackageBehaviorConfig? = null
         behaviorRelativePaths.distinct().forEachIndexed { index, relativePath ->

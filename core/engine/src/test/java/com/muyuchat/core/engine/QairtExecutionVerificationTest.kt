@@ -31,6 +31,43 @@ class QairtExecutionVerificationTest {
     }
 
     @Test
+    fun qairtFingerprintIgnoresLiteRtQualcommDispatchAssets() {
+        val base = Files.createTempDirectory("qairt-runtime-base").toFile()
+        val withLiteRt = Files.createTempDirectory("qairt-runtime-litert").toFile()
+        try {
+            listOf("libnpu_jni.so", "libgeniex.so", "libgeniex_core.so", "libgeniex_plugin_qairt.so")
+                .forEach { name ->
+                    File(base, name).writeText("geniex-$name")
+                    File(withLiteRt, name).writeText("geniex-$name")
+            }
+            File(withLiteRt, "libLiteRtDispatch_Qualcomm.so").writeText("litert")
+
+            assertEquals(
+                qairtRuntimeBinaryFingerprint(base),
+                qairtRuntimeBinaryFingerprint(withLiteRt)
+            )
+            assertTrue(hasGenieXQairtBridge(base))
+            assertTrue(hasGenieXQairtBridge(withLiteRt))
+        } finally {
+            base.deleteRecursively()
+            withLiteRt.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun litertOnlyNativeDirectoryCannotProvideQairtBridgeEvidence() {
+        val directory = Files.createTempDirectory("litert-only-native").toFile()
+        try {
+            File(directory, "libLiteRtDispatch_Qualcomm.so").writeText("litert")
+            File(directory, "libQnnSystem.so").writeText("qnn")
+            File(directory, "libQnnHtpV73Skel.so").writeText("v73")
+            assertTrue(!hasGenieXQairtBridge(directory))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun persistsOnlyCompleteExactBundleChipsetRuntimeIdentities() {
         val root = Files.createTempDirectory("mca-qairt-verifications").toFile()
         val store = QairtExecutionVerificationStore(File(root, "verifications.json"))

@@ -2,12 +2,26 @@ package com.muyuchat.mca
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.json.JSONObject
 
 class LocalImageWorkerProtocolTest {
+    @Test
+    fun `cancel protocol distinguishes legacy unscoped from explicitly blank IDs`() {
+        assertNull(LocalImageWorkerProtocol.parseCancelRequestId(
+            LocalImageWorkerProtocol.cancelRequest(null)
+        ))
+        assertEquals("", LocalImageWorkerProtocol.parseCancelRequestId(
+            LocalImageWorkerProtocol.cancelRequest("")
+        ))
+        assertEquals("request-42", LocalImageWorkerProtocol.parseCancelRequestId(
+            LocalImageWorkerProtocol.cancelRequest("request-42")
+        ))
+    }
+
     @Test
     fun `upscale request round trips fixed model identity and every product scale`() {
         val input = LocalImagePreparedInput(

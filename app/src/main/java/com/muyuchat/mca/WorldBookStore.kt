@@ -70,7 +70,8 @@ data class WorldBookRecord(
 
 data class WorldBookImportResult(
     val book: WorldBookRecord? = null,
-    val error: String? = null
+    val error: String? = null,
+    val warnings: List<String> = emptyList()
 ) {
     val isSuccess: Boolean
         get() = book != null && error == null
@@ -96,19 +97,24 @@ object WorldBookCodec {
         fallbackName: String = "Imported World Book"
     ): WorldBookImportResult = runCatching {
         require(rawJson.toByteArray(Charsets.UTF_8).size <= MAX_BOOK_CHARS) {
-            "World book is larger than 1 MiB."
+            "世界书文件超过 1 MiB。"
         }
-        val root = JSONObject(rawJson)
-        parse(
-            root = root,
+        parseDetailed(
+            root = parseImportRoot(rawJson),
             scope = scope,
             assistantId = assistantId,
             chatSessionId = chatSessionId,
             fallbackName = fallbackName
         )
     }.fold(
-        onSuccess = { WorldBookImportResult(book = it) },
-        onFailure = { WorldBookImportResult(error = it.message ?: "Invalid world book JSON.") }
+        onSuccess = { it },
+        onFailure = { error ->
+            val message = when (error) {
+                is org.json.JSONException -> "世界书文件不是有效的 JSON，请重新从酒馆导出 World Info JSON。"
+                else -> error.message ?: "世界书导入失败，请检查文件格式后重试。"
+            }
+            WorldBookImportResult(error = message)
+        }
     )
 
     fun parse(
@@ -117,10 +123,22 @@ object WorldBookCodec {
         assistantId: String? = null,
         chatSessionId: String? = null,
         fallbackName: String = "Imported World Book"
-    ): WorldBookRecord {
-        val source = root.optJSONObject("character_book") ?: root
+    ): WorldBookRecord = parseDetailed(root, scope, assistantId, chatSessionId, fallbackName)
+        .book ?: error("世界书没有可用条目。")
+
+    fun parseDetailed(
+        root: JSONObject,
+        scope: WorldBookScope,
+        assistantId: String? = null,
+        chatSessionId: String? = null,
+        fallbackName: String = "Imported World Book"
+    ): WorldBookImportResult {
+        val source = root.optJSONObject("character_book")
+            ?: root.optJSONObject("world_info")
+            ?: root.optJSONObject("worldInfo")
+            ?: root
         val rawEntries = source.opt("entries")
-        val entries = when (rawEntries) {
+        val parsedEntries = when (rawEntries) {
             is JSONObject -> rawEntries.keys().asSequence().mapNotNull { key ->
                 rawEntries.optJSONObject(key)?.let { entry -> parseEntry(entry, key) }
             }.toList()
@@ -129,28 +147,118 @@ object WorldBookCodec {
             }.filterNotNull()
             else -> emptyList()
         }
-        require(entries.isNotEmpty()) { "World book contains no usable entries." }
-        require(entries.size <= MAX_ENTRIES) { "World book contains more than $MAX_ENTRIES entries." }
+        val entries = parsedEntries.mapNotNull(ParsedWorldBookEntry::entry)
+        val skippedRegexEntries = parsedEntries.count(ParsedWorldBookEntry::regexSkipped)
+        if (entries.isEmpty() && skippedRegexEntries > 0) {
+            error("世界书只包含正则触发条目；为避免无界正则导致卡顿，MCA 不导入这类条目。请改用普通关键词。")
+        }
+        require(entries.isNotEmpty()) {
+            "世界书没有可用条目。请检查 entries 中是否有非空 content，并为普通条目设置关键词。"
+        }
+        require(entries.size <= MAX_ENTRIES) { "世界书条目超过 $MAX_ENTRIES 条，请拆分后导入。" }
         val name = source.optString("name")
             .ifBlank { source.optString("title") }
+            .ifBlank { root.optString("name") }
+            .ifBlank { root.optString("title") }
             .ifBlank { fallbackName }
             .trim()
             .take(96)
-        return WorldBookRecord(
-            name = name,
-            scope = scope,
-            assistantId = assistantId?.takeIf { it.isNotBlank() },
-            chatSessionId = chatSessionId?.takeIf { it.isNotBlank() },
-            entries = entries
+        val warnings = buildList {
+            if (skippedRegexEntries > 0) {
+                add("有 $skippedRegexEntries 条正则触发条目未导入；MCA 使用普通关键词，避免不受信任正则造成卡顿。")
+            }
+        }
+        return WorldBookImportResult(
+            book = WorldBookRecord(
+                name = name,
+                scope = scope,
+                assistantId = assistantId?.takeIf { it.isNotBlank() },
+                chatSessionId = chatSessionId?.takeIf { it.isNotBlank() },
+                entries = entries
+            ),
+            warnings = warnings
         )
     }
 
-    private fun parseEntry(source: JSONObject, fallbackId: String): WorldBookEntry? {
+    private data class ParsedWorldBookEntry(
+        val entry: WorldBookEntry?,
+        val regexSkipped: Boolean = false
+    )
+
+    /** Accepts Tavern JSON exports plus entry-oriented JSON arrays and JSONL files. */
+    private fun parseImportRoot(rawJson: String): JSONObject {
+        val sourceText = rawJson.removePrefix("\uFEFF").trim()
+        require(sourceText.isNotBlank()) { "世界书文件为空。" }
+
+        val objectRoot = runCatching { JSONObject(sourceText) }.getOrNull()
+        if (objectRoot != null) {
+            if (hasWorldBookContainer(objectRoot)) return objectRoot
+            if (looksLikeEntry(objectRoot)) {
+                return JSONObject()
+                    .put("entries", JSONArray().put(objectRoot))
+            }
+        }
+
+        val arrayRoot = runCatching { JSONArray(sourceText) }.getOrNull()
+        if (arrayRoot != null) {
+            return JSONObject().put("entries", arrayRoot)
+        }
+
+        val lines = sourceText.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        require(lines.isNotEmpty()) { "世界书文件为空。" }
+        val entries = JSONArray()
+        var name = ""
+        lines.forEachIndexed { index, line ->
+            val row = runCatching { JSONObject(line) }.getOrElse { error ->
+                throw IllegalArgumentException("JSONL 第 ${index + 1} 行不是有效的 JSON 对象。", error)
+            }
+            if (name.isBlank()) {
+                name = row.optString("name").ifBlank { row.optString("title") }
+            }
+            val nested = row.optJSONObject("character_book")
+                ?: row.optJSONObject("world_info")
+                ?: row.optJSONObject("worldInfo")
+            val nestedEntries = nested?.opt("entries")
+            when (nestedEntries) {
+                is JSONArray -> for (entryIndex in 0 until nestedEntries.length()) {
+                    nestedEntries.optJSONObject(entryIndex)?.let { entries.put(it) }
+                }
+                is JSONObject -> nestedEntries.keys().asSequence().forEach { key ->
+                    nestedEntries.optJSONObject(key)?.let { entries.put(it) }
+                }
+            }
+            val rootEntries = row.opt("entries")
+            when (rootEntries) {
+                is JSONArray -> for (entryIndex in 0 until rootEntries.length()) {
+                    rootEntries.optJSONObject(entryIndex)?.let { entries.put(it) }
+                }
+                is JSONObject -> rootEntries.keys().asSequence().forEach { key ->
+                    rootEntries.optJSONObject(key)?.let { entries.put(it) }
+                }
+            }
+            if (looksLikeEntry(row)) entries.put(row)
+        }
+        require(entries.length() > 0) {
+            "没有找到世界书条目。请使用 World Info JSON，或每行一条 JSONL 条目（至少包含 content 和 key/constant）。"
+        }
+        return JSONObject()
+            .put("name", name.ifBlank { "Imported World Book" })
+            .put("entries", entries)
+    }
+
+    private fun hasWorldBookContainer(root: JSONObject): Boolean =
+        root.has("entries") || root.has("character_book") || root.has("world_info") || root.has("worldInfo")
+
+    private fun looksLikeEntry(value: JSONObject): Boolean =
+        (value.has("content") || value.has("entry")) &&
+            (value.has("key") || value.has("keys") || value.optBoolean("constant", false))
+
+    private fun parseEntry(source: JSONObject, fallbackId: String): ParsedWorldBookEntry? {
         val content = source.optString("content")
             .ifBlank { source.optString("entry") }
             .trim()
         if (content.isBlank()) return null
-        require(content.length <= MAX_ENTRY_CHARS) { "A world book entry is too large." }
+        require(content.length <= MAX_ENTRY_CHARS) { "单条世界书内容超过 64 KiB，请拆分条目后重试。" }
         val keys = readStringValues(source, listOf("key", "keys"))
             .flatMap { it.split(',', '\n') }
             .map { it.trim() }
@@ -166,23 +274,37 @@ object WorldBookCodec {
             .filter { it.isNotBlank() }
             .distinct()
             .take(32)
-        val enabled = !source.has("enabled") || source.optBoolean("enabled", true)
+        val enabled = if (source.has("enabled")) {
+            source.optBoolean("enabled", true)
+        } else {
+            !source.optBoolean("disable", source.optBoolean("disabled", false))
+        }
         val constant = source.optBoolean("constant", false)
         val selective = source.optBoolean("selective", false)
         val useRegex = source.optBoolean("use_regex", source.optBoolean("useRegex", false))
         val caseSensitive = source.optBoolean("case_sensitive", source.optBoolean("caseSensitive", false))
+        if (useRegex && !constant && enabled) {
+            return ParsedWorldBookEntry(entry = null, regexSkipped = true)
+        }
         if (!constant && keys.isEmpty()) return null
-        return WorldBookEntry(
-            id = source.opt("uid")?.toString()?.takeIf { it.isNotBlank() } ?: fallbackId,
-            keys = keys,
-            secondaryKeys = secondaryKeys,
-            content = content,
-            enabled = enabled,
-            constant = constant,
-            priority = source.optInt("order", source.optInt("priority", 0)),
-            selective = selective,
-            useRegex = useRegex,
-            caseSensitive = caseSensitive
+        return ParsedWorldBookEntry(
+            entry = WorldBookEntry(
+                id = source.opt("uid")?.toString()?.takeIf { it.isNotBlank() }
+                    ?: source.opt("id")?.toString()?.takeIf { it.isNotBlank() }
+                    ?: fallbackId,
+                keys = keys,
+                secondaryKeys = secondaryKeys,
+                content = content,
+                enabled = enabled,
+                constant = constant,
+                priority = source.optInt(
+                    "order",
+                    source.optInt("insertion_order", source.optInt("insertionOrder", source.optInt("priority", 0)))
+                ),
+                selective = selective,
+                useRegex = false,
+                caseSensitive = caseSensitive
+            )
         )
     }
 
@@ -553,12 +675,11 @@ object WorldBookResolver {
 
     private fun matchesTrigger(trigger: String, entry: WorldBookEntry, scanText: String): Boolean {
         if (trigger.isBlank()) return false
-        if (entry.useRegex) {
-            return runCatching {
-                Regex(trigger, if (entry.caseSensitive) emptySet() else setOf(RegexOption.IGNORE_CASE))
-                    .containsMatchIn(scanText)
-            }.getOrDefault(false)
-        }
+        // Java regular expressions have no execution timeout and can block the
+        // generation preflight on a crafted imported world-book trigger.
+        // Tavern regex-only entries are skipped during import; legacy records
+        // with this flag are inert as well.
+        if (entry.useRegex) return false
         val normalizedTrigger = if (entry.caseSensitive) {
             Normalizer.normalize(trigger, Normalizer.Form.NFKC)
         } else {

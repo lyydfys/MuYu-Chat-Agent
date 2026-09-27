@@ -233,6 +233,8 @@ class McaLoopbackServer(
                 method == "HEAD" && path == "/health" -> writeNoContent(client)
                 method == "GET" && path == "/health" -> writeJson(client, """{"status":"ok","name":"MuYu Chat Agent"}""")
                 method == "GET" && (path == "/v1/models" || path == "/models") -> writeJson(client, LocalApiRuntime.modelsJson())
+                method == "GET" && path == LocalApiCapabilityRegistry.PATH ->
+                    writeJson(client, LocalApiCapabilityRegistry.json())
                 method == "GET" && path in IMAGE_TEXTUAL_INVERSION_PATHS ->
                     writeJson(client, LocalApiRuntime.imageTextualInversionsJson())
                 method == "GET" && path == "/v1/mca/device" -> writeJson(client, LocalApiRuntime.deviceProfileJsonProvider())
@@ -253,6 +255,23 @@ class McaLoopbackServer(
                 method == "POST" && path == "/v1/mca/benchmark" -> writeJson(client, LocalApiRuntime.benchmarkJsonProvider(body))
                 method == "POST" && path in IMAGE_GENERATION_PATHS -> {
                     handleImageGeneration(client, body)
+                }
+                method == "POST" && path in RESPONSES_PATHS -> {
+                    val streaming = body.isStreamingRequest(headers)
+                    when (val prepared = prepareResponsesRequest(body, streaming)) {
+                        is PreparedResponsesRequest.Ready -> {
+                            try {
+                                if (streaming) {
+                                    streamResponses(client, prepared.request, prepared.lease)
+                                } else {
+                                    completeResponses(client, prepared.request, prepared.lease)
+                                }
+                            } finally {
+                                releaseGenerationLease(prepared.lease)
+                            }
+                        }
+                        is PreparedResponsesRequest.Rejected -> writePreflightRejection(client, prepared.rejection)
+                    }
                 }
                 method == "GET" && path == "/metrics" -> writeText(client, LocalApiRuntime.metricsJson())
                 method == "POST" && path == "/v1/generate/stop" -> {
@@ -365,11 +384,12 @@ class McaLoopbackServer(
             )
             return
         } catch (error: Throwable) {
+            val mapped = mapImageProviderFailure(error)
             writeError(
                 socket,
-                "500 Internal Server Error",
-                "image_generation_failed",
-                error.message ?: "Local image generation failed."
+                mapped.status.toHttpStatus(),
+                mapped.code,
+                mapped.message
             )
             return
         } finally {
@@ -484,12 +504,33 @@ class McaLoopbackServer(
                 }
             }
         }
+        val peerProbe = launch {
+            while (isActive && !completed.get()) {
+                delay(250L)
+                if (completed.get()) return@launch
+                try {
+                    socket.sendUrgentData(0)
+                } catch (error: IOException) {
+                    if (error.isPeerDisconnect()) {
+                        cancelImageRequest(
+                            requestId = requestId,
+                            requestJob = requestJob,
+                            reason = "Local API image client disconnected: ${error.javaClass.simpleName}."
+                        )
+                        return@launch
+                    }
+                }
+            }
+        }
         try {
             block()
         } finally {
             completed.set(true)
             runCatching { if (!socket.isInputShutdown) socket.shutdownInput() }
-            withContext(NonCancellable) { disconnectMonitor.cancelAndJoin() }
+            withContext(NonCancellable) {
+                disconnectMonitor.cancelAndJoin()
+                peerProbe.cancelAndJoin()
+            }
         }
     }
 
@@ -946,49 +987,53 @@ class McaLoopbackServer(
                 }
             }
         }
-        try {
-            stream.collect { event ->
-                captureGenerationSequence()
-                synchronized(output) {
-                    when (event) {
-                        is GenerateEvent.Phase -> finalStats = event.stats
-                        is GenerateEvent.Persist -> Unit
-                        is GenerateEvent.Chunk -> {
-                            finalStats = event.stats
-                            if (event.reasoning.isNotBlank()) {
+        withChatClientDisconnectCancellation(socket, requestId) {
+            try {
+                stream.collect { event ->
+                    captureGenerationSequence()
+                    synchronized(output) {
+                        when (event) {
+                            is GenerateEvent.Phase -> finalStats = event.stats
+                            is GenerateEvent.Persist -> Unit
+                            is GenerateEvent.Chunk -> {
+                                finalStats = event.stats
+                                if (event.reasoning.isNotEmpty()) {
+                                    output.write(
+                                        "data: ${event.reasoning.toSseJson(requestId, created, generationSequence, reasoning = true)}\n\n"
+                                    )
+                                }
+                                if (event.text.isNotEmpty()) {
+                                    if (event.text.any { !it.isWhitespace() }) {
+                                        hasVisibleContent = true
+                                    }
+                                    output.write("data: ${event.text.toSseJson(requestId, created, generationSequence)}\n\n")
+                                }
+                            }
+                            is GenerateEvent.Done -> {
+                                finalStats = event.stats
+                                writeTerminalFrame()
+                            }
+                            is GenerateEvent.Error -> {
                                 output.write(
-                                    "data: ${event.reasoning.toSseJson(requestId, created, generationSequence, reasoning = true)}\n\n"
+                                    "data: ${errorJson(
+                                        generationErrorCode(event),
+                                        event.message,
+                                        generationErrorDetails(event, requestId, generationSequence).toString()
+                                    )}\n\n"
                                 )
-                            }
-                            if (event.text.isNotBlank()) {
-                                hasVisibleContent = true
-                                output.write("data: ${event.text.toSseJson(requestId, created, generationSequence)}\n\n")
+                                writeTerminalFrame(includeEmptyVisibleError = false)
                             }
                         }
-                        is GenerateEvent.Done -> {
-                            finalStats = event.stats
-                            writeTerminalFrame()
-                        }
-                        is GenerateEvent.Error -> {
-                            output.write(
-                                "data: ${errorJson(
-                                    generationErrorCode(event),
-                                    event.message,
-                                    generationErrorDetails(event, requestId, generationSequence).toString()
-                                )}\n\n"
-                            )
-                            writeTerminalFrame(includeEmptyVisibleError = false)
-                        }
+                        output.flush()
                     }
-                    output.flush()
                 }
+            } finally {
+                heartbeat.cancelAndJoin()
             }
-        } finally {
-            heartbeat.cancelAndJoin()
-        }
-        synchronized(output) {
-            writeTerminalFrame()
-            output.flush()
+            synchronized(output) {
+                writeTerminalFrame()
+                output.flush()
+            }
         }
     }
 
@@ -1021,83 +1066,540 @@ class McaLoopbackServer(
         var generationError: GenerateEvent.Error? = null
         var finalStats: RuntimeStats? = null
         var generationSequence: Long? = null
-        stream.collect { event ->
+        withChatClientDisconnectCancellation(socket, requestId) {
+            stream.collect { event ->
+                generationSequence = generationSequence
+                    ?: LocalApiRuntime.generationSequence()?.takeIf { current ->
+                        sequenceBefore?.let { current > it } ?: (current > 0L)
+                    }
+                generationSequence?.let { LocalApiRuntime.recordGenerationSequence(requestId, it) }
+                when (event) {
+                    is GenerateEvent.Phase -> finalStats = event.stats
+                    is GenerateEvent.Persist -> Unit
+                    is GenerateEvent.Chunk -> {
+                        finalStats = event.stats
+                        if (event.text.isNotEmpty()) builder.append(event.text)
+                        if (event.reasoning.isNotEmpty()) reasoningBuilder.append(event.reasoning)
+                    }
+                    is GenerateEvent.Done -> finalStats = event.stats
+                    is GenerateEvent.Error -> generationError = event
+                }
+            }
+            if (generationError != null) {
+                val error = requireNotNull(generationError)
+                writeError(
+                    socket,
+                    generationErrorStatus(error),
+                    generationErrorCode(error),
+                    error.message,
+                    generationErrorDetails(error, requestId, generationSequence).toString()
+                )
+                return@withChatClientDisconnectCancellation
+            }
+            if (builder.isBlank()) {
+                writeError(
+                    socket,
+                    "500 Internal Server Error",
+                    "generation_empty_visible_output",
+                    emptyVisibleOutputMessage(finalStats, request.params),
+                    generationTraceJson(requestId, generationSequence).toString()
+                )
+                return@withChatClientDisconnectCancellation
+            }
+            val response = JSONObject()
+                .put("id", requestId)
+                .put("object", "chat.completion")
+                .put("created", created)
+                .put("model", currentModelName())
+                .put("mca_trace", generationTraceJson(requestId, generationSequence))
+                .put(
+                    "choices",
+                    JSONArray().put(
+                        run {
+                            val message = JSONObject()
+                                .put("role", "assistant")
+                                .put("content", builder.toString())
+                            if (reasoningBuilder.isNotBlank()) {
+                                message.put("reasoning_content", reasoningBuilder.toString())
+                            }
+                            JSONObject()
+                                .put("index", 0)
+                                .put("message", message)
+                                .put("finish_reason", "stop")
+                        }
+                    )
+                )
+                .put(
+                    "usage",
+                    JSONObject()
+                        .put("prompt_tokens", tokenOrNull(finalStats?.promptTokens))
+                        .put("completion_tokens", tokenOrNull(finalStats?.completionTokens))
+                        .put(
+                            "total_tokens",
+                            finalStats?.let { stats ->
+                                val total = stats.promptTokens + stats.completionTokens
+                                if (total > 0) total else JSONObject.NULL
+                            } ?: JSONObject.NULL
+                        )
+                )
+            writeJson(socket, response.toString())
+        }
+    }
+
+    /**
+     * Detect a client that has closed an in-flight chat connection and stop the exact native
+     * request before the generation lease is released. Without this bridge an SSE consumer can
+     * disappear after the first chunk while the worker keeps the single local generation slot
+     * occupied until its natural completion.
+     */
+    private suspend fun <T> withChatClientDisconnectCancellation(
+        socket: Socket,
+        requestId: String,
+        block: suspend () -> T
+    ): T = coroutineScope {
+        val requestJob = requireNotNull(currentCoroutineContext()[Job]) {
+            "Local API chat generation requires a request coroutine."
+        }
+        val completed = AtomicBoolean(false)
+        val disconnected = AtomicBoolean(false)
+        val input = socket.getInputStream()
+        val monitor = launch {
+            while (isActive && !completed.get()) {
+                try {
+                    if (input.read() < 0) {
+                        // A client may half-close its request output while continuing to read the
+                        // response (curl and the JVM contract tests do this). Probe the peer's
+                        // write side before treating EOF as a vanished response consumer.
+                        while (isActive && !completed.get()) {
+                            delay(200L)
+                            if (completed.get()) return@launch
+                            try {
+                                socket.sendUrgentData(0)
+                            } catch (error: IOException) {
+                                disconnected.set(true)
+                                requestJob.cancel(
+                                    CancellationException(
+                                        "Local API chat client disconnected: ${error.javaClass.simpleName}."
+                                    )
+                                )
+                                return@launch
+                            }
+                        }
+                        return@launch
+                    }
+                } catch (_: SocketTimeoutException) {
+                    // Continue polling until the request completes or the client resets it.
+                } catch (error: IOException) {
+                    if (!completed.get()) {
+                        disconnected.set(true)
+                        requestJob.cancel(
+                            CancellationException(
+                                "Local API chat client disconnected: ${error.javaClass.simpleName}."
+                            )
+                        )
+                    }
+                    return@launch
+                }
+            }
+        }
+        // A client that stops reading an SSE response often keeps its request side open. In
+        // that case the input reader above can remain blocked until the socket timeout, leaving
+        // the single local generation lease occupied for several seconds. A lightweight TCP
+        // urgent-data probe detects a peer FIN/RST independently of the request half-close. It
+        // does not write into the HTTP response stream and therefore cannot corrupt SSE frames.
+        val peerProbe = launch {
+            while (isActive && !completed.get()) {
+                delay(250L)
+                if (completed.get()) return@launch
+                try {
+                    socket.sendUrgentData(0)
+                } catch (error: IOException) {
+                    if (error.isPeerDisconnect()) {
+                        disconnected.set(true)
+                        requestJob.cancel(
+                            CancellationException(
+                                "Local API chat client disconnected: ${error.javaClass.simpleName}."
+                            )
+                        )
+                        return@launch
+                    }
+                    // Some Android/desktop TCP stacks reject OOB probes while the connection is
+                    // still healthy. Keep the input monitor and normal write path authoritative
+                    // for those stacks instead of treating the capability error as a disconnect.
+                }
+            }
+        }
+        try {
+            block()
+        } catch (error: IOException) {
+            withContext(NonCancellable) {
+                disconnected.set(true)
+                runCatching { LocalApiRuntime.stopGenerationIfRequestActive(requestId) }
+            }
+            throw error
+        } finally {
+            withContext(NonCancellable) {
+                completed.set(true)
+                monitor.cancelAndJoin()
+                peerProbe.cancelAndJoin()
+                if (disconnected.get()) {
+                    runCatching {
+                        LocalApiRuntime.stopGenerationIfRequestActive(requestId)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun IOException.isPeerDisconnect(): Boolean {
+        val text = message.orEmpty().lowercase()
+        return text.isBlank() ||
+            "broken pipe" in text ||
+            "connection reset" in text ||
+            "connection abort" in text ||
+            "connection closed" in text ||
+            "socket closed" in text ||
+            "not connected" in text ||
+            "eof" in text
+    }
+
+    private data class MappedImageProviderFailure(
+        val status: Int,
+        val code: String,
+        val message: String
+    )
+
+    /** Converts legacy/unstructured provider failures into actionable API errors. */
+    private fun mapImageProviderFailure(error: Throwable): MappedImageProviderFailure {
+        val message = error.message.orEmpty().ifBlank { "Local image generation failed." }
+        val normalized = message.lowercase()
+        return when {
+            normalized.contains("no configured local image model") ||
+                normalized.contains("no local image model") ->
+                MappedImageProviderFailure(
+                    503,
+                    "image_runtime_unavailable",
+                    "No configured local image model is selected. Load a complete image model in the image page, then retry."
+                )
+            normalized.contains("generation in progress") ||
+                normalized.contains("image_generation_busy") ||
+                normalized.contains("another local image") ->
+                MappedImageProviderFailure(409, "image_generation_busy", message)
+            normalized.contains("contextbinary is missing") ||
+                normalized.contains("bundle is missing") ||
+                normalized.contains("model bundle") && normalized.contains("missing") ->
+                MappedImageProviderFailure(
+                    409,
+                    "image_model_not_ready",
+                    "$message Re-download or re-import the complete model bundle, then retry."
+                )
+            normalized.contains("timeout") || normalized.contains("timed out") ->
+                MappedImageProviderFailure(504, "image_generation_timeout", message)
+            normalized.contains("worker") && normalized.contains("unavailable") ->
+                MappedImageProviderFailure(503, "image_worker_unavailable", message)
+            else -> MappedImageProviderFailure(500, "image_generation_failed", message)
+        }
+    }
+
+    private suspend fun streamResponses(
+        socket: Socket,
+        request: LocalResponsesRequest,
+        lease: GenerationLease
+    ) = coroutineScope {
+        lease.job = currentCoroutineContext()[Job]
+        val responseId = "resp-${UUID.randomUUID().toString().replace("-", "")}";
+        lease.requestId = responseId
+        val messageId = "msg-${UUID.randomUUID().toString().replace("-", "")}";
+        val created = System.currentTimeMillis() / 1000L
+        val stream = LocalApiRuntime.streamChat(
+            request.chatRequest,
+            LocalChatExecutionContext(requestId = responseId)
+        )
+        if (stream == null) {
+            writeError(
+                socket,
+                "503 Service Unavailable",
+                "engine_unavailable",
+                "MCA engine is not attached."
+            )
+            return@coroutineScope
+        }
+        val output = socket.getOutputStream().bufferedWriter(Charsets.UTF_8)
+        val text = StringBuilder()
+        val reasoning = StringBuilder()
+        var finalStats: RuntimeStats? = null
+        var generationError: GenerateEvent.Error? = null
+        var generationSequence: Long? = null
+        val sequenceBefore = LocalApiRuntime.generationSequence()
+        fun capture(event: GenerateEvent) {
             generationSequence = generationSequence
                 ?: LocalApiRuntime.generationSequence()?.takeIf { current ->
                     sequenceBefore?.let { current > it } ?: (current > 0L)
                 }
-            generationSequence?.let { LocalApiRuntime.recordGenerationSequence(requestId, it) }
+            generationSequence?.let { LocalApiRuntime.recordGenerationSequence(responseId, it) }
             when (event) {
                 is GenerateEvent.Phase -> finalStats = event.stats
                 is GenerateEvent.Persist -> Unit
                 is GenerateEvent.Chunk -> {
                     finalStats = event.stats
-                    if (event.text.isNotBlank()) builder.append(event.text)
-                    if (event.reasoning.isNotBlank()) reasoningBuilder.append(event.reasoning)
+                    text.append(event.text)
+                    reasoning.append(event.reasoning)
                 }
                 is GenerateEvent.Done -> finalStats = event.stats
                 is GenerateEvent.Error -> generationError = event
             }
         }
-        if (generationError != null) {
-            val error = requireNotNull(generationError)
-            writeError(
-                socket,
-                generationErrorStatus(error),
-                generationErrorCode(error),
-                error.message,
-                generationErrorDetails(error, requestId, generationSequence).toString()
-            )
-            return
+        fun sendEvent(type: String, payload: JSONObject) {
+            output.write("event: $type\n")
+            output.write("data: ${payload}\n\n")
+            output.flush()
         }
-        if (builder.isBlank()) {
-            writeError(
-                socket,
-                "500 Internal Server Error",
-                "generation_empty_visible_output",
-                emptyVisibleOutputMessage(finalStats, request.params),
-                generationTraceJson(requestId, generationSequence).toString()
+        withChatClientDisconnectCancellation(socket, responseId) {
+            output.write("HTTP/1.1 200 OK\r\n")
+            output.write("Content-Type: text/event-stream; charset=utf-8\r\n")
+            output.write("Cache-Control: no-cache\r\n")
+            output.write("X-Accel-Buffering: no\r\n")
+            output.write(corsHeaders())
+            output.write("Connection: close\r\n\r\n")
+            output.flush()
+            sendEvent(
+                "response.created",
+                responsesEnvelope(responseId, created, request.model, "in_progress", "", "", null)
             )
-            return
-        }
-        val response = JSONObject()
-            .put("id", requestId)
-            .put("object", "chat.completion")
-            .put("created", created)
-            .put("model", currentModelName())
-            .put("mca_trace", generationTraceJson(requestId, generationSequence))
-            .put(
-                "choices",
-                JSONArray().put(
-                    run {
-                        val message = JSONObject()
-                            .put("role", "assistant")
-                            .put("content", builder.toString())
-                        if (reasoningBuilder.isNotBlank()) {
-                            message.put("reasoning_content", reasoningBuilder.toString())
+            sendEvent(
+                "response.output_item.added",
+                responsesOutputItem(messageId, "in_progress", "")
+            )
+            sendEvent(
+                "response.content_part.added",
+                JSONObject()
+                    .put("type", "response.content_part.added")
+                    .put("response_id", responseId)
+                    .put("item_id", messageId)
+                    .put("output_index", 0)
+                    .put("content_index", 0)
+                    .put("part", JSONObject().put("type", "output_text").put("text", "").put("annotations", JSONArray()))
+            )
+            stream.collect { event ->
+                capture(event)
+                when (event) {
+                    is GenerateEvent.Chunk -> {
+                        if (event.reasoning.isNotEmpty()) {
+                            sendEvent(
+                                "response.reasoning_summary_text.delta",
+                                JSONObject()
+                                    .put("type", "response.reasoning_summary_text.delta")
+                                    .put("response_id", responseId)
+                                    .put("item_id", messageId)
+                                    .put("output_index", 0)
+                                    .put("summary_index", 0)
+                                    .put("delta", event.reasoning)
+                            )
                         }
-                        JSONObject()
-                            .put("index", 0)
-                            .put("message", message)
-                            .put("finish_reason", "stop")
+                        if (event.text.isNotEmpty()) {
+                            sendEvent(
+                                "response.output_text.delta",
+                                JSONObject()
+                                    .put("type", "response.output_text.delta")
+                                    .put("response_id", responseId)
+                                    .put("item_id", messageId)
+                                    .put("output_index", 0)
+                                    .put("content_index", 0)
+                                    .put("delta", event.text)
+                            )
+                        }
                     }
+                    is GenerateEvent.Phase,
+                    is GenerateEvent.Persist,
+                    is GenerateEvent.Done,
+                    is GenerateEvent.Error -> Unit
+                }
+            }
+            if (generationError != null) {
+                val error = requireNotNull(generationError)
+                sendEvent(
+                    "response.failed",
+                    responsesEnvelope(responseId, created, request.model, "failed", text.toString(), reasoning.toString(), finalStats)
+                        .put("error", errorJson(generationErrorCode(error), error.message))
+                )
+                output.write("data: [DONE]\n\n")
+                output.flush()
+                return@withChatClientDisconnectCancellation
+            }
+            if (text.isBlank()) {
+                sendEvent(
+                    "response.failed",
+                    responsesEnvelope(responseId, created, request.model, "failed", "", reasoning.toString(), finalStats)
+                        .put("error", errorJson("generation_empty_visible_output", emptyVisibleOutputMessage(finalStats, request.chatRequest.params)))
+                )
+                output.write("data: [DONE]\n\n")
+                output.flush()
+                return@withChatClientDisconnectCancellation
+            }
+            sendEvent(
+                "response.output_text.done",
+                JSONObject()
+                    .put("type", "response.output_text.done")
+                    .put("response_id", responseId)
+                    .put("item_id", messageId)
+                    .put("output_index", 0)
+                    .put("content_index", 0)
+                    .put("text", text.toString())
+            )
+            sendEvent(
+                "response.content_part.done",
+                JSONObject()
+                    .put("type", "response.content_part.done")
+                    .put("response_id", responseId)
+                    .put("item_id", messageId)
+                    .put("output_index", 0)
+                    .put("content_index", 0)
+                    .put("part", JSONObject().put("type", "output_text").put("text", text.toString()).put("annotations", JSONArray()))
+            )
+            sendEvent("response.output_item.done", responsesOutputItem(messageId, "completed", text.toString()))
+            sendEvent(
+                "response.completed",
+                responsesEnvelope(responseId, created, request.model, "completed", text.toString(), reasoning.toString(), finalStats)
+            )
+            output.write("data: [DONE]\n\n")
+            output.flush()
+        }
+    }
+
+    private suspend fun completeResponses(
+        socket: Socket,
+        request: LocalResponsesRequest,
+        lease: GenerationLease
+    ) = coroutineScope {
+        lease.job = currentCoroutineContext()[Job]
+        val responseId = "resp-${UUID.randomUUID().toString().replace("-", "")}";
+        lease.requestId = responseId
+        val created = System.currentTimeMillis() / 1000L
+        val stream = LocalApiRuntime.streamChat(
+            request.chatRequest,
+            LocalChatExecutionContext(requestId = responseId)
+        )
+        if (stream == null) {
+            writeError(socket, "503 Service Unavailable", "engine_unavailable", "MCA engine is not attached.")
+            return@coroutineScope
+        }
+        val text = StringBuilder()
+        val reasoning = StringBuilder()
+        var finalStats: RuntimeStats? = null
+        var generationError: GenerateEvent.Error? = null
+        var generationSequence: Long? = null
+        val sequenceBefore = LocalApiRuntime.generationSequence()
+        withChatClientDisconnectCancellation(socket, responseId) {
+            stream.collect { event ->
+                generationSequence = generationSequence
+                    ?: LocalApiRuntime.generationSequence()?.takeIf { current ->
+                        sequenceBefore?.let { current > it } ?: (current > 0L)
+                    }
+                generationSequence?.let { LocalApiRuntime.recordGenerationSequence(responseId, it) }
+                when (event) {
+                    is GenerateEvent.Phase -> finalStats = event.stats
+                    is GenerateEvent.Persist -> Unit
+                    is GenerateEvent.Chunk -> {
+                        finalStats = event.stats
+                        text.append(event.text)
+                        reasoning.append(event.reasoning)
+                    }
+                    is GenerateEvent.Done -> finalStats = event.stats
+                    is GenerateEvent.Error -> generationError = event
+                }
+            }
+            if (generationError != null) {
+                val error = requireNotNull(generationError)
+                writeError(
+                    socket,
+                    generationErrorStatus(error),
+                    generationErrorCode(error),
+                    error.message,
+                    generationErrorDetails(error, responseId, generationSequence).toString()
+                )
+                return@withChatClientDisconnectCancellation
+            }
+            if (text.isBlank()) {
+                writeError(
+                    socket,
+                    "500 Internal Server Error",
+                    "generation_empty_visible_output",
+                    emptyVisibleOutputMessage(finalStats, request.chatRequest.params),
+                    generationTraceJson(responseId, generationSequence).toString()
+                )
+                return@withChatClientDisconnectCancellation
+            }
+            writeJson(
+                socket,
+                responsesEnvelope(
+                    responseId,
+                    created,
+                    request.model,
+                    "completed",
+                    text.toString(),
+                    reasoning.toString(),
+                    finalStats
+                ).toString()
+            )
+        }
+    }
+
+    private fun responsesEnvelope(
+        responseId: String,
+        created: Long,
+        model: String,
+        status: String,
+        text: String,
+        reasoning: String,
+        stats: RuntimeStats?
+    ): JSONObject {
+        val response = JSONObject()
+            .put("id", responseId)
+            .put("object", "response")
+            .put("created_at", created)
+            .put("status", status)
+            .put("model", model)
+            .put("output", JSONArray())
+        if (text.isNotEmpty() || status == "completed" || status == "failed") {
+            response.getJSONArray("output").put(
+                responsesOutputItem(
+                    "msg-${responseId.removePrefix("resp-")}",
+                    if (status == "completed") "completed" else status,
+                    text
                 )
             )
-            .put(
+        }
+        if (reasoning.isNotBlank()) response.put("reasoning_summary", reasoning)
+        stats?.let { value ->
+            response.put(
                 "usage",
                 JSONObject()
-                    .put("prompt_tokens", tokenOrNull(finalStats?.promptTokens))
-                    .put("completion_tokens", tokenOrNull(finalStats?.completionTokens))
+                    .put("input_tokens", tokenOrNull(value.promptTokens))
+                    .put("output_tokens", tokenOrNull(value.completionTokens))
                     .put(
                         "total_tokens",
-                        finalStats?.let { stats ->
-                            val total = stats.promptTokens + stats.completionTokens
-                            if (total > 0) total else JSONObject.NULL
-                        } ?: JSONObject.NULL
+                        (value.promptTokens + value.completionTokens).takeIf { it > 0 } ?: JSONObject.NULL
                     )
             )
-        writeJson(socket, response.toString())
+        }
+        return response
     }
+
+    private fun responsesOutputItem(id: String, status: String, text: String): JSONObject =
+        JSONObject()
+            .put("type", "message")
+            .put("id", id)
+            .put("status", status)
+            .put("role", "assistant")
+            .put(
+                "content",
+                JSONArray().put(
+                    JSONObject()
+                        .put("type", "output_text")
+                        .put("text", text)
+                        .put("annotations", JSONArray())
+                )
+            )
 
     private fun isPublicRoute(method: String, path: String): Boolean =
         method == "OPTIONS" ||
@@ -1210,7 +1712,18 @@ class McaLoopbackServer(
         streaming: Boolean
     ): PreparedGenerationRequest {
         val parsed = runCatching {
-            OpenAiApiCompat.parseChatRequestChecked(body, LocalApiRuntime.generationParamsProvider())
+            OpenAiApiCompat.parseChatRequestChecked(
+                body = body,
+                baseParams = LocalApiRuntime.generationParamsProvider(),
+                // OpenAI-compatible generation routes are strict JSON APIs.
+                // Keep the historical /completion text compatibility route
+                // permissive for existing local clients, while the standard
+                // chat/completions and completions endpoints reject malformed
+                // bodies and missing model ids before touching the engine.
+                requireJsonObject = route != "/completion",
+                requireModel = route != "/completion",
+                requireNonEmptyMessages = route == "/v1/chat/completions" || route == "/chat/completions"
+            )
         }.getOrElse { error ->
             return PreparedGenerationRequest.Rejected(
                 httpStatus = 500,
@@ -1222,7 +1735,7 @@ class McaLoopbackServer(
             is OpenAiChatParseResult.Success -> parsed.request
             is OpenAiChatParseResult.Rejected -> {
                 return PreparedGenerationRequest.Rejected(
-                    httpStatus = 409,
+                    httpStatus = parsed.rejection.httpStatus,
                     code = parsed.rejection.code,
                     message = parsed.rejection.message,
                     detailsJson = parsed.rejection.detailsJson
@@ -1237,10 +1750,75 @@ class McaLoopbackServer(
             )
         }
         request.contextLengthRejection()?.let { return it }
-        val preflightRequest = LocalApiPreflightRequest(
+        return admitGenerationRequest(
             route = route,
             streaming = streaming,
             requestedModel = OpenAiApiCompat.requestedModel(body),
+            request = request
+        )
+    }
+
+    private fun prepareResponsesRequest(
+        body: String,
+        streaming: Boolean
+    ): PreparedResponsesRequest {
+        val parsed = LocalResponsesCompat.parseRequest(
+            body = body,
+            baseParams = LocalApiRuntime.generationParamsProvider()
+        )
+        if (parsed is LocalResponsesParseResult.Rejected) {
+            return PreparedResponsesRequest.Rejected(parsed.rejection)
+        }
+        val request = (parsed as LocalResponsesParseResult.Success).request
+        request.chatRequest.localApiVisionRejection()?.let { rejection ->
+            return PreparedResponsesRequest.Rejected(
+                OpenAiRequestRejection(
+                    code = rejection.code,
+                    message = rejection.message,
+                    httpStatus = 409
+                )
+            )
+        }
+        request.chatRequest.contextLengthRejection()?.let { rejection ->
+            return PreparedResponsesRequest.Rejected(
+                OpenAiRequestRejection(
+                    code = rejection.code,
+                    message = rejection.message,
+                    detailsJson = rejection.detailsJson,
+                    httpStatus = rejection.httpStatus
+                )
+            )
+        }
+        return when (
+            val admitted = admitGenerationRequest(
+                route = "/v1/responses",
+                streaming = streaming,
+                requestedModel = request.model,
+                request = request.chatRequest
+            )
+        ) {
+            is PreparedGenerationRequest.Ready -> PreparedResponsesRequest.Ready(request, admitted.lease)
+            is PreparedGenerationRequest.Rejected -> PreparedResponsesRequest.Rejected(
+                OpenAiRequestRejection(
+                    code = admitted.code,
+                    message = admitted.message,
+                    detailsJson = admitted.detailsJson,
+                    httpStatus = admitted.httpStatus
+                )
+            )
+        }
+    }
+
+    private fun admitGenerationRequest(
+        route: String,
+        streaming: Boolean,
+        requestedModel: String?,
+        request: ChatRequest
+    ): PreparedGenerationRequest {
+        val preflightRequest = LocalApiPreflightRequest(
+            route = route,
+            streaming = streaming,
+            requestedModel = requestedModel,
             chatRequest = request
         )
         return synchronized(generationLeaseLock) {
@@ -1289,9 +1867,26 @@ class McaLoopbackServer(
     }
 
     private fun releaseGenerationLease(lease: GenerationLease) {
-        synchronized(generationLeaseLock) {
-            if (activeGenerationLease === lease) {
+        val requestIdToStop = synchronized(generationLeaseLock) {
+            if (activeGenerationLease !== lease) {
+                return
+            }
+            // A cancelled request can leave the native runner generating for a short period
+            // after the HTTP coroutine has unwound. Keep the lease until the exact request has
+            // been stopped; otherwise the next client observes generation_in_progress.
+            val cancelled = lease.job?.isCancelled == true
+            if (!cancelled || lease.requestId.isBlank()) {
                 activeGenerationLease = null
+                return
+            }
+            lease.requestId
+        }
+        scope.launch {
+            runCatching { LocalApiRuntime.stopGenerationIfRequestActive(requestIdToStop) }
+            synchronized(generationLeaseLock) {
+                if (activeGenerationLease === lease) {
+                    activeGenerationLease = null
+                }
             }
         }
     }
@@ -1358,6 +1953,16 @@ class McaLoopbackServer(
             message = rejection.message,
             detailsJson = rejection.detailsJson,
             retryAfterMs = rejection.retryAfterMs
+        )
+    }
+
+    private fun writePreflightRejection(socket: Socket, rejection: OpenAiRequestRejection) {
+        writeError(
+            socket = socket,
+            status = rejection.httpStatus.toHttpStatus(),
+            code = rejection.code,
+            message = rejection.message,
+            detailsJson = rejection.detailsJson
         )
     }
 
@@ -1786,7 +2391,8 @@ class McaLoopbackServer(
         return when {
             method.equals("POST", ignoreCase = true) && normalizedPath in IMAGE_GENERATION_PATHS ->
                 MAX_IMAGE_REQUEST_BODY_BYTES
-            method.equals("POST", ignoreCase = true) && normalizedPath in GENERATION_PATHS ->
+            method.equals("POST", ignoreCase = true) &&
+                (normalizedPath in GENERATION_PATHS || normalizedPath in RESPONSES_PATHS) ->
                 MAX_CHAT_REQUEST_BODY_BYTES
             else -> MAX_CONTROL_REQUEST_BODY_BYTES
         }
@@ -1837,6 +2443,17 @@ class McaLoopbackServer(
         ) : PreparedGenerationRequest
     }
 
+    private sealed interface PreparedResponsesRequest {
+        data class Ready(
+            val request: LocalResponsesRequest,
+            val lease: GenerationLease
+        ) : PreparedResponsesRequest
+
+        data class Rejected(
+            val rejection: OpenAiRequestRejection
+        ) : PreparedResponsesRequest
+    }
+
     private class GenerationLease {
         @Volatile
         var job: Job? = null
@@ -1874,6 +2491,7 @@ class McaLoopbackServer(
             ): Boolean = size > MAX_IDEMPOTENCY_RECORDS
         }
         private val GENERATION_PATHS = setOf("/v1/chat/completions", "/chat/completions", "/v1/completions", "/completion")
+        private val RESPONSES_PATHS = setOf("/v1/responses", "/responses")
         private val IMAGE_GENERATION_PATHS = setOf("/v1/images/generations", "/images/generations")
         private val IMAGE_TEXTUAL_INVERSION_PATHS = setOf(
             "/v1/images/textual-inversions",
@@ -1891,7 +2509,9 @@ class McaLoopbackServer(
         private const val CLIENT_READ_TIMEOUT_MS = 15_000
         private const val SERVER_BACKLOG = 128
         private const val MAX_ACTIVE_CLIENTS = 16
-        private const val SSE_HEARTBEAT_INTERVAL_MS = 5_000L
+        // Keep a disconnected SSE client observable before the native request can hold the
+        // single generation slot for several seconds.
+        private const val SSE_HEARTBEAT_INTERVAL_MS = 1_000L
         private const val TAG = "McaLoopbackServer"
         private const val TUNING_JOB_PATH_PREFIX = "/v1/tuning/jobs/"
         private const val MAX_TUNING_MODEL_ID_LENGTH = 512

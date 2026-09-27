@@ -1,6 +1,7 @@
 package com.muyuchat.core.engine
 
 import com.geniex.sdk.bean.ModelType
+import java.io.File
 import java.nio.file.Files
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -80,6 +81,82 @@ class LocalChatRunnerTest {
     }
 
     @Test
+    fun projectorDiscoveryPrefersMatchingModelStemOverLargestUnrelatedProjector() {
+        val root = Files.createTempDirectory("mca-geniex-projectors").toFile()
+        try {
+            val model = File(root, "Qwen2-VL-7B-Instruct-Q4_K_M.gguf").apply { writeText("model") }
+            val matching = File(root, "mmproj-Qwen2-VL-7B-Instruct-f16.gguf").apply {
+                writeText("small matching projector")
+            }
+            val unrelated = File(root, "mmproj-Large-Unrelated-Vision-Projector-f32.gguf").apply {
+                writeText("this is intentionally larger and must not win")
+                appendText("x".repeat(4096))
+            }
+
+            assertEquals(matching.canonicalFile, chooseGenieXVisionProjector(model, listOf(unrelated, matching)))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun projectorDiscoveryReturnsNullForEmptyOrUnreadableCandidates() {
+        val root = Files.createTempDirectory("mca-geniex-projectors-empty").toFile()
+        try {
+            val model = File(root, "model-Q4_K_M.gguf").apply { writeText("model") }
+            val empty = File(root, "mmproj-model-f16.gguf").apply { createNewFile() }
+
+            assertEquals(null, chooseGenieXVisionProjector(model, listOf(empty)))
+            assertEquals(null, chooseGenieXVisionProjector(model, emptyList()))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun projectorDiscoveryRefusesUnrelatedProjectorFromAnotherDirectory() {
+        val root = Files.createTempDirectory("mca-geniex-projectors-unrelated").toFile()
+        try {
+            val modelDir = File(root, "model").apply { mkdirs() }
+            val projectorDir = File(root, "other").apply { mkdirs() }
+            val model = File(modelDir, "Qwen2-VL-7B-Instruct-Q4_K_M.gguf").apply { writeText("model") }
+            val unrelated = File(projectorDir, "mmproj-Large-Unrelated-Vision-Projector-f32.gguf")
+                .apply { writeText("projector") }
+
+            assertEquals(null, chooseGenieXVisionProjector(model, listOf(unrelated)))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun projectorDiscoveryDoesNotGuessBetweenMultipleGenericProjectorsInSameDirectory() {
+        val root = Files.createTempDirectory("mca-geniex-projectors-ambiguous").toFile()
+        try {
+            val model = File(root, "Qwen2-VL-7B-Instruct-Q4_K_M.gguf").apply { writeText("model") }
+            val genericA = File(root, "mmproj-f16.gguf").apply { writeText("projector a") }
+            val genericB = File(root, "mmproj-f32.gguf").apply { writeText("projector b is larger") }
+
+            assertEquals(null, chooseGenieXVisionProjector(model, listOf(genericA, genericB)))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun projectorDiscoveryAcceptsOneGenericProjectorBesideTheModel() {
+        val root = Files.createTempDirectory("mca-geniex-projectors-single-generic").toFile()
+        try {
+            val model = File(root, "model-Q4_K_M.gguf").apply { writeText("model") }
+            val projector = File(root, "mmproj-f16.gguf").apply { writeText("projector") }
+
+            assertEquals(projector.canonicalFile, chooseGenieXVisionProjector(model, listOf(projector)))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun vlmMessageParsingInjectsOnlyCurrentUserImages() {
         val messages = genieXVlmMessagesFromJson(
             """
@@ -100,6 +177,24 @@ class LocalChatRunnerTest {
         assertEquals(3, messages.size)
         assertEquals("describe this", messages.last().contents.first().text)
         assertEquals(listOf("/tmp/current.jpg"), genieXCurrentTurnImagePaths(messages).toList())
+    }
+
+    @Test
+    fun vlmMessageParsingAcceptsResponsesInputImageAndFileUriVariants() {
+        val messages = genieXVlmMessagesFromJson(
+            """
+            [{"role":"user","content":[
+              {"type":"input_image","input_image":{"url":"file:/tmp/a.jpg"}},
+              {"type":"image","image":{"path":"file:///tmp/b.jpg"}},
+              {"type":"image_url","image_url":{"url":"file:///tmp/a.jpg"}}
+            ]}]
+            """.trimIndent()
+        )
+
+        // a.jpg is repeated in two URI spellings and must remain one image;
+        // input_image must not be silently dropped before the native call.
+        assertEquals(listOf("/tmp/a.jpg", "/tmp/b.jpg"), genieXCurrentTurnImagePaths(messages).toList())
+        assertEquals(2, messages.single().contents.size)
     }
 
     @Test

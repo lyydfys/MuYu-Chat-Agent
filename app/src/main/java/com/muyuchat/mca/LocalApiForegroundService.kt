@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -17,31 +18,97 @@ import com.muyuchat.mca.R
 class LocalApiForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
-        ensureChannel()
+        // Android starts the foreground-service timeout as soon as
+        // startForegroundService() is accepted. Promote from onCreate before any
+        // queued start/stop command can race with onStartCommand().
+        runCatching {
+            ensureChannel()
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(openPort = requestedOpenPort),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+            synchronized(stateLock) {
+                serviceCreated = true
+                serviceForeground = true
+            }
+        }.onFailure { error ->
+            Log.e(TAG, "Unable to promote local API service during creation", error)
+            synchronized(stateLock) {
+                serviceCreated = true
+                serviceForeground = false
+            }
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // The API server and its providers belong to MainViewModel. If Android recreates this
-        // notification-only service after the app process was killed, there is no server here to
-        // advertise or safely reconstruct. Stop the orphaned restart instead of showing a false
-        // "running" notification.
-        if (intent == null) {
-            stopSelf(startId)
-            return START_NOT_STICKY
+        val openPort = intent?.getBooleanExtra(EXTRA_OPEN_PORT, requestedOpenPort) ?: requestedOpenPort
+        synchronized(stateLock) {
+            requestedOpenPort = openPort
         }
-
-        val openPort = intent.getBooleanExtra(EXTRA_OPEN_PORT, false)
-        val notification = buildNotification(openPort)
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-        )
+        runCatching {
+            ensureChannel()
+            // onCreate normally performed the first promotion. Repeat it here to
+            // update the notification after a bind-mode change and to keep the
+            // null-intent recreation path safe on OEM Android builds.
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(openPort),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+            synchronized(stateLock) {
+                serviceCreated = true
+                serviceForeground = true
+            }
+            if (intent == null || !isRequested()) {
+                stopSelf(startId)
+            }
+        }.onFailure { error ->
+            // Android may reject promotion independently of the start request.
+            // Keep that platform failure out of the main thread's uncaught path.
+            Log.e(TAG, "Unable to promote local API to foreground", error)
+            synchronized(stateLock) { serviceForeground = false }
+            stopSelf(startId)
+        }
         return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        val restartAfterDestroy = synchronized(stateLock) {
+            val wasForeground = serviceForeground
+            serviceCreated = false
+            serviceForeground = false
+            // A future start must issue a new startForegroundService request.
+            startRequested = false
+            requestedRunning && wasForeground
+        }
+        runCatching {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        }
+        super.onDestroy()
+        // A stop request can overlap a new start request while Android is still
+        // dispatching onDestroy(). Re-issue the request after teardown when the
+        // desired state is running, so the new owner cannot be stranded without
+        // a service notification.
+        if (restartAfterDestroy) {
+            runCatching {
+                synchronized(stateLock) { startRequested = true }
+                ContextCompat.startForegroundService(
+                    applicationContext,
+                    Intent(applicationContext, LocalApiForegroundService::class.java)
+                        .putExtra(EXTRA_OPEN_PORT, requestedOpenPort)
+                )
+            }.onFailure { error ->
+                synchronized(stateLock) { startRequested = false }
+                Log.e(TAG, "Unable to restart local API foreground service", error)
+            }
+        }
+    }
 
     private fun buildNotification(openPort: Boolean) =
         NotificationCompat.Builder(this, CHANNEL_ID)
@@ -77,18 +144,70 @@ class LocalApiForegroundService : Service() {
     }
 
     companion object {
+        private const val TAG = "McaLocalApiService"
         private const val CHANNEL_ID = "mca_local_api"
         private const val NOTIFICATION_ID = 11435
         private const val EXTRA_OPEN_PORT = "open_port"
+        private val stateLock = Any()
+        @Volatile private var requestedRunning = false
+        @Volatile private var requestedOpenPort = false
+        @Volatile private var startRequested = false
+        @Volatile private var serviceCreated = false
+        @Volatile private var serviceForeground = false
 
-        fun start(context: Context, openPort: Boolean) {
-            val intent = Intent(context, LocalApiForegroundService::class.java)
-                .putExtra(EXTRA_OPEN_PORT, openPort)
-            ContextCompat.startForegroundService(context, intent)
+        fun start(context: Context, openPort: Boolean): Boolean =
+            runCatching {
+                val shouldStart = synchronized(stateLock) {
+                    requestedRunning = true
+                    requestedOpenPort = openPort
+                    if (startRequested) {
+                        false
+                    } else {
+                        startRequested = true
+                        true
+                    }
+                }
+                if (shouldStart) {
+                    val intent = Intent(context, LocalApiForegroundService::class.java)
+                        .putExtra(EXTRA_OPEN_PORT, openPort)
+                    ContextCompat.startForegroundService(context, intent)
+                }
+                true
+            }.onFailure { error ->
+                synchronized(stateLock) {
+                    requestedRunning = false
+                    startRequested = false
+                }
+                Log.e(TAG, "Unable to start local API foreground service", error)
+            }.getOrDefault(false)
+
+        /**
+         * Returns true only after Android has accepted the service and the
+         * notification-backed foreground promotion has completed.  Starting a
+         * foreground service is asynchronous; callers must not expose a
+         * listener that depends on the service until this becomes true.
+         */
+        fun isForegroundReady(): Boolean = synchronized(stateLock) {
+            requestedRunning && serviceCreated && serviceForeground
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, LocalApiForegroundService::class.java))
+            val shouldStop = synchronized(stateLock) {
+                requestedRunning = false
+                // If the start request has not reached onCreate yet, do not cancel
+                // it. The service will promote itself first and then observe the
+                // false desired state in onStartCommand(). This closes the Android
+                // start/stop race that caused the process crash.
+                serviceCreated || serviceForeground
+            }
+            if (!shouldStop) return
+            runCatching {
+                context.stopService(Intent(context, LocalApiForegroundService::class.java))
+            }.onFailure { error ->
+                Log.w(TAG, "Unable to stop local API foreground service", error)
+            }
         }
+
+        private fun isRequested(): Boolean = requestedRunning
     }
 }

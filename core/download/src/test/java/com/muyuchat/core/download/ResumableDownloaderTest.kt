@@ -75,6 +75,36 @@ class ResumableDownloaderTest {
         }
     }
 
+    @Test
+    fun zeroByteResponseIsRejectedWithoutPublishingAnEmptyFinalFile() = runBlocking {
+        FixedContentServer(byteArrayOf()).use { server ->
+            val tempDir = Files.createTempDirectory("mca-empty-download-test").toFile()
+            try {
+                val temp = File(tempDir, "model.gguf.part")
+                val final = File(tempDir, "model.gguf")
+                val remote = RemoteModelFile(
+                    repoId = "owner/model",
+                    revision = "main",
+                    path = "model.gguf",
+                    name = "model.gguf",
+                    sizeBytes = null,
+                    sha256 = null,
+                    downloadUrl = server.url
+                )
+
+                val error = runCatching {
+                    ResumableDownloader(maxRetries = 0)
+                        .download(remote, temp, final)
+                }.exceptionOrNull()
+
+                assertTrue(error?.message.orEmpty().contains("内容为空"))
+                assertFalse("An empty response must never become a completed model", final.exists())
+            } finally {
+                tempDir.deleteRecursively()
+            }
+        }
+    }
+
     private class PartialContentServer(
         private val bytes: ByteArray,
         private val firstChunkBytes: Int

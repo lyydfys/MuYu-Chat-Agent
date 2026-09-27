@@ -153,10 +153,10 @@ class LocalImagePromptLanguageTest {
     }
 
     @Test
-    fun `all eighteen recommended profiles require canonical English tags until native topology is verified`() {
+    fun `all nineteen recommended profiles require canonical English tags until native topology is verified`() {
         val targets = ImageExecutionProfileResolver.builtInTargets
 
-        assertEquals(18, targets.size)
+        assertEquals(19, targets.size)
         targets.forEach { target ->
             val profile = requireNotNull(
                 ImageExecutionProfileResolver.legacyBuiltInProfileForCompatibility(

@@ -24,6 +24,35 @@ import org.junit.Test
 
 class McaInferenceServicePhaseEventTest {
     @Test
+    fun finalMetricsDistinguishNativeCountsFromRuntimeEstimates() = runBlocking {
+        for (estimated in listOf(false, true)) {
+            val runner = PhaseRunner().apply {
+                enqueue("answer")
+                tokenUsageOverride = JSONObject()
+                    .put("promptTokens", 4000)
+                    .put("completionTokens", 32)
+                    .put("promptTokensEstimated", estimated)
+                    .put("completionTokensEstimated", estimated)
+            }
+            val done = loadedService(runner).streamChat(request()).toList().last() as GenerateEvent.Done
+            assertEquals(4000, done.stats.promptTokens)
+            assertEquals(32, done.stats.completionTokens)
+            assertEquals(estimated, done.stats.promptTokensEstimated)
+            assertEquals(estimated, done.stats.completionTokensEstimated)
+        }
+    }
+
+    @Test
+    fun missingNativeTokenCountsRemainMarkedAsEstimatesAtCompletion() = runBlocking {
+        val runner = PhaseRunner().apply { enqueue("answer") }
+        val done = loadedService(runner).streamChat(request()).toList().last() as GenerateEvent.Done
+        assertTrue(done.stats.promptTokens > 0)
+        assertTrue(done.stats.completionTokens > 0)
+        assertTrue(done.stats.promptTokensEstimated)
+        assertTrue(done.stats.completionTokensEstimated)
+    }
+
+    @Test
     fun streamEmitsOrderedIndeterminatePhasesAroundNativeGeneration() = runBlocking {
         val runner = PhaseRunner().apply { enqueue("answer") }
         val service = loadedService(runner)
@@ -325,6 +354,7 @@ class McaInferenceServicePhaseEventTest {
         var prefillStepsDuringBegin: List<TokenProgress> = emptyList()
         var terminalPrefillTokens: Int = 0
         var terminalPrefillMs: Long = 0L
+        var tokenUsageOverride: JSONObject? = null
         var sessionKnownLost: Boolean = false
         val timeline = Collections.synchronizedList(mutableListOf<String>())
         var generateCalls = 0
@@ -409,7 +439,9 @@ class McaInferenceServicePhaseEventTest {
             blockedGenerateRelease?.countDown()
         }
         override fun isSessionKnownLost(): Boolean = sessionKnownLost
-        override fun getRuntimeStatsJson(): String = statsJson
+        override fun getRuntimeStatsJson(): String = JSONObject(statsJson).apply {
+            tokenUsageOverride?.let { usage -> usage.keys().forEach { key -> put(key, usage.get(key)) } }
+        }.toString()
         override fun shutdown() = Unit
 
         fun enqueue(vararg values: String) {

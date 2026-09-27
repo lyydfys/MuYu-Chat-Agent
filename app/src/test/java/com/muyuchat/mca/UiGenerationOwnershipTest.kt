@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import java.util.concurrent.atomic.AtomicLong
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -29,21 +30,21 @@ class UiGenerationOwnershipTest {
     }
 
     @Test
-    fun backgroundInvalidatesAPendingRegenerationBeforeItsRoomCallback() {
+    fun backgroundKeepsAPendingGenerationEligibleForActivation() {
         val sequence = AtomicLong(0L)
         val ownership = UiGenerationOwnership(sequence)
         val pending = requireNotNull(ownership.reserveStart())
 
         val background = ownership.background()
 
-        assertTrue(background.pendingCancelled)
+        assertFalse(background.pendingCancelled)
         assertNull(background.owner)
-        assertTrue(sequence.get() > pending.runId)
-        assertFalse(ownership.activate(pending, Any()))
+        assertEquals(pending.runId, sequence.get())
+        assertTrue(ownership.activate(pending, Any()))
     }
 
     @Test
-    fun oldBackgroundActionCannotReleaseOrCancelAReplacementEpoch() {
+    fun explicitCancelStillWinsAfterBackgrounding() {
         val sequence = AtomicLong(0L)
         val ownership = UiGenerationOwnership(sequence)
         val oldOwner = Any()
@@ -58,22 +59,26 @@ class UiGenerationOwnershipTest {
         )
 
         val background = ownership.background()
-        assertSame(oldOwner, background.owner)
-        assertTrue(background.stopLocalRuntime)
+        assertNull(background.owner)
+        assertFalse(background.stopLocalRuntime)
+
+        // The active request remains owned while backgrounded. A user pressing
+        // Stop is still an explicit cancellation and must invalidate it.
+        val stopped = ownership.cancelCurrent()
+        assertSame(oldOwner, stopped.owner)
+        assertTrue(stopped.stopLocalRuntime)
 
         ownership.foreground()
         val replacementOwner = Any()
         val replacement = requireNotNull(ownership.reserveStart())
         assertTrue(ownership.activate(replacement, replacementOwner))
-        ownership.finish(oldReservation.runId, oldOwner)
-
         val current = ownership.cancelCurrent()
         assertSame(replacementOwner, current.owner)
         assertFalse(current.stopLocalRuntime)
     }
 
     @Test
-    fun replacementReservationInvalidatesTheBackgroundFinalizationEpoch() {
+    fun backgroundDoesNotAdvanceGenerationEpoch() {
         val sequence = AtomicLong(0L)
         val ownership = UiGenerationOwnership(sequence)
         val oldOwner = Any()
@@ -81,7 +86,8 @@ class UiGenerationOwnershipTest {
         assertTrue(ownership.activate(oldReservation, oldOwner))
 
         val background = ownership.background()
-        assertTrue(sequence.get() == background.invalidatedRunId)
+        assertTrue(sequence.get() == oldReservation.runId)
+        assertTrue(background.invalidatedRunId == oldReservation.runId)
 
         ownership.foreground()
         val replacement = requireNotNull(ownership.reserveStart())

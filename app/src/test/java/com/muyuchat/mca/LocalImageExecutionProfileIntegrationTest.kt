@@ -1,16 +1,104 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.download.ModelScopeClient
 import java.io.RandomAccessFile
 import java.nio.file.Files
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalImageExecutionProfileIntegrationTest {
+    @Test
+    fun `upgrading installed Gen5 profiles retains publisher subdirectories before generation`() {
+        val ids = setOf("qualcomm_sd15_gen5_qnn", "qualcomm_sd21_gen5_qnn", "qualcomm_controlnet_canny_gen5_qnn")
+        ModelScopeClient().recommendedModels().filter { it.id in ids }.forEach { recommendation ->
+            val root = Files.createTempDirectory("gen5-installed-upgrade").toFile()
+            try {
+                val bundle = requireNotNull(recommendation.imageEngineBundle)
+                val wrapper = recommendation.recommendedFileName.removeSuffix(".zip")
+                val directory = root.resolve(wrapper).apply { mkdirs() }
+                val primary = directory.resolve("unet.bin").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+                val current = requireNotNull(materializeDownloadedImageExecutionProfile(bundle, primary.sha256ForProfile()))
+                fun ImageGraphArtifactContract?.installedV2() = this?.let { artifact ->
+                    val relative = "$wrapper/${artifact.relativePath}"
+                    root.resolve(relative).takeUnless { it.exists() }?.writeBytes(byteArrayOf(4))
+                    artifact.copy(relativePath = relative, graphName = "model")
+                }
+                val old = current.copy(profileRevision = 2, graph = current.graph.copy(
+                    textEncoder = current.graph.textEncoder.installedV2(),
+                    unet = current.graph.unet.installedV2(),
+                    vae = current.graph.vae.installedV2(),
+                    controlNet = current.graph.controlNet.installedV2()
+                ))
+                val components = JSONArray()
+                listOfNotNull(old.graph.textEncoder, old.graph.unet, old.graph.vae, old.graph.controlNet).forEach { graph ->
+                    components.put(JSONObject()
+                        .put("role", if (graph == old.graph.unet) "DIFFUSION" else "CONFIG")
+                        .put("path", graph.relativePath).put("required", true)
+                        .put("sourceRepo", recommendation.repoId)
+                        .put("sourcePath", "${recommendation.recommendedFileName}!/${graph.relativePath}"))
+                }
+                bundle.requiredComponents.filterNot { it.fileName.endsWith(".zip") }.forEach { sidecar ->
+                    // Use valid publisher sidecar fields so the production parser participates
+                    // in the upgrade test instead of failing on an empty JSON placeholder.
+                    val content = when (sidecar.relativePath.substringAfterLast('/')) {
+                        "scheduler_config.json" -> JSONObject()
+                            .put("_class_name", if (current.family == LocalImageModelFamily.SD21) "DDIMScheduler" else "PNDMScheduler")
+                            .put("beta_start", 0.00085).put("beta_end", 0.012)
+                            .put("beta_schedule", "scaled_linear").put("num_train_timesteps", 1_000)
+                            .put("set_alpha_to_one", false).put("skip_prk_steps", true)
+                            .put("steps_offset", 1).put("clip_sample", false)
+                            .apply {
+                                if (current.family == LocalImageModelFamily.SD21) put("prediction_type", "v_prediction")
+                            }
+                        "tokenizer_config.json" -> JSONObject().put("model_max_length", 77)
+                            .put("bos_token", "<|startoftext|>").put("eos_token", "<|endoftext|>")
+                            .put("pad_token", "<|endoftext|>")
+                        else -> JSONObject()
+                    }
+                    root.resolve(sidecar.relativePath).apply { parentFile.mkdirs(); writeText(content.toString()) }
+                    components.put(JSONObject().put("role", sidecar.role.name)
+                        .put("path", sidecar.relativePath).put("required", true)
+                        .put("sourceRepo", sidecar.repoId).put("sourcePath", sidecar.fileName))
+                }
+                val manifest = JSONObject().put("schema", "mca.image_engine.bundle.v1")
+                    .put("id", bundle.id).put("recommendationId", recommendation.id)
+                    .put("runtime", "QNN_HTP").put("family", current.family.name)
+                    .put("task", current.task.name).put("components", components)
+                    .put("executionProfile", ImageExecutionProfileJson.toJson(old))
+                root.resolve("manifest.json").writeText(manifest.toString())
+                val resolution = resolveLocalImageExecutionProfile(
+                    model = LocalImageModelRecord(
+                        id = recommendation.id, displayName = recommendation.title,
+                        path = primary.absolutePath, fileName = primary.name,
+                        sizeBytes = primary.length(), sha256 = primary.sha256ForProfile(),
+                        runtime = LocalImageRuntime.QNN_HTP, family = current.family,
+                        bundleRoot = root.absolutePath, source = "hugging_face:${recommendation.repoId}"
+                    ),
+                    options = LocalImageGenerationOptions(), bundleRoot = root
+                )
+                assertEquals(3, resolution.profile.profileRevision)
+                listOfNotNull(resolution.profile.graph.textEncoder, resolution.profile.graph.unet,
+                    resolution.profile.graph.vae, resolution.profile.graph.controlNet).forEach { artifact ->
+                    assertTrue(artifact.relativePath.startsWith("$wrapper/"))
+                    assertTrue(root.resolve(artifact.relativePath).isFile)
+                    assertFalse(artifact.graphName == "model")
+                }
+                assertEquals(current.graph.unet!!.graphName, resolution.layers.resolved.graphName)
+                // Resolution is request-scoped; the user's installed metadata is not rewritten.
+                assertEquals(2, JSONObject(root.resolve("manifest.json").readText())
+                    .getJSONObject("executionProfile").getInt("profileRevision"))
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
     @Test
     fun `semantic smoke low-step marker is internal and preserves normal qnn quality floor`() {
         val root = Files.createTempDirectory("image-profile-semantic-low-step").toFile()
@@ -47,6 +135,31 @@ class LocalImageExecutionProfileIntegrationTest {
             assertEquals(4, smoke.profile.scheduler.minSteps)
             assertEquals(4, smoke.profile.defaults.steps)
             assertFalse(LocalImageGenerationOptions(allowLowStepSmoke = true).toJson().has("allowLowStepSmoke"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `MNN Qwen tokenizer text table is not parsed as a JSON sidecar`() {
+        val recommendation = ModelScopeClient().recommendedModels()
+            .single { it.id == "qwen_image_21_mnn_opencl" }
+        val profile = requireNotNull(
+            materializeDownloadedImageExecutionProfile(
+                bundle = requireNotNull(recommendation.imageEngineBundle),
+                modelFingerprint = FINGERPRINT
+            )
+        ).let { profile ->
+            profile.copy(graph = profile.graph.copy(tokenizerSidecar = "text_encoder/tokenizer.txt"))
+        }
+        val root = Files.createTempDirectory("qwen-tokenizer-sidecar").toFile()
+        try {
+            root.resolve("text_encoder/tokenizer.txt").apply {
+                requireNotNull(parentFile).mkdirs()
+                writeText("430\n", Charsets.UTF_8)
+            }
+
+            assertNull(parseLocalImageExecutionProfileSidecars(root, profile))
         } finally {
             root.deleteRecursively()
         }

@@ -30,9 +30,12 @@ internal fun userNotice(message: String): UserNotice? = when {
     message.startsWith("请先在模型") || message.contains("未加载模型") ->
         UserNotice("尚未准备好模型", "选择已有模型，或下载一个推荐模型。", GuidanceAction.MODELS)
     message.contains("失败") || message.contains("不完整") || message.contains("不可用") ||
-        message.contains("不支持") || message.contains("无效") || message.contains("必须") ||
-        message.contains("请先选择") || message.contains("超过") ||
-        message.contains("请使用英文") || message.startsWith("当前模型仅支持英文") -> when {
+            message.contains("不支持") || message.contains("无效") || message.contains("必须") ||
+            message.contains("请先选择") || message.contains("超过") ||
+            message.contains("请使用英文") || message.startsWith("当前模型仅支持英文") ||
+            message.contains("分词") || message.contains("Binder", ignoreCase = true) ||
+            message.contains("worker", ignoreCase = true) || message.contains("隔离进程") ||
+            message.contains("超时") || message.contains("卡住") -> when {
             message.contains("不完整") || message.contains("组件校验失败") ->
                 UserNotice("模型文件不完整或校验失败", "在模型管理中检查缺失组件，再重新下载或导入。", GuidanceAction.MODELS)
             message.startsWith("请使用英文") || message.startsWith("当前模型仅支持英文") ->
@@ -42,7 +45,11 @@ internal fun userNotice(message: String): UserNotice? = when {
                 UserNotice("生成设置需要调整", "返回生成页查看参数，使用当前模型支持的值。", GuidanceAction.EDIT)
             message.contains("请先选择") || message.contains("不支持此生成方式") ->
                 UserNotice("生成方式或输入图片尚未就绪", "选择支持的生成方式，并补齐原图、蒙版或控制图。", GuidanceAction.EDIT)
-            else -> UserNotice("本次操作未完成", "查看错误详情后重试；持续失败时可复制详情反馈。", GuidanceAction.DETAILS)
+            message.contains("分词") || message.contains("Binder", ignoreCase = true) ||
+                message.contains("worker", ignoreCase = true) || message.contains("隔离进程") ||
+                message.contains("超时") || message.contains("卡住") ->
+                UserNotice("本地推理进程未完成", "等待进程恢复后重试；如果仍失败，请重新加载模型并查看详情。", GuidanceAction.DETAILS)
+            else -> UserNotice("请求未完成", "查看错误详情中的阶段和原因后重试；持续失败时重新加载模型或更换模型。", GuidanceAction.DETAILS)
         }
     else -> null
 }

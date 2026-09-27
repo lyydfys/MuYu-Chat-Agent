@@ -53,6 +53,37 @@ class AppForegroundRecoveryContractTest {
             observed
         )
         assertEquals(ProcessUiLifecycleEvent.BACKGROUNDED, relay.events.first())
+        assertEquals(ProcessUiLifecycleEvent.BACKGROUNDED, relay.current())
+    }
+
+    @Test
+    fun localApiForegroundServicePromotesBeforeQueuedCommandsCanStopIt() {
+        val service = sourceFile("app/src/main/java/com/muyuchat/mca/LocalApiForegroundService.kt")
+        val onCreate = functionBody(service, "override fun onCreate()")
+        val onStart = functionBody(service, "override fun onStartCommand(")
+        val stop = functionBody(service, "fun stop(context: Context)")
+
+        assertTrue(onCreate.contains("ServiceCompat.startForeground("))
+        assertTrue(onCreate.indexOf("ServiceCompat.startForeground(") < onCreate.indexOf("serviceForeground = true"))
+        assertTrue(onStart.contains("if (intent == null || !isRequested())"))
+        assertTrue(stop.contains("serviceCreated || serviceForeground"))
+        assertTrue(stop.contains("do not cancel"))
+        assertTrue(service.contains("restartAfterDestroy"))
+        assertTrue(service.contains("requestedRunning && wasForeground"))
+    }
+
+    @Test
+    fun initialApiRecoveryDoesNotDependOnAConsumedForegroundReplay() {
+        val application = sourceFile("app/src/main/java/com/muyuchat/mca/McaApplication.kt")
+        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+
+        assertTrue(application.contains("fun current(): ProcessUiLifecycleEvent?"))
+        assertTrue(viewModel.contains("if (initialApiPreferences.apiEnabled)"))
+        assertFalse(viewModel.contains("initialApiPreferences.apiEnabled &&\n            ProcessUiLifecycleEvents.current() != ProcessUiLifecycleEvent.FOREGROUNDED"))
+        val foreground = functionBody(viewModel, "fun onAppForegrounded()")
+        assertTrue(foreground.contains("apiLifecycleRequestJob?.let"))
+        assertTrue(foreground.contains("pending.join()"))
+        assertFalse(foreground.contains("apiLifecycleRequestJob?.cancel()"))
     }
 
     @Test
@@ -87,31 +118,76 @@ class AppForegroundRecoveryContractTest {
     }
 
     @Test
-    fun backgroundStopCannotCancelAReplacementGenerationJob() {
+    fun backgroundingPreservesGenerationAndUsesAForegroundService() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val body = functionBody(viewModel, "fun onAppBackgrounded()")
 
-        assertTrue(body.contains("val uiRunId = generationRunSequence.get()"))
-        assertTrue(body.contains("engine.activeGenerationStopToken()"))
-        assertTrue(body.contains("token.requestId.startsWith(\"ui-${'$'}uiRunId-\")"))
-        assertTrue(body.contains("val cancellation = uiGenerationOwnership.background()"))
-        assertTrue(body.contains("val backgroundedJob = cancellation.owner as? Job"))
-        assertTrue(body.contains("generationRunSequence.get() != cancellation.invalidatedRunId"))
-        assertTrue(
-            body.split("generationRunSequence.get() != cancellation.invalidatedRunId").size - 1 >= 3
-        )
-        assertTrue(body.contains("backgroundedJob.cancel()"))
-        assertTrue(body.contains("engine.stopGenerationIfActive(expectedStopToken)"))
-        assertTrue(
-            body.split("persistChatSessions(generationRunId = cancellation.invalidatedRunId)").size - 1 == 2
-        )
-        assertTrue(
-            body.indexOf("backgroundedJob.cancel()") <
-                body.indexOf("engine.stopGenerationIfActive(expectedStopToken)")
-        )
-        assertTrue(body.contains("nativeStopIssued = false"))
-        assertFalse(body.contains("engine.stopGeneration()"))
-        assertFalse(body.contains("generationJob?.cancel()"))
+        assertTrue(body.contains("uiGenerationOwnership.background()"))
+        assertTrue(body.contains("pauseAgentTuning()"))
+        assertFalse(body.contains("engine.stopGenerationIfActive"))
+        assertFalse(body.contains("backgroundedJob.cancel()"))
+
+        assertTrue(viewModel.contains("McaGenerationForegroundService.acquire("))
+        assertTrue(viewModel.contains("McaGenerationForegroundService.release("))
+        assertTrue(viewModel.contains("McaGenerationForegroundService.KIND_CHAT"))
+    }
+
+    @Test
+    fun imagesAndUpscaleKeepTheCallerAliveUntilTheJobHasFinished() {
+        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        for (signature in listOf("private fun enqueueImageGeneration(", "fun upscaleImageAsset(")) {
+            val body = functionBody(viewModel, signature)
+            val acquire = body.indexOf("val foregroundLease = McaGenerationForegroundService.acquire(")
+            val launch = body.indexOf("val executionJob = viewModelScope.launch")
+            val completion = body.indexOf("executionJob.invokeOnCompletion")
+            val release = body.indexOf("McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)")
+            assertTrue(acquire >= 0 && acquire < launch)
+            assertTrue(completion > launch && release > completion)
+            assertTrue(body.substring(completion, release).contains("finally"))
+        }
+    }
+
+    @Test
+    fun regenerationIsProtectedBeforeAsynchronousPersistence() {
+        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val body = functionBody(viewModel, "fun regenerateLastResponse()")
+        val acquire = body.indexOf("val preparationLease = McaGenerationForegroundService.acquire(")
+        val persist = body.indexOf("val persistenceJob = persistConversationMutation(")
+        assertTrue(acquire >= 0 && persist > acquire)
+        assertTrue(body.contains("persistenceJob.invokeOnCompletion"))
+        assertTrue(body.contains("McaGenerationForegroundService.release(getApplication<Application>(), preparationLease)"))
+    }
+
+    @Test
+    fun apiStartRejectionReachesTheExistingLifecycleRollback() {
+        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val body = functionBody(viewModel, "private fun setLocalApiForegroundService(")
+        assertTrue(body.contains("check(LocalApiForegroundService.start("))
+    }
+
+    @Test
+    fun apiListenerIsPublishedOnlyAfterForegroundServicePromotion() {
+        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val body = functionBody(viewModel, "private suspend fun applyLocalApiState(")
+        val service = sourceFile("app/src/main/java/com/muyuchat/mca/LocalApiForegroundService.kt")
+
+        assertTrue(body.contains("ensureLocalApiForegroundServiceReady("))
+        assertTrue(body.indexOf("ensureLocalApiForegroundServiceReady(") < body.indexOf("startApiServer("))
+        assertTrue(viewModel.contains("awaitLocalApiForegroundServiceReady()"))
+        assertTrue(service.contains("fun isForegroundReady(): Boolean"))
+    }
+
+    @Test
+    fun generationForegroundServiceIsDeclaredAsAUserVisibleSpecialUseService() {
+        val manifest = sourceFile("app/src/main/AndroidManifest.xml")
+        val service = sourceFile("app/src/main/java/com/muyuchat/mca/McaGenerationForegroundService.kt")
+
+        assertTrue(manifest.contains(".McaGenerationForegroundService"))
+        assertTrue(manifest.contains("android:foregroundServiceType=\"specialUse\""))
+        assertTrue(manifest.contains("mca_user_generation"))
+        assertTrue(service.contains("ContextCompat.startForegroundService"))
+        assertTrue(service.contains("ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE"))
+        assertTrue(service.contains("START_NOT_STICKY"))
     }
 
     @Test
@@ -148,6 +224,8 @@ class AppForegroundRecoveryContractTest {
         assertTrue(release.contains("loadedModelJsonProvider = { \"{}\" }"))
         assertTrue(release.contains("benchmarkJsonProvider = { \"{}\" }"))
         assertTrue(release.contains("controlPlane = null"))
+        assertTrue(cleared.contains("forceServerStop = releasedRuntimeOwner"))
+        assertTrue(viewModel.contains("forceServerStop = true"))
     }
 
     @Test

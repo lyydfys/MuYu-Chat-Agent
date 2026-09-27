@@ -38,12 +38,18 @@ class LiteRtQualcommRuntimeStagerTest {
     @Test
     fun socHintsSelectOnlyExactPackagedTransports() {
         assertEquals("v79", LiteRtQualcommRuntimeStager.variantForSocModel("SM8750P"))
+        assertEquals("v79", LiteRtQualcommRuntimeStager.variantForSocModel("SM8735"))
+        assertEquals("v79", LiteRtQualcommRuntimeStager.variantForSocModel("69"))
+        assertEquals("v79", LiteRtQualcommRuntimeStager.variantForSocModel("85"))
+        assertEquals("v81", LiteRtQualcommRuntimeStager.variantForSocModel("87"))
         assertEquals("v79", LiteRtQualcommRuntimeStager.variantForSocModel("sm8750"))
         assertEquals("v81", LiteRtQualcommRuntimeStager.variantForSocModel("SM8850"))
         assertEquals("v73", LiteRtQualcommRuntimeStager.variantForSocModel("SM8550P"))
         assertEquals("v73", LiteRtQualcommRuntimeStager.variantForSocModel("QCS8550"))
         assertEquals("v75", LiteRtQualcommRuntimeStager.variantForSocModel("SM8650"))
         assertEquals("v75", LiteRtQualcommRuntimeStager.variantForSocModel("SM8635"))
+        assertEquals("v73", LiteRtQualcommRuntimeStager.variantForSocModel("66"))
+        assertEquals("v75", LiteRtQualcommRuntimeStager.variantForSocModel("68"))
         assertNull(LiteRtQualcommRuntimeStager.variantForSocModel("SM9999"))
         assertNull(LiteRtQualcommRuntimeStager.variantForSocModel(null))
     }

@@ -19,7 +19,8 @@ internal sealed interface OpenAiChatParseResult {
 internal data class OpenAiRequestRejection(
     val code: String,
     val message: String,
-    val detailsJson: String = "{}"
+    val detailsJson: String = "{}",
+    val httpStatus: Int = 409
 )
 
 internal class OpenAiRequestRejectedException(
@@ -71,12 +72,52 @@ internal object OpenAiApiCompat {
 
     fun parseChatRequestChecked(
         body: String,
-        baseParams: GenerationParams = GenerationParams()
+        baseParams: GenerationParams = GenerationParams(),
+        requireJsonObject: Boolean = false,
+        requireModel: Boolean = false,
+        requireNonEmptyMessages: Boolean = false
     ): OpenAiChatParseResult {
-        val root = runCatching { JSONObject(body) }.getOrNull()
-            ?: return OpenAiChatParseResult.Success(
-                ChatRequest(listOf(ChatMessage(Role.USER, body)), params = baseParams)
+        val root = runCatching { JSONObject(body) }.getOrElse {
+            if (!requireJsonObject) {
+                return OpenAiChatParseResult.Success(
+                    ChatRequest(listOf(ChatMessage(Role.USER, body)), params = baseParams)
+                )
+            }
+            return OpenAiChatParseResult.Rejected(
+                OpenAiRequestRejection(
+                    code = "invalid_request",
+                    message = "Request body must be a valid JSON object.",
+                    detailsJson = JSONObject().put("param", "body").toString(),
+                    httpStatus = 400
+                )
             )
+        }
+        if (requireModel) {
+            val model = root.opt("model")
+            if (model !is String || model.trim().isBlank()) {
+                return OpenAiChatParseResult.Rejected(
+                    OpenAiRequestRejection(
+                        code = "invalid_request",
+                        message = "The request body must include a non-empty string 'model'.",
+                        detailsJson = JSONObject().put("param", "model").toString(),
+                        httpStatus = 400
+                    )
+                )
+            }
+        }
+        if (requireNonEmptyMessages) {
+            val messages = root.opt("messages")
+            if (!root.has("messages") || messages !is JSONArray || messages.length() == 0) {
+                return OpenAiChatParseResult.Rejected(
+                    OpenAiRequestRejection(
+                        code = "invalid_request",
+                        message = "The request body must include a non-empty array 'messages'.",
+                        detailsJson = JSONObject().put("param", "messages").toString(),
+                        httpStatus = 400
+                    )
+                )
+            }
+        }
         val restrictedFields = root.restrictedParameterPaths()
         if (restrictedFields.isNotEmpty()) {
             return OpenAiChatParseResult.Rejected(
@@ -101,6 +142,10 @@ internal object OpenAiApiCompat {
 
     fun requestedModel(body: String): String? =
         runCatching { JSONObject(body).optString("model").trim().takeIf { it.isNotBlank() } }.getOrNull()
+
+    /** Exposes the same native/runtime parameter guard to other local OpenAI protocol adapters. */
+    internal fun restrictedParameterPaths(root: JSONObject): List<String> =
+        root.restrictedParameterPaths()
 
     private fun JSONObject.toGenerationParams(baseParams: GenerationParams): GenerationParams {
         val hasShowReasoning = has("show_reasoning") && !isNull("show_reasoning")
@@ -268,13 +313,22 @@ internal object OpenAiApiCompat {
             for (index in 0 until value.length()) {
                 val part = value.optJSONObject(index) ?: continue
                 val type = part.optString("type")
-                if (type != "image_url" && type != "input_image") continue
-                val imageUrl = part.opt("image_url")
-                val url = when (imageUrl) {
-                    is JSONObject -> imageUrl.optString("url")
-                    is String -> imageUrl
-                    else -> part.optString("url")
-                }.trim()
+                if (type != "image_url" && type != "input_image" && type != "image") continue
+                // Clients use all three spellings for the same OpenAI-compatible
+                // image part.  Accept both nested and scalar values so the
+                // native runners always receive one normalized attachment.
+                val url = sequenceOf(
+                    part.opt("image_url"),
+                    part.opt("image"),
+                    part.opt("input_image"),
+                    part.opt("url")
+                ).mapNotNull { value ->
+                    when (value) {
+                        is JSONObject -> value.optString("url")
+                        is String -> value
+                        else -> null
+                    }
+                }.firstOrNull { it.isNotBlank() }.orEmpty().trim()
                 if (url.isBlank()) continue
                 add(
                     ChatImageAttachment(

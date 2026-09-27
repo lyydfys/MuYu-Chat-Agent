@@ -138,6 +138,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.rememberDateRangePickerState
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
@@ -174,10 +176,14 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
@@ -200,6 +206,12 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.ChatImageAttachment
+import com.muyuchat.core.engine.visionDeduplicationKey
+import com.muyuchat.core.engine.ChatGeneratedImageRequest
+import com.muyuchat.core.engine.ChatGeneratedImageOrigin
+import com.muyuchat.core.engine.ChatGeneratedImageStatus
+import com.muyuchat.core.engine.ChatImageToolContinuationStatus
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
 import com.muyuchat.core.engine.GenerationPhase
@@ -225,6 +237,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.security.MessageDigest
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -245,6 +258,7 @@ private val McaInputPlaceholder = Color(0xFF8A93A3)
 
 data class ChatUiState(
     val modelLoadMessage: String? = null,
+    val modelReadinessLabel: String? = null,
     val messages: List<ChatMessage> = emptyList(),
     val history: List<ChatHistoryItem> = emptyList(),
     val localModels: List<ChatModelChoice> = emptyList(),
@@ -280,6 +294,8 @@ data class ChatUiState(
     val generationPersistProgress: PersistProgress? = null,
     val generationStats: RuntimeStats? = null,
     val promptContextUsage: PromptContextUsage? = null,
+    val contextCompressionThresholdPercent: Int = 80,
+    val contextCompressionPending: Boolean = false,
     val selectedModelId: String? = null,
     val selectedModelName: String? = null,
     val selectedModelIsCloud: Boolean = false,
@@ -287,9 +303,15 @@ data class ChatUiState(
     val selectedImageModelId: String? = null,
     val selectedImageModelName: String? = null,
     val selectedImageModelIsCloud: Boolean = false,
+    val assistantImageToolAvailable: Boolean = false,
+    val assistantImageToolUnavailableReason: String = "角色生图工具仅支持已配置的 OpenAI Responses 云端聊天。",
+    val assistantImageToolAutoApproval: Boolean = false,
+    val assistantImageToolCanChange: Boolean = false,
     val stats: RuntimeStats = RuntimeStats(),
     val apiEnabled: Boolean = false,
     val restEnabled: Boolean = false,
+    /** Sampling/reasoning values for the currently selected model. */
+    val generationParams: GenerationParams = GenerationParams(),
     val reasoningMode: ReasoningMode = ReasoningMode.OFF,
     val webSearchEnabled: Boolean = false,
     val webSearchConfigured: Boolean = false,
@@ -437,7 +459,13 @@ data class AssistantUiItem(
     val webSearchEnabled: Boolean,
     val fileContextEnabled: Boolean,
     val selected: Boolean,
-    val exportJson: String
+    val exportJson: String,
+    val topK: Int = 20,
+    val minP: Float = 0f,
+    val repeatPenalty: Float = 1.08f,
+    val presencePenalty: Float = 0f,
+    val frequencyPenalty: Float = 0.2f,
+    val stopWords: List<String> = emptyList()
 )
 
 data class AssistantEditorDraft(
@@ -454,7 +482,13 @@ data class AssistantEditorDraft(
     val reasoningMode: ReasoningMode,
     val memoryEnabled: Boolean,
     val webSearchEnabled: Boolean,
-    val fileContextEnabled: Boolean
+    val fileContextEnabled: Boolean,
+    val topK: Int = 20,
+    val minP: Float = 0f,
+    val repeatPenalty: Float = 1.08f,
+    val presencePenalty: Float = 0f,
+    val frequencyPenalty: Float = 0.2f,
+    val stopWords: List<String> = emptyList()
 )
 
 data class ImageAssetUiItem(
@@ -579,7 +613,10 @@ data class ImageGenerationUiJob(
     val modelId: String? = null,
     val modelName: String = "",
     val modelIsCloud: Boolean = false,
+    val chatSessionId: String? = null,
+    val chatMessageId: String? = null,
     val imageAssetId: String? = null,
+    val imageAssetIds: List<String> = emptyList(),
     val previewUriString: String? = null,
     val previewMode: String = "",
     val previewStep: Int = 0,
@@ -607,6 +644,89 @@ internal fun imageAssistantCardKind(
     image != null -> ImageAssistantCardKind.RESULT
     job?.terminal == true -> ImageAssistantCardKind.TERMINAL
     else -> ImageAssistantCardKind.CREATING
+}
+
+internal enum class ChatGeneratedImageUiState {
+    RUNNING,
+    AWAITING_APPROVAL,
+    RESULT,
+    FAILED,
+    CANCELLED,
+    INTERRUPTED,
+    MISSING_RESULT
+}
+
+internal fun chatGeneratedImageJob(
+    request: ChatGeneratedImageRequest,
+    jobs: List<ImageGenerationUiJob>,
+    activeConversationId: String?
+): ImageGenerationUiJob? {
+    val currentJobId = request.currentJobId
+    if (currentJobId != null) return jobs.firstOrNull { it.id == currentJobId }
+    return jobs.firstOrNull { job ->
+        job.chatMessageId == request.id && job.chatSessionId == activeConversationId
+    }
+}
+
+internal fun chatGeneratedImageAssetIds(
+    request: ChatGeneratedImageRequest,
+    job: ImageGenerationUiJob?
+): List<String> {
+    if (request.status == ChatGeneratedImageStatus.DONE && request.imageAssetIds.isNotEmpty()) {
+        return request.imageAssetIds
+    }
+    return job?.imageAssetIds.orEmpty().ifEmpty { job?.imageAssetId?.let(::listOf).orEmpty() }
+}
+
+/**
+ * Resolves the complete batch for a chat image event while preserving the
+ * generator's order.  The gallery list is not ordered by the chat event, so
+ * looking up only the first asset (or sorting the gallery) can make a batch
+ * appear to contain a single image until the user leaves and re-enters the
+ * page.  Missing assets are omitted until the library publishes them.
+ */
+internal fun chatGeneratedImageItems(
+    request: ChatGeneratedImageRequest,
+    job: ImageGenerationUiJob?,
+    availableImages: List<ImageAssetUiItem>
+): List<ImageAssetUiItem> {
+    val byId = availableImages.associateBy(ImageAssetUiItem::id)
+    return chatGeneratedImageAssetIds(request, job)
+        .asSequence()
+        .filter(String::isNotBlank)
+        .distinct()
+        .mapNotNull(byId::get)
+        .toList()
+}
+
+internal fun chatGeneratedImageUiState(
+    request: ChatGeneratedImageRequest,
+    job: ImageGenerationUiJob?,
+    imageCount: Int
+): ChatGeneratedImageUiState = when {
+    imageCount > 0 -> ChatGeneratedImageUiState.RESULT
+    job?.failed == true -> ChatGeneratedImageUiState.FAILED
+    job != null && !job.terminal -> ChatGeneratedImageUiState.RUNNING
+    job?.terminal == true && job.statusLabel == "已取消" -> ChatGeneratedImageUiState.CANCELLED
+    job?.terminal == true && job.failed -> ChatGeneratedImageUiState.FAILED
+    job?.terminal == true -> ChatGeneratedImageUiState.MISSING_RESULT
+    request.status == ChatGeneratedImageStatus.FAILED -> ChatGeneratedImageUiState.FAILED
+    request.status == ChatGeneratedImageStatus.CANCELLED -> ChatGeneratedImageUiState.CANCELLED
+    request.status == ChatGeneratedImageStatus.AWAITING_APPROVAL -> ChatGeneratedImageUiState.AWAITING_APPROVAL
+    request.status == ChatGeneratedImageStatus.QUEUED -> ChatGeneratedImageUiState.RUNNING
+    request.status == ChatGeneratedImageStatus.INTERRUPTED ||
+        request.status == ChatGeneratedImageStatus.GENERATING -> ChatGeneratedImageUiState.INTERRUPTED
+    else -> ChatGeneratedImageUiState.MISSING_RESULT
+}
+
+internal fun chatGeneratedImageModelLabel(request: ChatGeneratedImageRequest): String? {
+    val model = request.modelName?.trim()?.takeIf(String::isNotBlank)
+    val backend = when (request.backendId?.trim()?.uppercase()) {
+        "LOCAL" -> "本地"
+        "CLOUD" -> "云端"
+        else -> null
+    }
+    return listOfNotNull(model, backend).joinToString(" · ").takeIf(String::isNotBlank)
 }
 
 enum class ImageGenerationUiTaskMode(val wireName: String, val label: String) {
@@ -1389,7 +1509,12 @@ data class ChatModelChoice(
     val imageImg2ImgSupportedSamplers: List<String> = imageSupportedSamplers,
     val imagePreviewMode: ImageGenerationUiPreviewMode? = null,
     val imageDefaultPreviewInterval: Int = 1,
-    val supportsImageLivePreview: Boolean = imagePreviewMode != null
+    val supportsImageLivePreview: Boolean = imagePreviewMode != null,
+    /** Per-model local execution transports exposed by the chat selector. */
+    val backendOptions: List<ChatBackendOption> = emptyList(),
+    val selectedBackendId: String? = null,
+    /** Last persisted positive llama.cpp GPU layer count for custom mode. */
+    val customGpuLayers: Int? = null
 ) {
     init {
         require(supportsImageLivePreview == (imagePreviewMode != null)) {
@@ -1765,11 +1890,14 @@ data class ChatHistoryItem(
 )
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun ChatScreen(
     state: ChatUiState,
     onInputChange: (String) -> Unit,
     onDismissStatusMessage: () -> Unit = {},
     onSend: () -> Unit,
+    onSendImagePrompt: () -> Unit = onSend,
+    onSetAssistantImageToolAutoApproval: (Boolean) -> Unit = {},
     onStop: () -> Unit,
     onNewConversation: () -> Unit,
     onSelectConversation: (String) -> Unit,
@@ -1802,10 +1930,17 @@ fun ChatScreen(
     onDeleteFileAsset: (String) -> Unit = {},
     onGenerateImagePrompt: (String, ImageGenerationUiOptions) -> Boolean = { _, _ -> false },
     onRetryImageGeneration: (String) -> Unit = {},
+    onRetryChatImageRequest: (String) -> Unit = {},
+    onCancelChatImageGeneration: (String) -> Unit = {},
+    onApproveChatImageRequest: (String) -> Unit = {},
+    onRejectChatImageRequest: (String) -> Unit = {},
+    onContinueAssistantImageTurn: (String) -> Unit = {},
     onRecreateImageAsset: (String) -> Unit = {},
     onCancelImageGeneration: () -> Unit = {},
     releaseGenerationImageGrantsIfCoordinatorIdle: ((() -> Unit) -> Boolean),
     onSelectImageModel: (String) -> Unit = {},
+    onModelBackendChange: (String, String) -> Unit = { _, _ -> },
+    onGenerationParamsChange: (GenerationParams) -> Unit = {},
     onReasoningModeChange: (ReasoningMode) -> Unit,
     onCloudReasoningModeLocked: () -> Unit = {},
     onToggleWebSearchForTurn: () -> Unit = {},
@@ -1819,6 +1954,8 @@ fun ChatScreen(
     onImportImageModel: () -> Unit = onOpenModels,
     onOpenApi: () -> Unit,
     onOpenSettings: () -> Unit,
+    onRequestContextCompression: () -> Unit = {},
+    onSetContextCompressionThreshold: (Int) -> Unit = {},
     onSaveAssistant: (AssistantEditorDraft) -> Unit = {},
     onSelectAssistant: (String) -> Unit = {},
     onDeleteAssistant: (String) -> Unit = {},
@@ -1850,6 +1987,43 @@ fun ChatScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    var chatAttachmentPreflightRunning by remember { mutableStateOf(false) }
+    val latestChatInput = rememberUpdatedState(state.input)
+    val latestOnInputChange = rememberUpdatedState(onInputChange)
+    val latestOnSend = rememberUpdatedState(onSend)
+    val submitChatMessage = {
+        val submittedInput = latestChatInput.value
+        if (!chatAttachmentPreflightRunning) {
+            // Run the same asynchronous content-identity pass for every image
+            // marker. A single marker can still represent two logical images
+            // after picker/import recovery (or a file URI copied into a second
+            // private path); waiting until the native boundary is too late and
+            // makes the user bubble briefly show two images.
+            if (chatImageAttachmentMarkerCount(submittedInput) < 1) {
+                latestOnSend.value()
+            } else {
+                chatAttachmentPreflightRunning = true
+                scope.launch {
+                    try {
+                        val normalizedInput = withContext(Dispatchers.IO) {
+                            deduplicateChatImageAttachmentMarkers(submittedInput) { uri ->
+                                chatImageAttachmentContentIdentity(context, uri)
+                            }
+                        }
+                        // Keep a fast edit or a just-imported attachment from being overwritten
+                        // by the snapshot that began the asynchronous content check.
+                        if (latestChatInput.value != submittedInput) return@launch
+                        if (normalizedInput != submittedInput) {
+                            latestOnInputChange.value(normalizedInput)
+                        }
+                        latestOnSend.value()
+                    } finally {
+                        chatAttachmentPreflightRunning = false
+                    }
+                }
+            }
+        }
+    }
     val imageParameterPreferences = remember(context) {
         context.applicationContext.getSharedPreferences(
             IMAGE_GENERATION_UI_PARAMETER_PREFS,
@@ -2439,11 +2613,15 @@ fun ChatScreen(
                     widthValue in localControls.imageMinWidth..localControls.imageMaxWidth &&
                     heightValue in localControls.imageMinHeight..localControls.imageMaxHeight &&
                     widthValue % localControls.imageWidthMultiple == 0 &&
-                    heightValue % localControls.imageHeightMultiple == 0
+                    heightValue % localControls.imageHeightMultiple == 0 &&
+                    (!localControls.isQwenImage21Model() ||
+                        (widthValue to heightValue) in QWEN_IMAGE_21_VERIFIED_SIZE_PAIRS)
                 )
         }
         if (!dimensionsValid) {
             val message = when {
+                localControls?.isQwenImage21Model() == true ->
+                    "Qwen-Image-2.1 只能使用模型已验证的 21 个尺寸组合，请按比例/档位选择"
                 imageUltraFixEnabled && imageInputDimensionsProbing ->
                     "正在检查 UltraFix 源图尺寸，请稍后重试"
                 imageUltraFixEnabled && ultraFixSourceTarget == null ->
@@ -2826,8 +3004,10 @@ fun ChatScreen(
             listState.scrollToItem(state.messages.lastIndex)
         }
     }
-    val historyBackEnabled = drawerState.currentValue == DrawerValue.Open ||
-        drawerState.targetValue == DrawerValue.Open
+    val historyBackEnabled = !WindowInsets.isImeVisible && (
+        drawerState.currentValue == DrawerValue.Open ||
+            drawerState.targetValue == DrawerValue.Open
+        )
     SystemBackMotionHandler(
         enabled = historyBackEnabled,
         onProgress = {},
@@ -2874,6 +3054,10 @@ fun ChatScreen(
                 .then(modifier)
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
+                // Keep the composer above the IME. adjustResize alone is not
+                // sufficient on all MIUI/edge-to-edge configurations and can
+                // leave the send/stop control underneath the keyboard.
+                .imePadding()
         ) {
             ChatBackground(
                 state = chatBackground,
@@ -2885,6 +3069,9 @@ fun ChatScreen(
                     onOpenHistory = { scope.launch { drawerState.open() } },
                     onNewConversation = onNewConversation,
                     onLoadModel = onLoadModel,
+                    onModelBackendChange = onModelBackendChange,
+                    generationParams = state.generationParams,
+                    onGenerationParamsChange = onGenerationParamsChange,
                     onOpenModels = onOpenModels,
                     onReasoningModeChange = onReasoningModeChange,
                     onCloudReasoningModeLocked = onCloudReasoningModeLocked,
@@ -2920,8 +3107,52 @@ fun ChatScreen(
                         items = state.messages,
                         key = { index, message -> "${message.role.name}:${message.createdAt}:$index" }
                     ) { index, message ->
+                        val generatedImageRequest = message.generatedImageRequest
+                        val generatedImageJob = generatedImageRequest?.let { request ->
+                            chatGeneratedImageJob(
+                                request = request,
+                                jobs = state.imageJobs,
+                                activeConversationId = state.activeConversationId
+                            )
+                        }
+                        val generatedImages = generatedImageRequest?.let { request ->
+                            chatGeneratedImageItems(
+                                request = request,
+                                job = generatedImageJob,
+                                availableImages = state.images
+                            )
+                        }.orEmpty()
+                        val generatedImageVisualState = generatedImageRequest?.let { request ->
+                            chatGeneratedImageUiState(
+                                request = request,
+                                job = generatedImageJob,
+                                imageCount = generatedImages.size
+                            )
+                        }
                         MessageBubble(
                             message = message,
+                            generatedImageRequest = generatedImageRequest,
+                            generatedImageJob = generatedImageJob,
+                            generatedImageVisualState = generatedImageVisualState,
+                            generatedImages = generatedImages,
+                            onRetryChatImage = {
+                                generatedImageRequest?.let { onRetryChatImageRequest(it.id) }
+                            },
+                            onCancelChatImage = {
+                                generatedImageRequest?.let { onCancelChatImageGeneration(it.id) }
+                            },
+                            onApproveChatImage = {
+                                generatedImageRequest?.let { onApproveChatImageRequest(it.id) }
+                            },
+                            onRejectChatImage = {
+                                generatedImageRequest?.let { onRejectChatImageRequest(it.id) }
+                            },
+                            onContinueAssistantImageTurn = {
+                                generatedImageRequest?.let { onContinueAssistantImageTurn(it.id) }
+                            },
+                            onOpenImageModels = onOpenModels,
+                            onUseImageAsset = onUseImageAsset,
+                            onDeleteImageAsset = onDeleteImageAsset,
                             showAssistantActions = index == lastAssistantIndex && message.role == Role.ASSISTANT,
                             canRegenerate = !state.isGenerating,
                             isGenerating = state.isGenerating && index == lastAssistantIndex,
@@ -2957,10 +3188,20 @@ fun ChatScreen(
                 onOpenModels = onOpenModels,
                 input = state.input,
                 isGenerating = state.isGenerating,
+                selectedImageModelName = state.selectedImageModelName,
+                selectedImageModelIsCloud = state.selectedImageModelIsCloud,
+                assistantImageToolAvailable = state.assistantImageToolAvailable,
+                assistantImageToolUnavailableReason = state.assistantImageToolUnavailableReason,
+                assistantImageToolAutoApproval = state.assistantImageToolAutoApproval,
+                assistantImageToolCanChange = state.assistantImageToolCanChange,
+                imageGenerationBusy = state.imageJobs.any { job -> !job.terminal },
                 statusMessage = state.statusMessage,
                 onInputChange = onInputChange,
                 onDismissStatusMessage = onDismissStatusMessage,
-                onSend = onSend,
+                onSend = submitChatMessage,
+                onSendImagePrompt = onSendImagePrompt,
+                attachmentPreflightRunning = chatAttachmentPreflightRunning,
+                onSetAssistantImageToolAutoApproval = onSetAssistantImageToolAutoApproval,
                 onStop = onStop,
                 onOpenCamera = {
                     cameraPicker.launch(null)
@@ -3010,6 +3251,7 @@ fun ChatScreen(
                     assistants = state.assistants,
                     worldBooks = state.worldBooks,
                     knowledgeBases = state.knowledgeBases,
+                    statusMessage = state.statusMessage,
                     selectedAssistantId = state.selectedAssistantId,
                     hasActiveConversation = state.activeConversationId != null,
                     selectedModelName = state.selectedModelName,
@@ -3673,6 +3915,8 @@ fun ChatScreen(
                     onOpenSettings = {
                         onOpenSettings()
                     },
+                    onRequestContextCompression = onRequestContextCompression,
+                    onSetContextCompressionThreshold = onSetContextCompressionThreshold,
                     onOpenImages = {
                         closeMenu()
                         showImages = true
@@ -3733,6 +3977,7 @@ private fun AssistantRoleScreen(
     assistants: List<AssistantUiItem>,
     worldBooks: List<WorldBookUiItem>,
     knowledgeBases: List<KnowledgeBaseUiItem>,
+    statusMessage: String?,
     selectedAssistantId: String,
     hasActiveConversation: Boolean,
     selectedModelName: String?,
@@ -3867,6 +4112,7 @@ private fun AssistantRoleScreen(
                 managingContext -> ContextLibraryPage(
                     worldBooks = worldBooks,
                     knowledgeBases = knowledgeBases,
+                    statusMessage = statusMessage,
                     hasActiveConversation = hasActiveConversation,
                     onBack = closePage,
                     onImportWorldBook = onImportWorldBookFile,
@@ -3909,10 +4155,8 @@ private fun AssistantRoleScreen(
                 importing -> AssistantImportPage(
                     onBack = closePage,
                     onImportFile = onImportAssistantCardFile,
-                    onImport = {
-                        onImportAssistantCard(it)
-                        closePage()
-                    },
+                    onImport = onImportAssistantCard,
+                    statusMessage = statusMessage,
                     modifier = pageModifier
                 )
                 else -> Unit
@@ -4048,15 +4292,75 @@ private fun AssistantEditorPage(
     var prompt by remember(assistant?.id) {
         mutableStateOf((assistant?.systemPrompt ?: "").take(MAX_ASSISTANT_SYSTEM_PROMPT_CHARS))
     }
+    var roleplayPresetId by remember(assistant?.id) {
+        mutableStateOf(assistant?.let { RoleplayStylePresets.selectedPresetId(it.systemPrompt) })
+    }
     var defaultModelMode by remember(assistant?.id) { mutableStateOf(assistant?.defaultModelMode ?: "follow_current") }
     var defaultModelId by remember(assistant?.id) { mutableStateOf(assistant?.defaultModelId) }
     var temperatureText by remember(assistant?.id) { mutableStateOf((assistant?.temperature ?: GenerationParams().temperature).cleanParamText()) }
     var topPText by remember(assistant?.id) { mutableStateOf((assistant?.topP ?: GenerationParams().topP).cleanParamText()) }
+    var topKText by remember(assistant?.id) { mutableStateOf((assistant?.topK ?: GenerationParams().topK).toString()) }
+    var minPText by remember(assistant?.id) { mutableStateOf((assistant?.minP ?: GenerationParams().minP).cleanParamText()) }
+    var repeatPenaltyText by remember(assistant?.id) { mutableStateOf((assistant?.repeatPenalty ?: GenerationParams().repeatPenalty).cleanParamText()) }
+    var presencePenaltyText by remember(assistant?.id) { mutableStateOf((assistant?.presencePenalty ?: GenerationParams().presencePenalty).cleanParamText()) }
+    var frequencyPenaltyText by remember(assistant?.id) { mutableStateOf((assistant?.frequencyPenalty ?: GenerationParams().frequencyPenalty).cleanParamText()) }
     var nPredictText by remember(assistant?.id) { mutableStateOf((assistant?.nPredict ?: GenerationParams().nPredict).toString()) }
+    var stopWordsText by remember(assistant?.id) { mutableStateOf(JSONArray(assistant?.stopWords.orEmpty()).toString()) }
     var reasoningMode by remember(assistant?.id) { mutableStateOf(assistant?.reasoningMode ?: GenerationParams().reasoningMode) }
     var memoryEnabled by remember(assistant?.id) { mutableStateOf(assistant?.memoryEnabled ?: false) }
     var webSearchEnabled by remember(assistant?.id) { mutableStateOf(assistant?.webSearchEnabled ?: false) }
     var fileContextEnabled by remember(assistant?.id) { mutableStateOf(assistant?.fileContextEnabled ?: true) }
+    var roleplayPresetMenuExpanded by rememberSaveable { mutableStateOf(false) }
+    var presetImportMessage by rememberSaveable(assistant?.id) { mutableStateOf<String?>(null) }
+    var presetImporting by rememberSaveable(assistant?.id) { mutableStateOf(false) }
+    var advancedSamplingExpanded by rememberSaveable(assistant?.id) { mutableStateOf(false) }
+    val context = LocalContext.current
+    val presetImportScope = rememberCoroutineScope()
+    val presetPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            presetImporting = true
+            presetImportMessage = "正在读取酒馆预设…"
+            presetImportScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val json = requireNotNull(context.contentResolver.openInputStream(uri)) {
+                            "无法读取所选文件。"
+                        }.use { stream -> readSillyTavernPresetJson(stream) }
+                        SillyTavernPresetCodec.parse(
+                            rawJson = json,
+                            fallbackName = uri.lastPathSegment?.substringAfterLast('/') ?: "Tavern 预设"
+                        )
+                    }
+                }
+                result.onSuccess { preset ->
+                    preset.temperature?.let { temperatureText = it.cleanParamText() }
+                    preset.topP?.let { topPText = it.cleanParamText() }
+                    preset.topK?.let { topKText = it.toString() }
+                    preset.minP?.let { minPText = it.cleanParamText() }
+                    preset.repeatPenalty?.let { repeatPenaltyText = it.cleanParamText() }
+                    preset.presencePenalty?.let { presencePenaltyText = it.cleanParamText() }
+                    preset.frequencyPenalty?.let { frequencyPenaltyText = it.cleanParamText() }
+                    preset.maxTokens?.let { nPredictText = it.coerceIn(16, 65_536).toString() }
+                    preset.stopWords?.let { stopWordsText = JSONArray(it).toString() }
+                    preset.promptAppendix?.let { appendix ->
+                        prompt = SillyTavernPresetCodec.mergePromptAppendix(prompt, appendix)
+                    }
+                    advancedSamplingExpanded = true
+                    presetImportMessage = buildString {
+                        append("已导入酒馆采样参数：").append(preset.name)
+                        if (preset.promptAppendix != null) {
+                            append("；已合并纯文本提示内容")
+                        } else if (preset.ignoredPromptFields.isNotEmpty()) {
+                            append("；模板字段未应用，继续使用模型原生聊天模板")
+                        }
+                    }
+                }.onFailure { error ->
+                    presetImportMessage = "酒馆预设导入失败：${error.message ?: "请确认选择的是生成参数 JSON 文件。"}"
+                }
+                presetImporting = false
+            }
+        }
+    }
     fun buildDraft(id: String?, draftName: String = name): AssistantEditorDraft =
         AssistantEditorDraft(
             id = id,
@@ -4068,11 +4372,17 @@ private fun AssistantEditorPage(
             defaultModelId = defaultModelId,
             temperature = temperatureText.toAssistantFloat(assistant?.temperature ?: GenerationParams().temperature, 0f, 2f),
             topP = topPText.toAssistantFloat(assistant?.topP ?: GenerationParams().topP, 0f, 1f),
-            nPredict = nPredictText.toAssistantInt(assistant?.nPredict ?: GenerationParams().nPredict, 128, 65_536),
+            nPredict = nPredictText.toAssistantInt(assistant?.nPredict ?: GenerationParams().nPredict, 16, 65_536),
             reasoningMode = reasoningMode,
             memoryEnabled = memoryEnabled,
             webSearchEnabled = webSearchEnabled,
-            fileContextEnabled = fileContextEnabled
+            fileContextEnabled = fileContextEnabled,
+            topK = topKText.toAssistantInt(assistant?.topK ?: GenerationParams().topK, 0, 1000),
+            minP = minPText.toAssistantFloat(assistant?.minP ?: GenerationParams().minP, 0f, 1f),
+            repeatPenalty = repeatPenaltyText.toAssistantFloat(assistant?.repeatPenalty ?: GenerationParams().repeatPenalty, 0.5f, 2f),
+            presencePenalty = presencePenaltyText.toAssistantFloat(assistant?.presencePenalty ?: GenerationParams().presencePenalty, -2f, 2f),
+            frequencyPenalty = frequencyPenaltyText.toAssistantFloat(assistant?.frequencyPenalty ?: GenerationParams().frequencyPenalty, -2f, 2f),
+            stopWords = stopWordsText.toAssistantStopWords(assistant?.stopWords.orEmpty())
         )
 
     Column(
@@ -4126,14 +4436,66 @@ private fun AssistantEditorPage(
                     )
                 }
                 item {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("角色演绎风格", style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                "风格说明会加入可编辑提示词，并设置较短的移动端输出上限。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Box {
+                            TextButton(onClick = { roleplayPresetMenuExpanded = true }) {
+                                Text(
+                                    RoleplayStylePresets.all.firstOrNull { it.id == roleplayPresetId }?.name
+                                        ?: "选择预设"
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = roleplayPresetMenuExpanded,
+                                onDismissRequest = { roleplayPresetMenuExpanded = false }
+                            ) {
+                                RoleplayStylePresets.all.forEach { preset ->
+                                    DropdownMenuItem(
+                                        text = { Text(preset.name) },
+                                        onClick = {
+                                            roleplayPresetMenuExpanded = false
+                                            roleplayPresetId = preset.id
+                                            prompt = RoleplayStylePresets.withPresetPrompt(prompt, preset)
+                                            temperatureText = preset.temperature.cleanParamText()
+                                            topPText = preset.topP.cleanParamText()
+                                            topKText = preset.topK.toString()
+                                            repeatPenaltyText = preset.repeatPenalty.cleanParamText()
+                                            nPredictText = preset.maxTokens.toString()
+                                        }
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("移除风格说明") },
+                                    onClick = {
+                                        roleplayPresetMenuExpanded = false
+                                        roleplayPresetId = null
+                                        prompt = RoleplayStylePresets.withPresetPrompt(prompt, null)
+                                    }
+                                )
+                            }
+                        }
+                    }
                     OutlinedTextField(
                         value = prompt,
-                        onValueChange = { prompt = it.take(MAX_ASSISTANT_SYSTEM_PROMPT_CHARS) },
+                        onValueChange = {
+                            prompt = it.take(MAX_ASSISTANT_SYSTEM_PROMPT_CHARS)
+                            roleplayPresetId = RoleplayStylePresets.selectedPresetId(prompt)
+                        },
                         label = { Text("系统提示词") },
                         minLines = 6,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    TextButton(onClick = { prompt = GenerationParams().systemPrompt }) {
+                    TextButton(onClick = {
+                        prompt = GenerationParams().systemPrompt
+                        roleplayPresetId = null
+                    }) {
                         Text("恢复默认提示词")
                     }
                 }
@@ -4189,7 +4551,38 @@ private fun AssistantEditorPage(
                     }
                 }
                 item {
-                    Text("参数", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "生成参数",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedButton(
+                            onClick = { presetPicker.launch(arrayOf("*/*")) },
+                            enabled = !presetImporting,
+                            modifier = Modifier.height(40.dp)
+                        ) {
+                            if (presetImporting) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+                            Text(if (presetImporting) "读取中" else "导入酒馆预设")
+                        }
+                    }
+                    presetImportMessage?.let { message ->
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (message.contains("失败")) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Text(
+                        "支持 temperature、top_p/top_k、min_p、rep_pen、penalties、max_length/max_tokens 和 stop；模型模板、prompt_order、宏及其他未支持字段会忽略。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         OutlinedTextField(
                             value = temperatureText,
@@ -4214,6 +4607,61 @@ private fun AssistantEditorPage(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    TextButton(onClick = { advancedSamplingExpanded = !advancedSamplingExpanded }) {
+                        Text(if (advancedSamplingExpanded) "收起高级采样参数" else "高级采样参数")
+                    }
+                    if (advancedSamplingExpanded) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = topKText,
+                                onValueChange = { topKText = it },
+                                label = { Text("top_k") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = minPText,
+                                onValueChange = { minPText = it },
+                                label = { Text("min_p") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = repeatPenaltyText,
+                                onValueChange = { repeatPenaltyText = it },
+                                label = { Text("重复惩罚") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = presencePenaltyText,
+                                onValueChange = { presencePenaltyText = it },
+                                label = { Text("presence") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = frequencyPenaltyText,
+                                onValueChange = { frequencyPenaltyText = it },
+                                label = { Text("frequency") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = stopWordsText,
+                                onValueChange = { stopWordsText = it.take(4096) },
+                                label = { Text("停止词 JSON 数组") },
+                                placeholder = { Text("[\"<END>\", \"\\nUser:\"]") },
+                                minLines = 2,
+                                maxLines = 4,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         ReasoningMode.entries.forEach { mode ->
@@ -4290,6 +4738,7 @@ private fun AssistantEditorPage(
 private fun ContextLibraryPage(
     worldBooks: List<WorldBookUiItem>,
     knowledgeBases: List<KnowledgeBaseUiItem>,
+    statusMessage: String?,
     hasActiveConversation: Boolean,
     onBack: () -> Unit,
     onImportWorldBook: (WorldBookImportScope) -> Unit,
@@ -4302,6 +4751,7 @@ private fun ContextLibraryPage(
 ) {
     var knowledgeBaseName by rememberSaveable { mutableStateOf("") }
     var worldBookScopeMenuOpen by rememberSaveable { mutableStateOf(false) }
+    var showUsageGuide by rememberSaveable { mutableStateOf(false) }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -4321,7 +4771,26 @@ private fun ContextLibraryPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            TextButton(onClick = { showUsageGuide = true }) {
+                Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(5.dp))
+                Text("使用说明")
+            }
         }
+        statusMessage
+            ?.takeIf { it.contains("世界书") || it.contains("知识库") }
+            ?.let { message ->
+                Text(
+                    text = message,
+                    color = if (message.contains("失败") || message.contains("未找到")) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp)
+                )
+            }
         Spacer(modifier = Modifier.height(14.dp))
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -4369,6 +4838,14 @@ private fun ContextLibraryPage(
                         }
                     }
                 }
+            }
+            item {
+                Text(
+                    "支持 Tavern World Info JSON 常用字段；角色卡 v2/v3 的内嵌世界书会随角色卡自动导入。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+                )
             }
             if (worldBooks.isEmpty()) {
                 item {
@@ -4421,7 +4898,7 @@ private fun ContextLibraryPage(
                 Spacer(modifier = Modifier.height(14.dp))
                 Text("知识库", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "导入后会自动选中当前会话；发送消息时按词语和词形变化检索，命中片段会显示在发送后的上下文详情中。",
+                    "导入后会自动选中当前会话。支持 TXT、Markdown、JSON、XML、CSV 和代码文本，每个文件不超过 1 MiB；提问时带上资料里的关键词，更容易检索到相关片段。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -4510,13 +4987,50 @@ private fun ContextLibraryPage(
             }
         }
     }
+    if (showUsageGuide) {
+        AlertDialog(
+            onDismissRequest = { showUsageGuide = false },
+            title = { Text("世界书和知识库怎么用") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("世界书：把设定写成条目。常驻条目每轮都会加入上下文；普通条目需要聊天消息命中关键词才会加入。导入时可选全局、当前角色或当前对话。")
+                    Text("Tavern 兼容：读取 World Info JSON 的 entries 对象/数组和角色卡 v2/v3 的 character_book；支持常驻、关键词、二级关键词、优先级和大小写选项。position/probability/depth 等高级触发条件暂不应用。宏和脚本不执行；正则条目会跳过并显示原因，请改用普通关键词。")
+                    Text("知识库：先创建知识库，再点文件夹图标导入文本文件。导入后默认选中；取消勾选后该库不会参与检索。它按关键词找相关片段，不会把整份文档常驻塞进提示词，也不会训练模型。")
+                    Text("确认生效：提问时使用资料里的专有名词或关键词；回答下方的上下文详情会显示世界书/知识库命中与跳过情况。")
+                    Text("目前不直接导入 PDF、Word 或压缩包；请先另存为 TXT/Markdown。单个文件上限 1 MiB。")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showUsageGuide = false }) { Text("知道了") }
+            }
+        )
+    }
 }
+
+private val QWEN_IMAGE_21_VERIFIED_SIZE_PAIRS: Set<Pair<Int, Int>> = setOf(
+    512 to 512, 576 to 448, 448 to 576, 640 to 416, 416 to 640,
+    672 to 384, 384 to 672,
+    384 to 384, 448 to 320, 320 to 448, 480 to 320, 320 to 480,
+    512 to 288, 288 to 512,
+    320 to 320, 384 to 288, 288 to 384, 384 to 256, 256 to 384,
+    416 to 256, 256 to 416
+)
+
+private fun ChatModelChoice.isQwenImage21Model(): Boolean =
+    id.contains("qwen_image_21", ignoreCase = true) ||
+        displayName.contains("Qwen-Image-2.1", ignoreCase = true)
 
 @Composable
 private fun AssistantImportPage(
     onBack: () -> Unit,
     onImportFile: () -> Unit,
     onImport: (String) -> Unit,
+    statusMessage: String?,
     modifier: Modifier = Modifier
 ) {
     var rawJson by remember { mutableStateOf("") }
@@ -4537,6 +5051,16 @@ private fun AssistantImportPage(
                 Text("粘贴 MCA 角色卡 JSON", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+        statusMessage
+            ?.takeIf { it.contains("角色卡") && it.contains("导入") }
+            ?.let { message ->
+                Text(
+                    message,
+                    color = if (message.contains("失败") || message.contains("未完成")) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         Surface(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             color = MaterialTheme.colorScheme.surface,
@@ -4635,6 +5159,16 @@ private fun String.toAssistantFloat(default: Float, min: Float, max: Float): Flo
 
 private fun String.toAssistantInt(default: Int, min: Int, max: Int): Int =
     trim().toIntOrNull()?.coerceIn(min, max) ?: default.coerceIn(min, max)
+
+private fun String.toAssistantStopWords(default: List<String>): List<String> =
+    runCatching {
+        val array = JSONArray(trim())
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optString(index).takeIf(String::isNotEmpty)?.let(::add)
+            }
+        }.distinct().take(32).filter { it.length <= 128 }
+    }.getOrDefault(default)
 
 @Composable
 private fun ImagesWorkspaceScreen(
@@ -4881,11 +5415,17 @@ private fun ImagesWorkspaceScreen(
     val latestJob = jobs.firstOrNull()
     val activeJob = if (showGenerationCanvas) latestJob else null
     val activePrompt = activeJob?.prompt ?: pendingConversationPrompt
-    val activeImage = activeJob?.imageAssetId?.let { imageId ->
+    val activeImageIds = activeJob?.imageAssetIds.orEmpty().ifEmpty {
+        activeJob?.imageAssetId?.let(::listOf).orEmpty()
+    }
+    // A prompt is not an image identity. Falling back to a prompt match can
+    // attach images from an older task (or duplicate the same image) when two
+    // generations use the same text. Completed jobs must publish explicit
+    // asset ids; legacy single-image jobs may still use imageAssetId above.
+    val activeImages = activeImageIds.mapNotNull { imageId ->
         images.firstOrNull { it.id == imageId }
-    } ?: activeJob
-        ?.takeIf { it.statusLabel == "完成" }
-        ?.let { doneJob -> images.firstOrNull { it.prompt == doneJob.prompt } }
+    }
+    val activeImage = activeImages.firstOrNull()
     val isImageGenerating = activeJob?.isWorking == true
     val canvasModelId = activeJob?.modelId ?: selectedImageModelId
     val canvasModelName = activeJob?.modelName?.takeIf(String::isNotBlank) ?: selectedImageModelName
@@ -4979,6 +5519,7 @@ private fun ImagesWorkspaceScreen(
                 prompt = activePrompt,
                 job = activeJob,
                 image = activeImage,
+                images = activeImages,
                 imageModels = imageModels,
                 selectedImageModelId = canvasModelId,
                 selectedImageModelName = canvasModelName,
@@ -7018,6 +7559,7 @@ private fun ImageInputOptionsPanel(
                 style = MaterialTheme.typography.bodySmall
             )
             if (!selectedModelIsCloud && executionModel != null) {
+                val isQwenImage21Model = executionModel.isQwenImage21Model()
                 val displayedMinWidth = if (ultraFixEnabled) {
                     executionModel.imageUltraFixMinWidth
                 } else {
@@ -7050,6 +7592,13 @@ private fun ImageInputOptionsPanel(
                 }
                 val fixedWidth = displayedMinWidth == displayedMaxWidth
                 val fixedHeight = displayedMinHeight == displayedMaxHeight
+                if (isQwenImage21Model) {
+                    Text(
+                        "Qwen-Image-2.1 已验证 21 个尺寸组合：Standard（7 种比例）512×512、576×448、448×576、640×416、416×640、672×384、384×672；Fast 384×384、448×320、320×448、480×320、320×480、512×288、288×512；Tiny 320×320、384×288、288×384、384×256、256×384、416×256、256×416。任意 32 对齐尺寸不代表可运行。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -7060,7 +7609,9 @@ private fun ImageInputOptionsPanel(
                         label = { Text("宽度") },
                         supportingText = {
                             Text(
-                                if (fixedWidth) {
+                                if (isQwenImage21Model) {
+                                    "只能使用模型已验证的宽高组合"
+                                } else if (fixedWidth) {
                                     "模型固定尺寸"
                                 } else {
                                     "$displayedMinWidth-$displayedMaxWidth / $displayedWidthMultiple"
@@ -7077,7 +7628,9 @@ private fun ImageInputOptionsPanel(
                         label = { Text("高度") },
                         supportingText = {
                             Text(
-                                if (fixedHeight) {
+                                if (isQwenImage21Model) {
+                                    "只能使用模型已验证的宽高组合"
+                                } else if (fixedHeight) {
                                     "模型固定尺寸"
                                 } else {
                                     "$displayedMinHeight-$displayedMaxHeight / $displayedHeightMultiple"
@@ -7842,6 +8395,7 @@ private fun ImageGenerationCanvas(
     prompt: String,
     job: ImageGenerationUiJob?,
     image: ImageAssetUiItem?,
+    images: List<ImageAssetUiItem>,
     imageModels: List<ChatModelChoice>,
     selectedImageModelId: String?,
     selectedImageModelName: String?,
@@ -7900,6 +8454,7 @@ private fun ImageGenerationCanvas(
             ImageAssistantResultCard(
                 job = job,
                 image = image,
+                images = images,
                 onRetry = onRetry,
                 onCancelGeneration = onCancelGeneration,
                 onUseImageAsset = onUseImageAsset
@@ -7932,6 +8487,7 @@ private fun UserImagePromptBubble(prompt: String) {
 private fun ImageAssistantResultCard(
     job: ImageGenerationUiJob?,
     image: ImageAssetUiItem?,
+    images: List<ImageAssetUiItem> = image?.let(::listOf).orEmpty(),
     onRetry: () -> Unit,
     onCancelGeneration: () -> Unit,
     onUseImageAsset: (String) -> Unit
@@ -7944,6 +8500,7 @@ private fun ImageAssistantResultCard(
             )
             ImageAssistantCardKind.RESULT -> ImageGenerationResultImage(
                 image = requireNotNull(image),
+                images = images,
                 onUseImageAsset = onUseImageAsset
             )
             ImageAssistantCardKind.TERMINAL -> ImageGenerationTerminalCard(
@@ -7975,10 +8532,14 @@ private fun ImageCreatingPlaceholder(
 ) {
     val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
-    val previewBitmap = remember(previewUriString, previewRevision) {
-        previewUriString?.let { loadImageBitmap(context, it) }
-    }
-    val showingPreview = previewBitmap != null
+    val previewBitmap by rememberChatImageBitmap(
+        context = context,
+        uriString = previewUriString.orEmpty(),
+        maxDimensionPx = 1_024,
+        revisionKey = previewRevision
+    )
+    val previewBitmapValue = previewBitmap
+    val showingPreview = previewBitmapValue != null
     val cardColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF5F8FF)
     val titleColor = if (showingPreview) {
         Color.White
@@ -8035,9 +8596,9 @@ private fun ImageCreatingPlaceholder(
         shape = RoundedCornerShape(26.dp)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            if (previewBitmap != null) {
+            if (previewBitmapValue != null) {
                 Image(
-                    bitmap = previewBitmap.asImageBitmap(),
+                    bitmap = previewBitmapValue.asImageBitmap(),
                     contentDescription = "生成中的实际预览，第 $previewStep 步",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
@@ -8151,11 +8712,18 @@ private fun ImageGenerationFailureCard(job: ImageGenerationUiJob, onRetry: () ->
 }
 
 @Composable
-private fun ImageGenerationResultImage(image: ImageAssetUiItem, onUseImageAsset: (String) -> Unit) {
+private fun ImageGenerationResultImage(
+    image: ImageAssetUiItem,
+    images: List<ImageAssetUiItem>,
+    onUseImageAsset: (String) -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val darkTheme = isSystemInDarkTheme()
-    val bitmap = remember(image.uriString) { loadImageBitmap(context, image.uriString) }
+    // Chat bubbles can contain user-selected photos straight from the gallery.
+    // Never decode their full source dimensions synchronously during Compose:
+    // large camera images can exhaust the UI process while the message is sent.
+    val bitmap by rememberChatImageBitmap(context, image.uriString, maxDimensionPx = 512)
     val ratio = remember(image.width, image.height) {
         if (image.width > 0 && image.height > 0) {
             (image.width.toFloat() / image.height.toFloat()).coerceIn(0.72f, 1.78f)
@@ -8163,22 +8731,49 @@ private fun ImageGenerationResultImage(image: ImageAssetUiItem, onUseImageAsset:
             1.22f
         }
     }
-    Box(
-        modifier = Modifier
-            .widthIn(max = 480.dp)
-            .fillMaxWidth(0.92f)
-            .aspectRatio(ratio)
-            .clip(RoundedCornerShape(22.dp))
-            .background(if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1))
-    ) {
-        if (bitmap != null) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (images.size > 1) {
+            Text("共 ${images.size} 张", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                images.forEach { item ->
+                    val thumbnail by rememberChatImageBitmap(
+                        context,
+                        item.uriString,
+                        maxDimensionPx = 192
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1))
+                            .clickable { onUseImageAsset(item.id) }
+                    ) {
+                        thumbnail?.let {
+                            Image(it.asImageBitmap(), contentDescription = item.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                        }
+                    }
+                }
+            }
+        }
+        Box(
+            modifier = Modifier
+                .widthIn(max = 480.dp)
+                .fillMaxWidth(0.92f)
+                .aspectRatio(ratio)
+                .clip(RoundedCornerShape(22.dp))
+                .background(if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1))
+        ) {
+        bitmap?.let { loadedBitmap ->
             Image(
-                bitmap = bitmap.asImageBitmap(),
+                bitmap = loadedBitmap.asImageBitmap(),
                 contentDescription = image.name,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
-        } else {
+        } ?: run {
             Icon(
                 imageVector = Icons.Default.Image,
                 contentDescription = null,
@@ -8249,6 +8844,8 @@ private fun ImageGenerationResultImage(image: ImageAssetUiItem, onUseImageAsset:
             }
         }
     }
+}
+
 }
 
 private enum class ImageEngineSource(val title: String, val subtitle: String) {
@@ -8615,7 +9212,7 @@ private fun ImageAssetTile(
 ) {
     val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
-    val bitmap = remember(image.uriString) { loadImageBitmap(context, image.uriString) }
+    val bitmap by rememberChatImageBitmap(context, image.uriString, maxDimensionPx = 384)
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(2.dp))
@@ -8629,14 +9226,14 @@ private fun ImageAssetTile(
             )
             .combinedClickable(onClick = onOpen, onLongClick = onLongPress)
     ) {
-        if (bitmap != null) {
+        bitmap?.let { loadedBitmap ->
             Image(
-                bitmap = bitmap.asImageBitmap(),
+                bitmap = loadedBitmap.asImageBitmap(),
                 contentDescription = image.name,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
-        } else {
+        } ?: run {
             Icon(
                 imageVector = Icons.Default.Image,
                 contentDescription = null,
@@ -8747,7 +9344,7 @@ private fun ImageAssetPreviewOverlay(
     val context = LocalContext.current
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
-    val bitmap = remember(image.uriString) { loadImageBitmap(context, image.uriString) }
+    val bitmap by rememberChatImageBitmap(context, image.uriString, maxDimensionPx = 1280)
     var showGenerationDetails by rememberSaveable(image.id) { mutableStateOf(false) }
     var showParameterReuse by rememberSaveable(image.id) { mutableStateOf(false) }
     var showUpscaleDialog by rememberSaveable(image.id) { mutableStateOf(false) }
@@ -8903,9 +9500,9 @@ private fun ImageAssetPreviewOverlay(
                 }
             }
         }
-        if (bitmap != null) {
+        bitmap?.let { loadedBitmap ->
             Image(
-                bitmap = bitmap.asImageBitmap(),
+                bitmap = loadedBitmap.asImageBitmap(),
                 contentDescription = image.name,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
@@ -8914,7 +9511,7 @@ private fun ImageAssetPreviewOverlay(
                     .fillMaxHeight(0.82f)
                     .padding(horizontal = 12.dp, vertical = 76.dp)
             )
-        } else {
+        } ?: run {
             Column(
                 modifier = Modifier.align(Alignment.Center),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -9895,15 +10492,52 @@ private fun ImagePromptBar(
     }
 }
 
-private fun loadImageBitmap(context: Context, uriString: String): Bitmap? =
-    runCatching {
-        val uri = Uri.parse(uriString)
+private fun loadImageBitmap(
+    context: Context,
+    uriString: String,
+    maxDimensionPx: Int? = null
+): Bitmap? = runCatching {
+    val uri = Uri.parse(uriString)
+    fun decode(options: BitmapFactory.Options? = null): Bitmap? =
         if (uri.scheme.equals("file", ignoreCase = true)) {
-            BitmapFactory.decodeFile(uri.path)
+            if (options == null) BitmapFactory.decodeFile(uri.path)
+            else BitmapFactory.decodeFile(uri.path, options)
         } else {
-            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                if (options == null) BitmapFactory.decodeStream(stream)
+                else BitmapFactory.decodeStream(stream, null, options)
+            }
         }
-    }.getOrNull()
+
+    val bound = maxDimensionPx?.coerceAtLeast(1) ?: return@runCatching decode()
+    val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    decode(boundsOptions)
+    if (boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return@runCatching null
+    var sampleSize = 1
+    while (maxOf(boundsOptions.outWidth, boundsOptions.outHeight) / sampleSize > bound &&
+        sampleSize <= (1 shl 29)
+    ) {
+        sampleSize *= 2
+    }
+    decode(BitmapFactory.Options().apply { inSampleSize = sampleSize })
+}.getOrNull()
+
+@Composable
+private fun rememberChatImageBitmap(
+    context: Context,
+    uriString: String,
+    maxDimensionPx: Int? = null,
+    revisionKey: Any? = null
+) = produceState<Bitmap?>(
+    initialValue = null,
+    key1 = uriString,
+    key2 = maxDimensionPx,
+    key3 = revisionKey
+) {
+        value = withContext(Dispatchers.IO) {
+            loadImageBitmap(context.applicationContext, uriString, maxDimensionPx)
+        }
+    }
 
 private fun downloadImageAssetToGallery(context: Context, image: ImageAssetUiItem): Result<String> =
     runCatching { copyImageAssetToGallery(context, image).displayPath }
@@ -10155,12 +10789,15 @@ private fun McaAppMenuPage(
     onOpenAgent: () -> Unit,
     onOpenApi: () -> Unit,
     onOpenSettings: () -> Unit,
+    onRequestContextCompression: () -> Unit,
+    onSetContextCompressionThreshold: (Int) -> Unit,
     onOpenImages: () -> Unit,
     onOpenAssistants: () -> Unit,
     onClearHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var confirmClear by remember { mutableStateOf(false) }
+    var chooseCompressionThreshold by remember { mutableStateOf(false) }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -10203,7 +10840,7 @@ private fun McaAppMenuPage(
                 AppMenuRow(icon = { Icon(Icons.Default.Folder, null) }, title = "模型管理", subtitle = "本地高速/兼容引擎与魔塔下载", onClick = onOpenModels)
                 AppMenuRow(icon = { McaLogoMark(size = 22.dp, cornerRadius = 7.dp) }, title = "智能调参", subtitle = "测速、推荐与高级参数", onClick = onOpenAgent)
                 AppMenuRow(icon = { Icon(Icons.Default.NetworkWifi, null) }, title = "本地 API", subtitle = "接口地址、Key、API 使用文档", onClick = onOpenApi)
-                AppMenuRow(icon = { Icon(Icons.Default.Settings, null) }, title = "系统设置", subtitle = "运行、日志、诊断与实验功能", onClick = onOpenSettings)
+                 AppMenuRow(icon = { Icon(Icons.Default.Settings, null) }, title = "系统设置", subtitle = "运行、日志、诊断与高级设置", onClick = onOpenSettings)
                 AppMenuRow(icon = { Icon(Icons.Default.Image, null) }, title = "聊天背景", subtitle = "设置全局、助手或当前会话背景图片", onClick = onOpenBackgroundSettings)
                 AppMenuRow(icon = { Icon(Icons.Default.Info, null) }, title = "快速开始", subtitle = "聊天、生图与常见问题", onClick = onOpenQuickStart)
             }
@@ -10253,6 +10890,32 @@ private fun McaAppMenuPage(
 
             Spacer(modifier = Modifier.height(18.dp))
             Text(
+                "对话",
+                modifier = Modifier.padding(start = 12.dp, bottom = 8.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            AppMenuCard {
+                AppMenuRow(
+                    icon = { Icon(Icons.Default.Replay, null) },
+                    title = if (state.contextCompressionPending) "已安排压缩" else "立即压缩上下文",
+                    subtitle = if (state.contextCompressionPending) {
+                        "下一次发送时执行，保留角色设定和最近消息"
+                    } else {
+                        "压缩较早对话，减少长上下文占用"
+                    },
+                    onClick = onRequestContextCompression
+                )
+                AppMenuRow(
+                    icon = { Icon(Icons.Default.Settings, null) },
+                    title = "自动压缩阈值 · ${state.contextCompressionThresholdPercent}%",
+                    subtitle = "达到模型上下文窗口的该比例后自动压缩",
+                    onClick = { chooseCompressionThreshold = true }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(18.dp))
+            Text(
                 "历史",
                 modifier = Modifier.padding(start = 12.dp, bottom = 8.dp),
                 style = MaterialTheme.typography.labelMedium,
@@ -10292,6 +10955,40 @@ private fun McaAppMenuPage(
             }
         )
     }
+
+    if (chooseCompressionThreshold) {
+        AlertDialog(
+            onDismissRequest = { chooseCompressionThreshold = false },
+            title = { Text("自动压缩阈值") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "阈值越低越早整理上下文；系统消息、角色设定和最近消息会保留。",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    listOf(70, 80, 90).forEach { percent ->
+                        TextButton(
+                            onClick = {
+                                onSetContextCompressionThreshold(percent)
+                                chooseCompressionThreshold = false
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "$percent%${if (percent == state.contextCompressionThresholdPercent) "（当前）" else ""}",
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { chooseCompressionThreshold = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -10326,15 +11023,25 @@ private fun AppMenuRow(
             icon()
         }
         Spacer(modifier = Modifier.width(10.dp))
-        Text(
-            title,
-            color = rowContentColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 18.sp),
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.weight(1f)
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                title,
+                color = rowContentColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 18.sp),
+                fontWeight = FontWeight.Medium
+            )
+            subtitle.takeIf { it.isNotBlank() }?.let { detail ->
+                Text(
+                    detail,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 15.sp)
+                )
+            }
+        }
         Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -10810,12 +11517,31 @@ private fun cacheEvidenceLabel(stats: RuntimeStats): String? {
     }
 }
 
+/** Never attribute stale local throughput/KV evidence to a retained or cloud model selection. */
+internal fun ChatUiState.hasReadyLocalModelForHeader(): Boolean =
+    !selectedModelIsCloud && stats.loaded && selectedModelId != null &&
+        localModels.any { it.id == selectedModelId && !it.cloud && it.loaded }
+
+internal fun ChatUiState.modelHeaderSubtitle(): String {
+    modelLoadMessage?.takeIf { it.isNotBlank() }?.let { return it }
+    return listOfNotNull(
+        modelReadinessLabel?.takeIf { it.isNotBlank() },
+        selectedModelRuntimeLabel?.takeIf { it.isNotBlank() },
+        generationPerformanceSummary(stats).takeIf { hasReadyLocalModelForHeader() }
+    ).joinToString(" · ").ifBlank {
+        if (selectedModelIsCloud && selectedModelName != null) "云端 API" else "待加载 · 点击选择模型"
+    }
+}
+
 @Composable
 private fun ChatStatusBar(
     state: ChatUiState,
     onOpenHistory: () -> Unit,
     onNewConversation: () -> Unit,
     onLoadModel: (String) -> Unit,
+    onModelBackendChange: (String, String) -> Unit,
+    generationParams: GenerationParams,
+    onGenerationParamsChange: (GenerationParams) -> Unit,
     onOpenModels: () -> Unit,
     onReasoningModeChange: (ReasoningMode) -> Unit,
     onCloudReasoningModeLocked: () -> Unit,
@@ -10823,17 +11549,10 @@ private fun ChatStatusBar(
 ) {
     val apiActive = state.selectedModelIsCloud || state.apiEnabled || state.restEnabled
     var modelMenuExpanded by rememberSaveable { mutableStateOf(false) }
-    val modelRuntimeLabel = state.selectedModelRuntimeLabel?.takeIf { it.isNotBlank() }
-    val cacheEvidence = cacheEvidenceLabel(state.stats)
-    val performanceSummary = generationPerformanceSummary(state.stats)
-    val modelSubtitle = state.modelLoadMessage ?: if (state.selectedModelName == null) {
-        modelRuntimeLabel ?: "未加载本地或云端推理引擎"
-    } else {
-        listOfNotNull(
-            modelRuntimeLabel,
-            performanceSummary
-        ).joinToString(" · ")
-    }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val cacheEvidence = cacheEvidenceLabel(state.stats).takeIf { state.hasReadyLocalModelForHeader() }
+    val modelSubtitle = state.modelHeaderSubtitle()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -10856,7 +11575,15 @@ private fun ChatStatusBar(
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { modelMenuExpanded = true },
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = "选择模型"
+                        role = SemanticsRole.Button
+                    }
+                    .clickable {
+                        focusManager.clearFocus(force = true)
+                        keyboardController?.hide()
+                        modelMenuExpanded = true
+                    },
                 color = MaterialTheme.colorScheme.surface,
                 shape = CircleShape,
                 shadowElevation = 5.dp
@@ -10926,6 +11653,9 @@ private fun ChatStatusBar(
                     modelMenuExpanded = false
                     onLoadModel(id)
                 },
+                onModelBackendChange = onModelBackendChange,
+                generationParams = generationParams,
+                onGenerationParamsChange = onGenerationParamsChange,
                 onReasoningModeChange = onReasoningModeChange,
                 onCloudReasoningModeLocked = onCloudReasoningModeLocked,
                 onOpenModels = {
@@ -11146,14 +11876,18 @@ private fun ModelSwitcherDropdown(
     selectedModelIsCloud: Boolean,
     isGenerating: Boolean,
     reasoningMode: ReasoningMode,
+    generationParams: GenerationParams,
+    onGenerationParamsChange: (GenerationParams) -> Unit,
     onDismiss: () -> Unit,
     onLoadModel: (String) -> Unit,
+    onModelBackendChange: (String, String) -> Unit,
     onReasoningModeChange: (ReasoningMode) -> Unit,
     onCloudReasoningModeLocked: () -> Unit,
     onOpenModels: () -> Unit
 ) {
     val context = LocalContext.current
     var reasoningExpanded by rememberSaveable { mutableStateOf(false) }
+    var generationParamsDialogVisible by rememberSaveable { mutableStateOf(false) }
     var sourceExpanded by rememberSaveable { mutableStateOf<InferenceSource?>(null) }
     val localModels = models.filterNot { it.cloud }
     val cloudModels = models.filter { it.cloud }
@@ -11274,6 +12008,30 @@ private fun ModelSwitcherDropdown(
                     leading = {
                         Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurface)
                     },
+                    onClick = {
+                        sourceExpanded = null
+                        reasoningExpanded = false
+                        generationParamsDialogVisible = true
+                    }
+                ) {
+                    Column {
+                        Text(
+                            text = "生成参数",
+                            style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "按当前模型保存采样和输出设置",
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                CapsuleMenuRow(
+                    leading = {
+                        Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurface)
+                    },
                     onClick = onOpenModels
                 ) {
                     Text(
@@ -11297,6 +12055,7 @@ private fun ModelSwitcherDropdown(
                         onLoadModel(id)
                         sourceExpanded = null
                     },
+                    onModelBackendChange = onModelBackendChange,
                     onOpenModels = onOpenModels,
                     modifier = Modifier
                         .padding(horizontal = 12.dp, vertical = 4.dp)
@@ -11320,6 +12079,17 @@ private fun ModelSwitcherDropdown(
                 )
             }
         }
+    }
+    if (generationParamsDialogVisible) {
+        GenerationParamsQuickDialog(
+            params = generationParams,
+            onDismiss = { generationParamsDialogVisible = false },
+            onApply = { updated ->
+                onGenerationParamsChange(updated)
+                generationParamsDialogVisible = false
+                onDismiss()
+            }
+        )
     }
 }
 
@@ -11378,6 +12148,7 @@ private fun ModelSourceInlineCapsule(
     models: List<ChatModelChoice>,
     isGenerating: Boolean,
     onLoadModel: (String) -> Unit,
+    onModelBackendChange: (String, String) -> Unit,
     onOpenModels: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -11419,7 +12190,8 @@ private fun ModelSourceInlineCapsule(
                             enabled = !isGenerating || model.loaded,
                             onClick = {
                                 if (!model.loaded) onLoadModel(model.id)
-                            }
+                            },
+                            onBackendChange = onModelBackendChange
                         )
                     }
                 }
@@ -11432,10 +12204,63 @@ private fun ModelSourceInlineCapsule(
 private fun ModelChoicePill(
     model: ChatModelChoice,
     enabled: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onBackendChange: (String, String) -> Unit
 ) {
     val darkTheme = isSystemInDarkTheme()
     val selectedColor = if (darkTheme) MaterialTheme.colorScheme.primary else Color(0xFF1A73E8)
+    var customGpuDialogVisible by rememberSaveable(model.id) { mutableStateOf(false) }
+    var customGpuLayersText by rememberSaveable(model.id, model.customGpuLayers) {
+        mutableStateOf((model.customGpuLayers ?: 32).toString())
+    }
+    var customGpuLayerError by rememberSaveable(model.id) { mutableStateOf<String?>(null) }
+    if (customGpuDialogVisible) {
+        AlertDialog(
+            onDismissRequest = {
+                customGpuDialogVisible = false
+                customGpuLayerError = null
+            },
+            title = { Text("自定义 GPU 层数") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "仅对当前 GGUF 模型生效。数值越大，尝试放到 GPU 的层越多；0 表示 CPU。" +
+                            "设备或显存不足时，加载会给出具体错误，不会静默假装使用 GPU。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedTextField(
+                        value = customGpuLayersText,
+                        onValueChange = {
+                            customGpuLayersText = it.filter(Char::isDigit).take(4)
+                            customGpuLayerError = null
+                        },
+                        label = { Text("GPU 层数（0–4096）") },
+                        singleLine = true,
+                        isError = customGpuLayerError != null,
+                        supportingText = customGpuLayerError?.let { error -> { Text(error) } }
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val layers = customGpuLayersText.toIntOrNull()
+                    if (layers == null || layers !in 0..4096) {
+                        customGpuLayerError = "请输入 0 到 4096 之间的整数。"
+                    } else {
+                        onBackendChange(model.id, "custom:$layers")
+                        customGpuDialogVisible = false
+                        customGpuLayerError = null
+                    }
+                }) { Text("保存并加载") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    customGpuDialogVisible = false
+                    customGpuLayerError = null
+                }) { Text("取消") }
+            }
+        )
+    }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -11458,7 +12283,7 @@ private fun ModelChoicePill(
                 Spacer(modifier = Modifier.size(17.dp))
             }
             Spacer(modifier = Modifier.width(8.dp))
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(
                     text = displayModelName(model.displayName) ?: model.displayName,
                     maxLines = 1,
@@ -11484,6 +12309,50 @@ private fun ModelChoicePill(
                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
                     fontWeight = if (model.loaded) FontWeight.Medium else FontWeight.Normal
                 )
+                if (model.backendOptions.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        model.backendOptions.forEach { option ->
+                            FilterChip(
+                                selected = model.selectedBackendId == option.id,
+                                onClick = {
+                                    if (option.id == "custom") {
+                                        customGpuLayersText = (model.customGpuLayers ?: 32).toString()
+                                        customGpuDialogVisible = true
+                                    } else {
+                                        onBackendChange(model.id, option.id)
+                                    }
+                                },
+                                enabled = option.enabled && enabled,
+                                label = {
+                                    Text(
+                                        option.label,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.5.sp)
+                                    )
+                                },
+                                modifier = Modifier.heightIn(min = 28.dp)
+                            )
+                        }
+                    }
+                    model.backendOptions
+                        .firstOrNull { it.id == model.selectedBackendId }
+                        ?.availabilityNote
+                        ?.takeIf(String::isNotBlank)
+                        ?.let { note ->
+                            Text(
+                                text = note,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 11.sp)
+                            )
+                        }
+                }
             }
         }
     }
@@ -12310,6 +13179,56 @@ private val ATTACHMENT_NAME_PATTERNS = listOf(
 private val IMAGE_ATTACHMENT_PATTERN = Regex("""【上传图片：([^】]+)】""")
 private val IMAGE_ATTACHMENT_WITH_URI_PATTERN = Regex("""【上传图片：([^】]+)】(?:\s*\n描述：[^\n]+)?\s*\n(\S+)""")
 
+private const val CHAT_ATTACHMENT_IDENTITY_MAX_BYTES = 64L * 1024L * 1024L
+
+/**
+ * Resolves the content identity used by the composer preflight and message bubble.
+ *
+ * Picker URIs are not the only representation that can occur here.  Imported
+ * assets are persisted as private `file://` URIs, and an older history can also
+ * contain an absolute path.  The old implementation returned `null` for those
+ * paths, so two copies of the same picked image survived the UI preflight and
+ * were rendered as two attachments until the conversation was reloaded.  Keep
+ * content-provider reads context-aware, then delegate every file/data/URL form
+ * to the engine's shared identity contract.
+ *
+ * This function is called from a coroutine on Dispatchers.IO.  It streams raw
+ * bytes and never retains the image in memory.
+ */
+private fun chatImageAttachmentContentIdentity(context: Context, rawUri: String): String? {
+    val uri = runCatching { Uri.parse(rawUri) }.getOrNull() ?: return null
+    if (!uri.scheme.equals("content", ignoreCase = true)) {
+        // Local imported files and inline data URLs can use the same byte-based
+        // identity as the native/cloud request path.  Remote URLs remain
+        // conservative and are normalized by the shared helper.
+        return runCatching {
+            ChatImageAttachment(uriString = rawUri).visionDeduplicationKey()
+        }.getOrNull()
+    }
+    return runCatching {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val input = requireNotNull(context.contentResolver.openInputStream(uri)) {
+            "Cannot read image attachment URI."
+        }
+        var totalBytes = 0L
+        input.use { stream ->
+            val buffer = ByteArray(32 * 1024)
+            while (true) {
+                val read = stream.read(buffer)
+                if (read < 0) break
+                totalBytes += read
+                require(totalBytes <= CHAT_ATTACHMENT_IDENTITY_MAX_BYTES) {
+                    "Image attachment is too large to hash for duplicate detection."
+                }
+                digest.update(buffer, 0, read)
+            }
+        }
+        "bytes:" + digest.digest().joinToString("") { byte ->
+            "%02x".format(byte.toInt() and 0xff)
+        }
+    }.getOrNull()
+}
+
 private fun hasImageAttachmentMarker(input: String): Boolean =
     IMAGE_ATTACHMENT_PATTERN.containsMatchIn(input)
 
@@ -12341,10 +13260,20 @@ private fun ChatInputBar(
     onOpenModels: () -> Unit,
     input: String,
     isGenerating: Boolean,
+    selectedImageModelName: String?,
+    selectedImageModelIsCloud: Boolean,
+    assistantImageToolAvailable: Boolean,
+    assistantImageToolUnavailableReason: String,
+    assistantImageToolAutoApproval: Boolean,
+    assistantImageToolCanChange: Boolean,
+    imageGenerationBusy: Boolean,
     statusMessage: String?,
     onInputChange: (String) -> Unit,
     onDismissStatusMessage: () -> Unit,
     onSend: () -> Unit,
+    attachmentPreflightRunning: Boolean = false,
+    onSendImagePrompt: () -> Unit,
+    onSetAssistantImageToolAutoApproval: (Boolean) -> Unit,
     onStop: () -> Unit,
     onOpenCamera: () -> Unit,
     onOpenPhoto: () -> Unit,
@@ -12371,6 +13300,8 @@ private fun ChatInputBar(
 ) {
     var showActionSheet by rememberSaveable { mutableStateOf(false) }
     var researchModeExpanded by rememberSaveable { mutableStateOf(false) }
+    var imagePromptMode by rememberSaveable { mutableStateOf(false) }
+    var showAutoImageApprovalConfirmation by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
     val inputShellColor = if (darkTheme) MaterialTheme.colorScheme.surface else McaInputShell
@@ -12378,6 +13309,34 @@ private fun ChatInputBar(
     val inputIconSurfaceColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else McaInputIconSurface
     val inputTextColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else McaInputText
     val inputPlaceholderColor = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else McaInputPlaceholder
+    val visibleInput = displayInputWithoutAttachment(input)
+    val slashCommandSuggestions = remember(visibleInput) {
+        chatSlashCommandSuggestions(visibleInput)
+    }
+    if (showAutoImageApprovalConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showAutoImageApprovalConfirmation = false },
+            title = { Text("允许本对话自动生图？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("之后角色发起的图片请求会直接执行，不再逐次询问。你可以随时切回“每次询问”。")
+                    Text("当前生图模型：${selectedImageModelName.orEmpty().ifBlank { "尚未选择" }}")
+                    if (selectedImageModelIsCloud) {
+                        Text("提示词会发送给云端生图服务；服务商可能按其规则计费。")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showAutoImageApprovalConfirmation = false
+                    onSetAssistantImageToolAutoApproval(true)
+                }) { Text("允许本对话自动生成") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAutoImageApprovalConfirmation = false }) { Text("取消") }
+            }
+        )
+    }
     if (showActionSheet) {
         CompactInputActionMenu(
             onDismiss = {
@@ -12419,6 +13378,25 @@ private fun ChatInputBar(
                 showActionSheet = false
                 onOpenWebSearchSettings()
             },
+            onImagePromptMode = {
+                researchModeExpanded = false
+                showActionSheet = false
+                imagePromptMode = !imagePromptMode
+            },
+            assistantImageToolAvailable = assistantImageToolAvailable,
+            assistantImageToolUnavailableReason = assistantImageToolUnavailableReason,
+            assistantImageToolAutoApproval = assistantImageToolAutoApproval,
+            assistantImageToolCanChange = assistantImageToolCanChange,
+            onSetAssistantImageToolAutoApproval = { enabled ->
+                researchModeExpanded = false
+                showActionSheet = false
+                if (enabled) {
+                    showAutoImageApprovalConfirmation = true
+                } else {
+                    onSetAssistantImageToolAutoApproval(false)
+                }
+            },
+            imagePromptMode = imagePromptMode,
             webSearchEnabled = webSearchEnabled,
             webSearchConfigured = webSearchConfigured,
             webSearchEnabledForTurn = webSearchEnabledForTurn,
@@ -12474,6 +13452,49 @@ private fun ChatInputBar(
                     modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 6.dp)
                 )
             }
+            if (imagePromptMode) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 4.dp, end = 2.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "聊天内生图",
+                        color = McaPrimaryBlue,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        when {
+                            imageGenerationBusy -> "图片任务进行中，完成后可继续 · ${selectedImageModelName.orEmpty()}"
+                            selectedImageModelName.isNullOrBlank() -> "尚未选择生图模型，点击查看模型"
+                            else -> "当前：${if (selectedImageModelIsCloud) "云端" else "本地"} · $selectedImageModelName"
+                        },
+                        color = inputPlaceholderColor,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable(enabled = selectedImageModelName.isNullOrBlank()) {
+                                onOpenModels()
+                            },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    IconButton(
+                        onClick = { imagePromptMode = false },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "退出聊天生图模式",
+                            modifier = Modifier.size(16.dp),
+                            tint = inputPlaceholderColor
+                        )
+                    }
+                }
+            }
             AttachmentPreview(
                 input = input,
                 visionCapabilityLabel = visionCapabilityLabel,
@@ -12481,6 +13502,58 @@ private fun ChatInputBar(
                 visionCapabilityReady = visionCapabilityReady,
                 onRemove = { onInputChange(removeAttachmentFromInput(input)) }
             )
+            if (!isGenerating && slashCommandSuggestions.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 50.dp, end = 48.dp, bottom = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    slashCommandSuggestions.forEach { command ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onInputChange(
+                                        mergeInputWithExistingAttachment(
+                                            input,
+                                            insertChatSlashCommand(visibleInput, command)
+                                        )
+                                    )
+                                },
+                            color = inputFieldColor,
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = command.command,
+                                    color = McaPrimaryBlue,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = command.title,
+                                        color = inputTextColor,
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                    Text(
+                                        text = command.description,
+                                        color = inputPlaceholderColor,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
@@ -12493,7 +13566,6 @@ private fun ChatInputBar(
                     Icon(Icons.Default.Add, contentDescription = "更多操作", modifier = Modifier.size(24.dp), tint = if (isGenerating) inputPlaceholderColor else McaPrimaryBlue)
                 }
                 Spacer(modifier = Modifier.width(10.dp))
-                val visibleInput = displayInputWithoutAttachment(input)
                 Surface(
                     modifier = Modifier
                         .weight(1f)
@@ -12509,7 +13581,7 @@ private fun ChatInputBar(
                     ) {
                         if (visibleInput.isBlank()) {
                             Text(
-                                "问问 MCA",
+                                if (imagePromptMode) "描述要生成的图片" else "问问 MCA",
                                 color = inputPlaceholderColor,
                                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp)
                             )
@@ -12519,7 +13591,7 @@ private fun ChatInputBar(
                             onValueChange = { visibleText ->
                                 onInputChange(mergeInputWithExistingAttachment(input, visibleText))
                             },
-                            enabled = !isGenerating,
+                            enabled = !isGenerating && !attachmentPreflightRunning,
                             maxLines = 4,
                             textStyle = TextStyle(
                                 color = inputTextColor,
@@ -12534,18 +13606,37 @@ private fun ChatInputBar(
                 Spacer(modifier = Modifier.width(10.dp))
                 FloatingActionButton(
                     onClick = {
-                    if (isGenerating) onStop() else onSend()
-                },
+                        if (isGenerating) onStop()
+                        else if (attachmentPreflightRunning) Unit
+                        else if (imagePromptMode) onSendImagePrompt()
+                        else onSend()
+                    },
                     containerColor = McaPrimaryBlue,
                     elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp),
                     shape = CircleShape,
                     modifier = Modifier.size(40.dp)
                 ) {
-                    Icon(
-                        imageVector = if (isGenerating) Icons.Default.Stop else Icons.AutoMirrored.Filled.Send,
-                        contentDescription = if (isGenerating) "停止" else "发送",
-                        tint = Color.White
-                    )
+                    if (attachmentPreflightRunning && !isGenerating) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(19.dp),
+                            strokeWidth = 2.dp,
+                            color = Color.White
+                        )
+                    } else {
+                        Icon(
+                            imageVector = when {
+                                isGenerating -> Icons.Default.Stop
+                                imagePromptMode -> Icons.Default.Image
+                                else -> Icons.AutoMirrored.Filled.Send
+                            },
+                            contentDescription = when {
+                                isGenerating -> "停止"
+                                imagePromptMode -> "生成图片"
+                                else -> "发送"
+                            },
+                            tint = Color.White
+                        )
+                    }
                 }
             }
         }
@@ -12721,6 +13812,13 @@ private fun CompactInputActionMenu(
     onPhoto: () -> Unit,
     onFile: () -> Unit,
     onLibrary: () -> Unit,
+    onImagePromptMode: () -> Unit,
+    assistantImageToolAvailable: Boolean,
+    assistantImageToolUnavailableReason: String,
+    assistantImageToolAutoApproval: Boolean,
+    assistantImageToolCanChange: Boolean,
+    onSetAssistantImageToolAutoApproval: (Boolean) -> Unit,
+    imagePromptMode: Boolean,
     onWebSearch: () -> Unit,
     onResearchMode: () -> Unit,
     onOpenWebSearchSettings: () -> Unit,
@@ -12768,6 +13866,29 @@ private fun CompactInputActionMenu(
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    CompactInputActionRow(
+                        icon = { Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                        label = if (imagePromptMode) "退出聊天生图" else "在聊天中生成图片",
+                        onClick = onImagePromptMode
+                    )
+                    CompactInputActionRow(
+                        icon = { Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                        label = if (assistantImageToolAutoApproval) {
+                            "角色生图：本对话自动授权"
+                        } else {
+                            "角色生图：每次询问"
+                        },
+                        subtitle = when {
+                            !assistantImageToolAvailable -> assistantImageToolUnavailableReason
+                            !assistantImageToolCanChange -> "发送一条消息创建对话后即可设置"
+                            assistantImageToolAutoApproval -> "Responses 角色请求将直接生成，可随时关闭"
+                            else -> "Responses 角色请求会先显示确认卡片"
+                        },
+                        enabled = assistantImageToolAvailable && assistantImageToolCanChange,
+                        onClick = {
+                            onSetAssistantImageToolAutoApproval(!assistantImageToolAutoApproval)
+                        }
+                    )
                     CompactInputActionRow(
                         icon = { Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(20.dp)) },
                         label = "相机",
@@ -12829,6 +13950,7 @@ private fun CompactInputActionRow(
     icon: @Composable () -> Unit,
     label: String,
     subtitle: String? = null,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     val darkTheme = isSystemInDarkTheme()
@@ -12837,7 +13959,7 @@ private fun CompactInputActionRow(
             .fillMaxWidth()
             .height(48.dp)
             .clip(CircleShape)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -12851,15 +13973,26 @@ private fun CompactInputActionRow(
             }
         }
         Spacer(modifier = Modifier.width(14.dp))
-        Text(
-            text = label,
-            color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124),
-            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 19.sp),
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+            Text(
+                text = label,
+                color = (if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124))
+                    .copy(alpha = if (enabled) 1f else 0.58f),
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 19.sp),
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            subtitle?.takeIf(String::isNotBlank)?.let {
+                Text(
+                    text = it,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 0.82f else 0.62f),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
     }
 }
 
@@ -13104,6 +14237,7 @@ private fun AttachmentPreview(
 ) {
     val name = remember(input) { extractAttachmentName(input) } ?: return
     val isImageAttachment = remember(input) { hasImageAttachmentMarker(input) }
+    val imageAttachmentCount = remember(input) { chatImageAttachmentMarkerCount(input) }
     val statusColor = if (visionCapabilityReady) McaPrimaryBlue else MaterialTheme.colorScheme.error
     val containerColor = if (isImageAttachment) {
         if (visionCapabilityReady) McaInputIconSurface.copy(alpha = 0.92f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.44f)
@@ -13154,8 +14288,12 @@ private fun AttachmentPreview(
             }
             Spacer(modifier = Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = name,
+                    Text(
+                        text = if (isImageAttachment && imageAttachmentCount > 1) {
+                            "$name · 共 $imageAttachmentCount 张图片"
+                        } else {
+                            name
+                        },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     color = contentColor,
@@ -13196,6 +14334,18 @@ private fun AttachmentPreview(
 @Composable
 private fun MessageBubble(
     message: ChatMessage,
+    generatedImageRequest: ChatGeneratedImageRequest?,
+    generatedImageJob: ImageGenerationUiJob?,
+    generatedImageVisualState: ChatGeneratedImageUiState?,
+    generatedImages: List<ImageAssetUiItem>,
+    onRetryChatImage: () -> Unit,
+    onCancelChatImage: () -> Unit,
+    onApproveChatImage: () -> Unit,
+    onRejectChatImage: () -> Unit,
+    onContinueAssistantImageTurn: () -> Unit,
+    onOpenImageModels: () -> Unit,
+    onUseImageAsset: (String) -> Unit,
+    onDeleteImageAsset: (String) -> Unit,
     showAssistantActions: Boolean,
     canRegenerate: Boolean,
     isGenerating: Boolean,
@@ -13209,6 +14359,7 @@ private fun MessageBubble(
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val isUser = message.role == Role.USER
 
     Row(
@@ -13216,11 +14367,36 @@ private fun MessageBubble(
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
         if (isUser) {
-            UserMessageBubble(message)
+            UserMessageBubble(
+                message = message,
+                onCopy = {
+                    val copyText = displayInputWithoutAttachment(message.content)
+                    if (copyText.isNotBlank()) {
+                        scope.launch {
+                            clipboard.setClipEntry(
+                                ClipEntry(ClipData.newPlainText("MCA", copyText))
+                            )
+                            Toast.makeText(context, "已复制提示词", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            )
         } else {
             AssistantMessageBlock(
                 modifier = Modifier.fillMaxWidth(),
                 message = message,
+                generatedImageRequest = generatedImageRequest,
+                generatedImageJob = generatedImageJob,
+                generatedImageVisualState = generatedImageVisualState,
+                generatedImages = generatedImages,
+                onRetryChatImage = onRetryChatImage,
+                onCancelChatImage = onCancelChatImage,
+                onApproveChatImage = onApproveChatImage,
+                onRejectChatImage = onRejectChatImage,
+                onContinueAssistantImageTurn = onContinueAssistantImageTurn,
+                onOpenImageModels = onOpenImageModels,
+                onUseImageAsset = onUseImageAsset,
+                onDeleteImageAsset = onDeleteImageAsset,
                 showActions = showAssistantActions,
                 canRegenerate = canRegenerate,
                 isGenerating = isGenerating,
@@ -13244,66 +14420,103 @@ private fun MessageBubble(
 }
 
 @Composable
-private fun UserMessageBubble(message: ChatMessage) {
+private fun UserMessageBubble(
+    message: ChatMessage,
+    onCopy: () -> Unit
+) {
     val context = LocalContext.current
-    Surface(
-        color = Color(0xFFEEF4FF),
-        shape = RoundedCornerShape(
-            topStart = 20.dp,
-            topEnd = 20.dp,
-            bottomStart = 20.dp,
-            bottomEnd = 6.dp
-        ),
-        modifier = Modifier.widthIn(max = 280.dp)
+    val copyableContent = displayInputWithoutAttachment(message.content)
+    val visibleImageAttachments by produceState(
+        initialValue = message.imageAttachments.takeIf { it.size <= 1 }.orEmpty(),
+        key1 = message.imageAttachments
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 17.dp, vertical = 13.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+        // Legacy histories may keep distinct content:// URIs for the same bytes.
+        // Resolve their identities off the UI thread before showing thumbnails.
+        value = withContext(Dispatchers.IO) {
+            deduplicateChatImageAttachments(message.imageAttachments) { uri ->
+                chatImageAttachmentContentIdentity(context, uri)
+            }
+        }
+    }
+    Column(
+        modifier = Modifier.widthIn(max = 280.dp),
+        horizontalAlignment = Alignment.End
+    ) {
+        Surface(
+            color = Color(0xFFEEF4FF),
+            shape = RoundedCornerShape(
+                topStart = 20.dp,
+                topEnd = 20.dp,
+                bottomStart = 20.dp,
+                bottomEnd = 6.dp
+            ),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            if (message.imageAttachments.isNotEmpty()) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.horizontalScroll(rememberScrollState())
-                ) {
-                    message.imageAttachments.forEach { attachment ->
-                        val bitmap = remember(attachment.uriString) {
-                            loadImageBitmap(context, attachment.uriString)
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = Color.White.copy(alpha = 0.72f),
-                            modifier = Modifier.size(104.dp)
-                        ) {
-                            if (bitmap != null) {
-                                Image(
-                                    bitmap = bitmap.asImageBitmap(),
-                                    contentDescription = attachment.name.ifBlank { "上传图片" },
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            } else {
-                                Box(
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        Icons.Default.Image,
-                                        contentDescription = null,
-                                        tint = McaPrimaryBlue.copy(alpha = 0.72f)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 17.dp, vertical = 13.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (visibleImageAttachments.isNotEmpty()) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.horizontalScroll(rememberScrollState())
+                    ) {
+                        visibleImageAttachments.forEach { attachment ->
+                            val bitmap by rememberChatImageBitmap(
+                                context,
+                                attachment.uriString,
+                                maxDimensionPx = 384
+                            )
+                            val displayBitmap = bitmap
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = Color.White.copy(alpha = 0.72f),
+                                modifier = Modifier.size(104.dp)
+                            ) {
+                                if (displayBitmap != null) {
+                                    Image(
+                                        bitmap = displayBitmap.asImageBitmap(),
+                                        contentDescription = attachment.name.ifBlank { "上传图片" },
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
                                     )
+                                } else {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Image,
+                                            contentDescription = null,
+                                            tint = McaPrimaryBlue.copy(alpha = 0.72f)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                if (message.content.isNotBlank()) {
+                    PagedPlainMessageText(
+                        content = message.content,
+                        color = Color(0xFF202124),
+                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 24.sp)
+                    )
+                }
             }
-            if (message.content.isNotBlank()) {
-                PagedPlainMessageText(
-                    content = message.content,
-                    color = Color(0xFF202124),
-                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 24.sp)
+        }
+        if (copyableContent.isNotBlank()) {
+            IconButton(
+                onClick = onCopy,
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    Icons.Default.ContentCopy,
+                    contentDescription = "复制提示词",
+                    modifier = Modifier.size(17.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
                 )
             }
         }
@@ -13311,9 +14524,104 @@ private fun UserMessageBubble(message: ChatMessage) {
 }
 
 @Composable
+private fun GenerationParamsQuickDialog(
+    params: GenerationParams,
+    onDismiss: () -> Unit,
+    onApply: (GenerationParams) -> Unit
+) {
+    var temperatureText by remember(params) { mutableStateOf(params.temperature.cleanParamText()) }
+    var topPText by remember(params) { mutableStateOf(params.topP.cleanParamText()) }
+    var topKText by remember(params) { mutableStateOf(params.topK.toString()) }
+    var minPText by remember(params) { mutableStateOf(params.minP.cleanParamText()) }
+    var repeatPenaltyText by remember(params) { mutableStateOf(params.repeatPenalty.cleanParamText()) }
+    var nPredictText by remember(params) { mutableStateOf(params.nPredict.toString()) }
+    var reasoningMode by remember(params) { mutableStateOf(params.reasoningMode) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
+    fun parseFloat(label: String, value: String, min: Float, max: Float): Float? {
+        val parsed = value.trim().toFloatOrNull()
+        if (parsed == null || !parsed.isFinite() || parsed !in min..max) {
+            errorText = "$label 请输入 ${min.cleanParamText()} 到 ${max.cleanParamText()} 之间的数字"
+            return null
+        }
+        return parsed
+    }
+
+    fun parseInt(label: String, value: String, min: Int, max: Int): Int? {
+        val parsed = value.trim().toIntOrNull()
+        if (parsed == null || parsed !in min..max) {
+            errorText = "$label 请输入 $min 到 $max 之间的整数"
+            return null
+        }
+        return parsed
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("当前模型参数") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "只影响当前模型，切换模型后会自动恢复该模型的设置。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(value = temperatureText, onValueChange = { temperatureText = it; errorText = null }, label = { Text("temperature") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = topPText, onValueChange = { topPText = it; errorText = null }, label = { Text("top_p") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = topKText, onValueChange = { topKText = it; errorText = null }, label = { Text("top_k") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = minPText, onValueChange = { minPText = it; errorText = null }, label = { Text("min_p") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = repeatPenaltyText, onValueChange = { repeatPenaltyText = it; errorText = null }, label = { Text("重复惩罚") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = nPredictText, onValueChange = { nPredictText = it; errorText = null }, label = { Text("最大输出 tokens") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Text("思考模式", style = MaterialTheme.typography.labelLarge)
+                Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ReasoningMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = reasoningMode == mode,
+                            onClick = { reasoningMode = mode },
+                            label = { Text(mode.shortLabel()) }
+                        )
+                    }
+                }
+                errorText?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val temperature = parseFloat("temperature", temperatureText, 0f, 2f) ?: return@TextButton
+                val topP = parseFloat("top_p", topPText, 0f, 1f) ?: return@TextButton
+                val topK = parseInt("top_k", topKText, 0, 1000) ?: return@TextButton
+                val minP = parseFloat("min_p", minPText, 0f, 1f) ?: return@TextButton
+                val repeatPenalty = parseFloat("重复惩罚", repeatPenaltyText, 0.5f, 2f) ?: return@TextButton
+                val nPredict = parseInt("最大输出 tokens", nPredictText, 16, 65_536) ?: return@TextButton
+                onApply(params.copy(temperature = temperature, topP = topP, topK = topK, minP = minP, repeatPenalty = repeatPenalty, nPredict = nPredict, reasoningMode = reasoningMode, hideReasoning = reasoningMode == ReasoningMode.OFF))
+            }) { Text("应用") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@Composable
 private fun AssistantMessageBlock(
     modifier: Modifier = Modifier,
     message: ChatMessage,
+    generatedImageRequest: ChatGeneratedImageRequest?,
+    generatedImageJob: ImageGenerationUiJob?,
+    generatedImageVisualState: ChatGeneratedImageUiState?,
+    generatedImages: List<ImageAssetUiItem>,
+    onRetryChatImage: () -> Unit,
+    onCancelChatImage: () -> Unit,
+    onApproveChatImage: () -> Unit,
+    onRejectChatImage: () -> Unit,
+    onContinueAssistantImageTurn: () -> Unit,
+    onOpenImageModels: () -> Unit,
+    onUseImageAsset: (String) -> Unit,
+    onDeleteImageAsset: (String) -> Unit,
     showActions: Boolean,
     canRegenerate: Boolean,
     isGenerating: Boolean,
@@ -13380,13 +14688,37 @@ private fun AssistantMessageBlock(
                 } else {
                     Spacer(modifier = Modifier.height(18.dp))
                 }
-            } else if (message.content.isNotBlank()) {
+            } else if (message.content.isNotBlank() && generatedImageRequest == null) {
                 SelectionContainer {
                     PagedAssistantRichText(message.content)
                 }
             }
+            if (generatedImageRequest != null && generatedImageVisualState != null) {
+                ChatGeneratedImageContent(
+                    request = generatedImageRequest,
+                    job = generatedImageJob,
+                    visualState = generatedImageVisualState,
+                    images = generatedImages,
+                    onRetry = onRetryChatImage,
+                    onCancel = onCancelChatImage,
+                    onApprove = onApproveChatImage,
+                    onReject = onRejectChatImage,
+                    onContinueAssistantImageTurn = onContinueAssistantImageTurn,
+                    onOpenImageModels = onOpenImageModels,
+                    onUseImageAsset = onUseImageAsset,
+                    onDeleteImageAsset = onDeleteImageAsset
+                )
+            }
             if (isGenerating) {
                 GenerationPerformanceLine(generationStats)
+            } else {
+                message.generationMetricsSummary()?.let { summary ->
+                    Text(
+                        text = summary,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             if (message.sourceReferences.isNotEmpty() || message.webSearchTrace?.hasContent == true) {
                 WebSearchSourcesRow(
@@ -13408,16 +14740,452 @@ private fun AssistantMessageBlock(
 }
 
 @Composable
+private fun ChatGeneratedImageContent(
+    request: ChatGeneratedImageRequest,
+    job: ImageGenerationUiJob?,
+    visualState: ChatGeneratedImageUiState,
+    images: List<ImageAssetUiItem>,
+    onRetry: () -> Unit,
+    onCancel: () -> Unit,
+    onApprove: () -> Unit,
+    onReject: () -> Unit,
+    onContinueAssistantImageTurn: () -> Unit,
+    onOpenImageModels: () -> Unit,
+    onUseImageAsset: (String) -> Unit,
+    onDeleteImageAsset: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var selectedImageId by remember(request.id) { mutableStateOf(images.firstOrNull()?.id) }
+    var previewImageId by remember(request.id) { mutableStateOf<String?>(null) }
+    val selectedImage = images.firstOrNull { it.id == selectedImageId } ?: images.firstOrNull()
+    val darkTheme = isSystemInDarkTheme()
+
+    when (visualState) {
+        ChatGeneratedImageUiState.AWAITING_APPROVAL -> {
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.58f),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.widthIn(max = 480.dp).fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        "角色请求生成图片",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        request.prompt,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 6,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    chatGeneratedImageModelLabel(request)?.let { modelLabel ->
+                        Text(
+                            "将使用：$modelLabel",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (request.backendId.equals("CLOUD", ignoreCase = true)) {
+                        Text(
+                            "确认后会将这段提示词发送给所选云端生图服务。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        request.message.ifBlank { "是否允许使用当前图像模型生成这张图片？" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = onApprove) { Text("同意生成") }
+                        TextButton(onClick = onReject) { Text("拒绝") }
+                    }
+                }
+            }
+        }
+        ChatGeneratedImageUiState.RUNNING -> {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    request.prompt,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
+                chatGeneratedImageModelLabel(request)?.let { modelLabel ->
+                    Text(
+                        modelLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (job != null) {
+                    ImageCreatingPlaceholder(
+                        statusText = job.statusLabel.ifBlank { "生成中" },
+                        statusMessage = job.message.ifBlank { request.message },
+                        startedAtMillis = job.startedAtMillis,
+                        previewUriString = job.previewUriString,
+                        previewStep = job.previewStep,
+                        previewRevision = job.previewRevision,
+                        onCancel = onCancel
+                    )
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text(
+                            request.message.ifBlank { "正在准备图片生成。" },
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(onClick = onCancel) { Text("取消") }
+                    }
+                }
+            }
+        }
+        ChatGeneratedImageUiState.RESULT -> {
+            if (selectedImage != null) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        request.prompt,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    chatGeneratedImageModelLabel(request)?.let { modelLabel ->
+                        Text(
+                            modelLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL) {
+                        val continuationMessage = when (request.toolContinuationStatus) {
+                            ChatImageToolContinuationStatus.RUNNING -> "正在继续角色回复…"
+                            ChatImageToolContinuationStatus.FAILED -> "图片已完成，角色后续回复未完成。可以重试继续。"
+                            ChatImageToolContinuationStatus.NOT_STARTED -> "图片已完成，正在准备角色回复。"
+                            ChatImageToolContinuationStatus.COMPLETED -> null
+                        }
+                        continuationMessage?.let { message ->
+                            Text(
+                                message,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (images.size > 1) {
+                        Text(
+                            "共 ${images.size} 张 · 点击图片查看大图",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        ChatGeneratedImageGrid(
+                            images = images,
+                            selectedImageId = selectedImage.id,
+                            onSelect = { imageId ->
+                                selectedImageId = imageId
+                                previewImageId = imageId
+                            }
+                        )
+                    } else {
+                        // Never decode an original camera/PNG at full resolution in the
+                        // composition path.  A single 12K image can otherwise allocate tens of
+                        // megabytes and take the UI process down when a chat image is selected.
+                        val bitmap by rememberChatImageBitmap(
+                            context = context,
+                            uriString = selectedImage.uriString,
+                            maxDimensionPx = 1536
+                        )
+                        val bitmapValue = bitmap
+                        val ratio = remember(selectedImage.width, selectedImage.height) {
+                            if (selectedImage.width > 0 && selectedImage.height > 0) {
+                                (selectedImage.width.toFloat() / selectedImage.height.toFloat())
+                                    .coerceIn(0.5f, 2.0f)
+                            } else {
+                                1f
+                            }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .widthIn(max = 480.dp)
+                                .fillMaxWidth(0.94f)
+                                .aspectRatio(ratio)
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { previewImageId = selectedImage.id },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (bitmapValue != null) {
+                                Image(
+                                    bitmap = bitmapValue.asImageBitmap(),
+                                    contentDescription = "生成图片 ${selectedImage.width}×${selectedImage.height}，点击查看大图",
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Text(
+                                    "图片文件暂时无法读取",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                    if (images.size > 1) {
+                        val selectedIndex = images.indexOfFirst { it.id == selectedImage.id } + 1
+                        Text(
+                            "当前选择：第 ${selectedIndex.coerceAtLeast(1)} 张",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(onClick = { previewImageId = selectedImage.id }) { Text("查看") }
+                        TextButton(onClick = { onUseImageAsset(selectedImage.id) }) { Text("编辑") }
+                        TextButton(onClick = onRetry) { Text("再生成") }
+                        TextButton(onClick = { onDeleteImageAsset(selectedImage.id) }) { Text("删除") }
+                        if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
+                            request.toolContinuationStatus in setOf(
+                                ChatImageToolContinuationStatus.NOT_STARTED,
+                                ChatImageToolContinuationStatus.FAILED
+                            )
+                        ) {
+                            TextButton(onClick = onContinueAssistantImageTurn) { Text("继续角色回复") }
+                        }
+                    }
+                }
+            }
+        }
+        ChatGeneratedImageUiState.FAILED,
+        ChatGeneratedImageUiState.CANCELLED,
+        ChatGeneratedImageUiState.INTERRUPTED,
+        ChatGeneratedImageUiState.MISSING_RESULT -> {
+            val headline = when (visualState) {
+                ChatGeneratedImageUiState.FAILED -> "图片生成失败"
+                ChatGeneratedImageUiState.CANCELLED -> "图片生成已取消"
+                ChatGeneratedImageUiState.INTERRUPTED -> "图片生成中断"
+                ChatGeneratedImageUiState.MISSING_RESULT -> "图片文件不可用"
+                else -> "图片生成未完成"
+            }
+            Surface(
+                color = if (visualState == ChatGeneratedImageUiState.FAILED) {
+                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.34f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
+                },
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.widthIn(max = 480.dp).fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(headline, style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        request.prompt,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    chatGeneratedImageModelLabel(request)?.let { modelLabel ->
+                        Text(
+                            modelLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        job?.message?.takeIf(String::isNotBlank)
+                            ?: request.message.ifBlank { "图片没有保存到本地图库。" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = onRetry) { Text("重试") }
+                        TextButton(onClick = onOpenImageModels) { Text("生图模型") }
+                        if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
+                            request.toolContinuationStatus in setOf(
+                                ChatImageToolContinuationStatus.NOT_STARTED,
+                                ChatImageToolContinuationStatus.FAILED
+                            )
+                        ) {
+                            TextButton(onClick = onContinueAssistantImageTurn) { Text("继续角色回复") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    val previewImage = images.firstOrNull { it.id == previewImageId }
+    if (previewImage != null) {
+        // The full-screen preview still uses a bounded bitmap; the original file remains
+        // available for save/share and is never decoded into the Compose heap.
+        val previewBitmap by rememberChatImageBitmap(
+            context = context,
+            uriString = previewImage.uriString,
+            maxDimensionPx = 2048
+        )
+        val previewBitmapValue = previewBitmap
+        Dialog(
+            onDismissRequest = { previewImageId = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth(0.96f)
+                    .heightIn(max = 760.dp),
+                shape = RoundedCornerShape(18.dp),
+                color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "${previewImage.width}×${previewImage.height}",
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(onClick = { previewImageId = null }) { Text("关闭") }
+                    }
+                    if (previewBitmapValue != null) {
+                        Image(
+                            bitmap = previewBitmapValue.asImageBitmap(),
+                            contentDescription = previewImage.name,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 680.dp)
+                        )
+                    } else {
+                        Text("图片文件暂时无法读取。")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Displays every asset from a batch in the chat event itself. */
+@Composable
+private fun ChatGeneratedImageGrid(
+    images: List<ImageAssetUiItem>,
+    selectedImageId: String,
+    onSelect: (String) -> Unit
+) {
+    val context = LocalContext.current
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        images.chunked(2).forEachIndexed { rowIndex, rowImages ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rowImages.forEachIndexed { columnIndex, item ->
+                    val itemIndex = rowIndex * 2 + columnIndex + 1
+                    val bitmap by rememberChatImageBitmap(
+                        context = context,
+                        uriString = item.uriString,
+                        maxDimensionPx = 640
+                    )
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .aspectRatio(1f)
+                            .clickable { onSelect(item.id) },
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(14.dp),
+                        border = if (item.id == selectedImageId) {
+                            BorderStroke(2.dp, McaPrimaryBlue)
+                        } else {
+                            null
+                        }
+                    ) {
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            if (bitmap != null) {
+                                Image(
+                                    bitmap = bitmap!!.asImageBitmap(),
+                                    contentDescription = "生成图片第 ${itemIndex} 张 ${item.name}",
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Text(
+                                    "图片加载中…",
+                                    modifier = Modifier.align(Alignment.Center),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Surface(
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(7.dp),
+                                color = Color.Black.copy(alpha = 0.58f),
+                                shape = CircleShape
+                            ) {
+                                Text(
+                                    "$itemIndex",
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
+                if (rowImages.size == 1) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun WebSearchSourcesRow(
     sources: List<ChatSourceReference>,
     trace: ChatWebSearchTrace?
 ) {
-    val context = LocalContext.current
     var selectedUrl by remember(sources) { mutableStateOf<String?>(null) }
+    var browserUrl by remember(sources) { mutableStateOf<String?>(null) }
     val selectedSource = sources.firstOrNull { it.url == selectedUrl }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (trace?.hasContent == true) {
-            WebSearchTraceCard(trace = trace)
+            WebSearchTraceCard(
+                trace = trace,
+                onOpenBrowser = { query ->
+                    val encoded = java.net.URLEncoder.encode(query, Charsets.UTF_8.name())
+                    browserUrl = "https://www.google.com/search?q=$encoded"
+                }
+            )
         }
         if (sources.isEmpty()) return@Column
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -13524,19 +15292,29 @@ private fun WebSearchSourcesRow(
                 WebSearchSourceDetailCard(
                     source = source,
                     onOpen = {
-                        runCatching {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(source.url)))
-                        }
+                        // Opening a source is an explicit user action. Keep it
+                        // inside MCA so a result cannot silently hand off to an
+                        // arbitrary external intent or browser.
+                        browserUrl = source.url
                     },
                     onClose = { selectedUrl = null }
                 )
             }
         }
+        browserUrl?.let { url ->
+            InternalBrowserDialog(
+                initialUrl = url,
+                onDismiss = { browserUrl = null }
+            )
+        }
     }
 }
 
 @Composable
-private fun WebSearchTraceCard(trace: ChatWebSearchTrace) {
+private fun WebSearchTraceCard(
+    trace: ChatWebSearchTrace,
+    onOpenBrowser: (String) -> Unit
+) {
     var expanded by rememberSaveable(trace.query, trace.message, trace.elapsedMs, trace.running) { mutableStateOf(false) }
     val statusColor = trace.webSearchTraceColor()
     val runningRotation = if (trace.running) {
@@ -13631,6 +15409,23 @@ private fun WebSearchTraceCard(trace: ChatWebSearchTrace) {
                 exit = fadeOut(tween(90)) + shrinkVertically(animationSpec = tween(140))
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (trace.query.isNotBlank() && !trace.running) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(onClick = { onOpenBrowser(trace.query) }) {
+                                Icon(
+                                    Icons.Default.Search,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("在内置浏览器中查看搜索")
+                            }
+                        }
+                    }
                     WebSearchTraceSection(
                         title = "检索目标",
                         values = (trace.searchedQueries + trace.directUrls)
@@ -13823,7 +15618,7 @@ private fun WebSearchSourceDetailCard(
                     Text("复制链接")
                 }
                 Button(onClick = onOpen) {
-                    Text("打开网页")
+                    Text("应用内打开")
                 }
             }
         }
@@ -14065,7 +15860,7 @@ private fun AssistantRichText(content: String) {
                 is MarkdownBlock.Heading -> HeadingBlock(block.text, block.level)
                 is MarkdownBlock.Paragraph -> ParagraphBlock(block.text)
                 is MarkdownBlock.BulletList -> ListBlock(block.items, ordered = false)
-                is MarkdownBlock.NumberedList -> ListBlock(block.items, ordered = true)
+                is MarkdownBlock.NumberedList -> NumberedListBlock(block.items)
                 is MarkdownBlock.Quote -> QuoteBlock(block.text)
                 is MarkdownBlock.Table -> TableBlock(block.rows)
                 MarkdownBlock.Divider -> HorizontalDivider(
@@ -14123,6 +15918,30 @@ private fun ListBlock(items: List<String>, ordered: Boolean) {
                 )
                 Text(
                     text = inlineMarkdownText(item),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 22.sp),
+                    modifier = Modifier.weight(1f),
+                    softWrap = true
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NumberedListBlock(items: List<OrderedMarkdownItem>) {
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        items.forEach { item ->
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                Text(
+                    text = "${item.number}.",
+                    color = MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 22.sp),
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.widthIn(min = 22.dp)
+                )
+                Text(
+                    text = inlineMarkdownText(item.text),
                     color = MaterialTheme.colorScheme.onSurface,
                     style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 22.sp),
                     modifier = Modifier.weight(1f),
@@ -14286,7 +16105,7 @@ private sealed class MarkdownBlock {
     data class Paragraph(val text: String) : MarkdownBlock()
     data class Heading(val text: String, val level: Int) : MarkdownBlock()
     data class BulletList(val items: List<String>) : MarkdownBlock()
-    data class NumberedList(val items: List<String>) : MarkdownBlock()
+    data class NumberedList(val items: List<OrderedMarkdownItem>) : MarkdownBlock()
     data class Quote(val text: String) : MarkdownBlock()
     data class Code(val language: String?, val code: String) : MarkdownBlock()
     data class Table(val rows: List<List<String>>) : MarkdownBlock()
@@ -14297,6 +16116,7 @@ private fun parseMarkdownBlocks(content: String): List<MarkdownBlock> {
     val blocks = mutableListOf<MarkdownBlock>()
     val paragraph = mutableListOf<String>()
     val listItems = mutableListOf<String>()
+    val orderedListItems = mutableListOf<OrderedMarkdownItem>()
     var listOrdered = false
     val codeBuffer = StringBuilder()
     val plainCodeLines = mutableListOf<String>()
@@ -14313,14 +16133,13 @@ private fun parseMarkdownBlocks(content: String): List<MarkdownBlock> {
     }
 
     fun flushList() {
-        if (listItems.isNotEmpty()) {
-            blocks += if (listOrdered) {
-                MarkdownBlock.NumberedList(listItems.toList())
-            } else {
-                MarkdownBlock.BulletList(listItems.toList())
-            }
+        if (listOrdered && orderedListItems.isNotEmpty()) {
+            blocks += MarkdownBlock.NumberedList(orderedListItems.toList())
+        } else if (!listOrdered && listItems.isNotEmpty()) {
+            blocks += MarkdownBlock.BulletList(listItems.toList())
         }
         listItems.clear()
+        orderedListItems.clear()
     }
 
     fun flushPlainCode() {
@@ -14366,7 +16185,13 @@ private fun parseMarkdownBlocks(content: String): List<MarkdownBlock> {
                 flushParagraph()
                 flushList()
                 inCode = true
-                codeLanguage = line.trim().removePrefix("```").trim().ifBlank { null }
+                val header = parseCodeFenceHeader(line)
+                codeLanguage = header.language
+                // A few local models emit the opening fence and the first code
+                // token on one line (for example ```html<!DOCTYPE html> or
+                // ```json{"key":1}). Keep that token in the code buffer
+                // instead of treating it as part of the language label.
+                header.inlineCode?.let { codeBuffer.appendLine(it) }
             }
         } else if (inCode) {
             codeBuffer.appendLine(line)
@@ -14410,9 +16235,14 @@ private fun parseMarkdownBlocks(content: String): List<MarkdownBlock> {
             flushPlainCode()
             flushParagraph()
             val ordered = line.isNumberedLine()
-            if (listItems.isNotEmpty() && listOrdered != ordered) flushList()
+            if ((listItems.isNotEmpty() || orderedListItems.isNotEmpty()) && listOrdered != ordered) flushList()
             listOrdered = ordered
-            listItems += stripListMarker(line)
+            if (ordered) {
+                val fallback = orderedListItems.lastOrNull()?.number?.plus(1) ?: 1
+                parseOrderedMarkdownItem(line, fallback)?.let { orderedListItems += it }
+            } else {
+                listItems += stripListMarker(line)
+            }
         } else {
             flushTable()
             flushPlainCode()
@@ -14431,10 +16261,32 @@ private fun parseMarkdownBlocks(content: String): List<MarkdownBlock> {
 private fun normalizeChatText(content: String): String =
     content
         .repairInlineCodeFences()
+        .repairCompactArithmeticRows()
         .replace("\r\n", "\n")
         .replace("\r", "\n")
-        .replace(Regex("""\s+(?=\d{1,2}[.)]\s+)"""), "\n")
+        // Keep ordered rows emitted by local models as list items even when they use
+        // Chinese punctuation or omit the conventional space (`1、标题`, `2.内容`).
+        .let(::splitEmbeddedOrderedMarkdownRows)
         .replace(Regex("""\s+(?=[-*]\s+)"""), "\n")
+
+internal fun String.repairCompactArithmeticRows(): String {
+    // ARITHMETIC_EXPRESSION_PATTERN is deliberately anchored for single-row
+    // classification.  Counting it with findAll() therefore misses compact
+    // rows embedded in a paragraph (the common "1×1=1 2×2=4" output).  Use an
+    // unanchored candidate pattern for the guard, then keep the stricter
+    // boundary-aware replacement below so decimals and prose are untouched.
+    val compactRowCandidates = Regex(
+        """(?<![A-Za-z0-9_])\d+\s*[×x*＋+−-]\s*\d+\s*=\s*\d+(?![A-Za-z0-9_])"""
+    ).findAll(this).count()
+    if (compactRowCandidates < 2) return this
+    // Small models often emit a multiplication table as one whitespace
+    // separated line. Split only at a boundary followed by another complete
+    // arithmetic row, so ordinary prose containing numbers is left alone.
+    return replace(
+        Regex("""(?<=\d)\s+(?=\d+\s*[×x*＋+−-]\s*\d+\s*=\s*\d+)"""),
+        "\n"
+    )
+}
 
 private fun String.repairInlineCodeFences(): String {
     val withFenceBreaks = replace(Regex("""([^\n])\s*```"""), "$1\n```")
@@ -14443,15 +16295,239 @@ private fun String.repairInlineCodeFences(): String {
     }
 }
 
-private fun repairCodeText(value: String, language: String?): String {
-    val normalizedLanguage = language?.lowercase().orEmpty()
-    if (value.lineSequence().count() > 1) return value
-    if (normalizedLanguage !in setOf("python", "py")) return value
-    return value
+private data class CodeFenceHeader(
+    val language: String?,
+    val inlineCode: String?
+)
+
+/**
+ * Parses an opening Markdown fence without losing compact first-line code.
+ *
+ * Markdown normally uses ` ```python` followed by a newline, but small local
+ * models frequently emit ` ```pythonprint(...)` or ` ```html<!DOCTYPE ...>`.
+ * The old parser fed the whole suffix to [codeLanguage], so the UI displayed
+ * the first code token as a language and rendered an empty block.
+ */
+private fun parseCodeFenceHeader(line: String): CodeFenceHeader {
+    val tail = line.trimStart().removePrefix("```")
+    if (tail.isBlank()) return CodeFenceHeader(null, null)
+
+    val compact = tail.trimStart()
+    val knownLanguages = listOf(
+        "typescript", "javascript", "kotlin", "python", "markdown", "json",
+        "html", "shell", "bash", "yaml", "java", "cpp", "c++", "css",
+        "sql", "xml", "text", "plain", "ts", "js", "py", "sh", "yml", "md", "c"
+    ).sortedByDescending { it.length }
+    val lower = compact.lowercase()
+    val compactLanguage = knownLanguages.firstOrNull { language ->
+        lower.startsWith(language) && compact.length > language.length
+    }
+    if (compactLanguage != null) {
+        val suffix = compact.substring(compactLanguage.length)
+        // A space after the language is the normal info-string form. It is
+        // still safe to treat the suffix as inline code when it clearly starts
+        // a payload; otherwise preserve the standard language-only header.
+        val payload = suffix.trimStart()
+        if (payload.isNotBlank() && looksLikeInlineCodePayload(payload, suffix)) {
+            return CodeFenceHeader(compactLanguage, payload)
+        }
+        return CodeFenceHeader(compactLanguage, null)
+    }
+
+    // Standard fences with a separated language/info string. Unknown language
+    // names are retained for display, while any payload after whitespace is
+    // intentionally not promoted to code because it may be an info string.
+    val language = compact.takeWhile { !it.isWhitespace() }.ifBlank { null }
+    return CodeFenceHeader(language, null)
+}
+
+private fun looksLikeInlineCodePayload(payload: String, originalSuffix: String): Boolean {
+    if (originalSuffix.isNotEmpty() && !originalSuffix.first().isWhitespace()) return true
+    if (payload.first() in "<{[\"'#/0123456789") return true
+    return Regex(
+        """^(import|from|def|class|if|elif|else|for|while|try|except|return|print|const|let|var|val|fun|function|public|private|select|insert|update|create)\b""",
+        RegexOption.IGNORE_CASE
+    ).containsMatchIn(payload)
+}
+
+internal fun repairCodeText(value: String, language: String?): String {
+    val inferredLanguage = language ?: detectCodeLanguage(
+        value.lines().filter { it.isNotBlank() }
+    )
+    val normalizedLanguage = inferredLanguage?.lowercase().orEmpty()
+    // A number of local models emit Python without any leading whitespace even
+    // though the block structure is present (`def f():` followed by `return`).
+    // Repair only the unindented form; if the model supplied deliberate
+    // indentation, preserve it byte-for-byte.
+    if (normalizedLanguage in setOf("python", "py") && value.lineSequence().count() > 1) {
+        return normalizePythonCodeIndentation(value)
+    }
+    if (value.lineSequence().count() > 1) {
+        // Keep deliberate Python/Markdown indentation untouched.  For brace languages, however,
+        // local models frequently emit every line at column zero; derive only the structural
+        // indentation so copied code is readable and executable without rewriting its tokens.
+        if (normalizedLanguage in BRACE_CODE_LANGUAGES && value.contains('{') && value.contains('}')) {
+            return normalizeBraceCodeIndentation(value)
+        }
+        return value
+    }
+    if (normalizedLanguage in setOf("python", "py")) {
+        return value
         .replace(Regex("""(?<=[A-Za-z0-9_)\]])(?=(?:import|from|def|class|if|elif|else|for|while|try|except|finally|return|print)\b)"""), "\n")
         .replace(Regex("""(?<=[A-Za-z0-9_)\]])(?=#)"""), "\n")
         .replace(Regex("""(?<=[0-9)\]])(?=[A-Z_]{2,}\s*=)"""), "\n")
         .trimStart('\n')
+    }
+    if (normalizedLanguage !in COMPACT_CODE_LANGUAGES) return value
+    return formatCompactStructuredCode(value)
+}
+
+/**
+ * Adds four-space indentation to an otherwise flat Python block.
+ *
+ * This is a conservative display repair, not a Python formatter.  It runs
+ * only when every non-empty source line starts at column zero and at least one
+ * block header is present.  Existing indentation, strings, and tokens are
+ * therefore left untouched.
+ */
+internal fun normalizePythonCodeIndentation(value: String): String {
+    val lines = value.replace("\r\n", "\n").replace('\r', '\n').lines()
+    val nonBlank = lines.filter { it.isNotBlank() }
+    if (nonBlank.isEmpty() || nonBlank.any { it.first().isWhitespace() }) return value
+    val hasBlockHeader = nonBlank.any { line ->
+        val trimmed = line.trim()
+        trimmed.endsWith(":") &&
+            Regex("^(?:def|class|if|elif|else|for|while|try|except|finally|with|match|case)\\b")
+                .containsMatchIn(trimmed)
+    }
+    if (!hasBlockHeader) return value
+
+    var depth = 0
+    return lines.joinToString("\n") { rawLine ->
+        val trimmed = rawLine.trim()
+        if (trimmed.isBlank()) {
+            ""
+        } else {
+            val topLevelDeclaration = trimmed.matches(Regex("^(?:def|class)\\b.*"))
+            if (topLevelDeclaration) depth = 0
+            val dedent = when {
+                Regex("^(?:elif|else|except|finally|case)\\b").containsMatchIn(trimmed) -> 1
+                else -> 0
+            }
+            val lineDepth = (depth - dedent).coerceAtLeast(0)
+            val formatted = "    ".repeat(lineDepth) + trimmed
+            if (trimmed.endsWith(":")) {
+                depth = lineDepth + 1
+            } else if (dedent > 0) {
+                depth = lineDepth
+            }
+            formatted
+        }
+    }
+}
+
+private val BRACE_CODE_LANGUAGES = setOf(
+    "javascript", "js", "typescript", "ts", "java", "kotlin", "kt", "kts",
+    "c", "cpp", "c++", "csharp", "cs", "go", "rust", "swift", "php", "dart",
+    "shell", "bash", "sh", "css", "html", "xml"
+)
+
+internal fun normalizeBraceCodeIndentation(value: String): String {
+    val result = mutableListOf<String>()
+    var depth = 0
+    value.replace("\r\n", "\n").replace('\r', '\n').lines().forEach { raw ->
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) {
+            result += ""
+            return@forEach
+        }
+        val depthBefore = depth
+        val closesBefore = trimmed.takeWhile { it == '}' }.count()
+        result += "    ".repeat((depthBefore - closesBefore).coerceAtLeast(0)) + trimmed
+        // Count only structural braces outside simple quoted strings. This is intentionally
+        // conservative; full language parsing would risk altering user text on malformed output.
+        var quote: Char? = null
+        var escaped = false
+        var opens = 0
+        var closes = 0
+        trimmed.forEach { ch ->
+            if (quote != null) {
+                if (escaped) escaped = false else if (ch == '\\') escaped = true else if (ch == quote) quote = null
+            } else if (ch == '\'' || ch == '"' || ch == '`') {
+                quote = ch
+            } else if (ch == '{') {
+                opens++
+            } else if (ch == '}') {
+                closes++
+            }
+        }
+        depth = (depthBefore + opens - closes).coerceAtLeast(0)
+    }
+    return result.joinToString("\n").replace(Regex("\n{3,}"), "\n\n")
+}
+
+private val COMPACT_CODE_LANGUAGES = setOf(
+    "javascript", "js", "typescript", "ts", "java", "kotlin", "kt", "kts",
+    "c", "cpp", "c++", "csharp", "cs", "go", "rust", "swift", "php", "dart",
+    "shell", "bash", "sh", "sql", "css", "html", "xml"
+)
+
+/** Recovers readable lines from models that emit a whole program in one line. */
+private fun formatCompactStructuredCode(value: String): String {
+    val lines = mutableListOf<String>()
+    val current = StringBuilder()
+    var quote: Char? = null
+    var escaped = false
+    var parenDepth = 0
+    var indent = 0
+
+    fun flush() {
+        val text = current.toString().trim()
+        if (text.isNotEmpty()) lines += "    ".repeat(indent.coerceAtLeast(0)) + text
+        current.clear()
+    }
+
+    value.forEach { char ->
+        if (quote != null) {
+            current.append(char)
+            if (escaped) escaped = false
+            else if (char == '\\') escaped = true
+            else if (char == quote) quote = null
+            return@forEach
+        }
+        when {
+            char == '\'' || char == '"' || char == '`' -> {
+                quote = char
+                current.append(char)
+            }
+            char == '(' || char == '[' -> {
+                parenDepth++
+                current.append(char)
+            }
+            char == ')' || char == ']' -> {
+                parenDepth = (parenDepth - 1).coerceAtLeast(0)
+                current.append(char)
+            }
+            char == '{' -> {
+                current.append(char)
+                flush()
+                indent++
+            }
+            char == '}' -> {
+                flush()
+                indent = (indent - 1).coerceAtLeast(0)
+                current.append(char)
+                if (current.length > 1) flush()
+            }
+            char == ';' && parenDepth == 0 -> {
+                current.append(char)
+                flush()
+            }
+            else -> current.append(char)
+        }
+    }
+    flush()
+    return lines.joinToString("\n").replace(Regex("\n{3,}"), "\n\n")
 }
 
 private fun splitReadableParagraphs(value: String): List<String> {
@@ -14480,18 +16556,20 @@ private fun String.isBulletLine(): Boolean {
     val trimmed = trimStart()
     return trimmed.startsWith("- ") ||
         trimmed.startsWith("* ") ||
-        trimmed.matches(Regex("""\d+[.)]\s+.*"""))
+        trimmed.matches(Regex("""\d{1,4}[.)、](?=\s|[^\d\s])\s*.+"""))
 }
 
 private fun String.isNumberedLine(): Boolean =
-    trimStart().matches(Regex("""\d+[.)]\s+.*"""))
+    isOrderedMarkdownLine()
 
 private fun stripListMarker(value: String): String {
     val trimmed = value.trimStart()
+    if (trimmed.isOrderedMarkdownLine()) {
+        return stripOrderedMarkdownMarker(trimmed)
+    }
     return trimmed
         .removePrefix("- ")
         .removePrefix("* ")
-        .replaceFirst(Regex("""^\d+[.)]\s+"""), "")
 }
 
 private fun String.isHorizontalRule(): Boolean {
@@ -14545,6 +16623,10 @@ private fun String.isLikelyCodeLine(continuingCodeBlock: Boolean): Boolean {
 private fun String.isStrongCodeLine(): Boolean {
     val trimmed = trim()
     if (trimmed.length < 2) return false
+    // Arithmetic tables are common code-like output from small local models.
+    // Recognize both ASCII and Chinese multiplication signs so each row keeps
+    // its own line instead of being merged into one paragraph.
+    if (ARITHMETIC_EXPRESSION_PATTERN.matches(trimmed)) return true
     if (CODE_DECLARATION_PATTERN.containsMatchIn(trimmed)) return true
     if (CODE_KEYWORD_PATTERN.containsMatchIn(trimmed) && (trimmed.endsWith(":") || trimmed.endsWith("{"))) return true
     if (trimmed.startsWith("#include") || trimmed.startsWith("using namespace")) return true
@@ -14584,6 +16666,9 @@ private val CODE_CALL_PATTERN = Regex(
 
 private val CODE_ASSIGNMENT_PATTERN = Regex(
     pattern = """^[A-Za-z_][A-Za-z0-9_.$\[\]]*\s*(=|\+=|-=|\*=|/=|:=)\s*.+"""
+)
+private val ARITHMETIC_EXPRESSION_PATTERN = Regex(
+    pattern = """^\d+\s*[×x*＋+−-]\s*\d+\s*=\s*\d+$"""
 )
 
 private fun cleanReasoningForDisplay(value: String): String {
@@ -14790,7 +16875,11 @@ private fun buildInlineMarkdown(
 private val MARKDOWN_LINK_PATTERN = Regex("""\[(.+?)]\((https?://[^)\s]+)\)""")
 private val URL_PATTERN = Regex("""https?://[^\s)）]+""")
 private val CODE_FENCE_LANGUAGE_WITH_CODE_PATTERN = Regex(
-    """```(python|py|kotlin|java|javascript|js|typescript|ts|cpp|c\+\+|c|html|css|sql|json|bash|sh)(?=(?:import|from|def|class|#|//|[A-Za-z_][A-Za-z0-9_]*\s*=))""",
+    // Some local models emit the language tag and the first code token without a
+    // newline (for example ```html<!DOCTYPE html>). Treat a markup opener as
+    // code as well, otherwise the renderer shows `html<!DOCTYPE...` in the
+    // language label and the whole block is parsed as prose.
+    """```(python|py|kotlin|java|javascript|js|typescript|ts|cpp|c\+\+|c|html|css|sql|json|bash|sh)(?=(?:import|from|def|class|#|//|<|[A-Za-z_][A-Za-z0-9_]*\s*=))""",
     RegexOption.IGNORE_CASE
 )
 private const val REASONING_COLLAPSED_MAX_LINES = 4

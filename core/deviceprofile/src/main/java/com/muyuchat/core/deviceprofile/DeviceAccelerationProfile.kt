@@ -17,9 +17,11 @@ internal val QNN_PLATFORM_RUNTIME_DIRECTORY_PREFIXES = listOf(
 
 enum class SnapdragonAccelerationTier(val label: String) {
     NONE("非骁龙 NPU 平台"),
+    SNAPDRAGON_888("骁龙 888"),
     SNAPDRAGON_8_GEN1("骁龙 8 Gen 1"),
     SNAPDRAGON_8_GEN2("骁龙 8 Gen 2"),
     SNAPDRAGON_8_GEN3("骁龙 8 Gen 3"),
+    SNAPDRAGON_8S_GEN4("骁龙 8s Gen 4"),
     SNAPDRAGON_8_ELITE("骁龙 8 Elite"),
     SNAPDRAGON_8_ELITE_GEN5("骁龙 8 Elite Gen 5"),
     SNAPDRAGON_OTHER("骁龙平台")
@@ -96,24 +98,38 @@ data class QnnRuntimeProfile(
  * permissible host/DSP tuple remains available for real native load.
  */
 object QnnRuntimeProfileSelector {
-    fun htpArchVersionForChipsetCode(chipsetCode: String): Int? =
-        when (chipsetCode.trim().uppercase(Locale.US)) {
+    fun htpArchVersionForChipsetCode(chipsetCode: String): Int? {
+        val normalized = chipsetCode.trim().uppercase(Locale.US)
+        val numericSocModel = normalized.toIntOrNull()
+        return when {
+            numericSocModel == 30 -> 68
+            numericSocModel == 36 || numericSocModel == 42 -> 69
+            numericSocModel == 43 || numericSocModel == 66 -> 73
+            numericSocModel == 57 || numericSocModel == 68 -> 75
+            numericSocModel == 69 || numericSocModel == 85 -> 79
+            numericSocModel == 87 -> 81
+            else -> when (normalized) {
             "SM8350" -> 68
             "SM8450", "SM8475" -> 69
             "SM8550", "SM8550P", "QCS8550", "QCM8550" -> 73
             "SM8635", "SM8650", "SM8650P" -> 75
-            "SM8750", "SM8750P" -> 79
+            // SM8735 (Snapdragon 8s Gen 4) uses the same HTP v79 class as
+            // SM8750. Keep it explicit so a context built for socModel=85
+            // is never mistaken for an unknown/future device.
+            "SM8735", "SM8750", "SM8750P" -> 79
             "SM8850", "SM8850P" -> 81
             else -> null
+            }
         }
+    }
 
     fun htpArchVersionForSocModel(socModel: Int): Int? =
         when (socModel) {
             30 -> 68
             36, 42 -> 69
-            43 -> 73
+            43, 66 -> 73
             57, 68 -> 75
-            69 -> 79
+            69, 85 -> 79
             87 -> 81
             else -> null
         }
@@ -274,6 +290,8 @@ data class QnnRuntimeStatus(
     val cdspRpcLibraryPath: String? = null,
     val cdspRpcMessage: String = "",
     val htpArchVersion: Int = 0,
+    /** Device-required HTP architecture, when the SoC is known. */
+    val preferredHtpArchVersion: Int? = null,
     val runtimeDirectory: String? = null,
     val dspRuntimeDirectory: String? = null,
     val probeState: QnnRuntimeProbeState = QnnRuntimeProbeState.NOT_REQUESTED,
@@ -282,6 +300,11 @@ data class QnnRuntimeStatus(
     val ready: Boolean
         get() = qnnSystemLibraryPresent && qnnHtpLibraryPresent && htpSkelLibraryPresent
 
+    /** Prevents a complete but wrong-generation transport from being advertised as usable. */
+    val exactArchMatch: Boolean
+        get() = preferredHtpArchVersion == null ||
+            (htpArchVersion > 0 && htpArchVersion == preferredHtpArchVersion)
+
     val loadable: Boolean
         get() = probeState == QnnRuntimeProbeState.LOADABLE
 
@@ -289,7 +312,7 @@ data class QnnRuntimeStatus(
         get() = loadable
 
     val htpTransportVerified: Boolean
-        get() = ready && htpStubLibraryPresent && loadable
+        get() = ready && htpStubLibraryPresent && loadable && exactArchMatch
 
     val transportDependencyBlocked: Boolean
         get() = probeState == QnnRuntimeProbeState.LOAD_FAILED &&
@@ -300,7 +323,8 @@ data class QnnRuntimeStatus(
         get() = ready &&
             htpStubLibraryPresent &&
             probeState == QnnRuntimeProbeState.LOADABLE &&
-            !transportDependencyBlocked
+            !transportDependencyBlocked &&
+            exactArchMatch
 
     fun toJson(): JSONObject = JSONObject()
         .put("ready", ready)
@@ -322,6 +346,8 @@ data class QnnRuntimeStatus(
         .put("cdspRpcLibraryPath", cdspRpcLibraryPath)
         .put("cdspRpcMessage", cdspRpcMessage)
         .put("htpArchVersion", htpArchVersion)
+        .put("preferredHtpArchVersion", preferredHtpArchVersion ?: JSONObject.NULL)
+        .put("exactArchMatch", exactArchMatch)
         .put("runtimeDirectory", runtimeDirectory)
         .put("dspRuntimeDirectory", dspRuntimeDirectory)
         .put("probeState", probeState.name.lowercase(Locale.US))
@@ -390,6 +416,7 @@ data class QnnRuntimeStatus(
                 cdspRpcLibraryPath = profile?.cdspRpcLibrary?.absolutePath,
                 cdspRpcMessage = rpcProbe.second,
                 htpArchVersion = profile?.htpArchVersion ?: 0,
+                preferredHtpArchVersion = preferredHtpArchVersion,
                 runtimeDirectory = profile?.runtimeDirectory,
                 dspRuntimeDirectory = profile?.dspDirectory?.absolutePath,
                 probeState = probe.first,
@@ -446,6 +473,7 @@ data class DeviceAccelerationProfile(
             val npu = if (supportsSnapdragonNpu) "NPU candidate" else "CPU first"
             val runtime = when {
                 qnnRuntime.transportDependencyBlocked -> "NPU device transport blocked"
+                qnnRuntime.ready && !qnnRuntime.exactArchMatch -> "QNN HTP arch mismatch"
                 qnnRuntime.loadable -> "QNN loadable"
                 qnnRuntime.probeState == QnnRuntimeProbeState.LOAD_FAILED -> "QNN load failed"
                 qnnRuntime.ready -> "QNN unverified"
@@ -517,6 +545,7 @@ object DeviceAccelerationAnalyzer {
         val sdxlCandidate = isSnapdragon
         val runtimeStatus = when {
             !qnnRuntime.ready -> AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_MISSING
+            !qnnRuntime.exactArchMatch -> AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED
             qnnRuntime.probeState == QnnRuntimeProbeState.LOAD_FAILED ->
                 AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_LOAD_FAILED
             !qnnRuntime.loadable -> AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED
@@ -543,6 +572,8 @@ object DeviceAccelerationAnalyzer {
                 reason = when {
                     !qnnRuntime.ready ->
                         "QNN 视觉入口已开放；加载完整 runtime 与模型包后由真实执行确认。"
+                    !qnnRuntime.exactArchMatch ->
+                        "已发现 QNN HTP V${qnnRuntime.htpArchVersion}，但设备需要 HTP V${qnnRuntime.preferredHtpArchVersion}；不会把该 runtime 标记为可用。"
                     qnnRuntime.probeState == QnnRuntimeProbeState.LOAD_FAILED ->
                         "QNN runtime files were found, but native load probe failed: ${qnnRuntime.probeMessage}"
                     !qnnRuntime.loadable ->
@@ -567,6 +598,13 @@ object DeviceAccelerationAnalyzer {
                     backend = "qnn_htp",
                     status = AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_LOAD_FAILED,
                     reason = "QNN runtime files were found, but native load probe failed: ${qnnRuntime.probeMessage}",
+                    minRamGb = if (sdxlCandidate) 12 else 8
+                )
+                !qnnRuntime.exactArchMatch -> AccelerationCapability(
+                    label = if (sdxlCandidate) "SD1.5 / SDXL QNN image" else "SD1.5 QNN image",
+                    backend = "qnn_htp",
+                    status = AccelerationCapabilityStatus.DEVICE_CAPABLE_RUNTIME_UNVERIFIED,
+                    reason = "已发现 HTP V${qnnRuntime.htpArchVersion} runtime，但设备需要 HTP V${qnnRuntime.preferredHtpArchVersion}；请安装匹配的 QNN/HTP 包后重试。",
                     minRamGb = if (sdxlCandidate) 12 else 8
                 )
                 !qnnRuntime.loadable -> AccelerationCapability(
@@ -600,6 +638,9 @@ object DeviceAccelerationAnalyzer {
                 if (!qnnRuntime.ready) add("QNN runtime is not packaged yet; do not claim active NPU execution.")
                 if (qnnRuntime.ready && !qnnRuntime.loadable) add("QNN runtime is not load-verified yet; do not enter NPU smoke.")
                 if (qnnRuntime.transportDependencyBlocked) add("Snapdragon NPU device transport is blocked; keep the entry visible and report the real graph smoke result.")
+                if (qnnRuntime.ready && !qnnRuntime.exactArchMatch) {
+                    add("QNN HTP V${qnnRuntime.htpArchVersion} does not match the device-required HTP V${qnnRuntime.preferredHtpArchVersion}; do not advertise NPU execution.")
+                }
             }
         )
     }
@@ -713,29 +754,51 @@ object DeviceAccelerationAnalyzer {
     fun userFacingQnnSocModelName(socModel: Int): String =
         publicChipsetDisplayName(qnnSocModelName(socModel), SocFamily.Snapdragon)
 
-    fun snapdragonTierFor(chipsetCode: String): SnapdragonAccelerationTier =
-        when (chipsetCode.uppercase(Locale.US)) {
+    fun snapdragonTierFor(chipsetCode: String): SnapdragonAccelerationTier {
+        val normalized = chipsetCode.trim().uppercase(Locale.US)
+        val numericSocModel = normalized.toIntOrNull()
+        return when {
+            numericSocModel == 87 -> SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE_GEN5
+            numericSocModel == 69 -> SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE
+            numericSocModel == 85 -> SnapdragonAccelerationTier.SNAPDRAGON_8S_GEN4
+            numericSocModel == 57 || numericSocModel == 68 -> SnapdragonAccelerationTier.SNAPDRAGON_8_GEN3
+            numericSocModel == 43 || numericSocModel == 66 -> SnapdragonAccelerationTier.SNAPDRAGON_8_GEN2
+            numericSocModel == 30 -> SnapdragonAccelerationTier.SNAPDRAGON_888
+            numericSocModel == 42 || numericSocModel == 36 -> SnapdragonAccelerationTier.SNAPDRAGON_8_GEN1
+            else -> when (normalized) {
             "SM8850", "SM8850P" -> SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE_GEN5
             "SM8750", "SM8750P" -> SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE
+            "SM8735" -> SnapdragonAccelerationTier.SNAPDRAGON_8S_GEN4
             "SM8650", "SM8650P", "SM8635" -> SnapdragonAccelerationTier.SNAPDRAGON_8_GEN3
             "SM8550", "SM8550P", "QCS8550", "QCM8550" -> SnapdragonAccelerationTier.SNAPDRAGON_8_GEN2
+            "SM8350" -> SnapdragonAccelerationTier.SNAPDRAGON_888
             "SM8475", "SM8450" -> SnapdragonAccelerationTier.SNAPDRAGON_8_GEN1
             "" -> SnapdragonAccelerationTier.SNAPDRAGON_OTHER
             else -> SnapdragonAccelerationTier.SNAPDRAGON_OTHER
+            }
         }
+    }
 
-    fun expectedQnnSocModelForChipsetCode(chipsetCode: String): Int? =
-        when (chipsetCode.uppercase(Locale.US)) {
+    fun expectedQnnSocModelForChipsetCode(chipsetCode: String): Int? {
+        val normalized = chipsetCode.trim().uppercase(Locale.US)
+        val numericSocModel = normalized.toIntOrNull()
+        return when {
+            numericSocModel?.let { it in setOf(30, 36, 42, 43, 57, 66, 68, 69, 85, 87) } == true ->
+                numericSocModel
+            else -> when (normalized) {
             "SM8850", "SM8850P" -> 87
             "SM8750", "SM8750P" -> 69
+            "SM8735" -> 85
             "SM8650", "SM8650P" -> 57
             "SM8635" -> 68
             "SM8550", "SM8550P" -> 43
-            "QCS8550" -> 66
+            "QCS8550", "QCM8550" -> 66
             "SM8475" -> 42
             "SM8450" -> 36
             else -> null
+            }
         }
+    }
 
     /** Exact HTP profile required by the public Snapdragon part number. */
     fun expectedQnnHtpArchVersionForChipsetCode(chipsetCode: String): Int? =
@@ -744,6 +807,7 @@ object DeviceAccelerationAnalyzer {
     fun qnnSocModelName(socModel: Int): String =
         when (socModel) {
             87 -> "SM8850"
+            85 -> "SM8735"
             69 -> "SM8750"
             68 -> "SM8635"
             66 -> "QCS8550"
@@ -758,9 +822,11 @@ object DeviceAccelerationAnalyzer {
         when (tier) {
             SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE_GEN5 -> "HTP v81 class"
             SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE -> "HTP v79 class"
+            SnapdragonAccelerationTier.SNAPDRAGON_8S_GEN4 -> "HTP v79 class"
             SnapdragonAccelerationTier.SNAPDRAGON_8_GEN3 -> "HTP v75 class"
             SnapdragonAccelerationTier.SNAPDRAGON_8_GEN2 -> "HTP v73 class"
-            SnapdragonAccelerationTier.SNAPDRAGON_8_GEN1 -> "HTP v68+ class"
+            SnapdragonAccelerationTier.SNAPDRAGON_8_GEN1 -> "HTP v69 class"
+            SnapdragonAccelerationTier.SNAPDRAGON_888 -> "HTP v68 class"
             else -> ""
         }
 

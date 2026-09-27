@@ -105,6 +105,18 @@ class DownloadRecoveryTest {
         assertFalse(receipt.matches(remote()))
     }
 
+    @Test fun emptyCompletedDownloadCannotPassOrCreateAReceipt() = runBlocking {
+        val file = temp.newFile("empty.gguf")
+        val receipt = CompletedDownloadReceipt(file, "empty-request")
+
+        assertFalse(receipt.matches(remote()))
+        assertTrue(runCatching { receipt.record() }.isFailure)
+
+        file.writeText("complete")
+        receipt.record()
+        assertTrue(receipt.matches(remote()))
+    }
+
     private fun archive(vararg entries: Pair<String, String>): File = temp.newFile().also { file ->
         ZipOutputStream(file.outputStream()).use { zip -> entries.forEach { (path, text) ->
             zip.putNextEntry(ZipEntry(path)); zip.write(text.toByteArray()); zip.closeEntry()

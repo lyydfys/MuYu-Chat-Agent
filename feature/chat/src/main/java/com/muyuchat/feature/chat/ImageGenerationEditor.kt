@@ -1,3 +1,5 @@
+﻿@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.muyuchat.feature.chat
 
 import android.graphics.Bitmap
@@ -19,6 +21,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
@@ -232,7 +236,7 @@ private fun CropEditor(
         if (saving) return
         if (dirty) confirmDiscard = true else onBack()
     }
-    BackHandler(enabled = true, onBack = ::requestBack)
+    BackHandler(enabled = !WindowInsets.isImeVisible, onBack = ::requestBack)
 
     ImageEditorScaffold(
         title = "裁剪图片",
@@ -482,7 +486,7 @@ private fun MaskEditor(
         if (saving) return
         if (dirty) confirmDiscard = true else onBack()
     }
-    BackHandler(enabled = true, onBack = ::requestBack)
+    BackHandler(enabled = !WindowInsets.isImeVisible, onBack = ::requestBack)
 
     ImageEditorScaffold(
         title = "绘制蒙版",
@@ -1121,7 +1125,7 @@ private fun PositionedMaskDrawingDialog(
 
 @Composable
 private fun ImageEditorLoadFailure(message: String, onBack: () -> Unit) {
-    BackHandler(onBack = onBack)
+    BackHandler(enabled = !WindowInsets.isImeVisible, onBack = onBack)
     Column(
         modifier = Modifier
             .fillMaxSize()

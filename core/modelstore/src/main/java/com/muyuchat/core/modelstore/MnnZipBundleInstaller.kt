@@ -35,7 +35,10 @@ internal class MnnZipBundleInstaller(
     fun install(
         source: InputStream,
         finalBundleRoot: File,
-        compressedSizeBytes: Long? = null
+        compressedSizeBytes: Long? = null,
+        importMode: MnnImportMode = MnnImportMode.FULL,
+        onProgress: (ModelImportProgress) -> Unit = {},
+        checkCancelled: () -> Unit = {}
     ): MnnZipInstallResult {
         require(!finalBundleRoot.exists()) {
             "MNN bundle destination already exists: ${finalBundleRoot.absolutePath}"
@@ -55,8 +58,10 @@ internal class MnnZipBundleInstaller(
 
         var committed = false
         try {
-            val extraction = extract(source, stagingRoot, compressedSizeBytes)
-            val stagedBundleRoot = findSingleReadyBundleRoot(stagingRoot)
+            val extraction = extract(source, stagingRoot, compressedSizeBytes, onProgress, checkCancelled)
+            val stagedBundleRoot = findMnnImportBundleRoot(stagingRoot, importMode, checkCancelled)
+            prepareImportedMnnConfiguration(stagedBundleRoot, importMode, checkCancelled)
+            checkCancelled()
             if (!stagedBundleRoot.renameTo(finalBundleRoot.canonicalFile)) {
                 throw IOException("Unable to atomically commit the imported MNN bundle.")
             }
@@ -75,7 +80,9 @@ internal class MnnZipBundleInstaller(
     private fun extract(
         source: InputStream,
         stagingRoot: File,
-        compressedSizeBytes: Long?
+        compressedSizeBytes: Long?,
+        onProgress: (ModelImportProgress) -> Unit,
+        checkCancelled: () -> Unit
     ): ExtractionCounters {
         val knownSourceSize = compressedSizeBytes?.takeIf { it > 0L }
         val overallLimit = minOf(
@@ -89,10 +96,15 @@ internal class MnnZipBundleInstaller(
 
         ZipInputStream(source.buffered()).use { zip ->
             while (true) {
+                checkCancelled()
                 val entry = zip.nextEntry ?: break
                 entryCount += 1
                 require(entryCount <= limits.maxEntryCount) {
                     "MNN zip contains too many entries (limit=${limits.maxEntryCount})."
+                }
+                if (entry.isDirectory && entry.name.replace('\\', '/').trimEnd('/') in setOf("", ".")) {
+                    zip.closeEntry()
+                    continue
                 }
                 val relativePath = normalizeEntryPath(entry)
                 rejectPathConflict(relativePath, entry.isDirectory, files, directories)
@@ -119,6 +131,7 @@ internal class MnnZipBundleInstaller(
                 target.outputStream().buffered().use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     while (true) {
+                        checkCancelled()
                         val read = zip.read(buffer)
                         if (read < 0) break
                         if (read == 0) continue
@@ -131,6 +144,7 @@ internal class MnnZipBundleInstaller(
                             "MNN zip expands beyond the supported size or compression-ratio limit."
                         }
                         output.write(buffer, 0, read)
+                        onProgress(ModelImportProgress("copying", relativePath, entryCount, 0, totalBytes))
                     }
                 }
                 require(declaredSize < 0L || declaredSize == entryBytes) {
@@ -151,26 +165,6 @@ internal class MnnZipBundleInstaller(
         return ExtractionCounters(entryCount = entryCount, totalBytes = totalBytes)
     }
 
-    private fun findSingleReadyBundleRoot(stagingRoot: File): File {
-        val candidates = buildList {
-            add(stagingRoot)
-            stagingRoot.walkTopDown()
-                .filter { it.isFile && it.name == "config.json" }
-                .mapNotNull(File::getParentFile)
-                .forEach(::add)
-        }.distinctBy { it.canonicalPath }
-            .filter { MnnBundleReadinessAnalyzer.analyze(it).canLoad }
-        require(candidates.size == 1) {
-            when {
-                candidates.isEmpty() ->
-                    "MNN zip 包不完整：未找到可加载的完整模型根目录，请确认压缩包包含全部组件且保留原目录结构。"
-                else ->
-                    "MNN zip 包包含多个完整模型根目录，无法安全判断要导入哪一个。"
-            }
-        }
-        return candidates.single().canonicalFile
-    }
-
     private fun normalizeEntryPath(entry: ZipEntry): String {
         val raw = entry.name
         require(raw.isNotBlank()) { "MNN zip contains a blank entry path." }
@@ -183,11 +177,7 @@ internal class MnnZipBundleInstaller(
         require(!WINDOWS_DRIVE_PREFIX.containsMatchIn(normalized)) {
             "MNN zip entry path must not use an absolute drive path: $raw"
         }
-        val segments = normalized.split('/')
-        require(segments.none { it.isBlank() || it == "." || it == ".." }) {
-            "MNN zip entry path contains an unsafe segment: $raw"
-        }
-        return segments.joinToString("/")
+        return normalizeMnnImportPath(normalized)
     }
 
     private fun rejectPathConflict(

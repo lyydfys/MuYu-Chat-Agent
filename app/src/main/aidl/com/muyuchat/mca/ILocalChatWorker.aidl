@@ -17,7 +17,9 @@ interface ILocalChatWorker {
     void resetPrefillProgress();
     String generateNextChunk();
     void invalidateConversationContext();
-    void requestStop();
+    // Cancellation must never block the caller behind a wedged native
+    // operation. The worker schedules its exact-token recovery independently.
+    oneway void requestStop();
     boolean requestStopIfActive();
     String getRuntimeStatsJson();
     oneway void shutdown();

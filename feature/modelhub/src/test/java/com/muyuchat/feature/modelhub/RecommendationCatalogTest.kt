@@ -1,9 +1,14 @@
 package com.muyuchat.feature.modelhub
 
 import com.muyuchat.core.download.ModelScopeClient
+import com.muyuchat.core.download.ModelRepositoryProvider
+import com.muyuchat.core.download.RemoteModelFile
 import com.muyuchat.core.download.RecommendedChatRuntime
 import com.muyuchat.core.download.RecommendedModelSection
 import com.muyuchat.core.download.RecommendedModelStatus
+import com.muyuchat.core.modelstore.ChatModelRuntime
+import com.muyuchat.core.modelstore.ModelManifest
+import com.muyuchat.core.modelstore.ModelSource
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -19,6 +24,7 @@ class RecommendationCatalogTest {
 
         assertCpuCatalog(catalog)
         assertEquals(expectedIds(RecommendedModelSection.NPU_CHAT), catalog.npuChat.map { it.id })
+        assertQwenImage21GpuCatalog(catalog)
         assertNpuImageCatalog(catalog)
     }
 
@@ -28,6 +34,7 @@ class RecommendationCatalogTest {
 
         assertCpuCatalog(catalog)
         assertEquals(expectedIds(RecommendedModelSection.NPU_CHAT), catalog.npuChat.map { it.id })
+        assertQwenImage21GpuCatalog(catalog)
         assertNpuImageCatalog(catalog)
     }
 
@@ -44,7 +51,9 @@ class RecommendationCatalogTest {
         assertTrue(access.canDownload)
         assertTrue(access.experimental)
         assertTrue(recommendationQnnCompatibilityLine(sdxl, "SM8750P")!!.contains("HTP V79"))
-        assertTrue(recommendationQnnCompatibilityLine(sdxl, "SM8750P")!!.contains("实验包"))
+        assertTrue(recommendationQnnCompatibilityLine(sdxl, "SM8750P")!!.contains("HTP V75"))
+        assertEquals(null, recommendationQnnCompatibilityLine(sdxl, ""))
+        assertEquals(null, recommendationQnnCompatibilityLine(sdxl, "SM8650"))
     }
 
     @Test
@@ -53,6 +62,7 @@ class RecommendationCatalogTest {
 
         assertCpuCatalog(catalog)
         assertEquals(expectedIds(RecommendedModelSection.NPU_CHAT), catalog.npuChat.map { it.id })
+        assertQwenImage21GpuCatalog(catalog)
         assertNpuImageCatalog(catalog)
     }
 
@@ -63,6 +73,7 @@ class RecommendationCatalogTest {
 
             assertCpuCatalog(catalog)
             assertEquals(expectedIds(RecommendedModelSection.NPU_CHAT), catalog.npuChat.map { it.id })
+            assertQwenImage21GpuCatalog(catalog)
             assertNpuImageCatalog(catalog)
         }
     }
@@ -81,6 +92,7 @@ class RecommendationCatalogTest {
             catalog.qualityChat,
             catalog.npuChat,
             catalog.cpuImage,
+            catalog.gpuImage,
             catalog.npuImage
         ).flatten().map { it.id }
         assertTrue(
@@ -115,6 +127,70 @@ class RecommendationCatalogTest {
     }
 
     @Test
+    fun chatRecommendationMatchesManagedBundleBySourceIdentityAndRuntime() {
+        val mnn = recommendations.first { it.mnnModelBundle != null }
+        val bundle = requireNotNull(mnn.mnnModelBundle)
+        val managedMnn = ModelManifest(
+            id = "mnn-local",
+            displayName = "renamed by user",
+            path = "/models/mnn",
+            runtime = ChatModelRuntime.MNN,
+            source = ModelSource.MODELSCOPE,
+            repoId = bundle.repoId,
+            revision = bundle.revision,
+            fileName = "managed-bundle",
+            sizeBytes = 1L,
+            sha256 = "mnn-sha"
+        )
+        assertEquals(managedMnn, recommendedLocalChatModel(mnn, listOf(managedMnn)))
+        assertEquals(null, recommendedLocalChatModel(mnn, listOf(managedMnn.copy(repoId = "other/repo"))))
+
+        val gguf = recommendations.first {
+            it.chatRuntime == RecommendedChatRuntime.GGUF && it.kind == com.muyuchat.core.download.ModelScopeRecommendedKind.CHAT
+        }
+        val managedGguf = ModelManifest(
+            id = "gguf-local",
+            displayName = gguf.title,
+            path = "/models/${gguf.recommendedFileName}",
+            runtime = ChatModelRuntime.LLAMA_CPP,
+            source = ModelSource.HUGGING_FACE,
+            repoId = gguf.repoId,
+            revision = gguf.revision,
+            fileName = gguf.recommendedFileName.substringAfterLast('/'),
+            sizeBytes = 1L,
+            sha256 = "gguf-sha"
+        )
+        assertEquals(managedGguf, recommendedLocalChatModel(gguf, listOf(managedGguf)))
+    }
+
+    @Test
+    fun remoteFileFilterSearchesLoadedResultsWithoutChangingBlankQueryOrder() {
+        val files = listOf(
+            RemoteModelFile(
+                repoId = "demo/model",
+                revision = "main",
+                path = "mnn/tokenizer.txt",
+                name = "tokenizer.txt",
+                downloadUrl = "https://example.invalid/tokenizer.txt",
+                provider = ModelRepositoryProvider.MODELSCOPE
+            ),
+            RemoteModelFile(
+                repoId = "demo/model",
+                revision = "main",
+                path = "gguf/model-q4.gguf",
+                name = "model-q4.gguf",
+                downloadUrl = "https://example.invalid/model-q4.gguf",
+                provider = ModelRepositoryProvider.HUGGING_FACE
+            )
+        )
+
+        assertEquals(files, filterRemoteModelFiles(files, ""))
+        assertEquals(listOf(files[0]), filterRemoteModelFiles(files, "TOKENIZER"))
+        assertEquals(listOf(files[1]), filterRemoteModelFiles(files, "hugging face"))
+        assertEquals(listOf(files[1]), filterRemoteModelFiles(files, ".gguf"))
+    }
+
+    @Test
     fun npuImageDownloadsStayOpenOnUnmatchedAndUnknownDevices() {
         val cyberRealistic = recommendations.first { it.id == "cyberrealistic_sd15_qnn228" }
 
@@ -132,7 +208,6 @@ class RecommendationCatalogTest {
         val snapdragon = recommendationDownloadAccess(npu, "SM8850", deviceIsSnapdragon = true)
         assertTrue(snapdragon.canDownload)
         assertEquals(RecommendationDeviceFit.VENDOR_GENERIC, snapdragon.deviceFit)
-        assertEquals("设备路径：骁龙通用尝试；以本机 native load 和首轮推理结果为准", recommendationDeviceFitLine(snapdragon))
 
         val nonSnapdragon = recommendationDownloadAccess(npu, "MT6989", deviceIsSnapdragon = false)
         assertTrue(nonSnapdragon.canDownload)
@@ -165,9 +240,7 @@ class RecommendationCatalogTest {
     }
 
     @Test
-    fun splitSdxlCardsStayOpenAndDescribeTheUnverifiedProductChainAccurately() {
-        val expectedCopy =
-            "工程状态：已接真实 VAE encoder + 隔离 encoder→UNet→VAE 的 IMG2IMG、Inpaint、UltraFix 与 Textual Inversion 产品链；尚需代表 ARM64 设备的生产 UI/API 真机验证"
+    fun splitSdxlCardsStayOpenAndDescribeTheirImageTaskAndDimensions() {
         val ids = listOf(
             "sdxl_base_qnn228",
             "realismsdxl_dmd2_alt_qnn228",
@@ -185,34 +258,32 @@ class RecommendationCatalogTest {
                 val access = recommendationDownloadAccess(model, chipset, isSnapdragon)
                 assertTrue("$id must stay downloadable on $deviceDescription", access.canDownload)
                 assertEquals(
-                    "实验下载",
-                    recommendationDownloadCtaLabel(model, access.canDownload, access.experimental)
+                    "下载",
+                    recommendationDownloadCtaLabel(access.canDownload)
                 )
             }
-            assertEquals(expectedCopy, recommendationVerificationLine(model, qairtVerified = false))
+            assertEquals("文生图 · 1024×1024", recommendationCapabilityLine(model))
         }
     }
 
     @Test
-    fun experimentalDownloadsAreExplicitAndRemainSeparateFromDefaultRecommendations() {
+    fun internalAcceptanceDoesNotChangeDownloadLabel() {
         val realisticVision = recommendations.first { it.id == "realisticvisionhyper_sd15_qnn228" }
         val access = recommendationDownloadAccess(realisticVision, "SM8550", deviceIsSnapdragon = true)
 
         assertTrue(access.canDownload)
         assertEquals(
-            if (access.experimental) "实验下载" else "下载",
-            recommendationDownloadCtaLabel(realisticVision, access.canDownload, access.experimental)
+            "下载",
+            recommendationDownloadCtaLabel(access.canDownload)
         )
         assertEquals(
-            "工程状态：已接真实 VAE encoder→共享 UNet/VAE 的 IMG2IMG、Inpaint、UltraFix、Textual Inversion 与 VAE 预览产品链；历史文生图证据不代表这些链路已验收，尚需代表性 ARM64 生产 UI/API 真机验证",
-            recommendationVerificationLine(realisticVision, qairtVerified = false)
+            "文生图 · 512×512",
+            recommendationCapabilityLine(realisticVision)
         )
     }
 
     @Test
-    fun sharedSd15CardsDescribeProductWiringWithoutClaimingProductionValidation() {
-        val expectedCopy =
-            "工程状态：已接真实 VAE encoder→共享 UNet/VAE 的 IMG2IMG、Inpaint、UltraFix、Textual Inversion 与 VAE 预览产品链；历史文生图证据不代表这些链路已验收，尚需代表性 ARM64 生产 UI/API 真机验证"
+    fun sharedSd15CardsDescribeImageTaskAndDimensions() {
         listOf(
             "cyberrealistic_sd15_qnn228",
             "realisticvisionhyper_sd15_qnn228",
@@ -220,7 +291,7 @@ class RecommendationCatalogTest {
             "meinamix_sd15_qnn228"
         ).forEach { id ->
             val model = recommendations.first { it.id == id }
-            assertEquals(expectedCopy, recommendationVerificationLine(model, qairtVerified = false))
+            assertEquals("文生图 · 512×512", recommendationCapabilityLine(model))
         }
     }
 
@@ -245,6 +316,7 @@ class RecommendationCatalogTest {
             collapsedRecommendationModels(catalog.npuChat).map { it.id }
         )
         assertEquals(listOf(catalog.cpuImage.first().id), collapsedRecommendationModels(catalog.cpuImage).map { it.id })
+        assertEquals(listOf("qwen_image_21_mnn_opencl"), collapsedRecommendationModels(catalog.gpuImage).map { it.id })
         assertEquals(listOf("cyberrealistic_sd15_qnn228"), collapsedRecommendationModels(catalog.npuImageSd15).map { it.id })
         assertEquals(listOf("sdxl_base_qnn228"), collapsedRecommendationModels(catalog.npuImageSdxl).map { it.id })
         assertEquals(listOf("qualcomm_sd15_gen5_qnn"), collapsedRecommendationModels(catalog.npuImageGen5).map { it.id })
@@ -266,7 +338,7 @@ class RecommendationCatalogTest {
         assertTrue(catalogFor("").qualityChat.any { it.id == gemma.id })
         assertTrue(access.canDownload)
         assertTrue(access.experimental)
-        assertEquals("实验下载", recommendationDownloadCtaLabel(gemma, access.canDownload, access.experimental))
+        assertEquals("下载", recommendationDownloadCtaLabel(access.canDownload))
         assertEquals(
             "https://hf-mirror.com/mradermacher/Huihui-gemma-4-26B-A4B-it-abliterated-GGUF",
             gemma.modelPageUrl
@@ -286,38 +358,50 @@ class RecommendationCatalogTest {
     }
 
     @Test
-    fun statusLabelsExposeOnlyTheThreeProductStates() {
-        assertEquals("已验证", recommendationStatusLabel(RecommendedModelStatus.RECOMMENDED))
-        assertEquals("实验", recommendationStatusLabel(RecommendedModelStatus.EXPERIMENTAL))
-        assertEquals("实验", recommendationStatusLabel(RecommendedModelStatus.NOT_RECOMMENDED))
-        assertEquals("待接入", recommendationStatusLabel(RecommendedModelStatus.PENDING_INTEGRATION))
+    fun internalAcceptanceStateDoesNotBlockDownloadsOrExposeAnExperimentalAction() {
+        val source = recommendations.first { it.id == "gemma4_e2b_litertlm_cpu" }
+        RecommendedModelStatus.entries.forEach { status ->
+            val model = source.copy(status = status)
+            val access = recommendationDownloadAccess(model, "")
+            assertTrue(access.canDownload)
+            assertEquals("下载", recommendationDownloadCtaLabel(access.canDownload))
+        }
+        assertEquals("暂不可下载", recommendationDownloadCtaLabel(false))
     }
 
     @Test
-    fun recommendationCardPolicySeparatesHardwareAndEngineeringState() {
+    fun recommendationCardDescribesMemoryAndCapabilities() {
         val qwen = ModelScopeClient().recommendedModels().first { it.id == "qwen35_2b_q4" }
 
-        assertEquals("硬件适配：建议 6GB+ · 适合本机", recommendationHardwareLine(qwen, "适合本机"))
+        assertEquals("建议内存：6 GB 及以上 · 适合本机", recommendationHardwareLine(qwen, "适合本机"))
         assertEquals(
-            "验证状态：MNN 文本与图文链路已通过代表机型回归；兼容 ARM64 设备默认开放",
-            recommendationVerificationLine(qwen, qairtVerified = false)
+            "文本聊天 · 图片理解",
+            recommendationCapabilityLine(qwen)
         )
-        assertEquals("下载策略：ModelScope / 国内镜像优先", RECOMMENDATION_DOWNLOAD_SOURCE_POLICY)
     }
 
     @Test
-    fun verifiedQairtCardsReflectTheCompletedEliteRegressions() {
+    fun deviceFitLabelsUseUserFacingHardwareLanguage() {
+        assertEquals("通用设备", RecommendationDeviceFit.UNIVERSAL.label)
+        assertEquals("芯片匹配", RecommendationDeviceFit.EXACT.label)
+        assertEquals("骁龙设备", RecommendationDeviceFit.VENDOR_GENERIC.label)
+        assertEquals("其他芯片平台", RecommendationDeviceFit.CROSS_VENDOR.label)
+        assertEquals("设备信息未识别", RecommendationDeviceFit.UNKNOWN.label)
+    }
+
+    @Test
+    fun qairtCardsDistinguishTextAndVisionCapabilities() {
         val allRecommendations = ModelScopeClient().recommendedModels()
         val qwenVl = allRecommendations.first { it.id == "qwen3_vl_4b_qairt_w4a16" }
         val qwenText = allRecommendations.first { it.id == "qwen3_4b_2507_qairt_w4a16" }
 
         assertEquals(
-            "验证状态：当前设备冷态、连续图文、Local API 与取消恢复已通过",
-            recommendationVerificationLine(qwenVl, qairtVerified = true)
+            "文本聊天 · 图片理解",
+            recommendationCapabilityLine(qwenVl)
         )
         assertEquals(
-            "验证状态：当前设备十轮文本、Local API 与二次加载已通过",
-            recommendationVerificationLine(qwenText, qairtVerified = true)
+            "文本聊天",
+            recommendationCapabilityLine(qwenText)
         )
     }
 
@@ -461,5 +545,21 @@ class RecommendationCatalogTest {
             catalog.npuImageGen5.map { it.id }
         )
         assertEquals(11, catalog.npuImage.size)
+    }
+
+    private fun assertQwenImage21GpuCatalog(catalog: RecommendationCatalog) {
+        assertEquals(listOf("qwen_image_21_mnn_opencl"), catalog.gpuImage.map { it.id })
+        assertTrue(catalog.cpuImage.none { it.id == "qwen_image_21_mnn_opencl" })
+        assertEquals(
+            RecommendedModelSection.GPU_IMAGE,
+            recommendations.first { it.id == "qwen_image_21_mnn_opencl" }.section
+        )
+        assertTrue(
+            recommendationDownloadAccess(
+                recommendations.first { it.id == "qwen_image_21_mnn_opencl" },
+                "",
+                deviceIsSnapdragon = false
+            ).canDownload
+        )
     }
 }

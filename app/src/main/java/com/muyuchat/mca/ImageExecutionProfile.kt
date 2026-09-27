@@ -17,6 +17,7 @@ internal enum class ImageModelVariant {
     Z_IMAGE_TURBO,
     FLUX2_KLEIN,
     QWEN_IMAGE,
+    QWEN_IMAGE_21,
     LONGCAT_IMAGE,
     CONTROLNET_CANNY,
     SANA_EDIT,
@@ -42,7 +43,7 @@ internal data class ImageProfileProvenance(
     val notes: List<String> = emptyList()
 )
 
-internal enum class ImageTokenizerBackend { TOKENIZERS_CPP, MNN_MTOK, SDCPP_NATIVE }
+internal enum class ImageTokenizerBackend { TOKENIZERS_CPP, MNN_MTOK, MNN_QWEN_IMAGE, SDCPP_NATIVE }
 internal enum class ImageUnicodeNormalization { NONE, NFC, NFKC }
 internal enum class ImageClipPadRule { EOS, ZERO, MODEL_DECLARED }
 

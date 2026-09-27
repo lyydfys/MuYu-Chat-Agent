@@ -265,41 +265,35 @@ class MainViewModelCompletionFallbackTest {
     }
 
     @Test
-    fun backgroundStopClosesOnlyTheCapturedGenerationAndNewRunsJoinIt() {
+    fun userStopBoundsTheNativeStopRequestBeforeJoiningTheUiJob() {
+        val source = mainViewModelSource()
+        val body = functionBody(source, "fun stopGeneration()")
+        val stop = body.indexOf("engine.stopGeneration()")
+        val requestTimeout = body.indexOf("withTimeoutOrNull(STOP_GENERATION_REQUEST_TIMEOUT_MS)")
+        val joinTimeout = body.indexOf("withTimeoutOrNull(STOP_GENERATION_JOIN_TIMEOUT_MS)")
+
+        assertTrue(stop >= 0)
+        assertTrue(requestTimeout >= 0)
+        assertTrue(joinTimeout > requestTimeout)
+        assertTrue(source.contains("private const val STOP_GENERATION_REQUEST_TIMEOUT_MS = 750L"))
+        assertTrue(body.contains("已请求停止，正在恢复本地推理进程"))
+    }
+
+    @Test
+    fun backgroundKeepsTheCapturedGenerationAndItsCompletionProtection() {
         val source = mainViewModelSource()
         val body = functionBody(source, "fun onAppBackgrounded()")
-        val ownership = body.indexOf("val cancellation = uiGenerationOwnership.background()")
-        val capture = body.indexOf("val backgroundedJob = cancellation.owner as? Job")
-        val token = body.indexOf("engine.activeGenerationStopToken()")
-        val stop = body.indexOf("engine.stopGenerationIfActive(expectedStopToken)")
-        val cancel = body.indexOf("backgroundedJob.cancel()")
-        val nullOwnerEpochGuard = body.indexOf(
-            "generationRunSequence.get() != cancellation.invalidatedRunId"
-        )
-        val epochGuard = body.indexOf(
-            "generationRunSequence.get() != cancellation.invalidatedRunId",
-            stop
-        )
-        val close = body.indexOf(
-            "afterBackgroundGenerationStopped(engine.stats.value, nativeStopIssued)",
-            epochGuard
-        )
-
-        assertTrue(ownership >= 0)
-        assertTrue(capture > ownership)
-        assertTrue(token >= 0)
-        assertTrue(token < ownership)
-        assertTrue(cancel > capture)
-        assertTrue(stop > cancel)
-        assertTrue(nullOwnerEpochGuard > capture)
-        assertTrue(nullOwnerEpochGuard < cancel)
-        assertTrue(epochGuard > stop)
-        assertTrue(close > epochGuard)
+        assertTrue(body.contains("uiGenerationOwnership.background()"))
+        assertFalse(body.contains("stopGeneration"))
         assertFalse(body.contains("generationJob?.cancel()"))
-        assertTrue(
-            functionBody(source, "private fun startGeneration(")
-                .contains("pendingBackgroundStop?.join()")
-        )
+        assertFalse(body.contains("backgroundedJob.cancel()"))
+        assertFalse(body.contains("afterBackgroundGenerationStopped"))
+
+        val generation = functionBody(source, "private fun startGeneration(")
+        assertTrue(generation.contains("val foregroundLease = McaGenerationForegroundService.acquire("))
+        assertTrue(generation.contains("ownedGenerationJob.invokeOnCompletion"))
+        assertTrue(generation.contains("McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)"))
+        assertFalse(generation.contains("McaGenerationForegroundService.stop("))
     }
 
     @Test
@@ -519,7 +513,7 @@ class MainViewModelCompletionFallbackTest {
 
         assertTrue(wait >= 0)
         assertTrue(invalidate > wait)
-        assertTrue(body.contains("initialState.selectedChatBackend == ChatBackend.LOCAL"))
+        assertTrue(body.contains("effectiveChatBackend == ChatBackend.LOCAL"))
     }
 
     private fun mainViewModelSource(): String {

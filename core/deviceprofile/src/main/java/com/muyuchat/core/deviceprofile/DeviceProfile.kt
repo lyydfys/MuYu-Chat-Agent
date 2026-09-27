@@ -158,6 +158,12 @@ class DeviceProfileReader(private val context: Context) {
             }
 
             addPrivateRuntimeRoot(File(appContext.codeCacheDir, "qnn-image-runtime"))
+            // LiteRT-LM's Qualcomm dispatch assets are staged independently
+            // from the GenieX image runtime, but the same coherent QNN profile
+            // probe is used for the device capability summary. Include its
+            // content-addressed root and child stages so the UI can report the
+            // runtime actually loaded for LiteRT NPU.
+            addPrivateRuntimeRoot(File(appContext.codeCacheDir, "litert-qualcomm-runtime"))
             addPrivateRuntimeRoot(File(appContext.filesDir, "qnnlibs"))
             addPrivateRuntimeRoot(File(appContext.filesDir, "runtime_libs"))
             add(File(appContext.applicationInfo.nativeLibraryDir))

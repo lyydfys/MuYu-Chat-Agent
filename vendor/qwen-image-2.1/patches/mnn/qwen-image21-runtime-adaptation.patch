@@ -1,0 +1,365 @@
+diff --git a/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp b/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp
+index 1f0b7d54..0a3d85a5 100644
+--- a/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp
++++ b/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp
+@@ -38,10 +38,11 @@ public:
+     // Step-by-step pieces, public so tools can validate each stage.
+     // Text encoder hidden states after dropping the system prompt: [1, L, 4096].
+     VARP encodePrompt(const std::string& prompt);
+-    // Text KV cache for all blocks: [32, 2, L, 32, 128].
+-    std::vector<VARP> buildPrefixCache(VARP textHidden);
+-    // Denoise from seeded noise against a prefix K/V of length prefixLen; returns packed latents [1, N, 64].
+-    VARP denoise(const std::vector<VARP>& prefixKV, int prefixLen, const float* cosTarget, const float* sinTarget, int steps, int seed,
++    // Packed per-layer cache returned by dit.mnn: [32, 2, L, 32, 128].
++    // The graph drops the masked zero sentinel used as the prefill input.
++    VARP buildPrefixCache(VARP textHidden);
++    // Denoise against a packed prefix K/V and derive the key length from the cache tensor itself.
++    VARP denoise(const VARP& prefixKV, const float* cosTarget, const float* sinTarget, int steps, int seed,
+                  std::function<void(int)> progressCallback);
+     // Image editing: one condition image (also chosen by run(..., inputImagePath)). Output keeps the input's
+     // aspect ratio at the configured pixel area.
+@@ -69,9 +70,8 @@ private:
+     std::shared_ptr<Module> loadModule(const std::string& file, const std::vector<std::string>& inputs,
+                                        const std::vector<std::string>& outputs,
+                                        std::shared_ptr<Executor::RuntimeManager> rt);
+-    // "past_kv_0".."past_kv_31" / "present_kv_0".."present_kv_31": one K/V tensor per layer, see runPrefix.
+-    static std::vector<std::string> kvNames(const char* prefix);
+-    std::vector<VARP> runPrefix(VARP hidden, const std::vector<float>& cosTab, const std::vector<float>& sinTab,
++    // dit.mnn exposes one packed "past_kv" input and one packed "present_kv" output.
++    VARP runPrefix(VARP hidden, const std::vector<float>& cosTab, const std::vector<float>& sinTab,
+                    const std::vector<float>& mask);
+     VARP embedText(VARP textHidden);
+     VARP encodeEditPrompt(const std::string& prompt, VARP bgr, int w, int h, std::vector<char>& isPad);
+diff --git a/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp b/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp
+index 04edf969..d18db2d0 100644
+--- a/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp
++++ b/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp
+@@ -10,8 +10,15 @@
+ //    4. The VAE decodes the 64-channel latents to RGBA.
+ //
+ #include <cmath>
++#include <chrono>
+ #include <cstring>
++#if defined(__ANDROID__)
++#include <android/api-level.h>
++#include <malloc.h>
++#endif
+ #include <fstream>
++#include <stdexcept>
++#include <thread>
+ #include "diffusion/qwen_image21_diffusion.hpp"
+ #include "llm/llm.hpp"
+ #include <MNN/AutoTime.hpp>
+@@ -49,6 +56,38 @@ int64_t nowUs() {
+ #endif
+ }
+ 
++int purgeUnusedHeapPages(bool purgeAll, int& apiLevel, int& option) {
++#if defined(__ANDROID__)
++    apiLevel = android_get_device_api_level();
++    if (purgeAll && apiLevel >= 34) {
++        option = M_PURGE_ALL;
++        const int purgeAllResult = mallopt(option, 0);
++        if (purgeAllResult == 1) {
++            return purgeAllResult;
++        }
++    }
++    if (apiLevel >= 28) {
++        option = M_PURGE;
++        return mallopt(option, 0);
++    }
++#endif
++    return -1;
++}
++
++void reclaimAfterTextEncoding(const char* stage) {
++    const int beforeMb = QwenImage21Diffusion::availableMemoryMB();
++    auto executor = MNN::Express::Executor::getGlobalExecutor();
++    if (executor) {
++        executor->gc(MNN::Express::Executor::FULL);
++    }
++    int purgeApiLevel = 0;
++    int purgeOption = 0;
++    const int purgeResult = purgeUnusedHeapPages(false, purgeApiLevel, purgeOption);
++    const int afterMb = QwenImage21Diffusion::availableMemoryMB();
++    MNN_PRINT("[QwenImage21] memory reclaim after %s: available %d -> %d MB, mallopt api=%d option=%d result=%d\n",
++              stage, beforeMb, afterMb, purgeApiLevel, purgeOption, purgeResult);
++}
++
+ VARP hostCopy(VARP v) {
+     auto conv = _Convert(v, NCHW);
+     auto info = conv->getInfo();
+@@ -226,6 +265,7 @@ VARP QwenImage21Diffusion::encodePrompt(const std::string& prompt) {
+     if (mMemoryMode != 1) {
+         mTextEncoder.reset();
+         MNN_PRINT("[QwenImage21] text encoder unloaded\n");
++        reclaimAfterTextEncoding("text encoder");
+     }
+     return result;
+ }
+@@ -283,6 +323,9 @@ void QwenImage21Diffusion::ropeTables(int textLen, int hTokens, int wTokens, std
+ }
+ 
+ std::vector<float> QwenImage21Diffusion::sigmas(int steps, int imageSeqLen) {
++    if (steps < 2) {
++        throw std::invalid_argument("Qwen-Image-2.1 requires at least 2 denoising steps.");
++    }
+     // FlowMatchEulerDiscreteScheduler: exponential time shift (mu from image_seq_len) + shift_terminal 0.02
+     const double baseSeq = 256, maxSeq = 8192, baseShift = 0.5, maxShift = 0.9, terminal = 0.02;
+     double m = (maxShift - baseShift) / (maxSeq - baseSeq);
+@@ -296,44 +339,41 @@ std::vector<float> QwenImage21Diffusion::sigmas(int steps, int imageSeqLen) {
+     std::vector<float> out(steps + 1);
+     for (int i = 0; i < steps; ++i) {
+         out[i] = (float)(1.0 - (1.0 - s[i]) / scale);
++        if (!std::isfinite(out[i])) {
++            throw std::runtime_error("Qwen-Image-2.1 produced a non-finite flow sigma.");
++        }
+     }
+     out[steps] = 0.0f;
+     return out;
+ }
+ 
+-// The K/V cache is one tensor per layer ("past_kv_0".."past_kv_31"), not a single [32,2,P,...] blob: that blob is
+-// exactly 1 MiB per prefix token, so an image-edit prefix (P > 1000) exceeds OpenCL's CL_DEVICE_MAX_MEM_ALLOC_SIZE
+-// (1 GiB on Adreno 740) and the host-staging buffer fails to allocate. Per layer it is P/32 MiB.
+-std::vector<std::string> QwenImage21Diffusion::kvNames(const char* prefix) {
+-    std::vector<std::string> names(kLayers);
+-    for (int i = 0; i < kLayers; ++i) names[i] = std::string(prefix) + std::to_string(i);
+-    return names;
+-}
+-
+-std::vector<VARP> QwenImage21Diffusion::runPrefix(VARP hidden, const std::vector<float>& cosTab,
+-                                                  const std::vector<float>& sinTab, const std::vector<float>& mask) {
++// dit.mnn takes a packed cache [layer, K/V, sequence, head, head_dim], not separately named layer tensors.
++VARP QwenImage21Diffusion::runPrefix(VARP hidden, const std::vector<float>& cosTab,
++                                     const std::vector<float>& sinTab, const std::vector<float>& mask) {
+     AUTOTIME;
+     int P = hidden->getInfo()->dim[1];
+-    std::vector<float> pastZero((size_t)2 * kHeads * kHeadDim, 0.0f);
++    std::vector<float> pastZero((size_t)kLayers * 2 * kHeads * kHeadDim, 0.0f);
+     float t0 = 0.0f;
+-    auto inputNames = kvNames("past_kv_");
+-    inputNames.insert(inputNames.begin(), {"hidden", "timestep", "rope_cos", "rope_sin", "attn_mask"});
+-    auto prefix = loadModule("dit.mnn", inputNames, kvNames("present_kv_"), runtime_manager_);
++    const std::vector<std::string> inputNames = {"hidden", "timestep", "rope_cos", "rope_sin", "attn_mask", "past_kv"};
++    auto prefix = loadModule("dit.mnn", inputNames, {"present_kv"}, runtime_manager_);
+     if (!prefix) return {};
+     std::vector<VARP> ins = {hidden, hostTensor({1}, &t0), hostTensor({P, 64}, cosTab.data()),
+-                             hostTensor({P, 64}, sinTab.data()), hostTensor({1, 1, P, P + 1}, mask.data())};
+-    for (int i = 0; i < kLayers; ++i) ins.push_back(hostTensor({2, 1, kHeads, kHeadDim}, pastZero.data()));
++                             hostTensor({P, 64}, sinTab.data()), hostTensor({1, 1, P, P + 1}, mask.data()),
++                             hostTensor({kLayers, 2, 1, kHeads, kHeadDim}, pastZero.data())};
+     int64_t st = nowUs();
+     auto out = prefix->onForward(ins);
+-    if (out.size() != (size_t)kLayers) return {};
+-    std::vector<VARP> kv(kLayers);
+-    for (int i = 0; i < kLayers; ++i) {
+-        kv[i] = hostCopy(out[i]);
+-        if (kv[i].get() == nullptr) return {};
+-        dump(("prefix_kv_" + std::to_string(i)).c_str(), kv[i]->readMap<float>(), kv[i]->getInfo()->size);
+-    }
+-    MNN_PRINT("[QwenImage21] prefix pass P=%d: %.2f s (K/V cache %d MB)\n", P, (nowUs() - st) / 1e6,
+-              (int)((size_t)kLayers * 2 * P * kHeads * kHeadDim * sizeof(float) / (1 << 20)));
++    if (out.size() != 1) return {};
++    auto kv = hostCopy(out[0]);
++    if (kv.get() == nullptr || kv->getInfo()->dim.size() != 5 || kv->getInfo()->dim[0] != kLayers ||
++        kv->getInfo()->dim[1] != 2 || kv->getInfo()->dim[2] != P || kv->getInfo()->dim[3] != kHeads ||
++        kv->getInfo()->dim[4] != kHeadDim) {
++        MNN_PRINT("[QwenImage21] invalid packed prefix K/V cache shape; expected seq=%d\n", P);
++        return {};
++    }
++    dump("prefix_kv", kv->readMap<float>(), kv->getInfo()->size);
++    MNN_PRINT("[QwenImage21] prefix pass P=%d cache_len=%d: %.2f s (K/V cache %d MB)\n", P,
++              kv->getInfo()->dim[2], (nowUs() - st) / 1e6,
++              (int)((size_t)kv->getInfo()->size * sizeof(float) / (1 << 20)));
+     out.clear();
+     prefix.reset();
+     return kv;
+@@ -349,7 +389,7 @@ VARP QwenImage21Diffusion::embedText(VARP textHidden) {
+     return hidden;
+ }
+ 
+-std::vector<VARP> QwenImage21Diffusion::buildPrefixCache(VARP textHidden) {
++VARP QwenImage21Diffusion::buildPrefixCache(VARP textHidden) {
+     int L = textHidden->getInfo()->dim[1];
+     auto hidden = embedText(textHidden);
+     if (hidden.get() == nullptr) return {};
+@@ -365,16 +405,23 @@ std::vector<VARP> QwenImage21Diffusion::buildPrefixCache(VARP textHidden) {
+     return runPrefix(hidden, cosTab, sinTab, mask);
+ }
+ 
+-VARP QwenImage21Diffusion::denoise(const std::vector<VARP>& prefixKV, int prefixLen, const float* cosTarget,
++VARP QwenImage21Diffusion::denoise(const VARP& prefixKV, const float* cosTarget,
+                                    const float* sinTarget, int steps, int seed,
+                                    std::function<void(int)> progressCallback) {
+     AUTOTIME;
+     const int N = mLatentH * mLatentW;
+-    if (prefixKV.size() != (size_t)kLayers) return nullptr;
++    if (prefixKV.get() == nullptr) return nullptr;
++    const auto cacheInfo = prefixKV->getInfo();
++    if (cacheInfo == nullptr || cacheInfo->dim.size() != 5 || cacheInfo->dim[0] != kLayers ||
++        cacheInfo->dim[1] != 2 || cacheInfo->dim[2] < 1 || cacheInfo->dim[3] != kHeads ||
++        cacheInfo->dim[4] != kHeadDim) {
++        MNN_PRINT("[QwenImage21] invalid packed prefix K/V cache shape\n");
++        return nullptr;
++    }
++    const int prefixLen = cacheInfo->dim[2];
+     if (!mImgIn) mImgIn = loadModule("img_in.mnn", {"lat"}, {"img_h"}, runtime_manager_);
+     if (!mDitStep) {
+-        auto inputNames = kvNames("past_kv_");
+-        inputNames.insert(inputNames.begin(), {"hidden", "timestep", "rope_cos", "rope_sin", "attn_mask"});
++        const std::vector<std::string> inputNames = {"hidden", "timestep", "rope_cos", "rope_sin", "attn_mask", "past_kv"};
+         mDitStep = loadModule("dit.mnn", inputNames, {"out"}, runtime_manager_);
+     }
+     if (!mImgIn || !mDitStep) return nullptr;
+@@ -383,7 +430,9 @@ VARP QwenImage21Diffusion::denoise(const std::vector<VARP>& prefixKV, int prefix
+     auto ropeSin = hostTensor({N, 64}, sinTarget);
+     ropeCos.fix(VARP::CONSTANT);
+     ropeSin.fix(VARP::CONSTANT);
+-    std::vector<float> zeroMask((size_t)N * (prefixLen + N), 0.0f);
++    const size_t keyLength = (size_t)prefixLen + N;
++    // present_kv omits the masked zero sentinel used during the prefill pass, so every cached key here is real.
++    std::vector<float> zeroMask((size_t)N * keyLength, 0.0f);
+     auto mask = hostTensor({1, 1, N, prefixLen + N}, zeroMask.data());
+     mask.fix(VARP::CONSTANT);
+ 
+@@ -402,11 +451,9 @@ VARP QwenImage21Diffusion::denoise(const std::vector<VARP>& prefixKV, int prefix
+         // Own copy: feeding another module's output directly lets the DiT reuse that buffer (seen with long prefixes).
+         auto imgH = hostCopy(imgOut[0]);
+         imgOut.clear();
+-        std::vector<VARP> ins = {imgH, tVar, ropeCos, ropeSin, mask};
+-        ins.insert(ins.end(), prefixKV.begin(), prefixKV.end());
++        std::vector<VARP> ins = {imgH, tVar, ropeCos, ropeSin, mask, prefixKV};
+         if (i == 0 && getenv("QWEN_IMAGE21_DUMP")) {
+-            auto names = kvNames("past_kv_");
+-            names.insert(names.begin(), {"hidden", "timestep", "rope_cos", "rope_sin", "attn_mask"});
++            const std::vector<std::string> names = {"hidden", "timestep", "rope_cos", "rope_sin", "attn_mask", "past_kv"};
+             std::vector<VARP> saved;
+             for (size_t k = 0; k < ins.size(); ++k) {
+                 auto c = hostCopy(ins[k]);
+@@ -432,6 +479,13 @@ VARP QwenImage21Diffusion::denoise(const std::vector<VARP>& prefixKV, int prefix
+         }
+         MNN_PRINT("[QwenImage21] step %d/%d sigma=%.4f %.2f s%s\n", i + 1, steps, sig[i], (nowUs() - st) / 1e6,
+                   bad ? " (non-finite!)" : "");
++        if (bad || !std::isfinite(dt)) {
++            char message[160];
++            snprintf(message, sizeof(message), "DiT denoising produced non-finite latent values at step %d/%d",
++                     i + 1, steps);
++            fail(kRuntimeError, message);
++            return nullptr;
++        }
+         if (mBackendType == MNN_FORWARD_OPENCL) {
+             ExecutorScope::Current()->gc(Executor::PART);
+         }
+@@ -608,6 +662,64 @@ bool QwenImage21Diffusion::ensureMemory(const char* stage, int needMB) {
+     return true;
+ }
+ 
++void reclaimRuntimeMemoryIfNeeded(const char* stage, int needMB) {
++    constexpr int kReserveMB = 400;
++    constexpr int kPollIntervalMs = 100;
++    constexpr int kMaxWaitMs = 5000;
++    constexpr int kStableSamplesRequired = 2;
++    const int beforeMB = QwenImage21Diffusion::availableMemoryMB();
++    const int requiredMB = needMB + kReserveMB;
++    if (beforeMB < 0 || beforeMB >= requiredMB) {
++        return;
++    }
++
++    // This runs on the serialized Qwen generation thread, after the text encoder has been destroyed.
++    // Reclaim only cached/free allocations; live prompt and diffusion tensors remain referenced.
++    auto executor = MNN::Express::Executor::getGlobalExecutor();
++    if (executor) {
++        executor->gc(MNN::Express::Executor::FULL);
++    }
++
++    int purgeApiLevel = 0;
++    int purgeOption = 0;
++    const int purgeResult = purgeUnusedHeapPages(false, purgeApiLevel, purgeOption);
++    const int afterGcMB = QwenImage21Diffusion::availableMemoryMB();
++    int purgeAllOption = 0;
++    int purgeAllResult = -1;
++    // Use the more expensive full purge only if a normal purge still leaves the DiT reserve short.
++    if (afterGcMB >= 0 && afterGcMB < requiredMB && purgeApiLevel >= 34) {
++        purgeAllResult = purgeUnusedHeapPages(true, purgeApiLevel, purgeAllOption);
++    }
++
++    const int afterPurgeMB = QwenImage21Diffusion::availableMemoryMB();
++    int settledMB = afterPurgeMB >= 0 ? afterPurgeMB : (afterGcMB >= 0 ? afterGcMB : beforeMB);
++    int waitedMs = 0;
++    int stableSamples = 0;
++    if (settledMB < requiredMB) {
++        // Releasing the CPU text encoder can return several gigabytes to Android asynchronously.
++        // Sample at a stage boundary so the existing reserve is enforced against settled memory,
++        // without starting the large DiT allocation while those pages are still being reclaimed.
++        for (int elapsedMs = 0; elapsedMs < kMaxWaitMs; elapsedMs += kPollIntervalMs) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
++            waitedMs += kPollIntervalMs;
++            const int sampledMB = QwenImage21Diffusion::availableMemoryMB();
++            if (sampledMB < 0) {
++                continue;
++            }
++            settledMB = sampledMB;
++            stableSamples = settledMB >= requiredMB ? stableSamples + 1 : 0;
++            if (stableSamples >= kStableSamplesRequired) {
++                break;
++            }
++        }
++    }
++    MNN_PRINT(
++        "[QwenImage21] memory reclaim before %s: available %d MB, after_gc %d MB, after_purge %d MB, settled %d MB, "
++        "required %d MB, waited %d ms, mallopt api=%d option=%d result=%d full_option=%d full_result=%d\n",
++        stage, beforeMB, afterGcMB, afterPurgeMB, settledMB, requiredMB, waitedMs, purgeApiLevel, purgeOption,
++        purgeResult, purgeAllOption, purgeAllResult);
++}
++
+ // ---------------------------------------------------------------------------------------------- edit
+ 
+ void QwenImage21Diffusion::editSize(int srcW, int srcH, int& w, int& h) const {
+@@ -804,11 +916,11 @@ bool QwenImage21Diffusion::runEdit(const std::string& prompt, const std::string&
+     dump("edit_cond_h", condH->readMap<float>(), (size_t)nc * kDim);
+     dump("edit_prefix", prefix.data(), prefix.size());
+     auto kv = runPrefix(hostTensor({1, P, kDim}, prefix.data()), cosP, sinP, mask);
+-    if (kv.empty()) return failStage("DiT prefix");
++    if (kv.get() == nullptr) return failStage("DiT prefix");
+     if (progressCallback) progressCallback(10);
+-    auto latents = denoise(kv, P, cosTab.data() + (size_t)P * 64, sinTab.data() + (size_t)P * 64, steps, seed,
++    auto latents = denoise(kv, cosTab.data() + (size_t)P * 64, sinTab.data() + (size_t)P * 64, steps, seed,
+                            progressCallback);
+-    kv.clear();
++    kv = nullptr;
+     if (latents.get() == nullptr) return failStage("DiT denoising");
+     if (!ensureMemory("VAE decoder", vaeDecodeNeedMB(w, h))) return false;
+     auto image = decode(latents);
+@@ -830,6 +942,9 @@ bool QwenImage21Diffusion::run(const std::string prompt, const std::string outpu
+     mError.clear();
+     try {
+         if (iterNum < 1) iterNum = 20;
++        if (iterNum < 2) {
++            return fail(kRuntimeError, "Qwen-Image-2.1 requires at least 2 denoising steps.");
++        }
+         if (iterNum > 100) iterNum = 100;
+         int seed = randomSeed < 0 ? (int)(nowUs() & 0x7fffffff) : randomSeed;
+         if (!inputImagePath.empty()) {
+@@ -845,15 +960,17 @@ bool QwenImage21Diffusion::run(const std::string prompt, const std::string outpu
+         int L = text->getInfo()->dim[1];
+         MNN_PRINT("[QwenImage21] text encoder done: %.2f s\n", (nowUs() - st) / 1e6);
+         if (progressCallback) progressCallback(5);
+-        if (!ensureMemory("DiT", ditNeedMB(L, N))) return false;
++        const int ditNeed = ditNeedMB(L, N);
++        reclaimRuntimeMemoryIfNeeded("DiT", ditNeed);
++        if (!ensureMemory("DiT", ditNeed)) return false;
+         auto kv = buildPrefixCache(text);
+-        if (kv.empty()) return failStage("DiT prefix");
++        if (kv.get() == nullptr) return failStage("DiT prefix");
+         if (progressCallback) progressCallback(10);
+         std::vector<float> cosTab, sinTab;
+         ropeTables(L, mLatentH, mLatentW, cosTab, sinTab);
+-        auto latents = denoise(kv, L, cosTab.data() + (size_t)L * 64, sinTab.data() + (size_t)L * 64, iterNum, seed,
++        auto latents = denoise(kv, cosTab.data() + (size_t)L * 64, sinTab.data() + (size_t)L * 64, iterNum, seed,
+                                progressCallback);
+-        kv.clear();
++        kv = nullptr;
+         if (latents.get() == nullptr) return failStage("DiT denoising");
+         if (!ensureMemory("VAE decoder", vaeDecodeNeedMB(mImageWidth, mImageHeight))) return false;
+         auto image = decode(latents);

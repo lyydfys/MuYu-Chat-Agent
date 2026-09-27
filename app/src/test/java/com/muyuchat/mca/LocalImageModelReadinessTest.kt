@@ -12,6 +12,7 @@ import com.muyuchat.core.download.ImageEngineQnnSmokeTensorSpec
 import com.muyuchat.core.download.ImageEngineQnnRuntimeProfileSpec
 import com.muyuchat.core.download.ImageEngineSmokeSpec
 import com.muyuchat.core.download.ImageEngineTask
+import com.muyuchat.core.download.ModelBundleInstaller
 import com.muyuchat.core.download.ModelRepositoryProvider
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.download.ModelScopeRecommendedKind
@@ -68,7 +69,7 @@ class LocalImageModelReadinessTest {
     fun everyRecommendedImagePersistsItsCatalogExecutionProfileBoundToPrimaryBytes() {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
-        assertEquals(18, models.size)
+        assertEquals(19, models.size)
         models.forEach { model ->
             val bundle = requireNotNull(model.imageEngineBundle)
             val source = requireNotNull(bundle.executionProfile)
@@ -440,7 +441,7 @@ class LocalImageModelReadinessTest {
         assertNull(record.localImageStructuralReadinessMessage())
         assertNull(record.localImageReadinessMessage())
         assertTrue(record.isReadyForLocalImageGeneration())
-        assertEquals("未验证·可尝试", record.localImageReadinessLabel())
+        assertEquals("已安装·待首次运行", record.localImageReadinessLabel())
         assertTrue(record.localImageVerificationDiagnosticMessage()!!.contains("可直接尝试"))
     }
 
@@ -459,7 +460,7 @@ class LocalImageModelReadinessTest {
             assertNull(record.localImageStructuralReadinessMessage())
             assertTrue(record.isReadyForLocalImageGeneration())
             assertNull(record.localImageReadinessMessage())
-            assertEquals("未验证·可尝试", record.localImageReadinessLabel())
+            assertEquals("已安装·待首次运行", record.localImageReadinessLabel())
             assertTrue(record.localImageVerificationDiagnosticMessage()!!.contains("native 执行"))
         } finally {
             root.deleteRecursively()
@@ -783,7 +784,7 @@ class LocalImageModelReadinessTest {
         assertNull(record.localImageStructuralReadinessMessage())
         assertNull(record.localImageReadinessMessage())
         assertTrue(record.isReadyForLocalImageGeneration())
-        assertEquals("未验证·可尝试", record.localImageReadinessLabel())
+        assertEquals("已安装·待首次运行", record.localImageReadinessLabel())
     }
 
     @Test
@@ -888,6 +889,142 @@ class LocalImageModelReadinessTest {
                 family = LocalImageModelFamily.SANA
             ).localImageStructuralReadinessMessage()
         )
+    }
+
+    @Test
+    fun qwenImage21RequiresPublisherVerifiedAuditForEveryTextToImageComponent() {
+        val root = Files.createTempDirectory("qwen-image-21-integrity").toFile()
+        try {
+            val primary = root.createCompleteQwenImage21Bundle()
+            val withoutAudit = LocalImageBundleContract.inspectQwenImage21Bundle(root, primary)
+            assertNotNull(withoutAudit.readinessMessage())
+            assertTrue(requireNotNull(withoutAudit.readinessMessage()).contains("integrity record"))
+
+            root.writeQwenImage21Audit()
+            val verified = LocalImageBundleContract.inspectQwenImage21Bundle(root, primary)
+            assertNull(verified.readinessMessage())
+
+            File(root, "dit.mnn.weight").appendBytes(byteArrayOf(0x7f))
+            val tampered = LocalImageBundleContract.inspectQwenImage21Bundle(root, primary)
+            assertNotNull(tampered.readinessMessage())
+            assertTrue(requireNotNull(tampered.readinessMessage()).contains("integrity audit failed"))
+            assertTrue(requireNotNull(tampered.readinessMessage()).contains("dit.mnn.weight"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun qwenImage21FreshPrivateInstallReceiptAvoidsFullHashOnFirstAndRepeatedChecks() {
+        val root = Files.createTempDirectory("qwen-image-21-receipt-fast-path").toFile()
+        try {
+            root.createCompleteQwenImage21Bundle()
+            root.writeQwenImage21Audit()
+            val verifier = QwenImage21BundleAuditVerifier(
+                cacheEligibleRoot = { true },
+                fileKeyProvider = { path, _ -> path.toAbsolutePath().normalize().toString() }
+            )
+
+            val first = verifier.verify(root)
+            assertTrue("fresh app-private install receipt should avoid rereading all model bytes", first.usedFastPath)
+            assertTrue(first.verification.isVerified)
+
+            val repeated = verifier.verify(root)
+            assertTrue("unchanged audit and file identities should use the verified cache", repeated.usedFastPath)
+            assertTrue(repeated.verification.isVerified)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun qwenImage21NewerComponentMtimeFallsBackToFullHashAndDetectsTampering() {
+        val root = Files.createTempDirectory("qwen-image-21-receipt-stale-component").toFile()
+        try {
+            root.createCompleteQwenImage21Bundle()
+            root.writeQwenImage21Audit()
+            val verifier = QwenImage21BundleAuditVerifier(
+                cacheEligibleRoot = { true },
+                fileKeyProvider = { path, _ -> path.toAbsolutePath().normalize().toString() }
+            )
+            assertTrue(verifier.verify(root).usedFastPath)
+
+            val component = File(root, "dit.mnn.weight")
+            val bytes = component.readBytes()
+            bytes[0] = (bytes[0].toInt() xor 0x01).toByte()
+            component.writeBytes(bytes)
+            component.setLastModified(File(root, ModelBundleInstaller.AUDIT_FILE_NAME).lastModified() + 5_000L)
+
+            val stale = verifier.verify(root)
+            assertFalse("component newer than audit must trigger full SHA verification", stale.usedFastPath)
+            assertEquals(
+                com.muyuchat.core.download.ModelBundleComponentVerificationStatus.DIGEST_MISMATCH,
+                stale.verification.components.first { it.audit.relativePath == "dit.mnn.weight" }.status
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun qwenImage21ChangedAuditFallsBackToFullHashAndRejectsStaleSourcePin() {
+        val root = Files.createTempDirectory("qwen-image-21-receipt-stale-audit").toFile()
+        try {
+            root.createCompleteQwenImage21Bundle()
+            root.writeQwenImage21Audit()
+            val verifier = QwenImage21BundleAuditVerifier(
+                cacheEligibleRoot = { true },
+                fileKeyProvider = { path, _ -> path.toAbsolutePath().normalize().toString() }
+            )
+            assertTrue(verifier.verify(root).usedFastPath)
+
+            val auditFile = File(root, ModelBundleInstaller.AUDIT_FILE_NAME)
+            val audit = JSONObject(auditFile.readText(Charsets.UTF_8))
+            val components = audit.getJSONArray("components")
+            val component = components.getJSONObject(0)
+            component.put("sourceSha256", "0".repeat(64))
+            auditFile.writeText(audit.toString(), Charsets.UTF_8)
+            auditFile.setLastModified(System.currentTimeMillis() + 10_000L)
+
+            val stale = verifier.verify(root)
+            assertFalse("changed audit bytes must invalidate the cached receipt", stale.usedFastPath)
+            assertEquals(
+                com.muyuchat.core.download.ModelBundleComponentVerificationStatus.SOURCE_SHA256_MISMATCH,
+                stale.verification.components.first { it.audit.relativePath == "dit.mnn" }.status
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun qwenImage21ForcedRecheckBypassesFastPathAndFindsSameMetadataTampering() {
+        val root = Files.createTempDirectory("qwen-image-21-receipt-forced-recheck").toFile()
+        try {
+            root.createCompleteQwenImage21Bundle()
+            root.writeQwenImage21Audit()
+            val verifier = QwenImage21BundleAuditVerifier(
+                cacheEligibleRoot = { true },
+                fileKeyProvider = { path, _ -> path.toAbsolutePath().normalize().toString() }
+            )
+            assertTrue(verifier.verify(root).usedFastPath)
+
+            val component = File(root, "dit.mnn.weight")
+            val originalMtime = component.lastModified()
+            val bytes = component.readBytes()
+            bytes[0] = (bytes[0].toInt() xor 0x01).toByte()
+            component.writeBytes(bytes)
+            component.setLastModified(originalMtime)
+
+            val forced = verifier.verify(root, forceFullRecheck = true)
+            assertFalse("explicit full recheck must bypass the receipt/cache", forced.usedFastPath)
+            assertEquals(
+                com.muyuchat.core.download.ModelBundleComponentVerificationStatus.DIGEST_MISMATCH,
+                forced.verification.components.first { it.audit.relativePath == "dit.mnn.weight" }.status
+            )
+        } finally {
+            root.deleteRecursively()
+        }
     }
 
     @Test
@@ -1820,6 +1957,41 @@ class LocalImageModelReadinessTest {
     private fun File.createCompleteSanaBundle(): File {
         LocalImageBundleContract.sanaRequiredComponentPaths.forEach { path -> touch(path) }
         return File(this, "transformer.mnn")
+    }
+
+    private fun File.createCompleteQwenImage21Bundle(): File {
+        LocalImageBundleContract.qwenImage21RequiredComponentPaths.forEach { path ->
+            touch(path, "qwen:$path")
+        }
+        return File(this, "dit.mnn")
+    }
+
+    private fun File.writeQwenImage21Audit() {
+        val components = JSONArray()
+        LocalImageBundleContract.qwenImage21RequiredComponentPaths.forEach { path ->
+            val content = File(this, path).readBytes()
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(content)
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            components.put(
+                JSONObject()
+                    .put("path", path)
+                    .put("observedSizeBytes", content.size)
+                    .put("observedSha256", digest)
+                    .put("sourceSha256", digest)
+                    .put("sourceMetadataStatus", "SOURCE_SHA256")
+                    .put("transformed", false)
+            )
+        }
+        val auditFile = File(this, ModelBundleInstaller.AUDIT_FILE_NAME)
+        auditFile.writeText(
+            JSONObject()
+                .put("schema", ModelBundleInstaller.AUDIT_SCHEMA)
+                .put("components", components)
+                .toString(),
+            Charsets.UTF_8
+        )
+        auditFile.setLastModified(System.currentTimeMillis() + 5_000L)
     }
 
     private fun File.writeComponentAudit(path: String, sourceMetadataStatus: String) {

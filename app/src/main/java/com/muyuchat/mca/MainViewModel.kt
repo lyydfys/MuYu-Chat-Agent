@@ -69,10 +69,23 @@ import com.muyuchat.core.download.isImageModelCandidate
 import com.muyuchat.core.download.kindLabel
 import com.muyuchat.core.download.stagedTransformer
 import com.muyuchat.core.engine.ChatImageAttachment
+import com.muyuchat.core.engine.deduplicateVisionAttachments
+import com.muyuchat.core.engine.deduplicateVisionAttachmentsForDisplay
+import com.muyuchat.core.engine.visionDeduplicationKey
+import com.muyuchat.core.engine.ChatGeneratedImageRequest
+import com.muyuchat.core.engine.ChatGeneratedImageOrigin
+import com.muyuchat.core.engine.ChatGeneratedImageStatus
+import com.muyuchat.core.engine.ChatImageToolContinuationStatus
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
+import com.muyuchat.core.engine.ChatToolCall
+import com.muyuchat.core.engine.ChatToolExchange
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
+import com.muyuchat.core.engine.ContextCompressionSettings
+import com.muyuchat.core.engine.ContextCompressionThreshold
+import com.muyuchat.core.engine.ContextCompressionTrigger
+import com.muyuchat.core.engine.compressChatRequestContext
 import com.muyuchat.core.engine.AuthorizedPendingSignatureVerification
 import com.muyuchat.core.engine.CanonicalParameterSet
 import com.muyuchat.core.engine.GenerateEvent
@@ -81,6 +94,11 @@ import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LoadParams
 import com.muyuchat.core.engine.LocalChatExecutionContext
 import com.muyuchat.core.engine.LocalChatRuntime
+import com.muyuchat.core.engine.LITERT_LM_VISION_TRANSPORT_UNAVAILABLE_MESSAGE
+import com.muyuchat.core.engine.LITERT_LM_KNOWN_TEXT_ONLY_VISION_UNAVAILABLE_MESSAGE
+import com.muyuchat.core.engine.LITERT_LM_VISION_COMPONENTS_UNAVAILABLE_MESSAGE
+import com.muyuchat.core.engine.liteRtVisionInputAvailable
+import com.muyuchat.core.engine.inlineVisionImageWithinLimit
 import com.muyuchat.core.engine.ModelExecutionProfile
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 import com.muyuchat.core.engine.McaInferenceService
@@ -137,6 +155,9 @@ import com.muyuchat.feature.agent.AgentTuningMode
 import com.muyuchat.feature.agent.AgentTuningJobState
 import com.muyuchat.feature.chat.ImageGenerationUiTaskMode
 import com.muyuchat.feature.chat.ImagePromptTokenMeasurement
+import com.muyuchat.feature.chat.ChatBackendFamily
+import com.muyuchat.feature.chat.chatBackendFamilyForRuntime
+import com.muyuchat.feature.chat.withChatBackend
 import com.muyuchat.core.nativebridge.NativeMnnDiffusionBridge
 import com.muyuchat.core.sdnative.NativeStableDiffusionBridge
 import com.muyuchat.core.telemetry.SocFamily
@@ -151,8 +172,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onStart
@@ -281,6 +304,13 @@ data class ChatSessionRecord(
     val appearanceOverride: ChatAppearance? = null
 )
 
+internal data class ChatImageToolPermissionUiState(
+    val available: Boolean,
+    val unavailableReason: String,
+    val autoApproval: Boolean,
+    val canChange: Boolean
+)
+
 enum class ChatAppearanceScope {
     GLOBAL,
     ASSISTANT,
@@ -291,6 +321,108 @@ internal data class ConversationTailPrune(
     val messages: List<ChatMessage>,
     val removedMessageCount: Int
 )
+
+internal fun List<ChatSessionRecord>.withInterruptedChatImageRequests(): List<ChatSessionRecord> =
+    map { session ->
+        var changed = false
+        val recoveredMessages = session.messages.map { message ->
+            val request = message.generatedImageRequest
+            if (request == null) {
+                message
+            } else if (request.status in setOf(
+                    ChatGeneratedImageStatus.QUEUED,
+                    ChatGeneratedImageStatus.GENERATING
+                )
+            ) {
+                changed = true
+                val interrupted = request.copy(
+                    status = ChatGeneratedImageStatus.INTERRUPTED,
+                    message = "应用未保留运行中的图片任务，请重试。",
+                    toolContinuationStatus = if (
+                        request.toolContinuationStatus == ChatImageToolContinuationStatus.RUNNING
+                    ) ChatImageToolContinuationStatus.FAILED else request.toolContinuationStatus,
+                    toolContinuationStarted = false
+                )
+                message.copy(
+                    content = interrupted.assistantTranscriptText(),
+                    generatedImageRequest = interrupted
+                )
+            } else if (request.toolContinuationStatus == ChatImageToolContinuationStatus.RUNNING) {
+                changed = true
+                val recoverable = request.copy(
+                    toolContinuationStatus = ChatImageToolContinuationStatus.FAILED,
+                    toolContinuationStarted = false,
+                    message = "图片已保存，但角色后续回复中断；点击“继续角色回复”可重试。"
+                )
+                message.copy(
+                    content = recoverable.assistantTranscriptText(),
+                    generatedImageRequest = recoverable
+                )
+            } else {
+                message
+            }
+        }
+        if (changed) {
+            session.copy(messages = recoveredMessages, updatedAt = System.currentTimeMillis())
+        } else {
+            session
+        }
+    }
+
+internal fun ChatGeneratedImageRequest.assistantTranscriptText(): String = when (status) {
+    ChatGeneratedImageStatus.AWAITING_APPROVAL -> "角色请求生成图片，等待你的确认。"
+    ChatGeneratedImageStatus.QUEUED -> "正在准备图片生成。"
+    ChatGeneratedImageStatus.GENERATING -> "正在生成图片。"
+    ChatGeneratedImageStatus.DONE -> if (imageAssetIds.size > 1) {
+        "已生成 ${imageAssetIds.size} 张图片。"
+    } else {
+        "图片已生成。"
+    }
+    ChatGeneratedImageStatus.FAILED -> "图片生成失败：${message.ifBlank { "请检查模型并重试。" }}"
+    ChatGeneratedImageStatus.CANCELLED -> "图片生成已取消。"
+    ChatGeneratedImageStatus.INTERRUPTED -> "上次图片生成中断，可重试。"
+}
+
+private data class PendingAssistantImageToolTurn(
+    val requestId: String,
+    val chatSessionId: String,
+    val originalRequestMessages: List<ChatMessage>,
+    val params: GenerationParams,
+    val cloudModelId: String,
+    val toolCalls: List<ChatToolCall>,
+    val primaryToolCallId: String,
+    val initialToolOutputs: Map<String, String>
+)
+
+private data class AssistantImageModelBinding(
+    val backend: ImageBackend,
+    val modelId: String,
+    val modelName: String,
+    val options: LocalImageGenerationOptions,
+    val fingerprint: String
+)
+
+private data class ChatImageCommitSnapshot(
+    val sessions: List<ChatSessionRecord>,
+    val activeMessages: List<ChatMessage>?
+)
+
+private fun chatImageCommitJournalJobId(jobId: String, imageId: String): String {
+    val safeImageId = imageId.filter { it.isLetterOrDigit() || it in "._:-" }
+        .take(128)
+        .ifBlank { "image" }
+    return "${jobId.take(120)}.$safeImageId"
+}
+
+private fun ImageGenerationStatusRecord.toChatGeneratedImageStatus(): ChatGeneratedImageStatus =
+    when (this) {
+        ImageGenerationStatusRecord.QUEUED -> ChatGeneratedImageStatus.QUEUED
+        ImageGenerationStatusRecord.GENERATING,
+        ImageGenerationStatusRecord.CANCEL_REQUESTED -> ChatGeneratedImageStatus.GENERATING
+        ImageGenerationStatusRecord.DONE -> ChatGeneratedImageStatus.DONE
+        ImageGenerationStatusRecord.CANCELLED -> ChatGeneratedImageStatus.CANCELLED
+        ImageGenerationStatusRecord.FAILED -> ChatGeneratedImageStatus.FAILED
+    }
 
 internal data class ConversationMutationRollbackState(
     val messages: List<ChatMessage>,
@@ -427,7 +559,8 @@ data class ImageGenerationJobSpec(
     val inputDraft: LocalImageInputDraft,
     val options: LocalImageGenerationOptions,
     val promptExecution: LocalImagePromptExecution? = null,
-    val chatSessionId: String? = null
+    val chatSessionId: String? = null,
+    val chatMessageId: String? = null
 ) {
     init {
         require(prompt.isNotBlank()) { "Image generation job prompt must not be blank." }
@@ -526,6 +659,7 @@ data class ImageGenerationJobRecord(
     val modelName: String = "",
     val spec: ImageGenerationJobSpec? = null,
     val imageAssetId: String? = null,
+    val imageAssetIds: List<String> = emptyList(),
     val previewUriString: String? = null,
     val previewMode: String = "",
     val previewStep: Int = 0,
@@ -920,7 +1054,8 @@ internal fun ImageGenerationJobRecord.withCommittedImageJobUpdate(
     status: ImageGenerationStatusRecord,
     message: String,
     imageAssetId: String? = null,
-    preview: PublishedLocalImagePreview? = null
+    preview: PublishedLocalImagePreview? = null,
+    imageAssetIds: List<String> = emptyList()
 ): ImageGenerationJobRecord {
     val lateNonTerminalAfterTerminal = this.status.terminal && !status.terminal
     // A cancellation request is deliberately non-terminal while the worker unwinds, but it must
@@ -941,6 +1076,15 @@ internal fun ImageGenerationJobRecord.withCommittedImageJobUpdate(
     } else {
         imageAssetId ?: this.imageAssetId
     }
+    val committedImageAssetIds = if (ignoredLateUpdate) {
+        this.imageAssetIds
+    } else if (imageAssetIds.isNotEmpty()) {
+        imageAssetIds
+    } else if (imageAssetId != null) {
+        listOf(imageAssetId)
+    } else {
+        this.imageAssetIds
+    }
     val previewVisible = committedStatus == ImageGenerationStatusRecord.GENERATING
     val committedPreview = preview?.takeIf { candidate ->
         previewVisible && candidate.revision > previewRevision
@@ -949,6 +1093,7 @@ internal fun ImageGenerationJobRecord.withCommittedImageJobUpdate(
         status = committedStatus,
         message = committedMessage,
         imageAssetId = committedImageAssetId,
+        imageAssetIds = committedImageAssetIds,
         previewUriString = if (!previewVisible) null else {
             committedPreview?.uriString ?: previewUriString
         },
@@ -1040,14 +1185,25 @@ internal fun localImageGenerationFailureMessage(error: Throwable): String = when
                 "校验失败时请重新导入完整模型包。"
         }
     }
-    is LocalImageWorkerRemoteException ->
-        "本地图像生成引擎返回错误：${error.message.orEmpty().ifBlank { "未知错误" }}。" +
-            "下一步：确认模型包完整并重试。"
+    is ImageNativeExecutionContractException -> imageExecutionContractFailureMessage(error.message)
+    is LocalImageWorkerRemoteException -> when (error.code.lowercase()) {
+        IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID.lowercase(),
+        EXECUTION_CONTRACT_MISMATCH.lowercase(),
+        "execution_evidence_invalid", "execution_contract_invalid" ->
+            imageExecutionContractFailureMessage(error.message)
+        else -> "本地图像生成引擎返回错误：${error.message.orEmpty().ifBlank { "未知错误" }}。" +
+            "下一步：重试一次；仍失败时请反馈模型名称、应用版本和此错误详情。"
+    }
     is LocalImageWorkerException ->
         "本地图像生成 worker 返回了无效结果，本次请求未完成。下一步：先校验模型包和组件可读性，" +
             "然后重新尝试；仍失败时请重新导入完整模型包。"
     else -> error.message ?: "图片生成模型调用失败，请检查模型包后重试。"
 }
+
+private fun imageExecutionContractFailureMessage(detail: String?): String =
+    "模型执行结果与应用配置不一致，本次图片未通过校验。" +
+        "下一步：请更新应用后重试；仍失败时请反馈模型名称和此错误详情。" +
+        "详情：${detail.orEmpty().ifBlank { "执行配置校验失败" }}"
 
 internal fun List<ImageGenerationJobRecord>.withLocalImagePromptPreparationFailureIfActive(
     activeJobId: String?,
@@ -1397,7 +1553,11 @@ internal class UiGenerationOwnership(
     }
 
     fun activate(reservation: UiGenerationReservation, owner: Any): Boolean = synchronized(lock) {
-        if (!foreground || pendingRunId != reservation.runId || sequence.get() != reservation.runId) {
+        // A request admitted while the UI was visible must still be allowed to
+        // enter the engine if the process moves to the background in the small
+        // hand-off window before activation.  Backgrounding no longer cancels
+        // an owned request; explicit user cancellation remains authoritative.
+        if (pendingRunId != reservation.runId || sequence.get() != reservation.runId) {
             return@synchronized false
         }
         pendingRunId = null
@@ -1454,24 +1614,16 @@ internal class UiGenerationOwnership(
 
     fun background(): UiGenerationCancellation = synchronized(lock) {
         foreground = false
-        val active = activeOwner?.takeUnless { it.phase == UiGenerationRuntimePhase.TERMINAL }
-        val pendingCancelled = pendingRunId != null
-        if (active == null && !pendingCancelled) {
-            return@synchronized UiGenerationCancellation(
-                owner = null,
-                pendingCancelled = false,
-                stopLocalRuntime = false,
-                invalidatedRunId = sequence.get()
-            )
-        }
-        pendingRunId = null
-        if (active != null) activeOwner = null
-        val invalidatedRunId = sequence.incrementAndGet()
+        // Process backgrounding is not a cancellation request.  Local chat,
+        // cloud chat, and their persistence callbacks must finish while the
+        // foreground service keeps the process alive.  Keep both pending and
+        // active ownership intact so late terminal events still belong to the
+        // same UI run when the activity returns.
         UiGenerationCancellation(
-            owner = active?.owner,
-            pendingCancelled = pendingCancelled,
-            stopLocalRuntime = active?.phase == UiGenerationRuntimePhase.LOCAL_ACTIVE,
-            invalidatedRunId = invalidatedRunId
+            owner = null,
+            pendingCancelled = false,
+            stopLocalRuntime = false,
+            invalidatedRunId = sequence.get()
         )
     }
 
@@ -1484,7 +1636,9 @@ private val imageAttachmentRegex = Regex("""\u3010上传图片：([^\u3011]+)\u3
 private val oldImagePlaceholderRegex = Regex("""\s*（当前文本模型会收到图片占位信息；完整识图能力后续接入多模态模型。）""")
 private const val FILE_ATTACHMENT_MARKER = "\u3010\u4e0a\u4f20\u6587\u4ef6\uff1a"
 private const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
+private const val CHAT_SEND_ATTACHMENT_IDENTITY_MAX_BYTES = 64L * 1024L * 1024L
 private const val MAX_VISION_IMAGE_EDGE = 1280
+private const val MAX_VISION_DECODE_PIXELS = 4_000_000L
 
 data class ImageLibraryBackupState(
     val running: Boolean = false,
@@ -1633,6 +1787,10 @@ data class MainUiState(
     /** Statistics emitted by the active request only; never reuse a prior turn's rates. */
     val generationStats: RuntimeStats? = null,
     val promptContextUsage: PromptContextUsage? = null,
+    /** User-selected automatic context compression threshold. */
+    val contextCompressionThresholdPercent: Int = 80,
+    /** A manual compression request is consumed by the next generation. */
+    val contextCompressionPending: Boolean = false,
     val persistentPrefixCacheEnabled: Boolean = true,
     val persistentPrefixCacheEntryCount: Int = 0,
     val persistentPrefixCacheBytes: Long = 0L,
@@ -1655,6 +1813,7 @@ data class MainUiState(
     val downloadIntegrityMessage: String? = null,
     val downloadExecutionStatus: String = "UNKNOWN",
     val downloadExecutionMessage: String? = null,
+    val importTasks: List<com.muyuchat.feature.modelhub.ModelImportTaskUi> = emptyList(),
     val busy: Boolean = false,
     val loadedModelId: String? = null,
     val loadedModelName: String? = null,
@@ -2066,6 +2225,76 @@ internal fun localImageExtensionResolutionFailure(
     )
 }
 
+internal data class EmbeddedCharacterBookImportResult(
+    val present: Boolean,
+    val book: WorldBookRecord? = null,
+    val error: String? = null,
+    val warnings: List<String> = emptyList()
+)
+
+internal fun parseEmbeddedCharacterBook(
+    card: CharacterCard,
+    assistantId: String
+): EmbeddedCharacterBookImportResult {
+    val root = card.toJson()
+    val data = root.optJSONObject("data") ?: root
+    if (!data.has("character_book") || data.isNull("character_book")) {
+        return EmbeddedCharacterBookImportResult(present = false)
+    }
+    val embedded = data.optJSONObject("character_book")
+        ?: return EmbeddedCharacterBookImportResult(
+            present = true,
+            error = "角色卡中的 character_book 不是有效的对象。"
+        )
+    return runCatching {
+        WorldBookCodec.parseDetailed(
+            root = embedded,
+            scope = WorldBookScope.ASSISTANT,
+            assistantId = assistantId,
+            fallbackName = "${card.name.ifBlank { "导入角色" }}的世界书"
+        )
+    }.fold(
+        onSuccess = { result ->
+            if (result.book != null) {
+                EmbeddedCharacterBookImportResult(
+                    present = true,
+                    book = result.book,
+                    warnings = result.warnings
+                )
+            } else {
+                EmbeddedCharacterBookImportResult(
+                    present = true,
+                    error = result.error ?: "角色卡内置世界书没有可用条目。"
+                )
+            }
+        },
+        onFailure = { error ->
+            EmbeddedCharacterBookImportResult(
+                present = true,
+                error = error.message?.trim()?.takeIf(String::isNotBlank)
+                    ?: "角色卡内置世界书格式无效。"
+            )
+        }
+    )
+}
+
+internal fun embeddedCharacterBookStatusSuffix(
+    result: EmbeddedCharacterBookImportResult,
+    saveError: String? = null
+): String {
+    if (!result.present) return ""
+    val book = result.book
+    val status = when {
+        result.error != null -> "内置世界书导入失败：${result.error}（角色卡已成功导入）"
+        book == null -> "内置世界书导入失败：没有可用条目（角色卡已成功导入）"
+        !saveError.isNullOrBlank() -> "内置世界书保存失败：${saveError.trim().take(240)}（角色卡已成功导入）"
+        else -> "内置世界书已导入 ${book.entries.size} 条"
+    }
+    val warnings = result.warnings.takeIf { book != null && saveError.isNullOrBlank() && it.isNotEmpty() }
+        ?.joinToString("；")
+    return if (warnings.isNullOrBlank()) "；$status" else "；$status；提示：$warnings"
+}
+
 class MainViewModel @JvmOverloads constructor(
     application: Application,
     private val deferStartup: Boolean = false,
@@ -2075,13 +2304,25 @@ class MainViewModel @JvmOverloads constructor(
         private val localApiProcessLifecycleLock = Any()
         private var localApiProcessOwnerToken: Any? = null
         private const val REST_PORT = 11435
+        private const val BACKGROUND_TASK_STATUS = "已转入后台运行，返回 MCA 后查看进度。"
+        private const val LOCAL_API_FOREGROUND_READY_TIMEOUT_MS = 3_000L
+        private const val LOCAL_API_FOREGROUND_READY_ATTEMPTS = 2
         private const val CLOUD_REASONING_LOCKED_MESSAGE = "云端模型的思考模式由服务商和具体模型决定，MCA 会默认按开启处理；如需关闭或调整，请在云端模型配置中设置相关参数。"
         private const val LOCAL_IMAGE_GENERATION_WATCHDOG_MS = 8 * 60 * 1000L
+        // A stop tap must never wait behind a wedged Binder/JNI call.  The
+        // isolated worker owns the longer cancellation grace period and can
+        // reclaim itself independently; the UI only waits long enough to
+        // enqueue the request before releasing its generation state.
+        private const val STOP_GENERATION_REQUEST_TIMEOUT_MS = 750L
+        private const val STOP_GENERATION_JOIN_TIMEOUT_MS = 2_000L
         private const val LOCAL_IMAGE_UI_PREVIEW_DIRECTORY = "local_image_ui_previews"
         private const val MAX_LOCAL_IMAGE_PREVIEW_BYTES = 16L * 1024L * 1024L
         private const val IMAGE_UPSCALER_PREFERENCES = "image_upscaler_product_selection_v1"
         private const val IMAGE_UPSCALER_SELECTED_ID = "selected_id"
         private const val GENERATION_PARAMETERS_PREFERENCES = "mca_generation_params"
+        private const val CONTEXT_COMPRESSION_PREFERENCES = "mca_context_compression_v1"
+        private const val CONTEXT_COMPRESSION_THRESHOLD_KEY = "threshold_percent"
+        private const val DOWNLOAD_REQUESTS_PREFERENCES = "mca_download_requests"
         private const val PERSISTENT_PREFIX_CACHE_ENABLED_KEY = "persistent_prefix_cache_enabled"
         private const val IMAGE_UPSCALE_TILE_SIZE = 128
         private const val MAX_DIRECT_COMPOSER_UTF8_BYTES = 256 * 1024
@@ -2108,6 +2349,8 @@ class MainViewModel @JvmOverloads constructor(
 
     private val modelStore = ModelStoreRepository(application)
     private val runtimeProfileStore = ModelRuntimeProfileStore(application)
+    /** User-facing sampling/reasoning values, isolated by local/cloud model identity. */
+    private val modelGenerationProfileStore = ModelGenerationProfileStore(application)
     private val installationScopeId = runBlocking(Dispatchers.IO) {
         runtimeProfileStore.installationScopeId()
     }
@@ -2153,11 +2396,18 @@ class MainViewModel @JvmOverloads constructor(
     private var foregroundRecoveryJob: Job? = null
     private val foregroundRecoverySequence = AtomicLong(0L)
     private val chatSessionStore = ChatSessionStore(application)
+    private val chatImageToolAuthorizationStore = ChatImageToolAuthorizationStore(application)
     private val worldBookStore = WorldBookStore(application)
     private val knowledgeBaseStore = KnowledgeBaseStore(application)
     private val chatContextComposer = ChatContextComposer(worldBookStore, knowledgeBaseStore)
     private val imageLibraryBackup = ImageLibraryBackup(application, chatSessionStore)
     private val imageAssetDirectory = canonicalImageAssetDirectory(application.filesDir)
+    private val chatImageCommitJournal by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ChatImageCommitJournal(
+            ownedRoot = File(application.filesDir, "pending-chat-image-commits"),
+            assetDirectory = imageAssetDirectory
+        )
+    }
     private val assistantStore = AssistantStore(application)
     private val globalChatAppearanceStore = GlobalChatAppearanceStore(application)
     private val backgroundImageStore = BackgroundImageStore(application)
@@ -2179,6 +2429,11 @@ class MainViewModel @JvmOverloads constructor(
         IMAGE_UPSCALER_PREFERENCES,
         Context.MODE_PRIVATE
     )
+    private val contextCompressionPreferences = application.getSharedPreferences(
+        CONTEXT_COMPRESSION_PREFERENCES,
+        Context.MODE_PRIVATE
+    )
+    private val manualContextCompressionRequests = ContextCompressionRequestStore()
     private val localImageWorkerClient = LocalImageWorkerClient(application)
     private val deviceProfileReader = DeviceProfileReader(application)
     private val advisor = AgentAdvisor()
@@ -2193,6 +2448,7 @@ class MainViewModel @JvmOverloads constructor(
     private val initialGlobalChatAppearance = globalChatAppearanceStore.load()
     private val loadedChatSessions = chatSessionStore.load()
     private val initialChatSessions = loadedChatSessions
+        .withInterruptedChatImageRequests()
         .withBackfilledAssistantSnapshots(initialAssistants)
         .also { snapshots ->
             if (snapshots != loadedChatSessions) {
@@ -2265,8 +2521,12 @@ class MainViewModel @JvmOverloads constructor(
     private val initialSelectedImageBackend = localImageModelStore.loadSelectedBackend()
     @Volatile
     private var generationJob: Job? = null
+    private var replyGenerationMetrics: ReplyGenerationMetrics? = null
+    /** Prevents double taps from invalidating the stop epoch twice and losing UI cleanup. */
+    private val stopGenerationInProgress = AtomicBoolean(false)
+    /** Serializes the final content-hash check for multi-image chat turns off the UI thread. */
+    private val chatImageSubmissionPreflight = AtomicBoolean(false)
     /** New UI generations join this job before entering the engine, preventing a stale stop. */
-    private var backgroundGenerationStopJob: Job? = null
     /** Invalidates late cleanup from a cancelled generation before another lifecycle operation. */
     private val generationRunSequence = AtomicLong(0L)
     private val uiGenerationOwnership = UiGenerationOwnership(generationRunSequence)
@@ -2311,9 +2571,22 @@ class MainViewModel @JvmOverloads constructor(
     private val imageLibraryMutationMutex = Mutex()
     private val imageLibraryStartupReconciliation = viewModelScope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
         try {
-            val initialImages = chatSessionStore.loadImages()
+            val loadedImages = chatSessionStore.loadImages()
             val files = chatSessionStore.loadFiles()
-            _uiState.update { state -> state.copy(images = initialImages, files = files) }
+            val (recoveredSessions, initialImages) = recoverPendingChatImageCommits(
+                sessions = durableChatSessions,
+                images = loadedImages
+            )
+            durableChatSessions = recoveredSessions
+            _uiState.update { state ->
+                val activeMessages = recoveredSessions.firstOrNull { it.id == state.activeChatSessionId }?.messages
+                state.copy(
+                    chatSessions = recoveredSessions,
+                    messages = activeMessages ?: state.messages,
+                    images = initialImages,
+                    files = files
+                )
+            }
             imageLibraryMutationMutex.withLock {
                 imageLibraryBackup.reconcile(initialImages)
                 val report = reconcileImageAssetDirectory(imageAssetDirectory, initialImages)
@@ -2334,6 +2607,13 @@ class MainViewModel @JvmOverloads constructor(
     private val latestImageFavoriteMutations =
         java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>()
     private var imageGenerationJob: Job? = null
+    /** Serializes the optional chat-model prompt bridge used by chat-page image requests. */
+    private var chatImagePromptBridgeJob: Job? = null
+    /** Invalidates a cancelled bridge before a slow provider can enqueue its stale result. */
+    private val chatImagePromptBridgeGeneration = AtomicLong(0L)
+    private val pendingAssistantImageToolTurns = java.util.concurrent.ConcurrentHashMap<String, PendingAssistantImageToolTurn>()
+    private val assistantImageContinuationLock = Any()
+    private val assistantImageContinuationsInFlight = mutableSetOf<String>()
     private var imageUpscaleJob: Job? = null
     @Volatile private var imageLibraryBackupJob: Job? = null
     private val imageLibraryBackupSequence = AtomicLong(0L)
@@ -2353,6 +2633,7 @@ class MainViewModel @JvmOverloads constructor(
     @Volatile private var activeImageGenerationJobId: String? = null
     @Volatile private var activeImageGenerationBackend: ImageBackend? = null
     @Volatile private var activeImageGenerationModelId: String? = null
+    @Volatile private var activeLocalImageWorkerRequestId: String? = null
     @Volatile private var activeLocalApiImageModelId: String? = null
     @Volatile private var activeImageUpscaleJobId: String? = null
     @Volatile private var activeImageUpscaleSourceImageId: String? = null
@@ -2370,6 +2651,73 @@ class MainViewModel @JvmOverloads constructor(
                 state.copy(statusMessage = "图片库启动清理未完全完成，将在下次启动重试。")
             }
         }
+    }
+
+    private suspend fun recoverPendingChatImageCommits(
+        sessions: List<ChatSessionRecord>,
+        images: List<ImageAssetRecord>
+    ): Pair<List<ChatSessionRecord>, List<ImageAssetRecord>> {
+        val journal = runCatching { chatImageCommitJournal }.getOrNull() ?: return sessions to images
+        val entries = runCatching { journal.enumerate().validEntries }.getOrNull().orEmpty()
+        if (entries.isEmpty()) return sessions to images
+        var recoveredSessions = sessions
+        val recoveredImages = images.toMutableList()
+        for (entry in entries) {
+            val asset = runCatching { entry.imageAssetRecord() }.getOrNull() ?: continue
+            val session = recoveredSessions.firstOrNull { it.id == entry.chatSessionId }
+            val request = session?.messages
+                ?.firstOrNull { it.generatedImageRequest?.id == entry.requestId }
+                ?.generatedImageRequest
+            val jobMatches = request != null && (
+                request.currentJobId == entry.jobId ||
+                    request.currentJobId?.let { entry.jobId.startsWith("$it.") } == true
+                )
+            val databaseAlreadyContains = recoveredImages.any { it.id == asset.id }
+            val safelyAssociate = session != null && request != null && jobMatches
+            if (safelyAssociate && session != null && request != null) {
+                val imageIds = (request.imageAssetIds + asset.id).distinct()
+                val completedRequest = request.copy(
+                    status = ChatGeneratedImageStatus.DONE,
+                    message = if (imageIds.size == 1) "已生成 1 张图片。" else "已生成 ${imageIds.size} 张图片。",
+                    imageAssetIds = imageIds
+                )
+                val updatedMessages = session.messages.map { message ->
+                    if (message.generatedImageRequest?.id == entry.requestId) {
+                        message.copy(
+                            content = completedRequest.assistantTranscriptText(),
+                            generatedImageRequest = completedRequest
+                        )
+                    } else message
+                }
+                val updatedSessions = recoveredSessions.map { current ->
+                    if (current.id == session.id) {
+                        current.copy(messages = updatedMessages, updatedAt = System.currentTimeMillis())
+                    } else current
+                }.sortedForHistory()
+                val committed = runCatching {
+                    chatSessionStore.saveGeneratedImageResult(updatedSessions, listOf(asset))
+                }.getOrDefault(false)
+                if (committed) {
+                    recoveredSessions = updatedSessions
+                    if (!databaseAlreadyContains) recoveredImages += asset
+                    journal.removeAfterDurableCommit(entry.jobId, entry.requestId, true)
+                    continue
+                }
+            }
+
+            // A stale or deleted chat must not strand a valid image file. Preserve it in the
+            // gallery; only associate it with a conversation when the request/job identity matches.
+            val galleryAsset = if (safelyAssociate) asset else asset.copy(chatSessionId = null)
+            val durable = if (databaseAlreadyContains) true else runCatching {
+                chatSessionStore.upsertImages(listOf(galleryAsset))
+                true
+            }.getOrDefault(false)
+            if (durable) {
+                if (!databaseAlreadyContains) recoveredImages += galleryAsset
+                journal.removeAfterDurableCommit(entry.jobId, entry.requestId, true)
+            }
+        }
+        return recoveredSessions to recoveredImages.sortedImagesForLibrary()
     }
 
     private fun startImageLibraryBackupJob(
@@ -2444,7 +2792,19 @@ class MainViewModel @JvmOverloads constructor(
                 modelScopeClient.userFacingRecommendedModels(),
                 initialDeviceProfile
             ),
-            params = initialEffectiveParams,
+            params = loadModelGenerationParams(
+                backend = if (initialSelectedBackend == ChatBackend.CLOUD) {
+                    ChatBackend.CLOUD
+                } else {
+                    ChatBackend.LOCAL
+                },
+                modelId = if (initialSelectedBackend == ChatBackend.CLOUD) {
+                    initialSelectedCloudChatModelId
+                } else {
+                    initialChatSessions.firstOrNull()?.modelId
+                },
+                defaults = initialEffectiveParams
+            ),
             agentLogs = agentLogger.recent(),
             benchmarkHistory = benchmarkHistoryLogger.recent(),
             deviceProfile = initialDeviceProfile,
@@ -2458,6 +2818,7 @@ class MainViewModel @JvmOverloads constructor(
             webSearchConfig = initialWebSearchConfig,
             webSearchDiagnostics = initialWebSearchDiagnostics,
             persistentPrefixCacheEnabled = initialPersistentPrefixCacheEnabled,
+            contextCompressionThresholdPercent = loadContextCompressionThreshold().percent,
             appUpdate = initialAppUpdateState
         )
     )
@@ -2532,7 +2893,7 @@ class MainViewModel @JvmOverloads constructor(
         synchronized(localApiImageGenerationLifecycleLock) {
             val ownership = activeLocalApiImageGenerationOwnership
                 ?: return@synchronized false
-            localImageWorkerClient.cancel()
+            localImageWorkerClient.cancel(ownership.requestId)
             ownership.requestJob.cancel(CancellationException(reason))
             true
         }
@@ -2543,7 +2904,7 @@ class MainViewModel @JvmOverloads constructor(
         if (activeLocalApiImageGenerationOwnership !== ownership) {
             false
         } else {
-            localImageWorkerClient.cancel()
+            localImageWorkerClient.cancel(ownership.requestId)
             true
         }
     }
@@ -2894,6 +3255,7 @@ class MainViewModel @JvmOverloads constructor(
     internal fun startAfterConstruction() {
         imageLibraryStartupReconciliation.start()
         observeManagedDownloads()
+        observeManagedImports()
         viewModelScope.launch {
             ProcessUiLifecycleEvents.events.collect { event ->
                 when (event) {
@@ -2935,7 +3297,10 @@ class MainViewModel @JvmOverloads constructor(
         LocalApiRuntime.claimOwner(localApiRuntimeOwner) {
             // The replacement already owns the process-global notification service. Retire only
             // this ViewModel's listener; owner-checked service cleanup below becomes a no-op.
-            retireLocalApiListener(stopForegroundService = true)
+            retireLocalApiListener(
+                stopForegroundService = true,
+                forceServerStop = true
+            )
         }
         LocalApiRuntime.engine = engine
         LocalApiRuntime.streamChatWithContextProvider = { request, executionContext ->
@@ -3489,6 +3854,12 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
 
+        // Always enqueue one construction-time recovery when the persisted
+        // preference says the API was enabled.  A ViewModel can be created
+        // after the process foreground replay has already been consumed; in
+        // that case waiting for the replay leaves the port closed indefinitely
+        // (the intermittent cold-start failure observed on device).  The
+        // lifecycle callback remains a second idempotent recovery path.
         if (initialApiPreferences.apiEnabled) {
             requestLocalApiState(
                 enabled = true,
@@ -3498,7 +3869,17 @@ class MainViewModel @JvmOverloads constructor(
         }
 
         viewModelScope.launch {
+            // StateFlow already conflates updates while the diagnostic query runs.
             engine.stats.collect { stats ->
+                // nativeStatsJson may cross a Binder/JNI boundary and can be
+                // slow while a worker is loading. Never execute that query
+                // inside the Main dispatcher or inside StateFlow.update's
+                // retryable lambda; a stale diagnostic snapshot is preferable
+                // to blocking frames or re-running the side effect.
+                val nativeStats = withContext(Dispatchers.IO) {
+                    runCatching { engine.nativeStatsJson() }.getOrDefault("{}")
+                }
+                if (engine.stats.value != stats) return@collect
                 _uiState.update { state ->
                     val lifecycle = when {
                         state.isGenerating -> AgentEngineLifecycle.GENERATING
@@ -3514,7 +3895,7 @@ class MainViewModel @JvmOverloads constructor(
                     }
                     state.copy(
                         stats = stats,
-                        nativeStatsJson = engine.nativeStatsJson(),
+                        nativeStatsJson = nativeStats,
                         engineLifecycle = lifecycle
                     )
                 }
@@ -3789,6 +4170,61 @@ class MainViewModel @JvmOverloads constructor(
         _uiState.update { it.copy(statusMessage = null) }
     }
 
+    /**
+     * Schedules a one-shot compression before the next chat request.  The
+     * request is deliberately consumed by startGeneration so the stored
+     * conversation is never rewritten behind the user's back.
+     */
+    fun requestContextCompression() {
+        val state = _uiState.value
+        if (state.isGenerating) {
+            _uiState.update { it.copy(statusMessage = "当前正在生成，请完成或停止后再压缩上下文。") }
+            return
+        }
+        if (state.messages.isEmpty()) {
+            _uiState.update { it.copy(statusMessage = "当前对话还没有可压缩的内容。") }
+            return
+        }
+        val sessionId = state.activeChatSessionId
+        if (sessionId.isNullOrBlank()) {
+            _uiState.update { it.copy(statusMessage = "当前对话尚未保存，暂时无法安排压缩。") }
+            return
+        }
+        manualContextCompressionRequests.request(sessionId)
+        _uiState.update {
+            it.copy(
+                contextCompressionPending = true,
+                statusMessage = "已安排压缩；下一次发送时会保留角色设定和最近消息。"
+            )
+        }
+    }
+
+    /** Persists one of the supported automatic thresholds and updates the UI. */
+    fun setContextCompressionThreshold(percent: Int) {
+        val threshold = ContextCompressionThreshold.values()
+            .firstOrNull { it.percent == percent }
+            ?: ContextCompressionThreshold.EIGHTY
+        contextCompressionPreferences.edit()
+            .putInt(CONTEXT_COMPRESSION_THRESHOLD_KEY, threshold.percent)
+            .apply()
+        _uiState.update {
+            it.copy(
+                contextCompressionThresholdPercent = threshold.percent,
+                statusMessage = "自动压缩阈值已设为 ${threshold.percent}%。"
+            )
+        }
+    }
+
+    private fun loadContextCompressionThreshold(): ContextCompressionThreshold =
+        ContextCompressionThreshold.values()
+            .firstOrNull {
+                it.percent == contextCompressionPreferences.getInt(
+                    CONTEXT_COMPRESSION_THRESHOLD_KEY,
+                    ContextCompressionThreshold.EIGHTY.percent
+                )
+            }
+            ?: ContextCompressionThreshold.EIGHTY
+
     fun attachFile(uriString: String) {
         if (_uiState.value.isGenerating) {
             _uiState.update { it.copy(statusMessage = "请先停止当前生成，再上传文件") }
@@ -3830,16 +4266,31 @@ class MainViewModel @JvmOverloads constructor(
                 fun publishImportedAttachment(): List<FileAssetRecord>? {
                     var filesToPersist: List<FileAssetRecord>? = null
                     _uiState.update { state ->
+                        val importedAttachment = imported.imageAsset?.toChatAttachment()
+                        // The system picker can deliver the same selection more than once and
+                        // every import is copied to a fresh private file.  Compare the actual
+                        // image bytes through the shared vision identity contract before adding
+                        // another marker to the composer; otherwise the outgoing bubble can
+                        // visibly contain the same photo twice even though the user picked it
+                        // only once.
+                        val alreadyAttached = importedAttachment != null &&
+                            state.prepareChatInput().imageAttachments.any { existing ->
+                                listOf(existing, importedAttachment)
+                                    .deduplicateVisionAttachments()
+                                    .size == 1
+                            }
                         val attachment = buildString {
-                            if (state.input.isNotBlank()) append("\n\n")
-                            if (imported.imageAsset != null) {
-                                append(imported.text.trim())
-                            } else if (imported.fileAsset != null) {
-                                append(imported.fileAsset.toInputAttachment())
-                            } else {
-                                append("【上传文件：").append(imported.name).append("】\n")
-                                append(imported.text.trim())
-                                if (imported.truncated) append("\n\n（文件较大，已截取前 64KB）")
+                            if (!alreadyAttached) {
+                                if (state.input.isNotBlank()) append("\n\n")
+                                if (imported.imageAsset != null) {
+                                    append(imported.text.trim())
+                                } else if (imported.fileAsset != null) {
+                                    append(imported.fileAsset.toInputAttachment())
+                                } else {
+                                    append("【上传文件：").append(imported.name).append("】\n")
+                                    append(imported.text.trim())
+                                    if (imported.truncated) append("\n\n（文件较大，已截取前 64KB）")
+                                }
                             }
                         }
                         val updatedImages = imported.imageAsset?.let { image ->
@@ -3855,7 +4306,9 @@ class MainViewModel @JvmOverloads constructor(
                             input = state.input + attachment,
                             images = updatedImages ?: state.images,
                             files = updatedFiles ?: state.files,
-                            statusMessage = if (imported.imageAsset != null) {
+                            statusMessage = if (imported.imageAsset != null && alreadyAttached) {
+                                "这张图片已在当前消息中，未重复添加：${imported.name}"
+                            } else if (imported.imageAsset != null) {
                                 "已添加图片：${imported.name}"
                             } else {
                                 "已添加文件：${imported.name}"
@@ -3892,6 +4345,12 @@ class MainViewModel @JvmOverloads constructor(
     fun useImageAsset(imageId: String) {
         val image = _uiState.value.images.firstOrNull { it.id == imageId } ?: return
         _uiState.update { state ->
+            val alreadyAttached = imageAttachmentRegex.findAll(state.input).any { match ->
+                match.groupValues.getOrNull(2)?.trim() == image.uriString.trim()
+            }
+            if (alreadyAttached) {
+                return@update state.copy(statusMessage = "这张图片已在当前消息中：${image.name}")
+            }
             val separator = if (state.input.isBlank()) "" else "\n\n"
             state.copy(
                 input = state.input + separator + image.toInputAttachment(),
@@ -4511,6 +4970,10 @@ class MainViewModel @JvmOverloads constructor(
                 }
             }
         }
+        val foregroundLease = McaGenerationForegroundService.acquire(
+            getApplication<Application>(),
+            McaGenerationForegroundService.KIND_IMAGE
+        )
         val executionJob = viewModelScope.launch(Dispatchers.IO) {
             var unpublishedImage: ImageAssetRecord? = null
             try {
@@ -4674,48 +5137,52 @@ class MainViewModel @JvmOverloads constructor(
         }
         imageUpscaleJob = executionJob
         executionJob.invokeOnCompletion { completion ->
-            synchronized(localImageUpscaleLifecycleLock) {
-                val ownsActiveUpscale = activeImageUpscaleJobId == requestId
-                if (ownsActiveUpscale) {
-                    activeImageUpscaleJobId = null
-                    activeImageUpscaleSourceImageId = null
-                }
-                val released = releaseObservedImageGenerationLease(lease)
-                _uiState.update { state ->
-                    val job = state.imageUpscaleJob
-                    val terminalJob = if (completion is CancellationException &&
-                        job?.id == requestId && !job.status.terminal
-                    ) {
-                        job.copy(
-                            status = ImageUpscaleStatusRecord.CANCELLED,
-                            message = "已取消图片放大"
-                        )
-                    } else {
-                        job
+            try {
+                synchronized(localImageUpscaleLifecycleLock) {
+                    val ownsActiveUpscale = activeImageUpscaleJobId == requestId
+                    if (ownsActiveUpscale) {
+                        activeImageUpscaleJobId = null
+                        activeImageUpscaleSourceImageId = null
                     }
-                    state.copy(
-                        activeLocalImageUpscalerId = if (ownsActiveUpscale) {
-                            null
-                        } else {
-                            state.activeLocalImageUpscalerId
-                        },
-                        imageUpscaleJob = terminalJob,
-                        localImageUpscalerMessage = if (terminalJob?.status ==
-                            ImageUpscaleStatusRecord.CANCELLED
+                    val released = releaseObservedImageGenerationLease(lease)
+                    _uiState.update { state ->
+                        val job = state.imageUpscaleJob
+                        val terminalJob = if (completion is CancellationException &&
+                            job?.id == requestId && !job.status.terminal
                         ) {
-                            "已取消图片放大"
+                            job.copy(
+                                status = ImageUpscaleStatusRecord.CANCELLED,
+                                message = "已取消图片放大"
+                            )
                         } else {
-                            state.localImageUpscalerMessage
-                        },
-                        statusMessage = if (!released) {
-                            "图片放大任务已结束，但 coordinator lease 状态不一致。"
-                        } else {
-                            state.statusMessage
+                            job
                         }
-                    )
+                        state.copy(
+                            activeLocalImageUpscalerId = if (ownsActiveUpscale) {
+                                null
+                            } else {
+                                state.activeLocalImageUpscalerId
+                            },
+                            imageUpscaleJob = terminalJob,
+                            localImageUpscalerMessage = if (terminalJob?.status ==
+                                ImageUpscaleStatusRecord.CANCELLED
+                            ) {
+                                "已取消图片放大"
+                            } else {
+                                state.localImageUpscalerMessage
+                            },
+                            statusMessage = if (!released) {
+                                "图片放大任务已结束，但 coordinator lease 状态不一致。"
+                            } else {
+                                state.statusMessage
+                            }
+                        )
+                    }
                 }
+                if (imageUpscaleJob === executionJob) imageUpscaleJob = null
+            } finally {
+                McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)
             }
-            if (imageUpscaleJob === executionJob) imageUpscaleJob = null
         }
     }
 
@@ -4740,7 +5207,7 @@ class MainViewModel @JvmOverloads constructor(
                     state
                 }
             }
-            val nativeCancelRequested = localImageWorkerClient.cancel()
+            val nativeCancelRequested = localImageWorkerClient.cancel(requestId)
             if (!nativeCancelRequested) {
                 imageUpscaleJob
                     ?.takeIf { activeImageUpscaleJobId == requestId }
@@ -5064,7 +5531,14 @@ class MainViewModel @JvmOverloads constructor(
         prompt: String,
         inputDraft: LocalImageInputDraft,
         options: LocalImageGenerationOptions,
-        jobSnapshot: ImageGenerationJobSpec?
+        jobSnapshot: ImageGenerationJobSpec?,
+        // Keep the generated UI id in the function body so callers that retry
+        // or continue an assistant tool turn can provide their own stable id.
+        // This also keeps the public admission signature free of interpolation
+        // braces, which makes source-level lifecycle checks unambiguous.
+        requestedJobId: String? = null,
+        requestedChatSessionId: String? = null,
+        requestedChatMessageId: String? = null
     ): Boolean {
         val cleanPrompt = (jobSnapshot?.prompt ?: prompt).trim()
         if (cleanPrompt.isBlank()) {
@@ -5084,13 +5558,21 @@ class MainViewModel @JvmOverloads constructor(
             _uiState.update { it.copy(statusMessage = "已有图片生成任务正在运行，请先停止当前任务") }
             return false
         }
-        val jobId = "ui-img-${UUID.randomUUID()}"
+        val jobId = requestedJobId ?: "ui-img-${UUID.randomUUID()}"
         val enqueueState = _uiState.value
         val requestedBackend = jobSnapshot?.backend ?: enqueueState.selectedImageBackend
         val requestedLocalModel = if (requestedBackend == ImageBackend.LOCAL) {
             jobSnapshot?.localModelSnapshot ?: enqueueState.selectedLocalImageModel()
         } else {
             null
+        }
+        if (enqueueState.isGenerating && requestedBackend == ImageBackend.LOCAL &&
+            enqueueState.selectedChatBackend == ChatBackend.LOCAL
+        ) {
+            _uiState.update {
+                it.copy(statusMessage = "本地聊天正在生成，请等本轮结束后再启动本地生图，避免设备内存冲突。")
+            }
+            return false
         }
         val requestedCloudConfig = if (requestedBackend == ImageBackend.CLOUD) {
             jobSnapshot?.cloudConfigSnapshot ?: enqueueState.selectedImageCloudConfig()?.normalized()
@@ -5118,7 +5600,10 @@ class MainViewModel @JvmOverloads constructor(
             ?: requestedLocalModel?.displayName
             ?: requestedCloudConfig?.displayName?.takeIf(String::isNotBlank)
             ?: requestedCloudConfig?.imageModel.orEmpty()
-        val requestedChatSessionId = jobSnapshot?.chatSessionId ?: enqueueState.activeChatSessionId
+        val owningChatSessionId = jobSnapshot?.chatSessionId
+            ?: requestedChatSessionId
+            ?: enqueueState.activeChatSessionId
+        val owningChatMessageId = jobSnapshot?.chatMessageId ?: requestedChatMessageId
         val baseOptions = jobSnapshot?.options ?: options
         if (requestedBackend == ImageBackend.LOCAL &&
             baseOptions.textualInversionIds.isNotEmpty() &&
@@ -5195,11 +5680,14 @@ class MainViewModel @JvmOverloads constructor(
             modelName = requestedModelName,
             inputDraft = queuedInputDraft,
             options = queuedOptions,
-            chatSessionId = requestedChatSessionId
+            chatSessionId = owningChatSessionId,
+            chatMessageId = owningChatMessageId
         )).copy(
             localModelSnapshot = requestedLocalModel,
             cloudConfigSnapshot = requestedCloudConfig,
-            options = queuedOptions
+            options = queuedOptions,
+            chatSessionId = owningChatSessionId,
+            chatMessageId = owningChatMessageId
         )
         val generationLease = tryAcquireObservedImageGenerationLease(jobId)
         if (generationLease == null) {
@@ -5322,6 +5810,12 @@ class MainViewModel @JvmOverloads constructor(
                 statusMessage = "图片任务已排队"
             )
         }
+        // Protect preparation, worker callbacks and the final library commit,
+        // including cloud images which do not have a local worker service.
+        val foregroundLease = McaGenerationForegroundService.acquire(
+            getApplication<Application>(),
+            McaGenerationForegroundService.KIND_IMAGE
+        )
         val executionJob = viewModelScope.launch(Dispatchers.IO) {
             var preparedJobSpec = executionJobSpec
             try {
@@ -5445,7 +5939,7 @@ class MainViewModel @JvmOverloads constructor(
                                         model = model,
                                         options = preparedJobSpec.effectiveOptions(child.options),
                                         inputDraft = queuedInputDraft,
-                                        chatSessionId = requestedChatSessionId,
+                                        chatSessionId = owningChatSessionId,
                                         generationMetadata = preparedJobSpec.toHistoryMetadata(),
                                         batchLineage = child.batchLineage,
                                         outputLineages = child.outputLineages,
@@ -5495,7 +5989,7 @@ class MainViewModel @JvmOverloads constructor(
                                 createCloudGeneratedImageAsset(
                                     prompt = cleanPrompt,
                                     config = imageConfig,
-                                    chatSessionId = requestedChatSessionId,
+                                    chatSessionId = owningChatSessionId,
                                     generationMetadata = executionJobSpec.toHistoryMetadata()
                                 )
                             )
@@ -5533,107 +6027,200 @@ class MainViewModel @JvmOverloads constructor(
                     }
                     return@launch
                 }
+                // A worker/provider is allowed to return an empty list when it has
+                // cancelled or failed after creating no artifact.  Treat that as a
+                // normal task failure before the commit code dereferences
+                // generatedImages.first(); the old path crashed the coroutine (and
+                // on some native worker builds the process) while publishing the
+                // result, which looked like an immediate app crash to the user.
+                if (generatedImages.isEmpty()) {
+                    val message = "图像引擎未返回图片文件，请检查模型完整性后重试。"
+                    _uiState.update { state ->
+                        state.copy(
+                            imageJobs = state.imageJobs.updateImageJob(
+                                jobId,
+                                ImageGenerationStatusRecord.FAILED,
+                                message
+                            ),
+                            statusMessage = message
+                        )
+                    }
+                    return@launch
+                }
                 val commitError = runCatching {
                     imageLibraryMutationMutex.withLock {
                         currentCoroutineContext().ensureActive()
-                        val admittedJob = _uiState.value.imageJobs.firstOrNull { it.id == jobId }
-                        if (activeImageGenerationJobId != jobId ||
-                            admittedJob?.status != ImageGenerationStatusRecord.GENERATING
-                        ) {
-                            throw CancellationException(
-                                "Image generation lost ownership before library commit."
-                            )
-                        }
-                        chatSessionStore.upsertImages(generatedImages)
-                        _uiState.update { state ->
-                            val job = state.imageJobs.firstOrNull { it.id == jobId }
-                            if (activeImageGenerationJobId != jobId ||
-                                job?.status != ImageGenerationStatusRecord.GENERATING
-                            ) {
-                                state
-                            } else {
-                                val committedImages = (
-                                    generatedImages + state.images.filterNot { existing ->
-                                        generatedImages.any { generated ->
-                                            generated.id == existing.id
-                                        }
+                        // Serialize this multi-table commit with every full chat snapshot write.
+                        // A stale full snapshot must never land after the image/request transaction.
+                        chatSessionPersistenceSequence.incrementAndGet()
+                        chatSessionPersistenceMutex.withLock {
+                            try {
+                                val admittedJob = _uiState.value.imageJobs.firstOrNull { it.id == jobId }
+                                if (activeImageGenerationJobId != jobId ||
+                                    admittedJob?.status != ImageGenerationStatusRecord.GENERATING
+                                ) {
+                                    throw CancellationException(
+                                        "Image generation lost ownership before library commit."
+                                    )
+                                }
+                                val chatSnapshot = buildChatImageCommitSnapshot(admittedJob, generatedImages)
+                                val journalRecords = if (chatSnapshot != null) {
+                                    val chatSessionId = requireNotNull(admittedJob.spec?.chatSessionId)
+                                    val requestId = requireNotNull(admittedJob.spec?.chatMessageId)
+                                    generatedImages.map { image ->
+                                        val journalJobId = chatImageCommitJournalJobId(jobId, image.id)
+                                        chatImageCommitJournal.stage(
+                                            ChatImageCommitJournal.Record(
+                                                jobId = journalJobId,
+                                                chatSessionId = chatSessionId,
+                                                requestId = requestId,
+                                                imageAssetMetadataJson = ChatImageCommitJournal
+                                                    .serializeImageAssetRecord(image)
+                                            )
+                                        )
                                     }
-                                ).sortedImagesForLibrary()
-                                state.copy(
-                                    images = committedImages,
-                                    imageJobs = state.imageJobs.updateImageJob(
-                                        jobId,
-                                        ImageGenerationStatusRecord.DONE,
-                                        if (generatedImages.size == 1) {
-                                            "已保存到图片库"
-                                        } else {
-                                            "已保存 ${generatedImages.size} 张图片"
-                                        },
-                                        generatedImages.first().id
-                                    ),
-                                    statusMessage = if (generatedImages.size == 1) {
-                                        "已生成图片并保存到图片库：${generatedImages.first().name}"
+                                } else emptyList()
+                                val atomicallySaved = chatSnapshot?.let { snapshot ->
+                                    chatSessionStore.saveGeneratedImageResult(snapshot.sessions, generatedImages)
+                                } == true
+                                if (atomicallySaved) {
+                                    durableChatSessions = requireNotNull(chatSnapshot).sessions
+                                }
+                                if (!atomicallySaved) {
+                                    // Keep non-chat image jobs and deleted-chat results in the gallery.
+                                    chatSessionStore.upsertImages(generatedImages)
+                                }
+                                journalRecords.forEach { record ->
+                                    runCatching {
+                                        chatImageCommitJournal.removeAfterDurableCommit(
+                                            record.jobId,
+                                            record.requestId,
+                                            durableCommitConfirmed = true
+                                        )
+                                    }
+                                }
+                                _uiState.update { state ->
+                                    val job = state.imageJobs.firstOrNull { it.id == jobId }
+                                    if (activeImageGenerationJobId != jobId ||
+                                        job?.status != ImageGenerationStatusRecord.GENERATING
+                                    ) {
+                                        state
                                     } else {
-                                        "已生成 ${generatedImages.size} 张图片并保存到图片库"
-                                    }
-                                )
-                            }
-                        }
-                        val published = _uiState.value.imageJobs.firstOrNull {
-                            it.id == jobId
-                        }?.let { job ->
-                            job.status == ImageGenerationStatusRecord.DONE &&
-                                job.imageAssetId == generatedImages.first().id
-                        } == true
-                        if (!published) {
-                            val generatedIds = generatedImages.map(ImageAssetRecord::id)
-                            val rolledBack = runCatching {
-                                chatSessionStore.deleteImages(generatedIds)
-                            }.isSuccess
-                            if (rolledBack) {
-                                throw CancellationException(
-                                    "Image generation was cancelled during library commit."
-                                )
-                            }
-                            // If rollback fails, Room owns these files. Publish that durable state
-                            // so memory and the database cannot silently diverge.
-                            _uiState.update { state ->
-                                val job = state.imageJobs.firstOrNull { it.id == jobId }
-                                if (job == null) {
-                                    state
-                                } else {
-                                    state.copy(
-                                        images = (
+                                        val committedImages = (
                                             generatedImages + state.images.filterNot { existing ->
                                                 generatedImages.any { generated ->
                                                     generated.id == existing.id
                                                 }
                                             }
-                                        ).sortedImagesForLibrary(),
-                                        imageJobs = state.imageJobs.updateImageJob(
-                                            jobId,
-                                            ImageGenerationStatusRecord.DONE,
-                                            if (generatedImages.size == 1) {
-                                                "已保存到图片库"
+                                        ).sortedImagesForLibrary()
+                                        state.copy(
+                                            images = committedImages,
+                                            chatSessions = if (atomicallySaved) {
+                                                requireNotNull(chatSnapshot).sessions
                                             } else {
-                                                "已保存 ${generatedImages.size} 张图片"
+                                                state.chatSessions
                                             },
-                                            generatedImages.first().id
-                                        ),
-                                        statusMessage = if (generatedImages.size == 1) {
-                                            "已生成图片并保存到图片库：${generatedImages.first().name}"
-                                        } else {
-                                            "已生成 ${generatedImages.size} 张图片并保存到图片库"
-                                        }
-                                    )
+                                            messages = if (atomicallySaved &&
+                                                state.activeChatSessionId == admittedJob.spec?.chatSessionId
+                                            ) {
+                                                requireNotNull(chatSnapshot).activeMessages ?: state.messages
+                                            } else {
+                                                state.messages
+                                            },
+                                            imageJobs = state.imageJobs.updateImageJob(
+                                                jobId = jobId,
+                                                status = ImageGenerationStatusRecord.DONE,
+                                                message = if (generatedImages.size == 1) {
+                                                    "已保存到图片库"
+                                                } else {
+                                                    "已保存 ${generatedImages.size} 张图片"
+                                                },
+                                                imageAssetId = generatedImages.first().id,
+                                                imageAssetIds = generatedImages.map(ImageAssetRecord::id)
+                                            ),
+                                            statusMessage = if (generatedImages.size == 1) {
+                                                "已生成图片并保存到图片库：${generatedImages.first().name}"
+                                            } else {
+                                                "已生成 ${generatedImages.size} 张图片并保存到图片库"
+                                            }
+                                        )
+                                    }
                                 }
+                                val published = _uiState.value.imageJobs.firstOrNull {
+                                    it.id == jobId
+                                }?.let { job ->
+                                    val generatedIds = generatedImages.map(ImageAssetRecord::id).toSet()
+                                    job.status == ImageGenerationStatusRecord.DONE &&
+                                        job.imageAssetId == generatedImages.first().id &&
+                                        job.imageAssetIds.toSet() == generatedIds
+                                } == true
+                                if (!published) {
+                                    val generatedIds = generatedImages.map(ImageAssetRecord::id)
+                                    val rolledBack = runCatching {
+                                        chatSessionStore.deleteImages(generatedIds)
+                                    }.isSuccess
+                                    if (rolledBack) {
+                                        throw CancellationException(
+                                            "Image generation was cancelled during library commit."
+                                        )
+                                    }
+                                    // If rollback fails, Room owns these files. Publish that durable state
+                                    // so memory and the database cannot silently diverge.
+                                    _uiState.update { state ->
+                                        val job = state.imageJobs.firstOrNull { it.id == jobId }
+                                        if (job == null) {
+                                            state
+                                        } else {
+                                            state.copy(
+                                                images = (
+                                                    generatedImages + state.images.filterNot { existing ->
+                                                        generatedImages.any { generated ->
+                                                            generated.id == existing.id
+                                                        }
+                                                    }
+                                                ).sortedImagesForLibrary(),
+                                                imageJobs = state.imageJobs.updateImageJob(
+                                                    jobId = jobId,
+                                                    status = ImageGenerationStatusRecord.DONE,
+                                                    message = if (generatedImages.size == 1) {
+                                                        "已保存到图片库"
+                                                    } else {
+                                                        "已保存 ${generatedImages.size} 张图片"
+                                                    },
+                                                    imageAssetId = generatedImages.first().id,
+                                                    imageAssetIds = generatedImages.map(ImageAssetRecord::id)
+                                                ),
+                                                statusMessage = if (generatedImages.size == 1) {
+                                                    "已生成图片并保存到图片库：${generatedImages.first().name}"
+                                                } else {
+                                                    "已生成 ${generatedImages.size} 张图片并保存到图片库"
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            } finally {
+                                // Invalidate snapshots captured before the in-memory state below
+                                // became the committed Room state. Later snapshots see the result.
+                                chatSessionPersistenceSequence.incrementAndGet()
                             }
                         }
                     }
                 }.exceptionOrNull()
                 if (commitError != null) {
                     generatedImages.forEach { image ->
-                        image.deleteLocalCopy(imageAssetDirectory)
+                        val rolledBack = image.deleteLocalCopy(imageAssetDirectory)
+                        val requestId = _uiState.value.imageJobs.firstOrNull { it.id == jobId }
+                            ?.spec?.chatMessageId
+                        if (rolledBack && !requestId.isNullOrBlank()) {
+                            runCatching {
+                                chatImageCommitJournal.removeAfterConfirmedAssetRollback(
+                                    jobId = chatImageCommitJournalJobId(jobId, image.id),
+                                    requestId = requestId,
+                                    rollbackConfirmed = true
+                                )
+                            }
+                        }
                     }
                     val cancelled = commitError is CancellationException ||
                         _uiState.value.imageJobs.firstOrNull { it.id == jobId }?.status ==
@@ -5674,36 +6261,55 @@ class MainViewModel @JvmOverloads constructor(
         }
         imageGenerationJob = executionJob
         executionJob.invokeOnCompletion { completion ->
-            synchronized(localImageLoraLifecycleLock) {
-                val ownsActiveGeneration = activeImageGenerationJobId == jobId
-                if (ownsActiveGeneration) {
-                    activeImageGenerationJobId = null
-                    activeImageGenerationBackend = null
-                    activeImageGenerationModelId = null
+            try {
+                synchronized(localImageLoraLifecycleLock) {
+                    val ownsActiveGeneration = activeImageGenerationJobId == jobId
+                    if (ownsActiveGeneration) {
+                        activeImageGenerationJobId = null
+                        activeImageGenerationBackend = null
+                        activeImageGenerationModelId = null
+                    }
                     _uiState.update { state ->
                         val job = state.imageJobs.firstOrNull { it.id == jobId }
+                        val status = when {
+                            job == null || job.status.terminal -> null
+                            completion is CancellationException -> ImageGenerationStatusRecord.CANCELLED
+                            else -> ImageGenerationStatusRecord.FAILED
+                        }
+                        val fallbackMessage = when {
+                            completion is CancellationException -> "已取消图片生成"
+                            completion != null -> "图片任务异常结束：${completion.message ?: completion::class.java.simpleName}"
+                            else -> "图片任务提前结束，未返回生成结果。"
+                        }
                         state.copy(
-                            activeLocalImageLoraIds = emptySet(),
-                            activeLocalImageTextualInversionIds = emptySet(),
-                            imageJobs = if (completion is CancellationException &&
-                                job != null && !job.status.terminal
-                            ) {
-                                state.imageJobs.updateImageJob(
-                                    jobId,
-                                    ImageGenerationStatusRecord.CANCELLED,
-                                    "已取消图片生成"
-                                )
+                            activeLocalImageLoraIds = if (ownsActiveGeneration) emptySet() else state.activeLocalImageLoraIds,
+                            activeLocalImageTextualInversionIds = if (ownsActiveGeneration) {
+                                emptySet()
+                            } else {
+                                state.activeLocalImageTextualInversionIds
+                            },
+                            imageJobs = if (status != null) {
+                                state.imageJobs.updateImageJob(jobId, status, fallbackMessage)
                             } else {
                                 state.imageJobs
+                            },
+                            statusMessage = if (status == ImageGenerationStatusRecord.FAILED) {
+                                fallbackMessage
+                            } else {
+                                state.statusMessage
                             }
                         )
                     }
+                    check(releaseObservedImageGenerationLease(generationLease)) {
+                        "UI image generation lease was replaced before request completion."
+                    }
                 }
-                check(releaseObservedImageGenerationLease(generationLease)) {
-                    "UI image generation lease was replaced before request completion."
-                }
+                persistFinalChatImageRequestForJob(jobId)
+                completeAssistantImageToolTurnForJob(jobId)
+                if (imageGenerationJob === executionJob) imageGenerationJob = null
+            } finally {
+                McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)
             }
-            if (imageGenerationJob === executionJob) imageGenerationJob = null
         }
         return true
     }
@@ -5726,9 +6332,12 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun cancelImageGeneration() {
+    fun cancelImageGeneration() = cancelImageGenerationForJob(expectedJobId = null)
+
+    private fun cancelImageGenerationForJob(expectedJobId: String?) {
         viewModelScope.launch(Dispatchers.IO) {
             val jobId = activeImageGenerationJobId
+            if (expectedJobId != null && jobId != expectedJobId) return@launch
             val localGeneration = activeImageGenerationBackend == ImageBackend.LOCAL
             if (jobId != null) {
                 _uiState.update { state ->
@@ -5753,7 +6362,7 @@ class MainViewModel @JvmOverloads constructor(
                     )
                 }
                 val nativeCancelRequested = if (localGeneration) {
-                    localImageWorkerClient.cancel()
+                    localImageWorkerClient.cancel(activeLocalImageWorkerRequestId ?: jobId)
                 } else {
                     false
                 }
@@ -6891,6 +7500,10 @@ class MainViewModel @JvmOverloads constructor(
             persistRuntimeUserOverrideFields(runtimeUserOverrideFields)
         }
         persistGenerationParams(params)
+        // Keep the legacy global/assistant preference for migration, while also
+        // recording this edit against the active model so switching models does
+        // not make users repeat the same tuning work.
+        persistModelGenerationParams(_uiState.value, params)
         val updatedAssistants = updatedAssistantsWithParams(params)
         assistantStore.saveAssistants(updatedAssistants)
         val hasLoadedModel = _uiState.value.loadedModelId != null
@@ -7049,6 +7662,12 @@ class MainViewModel @JvmOverloads constructor(
         temperature: Float,
         topP: Float,
         nPredict: Int,
+        topK: Int,
+        minP: Float,
+        repeatPenalty: Float,
+        presencePenalty: Float,
+        frequencyPenalty: Float,
+        stopWords: List<String>,
         reasoningMode: ReasoningMode,
         memoryEnabled: Boolean,
         webSearchEnabled: Boolean,
@@ -7077,7 +7696,18 @@ class MainViewModel @JvmOverloads constructor(
                 systemPrompt = cleanPrompt,
                 temperature = temperature.coerceIn(0f, 2f),
                 topP = topP.coerceIn(0f, 1f),
-                nPredict = nPredict.coerceIn(128, 65_536),
+                nPredict = nPredict.coerceIn(16, 65_536),
+                topK = topK.coerceIn(0, 1000),
+                minP = minP.coerceIn(0f, 1f),
+                repeatPenalty = repeatPenalty.coerceIn(0.5f, 2f),
+                presencePenalty = presencePenalty.coerceIn(-2f, 2f),
+                frequencyPenalty = frequencyPenalty.coerceIn(-2f, 2f),
+                stopWords = stopWords.asSequence()
+                    .map(String::trim)
+                    .filter { it.isNotEmpty() && it.length <= 128 }
+                    .distinct()
+                    .take(32)
+                    .toList(),
                 reasoningMode = reasoningMode,
                 hideReasoning = reasoningMode == ReasoningMode.OFF
             ).toAssistantGenerationJson(),
@@ -7099,6 +7729,9 @@ class MainViewModel @JvmOverloads constructor(
         val updatedParams = assistant.toGenerationParams(state.params)
         if (shouldSelectAssistant) {
             persistGenerationParams(updatedParams)
+            // Editing the active assistant is an explicit user change for the
+            // currently selected model; retain it in that model's profile.
+            persistModelGenerationParams(state, updatedParams)
         }
         // An assistant edit changes the persona that the user sees in the editor.  Keep the
         // selected assistant, session binding, and effective generation snapshot consistent:
@@ -7684,7 +8317,10 @@ class MainViewModel @JvmOverloads constructor(
         if (rejectWhileConversationMutationInProgress()) return
         val assistant = state.assistants.firstOrNull { it.id == assistantId } ?: return
         assistantStore.saveSelectedAssistantId(assistant.id)
-        val updatedParams = assistant.toGenerationParams(state.params)
+        val assistantParams = assistant.toGenerationParams(state.params)
+        val updatedParams = state.modelGenerationProfileKey()
+            ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, assistantParams) }
+            ?: assistantParams
         persistGenerationParams(updatedParams)
         val updatedSessions = state.chatSessions.bindSession(
             sessionId = state.activeChatSessionId,
@@ -7948,7 +8584,10 @@ class MainViewModel @JvmOverloads constructor(
             return
         }
         assistantStore.saveSelectedAssistantId(next.id)
-        val updatedParams = next.toGenerationParams(state.params)
+        val nextAssistantParams = next.toGenerationParams(state.params)
+        val updatedParams = state.modelGenerationProfileKey()
+            ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, nextAssistantParams) }
+            ?: nextAssistantParams
         persistGenerationParams(updatedParams)
         val updatedSessions = state.chatSessions
             .map { session ->
@@ -8061,27 +8700,27 @@ class MainViewModel @JvmOverloads constructor(
             createdAt = now,
             updatedAt = now
         )
-        val embeddedWorldBook = success.card.toEmbeddedWorldBookOrNull(assistant.id)
+        val embeddedWorldBookImport = parseEmbeddedCharacterBook(success.card, assistant.id)
         val updatedAssistants = state.assistants + assistant
-        var assistantCommitted = false
-        val updatedWorldBooks = try {
-            // The Room-backed assistant is the canonical owner. Publishing an
-            // assistant-scoped world book before this succeeds could leave a
-            // file-backed orphan after a failed import.
+        try {
             assistantStore.saveAssistants(updatedAssistants)
-            assistantCommitted = true
-            embeddedWorldBook?.let(worldBookStore::upsert) ?: state.worldBooks
         } catch (error: Throwable) {
-            if (assistantCommitted) {
-                // The stores cannot share one transaction, so compensate if
-                // the second persistence step could not be published.
-                runCatching { assistantStore.saveAssistants(state.assistants) }
-            }
             if (error is CancellationException) throw error
             _uiState.update {
-                it.copy(statusMessage = "角色卡导入未完成：${error.message ?: "无法保存角色或内置世界书"}")
+                it.copy(statusMessage = "角色卡导入失败：${error.message ?: "无法保存角色"}")
             }
             return
+        }
+        var updatedWorldBooks = state.worldBooks
+        var embeddedWorldBookSaveError: String? = null
+        embeddedWorldBookImport.book?.let { book ->
+            try {
+                updatedWorldBooks = worldBookStore.upsert(book)
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                embeddedWorldBookSaveError = error.message?.trim()?.takeIf(String::isNotBlank)
+                    ?: "无法保存到本机"
+            }
         }
         assistantStore.saveSelectedAssistantId(assistant.id)
         val updatedParams = assistant.toGenerationParams(state.params)
@@ -8106,11 +8745,7 @@ class MainViewModel @JvmOverloads constructor(
                     append(if (success.source == CharacterCardSource.JSON) " JSON " else " PNG ")
                     append("角色卡：")
                     append(assistant.name)
-                    embeddedWorldBook?.let { book ->
-                        append("；内置世界书 ")
-                        append(book.entries.size)
-                        append(" 条")
-                    }
+                    append(embeddedCharacterBookStatusSuffix(embeddedWorldBookImport, embeddedWorldBookSaveError))
                 }
             )
         }
@@ -8119,20 +8754,6 @@ class MainViewModel @JvmOverloads constructor(
         // Its captured persona must not share the previous local KV tail.
         markLocalConversationContextInvalid()
         applyAssistantDefaultModel(assistant)
-    }
-
-    private fun CharacterCard.toEmbeddedWorldBookOrNull(assistantId: String): WorldBookRecord? {
-        val root = toJson()
-        val data = root.optJSONObject("data") ?: root
-        val embedded = data.optJSONObject("character_book") ?: return null
-        return runCatching {
-            WorldBookCodec.parse(
-                root = embedded,
-                scope = WorldBookScope.ASSISTANT,
-                assistantId = assistantId,
-                fallbackName = "${name.ifBlank { "导入角色" }}的世界书"
-            )
-        }.getOrNull()
     }
 
     fun importWorldBook(rawJson: String, scope: WorldBookScope = WorldBookScope.ASSISTANT) {
@@ -8153,11 +8774,21 @@ class MainViewModel @JvmOverloads constructor(
             _uiState.update { it.copy(statusMessage = "世界书导入失败：${result.error ?: "格式不正确"}") }
             return
         }
-        val updated = worldBookStore.upsert(imported)
+        val updated = runCatching { worldBookStore.upsert(imported) }.getOrElse { error ->
+            _uiState.update {
+                it.copy(statusMessage = "世界书保存失败：${error.message ?: "请检查本机存储空间后重试"}")
+            }
+            return
+        }
         _uiState.update {
             it.copy(
                 worldBooks = updated,
-                statusMessage = "已导入世界书：${imported.name}（${imported.entries.size} 条）"
+                statusMessage = buildString {
+                    append("已导入世界书：${imported.name}（${imported.entries.size} 条）")
+                    result.warnings.takeIf { it.isNotEmpty() }?.let { warnings ->
+                        append("；").append(warnings.joinToString(" "))
+                    }
+                }
             )
         }
     }
@@ -8326,6 +8957,7 @@ class MainViewModel @JvmOverloads constructor(
             params.copy(nPredict = params.effectiveNPredict())
         }
         persistGenerationParams(updatedParams)
+        persistModelGenerationParams(state, updatedParams)
         _uiState.update {
             it.copy(
                 params = updatedParams,
@@ -8345,7 +8977,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun updateCloudApiFormat(value: String) {
-        val format = listOf(CloudApiFormat.OPENAI_COMPATIBLE, CloudApiFormat.ANTHROPIC)
+        val format = CloudApiFormat.entries
             .firstOrNull { it.name == value || it.label == value }
             ?: CloudApiFormat.OPENAI_COMPATIBLE
         val defaultBaseUrls = CloudApiFormat.entries.map { it.defaultBaseUrl }.filter { it.isNotBlank() }
@@ -8464,10 +9096,98 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Persists a GGUF backend choice against the target model before it is loaded.
+     * A choice made for another model must never leak through the global parameter
+     * object; loading the model later reads this profile and applies it to native.
+     */
+    fun updateModelBackendPreference(modelId: String, backendId: String) {
+        val target = _uiState.value.models.firstOrNull { it.id == modelId } ?: return
+        val family = chatBackendFamilyForRuntime(target.runtime.storageValue)
+        val current = loadModelGenerationParams(
+            backend = ChatBackend.LOCAL,
+            modelId = modelId,
+            defaults = _uiState.value.params
+        )
+        val updated = current.withChatBackend(family, backendId)
+        persistModelGenerationParams(ChatBackend.LOCAL, modelId, updated)
+        if (_uiState.value.loadedModelId == modelId) {
+            // Backend selection is load-bound for llama.cpp, MNN, LiteRT-LM,
+            // and QAIRT. Updating only the hot generation parameters leaves
+            // the old native session running and makes the chip lie about the
+            // selected transport. Persist the model-scoped profile, then use
+            // the normal transactional loader so the old session is stopped,
+            // the requested backend is initialized, and failures can restore
+            // the previous stable model.
+            updateParams(updated)
+            directParameterStageJob?.cancel()
+            _uiState.update {
+                it.copy(
+                    statusMessage = "正在重新加载 ${target.displayName}（${backendLabel(family, backendId)}）…"
+                )
+            }
+            loadModel(target)
+        } else {
+            _uiState.update { state ->
+                state.copy(
+                    statusMessage = "已保存 ${target.displayName} 的 " +
+                        "${backendLabel(family, backendId)} 设置；下次加载该模型时生效。"
+                )
+            }
+        }
+    }
+
+    private fun backendLabel(family: ChatBackendFamily, backendId: String): String = when (family) {
+        ChatBackendFamily.MNN -> if (backendId == "opencl") "GPU / OpenCL" else "CPU"
+        ChatBackendFamily.LITERT_LM -> when (backendId) {
+            "npu" -> "NPU"
+            "gpu" -> "GPU"
+            else -> "CPU"
+        }
+        ChatBackendFamily.QAIRT -> "NPU"
+        ChatBackendFamily.LLAMA_CPP -> when (backendId) {
+            "gpu" -> "GPU（全量）"
+            "auto" -> "自动调配"
+            "custom" -> "自定义 GPU 层数"
+            else -> com.muyuchat.feature.chat.customGpuLayerCountFromBackendId(backendId)
+                ?.let { "自定义 GPU 层数（$it）" }
+                ?: "CPU"
+        }
+        ChatBackendFamily.GENIEX_LLAMA_CPP -> when (backendId) {
+            "gpu" -> "GPU"
+            "npu" -> "NPU / HTP"
+            "hybrid" -> "NPU + CPU"
+            else -> "CPU"
+        }
+        ChatBackendFamily.UNKNOWN -> backendId.ifBlank { "默认" }
+    }
+
+    /** Read a target model's persisted generation profile for the model selector UI. */
+    fun generationParamsForChatModel(modelId: String): GenerationParams =
+        loadModelGenerationParams(
+            backend = ChatBackend.LOCAL,
+            modelId = modelId,
+            defaults = _uiState.value.params
+        )
+
+    fun updateCloudSupportsTools(value: Boolean) {
+        _uiState.update { state ->
+            state.copy(
+                cloudApiConfig = state.cloudApiConfig.copy(
+                    supportsTools = value && state.cloudApiConfig.apiFormat == CloudApiFormat.OPENAI_RESPONSES
+                )
+            )
+        }
+    }
+
     fun updateCloudImageModel(value: String) {
         _uiState.update { state ->
             state.copy(cloudApiConfig = state.cloudApiConfig.copy(imageModel = value))
         }
+    }
+
+    fun updateCloudResponsesReasoning(value: Boolean) {
+        _uiState.update { it.copy(cloudApiConfig = it.cloudApiConfig.copy(responsesReasoningEnabled = value)) }
     }
 
     fun updateCloudImageSize(value: String) {
@@ -8509,6 +9229,8 @@ class MainViewModel @JvmOverloads constructor(
             apiKey = config.apiKey,
             modelName = config.chatModel,
             supportsVision = config.supportsVision,
+            supportsTools = config.supportsTools,
+            responsesReasoningEnabled = config.responsesReasoningEnabled,
             imageSize = config.imageSize,
             updatedAt = System.currentTimeMillis()
         ) ?: _uiState.value.cloudModels.matchingCloudModel(
@@ -8521,6 +9243,8 @@ class MainViewModel @JvmOverloads constructor(
             displayName = config.safeDisplayName(),
             apiKey = config.apiKey,
             supportsVision = config.supportsVision,
+            supportsTools = config.supportsTools,
+            responsesReasoningEnabled = config.responsesReasoningEnabled,
             updatedAt = System.currentTimeMillis()
         ) ?: CloudModelRecord(
             kind = CloudModelKind.CHAT,
@@ -8531,6 +9255,8 @@ class MainViewModel @JvmOverloads constructor(
             apiKey = config.apiKey,
             modelName = config.chatModel,
             supportsVision = config.supportsVision,
+            supportsTools = config.supportsTools,
+            responsesReasoningEnabled = config.responsesReasoningEnabled,
             imageSize = config.imageSize
         )
         val models = _uiState.value.cloudModels.upsertCloudModel(record)
@@ -8539,6 +9265,12 @@ class MainViewModel @JvmOverloads constructor(
         cloudApiStore.saveModels(models)
         cloudApiStore.saveSelectedCloudChatModelId(selectedChatId)
         cloudApiStore.saveSelectedBackend(ChatBackend.CLOUD)
+        val modelParams = loadModelGenerationParams(
+            backend = ChatBackend.CLOUD,
+            modelId = selectedChatId,
+            defaults = _uiState.value.params
+        )
+        persistGenerationParams(modelParams)
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         _uiState.update { state ->
             sessionsToPersist = state.chatSessions.bindSession(
@@ -8552,6 +9284,7 @@ class MainViewModel @JvmOverloads constructor(
                 cloudModels = models,
                 selectedCloudChatModelId = selectedChatId,
                 selectedChatBackend = ChatBackend.CLOUD,
+                params = modelParams,
                 editingCloudModelId = null,
                 chatSessions = sessionsToPersist,
                 statusMessage = "已保存并加载云端推理模型：${record.displayName}"
@@ -8764,23 +9497,92 @@ class MainViewModel @JvmOverloads constructor(
         importModel(listOf(uri))
     }
 
-    fun importModel(uris: List<Uri>) {
-        launchModelOperation("导入未完成") {
-            busy("正在导入本地推理引擎...")
-            runCatching {
-                modelStore.importFromUris(uris)
-            }.onSuccess { model ->
-                managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update {
-                    it.copy(
-                        models = modelStore.listModels(),
-                        busy = false,
-                        statusMessage = "已导入${model.runtime.label}：${model.displayName}"
+    fun importModel(uris: List<Uri>, textOnly: Boolean = false, persistentAccess: Boolean = false) {
+        if (uris.isEmpty()) return
+        enqueueManagedImport(ManagedModelImportRequest(uris = uris.distinct().map(Uri::toString),
+            textOnly = textOnly, persistentAccess = persistentAccess))
+    }
+
+    fun importModelDirectory(uri: Uri, textOnly: Boolean = false, persistentAccess: Boolean = false) {
+        enqueueManagedImport(ManagedModelImportRequest(uris = listOf(uri.toString()), directory = true,
+            textOnly = textOnly, persistentAccess = persistentAccess))
+    }
+
+    private fun enqueueManagedImport(request: ManagedModelImportRequest) {
+        launchImportOperation {
+            ManagedModelImportWorker.enqueue(getApplication(), request)
+            _uiState.update { it.copy(statusMessage = if (request.persistentAccess)
+                "导入任务已保存，可在本地模型页查看进度或暂停；已完成组件可恢复。"
+                else "导入已开始。此文件提供方不支持保留访问权限，重启后可能需要重新选择源文件。") }
+        }
+    }
+
+    fun pauseManagedImport(requestId: String) {
+        launchImportOperation {
+            androidx.work.WorkManager.getInstance(getApplication<Application>())
+                .cancelUniqueWork("${ManagedModelImportWorker.TAG}-$requestId")
+        }
+    }
+
+    fun resumeManagedImport(requestId: String) {
+        launchImportOperation {
+            val app = getApplication<Application>()
+            ManagedModelImportWorker.enqueue(app, ManagedModelImportRequest.read(app.filesDir, requestId))
+        }
+    }
+
+    private fun launchImportOperation(operation: suspend () -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try { operation() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                _uiState.update { it.copy(statusMessage = "导入未完成：${error.message}。请在本地模型页重试或重新选择源文件。") }
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            chatImageToolAuthorizationStore.prune(initialChatSessions.map { it.id })
+        }
+    }
+
+    private fun observeManagedImports() {
+        launchImportOperation {
+            val app = getApplication<Application>()
+            val receipts = app.getSharedPreferences("mca_import_receipts", Context.MODE_PRIVATE)
+            val handled = receipts.getStringSet("handled", emptySet()).orEmpty().toMutableSet()
+            androidx.work.WorkManager.getInstance(app).getWorkInfosByTagFlow(ManagedModelImportWorker.TAG).collect { infos ->
+                val tasks = infos.sortedByDescending { info ->
+                    info.tags.firstOrNull { it.startsWith("created:") }?.substringAfter(':')?.toLongOrNull() ?: 0L
+                }.mapNotNull { info ->
+                    info.tags.firstOrNull { it.startsWith(ManagedModelImportWorker.REQUEST_TAG_PREFIX) }
+                        ?.removePrefix(ManagedModelImportWorker.REQUEST_TAG_PREFIX)?.let { it to info }
+                }.distinctBy { it.first }
+                val rows = tasks.map { (requestId, info) ->
+                    val active = !info.state.isFinished
+                    val message = when (info.state) {
+                        androidx.work.WorkInfo.State.SUCCEEDED -> info.outputData.getString("message") ?: "模型导入完成"
+                        androidx.work.WorkInfo.State.FAILED -> info.outputData.getString("error") ?: "导入未完成，请检查源文件和存储空间后重试。"
+                        androidx.work.WorkInfo.State.CANCELLED -> "导入已暂停，可恢复已完成组件"
+                        else -> info.progress.getString("message") ?: "正在等待导入"
+                    }
+                    com.muyuchat.feature.modelhub.ModelImportTaskUi(
+                        id = requestId, message = message, file = info.progress.getString("file"),
+                        bytes = info.progress.getLong("bytes", 0), totalBytes = info.progress.getLong("total", 0),
+                        active = active, resumable = info.state == androidx.work.WorkInfo.State.FAILED || info.state == androidx.work.WorkInfo.State.CANCELLED
                     )
                 }
-            }.onFailure { error ->
-                if (error is CancellationException) throw error
-                fail("导入失败：${error.message}")
+                // Task state is independent of chat/load/download busy ownership.
+                _uiState.update { it.copy(importTasks = rows.filter { row -> row.active || row.resumable } +
+                    rows.filter { row -> !row.active && !row.resumable }.take(3)) }
+                val completed = tasks.map { it.second }.filter {
+                    it.state == androidx.work.WorkInfo.State.SUCCEEDED && it.id.toString() !in handled
+                }
+                if (completed.isNotEmpty()) {
+                    managedRuntimeReadinessRefreshGate.invalidate()
+                    val models = modelStore.listModels()
+                    _uiState.update { it.copy(models = models) }
+                    handled.addAll(completed.map { it.id.toString() })
+                    receipts.edit().putStringSet("handled", handled.toSet()).apply()
+                }
             }
         }
     }
@@ -8956,8 +9758,49 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    /** Resume paused/failed downloads from their durable request records. */
+    fun resumeManagedDownloads() {
+        launchModelOperation("继续下载失败") {
+            val app = getApplication<Application>()
+            val workManager = androidx.work.WorkManager.getInstance(app)
+            val requestPreferences = app.getSharedPreferences(DOWNLOAD_REQUESTS_PREFERENCES, Context.MODE_PRIVATE)
+            val requests = requestPreferences.all.mapNotNull { (key, raw) ->
+                if (key.startsWith("use:")) return@mapNotNull null
+                (raw as? String)?.let { value ->
+                    runCatching { ManagedDownloadRequest.fromJson(value) }.getOrNull()
+                }
+            }
+            require(requests.isNotEmpty()) { "没有可恢复的下载任务。" }
+            var resumed = 0
+            requests.forEach { request ->
+                val infos = workManager
+                    .getWorkInfosForUniqueWork("${ManagedModelDownloadWorker.TAG}-${request.identity}")
+                    .get()
+                val hasLiveWork = infos.any { info ->
+                    info.state == androidx.work.WorkInfo.State.RUNNING ||
+                        info.state == androidx.work.WorkInfo.State.ENQUEUED ||
+                        info.state == androidx.work.WorkInfo.State.BLOCKED
+                }
+                if (!hasLiveWork) {
+                    if (requestPreferences.getBoolean("use:${request.identity}", false)) {
+                        autoUseManagedDownloads.add(request.identity)
+                    }
+                    ManagedModelDownloadWorker.enqueue(app, request)
+                    resumed++
+                }
+            }
+            require(resumed > 0) { "下载任务仍在运行，或没有可恢复任务。" }
+            _uiState.update { it.copy(statusMessage = "已继续下载，保留的临时文件将尝试断点续传。") }
+        }
+    }
+
     private fun enqueueManagedDownload(request: ManagedDownloadRequest, useAfterDownload: Boolean) {
         launchModelOperation("无法开始下载") {
+            getApplication<Application>().getSharedPreferences(DOWNLOAD_REQUESTS_PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .putString(request.identity, request.toJson())
+                .putBoolean("use:${request.identity}", useAfterDownload)
+                .apply()
             if (useAfterDownload) autoUseManagedDownloads.add(request.identity)
             _uiState.update { it.copy(downloadStatus = DownloadStatus.QUEUED,
                 downloadFileName = request.remote?.name ?: request.recommendationId,
@@ -9006,6 +9849,10 @@ class MainViewModel @JvmOverloads constructor(
                         recoverModelOperation(operation = {
                             val error = info.outputData.getString("error")
                             if (info.state == androidx.work.WorkInfo.State.SUCCEEDED && error == null) {
+                                info.tags.firstOrNull { tag -> tag.matches(Regex("[0-9a-f]{64}")) }?.let { identity ->
+                                    app.getSharedPreferences(DOWNLOAD_REQUESTS_PREFERENCES, Context.MODE_PRIVATE)
+                                        .edit().remove(identity).remove("use:$identity").apply()
+                                }
                                 refreshManagedRuntimeReadiness()
                                 val imageId = info.outputData.getString("imageId")
                                 val image = imageId?.let { id -> localImageModelStore.loadModels(discover = false).firstOrNull { it.id == id } }
@@ -9026,7 +9873,25 @@ class MainViewModel @JvmOverloads constructor(
                                     managedDownloadOwnedBusy = false
                                 }
                                 val model = info.outputData.getString("modelId")?.let(modelStore::getModel)
-                                if (model != null) useDownloadedChatModel(model, info.tags.any { autoUseManagedDownloads.remove(it) })
+                                if (model != null) {
+                                    val projectorDownloaded = info.outputData.getBoolean("projector", false)
+                                    val reloadLoadedVisionModel = projectorDownloaded &&
+                                        _uiState.value.loadedModelId == model.id &&
+                                        _uiState.value.selectedChatBackend == ChatBackend.LOCAL
+                                    if (reloadLoadedVisionModel) {
+                                        // A projector downloaded through the model hub is
+                                        // persisted after the worker finishes.  Reload the
+                                        // active GGUF immediately so the native runner binds
+                                        // the new mmproj instead of advertising a stale text
+                                        // session until the next manual model load.
+                                        _uiState.update {
+                                            it.copy(statusMessage = "视觉投影器已下载，正在重新加载模型以启用识图…")
+                                        }
+                                        loadModel(model)
+                                    } else {
+                                        useDownloadedChatModel(model, info.tags.any { autoUseManagedDownloads.remove(it) })
+                                    }
+                                }
                             } else if (active == null) {
                                 _uiState.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
                                     downloadStatus = if (info.state == androidx.work.WorkInfo.State.CANCELLED) DownloadStatus.PAUSED else DownloadStatus.FAILED,
@@ -9092,6 +9957,12 @@ class MainViewModel @JvmOverloads constructor(
         cloudApiStore.save(config)
         cloudApiStore.saveSelectedBackend(ChatBackend.CLOUD)
         cloudApiStore.saveSelectedCloudChatModelId(model.id)
+        val modelParams = loadModelGenerationParams(
+            backend = ChatBackend.CLOUD,
+            modelId = model.id,
+            defaults = _uiState.value.params
+        )
+        persistGenerationParams(modelParams)
         viewModelScope.launch(Dispatchers.IO) {
             engine.stopGeneration()
         }
@@ -9107,6 +9978,7 @@ class MainViewModel @JvmOverloads constructor(
                 cloudApiConfig = config,
                 selectedCloudChatModelId = model.id,
                 selectedChatBackend = ChatBackend.CLOUD,
+                params = modelParams,
                 chatSessions = sessionsToPersist,
                 busy = false,
                 statusMessage = "已切换到云端模型：${config.safeDisplayName()}",
@@ -9170,7 +10042,15 @@ class MainViewModel @JvmOverloads constructor(
                 failBeforeNativeReplacement("加载前检查失败：${preflight.message}")
                 return@launchModelOperation
             }
-            val params = _uiState.value.params
+            // Resolve the semantic profile before any isolated bootstrap/load work.  A model
+            // switch must never probe the new native runtime with the previous model's sampling
+            // budget or model-specific overrides; the formal publish below resolves it again
+            // after the committed execution profile is known.
+            val params = loadModelGenerationParams(
+                backend = ChatBackend.LOCAL,
+                modelId = requestedModel.id,
+                defaults = _uiState.value.params
+            )
             var persistedModels = validatedCatalog.models
             _uiState.update { it.copy(modelLoadStage = "正在准备运行环境") }
             var model = persistedModels.firstOrNull { it.id == requestedModel.id } ?: requestedModel
@@ -9455,8 +10335,36 @@ class MainViewModel @JvmOverloads constructor(
                 nativeReplacementOccurred = true
             }
             nativeLoad.getOrThrow()
-            _uiState.update { it.copy(modelLoadStage = "正在确认模型运行配置") }
             nativeReplacementOccurred = true
+            val nativeVisionLoadStats = currentNativeStatsJson()
+            val baseRunnerLoaded = runCatching {
+                JSONObject(nativeVisionLoadStats).optBoolean("loaded", false)
+            }.getOrDefault(false)
+            require(baseRunnerLoaded) {
+                "本地聊天引擎未确认模型已加载，已安全阻止请求。请重试加载；如果仍失败，请重新校验模型文件。"
+            }
+            val visionReadinessWarning = when (model.runtime) {
+                ChatModelRuntime.LLAMA_CPP -> llamaCppVisionReadinessWarning(
+                    runtime = model.runtime,
+                    configuredProjectorPath = loadParams.visionProjectorPath,
+                    nativeStatsJson = nativeVisionLoadStats
+                )
+                ChatModelRuntime.LITERT_LM -> {
+                    val stats = runCatching { JSONObject(nativeVisionLoadStats) }.getOrNull()
+                    when {
+                        stats?.optBoolean("visionModelKnownTextOnly", false) == true ->
+                            LITERT_LM_KNOWN_TEXT_ONLY_VISION_UNAVAILABLE_MESSAGE
+                        stats?.has("visionModelVisualComponentsPresent") == true &&
+                            !stats.optBoolean("visionModelVisualComponentsPresent", false) ->
+                            LITERT_LM_VISION_COMPONENTS_UNAVAILABLE_MESSAGE
+                        !liteRtVisionInputAvailable(nativeVisionLoadStats) ->
+                            LITERT_LM_VISION_TRANSPORT_UNAVAILABLE_MESSAGE
+                        else -> null
+                    }
+                }
+                else -> null
+            }
+            _uiState.update { it.copy(modelLoadStage = "正在确认模型运行配置") }
             val formalProfile = engine.activeExecutionProfile() ?: bootstrapProfile
             require(formalProfile.profileId == bootstrapProfile.profileId) {
                 "正式加载激活了非预期 profile。"
@@ -9502,7 +10410,13 @@ class MainViewModel @JvmOverloads constructor(
             activeRuntimeIdentity = identity
             activeModelForRuntimeProfile = model
             _uiState.update { it.copy(modelLoadStage = "正在完成准备") }
-            val effectiveParams = mergeExecutionProfile(params, formalProfile)
+            val modelParams = loadModelGenerationParams(
+                backend = ChatBackend.LOCAL,
+                modelId = model.id,
+                defaults = params
+            )
+            persistGenerationParams(modelParams)
+            val effectiveParams = mergeExecutionProfile(modelParams, formalProfile)
             _uiState.update { state ->
                 state.copy(
                     params = effectiveParams,
@@ -9534,6 +10448,9 @@ class MainViewModel @JvmOverloads constructor(
                 val profileState = runtimeProfileStore.currentRuntimeState(identity.identityHash)
                 val pendingTransaction = runtimeProfileStore.pendingTransaction(identity.identityHash)
                 val nativeStatsAfterLoad = currentNativeStatsJson()
+                val visionReadyAfterLoad = runCatching {
+                    JSONObject(nativeStatsAfterLoad).optBoolean("visionReady", false)
+                }.getOrDefault(false)
                 val logsAfterLoad = currentEngineLogs()
                 managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update { state ->
@@ -9591,10 +10508,19 @@ class MainViewModel @JvmOverloads constructor(
                             if (memoryAdmission.mode == LocalModelMemoryAdmissionMode.SPARSE_MOE_MMAP) {
                                 append("，稀疏 MoE mmap 模式已启用")
                             }
-                            if (JSONObject(nativeStatsAfterLoad).optBoolean("visionReady", false)) {
+                            if (visionReadyAfterLoad) {
                                 append("，本地视觉组件已就绪")
+                            } else if (visionReadinessWarning != null) {
+                                // A failed projector must disable image input, not discard a
+                                // perfectly usable text runner. Vision readiness is an
+                                // independent capability from chat-model readiness.
+                                append("。图片输入未启用：").append(visionReadinessWarning)
                             }
-                            append("。安全基线和正确性校准通过，可直接聊天；性能调优可在 Agent 页单独启动。")
+                            if (visionReadinessWarning == null || visionReadyAfterLoad) {
+                                append("。安全基线和正确性校准通过，可直接聊天；性能调优可在 Agent 页单独启动。")
+                            } else {
+                                append("。安全基线和正确性校准通过，可继续文字聊天；图片输入需修复投影器后再用。性能调优可在 Agent 页单独启动。")
+                            }
                         },
                         tab = AppTab.CHAT
                     )
@@ -10004,8 +10930,126 @@ class MainViewModel @JvmOverloads constructor(
     fun sendMessage() {
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
+        if (hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
+            _uiState.update { it.copy(statusMessage = "请先确认、取消或等待上一张角色请求的图片完成。") }
+            return
+        }
         val preparedInput = state.prepareChatInput()
         if ((preparedInput.text.isBlank() && preparedInput.imageAttachments.isEmpty()) || state.isGenerating) return
+        if (preparedInput.imageAttachments.size > 1) {
+            if (!chatImageSubmissionPreflight.compareAndSet(false, true)) return
+            viewModelScope.launch(Dispatchers.IO) {
+                // The composer already performs an asynchronous dedup pass, but keep a final
+                // model-boundary check here as well. This protects message persistence and the
+                // actual runner input if a picker/import callback races that UI preflight.
+                val uniqueAttachments = preparedInput.imageAttachments
+                    .deduplicateVisionAttachmentsForSend(getApplication<Application>())
+                withContext(Dispatchers.Main.immediate) {
+                    val current = _uiState.value
+                    if (current.input != state.input || current.isGenerating) return@withContext
+                    sendPreparedMessage(
+                        state = current,
+                        preparedInput = preparedInput.copy(imageAttachments = uniqueAttachments)
+                    )
+                }
+            }.invokeOnCompletion {
+                chatImageSubmissionPreflight.set(false)
+            }
+            return
+        }
+        sendPreparedMessage(state, preparedInput)
+    }
+
+    private fun sendPreparedMessage(
+        state: MainUiState,
+        preparedInput: PreparedChatInput
+    ) {
+        if (rejectWhileConversationMutationInProgress()) return
+        if (hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
+            _uiState.update { it.copy(statusMessage = "请先确认、取消或等待上一张角色请求的图片完成。") }
+            return
+        }
+        if ((preparedInput.text.isBlank() && preparedInput.imageAttachments.isEmpty()) || state.isGenerating) return
+        // Reject unsupported image input before creating/persisting a chat turn.
+        // Previously the request was first saved and marked as generating, then
+        // failed deeper in startGeneration. Besides confusing users, that sent
+        // stale/unsupported image state closer to native runtimes and made a
+        // repeated tap look like a duplicate-image submission.
+        if (preparedInput.imageAttachments.isNotEmpty()) {
+            if (state.selectedChatBackend == ChatBackend.CLOUD) {
+                val cloud = state.selectedChatCloudConfig()?.normalized()
+                val unavailable = when {
+                    cloud == null || !cloud.configured -> "请先配置并选择云端聊天模型，再发送图片。"
+                    !cloud.supportsVision -> "当前云端模型未开启图片输入。请在模型管理中为该模型启用图片输入后重试。"
+                    else -> null
+                }
+                if (unavailable != null) {
+                    _uiState.update { it.copy(statusMessage = unavailable) }
+                    return
+                }
+            } else if (!localVisionRunnerAvailable()) {
+                _uiState.update {
+                    it.copy(statusMessage = state.localVisionUnavailableMessage())
+                }
+                return
+            }
+        }
+        if (hasExplicitChatImageCommand(preparedInput.text)) {
+            if (preparedInput.imageAttachments.isNotEmpty() ||
+                preparedInput.text.contains(FILE_ATTACHMENT_MARKER)
+            ) {
+                _uiState.update {
+                    it.copy(statusMessage = "聊天生图暂不支持把已附加的图片或文件作为参考。请先移除附件，再发送 /image 图片描述。")
+                }
+                return
+            }
+            val imageIntent = parseExplicitChatImageIntent(preparedInput.text)
+            if (imageIntent == null) {
+                _uiState.update { it.copy(statusMessage = "请在 /image 后输入图片描述，再发送。") }
+                return
+            }
+            sendChatImageRequestWithPromptBridge(
+                visibleUserText = preparedInput.text,
+                prompt = imageIntent.sourceText
+            )
+            return
+        }
+        if (preparedInput.imageAttachments.isEmpty() &&
+            !preparedInput.text.contains(FILE_ATTACHMENT_MARKER)
+        ) {
+            val imageDecision = classifyChatImageIntent(preparedInput.text)
+            when (imageDecision.route) {
+                ChatImageIntentRoute.GENERATE -> {
+                    imageDecision.intent?.let { intent ->
+                        sendChatImageRequestWithPromptBridge(
+                            visibleUserText = preparedInput.text,
+                            prompt = intent.sourceText
+                        )
+                        return
+                    }
+                }
+                ChatImageIntentRoute.AMBIGUOUS -> {
+                    _uiState.update {
+                        it.copy(
+                            // Keep the composer draft untouched.  The next tap can either
+                            // add a subject or use the dedicated image skill explicitly.
+                            statusMessage = "图片请求不明确，请补充主体或动作；草稿已保留。"
+                        )
+                    }
+                    return
+                }
+                ChatImageIntentRoute.CHAT -> Unit
+            }
+        }
+        if (activeImageGenerationBackend == ImageBackend.LOCAL &&
+            activeImageGenerationJobId != null &&
+            state.selectedChatBackend == ChatBackend.LOCAL
+        ) {
+            _uiState.update {
+                it.copy(statusMessage = "本地生图正在运行，请等图片完成或停止后再启动本地聊天，避免设备内存冲突。")
+            }
+            return
+        }
         val assistantSnapshot = state.activeAssistantSnapshot()
             ?: state.selectedAssistant()?.toConversationSnapshot()
         val conversationParams = assistantSnapshot?.applyTo(state.params) ?: state.params
@@ -10017,8 +11061,17 @@ class MainViewModel @JvmOverloads constructor(
             },
             imageAttachments = preparedInput.imageAttachments
         )
+        // Context compression must run before the first admission decision.  The
+        // old ordering rejected an over-budget request (or let a trimmed
+        // request proceed without using that trimmed list) before the automatic
+        // compression policy could fold historical turns.  Build a logical
+        // request first, compress it in memory, then rebuild runtime context
+        // and perform the final safety admission.  The persisted conversation
+        // remains untouched; only the request crossing the runtime boundary is
+        // compressed/trimmed.
+        val preflightMessages = state.messages + user
         val preflightContext = chatContextComposer.compose(
-            messages = state.messages + user,
+            messages = preflightMessages,
             params = conversationParams,
             assistantId = conversationAssistantId,
             chatSessionId = state.activeChatSessionId,
@@ -10027,13 +11080,43 @@ class MainViewModel @JvmOverloads constructor(
                 ?: state.selectedAssistant()?.fileContextEnabled
                 ?: true
         )
-        val admission = localContextWindowAdmission(
-            ChatRequest(
-                messages = state.messages + user,
-                params = conversationParams,
-                runtimeSystemContext = preflightContext.runtimeSystemContext
-            )
+        val preflightRequest = ChatRequest(
+            messages = preflightMessages,
+            params = conversationParams,
+            runtimeSystemContext = preflightContext.runtimeSystemContext
         )
+        val initialAdmission = localContextWindowAdmission(preflightRequest)
+        val preflightCompression = compressChatRequestContext(
+            request = preflightRequest,
+            settings = ContextCompressionSettings(
+                threshold = loadContextCompressionThreshold(),
+                keepRecentMessages = 8
+            ),
+            // Force a compression attempt when the first safety decision is a
+            // rejection.  This matters when the conservative token estimate is
+            // below the configured threshold but runtime bytes/code points are
+            // already over the window.
+            trigger = if (initialAdmission.isAccepted) {
+                ContextCompressionTrigger.AUTOMATIC
+            } else {
+                ContextCompressionTrigger.MANUAL
+            }
+        )
+        val compressedPreflightMessages = preflightCompression.request.messages
+        val rebuiltPreflightContext = chatContextComposer.compose(
+            messages = compressedPreflightMessages,
+            params = conversationParams,
+            assistantId = conversationAssistantId,
+            chatSessionId = state.activeChatSessionId,
+            knowledgeBaseIds = state.selectedKnowledgeBaseIds,
+            fileContextEnabled = assistantSnapshot?.fileContextEnabled
+                ?: state.selectedAssistant()?.fileContextEnabled
+                ?: true
+        )
+        val finalPreflightRequest = preflightCompression.request.copy(
+            runtimeSystemContext = rebuiltPreflightContext.runtimeSystemContext
+        )
+        val admission = localContextWindowAdmission(finalPreflightRequest)
         if (!admission.isAccepted) {
             _uiState.update {
                 it.copy(
@@ -10076,7 +11159,7 @@ class MainViewModel @JvmOverloads constructor(
                 generationPersistProgress = null,
                 generationStats = null,
                 promptContextUsage = promptContextUsageFor(
-                    plan = preflightContext,
+                    plan = rebuiltPreflightContext,
                     admission = admission,
                     params = conversationParams
                 ),
@@ -10090,7 +11173,1681 @@ class MainViewModel @JvmOverloads constructor(
             }
         )
 
-        startGeneration(_uiState.value.messages.dropLast(1))
+        // Use the exact request that passed the preflight admission.  In particular, when the
+        // initial window check rejected the uncompressed history, preflight may have performed a
+        // forced/manual compression even though the normal automatic threshold is not reached.
+        // Rebuilding the request from the persisted UI list here would discard that accepted
+        // compressed context and make the same turn fail again inside startGeneration().
+        startGeneration(finalPreflightRequest.messages)
+    }
+
+    /** Sends the composer contents straight to the selected image backend. */
+    fun sendChatImagePrompt() {
+        val state = _uiState.value
+        // A second tap or a switch to an English prompt must cancel an older bridge job before
+        // it can enqueue a stale image request after the newer request.
+        chatImagePromptBridgeGeneration.incrementAndGet()
+        chatImagePromptBridgeJob?.cancel()
+        chatImagePromptBridgeJob = null
+        if (rejectWhileConversationMutationInProgress()) return
+        if (hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
+            _uiState.update { it.copy(statusMessage = "请先处理上一张角色请求的图片，再开始新的聊天生图。") }
+            return
+        }
+        if (state.isGenerating) {
+            _uiState.update {
+                it.copy(statusMessage = "当前对话仍在生成，结束或停止本轮后再发送生图请求。")
+            }
+            return
+        }
+        val preparedInput = state.prepareChatInput()
+        if (preparedInput.imageAttachments.isNotEmpty() ||
+            preparedInput.text.contains(FILE_ATTACHMENT_MARKER)
+        ) {
+            _uiState.update {
+                it.copy(statusMessage = "聊天内生图暂不使用上传附件作为参考图。请移除附件后重试，或在图片页使用图生图。")
+            }
+            return
+        }
+        val prompt = preparedInput.text.trim()
+        if (prompt.isBlank()) {
+            _uiState.update { it.copy(statusMessage = "先写下图片描述，再点击生成图片。") }
+            return
+        }
+        val imagePrompt = parseExplicitChatImageIntent(prompt)?.sourceText ?: prompt
+        sendChatImageRequestWithPromptBridge(
+            visibleUserText = preparedInput.text,
+            prompt = imagePrompt
+        )
+    }
+
+    /**
+     * Image models with an English-dominant text encoder cannot consume a Chinese chat request
+     * directly. Keep the user's original text in the chat composer/timeline, and ask the currently
+     * selected chat model for a bounded English diffusion prompt before creating the image job.
+     * Every explicit image-skill request gets one model pass, including already-English prompts.
+     */
+    private fun sendChatImageRequestWithPromptBridge(
+        visibleUserText: String,
+        prompt: String
+    ) {
+        val original = prompt.trim()
+        val initialImageOptions = chatImageOptionsForCurrentSelection(_uiState.value)
+        val originalNegativePrompt = initialImageOptions.negativePrompt
+        // This method is reachable only after a chat image skill has been selected. Every
+        // non-empty payload, including already-English, JSON, Markdown, and tagged prompts,
+        // must pass through the selected chat model before it reaches an image backend.
+        val bridgeGeneration = chatImagePromptBridgeGeneration.incrementAndGet()
+        chatImagePromptBridgeJob?.cancel()
+        _uiState.update {
+            it.copy(statusMessage = "正在准备图片描述…")
+        }
+        val bridgeBackend = _uiState.value.selectedChatBackend
+        val bridgeCloudConfig = if (bridgeBackend == ChatBackend.CLOUD) {
+            _uiState.value.selectedChatCloudConfig()
+                ?.normalized()
+                ?.takeIf { config -> config.configured }
+        } else {
+            null
+        }
+        val bridgeParams = _uiState.value.params
+        val bridgeContextState = _uiState.value
+        val bridgeAssistantSnapshot = bridgeContextState.activeAssistantSnapshot()
+            ?: bridgeContextState.selectedAssistant()?.toConversationSnapshot()
+        val bridgeAssistantRecord = bridgeAssistantSnapshot?.assistantId
+            ?.let { assistantId -> bridgeContextState.assistants.firstOrNull { it.id == assistantId } }
+            ?: bridgeContextState.selectedAssistant()
+        val bridgeAssistantName = bridgeAssistantSnapshot?.name ?: bridgeAssistantRecord?.name
+        val bridgeCharacterContext = bridgeAssistantSnapshot?.systemPrompt
+            ?: bridgeAssistantRecord?.systemPrompt
+        val bridgeConversationContext = bridgeContextState.messages
+        chatImagePromptBridgeJob = viewModelScope.launch {
+            // Resolve the same request-scoped lore and knowledge context used by ordinary chat.
+            // Previously the image bridge only received the assistant system prompt and a few
+            // recent turns, so phrases such as “让角色按世界书设定自拍” silently lost the
+            // selected World Book/knowledge entries. Compose it off the UI dispatcher and pass it
+            // as bounded inert reference data; the bridge's system contract still treats it as
+            // data and never executes instructions found inside imported documents.
+            val bridgeRuntimeContext = runCatching {
+                withContext(Dispatchers.IO) {
+                    chatContextComposer.compose(
+                        // Include the current image request in the retrieval query. Using only
+                        // the previous turns made a newly selected knowledge base appear empty
+                        // for prompts such as “让角色按这条设定自拍”.
+                        messages = bridgeConversationContext + ChatMessage(Role.USER, original),
+                        params = bridgeParams,
+                        assistantId = bridgeAssistantSnapshot?.assistantId
+                            ?: bridgeContextState.selectedAssistantId.orEmpty(),
+                        chatSessionId = bridgeContextState.activeChatSessionId,
+                        knowledgeBaseIds = bridgeContextState.selectedKnowledgeBaseIds,
+                        fileContextEnabled = bridgeAssistantSnapshot?.fileContextEnabled
+                            ?: bridgeAssistantRecord?.fileContextEnabled
+                            ?: true
+                    ).runtimeSystemContext
+                }
+            }.getOrNull()
+
+            suspend fun bridgeStreamFor(value: String, systemPrompt: String): Flow<GenerateEvent>? {
+                val request = ChatImagePromptBridge.chatImagePromptBridgeRequest(
+                    value,
+                    bridgeParams,
+                    systemPrompt = systemPrompt,
+                    assistantName = bridgeAssistantName,
+                    characterContext = bridgeCharacterContext,
+                    conversationContext = bridgeConversationContext,
+                    runtimeContext = bridgeRuntimeContext,
+                    protectNumericLiterals = false
+                )
+                return runCatching {
+                    when (bridgeBackend) {
+                        ChatBackend.CLOUD -> {
+                            bridgeCloudConfig?.let { config ->
+                                cloudChatProvider.streamChat(config, request)
+                            }
+                        }
+                        ChatBackend.LOCAL -> {
+                            val executionContext = LocalChatExecutionContext(
+                                requestId = "ui-image-prompt-${UUID.randomUUID()}"
+                            )
+                            LocalApiRuntime.streamChat(request, executionContext)
+                                ?: engine.streamChat(request, executionContext)
+                        }
+                    }
+                }.getOrNull()
+            }
+            suspend fun translateOne(value: String): ChatImagePromptBridge.Result {
+                val firstStream = bridgeStreamFor(value, ChatImagePromptBridge.SYSTEM_PROMPT)
+                    ?: return ChatImagePromptBridge.Result.Failed(
+                        ChatImagePromptBridge.Code.MODEL_ERROR,
+                        "当前聊天模型不可用，无法整理图片描述。"
+                    )
+                var translated = ChatImagePromptBridge.translateChatImagePrompt(
+                    value,
+                    firstStream,
+                    requireModelSummary = true
+                )
+                if (translated is ChatImagePromptBridge.Result.Failed) {
+                    bridgeStreamFor(value, ChatImagePromptBridge.FALLBACK_SYSTEM_PROMPT)?.let { retryStream ->
+                        translated = ChatImagePromptBridge.translateChatImagePrompt(
+                            value,
+                            retryStream,
+                            requireModelSummary = true
+                        )
+                    }
+                }
+                if (translated is ChatImagePromptBridge.Result.Prepared &&
+                    ChatImagePromptBridge.chatImagePromptNeedsDetailRepair(
+                        value,
+                        translated as ChatImagePromptBridge.Result.Prepared
+                    )
+                ) {
+                    val repairStream = bridgeStreamFor(
+                        value,
+                        ChatImagePromptBridge.DETAIL_REPAIR_SYSTEM_PROMPT
+                    )
+                    translated = if (repairStream == null) {
+                        ChatImagePromptBridge.Result.Failed(
+                            ChatImagePromptBridge.Code.DETAIL_LOSS,
+                            "聊天模型把复杂图片描述压缩成了过短摘要，无法取得完整修复结果。"
+                        )
+                    } else {
+                        val repaired = ChatImagePromptBridge.translateChatImagePrompt(
+                            value,
+                            repairStream,
+                            requireModelSummary = true
+                        )
+                        when {
+                            repaired is ChatImagePromptBridge.Result.Prepared &&
+                                !ChatImagePromptBridge.chatImagePromptNeedsDetailRepair(value, repaired) ->
+                                repaired
+                            repaired is ChatImagePromptBridge.Result.Failed -> repaired
+                            else -> ChatImagePromptBridge.Result.Failed(
+                                ChatImagePromptBridge.Code.DETAIL_LOSS,
+                                "聊天模型仍未保留复杂图片描述的主体、动作或构图细节。"
+                            )
+                        }
+                    }
+                }
+                return translated
+            }
+
+            suspend fun translateConfiguredNegative(value: String?): ChatImagePromptBridge.Result {
+                if (value.isNullOrBlank() || !value.containsHanScript()) {
+                    // The configured negative branch is already safe to send when it is ASCII.
+                    // It is still merged with the model-produced negative branch below; only a
+                    // Chinese configured default needs its own model pass.
+                    return ChatImagePromptBridge.Result.Prepared(
+                        originalPrompt = value.orEmpty(),
+                        effectivePrompt = value.orEmpty(),
+                        translated = false,
+                        effectiveNegativePrompt = value
+                    )
+                }
+                // A negative-only prompt is intentionally rejected by the bridge because it
+                // cannot produce an image on its own. Wrap it with a neutral positive subject so
+                // the same strict JSON contract can translate the configured negative branch.
+                return translateOne("neutral image\nNegative prompt: $value")
+            }
+
+            // This function is entered only after the image skill has been selected. The
+            // complete payload therefore always goes through the current chat model, regardless
+            // of whether it is English, Chinese, JSON, Markdown, a code block, a Tavern preset,
+            // or ordinary prose. Do not add a fast path here: it would silently reintroduce the
+            // old bug where only a narrow prompt dialect was normalized.
+            val result = translateOne(original)
+            // A provider may deliver a final chunk after coroutine cancellation.  Check both
+            // cancellation and the generation token before publishing anything or enqueueing a
+            // request, otherwise two rapid taps can start two image jobs.
+            currentCoroutineContext().ensureActive()
+            if (bridgeGeneration != chatImagePromptBridgeGeneration.get()) return@launch
+            when (result) {
+                is ChatImagePromptBridge.Result.Prepared -> {
+                    currentCoroutineContext().ensureActive()
+                    if (bridgeGeneration != chatImagePromptBridgeGeneration.get()) return@launch
+                    if (_uiState.value.isGenerating) {
+                        _uiState.update { it.copy(statusMessage = "当前对话已开始生成，图片请求未发送。") }
+                    } else {
+                        val translatedNegative = if (originalNegativePrompt.isNullOrBlank()) {
+                            null
+                        } else {
+                            currentCoroutineContext().ensureActive()
+                            if (bridgeGeneration != chatImagePromptBridgeGeneration.get()) return@launch
+                            when (val negativeResult = translateConfiguredNegative(originalNegativePrompt)) {
+                                is ChatImagePromptBridge.Result.Prepared -> {
+                                    currentCoroutineContext().ensureActive()
+                                    if (bridgeGeneration != chatImagePromptBridgeGeneration.get()) return@launch
+                                    // A negative-only translation request is wrapped with a
+                                    // neutral positive subject so the same JSON contract can be
+                                    // used.  Never fall back to that neutral positive text as a
+                                    // negative prompt: doing so silently turns a missing
+                                    // translation into an exclusion such as "neutral image".
+                                    val translated = negativeResult.effectiveNegativePrompt
+                                        ?.trim()
+                                        ?.takeIf(String::isNotBlank)
+                                    if (translated == null) {
+                                        _uiState.update {
+                                            it.copy(
+                                                input = visibleUserText,
+                                                statusMessage = "聊天模型未返回可用的英文负面图片描述，未启动生图。请重试。"
+                                            )
+                                        }
+                                        return@launch
+                                    }
+                                    translated
+                                }
+                                is ChatImagePromptBridge.Result.Failed -> {
+                                    _uiState.update {
+                                        it.copy(
+                                            input = visibleUserText,
+                                            statusMessage = "聊天模型未能整理负面图片描述，未启动生图。请重试。原因：${negativeResult.message}"
+                                        )
+                                    }
+                                    return@launch
+                                }
+                            }
+                        }
+                        currentCoroutineContext().ensureActive()
+                        if (bridgeGeneration != chatImagePromptBridgeGeneration.get()) return@launch
+                        val handoff = ChatImagePromptBridge.chatImagePromptBridgeHandoff(
+                            result = result,
+                            baseOptions = initialImageOptions,
+                            originalNegativePrompt = originalNegativePrompt,
+                            translatedModelNegativePrompt = translatedNegative,
+                            nativeMultilingual = false,
+                            allowNegativePrompt = chatImageNegativePromptSupported(_uiState.value)
+                        )
+                        sendChatImageRequest(
+                            visibleUserText = visibleUserText,
+                            prompt = handoff.prompt,
+                            optionsOverride = handoff.options,
+                            promptEnvelope = handoff.envelope
+                        )
+                        if (result.translated) {
+                            _uiState.update {
+                                it.copy(statusMessage = "已由当前聊天模型整理英文图片描述，开始生成。")
+                            }
+                        }
+                    }
+                }
+                is ChatImagePromptBridge.Result.Failed -> {
+                    _uiState.update {
+                        it.copy(
+                            input = visibleUserText,
+                            statusMessage = "聊天模型未能整理出可执行的图片描述，未启动生图。请重试。原因：${result.message}"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The chat bridge may emit a quality negative branch even when the selected image topology
+     * cannot condition on one. Keep that branch out of CFG-disabled/unsupported workers; an
+     * explicit non-empty options.negativePrompt would otherwise be rejected as a user override.
+     */
+    private fun chatImageNegativePromptSupported(state: MainUiState): Boolean {
+        if (state.selectedImageBackend != ImageBackend.LOCAL) return true
+        val model = state.selectedLocalImageModel() ?: return false
+        val bundleRoot = model.bundleRoot
+            ?.takeIf(String::isNotBlank)
+            ?.let(::File)
+            ?.takeIf(File::isDirectory)
+            ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+        return runCatching {
+            val profile = resolveLocalImageExecutionProfile(
+                model = model,
+                options = LocalImageGenerationOptions()
+                    .normalizedForPromptExecutionProfile(model.runtime),
+                bundleRoot = bundleRoot
+            ).profile
+            profile.capabilities.supportsNegativePrompt && profile.defaults.useCfg
+        }.getOrElse {
+            // Imported/legacy records can be usable before their sidecar is materialized. Keep
+            // the same conservative family gate used for default conditioning instead of
+            // silently dropping the negative branch for a valid SD/SDXL model.
+            chatImageFallbackNegativePromptForModel(model.family, model.runtime) != null
+        }
+    }
+
+    internal fun chatImageToolPermissionUiState(): ChatImageToolPermissionUiState {
+        val state = _uiState.value
+        val cloudModelId = state.selectedCloudChatModelId
+        val config = state.selectedChatCloudConfig()?.normalized()
+        val imageModelBinding = state.chatImageModelBinding()
+        val chatModelIdentity = chatImageToolChatModelIdentity(cloudModelId, config)
+        val imageModelIdentity = imageModelBinding?.authorizationIdentity()
+        val unavailableReason = when {
+            state.selectedChatBackend != ChatBackend.CLOUD ->
+                "角色自主生图目前仅支持 OpenAI Responses 云端聊天；本地模型可用输入框的聊天内生图。"
+            cloudModelId.isNullOrBlank() || config == null || !config.configured ->
+                "请先配置并选择一个云端聊天模型。"
+            config.apiFormat != CloudApiFormat.OPENAI_RESPONSES ->
+                "当前聊天协议不支持角色生图工具调用，请切换到 OpenAI Responses。"
+            !config.supportsTools ->
+                "当前 Responses 模型尚未启用工具调用，请到模型管理 > 云端编辑该模型并开启“支持工具调用”。"
+            imageModelBinding == null ->
+                "请先选择一个可用的本地或云端生图模型。"
+            else -> ""
+        }
+        val sessionId = state.activeChatSessionId
+        val authorizationMode = chatImageToolAuthorizationStore.getMode(
+            sessionId,
+            chatModelIdentity,
+            imageModelIdentity
+        )
+        return ChatImageToolPermissionUiState(
+            available = unavailableReason.isBlank(),
+            unavailableReason = unavailableReason,
+            autoApproval = unavailableReason.isBlank() &&
+                authorizationMode == ChatImageToolAuthorizationMode.AUTO_APPROVE,
+            canChange = unavailableReason.isBlank() && !sessionId.isNullOrBlank()
+        )
+    }
+
+    fun setAssistantImageToolAutoApproval(enabled: Boolean) {
+        val state = _uiState.value
+        val permission = chatImageToolPermissionUiState()
+        if (!permission.available) {
+            _uiState.update { it.copy(statusMessage = permission.unavailableReason) }
+            return
+        }
+        val sessionId = state.activeChatSessionId
+        val chatModelId = state.selectedCloudChatModelId
+        val chatModelIdentity = chatImageToolChatModelIdentity(
+            chatModelId,
+            state.selectedChatCloudConfig()?.normalized()
+        )
+        val imageModelIdentity = state.chatImageModelBinding()?.authorizationIdentity()
+        if (sessionId.isNullOrBlank() || chatModelIdentity == null || imageModelIdentity == null) {
+            _uiState.update {
+                it.copy(statusMessage = "先发送一条消息创建对话，再设置本对话的角色生图授权。")
+            }
+            return
+        }
+        val target = if (enabled) {
+            ChatImageToolAuthorizationMode.AUTO_APPROVE
+        } else {
+            ChatImageToolAuthorizationMode.ASK_EVERY_TIME
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val saved = chatImageToolAuthorizationStore.setMode(
+                sessionId,
+                chatModelIdentity,
+                imageModelIdentity,
+                target
+            )
+            _uiState.update { current ->
+                val currentChatIdentity = chatImageToolChatModelIdentity(
+                    current.selectedCloudChatModelId,
+                    current.selectedChatCloudConfig()?.normalized()
+                )
+                val currentImageIdentity = current.chatImageModelBinding()?.authorizationIdentity()
+                if (current.activeChatSessionId != sessionId ||
+                    currentChatIdentity != chatModelIdentity ||
+                    currentImageIdentity != imageModelIdentity
+                ) {
+                    current
+                } else {
+                    current.copy(
+                        statusMessage = if (saved) {
+                            if (target == ChatImageToolAuthorizationMode.AUTO_APPROVE) {
+                                "已允许当前对话中的 Responses 角色请求自动生图；可随时改回每次询问。"
+                            } else {
+                                "已改为每次询问；之后的角色生图请求会先等待你确认。"
+                            }
+                        } else {
+                            "授权设置未能保存，请稍后重试。"
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private fun sendChatImageRequest(
+        visibleUserText: String,
+        prompt: String,
+        optionsOverride: LocalImageGenerationOptions? = null,
+        promptEnvelope: PromptEnvelope? = null
+    ) {
+        val initialState = _uiState.value
+        if (initialState.isGenerating) {
+            _uiState.update { it.copy(statusMessage = "当前聊天仍在生成，请等本轮结束后再发送图片请求。") }
+            return
+        }
+        if (rejectWhileConversationMutationInProgress()) return
+        chatImageSubmissionBlockMessage(initialState)?.let { message ->
+            _uiState.update { it.copy(statusMessage = message) }
+            return
+        }
+
+        val assistantSnapshot = initialState.activeAssistantSnapshot()
+            ?: initialState.selectedAssistant()?.toConversationSnapshot()
+        val assistantId = assistantSnapshot?.assistantId ?: initialState.selectedAssistantId
+        val requestId = UUID.randomUUID().toString()
+        val jobId = "ui-img-${UUID.randomUUID()}"
+        val initialImageModelId = if (initialState.selectedImageBackend == ImageBackend.LOCAL) {
+            initialState.selectedLocalImageModelId
+        } else {
+            initialState.selectedCloudImageModelId
+        }
+        val initialImageModelName = if (initialState.selectedImageBackend == ImageBackend.LOCAL) {
+            initialState.selectedLocalImageModel()?.displayName
+        } else {
+            initialState.selectedImageCloudConfig()?.let { config ->
+                config.displayName.takeIf(String::isNotBlank) ?: config.imageModel
+            }
+        }
+        val imageFingerprint = when (initialState.selectedImageBackend) {
+            ImageBackend.LOCAL -> initialState.selectedLocalImageModel()?.chatImageRetryFingerprint()
+            ImageBackend.CLOUD -> initialState.selectedImageCloudConfig()?.chatImageRetryFingerprint()
+        }
+        val imageOptions = optionsOverride ?: chatImageOptionsForCurrentSelection(initialState)
+        promptEnvelope?.let { envelope ->
+            if (envelope.positive != prompt || envelope.negative != imageOptions.negativePrompt) {
+                _uiState.update {
+                    it.copy(
+                        input = visibleUserText,
+                        statusMessage = "图片描述整理结果已过期，未启动生图。请重试。"
+                    )
+                }
+                return
+            }
+        }
+        val request = ChatGeneratedImageRequest(
+            id = requestId,
+            prompt = prompt,
+            status = ChatGeneratedImageStatus.QUEUED,
+            message = "正在准备图片生成。",
+            currentJobId = jobId,
+            backendId = initialState.selectedImageBackend.name,
+            modelId = initialImageModelId,
+            modelName = initialImageModelName,
+            modelFingerprint = imageFingerprint,
+            generationOptionsJson = imageOptions.toJson().toString()
+        )
+        val user = ChatMessage(Role.USER, visibleUserText)
+        val assistant = ChatMessage(
+            role = Role.ASSISTANT,
+            content = "正在准备图片生成。",
+            generatedImageRequest = request
+        )
+        var ownerSessionId: String? = null
+        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
+        var knowledgeBaseIdsForBinding: Set<String> = emptySet()
+        _uiState.update { state ->
+            val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
+            ownerSessionId = sessionId
+            knowledgeBaseIdsForBinding = state.selectedKnowledgeBaseIds
+            val messages = state.messages + user + assistant
+            sessionsToPersist = state.chatSessions.upsertSession(
+                sessionId = sessionId,
+                messages = messages,
+                assistantId = assistantId,
+                assistantSnapshot = assistantSnapshot,
+                modelMode = state.selectedChatBackend.bindingValue(),
+                modelId = state.currentChatModelId()
+            )
+            state.copy(
+                input = "",
+                messages = messages,
+                activeChatSessionId = sessionId,
+                chatSessions = sessionsToPersist,
+                statusMessage = null
+            )
+        }
+        val chatSessionId = ownerSessionId ?: return
+        persistChatSessions(
+            sessions = sessionsToPersist,
+            knowledgeBinding = chatSessionId to knowledgeBaseIdsForBinding
+        )
+        val admitted = enqueueImageGeneration(
+            prompt = prompt,
+            inputDraft = LocalImageInputDraft(),
+            options = imageOptions,
+            jobSnapshot = null,
+            requestedJobId = jobId,
+            requestedChatSessionId = chatSessionId,
+            requestedChatMessageId = requestId
+        )
+        if (!admitted) {
+            updateChatGeneratedImageRequest(
+                chatSessionId = chatSessionId,
+                requestId = requestId,
+                request = request.copy(
+                    status = ChatGeneratedImageStatus.FAILED,
+                    message = _uiState.value.statusMessage ?: "无法开始图片生成，请检查已选模型。"
+                )
+            )
+            _uiState.update { state ->
+                if (state.activeChatSessionId == chatSessionId && state.input.isBlank()) {
+                    state.copy(input = visibleUserText)
+                } else {
+                    state
+                }
+            }
+        } else {
+            updateChatImageRequestFromJob(chatSessionId, requestId, jobId)
+        }
+    }
+
+    private fun chatImageSubmissionBlockMessage(state: MainUiState): String? {
+        val modelMessage = when (state.selectedImageBackend) {
+            ImageBackend.LOCAL -> {
+                val model = state.selectedLocalImageModel()
+                    ?: return "尚未选择可用的本地图像模型，请前往模型管理选择并配置一个模型。"
+                model.localImageStructuralReadinessMessage()?.let { "本地图像模型暂不可用：$it" }
+            }
+            ImageBackend.CLOUD -> {
+                val config = state.selectedImageCloudConfig()
+                    ?: return "尚未选择云端生图模型，请先在模型管理中添加并配置一个模型。"
+                if (!config.imageConfigured) {
+                    "当前云端生图模型尚未配置完整，请检查接口地址、模型名称和认证信息。"
+                } else null
+            }
+        }
+        if (modelMessage != null) return modelMessage
+        if (imageGenerationJob?.isActive == true || activeImageGenerationJobId != null ||
+            activeLocalApiImageModelId != null || localImageGenerationCoordinator.activeRequestId() != null
+        ) {
+            return "已有图片任务正在运行，请等它完成或取消后再发送新的生图请求。"
+        }
+        return null
+    }
+
+    private suspend fun handleAssistantImageToolCalls(
+        calls: List<ChatToolCall>,
+        originalRequestMessages: List<ChatMessage>,
+        paramsBeforeAssistant: GenerationParams,
+        chatSessionId: String?,
+        cloudModelId: String?,
+        chatModelIdentity: String?,
+        imageModelBinding: AssistantImageModelBinding?,
+        chatConfig: CloudApiConfig?
+    ): Boolean {
+        if (calls.isEmpty()) return false
+        if (calls.size != 1) {
+            setPendingAssistantToolFailure("一次助手回复最多只能请求生成一张图片。")
+            return true
+        }
+        val call = calls.single()
+        val args = validateChatImageToolCall(call)
+        if (args !is ChatImageToolArguments.Valid) {
+            setPendingAssistantToolFailure(
+                (args as ChatImageToolArguments.Invalid).reason
+            )
+            return true
+        }
+        val sessionId = chatSessionId ?: _uiState.value.activeChatSessionId
+        if (sessionId.isNullOrBlank() || cloudModelId.isNullOrBlank()) {
+            setPendingAssistantToolFailure("无法确定本次生图请求所属的对话或云端模型。")
+            return true
+        }
+        if (imageModelBinding == null) {
+            setPendingAssistantToolFailure("请先在模型管理中选择一个可用的生图模型，再发送本轮消息。")
+            return true
+        }
+        val effectivePromptResult = when (val promptResult = prepareAssistantImagePrompt(
+            prompt = args.prompt,
+            chatConfig = chatConfig,
+            params = paramsBeforeAssistant,
+            conversationContext = originalRequestMessages
+        )) {
+            is ChatImagePromptBridge.Result.Prepared -> promptResult
+            is ChatImagePromptBridge.Result.Failed -> {
+                setPendingAssistantToolFailure(
+                    "聊天模型未能把角色的图片描述整理成可执行提示词，未启动生图。请重试角色回复。原因：${promptResult.message}"
+                )
+                return true
+            }
+        }
+        val inlineNegativePrompt = effectivePromptResult.effectiveNegativePrompt
+        // Responses tool calls may carry a separate negative prompt. Translate it through the
+        // same chat connector and keep the effective value in the immutable image job options;
+        // previously only the positive prompt was bridged, so an English-only encoder rejected
+        // Chinese exclusions after the tool call had already been approved.
+        val translatedArgumentNegativePrompt = args.negativePrompt?.let { negativePrompt ->
+            when (val negativeResult = prepareAssistantImageNegativePrompt(
+                prompt = negativePrompt,
+                chatConfig = chatConfig,
+                params = paramsBeforeAssistant,
+                conversationContext = originalRequestMessages,
+                preserveAuthoredNegative = true
+            )) {
+                is ChatImagePromptBridge.Result.Prepared ->
+                    negativeResult.effectiveNegativePrompt?.trim()?.takeIf(String::isNotBlank)
+                        ?: run {
+                            setPendingAssistantToolFailure(
+                                "聊天模型未返回可用的英文负面提示词，未启动生图。请重试角色回复。"
+                            )
+                            return true
+                        }
+                is ChatImagePromptBridge.Result.Failed -> {
+                    setPendingAssistantToolFailure(
+                        "聊天模型未能把角色请求中的负面提示词整理成英文，未启动生图。请重试角色回复。原因：${negativeResult.message}"
+                    )
+                    return true
+                }
+            }
+        }
+        val modelNegativePrompt = imageModelBinding.options.negativePrompt
+        val effectiveModelNegativePrompt = if (translatedArgumentNegativePrompt != null ||
+            inlineNegativePrompt != null
+        ) {
+            // An assistant tool call can carry exclusions in either the structured
+            // negative_prompt argument or the structured bridge response. Keep both branches
+            // separate from the positive prompt and preserve their order without duplicates.
+            mergeChatImageNegativePrompts(
+                translatedArgumentNegativePrompt,
+                inlineNegativePrompt
+            )
+        } else if (chatImageNegativePromptNeedsBridge(modelNegativePrompt)) {
+            when (val modelNegativeResult = prepareAssistantImageNegativePrompt(
+                prompt = modelNegativePrompt.orEmpty(),
+                chatConfig = chatConfig,
+                params = paramsBeforeAssistant,
+                conversationContext = originalRequestMessages,
+                preserveAuthoredNegative = false
+            )) {
+                is ChatImagePromptBridge.Result.Prepared ->
+                    modelNegativeResult.effectiveNegativePrompt?.trim()?.takeIf(String::isNotBlank)
+                        // A model default is optional conditioning. If the chat bridge cannot
+                        // translate it, the helper returns an empty branch so generation can use
+                        // the image backend's built-in default (or no negative conditioning).
+                is ChatImagePromptBridge.Result.Failed -> {
+                    setPendingAssistantToolFailure(
+                        "聊天模型未能整理生图模型的默认负面提示词，未启动生图。请重试角色回复。原因：${modelNegativeResult.message}"
+                    )
+                    return true
+                }
+            }
+        } else {
+            modelNegativePrompt
+        }
+        // The bridge may emit a generic quality branch when the model/profile has no authored
+        // default. Keep that branch only for a local topology that actually encodes CFG negatives;
+        // otherwise the tool path would bypass the normal chat-image handoff gate and send an
+        // unusable negative prompt into a CFG-off worker.
+        val toolNegativeSupported = imageModelBinding.backend != ImageBackend.LOCAL ||
+            chatImageNegativePromptSupported(_uiState.value)
+        val effectiveImageOptions = imageModelBinding.options.copy(
+            negativePrompt = effectiveModelNegativePrompt.takeIf { toolNegativeSupported }
+        )
+        val requestId = UUID.randomUUID().toString()
+        val request = ChatGeneratedImageRequest(
+            id = requestId,
+            prompt = effectivePromptResult.effectivePrompt,
+            status = ChatGeneratedImageStatus.AWAITING_APPROVAL,
+            message = "角色请求生成一张图片。",
+            origin = ChatGeneratedImageOrigin.ASSISTANT_TOOL,
+            backendId = imageModelBinding.backend.name,
+            modelId = imageModelBinding.modelId,
+            modelName = imageModelBinding.modelName,
+            modelFingerprint = imageModelBinding.fingerprint,
+            generationOptionsJson = effectiveImageOptions.toJson().toString(),
+            toolCallId = call.id,
+            toolArgumentsJson = call.argumentsJson,
+            toolChatModelId = cloudModelId,
+            toolParamsJson = paramsBeforeAssistant.toJson(),
+            toolRequestMessageCount = originalRequestMessages.size,
+            toolRequestMessagesFingerprint = chatImageToolContextFingerprint(originalRequestMessages)
+        )
+        val imageSnapshot = buildChatImageRetrySnapshot(request, sessionId)
+        if (imageSnapshot == null) {
+            setPendingAssistantToolFailure("所选生图模型已不可用，请先恢复模型后重新发送本轮消息。")
+            return true
+        }
+        val snapshottedRequest = request.copy(
+            generationOptionsJson = imageSnapshot.options.toJson().toString()
+        )
+        pendingAssistantImageToolTurns[requestId] = PendingAssistantImageToolTurn(
+            requestId = requestId,
+            chatSessionId = sessionId,
+            originalRequestMessages = originalRequestMessages,
+            params = paramsBeforeAssistant,
+            cloudModelId = cloudModelId,
+            toolCalls = listOf(call),
+            primaryToolCallId = call.id,
+            initialToolOutputs = emptyMap()
+        )
+        attachAssistantImageRequestToTimeline(sessionId, snapshottedRequest)
+        val currentState = _uiState.value
+        val expectedImageIdentity = imageModelBinding.authorizationIdentity()
+        val currentChatIdentity = chatImageToolChatModelIdentity(
+            currentState.selectedCloudChatModelId,
+            currentState.selectedChatCloudConfig()?.normalized()
+        )
+        val currentImageIdentity = currentState.chatImageModelBinding()?.authorizationIdentity()
+        val selectionStillMatchesRequest = currentState.activeChatSessionId == sessionId &&
+            currentState.selectedCloudChatModelId == cloudModelId &&
+            currentChatIdentity == chatModelIdentity &&
+            currentImageIdentity == expectedImageIdentity
+        if (chatImageToolAuthorizationStore.getMode(
+                sessionId,
+                chatModelIdentity.takeIf { selectionStillMatchesRequest },
+                expectedImageIdentity.takeIf { selectionStillMatchesRequest }
+            ) ==
+            ChatImageToolAuthorizationMode.AUTO_APPROVE
+        ) {
+            // Automatic approval is valid only while the exact session, chat configuration,
+            // and image backend/model configuration remain the ones the user approved.
+            approveChatImageRequest(requestId)
+        }
+        return true
+    }
+
+    /**
+     * Normalizes a tool-call negative branch without pretending it is a positive image request.
+     * The bridge contract requires a positive branch, so a neutral subject is used only inside
+     * the isolated translation request. Authored tool arguments fail closed when their Chinese
+     * exclusion cannot be translated; a model-provided default may safely fall back to an empty
+     * branch so the image backend can apply its own defaults.
+     */
+    private suspend fun prepareAssistantImageNegativePrompt(
+        prompt: String,
+        chatConfig: CloudApiConfig?,
+        params: GenerationParams,
+        conversationContext: List<ChatMessage>,
+        preserveAuthoredNegative: Boolean
+    ): ChatImagePromptBridge.Result {
+        val source = prompt.trim()
+        if (source.isBlank()) {
+            return ChatImagePromptBridge.Result.Failed(
+                ChatImagePromptBridge.Code.INVALID_INPUT,
+                "负面图片描述为空。"
+            )
+        }
+        val neutralized = prepareAssistantImagePrompt(
+            prompt = "neutral image\nNegative prompt: $source",
+            chatConfig = chatConfig,
+            params = params,
+            conversationContext = conversationContext
+        )
+        return when (neutralized) {
+            is ChatImagePromptBridge.Result.Prepared -> {
+                val translatedNegative = neutralized.effectiveNegativePrompt
+                    ?.trim()
+                    ?.takeIf(String::isNotBlank)
+                when {
+                    translatedNegative != null -> neutralized.copy(
+                        originalPrompt = source,
+                        effectiveNegativePrompt = translatedNegative
+                    )
+                    preserveAuthoredNegative && !source.containsHanScript() &&
+                        source.length <= LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS &&
+                        source.isSafeAsciiDiffusionPrompt() -> neutralized.copy(
+                        originalPrompt = source,
+                        effectiveNegativePrompt = source
+                    )
+                    preserveAuthoredNegative -> neutralized.copy(originalPrompt = source)
+                    else -> neutralized.copy(
+                        originalPrompt = source,
+                        effectiveNegativePrompt = ""
+                    )
+                }
+            }
+            is ChatImagePromptBridge.Result.Failed -> {
+                // ASCII exclusions are already safe to send if the model is unavailable. A
+                // Chinese authored branch must never leak through unchanged; model defaults can
+                // be cleared instead of blocking an otherwise valid image request.
+                if (!source.containsHanScript() &&
+                    source.length <= LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS &&
+                    source.isSafeAsciiDiffusionPrompt()
+                ) {
+                    ChatImagePromptBridge.Result.Prepared(
+                        originalPrompt = source,
+                        effectivePrompt = "neutral image",
+                        translated = false,
+                        effectiveNegativePrompt = source
+                    )
+                } else if (!preserveAuthoredNegative && source.containsHanScript()) {
+                    ChatImagePromptBridge.Result.Prepared(
+                        originalPrompt = source,
+                        effectivePrompt = "neutral image",
+                        translated = false,
+                        effectiveNegativePrompt = ""
+                    )
+                } else {
+                    neutralized
+                }
+            }
+        }
+    }
+
+    /** Translate an assistant tool prompt with the exact chat connector that produced the call. */
+    private suspend fun prepareAssistantImagePrompt(
+        prompt: String,
+        chatConfig: CloudApiConfig?,
+        params: GenerationParams,
+        conversationContext: List<ChatMessage> = _uiState.value.messages
+    ): ChatImagePromptBridge.Result {
+        val config = chatConfig?.takeIf { it.configured }
+            ?: return ChatImagePromptBridge.Result.Failed(
+                ChatImagePromptBridge.Code.MODEL_ERROR,
+                "当前聊天模型配置不可用。请恢复聊天模型后重试。"
+            )
+        val state = _uiState.value
+        val assistantSnapshot = state.activeAssistantSnapshot()
+            ?: state.selectedAssistant()?.toConversationSnapshot()
+        val assistantRecord = assistantSnapshot?.assistantId
+            ?.let { assistantId -> state.assistants.firstOrNull { it.id == assistantId } }
+            ?: state.selectedAssistant()
+        val assistantName = assistantSnapshot?.name ?: assistantRecord?.name
+        val characterContext = assistantSnapshot?.systemPrompt ?: assistantRecord?.systemPrompt
+        val runtimeContext = runCatching {
+            withContext(Dispatchers.IO) {
+                chatContextComposer.compose(
+                    // The tool payload itself is the current query; include it so selected
+                    // knowledge chunks are retrieved for this image request rather than for an
+                    // older chat turn.
+                    messages = conversationContext + ChatMessage(Role.USER, prompt),
+                    params = params,
+                    assistantId = assistantSnapshot?.assistantId
+                        ?: state.selectedAssistantId.orEmpty(),
+                    chatSessionId = state.activeChatSessionId,
+                    knowledgeBaseIds = state.selectedKnowledgeBaseIds,
+                    fileContextEnabled = assistantSnapshot?.fileContextEnabled
+                        ?: assistantRecord?.fileContextEnabled
+                        ?: true
+                ).runtimeSystemContext
+            }
+        }.getOrNull()
+        val first = ChatImagePromptBridge.translateChatImagePrompt(
+            prompt = prompt,
+            stream = cloudChatProvider.streamChat(
+                config = config,
+                request = ChatImagePromptBridge.chatImagePromptBridgeRequest(
+                    prompt = prompt,
+                    params = params,
+                    assistantName = assistantName,
+                    characterContext = characterContext,
+                    conversationContext = conversationContext,
+                    runtimeContext = runtimeContext,
+                    protectNumericLiterals = false
+                )
+            ),
+            // A Responses tool call is also an image-skill invocation. The tool payload may be
+            // English, JSON, Markdown, or a compact preset; always let the selected chat model
+            // normalize it before the image encoder sees it.
+            requireModelSummary = true
+        )
+        if (first is ChatImagePromptBridge.Result.Prepared) return first
+        // Responses providers occasionally wrap the result in prose even when instructed not to.
+        // A single sequential fallback keeps assistant-tool image requests from sending known
+        // invalid Chinese text into an English-only image encoder.
+        return ChatImagePromptBridge.translateChatImagePrompt(
+            prompt = prompt,
+            stream = cloudChatProvider.streamChat(
+                config = config,
+                request = ChatImagePromptBridge.chatImagePromptBridgeRequest(
+                    prompt,
+                    params,
+                    systemPrompt = ChatImagePromptBridge.FALLBACK_SYSTEM_PROMPT,
+                    assistantName = assistantName,
+                    characterContext = characterContext,
+                    conversationContext = conversationContext,
+                    runtimeContext = runtimeContext,
+                    protectNumericLiterals = false
+                )
+            ),
+            requireModelSummary = true
+        )
+    }
+
+    private fun setPendingAssistantToolFailure(message: String) {
+        val state = _uiState.value
+        val messages = state.messages.toMutableList()
+        val pendingIndex = messages.indexOfLast {
+            it.role == Role.ASSISTANT && it.content.isBlank() && it.generatedImageRequest == null
+        }
+        val failedText = "图片请求未执行：$message"
+        if (pendingIndex >= 0) {
+            messages[pendingIndex] = messages[pendingIndex].copy(content = failedText)
+        } else {
+            messages += ChatMessage(Role.ASSISTANT, failedText)
+        }
+        val sessionId = state.activeChatSessionId ?: return
+        val assistantSnapshot = state.activeAssistantSnapshot()
+            ?: state.selectedAssistant()?.toConversationSnapshot()
+        val sessions = state.chatSessions.upsertSession(
+            sessionId = sessionId,
+            messages = messages,
+            assistantId = assistantSnapshot?.assistantId ?: state.selectedAssistantId,
+            assistantSnapshot = assistantSnapshot,
+            modelMode = state.selectedChatBackend.bindingValue(),
+            modelId = state.currentChatModelId()
+        )
+        _uiState.update {
+            it.copy(messages = messages, chatSessions = sessions, statusMessage = message)
+        }
+        persistChatSessions(sessions)
+    }
+
+    private fun attachAssistantImageRequestToTimeline(
+        chatSessionId: String,
+        request: ChatGeneratedImageRequest
+    ) {
+        val state = _uiState.value
+        val messages = state.messages.toMutableList()
+        val pendingIndex = messages.indexOfLast {
+            it.role == Role.ASSISTANT && it.content.isBlank() && it.generatedImageRequest == null
+        }
+        val card = ChatMessage(
+            role = Role.ASSISTANT,
+            content = request.assistantTranscriptText(),
+            generatedImageRequest = request
+        )
+        if (pendingIndex >= 0) messages[pendingIndex] = card else messages += card
+        val assistantSnapshot = state.activeAssistantSnapshot()
+            ?: state.selectedAssistant()?.toConversationSnapshot()
+        val sessions = state.chatSessions.upsertSession(
+            sessionId = chatSessionId,
+            messages = messages,
+            assistantId = assistantSnapshot?.assistantId ?: state.selectedAssistantId,
+            assistantSnapshot = assistantSnapshot,
+            modelMode = state.selectedChatBackend.bindingValue(),
+            modelId = state.currentChatModelId()
+        )
+        _uiState.update {
+            it.copy(messages = messages, chatSessions = sessions, statusMessage = null)
+        }
+        persistChatSessions(sessions)
+    }
+
+    private fun continueAssistantImageToolTurn(requestId: String, outputJson: String) {
+        synchronized(assistantImageContinuationLock) {
+            val current = findChatGeneratedImageRequest(requestId)?.second ?: return
+            if (!current.canContinueAssistantImageTurn() ||
+                !assistantImageContinuationsInFlight.add(requestId)
+            ) return
+            current
+        }
+        var reservation: UiGenerationReservation? = null
+        var started = false
+        try {
+            val (sessionId, request) = findChatGeneratedImageRequest(requestId) ?: return
+            val pending = pendingAssistantImageToolTurns[requestId]
+                ?: restorePendingAssistantImageToolTurn(sessionId, request)
+                ?: run {
+                    updateChatGeneratedImageRequest(
+                        sessionId,
+                        requestId,
+                        request.copy(
+                            toolOutputJson = outputJson,
+                            toolContinuationStatus = ChatImageToolContinuationStatus.COMPLETED,
+                            toolContinuationStarted = true,
+                            message = "图片已保存，但聊天上下文已变化，已跳过自动续答。你可以继续发送新消息。"
+                        )
+                    )
+                    pendingAssistantImageToolTurns.remove(requestId)
+                    return
+                }
+            val latest = findChatGeneratedImageRequest(requestId)?.second ?: request
+            updateChatGeneratedImageRequest(
+                sessionId,
+                requestId,
+                latest.copy(toolOutputJson = outputJson)
+            )
+            val state = _uiState.value
+            if (state.activeChatSessionId != pending.chatSessionId) {
+                _uiState.update { it.copy(statusMessage = "图片任务已结束；请回到原对话查看结果并继续聊天。") }
+                return
+            }
+            val cloudModelStillAvailable = state.cloudModels.any {
+                it.id == pending.cloudModelId && it.kind == CloudModelKind.CHAT && it.configured
+            }
+            if (!cloudModelStillAvailable) {
+                _uiState.update {
+                    it.copy(statusMessage = "图片已处理，但原云端聊天模型不可用；请恢复配置后继续角色回复。")
+                }
+                return
+            }
+            if (state.isGenerating) {
+                _uiState.update {
+                    it.copy(statusMessage = "图片已完成；当前聊天仍有生成任务，请完成或停止后再继续角色回复。")
+                }
+                return
+            }
+            // Reserve foreground UI ownership before persisting RUNNING. A background completion
+            // remains resumable and is retried by onAppForegrounded instead of being lost.
+            reservation = reserveUiGenerationStart()
+            if (reservation == null) {
+                _uiState.update {
+                    it.copy(statusMessage = "图片已完成；返回 MCA 后会继续角色回复。")
+                }
+                return
+            }
+            val call = pending.toolCalls.firstOrNull { it.id == pending.primaryToolCallId }
+            if (call == null) {
+                updateChatGeneratedImageRequest(
+                    sessionId,
+                    requestId,
+                    latest.copy(
+                        toolOutputJson = outputJson,
+                        toolContinuationStatus = ChatImageToolContinuationStatus.FAILED,
+                        toolContinuationStarted = false,
+                        message = "找不到本次工具调用记录，无法恢复角色回复。"
+                    )
+                )
+                return
+            }
+            updateChatGeneratedImageRequest(
+                pending.chatSessionId,
+                requestId,
+                latest.copy(
+                    toolOutputJson = outputJson,
+                    toolContinuationStatus = ChatImageToolContinuationStatus.RUNNING,
+                    toolContinuationStarted = true,
+                    message = latest.assistantTranscriptText()
+                )
+            )
+            val continuationState = _uiState.value
+            val messages = continuationState.messages + ChatMessage(Role.ASSISTANT, "")
+            val assistantSnapshot = continuationState.activeAssistantSnapshot()
+                ?: continuationState.selectedAssistant()?.toConversationSnapshot()
+            val sessions = continuationState.chatSessions.upsertSession(
+                sessionId = pending.chatSessionId,
+                messages = messages,
+                assistantId = assistantSnapshot?.assistantId ?: continuationState.selectedAssistantId,
+                assistantSnapshot = assistantSnapshot,
+                modelMode = ChatBackend.CLOUD.bindingValue(),
+                modelId = pending.cloudModelId
+            )
+            _uiState.update {
+                it.copy(
+                    input = "",
+                    messages = messages,
+                    chatSessions = sessions,
+                    isGenerating = true,
+                    generationPhase = null,
+                    generationTokenProgress = null,
+                    generationPersistProgress = null,
+                    generationStats = null,
+                    statusMessage = null
+                )
+            }
+            persistChatSessions(sessions)
+            started = startGeneration(
+                requestMessages = pending.originalRequestMessages,
+                reservation = reservation,
+                toolExchanges = listOf(ChatToolExchange(call, outputJson)),
+                paramsOverride = pending.params,
+                offerAssistantImageTool = false,
+                chatModelIdOverride = pending.cloudModelId,
+                continuationRequestId = requestId
+            )
+            if (!started) {
+                updateChatGeneratedImageRequest(
+                    pending.chatSessionId,
+                    requestId,
+                    latest.copy(
+                        toolOutputJson = outputJson,
+                        toolContinuationStatus = ChatImageToolContinuationStatus.FAILED,
+                        toolContinuationStarted = false,
+                        message = "角色回复未能启动，请检查云端模型后重试。"
+                    )
+                )
+                removeChatImageContinuationPlaceholder(pending.chatSessionId)
+            }
+        } finally {
+            if (!started) reservation?.let { uiGenerationOwnership.cancelPending(it) }
+            synchronized(assistantImageContinuationLock) {
+                assistantImageContinuationsInFlight.remove(requestId)
+            }
+        }
+    }
+
+    private fun finishAssistantImageContinuation(
+        requestId: String,
+        completed: Boolean,
+        failureMessage: String
+    ) {
+        val owner = findChatGeneratedImageRequest(requestId) ?: return
+        val (sessionId, request) = owner
+        if (request.toolContinuationStatus != ChatImageToolContinuationStatus.RUNNING) return
+        val updated = request.copy(
+            toolContinuationStatus = if (completed) {
+                ChatImageToolContinuationStatus.COMPLETED
+            } else {
+                ChatImageToolContinuationStatus.FAILED
+            },
+            toolContinuationStarted = completed,
+            message = if (completed) request.assistantTranscriptText() else failureMessage
+        )
+        updateChatGeneratedImageRequest(sessionId, requestId, updated)
+        if (completed) {
+            pendingAssistantImageToolTurns.remove(requestId)
+        }
+    }
+
+    private fun removeChatImageContinuationPlaceholder(chatSessionId: String) {
+        var updatedSessions: List<ChatSessionRecord>? = null
+        _uiState.update { state ->
+            if (state.activeChatSessionId != chatSessionId) return@update state
+            val last = state.messages.lastOrNull()
+            if (last?.role != Role.ASSISTANT || last.content.isNotBlank() ||
+                last.generatedImageRequest != null
+            ) return@update state
+            val messages = state.messages.dropLast(1)
+            val owner = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return@update state
+            val sessions = state.chatSessions.map { session ->
+                if (session.id == chatSessionId) {
+                    owner.copy(messages = messages, updatedAt = System.currentTimeMillis())
+                } else session
+            }.sortedForHistory()
+            updatedSessions = sessions
+            state.copy(
+                messages = messages,
+                chatSessions = sessions,
+                isGenerating = false,
+                generationPhase = null,
+                generationTokenProgress = null,
+                generationPersistProgress = null,
+                generationStats = null
+            )
+        }
+        updatedSessions?.let(::persistChatSessions)
+    }
+
+    /** Rebuild the volatile continuation envelope from the durable chat timeline after process death. */
+    private fun restorePendingAssistantImageToolTurn(
+        chatSessionId: String,
+        request: ChatGeneratedImageRequest
+    ): PendingAssistantImageToolTurn? {
+        if (request.origin != ChatGeneratedImageOrigin.ASSISTANT_TOOL ||
+            !request.canContinueAssistantImageTurn()
+        ) return null
+        val callId = request.toolCallId?.takeIf(String::isNotBlank) ?: return null
+        val modelId = request.toolChatModelId?.takeIf(String::isNotBlank) ?: return null
+        val params = request.toolParamsJson?.let { encoded ->
+            runCatching { GenerationParams.fromJson(JSONObject(encoded)) }.getOrNull()
+        } ?: return null
+        val state = _uiState.value
+        val session = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return null
+        val messages = if (state.activeChatSessionId == chatSessionId) state.messages else session.messages
+        val requestIndex = messages.indexOfFirst { it.generatedImageRequest?.id == request.id }
+        if (requestIndex < 0) return null
+        val requestMessageCount = request.toolRequestMessageCount ?: requestIndex
+        if (requestMessageCount !in 0..requestIndex) return null
+        val originalMessages = messages.take(requestMessageCount)
+        request.toolRequestMessagesFingerprint?.let { expected ->
+            if (chatImageToolContextFingerprint(originalMessages) != expected) return null
+        }
+        val call = ChatToolCall(
+            id = callId,
+            name = CHAT_IMAGE_TOOL_NAME,
+            argumentsJson = request.toolArgumentsJson ?: JSONObject().put("prompt", request.prompt).toString()
+        )
+        val pending = PendingAssistantImageToolTurn(
+            requestId = request.id,
+            chatSessionId = chatSessionId,
+            originalRequestMessages = originalMessages,
+            params = params,
+            cloudModelId = modelId,
+            toolCalls = listOf(call),
+            primaryToolCallId = call.id,
+            initialToolOutputs = emptyMap()
+        )
+        pendingAssistantImageToolTurns[request.id] = pending
+        return pending
+    }
+
+    private fun completeAssistantImageToolTurnForJob(jobId: String) {
+        val job = _uiState.value.imageJobs.firstOrNull { it.id == jobId } ?: return
+        val requestId = job.spec?.chatMessageId ?: return
+        val owner = findChatGeneratedImageRequest(requestId) ?: return
+        val (sessionId, request) = owner
+        if (request.origin != ChatGeneratedImageOrigin.ASSISTANT_TOOL) return
+        val output = when (request.status) {
+            ChatGeneratedImageStatus.DONE -> toolResultJson("completed", "Image generated successfully.")
+            ChatGeneratedImageStatus.CANCELLED -> toolResultJson("cancelled", "Image generation was cancelled.")
+            ChatGeneratedImageStatus.FAILED -> toolResultJson("failed", "Image generation failed.")
+            ChatGeneratedImageStatus.INTERRUPTED -> toolResultJson("interrupted", "Image generation was interrupted.")
+            ChatGeneratedImageStatus.AWAITING_APPROVAL,
+            ChatGeneratedImageStatus.QUEUED,
+            ChatGeneratedImageStatus.GENERATING -> return
+        }
+        updateChatGeneratedImageRequest(sessionId, requestId, request.copy(toolOutputJson = output))
+        continueAssistantImageToolTurn(requestId, output)
+    }
+
+    private fun toolResultJson(status: String, message: String): String = JSONObject()
+        .put("status", status)
+        .put("message", message)
+        .toString()
+
+    fun retryChatImageGeneration(requestId: String) {
+        val state = _uiState.value
+        if (state.isGenerating || imageGenerationJob?.isActive == true) {
+            _uiState.update {
+                it.copy(statusMessage = "当前有生成任务正在运行，完成或停止后再重试图片。")
+            }
+            return
+        }
+        val owner = state.chatSessions.firstNotNullOfOrNull { session ->
+            session.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
+                ?.let { session.id to it }
+        } ?: state.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
+            ?.let { message -> state.activeChatSessionId?.let { it to message } }
+        if (owner == null) {
+            _uiState.update { it.copy(statusMessage = "找不到这条图片请求，可能已从聊天记录删除。") }
+            return
+        }
+        val (sessionId, message) = owner
+        val previous = message.generatedImageRequest ?: return
+        val jobId = "ui-img-${UUID.randomUUID()}"
+        val snapshot = buildChatImageRetrySnapshot(previous, sessionId)
+        if (snapshot == null) {
+            _uiState.update {
+                it.copy(statusMessage = "原生图模型或参数已不可用；请重新选择原模型，或明确切换模型后再重试。")
+            }
+            return
+        }
+        val queuedRequest = previous.copy(
+            status = ChatGeneratedImageStatus.QUEUED,
+            message = "正在重新排队生成图片。",
+            imageAssetIds = emptyList(),
+            currentJobId = jobId,
+            toolOutputJson = null,
+            toolContinuationStatus = ChatImageToolContinuationStatus.NOT_STARTED,
+            toolContinuationStarted = false
+        )
+        updateChatGeneratedImageRequest(sessionId, requestId, queuedRequest)
+        val admitted = enqueueImageGeneration(
+            prompt = previous.prompt,
+            inputDraft = snapshot.inputDraft,
+            options = snapshot.options,
+            jobSnapshot = snapshot,
+            requestedJobId = jobId,
+            requestedChatSessionId = sessionId,
+            requestedChatMessageId = requestId
+        )
+        if (!admitted) {
+            updateChatGeneratedImageRequest(
+                chatSessionId = sessionId,
+                requestId = requestId,
+                request = queuedRequest.copy(
+                    status = ChatGeneratedImageStatus.FAILED,
+                    message = _uiState.value.statusMessage ?: "无法开始图片生成，请检查已选模型。"
+                )
+            )
+        } else {
+            updateChatImageRequestFromJob(sessionId, requestId, jobId)
+        }
+    }
+
+    fun approveChatImageRequest(requestId: String) {
+        val owner = findChatGeneratedImageRequest(requestId) ?: return
+        val (chatSessionId, request) = owner
+        if (request.status != ChatGeneratedImageStatus.AWAITING_APPROVAL) return
+        val snapshot = buildChatImageRetrySnapshot(request, chatSessionId)
+        if (snapshot == null) {
+            val failed = request.copy(
+                status = ChatGeneratedImageStatus.FAILED,
+                message = "原生图模型已不可用，请恢复该模型后重试；未切换到其他模型。"
+            )
+            updateChatGeneratedImageRequest(chatSessionId, requestId, failed)
+            if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL) {
+                continueAssistantImageToolTurn(requestId, toolResultJson("failed", failed.message))
+            }
+            return
+        }
+        val jobId = "ui-img-${UUID.randomUUID()}"
+        val queued = request.copy(
+            status = ChatGeneratedImageStatus.QUEUED,
+            message = "已确认，正在准备图片生成。",
+            currentJobId = jobId,
+            imageAssetIds = emptyList()
+        )
+        updateChatGeneratedImageRequest(chatSessionId, requestId, queued)
+        val admitted = enqueueImageGeneration(
+            prompt = request.prompt,
+            inputDraft = snapshot.inputDraft,
+            options = snapshot.options,
+            jobSnapshot = snapshot,
+            requestedJobId = jobId,
+            requestedChatSessionId = chatSessionId,
+            requestedChatMessageId = requestId
+        )
+        if (!admitted) {
+            val failed = queued.copy(
+                status = ChatGeneratedImageStatus.FAILED,
+                message = _uiState.value.statusMessage ?: "无法开始图片生成，请检查已选模型。"
+            )
+            updateChatGeneratedImageRequest(chatSessionId, requestId, failed)
+            if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL) {
+                continueAssistantImageToolTurn(requestId, toolResultJson("failed", failed.message))
+            }
+        } else {
+            updateChatImageRequestFromJob(chatSessionId, requestId, jobId)
+        }
+    }
+
+    fun rejectChatImageRequest(requestId: String) {
+        val owner = findChatGeneratedImageRequest(requestId) ?: return
+        val (chatSessionId, request) = owner
+        if (request.status != ChatGeneratedImageStatus.AWAITING_APPROVAL) return
+        val rejected = request.copy(
+            status = ChatGeneratedImageStatus.CANCELLED,
+            message = "你拒绝了这次生图请求，未生成图片。"
+        )
+        updateChatGeneratedImageRequest(chatSessionId, requestId, rejected)
+        if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL) {
+            continueAssistantImageToolTurn(requestId, toolResultJson("denied", rejected.message))
+        }
+    }
+
+    /** Resumes a terminal assistant tool turn if the process stopped before the follow-up reply. */
+    fun continueAssistantImageTurn(requestId: String) {
+        val owner = findChatGeneratedImageRequest(requestId) ?: return
+        val (_, request) = owner
+        if (!request.canContinueAssistantImageTurn()) return
+        val status = when (request.status) {
+            ChatGeneratedImageStatus.DONE -> "completed"
+            ChatGeneratedImageStatus.FAILED -> "failed"
+            ChatGeneratedImageStatus.CANCELLED -> "cancelled"
+            ChatGeneratedImageStatus.INTERRUPTED -> "interrupted"
+            ChatGeneratedImageStatus.AWAITING_APPROVAL,
+            ChatGeneratedImageStatus.QUEUED,
+            ChatGeneratedImageStatus.GENERATING -> return
+        }
+        val output = request.toolOutputJson ?: toolResultJson(
+            status,
+            when (status) {
+                "completed" -> "Image generated successfully."
+                "cancelled" -> "Image generation was cancelled."
+                "interrupted" -> "Image generation was interrupted."
+                else -> "Image generation failed."
+            }
+        )
+        continueAssistantImageToolTurn(requestId, output)
+    }
+
+    fun cancelChatImageGeneration(requestId: String) {
+        val owner = findChatGeneratedImageRequest(requestId) ?: return
+        val (_, request) = owner
+        if (request.status == ChatGeneratedImageStatus.AWAITING_APPROVAL) {
+            rejectChatImageRequest(requestId)
+            return
+        }
+        val jobId = request.currentJobId
+        if (jobId.isNullOrBlank()) {
+            _uiState.update { it.copy(statusMessage = "找不到这条图片任务的执行编号，请刷新聊天后重试。") }
+            return
+        }
+        cancelImageGenerationForJob(jobId)
+    }
+
+    private fun findChatGeneratedImageRequest(
+        requestId: String
+    ): Pair<String, ChatGeneratedImageRequest>? {
+        val state = _uiState.value
+        return state.chatSessions.firstNotNullOfOrNull { session ->
+            session.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
+                ?.generatedImageRequest
+                ?.let { session.id to it }
+        } ?: state.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
+            ?.generatedImageRequest
+            ?.let { request -> state.activeChatSessionId?.let { it to request } }
+    }
+
+    private fun hasUnresolvedAssistantImageToolTurn(chatSessionId: String?): Boolean {
+        if (chatSessionId.isNullOrBlank()) return false
+        val state = _uiState.value
+        val session = state.chatSessions.firstOrNull { it.id == chatSessionId }
+        val messages = if (state.activeChatSessionId == chatSessionId) state.messages else session?.messages.orEmpty()
+        return messages.any { message ->
+            message.generatedImageRequest?.let { request ->
+                request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
+                    request.toolContinuationStatus != ChatImageToolContinuationStatus.COMPLETED
+            } == true
+        } || pendingAssistantImageToolTurns.values.any { pending ->
+            pending.chatSessionId == chatSessionId
+        }
+    }
+
+    private fun hasActiveAssistantImageExecution(chatSessionId: String?): Boolean {
+        if (chatSessionId.isNullOrBlank()) return false
+        val state = _uiState.value
+        val session = state.chatSessions.firstOrNull { it.id == chatSessionId }
+        val messages = if (state.activeChatSessionId == chatSessionId) state.messages else session?.messages.orEmpty()
+        return messages.any { message ->
+            message.generatedImageRequest?.let { request ->
+                request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
+                    (request.status in setOf(
+                        ChatGeneratedImageStatus.AWAITING_APPROVAL,
+                        ChatGeneratedImageStatus.QUEUED,
+                        ChatGeneratedImageStatus.GENERATING
+                    ) || request.toolContinuationStatus == ChatImageToolContinuationStatus.RUNNING)
+            } == true
+        }
+    }
+
+    private fun isChatImageRequestActive(request: ChatGeneratedImageRequest): Boolean =
+        request.status in setOf(
+            ChatGeneratedImageStatus.AWAITING_APPROVAL,
+            ChatGeneratedImageStatus.QUEUED,
+            ChatGeneratedImageStatus.GENERATING
+        ) || request.toolContinuationStatus == ChatImageToolContinuationStatus.RUNNING
+
+    private fun buildChatImageRetrySnapshot(
+        request: ChatGeneratedImageRequest,
+        chatSessionId: String
+    ): ImageGenerationJobSpec? {
+        val state = _uiState.value
+        val options = request.generationOptionsJson?.let { encoded ->
+            runCatching { LocalImageGenerationOptions.fromHistoryJson(JSONObject(encoded)) }.getOrNull()
+        } ?: return null
+        val backend = request.backendId?.let { encoded ->
+            runCatching { ImageBackend.valueOf(encoded) }.getOrNull()
+        } ?: return null
+        val modelId = request.modelId ?: return null
+        return when (backend) {
+            ImageBackend.LOCAL -> {
+                val model = state.localImageModels.firstOrNull {
+                    it.id == modelId && it.configured
+                } ?: return null
+                if (request.modelFingerprint != null &&
+                    model.chatImageRetryFingerprint() != request.modelFingerprint
+                ) return null
+                ImageGenerationJobSpec(
+                    prompt = request.prompt,
+                    backend = backend,
+                    localModelSnapshot = model,
+                    modelId = model.id,
+                    modelName = request.modelName?.takeIf(String::isNotBlank) ?: model.displayName,
+                    inputDraft = LocalImageInputDraft(),
+                    options = options.copy(
+                        inputImage = null,
+                        maskImage = null,
+                        controlImage = null,
+                        taskMode = LocalImageTaskMode.TEXT_TO_IMAGE
+                    ),
+                    chatSessionId = chatSessionId,
+                    chatMessageId = request.id
+                )
+            }
+            ImageBackend.CLOUD -> {
+                val config = state.cloudModels.firstOrNull {
+                    it.id == modelId && it.kind == CloudModelKind.IMAGE && it.configured
+                }?.toImageConfig()?.normalized() ?: return null
+                if (request.modelFingerprint != null &&
+                    config.chatImageRetryFingerprint() != request.modelFingerprint
+                ) return null
+                ImageGenerationJobSpec(
+                    prompt = request.prompt,
+                    backend = backend,
+                    cloudConfigSnapshot = config,
+                    modelId = modelId,
+                    modelName = request.modelName?.takeIf(String::isNotBlank)
+                        ?: config.displayName.ifBlank { config.imageModel },
+                    inputDraft = LocalImageInputDraft(),
+                    options = options.copy(
+                        inputImage = null,
+                        maskImage = null,
+                        controlImage = null,
+                        taskMode = LocalImageTaskMode.TEXT_TO_IMAGE
+                    ),
+                    chatSessionId = chatSessionId,
+                    chatMessageId = request.id
+                )
+            }
+        }
+    }
+
+    private fun updateChatImageRequestFromJob(
+        chatSessionId: String,
+        requestId: String,
+        jobId: String
+    ) {
+        val job = _uiState.value.imageJobs.firstOrNull { it.id == jobId } ?: return
+        val request = _uiState.value.chatSessions.firstOrNull { it.id == chatSessionId }
+            ?.messages?.firstOrNull { it.generatedImageRequest?.id == requestId }
+            ?.generatedImageRequest
+            ?: _uiState.value.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
+                ?.generatedImageRequest
+            ?: return
+        val spec = job.spec ?: return
+        val fingerprint = when (spec.backend) {
+            ImageBackend.LOCAL -> spec.localModelSnapshot?.chatImageRetryFingerprint()
+            ImageBackend.CLOUD -> spec.cloudConfigSnapshot?.chatImageRetryFingerprint()
+        }
+        updateChatGeneratedImageRequest(
+            chatSessionId,
+            requestId,
+            request.copy(
+                currentJobId = jobId,
+                backendId = spec.backend.name,
+                modelId = spec.modelId,
+                modelName = spec.modelName,
+                modelFingerprint = fingerprint ?: request.modelFingerprint,
+                generationOptionsJson = spec.options.toJson().toString()
+            )
+        )
+    }
+
+    private fun updateChatGeneratedImageRequest(
+        chatSessionId: String,
+        requestId: String,
+        request: ChatGeneratedImageRequest
+    ) {
+        var persistedSessions: List<ChatSessionRecord>? = null
+        _uiState.update { state ->
+            val owner = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return@update state
+            val sourceMessages = if (state.activeChatSessionId == chatSessionId) {
+                state.messages
+            } else {
+                owner.messages
+            }
+            var found = false
+            val messages = sourceMessages.map { message ->
+                if (message.generatedImageRequest?.id != requestId) {
+                    message
+                } else {
+                    found = true
+                    message.copy(
+                        content = request.assistantTranscriptText(),
+                        generatedImageRequest = request
+                    )
+                }
+            }
+            if (!found) return@update state
+            val updatedOwner = owner.copy(messages = messages, updatedAt = System.currentTimeMillis())
+            val updatedSessions = state.chatSessions
+                .map { session -> if (session.id == chatSessionId) updatedOwner else session }
+                .sortedForHistory()
+            persistedSessions = updatedSessions
+            state.copy(
+                messages = if (state.activeChatSessionId == chatSessionId) messages else state.messages,
+                chatSessions = updatedSessions
+            )
+        }
+        persistedSessions?.let { sessions -> persistChatSessions(sessions) }
+    }
+
+    private fun buildChatImageCommitSnapshot(
+        job: ImageGenerationJobRecord,
+        images: List<ImageAssetRecord>
+    ): ChatImageCommitSnapshot? {
+        val spec = job.spec ?: return null
+        val chatSessionId = spec.chatSessionId ?: return null
+        val requestId = spec.chatMessageId ?: return null
+        if (images.isEmpty()) return null
+        val state = _uiState.value
+        val owner = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return null
+        val sourceMessages = if (state.activeChatSessionId == chatSessionId) state.messages else owner.messages
+        val currentRequest = sourceMessages.firstOrNull {
+            it.generatedImageRequest?.id == requestId
+        }?.generatedImageRequest ?: return null
+        if (!currentRequest.currentJobId.isNullOrBlank() && currentRequest.currentJobId != job.id) {
+            return null
+        }
+        val imageIds = images.map(ImageAssetRecord::id)
+        val completedRequest = currentRequest.copy(
+            status = ChatGeneratedImageStatus.DONE,
+            message = "已生成 ${imageIds.size} 张图片。",
+            imageAssetIds = imageIds
+        )
+        var found = false
+        val completedMessages = sourceMessages.map { message ->
+            if (message.generatedImageRequest?.id != requestId) {
+                message
+            } else {
+                found = true
+                message.copy(
+                    content = completedRequest.assistantTranscriptText(),
+                    generatedImageRequest = completedRequest
+                )
+            }
+        }
+        if (!found) return null
+        val updatedOwner = owner.copy(messages = completedMessages, updatedAt = System.currentTimeMillis())
+        val updatedSessions = state.chatSessions.map { session ->
+            if (session.id == chatSessionId) updatedOwner else session
+        }.sortedForHistory()
+        return ChatImageCommitSnapshot(
+            sessions = updatedSessions,
+            activeMessages = completedMessages.takeIf { state.activeChatSessionId == chatSessionId }
+        )
+    }
+
+    private fun persistFinalChatImageRequestForJob(jobId: String) {
+        val state = _uiState.value
+        val job = state.imageJobs.firstOrNull { it.id == jobId } ?: return
+        val spec = job.spec ?: return
+        val chatSessionId = spec.chatSessionId ?: return
+        val requestId = spec.chatMessageId ?: return
+        val existing = state.chatSessions.firstOrNull { it.id == chatSessionId }
+            ?.messages
+            ?.firstOrNull { it.generatedImageRequest?.id == requestId }
+            ?.generatedImageRequest
+            ?: state.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
+                ?.generatedImageRequest
+            ?: return
+        if (!existing.currentJobId.isNullOrBlank() && existing.currentJobId != jobId) return
+        val terminalStatus = when {
+            !job.status.terminal -> ChatGeneratedImageStatus.INTERRUPTED
+            else -> job.status.toChatGeneratedImageStatus()
+        }
+        val request = existing.copy(
+            status = terminalStatus,
+            message = when (terminalStatus) {
+                ChatGeneratedImageStatus.DONE -> "已生成 ${job.imageAssetIds.size.coerceAtLeast(1)} 张图片。"
+                ChatGeneratedImageStatus.CANCELLED -> job.message.ifBlank { "已取消图片生成。" }
+                ChatGeneratedImageStatus.FAILED -> job.message.ifBlank { "图片生成失败，请检查模型后重试。" }
+                ChatGeneratedImageStatus.INTERRUPTED -> "图片任务未能正常结束，可重试。"
+                ChatGeneratedImageStatus.QUEUED,
+                ChatGeneratedImageStatus.AWAITING_APPROVAL,
+                ChatGeneratedImageStatus.GENERATING -> job.message
+            },
+            imageAssetIds = if (terminalStatus == ChatGeneratedImageStatus.DONE) {
+                job.imageAssetIds.ifEmpty { job.imageAssetId?.let(::listOf).orEmpty() }
+            } else {
+                emptyList()
+            }
+        )
+        updateChatGeneratedImageRequest(chatSessionId, requestId, request)
     }
 
     fun regenerateLastResponse() {
@@ -10105,6 +12862,12 @@ class MainViewModel @JvmOverloads constructor(
         discardPendingAssistantOutput()
         val kept = state.messages.take(lastAssistant) + ChatMessage(Role.ASSISTANT, "")
         val generationReservation = reserveUiGenerationStart() ?: return
+        // Reserve background protection while the user is still in the UI,
+        // before Room persistence can delay the actual generation hand-off.
+        val preparationLease = McaGenerationForegroundService.acquire(
+            getApplication<Application>(),
+            McaGenerationForegroundService.KIND_CHAT
+        )
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         _uiState.update {
             val sessionId = it.activeChatSessionId ?: UUID.randomUUID().toString()
@@ -10127,12 +12890,16 @@ class MainViewModel @JvmOverloads constructor(
                 statusMessage = "正在重新生成上一条回答..."
             )
         }
-        persistConversationMutation(
+        val persistenceJob = persistConversationMutation(
             sessions = sessionsToPersist,
             rollback = rollback,
             onCommitted = { startGeneration(kept.dropLast(1), generationReservation) },
             onCommitFailed = { uiGenerationOwnership.cancelPending(generationReservation) }
         )
+        persistenceJob.invokeOnCompletion {
+            uiGenerationOwnership.cancelPending(generationReservation)
+            McaGenerationForegroundService.release(getApplication<Application>(), preparationLease)
+        }
     }
 
     fun deleteMessageAt(index: Int) {
@@ -10143,6 +12910,11 @@ class MainViewModel @JvmOverloads constructor(
             return
         }
         if (index !in state.messages.indices) return
+        val removedRequest = state.messages[index].generatedImageRequest
+        if (removedRequest?.let(::isChatImageRequestActive) == true) {
+            _uiState.update { it.copy(statusMessage = "这条消息仍关联运行中的图片任务，请等任务结束后再删除。") }
+            return
+        }
         val rollback = state.conversationMutationRollbackState()
         val updatedMessages = state.messages.filterIndexed { messageIndex, _ -> messageIndex != index }
         val emptiedActiveSessionId = state.activeChatSessionId.takeIf { updatedMessages.isEmpty() }
@@ -10171,6 +12943,7 @@ class MainViewModel @JvmOverloads constructor(
         emptiedActiveSessionId?.let { ownerId ->
             queueWorldBookCleanup(WorldBookScope.CHAT, setOf(ownerId))
         }
+        removedRequest?.let { pendingAssistantImageToolTurns.remove(it.id) }
         persistConversationMutation(updatedSessions, rollback)
     }
 
@@ -10184,6 +12957,17 @@ class MainViewModel @JvmOverloads constructor(
         val prune = state.messages.pruneLastConversationTurn()
         if (prune == null) {
             _uiState.update { it.copy(statusMessage = "\u6ca1\u6709\u53ef\u5220\u9664\u7684\u672c\u8f6e\u5bf9\u8bdd") }
+            return
+        }
+        val lastUserIndex = state.messages.indexOfLast { it.role == Role.USER }
+        val lastAssistantIndex = state.messages.indexOfLast { it.role == Role.ASSISTANT }
+        val removedEndIndex = if (lastAssistantIndex > lastUserIndex) lastAssistantIndex else lastUserIndex
+        val removedRequests = if (lastUserIndex >= 0 && removedEndIndex >= lastUserIndex) {
+            state.messages.subList(lastUserIndex, removedEndIndex + 1)
+                .mapNotNull { it.generatedImageRequest }
+        } else emptyList()
+        if (removedRequests.any(::isChatImageRequestActive)) {
+            _uiState.update { it.copy(statusMessage = "本轮仍关联运行中的图片任务，请等任务结束后再删除。") }
             return
         }
         val rollback = state.conversationMutationRollbackState()
@@ -10213,6 +12997,7 @@ class MainViewModel @JvmOverloads constructor(
         emptiedActiveSessionId?.let { ownerId ->
             queueWorldBookCleanup(WorldBookScope.CHAT, setOf(ownerId))
         }
+        removedRequests.forEach { pendingAssistantImageToolTurns.remove(it.id) }
         persistConversationMutation(
             sessions = updatedSessions,
             rollback = rollback,
@@ -10236,14 +13021,21 @@ class MainViewModel @JvmOverloads constructor(
 
     private fun startGeneration(
         requestMessages: List<ChatMessage>,
-        reservation: UiGenerationReservation? = null
-    ) {
-        val pendingBackgroundStop = backgroundGenerationStopJob
-        val admittedReservation = reservation ?: reserveUiGenerationStart() ?: return
+        reservation: UiGenerationReservation? = null,
+        toolExchanges: List<ChatToolExchange> = emptyList(),
+        paramsOverride: GenerationParams? = null,
+        offerAssistantImageTool: Boolean = true,
+        chatModelIdOverride: String? = null,
+        continuationRequestId: String? = null
+    ): Boolean {
+        val admittedReservation = reservation ?: reserveUiGenerationStart() ?: return false
         val generationRunId = admittedReservation.runId
+        val replyMetrics = ReplyGenerationMetrics(generationRunId)
         lateinit var ownedGenerationJob: Job
         ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
             var terminalEventSeen = false
+            var continuationCompleted = false
+            var continuationFailureMessage = "角色回复未完成，可点击继续角色回复重试。"
             fun generationStillOwnsUi(): Boolean =
                 generationRunSequence.get() == generationRunId
 
@@ -10257,6 +13049,7 @@ class MainViewModel @JvmOverloads constructor(
                         state
                     } else {
                         state.afterGenerationTerminated(stats, statusMessage)
+                            .withReplyGenerationMetrics(replyMetrics.finish())
                     }
                 }
             }
@@ -10269,10 +13062,14 @@ class MainViewModel @JvmOverloads constructor(
             }
 
             try {
-            pendingBackgroundStop?.join()
             if (!generationStillOwnsUi()) return@launch
             val initialState = _uiState.value
-            if (initialState.selectedChatBackend == ChatBackend.LOCAL) {
+            val effectiveChatBackend = if (chatModelIdOverride != null) {
+                ChatBackend.CLOUD
+            } else {
+                initialState.selectedChatBackend
+            }
+            if (effectiveChatBackend == ChatBackend.LOCAL) {
                 // Foreground reconciliation probes the isolated worker on IO. A send issued
                 // immediately after returning to the app must not overtake that probe and
                 // observe the transient unloaded projection before worker-loss recovery is armed.
@@ -10281,13 +13078,13 @@ class MainViewModel @JvmOverloads constructor(
             }
             val assistantSnapshot = initialState.activeAssistantSnapshot()
                 ?: initialState.selectedAssistant()?.toConversationSnapshot()
-            if (initialState.selectedChatBackend == ChatBackend.LOCAL &&
+            if (effectiveChatBackend == ChatBackend.LOCAL &&
                 !ensureLocalConversationContextInvalidated()
             ) {
                 return@launch
             }
-            val baseParams = initialState.params.let { current ->
-                val backendParams = if (initialState.selectedChatBackend == ChatBackend.CLOUD) {
+            val baseParams = (paramsOverride ?: initialState.params).let { current ->
+                val backendParams = if (effectiveChatBackend == ChatBackend.CLOUD) {
                     current.copy(
                         reasoningMode = ReasoningMode.STANDARD,
                         hideReasoning = false
@@ -10297,11 +13094,38 @@ class MainViewModel @JvmOverloads constructor(
                 }
                 backendParams.copy(nPredict = backendParams.effectiveNPredict())
             }
-            if (initialState.selectedChatBackend == ChatBackend.LOCAL && baseParams != initialState.params) {
+            if (effectiveChatBackend == ChatBackend.LOCAL && baseParams != initialState.params) {
                 persistGenerationParams(baseParams)
                 _uiState.update { it.copy(params = baseParams) }
             }
             val requestParams = assistantSnapshot?.applyTo(baseParams) ?: baseParams
+            // Compress older turns before retrieval/provider serialization. The
+            // deterministic strategy keeps system/role-card content; the normal
+            // admission gate below remains the final safety check.
+            val manualCompression = manualContextCompressionRequests.consume(initialState.activeChatSessionId)
+            val compressionThreshold = loadContextCompressionThreshold()
+            if (manualCompression) {
+                _uiState.update { it.copy(contextCompressionPending = false) }
+            }
+            val compression = compressChatRequestContext(
+                request = ChatRequest(messages = requestMessages, params = requestParams),
+                settings = ContextCompressionSettings(
+                    threshold = compressionThreshold,
+                    keepRecentMessages = 8
+                ),
+                trigger = if (manualCompression) {
+                    ContextCompressionTrigger.MANUAL
+                } else {
+                    ContextCompressionTrigger.AUTOMATIC
+                }
+            )
+            val effectiveRequestMessages = compression.request.messages
+            if (compression.didCompress) {
+                updateGenerationUi {
+                    it.copy(statusMessage = "已压缩 ${compression.compressedMessageCount} 条较早对话，保留角色设定和最近消息")
+                }
+            }
+            val imageModelBindingForToolTurn = initialState.chatImageModelBinding()
             val configuredPersonaForTurn = assistantSnapshot
                 ?.systemPrompt
                 ?.trim()
@@ -10312,7 +13136,7 @@ class MainViewModel @JvmOverloads constructor(
                     activeRuntimeIdentity?.runtime == LocalChatRuntime.LLAMA_CPP
             }
             val runtimeContextPlan = chatContextComposer.compose(
-                messages = requestMessages,
+                messages = effectiveRequestMessages,
                 params = requestParams,
                 assistantId = assistantSnapshot?.assistantId ?: initialState.selectedAssistantId,
                 chatSessionId = initialState.activeChatSessionId,
@@ -10379,7 +13203,7 @@ class MainViewModel @JvmOverloads constructor(
                 }
             }
             val webSearchTurn = executeWebSearchForChatTurn(
-                messages = requestMessages,
+                messages = effectiveRequestMessages,
                 config = webSearchConfigForTurn,
                 oneShotEnabled = webSearchTurnMode == WebSearchTurnMode.ON,
                 assistantWebSearchEnabled = assistantSnapshot?.webSearchEnabled
@@ -10427,27 +13251,54 @@ class MainViewModel @JvmOverloads constructor(
             }
             val contextAdmission = localContextWindowAdmission(
                 ChatRequest(
-                    messages = requestMessages,
+                    messages = effectiveRequestMessages,
                     params = requestParams,
                     runtimeSystemContext = runtimeSystemContextForTurn
                 )
             )
-            if (contextAdmission.isAccepted) {
+            if (!contextAdmission.isAccepted) {
+                appendAssistant(
+                    "\n${contextAdmission.userMessage ?: "当前请求超过模型上下文窗口，请压缩历史对话或缩短输入后重试。"}",
+                    generationRunId = generationRunId
+                )
                 updateGenerationUi {
                     it.copy(
-                        promptContextUsage = promptContextUsageFor(
-                            plan = runtimeContextPlan,
-                            admission = contextAdmission,
-                            params = requestParams
-                        )
+                        isGenerating = false,
+                        generationPhase = null,
+                        generationTokenProgress = null,
+                        generationPersistProgress = null,
+                        statusMessage = contextAdmission.userMessage
+                            ?: "当前请求超过模型上下文窗口"
                     )
                 }
+                persistChatSessions(generationRunId = generationRunId)
+                return@launch
             }
+            updateGenerationUi {
+                it.copy(
+                    promptContextUsage = promptContextUsageFor(
+                        plan = runtimeContextPlan,
+                        admission = contextAdmission,
+                        params = requestParams
+                    )
+                )
+            }
+            // Admission may deterministically trim older turns after the
+            // compression pass.  Use that exact list for every provider; the
+            // full list remains in the persisted session for future summaries.
+            val admittedRequestMessages = contextAdmission.request.messages
             val state = _uiState.value
-            val hasImageAttachments = requestMessages.any { it.imageAttachments.isNotEmpty() }
+            val hasImageAttachments = admittedRequestMessages.any { it.imageAttachments.isNotEmpty() }
             var localUiRequestId: String? = null
-            val stream = if (state.selectedChatBackend == ChatBackend.CLOUD) {
-                val cloudConfig = state.selectedChatCloudConfig()?.normalized()
+            var cloudModelIdForToolTurn: String? = chatModelIdOverride
+            var chatModelIdentityForToolTurn: String? = null
+            var chatConfigForToolTurn: CloudApiConfig? = null
+            val stream = if (effectiveChatBackend == ChatBackend.CLOUD) {
+                val cloudConfig = (chatModelIdOverride?.let { modelId ->
+                    state.cloudModels.firstOrNull {
+                        it.id == modelId && it.kind == CloudModelKind.CHAT && it.configured
+                    }?.toChatConfig()
+                } ?: state.selectedChatCloudConfig())?.normalized()
                 if (cloudConfig == null) {
                     appendAssistant(
                         "\n请先在模型管理 > 云端 加载一个对话推理模型。",
@@ -10465,6 +13316,12 @@ class MainViewModel @JvmOverloads constructor(
                     persistChatSessions(generationRunId = generationRunId)
                     return@launch
                 }
+                chatConfigForToolTurn = cloudConfig
+                cloudModelIdForToolTurn = chatModelIdOverride ?: initialState.currentChatModelId()
+                chatModelIdentityForToolTurn = chatImageToolChatModelIdentity(
+                    cloudModelIdForToolTurn,
+                    cloudConfig
+                )
                 if (hasImageAttachments && !cloudConfig.supportsVision) {
                     appendAssistant(
                         "\n当前云端推理引擎未开启图片输入。请在模型管理中编辑该云端推理引擎，打开“支持图片输入”后再发送图片。",
@@ -10483,7 +13340,7 @@ class MainViewModel @JvmOverloads constructor(
                     return@launch
                 }
                 val cloudMessages = runCatching {
-                    requestMessages.withInlineImageDataForCloud()
+                    admittedRequestMessages.withInlineImageDataForCloud()
                 }.getOrElse { error ->
                     appendAssistant(
                         "\n图片读取失败：无法读取或压缩这张图片。请换一张本地图片，或检查文件权限。${error.message?.let { "\n原因：$it" } ?: ""}",
@@ -10506,7 +13363,17 @@ class MainViewModel @JvmOverloads constructor(
                     ChatRequest(
                         messages = cloudMessages,
                         params = requestParams,
-                        runtimeSystemContext = runtimeSystemContextForTurn
+                        runtimeSystemContext = runtimeSystemContextForTurn,
+                        tools = if (offerAssistantImageTool && toolExchanges.isEmpty() &&
+                            cloudConfig.apiFormat == CloudApiFormat.OPENAI_RESPONSES &&
+                            cloudConfig.supportsTools &&
+                            imageModelBindingForToolTurn != null
+                        ) {
+                            listOf(chatImageToolDefinition())
+                        } else {
+                            emptyList()
+                        },
+                        toolExchanges = toolExchanges
                     )
                 )
             } else {
@@ -10528,7 +13395,7 @@ class MainViewModel @JvmOverloads constructor(
                     return@launch
                 }
                 val localMessages = if (hasImageAttachments) {
-                    runCatching { requestMessages.withLocalImageFilesForVision() }
+                    runCatching { admittedRequestMessages.withLocalImageFilesForVision() }
                         .getOrElse { error ->
                             appendAssistant(
                                 "\n本地图片预处理失败：图片压缩或缓存失败，请换一张本地图片后重试。${error.message?.let { "\n原因：$it" } ?: ""}",
@@ -10547,7 +13414,7 @@ class MainViewModel @JvmOverloads constructor(
                             return@launch
                         }
                 } else {
-                    requestMessages
+                    admittedRequestMessages
                 }
                 val uiRequestId = "ui-$generationRunId-${UUID.randomUUID().toString().replace("-", "")}"
                 localUiRequestId = uiRequestId
@@ -10578,7 +13445,7 @@ class MainViewModel @JvmOverloads constructor(
                     executionContext
                 )
             }
-            val runtimePhase = if (state.selectedChatBackend == ChatBackend.LOCAL) {
+            val runtimePhase = if (effectiveChatBackend == ChatBackend.LOCAL) {
                 UiGenerationRuntimePhase.LOCAL_ACTIVE
             } else {
                 UiGenerationRuntimePhase.CLOUD_ACTIVE
@@ -10614,6 +13481,7 @@ class MainViewModel @JvmOverloads constructor(
                     }
                     is GenerateEvent.Chunk -> {
                         if (!generationStillOwnsUi()) return@collect
+                        replyMetrics.record(event.stats)
                         appendAssistant(
                             delta = event.text,
                             reasoningDelta = event.reasoning,
@@ -10646,6 +13514,7 @@ class MainViewModel @JvmOverloads constructor(
                     }
                     is GenerateEvent.Done -> {
                         if (!generationStillOwnsUi()) return@collect
+                        replyMetrics.record(event.stats)
                         uiGenerationOwnership.markPhase(
                             generationRunId,
                             ownedGenerationJob,
@@ -10660,6 +13529,22 @@ class MainViewModel @JvmOverloads constructor(
                         try {
                             flushPendingAssistantOutput(generationRunId)
                             if (!generationStillOwnsUi()) return@collect
+                            if (event.toolCalls.isNotEmpty()) {
+                                val handled = handleAssistantImageToolCalls(
+                                    calls = event.toolCalls,
+                                    originalRequestMessages = requestMessages,
+                                    paramsBeforeAssistant = requestParams,
+                                    chatSessionId = initialState.activeChatSessionId,
+                                    cloudModelId = cloudModelIdForToolTurn,
+                                    chatModelIdentity = chatModelIdentityForToolTurn,
+                                    imageModelBinding = imageModelBindingForToolTurn,
+                                    chatConfig = chatConfigForToolTurn
+                                )
+                                if (handled) {
+                                    persistChatSessions(generationRunId = generationRunId)
+                                    return@collect
+                                }
+                            }
                             val requestId = localUiRequestId
                             val sequence = if (requestId == null) {
                                 null
@@ -10700,9 +13585,11 @@ class MainViewModel @JvmOverloads constructor(
                             }
                             if (!generationStillOwnsUi()) return@collect
                             persistChatSessions(generationRunId = generationRunId)
+                            continuationCompleted = true
                         } catch (error: CancellationException) {
                             throw error
                         } catch (error: Throwable) {
+                            continuationFailureMessage = "角色回复收尾失败：${error.message ?: "未知错误"}"
                             settleGenerationUi(
                                 event.stats,
                                 "生成已完成，但收尾处理失败：${error.message ?: "未知错误"}"
@@ -10718,6 +13605,7 @@ class MainViewModel @JvmOverloads constructor(
                         )
                         terminalEventSeen = true
                         settleGenerationUi(event.stats, event.message)
+                        continuationFailureMessage = event.message.ifBlank { continuationFailureMessage }
                         if (!generationStillOwnsUi()) return@collect
                         try {
                             flushPendingAssistantOutput(generationRunId)
@@ -10748,6 +13636,7 @@ class MainViewModel @JvmOverloads constructor(
                         } catch (error: CancellationException) {
                             throw error
                         } catch (error: Throwable) {
+                            continuationFailureMessage = "角色回复收尾失败：${error.message ?: "未知错误"}"
                             settleGenerationUi(
                                 event.stats,
                                 "${event.message}；生成收尾失败：${error.message ?: "未知错误"}"
@@ -10767,6 +13656,7 @@ class MainViewModel @JvmOverloads constructor(
                 terminalEventSeen = true
                 val message = error.message?.takeIf { it.isNotBlank() }
                     ?: error::class.java.simpleName
+                continuationFailureMessage = "角色回复失败：$message"
                 val stats = engine.stats.value.copy(lastError = message)
                 settleGenerationUi(stats, "生成失败：$message")
                 if (!generationStillOwnsUi()) return@launch
@@ -10799,7 +13689,7 @@ class MainViewModel @JvmOverloads constructor(
                             state.afterGenerationTerminated(
                                 fallbackStats,
                                 "生成流已结束，但运行时未返回完成状态，请重试。"
-                            )
+                            ).withReplyGenerationMetrics(replyMetrics.finish())
                         } else {
                             state
                         }
@@ -10814,49 +13704,101 @@ class MainViewModel @JvmOverloads constructor(
                         // from best-effort output persistence.
                     }
                 }
+                continuationRequestId?.let { requestId ->
+                    finishAssistantImageContinuation(
+                        requestId = requestId,
+                        completed = continuationCompleted,
+                        failureMessage = continuationFailureMessage
+                    )
+                }
             }
         }
         if (!uiGenerationOwnership.activate(admittedReservation, ownedGenerationJob)) {
             ownedGenerationJob.cancel()
-            return
+            uiGenerationOwnership.cancelPending(admittedReservation)
+            return false
         }
+        // Keep the main process eligible to finish cloud/UI chat work after
+        // the activity leaves the foreground. Local chat has an additional
+        // isolated worker service; this notification-only service covers the
+        // caller-side stream and persistence callbacks as well.
+        val foregroundLease = McaGenerationForegroundService.acquire(
+            getApplication<Application>(),
+            McaGenerationForegroundService.KIND_CHAT
+        )
         generationJob = ownedGenerationJob
+        replyGenerationMetrics = replyMetrics
         ownedGenerationJob.invokeOnCompletion {
-            uiGenerationOwnership.finish(generationRunId, ownedGenerationJob)
-            if (generationJob === ownedGenerationJob) {
-                generationJob = null
+            try {
+                uiGenerationOwnership.finish(generationRunId, ownedGenerationJob)
+                if (generationJob === ownedGenerationJob) {
+                    generationJob = null
+                }
+            } finally {
+                McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)
             }
         }
         ownedGenerationJob.start()
+        return true
     }
 
     fun stopGeneration() {
         if (rejectWhileConversationMutationInProgress()) return
+        if (!stopGenerationInProgress.compareAndSet(false, true)) return
         viewModelScope.launch {
-            val stoppedJob = cancelGenerationJob()
-            engine.stopGeneration()
-            stoppedJob?.join()
-            flushPendingAssistantOutput()
-            val rollback = _uiState.value.conversationMutationRollbackState()
-            var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-            _uiState.update {
-                sessionsToPersist = it.chatSessions
-                it.copy(
-                    isGenerating = false,
-                    generationPhase = null,
-                    generationTokenProgress = null,
-                    generationPersistProgress = null,
-                    engineLifecycle = engine.stats.value.lifecycleAfterGeneration(),
-                    statusMessage = "已停止生成"
-                )
+            try {
+                if (!_uiState.value.isGenerating) return@launch
+                val metrics = replyGenerationMetrics?.takeIf { it.runId == generationRunSequence.get() }
+                    ?.finish()
+                val stoppedJob = cancelGenerationJob()
+                val cancelledEpoch = generationRunSequence.get()
+                // The worker stop request is one-way and must not wait behind a
+                // native decode mutex. A wedged Binder decode is bounded here so
+                // the UI can recover even before the isolated worker watchdog
+                // finishes reclaiming its process.
+                val stopRequested = withTimeoutOrNull(STOP_GENERATION_REQUEST_TIMEOUT_MS) {
+                    engine.stopGeneration()
+                    true
+                } == true
+                val joined = withTimeoutOrNull(STOP_GENERATION_JOIN_TIMEOUT_MS) {
+                    stoppedJob?.join()
+                    true
+                } == true
+                if (generationRunSequence.get() != cancelledEpoch) return@launch
+                flushPendingAssistantOutput()
+                val rollback = _uiState.value.conversationMutationRollbackState()
+                var sessionsToPersist: List<ChatSessionRecord> = emptyList()
+                _uiState.update {
+                    val updated = it.withReplyGenerationMetrics(metrics)
+                    sessionsToPersist = updated.chatSessions
+                    updated.copy(
+                        isGenerating = false,
+                        generationPhase = null,
+                        generationTokenProgress = null,
+                        generationPersistProgress = null,
+                        generationStats = null,
+                        engineLifecycle = engine.stats.value.lifecycleAfterGeneration(),
+                        statusMessage = if (stopRequested && joined) {
+                            "已停止生成"
+                        } else {
+                            "已请求停止，正在恢复本地推理进程…"
+                        }
+                    )
+                }
+                persistConversationMutation(sessionsToPersist, rollback)
+            } finally {
+                stopGenerationInProgress.set(false)
             }
-            persistConversationMutation(sessionsToPersist, rollback)
         }
     }
 
     fun newChat() {
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
+        if (hasActiveAssistantImageExecution(state.activeChatSessionId)) {
+            _uiState.update { it.copy(statusMessage = "角色图片请求尚未完成，请先确认、取消或等待任务结束。") }
+            return
+        }
         if (state.isGenerating) {
             _uiState.update { it.copy(statusMessage = "请先停止当前生成，再新建对话") }
             return
@@ -10866,6 +13808,7 @@ class MainViewModel @JvmOverloads constructor(
                 messages = emptyList(),
                 input = "",
                 activeChatSessionId = null,
+                contextCompressionPending = false,
                 selectedKnowledgeBaseIds = emptySet(),
                 promptContextUsage = null,
                 statusMessage = "已新建对话"
@@ -10877,6 +13820,12 @@ class MainViewModel @JvmOverloads constructor(
     fun selectChatSession(sessionId: String) {
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
+        if (hasActiveAssistantImageExecution(state.activeChatSessionId) ||
+            hasActiveAssistantImageExecution(sessionId)
+        ) {
+            _uiState.update { it.copy(statusMessage = "角色图片请求尚未完成，请先确认、取消或等待任务结束。") }
+            return
+        }
         if (state.isGenerating) {
             _uiState.update { it.copy(statusMessage = "请先停止当前生成，再切换对话") }
             return
@@ -10886,11 +13835,7 @@ class MainViewModel @JvmOverloads constructor(
         val assistant = (session.assistantSnapshot?.assistantId ?: session.assistantId)
             ?.let { id -> state.assistants.firstOrNull { it.id == id } }
             ?: state.assistants.firstOrNull { it.id == state.selectedAssistantId }
-        val updatedParams = assistant?.toGenerationParams(state.params) ?: state.params
-        if (assistant != null && assistant.id != state.selectedAssistantId) {
-            assistantStore.saveSelectedAssistantId(assistant.id)
-            persistGenerationParams(updatedParams)
-        }
+        val assistantParams = assistant?.toGenerationParams(state.params) ?: state.params
         val sessionBackend = session.modelMode.toChatBackendOrNull()
         val sessionCloudModel = if (sessionBackend == ChatBackend.CLOUD) {
             state.cloudModels.firstOrNull { it.id == session.modelId && it.kind == CloudModelKind.CHAT && it.configured }
@@ -10900,6 +13845,25 @@ class MainViewModel @JvmOverloads constructor(
         val restoreCloud = sessionCloudModel != null
         val restoreLoadedLocal = sessionBackend == ChatBackend.LOCAL &&
             (session.modelId.isNullOrBlank() || session.modelId == state.loadedModelId)
+        val restoredBackend = when {
+            restoreCloud -> ChatBackend.CLOUD
+            restoreLoadedLocal -> ChatBackend.LOCAL
+            else -> state.selectedChatBackend
+        }
+        val restoredModelId = when {
+            restoreCloud -> sessionCloudModel?.id
+            restoredBackend == ChatBackend.LOCAL -> session.modelId ?: state.loadedModelId
+            else -> state.selectedCloudChatModelId
+        }
+        val updatedParams = loadModelGenerationParams(
+            backend = restoredBackend,
+            modelId = restoredModelId,
+            defaults = assistantParams
+        )
+        if (assistant != null && assistant.id != state.selectedAssistantId) {
+            assistantStore.saveSelectedAssistantId(assistant.id)
+            persistGenerationParams(updatedParams)
+        }
         if (sessionCloudModel != null) {
             cloudApiStore.saveSelectedBackend(ChatBackend.CLOUD)
             cloudApiStore.saveSelectedCloudChatModelId(sessionCloudModel.id)
@@ -10916,6 +13880,7 @@ class MainViewModel @JvmOverloads constructor(
                 "已打开对话；该会话原本使用的云端模型已不可用，请重新选择云端推理引擎。"
             else -> null
         }
+        val compressionPending = manualContextCompressionRequests.isPending(session.id)
         _uiState.update {
             it.copy(
                 messages = session.messages,
@@ -10924,18 +13889,27 @@ class MainViewModel @JvmOverloads constructor(
                 selectedKnowledgeBaseIds = selectedKnowledgeBaseIds,
                 selectedAssistantId = assistant?.id ?: it.selectedAssistantId,
                 params = updatedParams,
-                selectedChatBackend = when {
-                    restoreCloud -> ChatBackend.CLOUD
-                    restoreLoadedLocal -> ChatBackend.LOCAL
-                    else -> it.selectedChatBackend
-                },
+                selectedChatBackend = restoredBackend,
                 selectedCloudChatModelId = sessionCloudModel?.id ?: it.selectedCloudChatModelId,
                 cloudApiConfig = sessionCloudModel?.toChatConfig()?.normalized() ?: it.cloudApiConfig,
                 promptContextUsage = null,
+                contextCompressionPending = compressionPending,
                 statusMessage = status
             )
         }
         markLocalConversationContextInvalid()
+        session.messages.firstNotNullOfOrNull { message ->
+            message.generatedImageRequest?.takeIf { request ->
+                request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
+                    request.toolContinuationStatus == ChatImageToolContinuationStatus.NOT_STARTED &&
+                    request.status in setOf(
+                        ChatGeneratedImageStatus.DONE,
+                        ChatGeneratedImageStatus.FAILED,
+                        ChatGeneratedImageStatus.CANCELLED,
+                        ChatGeneratedImageStatus.INTERRUPTED
+                    )
+            }
+        }?.let { continueAssistantImageTurn(it.id) }
     }
 
     fun deleteChatSession(sessionId: String) {
@@ -10945,10 +13919,18 @@ class MainViewModel @JvmOverloads constructor(
             _uiState.update { it.copy(statusMessage = "请先停止当前生成，再删除记录") }
             return
         }
-        if (state.chatSessions.none { it.id == sessionId }) return
+        val session = state.chatSessions.firstOrNull { it.id == sessionId } ?: return
+        if (hasActiveAssistantImageExecution(sessionId) || state.imageJobs.any { job ->
+                job.spec?.chatSessionId == sessionId && !job.status.terminal
+            }
+        ) {
+            _uiState.update { it.copy(statusMessage = "该对话仍有图片任务正在执行，请等任务结束后再删除。") }
+            return
+        }
         val rollback = state.conversationMutationRollbackState()
         val remaining = state.chatSessions.filterNot { it.id == sessionId }
         val isActive = state.activeChatSessionId == sessionId
+        manualContextCompressionRequests.clear(sessionId)
         _uiState.update {
             it.copy(
                 chatSessions = remaining,
@@ -10957,11 +13939,18 @@ class MainViewModel @JvmOverloads constructor(
                 activeChatSessionId = if (isActive) null else it.activeChatSessionId,
                 selectedKnowledgeBaseIds = if (isActive) emptySet() else it.selectedKnowledgeBaseIds,
                 promptContextUsage = if (isActive) null else it.promptContextUsage,
+                contextCompressionPending = if (isActive) false else it.contextCompressionPending,
                 statusMessage = "已删除对话记录"
             )
         }
+        pendingAssistantImageToolTurns.entries.removeIf { entry ->
+            entry.value.chatSessionId == sessionId
+        }
         queueWorldBookCleanup(WorldBookScope.CHAT, setOf(sessionId))
         persistConversationMutation(remaining, rollback)
+        viewModelScope.launch(Dispatchers.IO) {
+            chatImageToolAuthorizationStore.remove(sessionId)
+        }
         viewModelScope.launch { chatAppearanceMutex.withLock { cleanupUnusedChatBackgrounds() } }
     }
 
@@ -11024,7 +14013,14 @@ class MainViewModel @JvmOverloads constructor(
             _uiState.update { it.copy(statusMessage = "请先停止当前生成，再清空历史") }
             return
         }
+        if (state.chatSessions.any { session -> hasActiveAssistantImageExecution(session.id) } ||
+            state.imageJobs.any { job -> job.spec?.chatSessionId != null && !job.status.terminal }
+        ) {
+            _uiState.update { it.copy(statusMessage = "仍有角色图片任务正在执行，请等任务结束后再清空历史。") }
+            return
+        }
         val rollback = state.conversationMutationRollbackState()
+        manualContextCompressionRequests.clearAll()
         _uiState.update {
             it.copy(
                 chatSessions = emptyList(),
@@ -11033,6 +14029,7 @@ class MainViewModel @JvmOverloads constructor(
                 activeChatSessionId = null,
                 selectedKnowledgeBaseIds = emptySet(),
                 promptContextUsage = null,
+                contextCompressionPending = false,
                 statusMessage = "已清空聊天记录"
             )
         }
@@ -11040,7 +14037,11 @@ class MainViewModel @JvmOverloads constructor(
             scope = WorldBookScope.CHAT,
             ownerIds = state.chatSessions.mapTo(hashSetOf()) { it.id }
         )
+        pendingAssistantImageToolTurns.clear()
         persistConversationMutation(emptyList(), rollback)
+        viewModelScope.launch(Dispatchers.IO) {
+            chatImageToolAuthorizationStore.prune(emptyList())
+        }
     }
 
     fun setPersistentPrefixCacheEnabled(enabled: Boolean) {
@@ -11117,73 +14118,37 @@ class MainViewModel @JvmOverloads constructor(
 
     fun clearChat() {
         viewModelScope.launch {
+            manualContextCompressionRequests.clear(_uiState.value.activeChatSessionId)
             cancelGenerationJob()
             engine.stopGeneration()
             discardPendingAssistantOutput()
             markLocalConversationContextInvalid()
-            _uiState.update { it.afterClearChatGenerationStopped(engine.stats.value) }
+            _uiState.update {
+                it.afterClearChatGenerationStopped(engine.stats.value).copy(contextCompressionPending = false)
+            }
             persistChatSessions()
         }
     }
 
     fun onAppBackgrounded() {
-        val uiRunId = generationRunSequence.get()
-        val expectedStopToken = engine.activeGenerationStopToken()?.takeIf { token ->
-            token.requestId.startsWith("ui-$uiRunId-")
+        // The process lifecycle callback only changes admission for *new* UI
+        // requests.  An already accepted chat request must continue in the
+        // isolated local worker or cloud transport while the activity is not
+        // visible.  Its foreground service owns process priority and its
+        // terminal/persistence callbacks retain the same generation epoch.
+        uiGenerationOwnership.background()
+        _uiState.update { state ->
+            val imageActive = state.imageJobs.any { job -> !job.status.terminal }
+            if ((state.isGenerating || imageActive) &&
+                state.statusMessage != BACKGROUND_TASK_STATUS
+            ) {
+                state.copy(statusMessage = BACKGROUND_TASK_STATUS)
+            } else {
+                state
+            }
         }
-        val cancellation = uiGenerationOwnership.background()
         if (adaptiveTuningJob?.isActive == true) {
             pauseAgentTuning()
-        }
-        if (!cancellation.cancelled) return
-        val backgroundedJob = cancellation.owner as? Job
-        if (backgroundedJob == null) {
-            if (generationRunSequence.get() == cancellation.invalidatedRunId) {
-                val pendingOutput = drainCancelledAssistantOutput(
-                    uiRunId,
-                    cancellation.invalidatedRunId
-                )
-                _uiState.update { state ->
-                    if (generationRunSequence.get() != cancellation.invalidatedRunId) {
-                        state
-                    } else {
-                        state.finalizeBackgroundCancelledAssistant(pendingOutput)
-                            .afterBackgroundGenerationStopped(
-                                engine.stats.value,
-                                nativeStopIssued = false
-                            )
-                    }
-                }
-                persistChatSessions(generationRunId = cancellation.invalidatedRunId)
-            }
-            return
-        }
-        // Cancellation is synchronous and prevents pre-native preparation from advancing while
-        // the conditional stop is dispatched. A blocked native request retains its captured token.
-        backgroundedJob.cancel()
-        backgroundGenerationStopJob = viewModelScope.launch {
-            val nativeStopIssued = if (cancellation.stopLocalRuntime) {
-                // The token is captured before invalidating UI ownership. If another transport
-                // claims the engine before this coroutine runs, the engine rejects this stale stop.
-                engine.stopGenerationIfActive(expectedStopToken)
-            } else {
-                false
-            }
-            if (generationRunSequence.get() != cancellation.invalidatedRunId) return@launch
-            if (cancellation.stopLocalRuntime) markLocalConversationContextInvalid()
-            val pendingOutput = drainCancelledAssistantOutput(
-                uiRunId,
-                cancellation.invalidatedRunId
-            )
-            _uiState.update { state ->
-                if (generationRunSequence.get() != cancellation.invalidatedRunId) {
-                    state
-                } else {
-                    state.finalizeBackgroundCancelledAssistant(pendingOutput)
-                        .afterBackgroundGenerationStopped(engine.stats.value, nativeStopIssued)
-                }
-            }
-            persistChatSessions(generationRunId = cancellation.invalidatedRunId)
         }
     }
 
@@ -11194,13 +14159,36 @@ class MainViewModel @JvmOverloads constructor(
      */
     fun onAppForegrounded() {
         uiGenerationOwnership.foreground()
+        _uiState.update { state ->
+            if (state.statusMessage != BACKGROUND_TASK_STATUS) {
+                state
+            } else {
+                val imageActive = state.imageJobs.any { job -> !job.status.terminal }
+                state.copy(
+                    statusMessage = if (state.isGenerating || imageActive) {
+                        "已回到前台，任务仍在运行。"
+                    } else {
+                        null
+                    }
+                )
+            }
+        }
         maybeCheckForAppUpdate()
+        resumePendingAssistantImageToolTurnIfReady()
         val recovery = foregroundRecoverySequence.incrementAndGet()
         foregroundRecoveryJob?.cancel()
-        apiLifecycleRequestJob?.cancel()
-        val apiOperation = apiLifecycleSequence.incrementAndGet()
         foregroundRecoveryJob = viewModelScope.launch(Dispatchers.IO) {
+            // Construction-time recovery and process-foreground recovery share
+            // the same serialized operation. Waiting for an already queued
+            // request avoids the old start -> cancel -> stop -> start sequence
+            // that could stop LocalApiForegroundService before Android delivered
+            // its first onStartCommand callback.
+            apiLifecycleRequestJob?.let { pending ->
+                if (pending !== coroutineContext[Job]) pending.join()
+            }
+            if (recovery != foregroundRecoverySequence.get()) return@launch
             val preferences = loadApiPreferences(getApplication<Application>())
+            val apiOperation = apiLifecycleSequence.incrementAndGet()
             val apiResult = applyLocalApiState(
                 operation = apiOperation,
                 enabled = preferences.apiEnabled,
@@ -11255,7 +14243,30 @@ class MainViewModel @JvmOverloads constructor(
                     )
                 }
             }
+            if (recovery == foregroundRecoverySequence.get()) {
+                resumePendingAssistantImageToolTurnIfReady()
+            }
         }
+    }
+
+    private fun resumePendingAssistantImageToolTurnIfReady() {
+        val state = _uiState.value
+        val sessionId = state.activeChatSessionId ?: return
+        val requestId = state.messages.asSequence()
+            .mapNotNull(ChatMessage::generatedImageRequest)
+            .firstOrNull { request ->
+                request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
+                    request.toolContinuationStatus == ChatImageToolContinuationStatus.NOT_STARTED &&
+                    request.status in setOf(
+                        ChatGeneratedImageStatus.DONE,
+                        ChatGeneratedImageStatus.FAILED,
+                        ChatGeneratedImageStatus.CANCELLED,
+                        ChatGeneratedImageStatus.INTERRUPTED
+                    )
+            }
+            ?.id
+            ?: return
+        continueAssistantImageTurn(requestId)
     }
 
     fun refreshLogs() {
@@ -11304,7 +14315,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun chatSessionExportFileName(sessionId: String): String {
         val session = _uiState.value.chatSessions.firstOrNull { it.id == sessionId }
-        val title = session?.title?.sanitizeFileName()?.ifBlank { "chat" } ?: "chat"
+        val title = safeChatExportTitle(session?.title)
         return "mca-$title-${System.currentTimeMillis()}.md"
     }
 
@@ -11394,6 +14405,7 @@ class MainViewModel @JvmOverloads constructor(
             userConfirmed = true
         )
         persistGenerationParams(updatedParams)
+        persistModelGenerationParams(state, updatedParams)
         _uiState.update {
             it.copy(
                 params = updatedParams,
@@ -11405,8 +14417,10 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun rollbackAgentParams() {
-        val previous = _uiState.value.rollbackParams ?: return
+        val state = _uiState.value
+        val previous = state.rollbackParams ?: return
         persistGenerationParams(previous)
+        persistModelGenerationParams(state, previous)
         _uiState.update {
             it.copy(
                 params = previous,
@@ -12573,11 +15587,12 @@ class MainViewModel @JvmOverloads constructor(
 
     private fun runAgentDebug(debugMode: AgentDebugMode, preference: UserPreference) {
         viewModelScope.launch(Dispatchers.IO) {
+            val profileOwner = _uiState.value
             _uiState.update { it.copy(preference = preference) }
             busy("Agent 正在运行${debugMode.label}...")
             runCatching {
                 val device = currentDeviceProfile()
-                val basePlan = _uiState.value.agentRecommendation?.tuningPlan
+                val basePlan = profileOwner.agentRecommendation?.tuningPlan
                     ?: buildRecommendation(preference, device, null).tuningPlan
                 val result = benchmarkRunner.runThreadSweep(
                     plan = basePlan,
@@ -12586,8 +15601,8 @@ class MainViewModel @JvmOverloads constructor(
                 )
                 val recommendation = buildRecommendation(preference, device, result.decodeTps)
                     .withBenchmarkThread(result)
-                val previousParams = _uiState.value.params
-                val updatedParams = recommendation.tuningPlan.applyTo(_uiState.value.params)
+                val previousParams = profileOwner.params
+                val updatedParams = recommendation.tuningPlan.applyTo(profileOwner.params)
                 appendBenchmarkHistory(device, result, updatedParams)
                 agentLogger.append(
                     device = device,
@@ -12597,6 +15612,7 @@ class MainViewModel @JvmOverloads constructor(
                     userConfirmed = true
                 )
                 persistGenerationParams(updatedParams)
+                persistModelGenerationParams(profileOwner, updatedParams)
                 _uiState.update {
                     it.copy(
                         deviceProfile = device,
@@ -12650,6 +15666,7 @@ class MainViewModel @JvmOverloads constructor(
                 userConfirmed = false
             )
             persistGenerationParams(updatedParams)
+            persistModelGenerationParams(ChatBackend.LOCAL, model.id, updatedParams)
             _uiState.update {
                 it.copy(
                     params = updatedParams,
@@ -12721,20 +15738,31 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     override fun onCleared() {
+        chatImagePromptBridgeJob?.cancel()
         val releasedRuntimeOwner = LocalApiRuntime.releaseOwner(localApiRuntimeOwner)
-        retireLocalApiListener(stopForegroundService = releasedRuntimeOwner)
+        // A stale ViewModel may be cleared after a replacement already owns the
+        // process. It must not stop the replacement's listener or notification
+        // service; only the owner that successfully released the singleton may
+        // tear down its server.
+        retireLocalApiListener(
+            stopForegroundService = releasedRuntimeOwner,
+            forceServerStop = releasedRuntimeOwner
+        )
         localImageWorkerClient.close()
         isolatedLocalChatRunners.close()
         super.onCleared()
     }
 
-    private fun retireLocalApiListener(stopForegroundService: Boolean) {
+    private fun retireLocalApiListener(
+        stopForegroundService: Boolean,
+        forceServerStop: Boolean
+    ) {
         apiLifecycleClosed.set(true)
         apiLifecycleSequence.incrementAndGet()
         foregroundRecoverySequence.incrementAndGet()
         foregroundRecoveryJob?.cancel()
         apiLifecycleRequestJob?.cancel()
-        stopApiServer()
+        if (forceServerStop) stopApiServer()
         if (stopForegroundService) {
             releaseLocalApiProcessOwnership()
         }
@@ -12768,14 +15796,21 @@ class MainViewModel @JvmOverloads constructor(
         var committed = false
         try {
             if (enabled) {
+                // Android may return from startForegroundService before
+                // onCreate/onStartCommand has promoted the service.  Starting
+                // the socket first creates a window where the API advertises
+                // itself but is not protected from process/background limits;
+                // on some cold starts that race left port 11435 unbound after
+                // the service request was lost.  Promote and wait first, then
+                // publish the listener.
+                check(ensureLocalApiForegroundServiceReady(restEnabled)) {
+                    "本机 API 后台服务未就绪，请回到应用前台后重试。"
+                }
                 startApiServer(if (restEnabled) "0.0.0.0" else "127.0.0.1")
             } else {
                 stopApiServer()
+                setLocalApiForegroundService(false, false)
             }
-            currentCoroutineContext().ensureActive()
-            if (!operationIsCurrent()) return@withLock null
-
-            setLocalApiForegroundService(enabled, restEnabled)
             currentCoroutineContext().ensureActive()
             if (!operationIsCurrent()) return@withLock null
 
@@ -12801,9 +15836,9 @@ class MainViewModel @JvmOverloads constructor(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
+            if (!operationIsCurrent()) return@withLock null
             stopApiServer()
             runCatching { setLocalApiForegroundService(false, false) }
-            if (!operationIsCurrent()) return@withLock null
             _uiState.update { state ->
                 if (!operationIsCurrent()) {
                     state
@@ -12818,11 +15853,43 @@ class MainViewModel @JvmOverloads constructor(
             committed = true
             LocalApiApplyResult(running = false, restEnabled = false, failure = error)
         } finally {
-            if (!committed || !operationIsCurrent()) {
+            // A superseded operation must not tear down a replacement operation's
+            // listener or foreground service. The replacement owns cleanup after
+            // it acquires the same mutex; onCleared() handles process teardown.
+            if (!committed && operationIsCurrent()) {
                 stopApiServer()
                 runCatching { setLocalApiForegroundService(false, false) }
             }
         }
+    }
+
+    private suspend fun awaitLocalApiForegroundServiceReady(): Boolean {
+        if (LocalApiForegroundService.isForegroundReady()) return true
+        return withTimeoutOrNull(LOCAL_API_FOREGROUND_READY_TIMEOUT_MS) {
+            while (!LocalApiForegroundService.isForegroundReady()) {
+                currentCoroutineContext().ensureActive()
+                delay(25L)
+            }
+            true
+        } == true
+    }
+
+    private suspend fun ensureLocalApiForegroundServiceReady(restEnabled: Boolean): Boolean {
+        repeat(LOCAL_API_FOREGROUND_READY_ATTEMPTS) { attempt ->
+            if (LocalApiForegroundService.isForegroundReady()) return true
+            if (attempt > 0) delay(100L)
+            runCatching {
+                setLocalApiForegroundService(true, restEnabled)
+            }.getOrElse { error ->
+                if (attempt == LOCAL_API_FOREGROUND_READY_ATTEMPTS - 1) throw error
+            }
+            if (awaitLocalApiForegroundServiceReady()) return true
+            // A timed-out start can leave an OEM service request queued. Clear
+            // that request before the bounded retry so the next attempt is a
+            // fresh startForegroundService call instead of an idempotent no-op.
+            runCatching { LocalApiForegroundService.stop(getApplication()) }
+        }
+        return false
     }
 
     private fun setLocalApiForegroundService(enabled: Boolean, restEnabled: Boolean) {
@@ -12831,7 +15898,9 @@ class MainViewModel @JvmOverloads constructor(
             // Only the current process owner may mutate the shared notification service.
             if (localApiProcessOwnerToken !== localApiRuntimeOwner || apiLifecycleClosed.get()) return
             if (enabled) {
-                LocalApiForegroundService.start(getApplication(), restEnabled)
+                check(LocalApiForegroundService.start(getApplication(), restEnabled)) {
+                    "系统拒绝启动 API 后台服务，请回到应用前台后重新开启 API。"
+                }
             } else {
                 LocalApiForegroundService.stop(getApplication())
             }
@@ -13413,7 +16482,7 @@ class MainViewModel @JvmOverloads constructor(
         preserveReusableNativePrefix: Boolean = false,
         onCommitted: (() -> Unit)? = null,
         onCommitFailed: (() -> Unit)? = null
-    ) {
+    ): Job {
         val snapshot = sessions.map { session ->
             session.copy(messages = session.messages.toList())
         }
@@ -13511,6 +16580,7 @@ class MainViewModel @JvmOverloads constructor(
         }
         conversationMutationBarrier = mutation
         localConversationContextInvalidationJob = mutation
+        return mutation
     }
 
     private fun persistKnowledgeBaseBindings(sessionId: String, knowledgeBaseIds: Set<String>) {
@@ -13699,6 +16769,7 @@ class MainViewModel @JvmOverloads constructor(
             .map { it.trim() }
             .firstOrNull { line ->
                 line.isNotBlank() &&
+                    !isUnsafeChatTitleLine(line) &&
                     !line.startsWith("【上传文件：") &&
                     !line.startsWith("【上传图片：") &&
                     !line.startsWith("（文件较大")
@@ -13759,7 +16830,8 @@ class MainViewModel @JvmOverloads constructor(
         status: ImageGenerationStatusRecord,
         message: String,
         imageAssetId: String? = null,
-        preview: PublishedLocalImagePreview? = null
+        preview: PublishedLocalImagePreview? = null,
+        imageAssetIds: List<String> = emptyList()
     ): List<ImageGenerationJobRecord> =
         map { job ->
             if (job.id == jobId) {
@@ -13767,7 +16839,8 @@ class MainViewModel @JvmOverloads constructor(
                     status = status,
                     message = message,
                     imageAssetId = imageAssetId ?: job.imageAssetId,
-                    preview = preview
+                    preview = preview,
+                    imageAssetIds = imageAssetIds
                 )
             } else {
                 job
@@ -13779,13 +16852,96 @@ class MainViewModel @JvmOverloads constructor(
             .firstOrNull { it.id == selectedCloudChatModelId && it.kind == CloudModelKind.CHAT }
             ?.toChatConfig()
 
+    /** Secret-free identity for the exact Responses chat endpoint and model configuration. */
+    private fun chatImageToolChatModelIdentity(
+        modelId: String?,
+        config: CloudApiConfig?
+    ): String? {
+        val normalizedId = modelId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val normalized = config?.normalized() ?: return null
+        if (!normalized.configured || normalized.apiFormat != CloudApiFormat.OPENAI_RESPONSES ||
+            !normalized.supportsTools
+        ) return null
+        return encodeChatImageAuthorizationIdentity(
+            listOf(
+                normalizedId,
+                normalized.apiFormat.name,
+                normalized.baseUrl,
+                normalized.chatModel,
+                normalized.supportsTools.toString(),
+                normalized.responsesReasoningEnabled.toString()
+            )
+        )
+    }
+
+    private fun AssistantImageModelBinding.authorizationIdentity(): String =
+        encodeChatImageAuthorizationIdentity(
+            listOf(backend.name, modelId, fingerprint)
+        )
+
+    private fun encodeChatImageAuthorizationIdentity(parts: List<String>): String =
+        parts.joinToString(separator = "\u0000") { value -> "${value.length}:$value" }
+
     private fun MainUiState.selectedImageCloudConfig(): CloudApiConfig? =
         cloudModels
             .firstOrNull { it.id == selectedCloudImageModelId && it.kind == CloudModelKind.IMAGE }
             ?.toImageConfig()
 
+    private fun MainUiState.canOfferAssistantImageTool(): Boolean = when (selectedImageBackend) {
+        ImageBackend.LOCAL -> selectedLocalImageModel() != null
+        ImageBackend.CLOUD -> selectedImageCloudConfig() != null
+    }
+
+    private fun MainUiState.chatImageModelBinding(): AssistantImageModelBinding? {
+        val state = this
+        return when (selectedImageBackend) {
+        ImageBackend.LOCAL -> selectedLocalImageModel()?.let { model ->
+            AssistantImageModelBinding(
+                backend = ImageBackend.LOCAL,
+                modelId = model.id,
+                modelName = model.displayName,
+                options = chatImageOptionsForCurrentSelection(state),
+                fingerprint = model.chatImageRetryFingerprint()
+            )
+        }
+        ImageBackend.CLOUD -> selectedImageCloudConfig()?.let { config ->
+            val modelId = selectedCloudImageModelId ?: return@let null
+            AssistantImageModelBinding(
+                backend = ImageBackend.CLOUD,
+                modelId = modelId,
+                modelName = config.displayName.ifBlank { config.imageModel },
+                options = LocalImageGenerationOptions(batchCount = 1),
+                fingerprint = config.chatImageRetryFingerprint()
+            )
+        }
+        }
+    }
+
     private fun MainUiState.selectedLocalImageModel(): LocalImageModelRecord? =
         localImageModels.firstOrNull { it.id == selectedLocalImageModelId && it.configured }
+
+    /** Captures the selected image model's default conditioning for chat-triggered images. */
+    private fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions {
+        val base = LocalImageGenerationOptions(batchCount = 1)
+        if (state.selectedImageBackend != ImageBackend.LOCAL) return base
+        val model = state.selectedLocalImageModel() ?: return base
+        val bundleRoot = model.bundleRoot
+            ?.takeIf(String::isNotBlank)
+            ?.let(::File)
+            ?.takeIf(File::isDirectory)
+            ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+        val defaultNegative = runCatching {
+            val profile = resolveLocalImageExecutionProfile(
+                model = model,
+                options = base.normalizedForPromptExecutionProfile(model.runtime),
+                bundleRoot = bundleRoot
+            ).profile
+            chatImageDefaultNegativePromptForProfile(profile)
+        }.getOrElse {
+            chatImageFallbackNegativePromptForModel(model.family, model.runtime)
+        }
+        return base.copy(negativePrompt = defaultNegative)
+    }
 
     private fun CloudApiConfig.normalized(): CloudApiConfig =
         copy(
@@ -13796,7 +16952,7 @@ class MainViewModel @JvmOverloads constructor(
             imageModel = imageModel.trim(),
             imageSize = imageSize.trim().ifBlank { "1024x1024" },
             imageEndpointPath = imageEndpointPath.trim().trim('/')
-        ).normalizedForImageRequest()
+        ).normalizedForImageRequest(preserveProviderName = true)
 
     private fun ChatSessionRecord.toMarkdown(): String = buildString {
         append("# ").append(title).append("\n\n")
@@ -13824,11 +16980,6 @@ class MainViewModel @JvmOverloads constructor(
         Role.ASSISTANT -> "MCA"
     }
 
-    private fun String.sanitizeFileName(): String =
-        replace(Regex("""[\\/:*?"<>|]"""), "_")
-            .trim()
-            .take(36)
-
     private fun displayNameForUri(uri: Uri): String {
         val resolver = getApplication<Application>().contentResolver
         val queriedName = if (uri.scheme.equals("content", ignoreCase = true)) {
@@ -13849,15 +17000,58 @@ class MainViewModel @JvmOverloads constructor(
         val mime = resolver.getType(uri).orEmpty().lowercase()
         val lowerName = name.lowercase()
         return mime.startsWith("text/") ||
-            mime in setOf("application/json", "application/xml", "application/x-ndjson") ||
+            mime in setOf(
+                "application/json", "application/xml", "application/x-ndjson",
+                "application/yaml", "application/x-yaml", "text/yaml",
+                "text/csv", "application/rtf"
+            ) ||
             lowerName.endsWith(".txt") ||
             lowerName.endsWith(".md") ||
             lowerName.endsWith(".markdown") ||
             lowerName.endsWith(".json") ||
+            lowerName.endsWith(".json5") ||
             lowerName.endsWith(".jsonl") ||
             lowerName.endsWith(".xml") ||
+            lowerName.endsWith(".yaml") ||
+            lowerName.endsWith(".yml") ||
             lowerName.endsWith(".csv") ||
             lowerName.endsWith(".log") ||
+            lowerName.endsWith(".html") ||
+            lowerName.endsWith(".htm") ||
+            lowerName.endsWith(".rst") ||
+            lowerName.endsWith(".tex") ||
+            lowerName.endsWith(".srt") ||
+            lowerName.endsWith(".vtt") ||
+            lowerName.endsWith(".toml") ||
+            lowerName.endsWith(".ini") ||
+            lowerName.endsWith(".conf") ||
+            lowerName.endsWith(".cfg") ||
+            lowerName.endsWith(".sql") ||
+            lowerName.endsWith(".sh") ||
+            lowerName.endsWith(".bash") ||
+            lowerName.endsWith(".zsh") ||
+            lowerName.endsWith(".bat") ||
+            lowerName.endsWith(".cmd") ||
+            lowerName.endsWith(".ps1") ||
+            lowerName.endsWith(".c") ||
+            lowerName.endsWith(".h") ||
+            lowerName.endsWith(".cc") ||
+            lowerName.endsWith(".cpp") ||
+            lowerName.endsWith(".cxx") ||
+            lowerName.endsWith(".hpp") ||
+            lowerName.endsWith(".cs") ||
+            lowerName.endsWith(".go") ||
+            lowerName.endsWith(".rs") ||
+            lowerName.endsWith(".swift") ||
+            lowerName.endsWith(".rb") ||
+            lowerName.endsWith(".php") ||
+            lowerName.endsWith(".dart") ||
+            lowerName.endsWith(".vue") ||
+            lowerName.endsWith(".jsx") ||
+            lowerName.endsWith(".tsx") ||
+            lowerName.endsWith(".gradle") ||
+            lowerName.endsWith(".properties") ||
+            lowerName.endsWith(".proto") ||
             lowerName.endsWith(".kt") ||
             lowerName.endsWith(".java") ||
             lowerName.endsWith(".py") ||
@@ -13902,7 +17096,7 @@ class MainViewModel @JvmOverloads constructor(
                 }
             }
         } ?: error("无法读取文件")
-        return output.toByteArray().toString(Charsets.UTF_8) to truncated
+        return decodeImportedText(output.toByteArray()) to truncated
     }
 
     private fun createFileAsset(
@@ -14103,15 +17297,22 @@ class MainViewModel @JvmOverloads constructor(
         onProgress: (LocalImageProgress) -> Unit = {}
     ): List<ImageAssetRecord> {
         val result = try {
-            localImageWorkerClient.generate(
-                model = model,
-                prompt = prompt,
-                options = options,
-                inputDraft = inputDraft,
-                onProgress = onProgress,
-                requestId = requestId,
-                batchLineage = batchLineage
-            )
+            activeLocalImageWorkerRequestId = requestId
+            try {
+                localImageWorkerClient.generate(
+                    model = model,
+                    prompt = prompt,
+                    options = options,
+                    inputDraft = inputDraft,
+                    onProgress = onProgress,
+                    requestId = requestId,
+                    batchLineage = batchLineage
+                )
+            } finally {
+                if (activeLocalImageWorkerRequestId == requestId) {
+                    activeLocalImageWorkerRequestId = null
+                }
+            }
         } catch (error: Throwable) {
             if (error !is CancellationException && error !is LocalImageWorkerCancelledException) {
                 recordLocalImageExecutionOutcome(model, error.message ?: "本地 native 生图执行失败。")
@@ -14630,6 +17831,7 @@ class MainViewModel @JvmOverloads constructor(
 
     private val cloudProviderPresets = listOf(
         CloudProviderPreset("openai", "OpenAI-compatible", "自定义推理引擎", CloudApiFormat.OPENAI_COMPATIBLE, "", ""),
+        CloudProviderPreset("responses", "OpenAI Responses", "自定义推理引擎", CloudApiFormat.OPENAI_RESPONSES, "", ""),
         CloudProviderPreset("anthropic", "Anthropic Messages", "自定义推理引擎", CloudApiFormat.ANTHROPIC, "", "")
     )
 
@@ -14658,6 +17860,51 @@ class MainViewModel @JvmOverloads constructor(
             .putBoolean("api_enabled", apiEnabled)
             .putBoolean("rest_enabled", apiEnabled && restEnabled)
             .apply()
+    }
+
+    private fun modelGenerationProfileKey(
+        backend: ChatBackend,
+        modelId: String?
+    ): String? {
+        val id = modelId?.trim().takeIf { !it.isNullOrBlank() } ?: return null
+        return when (backend) {
+            ChatBackend.LOCAL -> ModelGenerationProfileKey.local(id)
+            ChatBackend.CLOUD -> ModelGenerationProfileKey.cloud(id)
+        }
+    }
+
+    private fun MainUiState.modelGenerationProfileKey(): String? =
+        modelGenerationProfileKey(selectedChatBackend, currentChatModelId())
+
+    /**
+     * Applies a model's semantic profile without replacing the selected
+     * assistant/system prompt or native load-bound settings.
+     */
+    private fun loadModelGenerationParams(
+        backend: ChatBackend,
+        modelId: String?,
+        defaults: GenerationParams
+    ): GenerationParams {
+        val key = modelGenerationProfileKey(backend, modelId) ?: return defaults
+        return modelGenerationProfileStore.loadOrCreate(key, defaults)
+    }
+
+    private fun persistModelGenerationParams(state: MainUiState, params: GenerationParams) {
+        persistModelGenerationParams(
+            backend = state.selectedChatBackend,
+            modelId = state.currentChatModelId(),
+            params = params
+        )
+    }
+
+    private fun persistModelGenerationParams(
+        backend: ChatBackend,
+        modelId: String?,
+        params: GenerationParams
+    ) {
+        modelGenerationProfileKey(backend, modelId)?.let { key ->
+            modelGenerationProfileStore.save(key, params)
+        }
     }
 
     private fun loadGenerationParams(application: Application): GenerationParams {
@@ -14811,7 +18058,10 @@ class MainViewModel @JvmOverloads constructor(
             .trim()
         return PreparedChatInput(
             text = textWithoutAttachments,
-            imageAttachments = attachments
+            // Keep composer parsing cheap: the send callback runs on the UI
+            // thread. Content hashes are computed by the IO-bound vision and
+            // persistence paths; display also collapses imported file copies.
+            imageAttachments = attachments.deduplicateVisionAttachmentsForDisplay()
         )
     }
 
@@ -14836,10 +18086,12 @@ class MainViewModel @JvmOverloads constructor(
                 } else {
                     message.copy(
                         imageAttachments = message.imageAttachments
+                            .deduplicateVisionAttachments()
                             .take(MAX_CHAT_IMAGES_PER_MESSAGE)
                             .map { attachment ->
                                 if (attachment.hasInlineData) attachment else attachment.withCompressedInlineData()
                             }
+                            .deduplicateVisionAttachments()
                     )
                 }
             }
@@ -14853,8 +18105,10 @@ class MainViewModel @JvmOverloads constructor(
                 } else {
                     message.copy(
                         imageAttachments = message.imageAttachments
+                            .deduplicateVisionAttachments()
                             .take(MAX_CHAT_IMAGES_PER_MESSAGE)
                             .map { it.withCompressedFileForLocalVision() }
+                            .deduplicateVisionAttachments()
                     )
                 }
             }
@@ -14863,47 +18117,107 @@ class MainViewModel @JvmOverloads constructor(
     private fun ChatImageAttachment.withCompressedFileForLocalVision(): ChatImageAttachment {
         val bitmap = decodeBitmapForLocalVision()
         val prepared = bitmap.scaledToMaxEdge(MAX_VISION_IMAGE_EDGE)
+        val width = prepared.width
+        val height = prepared.height
         val visionDir = File(getApplication<Application>().cacheDir, "vision_inputs").apply { mkdirs() }
         val outputFile = File(visionDir, "vision-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(8)}.jpg")
-        outputFile.outputStream().use { output ->
-            prepared.compress(Bitmap.CompressFormat.JPEG, 88, output)
+        try {
+            outputFile.outputStream().use { output ->
+                check(prepared.compress(Bitmap.CompressFormat.JPEG, 88, output)) {
+                    "无法压缩图片：${name.ifBlank { "image" }}"
+                }
+            }
+        } catch (error: Throwable) {
+            outputFile.delete()
+            throw error
+        } finally {
+            if (prepared !== bitmap && !prepared.isRecycled) prepared.recycle()
+            if (!bitmap.isRecycled) bitmap.recycle()
         }
-        if (prepared !== bitmap) bitmap.recycle()
         return copy(
             uriString = Uri.fromFile(outputFile).toString(),
             mimeType = "image/jpeg",
             dataBase64 = "",
-            width = prepared.width,
-            height = prepared.height,
+            width = width,
+            height = height,
             sizeBytes = outputFile.length()
         )
     }
 
     private fun ChatImageAttachment.decodeBitmapForLocalVision(): Bitmap {
         if (hasInlineData) {
+            val encoded = plainBase64()
+            require(inlineVisionImageWithinLimit(encoded)) {
+                "图片超过本地识图的 20 MB 单张上限，请先压缩图片后重试。"
+            }
             val bytes = runCatching {
-                Base64.decode(plainBase64(), Base64.DEFAULT)
+                Base64.decode(encoded, Base64.DEFAULT)
             }.getOrElse {
                 error("无法解析内联图片：${name.ifBlank { "api-image" }}")
             }
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            require(bounds.outWidth > 0 && bounds.outHeight > 0) {
+                "内联图片没有可识别的尺寸：${name.ifBlank { "api-image" }}"
+            }
             val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
             return BitmapFactory.decodeByteArray(
                 bytes,
                 0,
                 bytes.size,
-                BitmapFactory.Options().apply { inSampleSize = sampleSize }
+                visionBitmapOptions(sampleSize)
             ) ?: error("无法读取内联图片：${name.ifBlank { "api-image" }}")
         }
         val uri = Uri.parse(uriString)
         val resolver = getApplication<Application>().contentResolver
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        require(bounds.outWidth > 0 && bounds.outHeight > 0) {
+            "图片没有可识别的尺寸：${name.ifBlank { uriString }}"
+        }
         val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
         return resolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, BitmapFactory.Options().apply { inSampleSize = sampleSize })
+            BitmapFactory.decodeStream(input, null, visionBitmapOptions(sampleSize))
         } ?: error("无法读取图片：${name.ifBlank { uriString }}")
+    }
+
+    /**
+     * Final send-boundary image deduplication.  The shared engine helper cannot open Android
+     * content:// providers, so this pass hashes provider bytes before a user turn is persisted.
+     * It runs on Dispatchers.IO and is deliberately the last step before sendPreparedMessage;
+     * picker/preflight races therefore cannot publish the same imported photo twice.
+     */
+    private fun List<ChatImageAttachment>.deduplicateVisionAttachmentsForSend(
+        context: Context
+    ): List<ChatImageAttachment> {
+        if (size < 2) return this
+        val seen = LinkedHashSet<String>(size)
+        return filter { attachment ->
+            val source = attachment.uriString.trim()
+            val identity = if (source.startsWith("content:", ignoreCase = true)) {
+                runCatching {
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    val input = requireNotNull(context.contentResolver.openInputStream(Uri.parse(source)))
+                    var total = 0L
+                    input.use { stream ->
+                        val buffer = ByteArray(32 * 1024)
+                        while (true) {
+                            val read = stream.read(buffer)
+                            if (read < 0) break
+                            total += read
+                            require(total <= CHAT_SEND_ATTACHMENT_IDENTITY_MAX_BYTES)
+                            digest.update(buffer, 0, read)
+                        }
+                    }
+                    "bytes:" + digest.digest().joinToString("") { byte ->
+                        "%02x".format(java.util.Locale.ROOT, byte.toInt() and 0xff)
+                    }
+                }.getOrElse { attachment.visionDeduplicationKey() }
+            } else {
+                attachment.visionDeduplicationKey()
+            }
+            seen.add(identity)
+        }
     }
 
     private fun ChatImageAttachment.withCompressedInlineData(): ChatImageAttachment {
@@ -14911,21 +18225,32 @@ class MainViewModel @JvmOverloads constructor(
         val resolver = getApplication<Application>().contentResolver
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        require(bounds.outWidth > 0 && bounds.outHeight > 0) {
+            "图片没有可识别的尺寸：${name.ifBlank { uriString }}"
+        }
         val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
         val bitmap = resolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, BitmapFactory.Options().apply { inSampleSize = sampleSize })
+            BitmapFactory.decodeStream(input, null, visionBitmapOptions(sampleSize))
         } ?: error("无法读取图片：${name.ifBlank { uriString }}")
         val prepared = bitmap.scaledToMaxEdge(MAX_VISION_IMAGE_EDGE)
-        val bytes = ByteArrayOutputStream().use { output ->
-            prepared.compress(Bitmap.CompressFormat.JPEG, 86, output)
-            output.toByteArray()
+        val width = prepared.width
+        val height = prepared.height
+        val bytes = try {
+            ByteArrayOutputStream().use { output ->
+                check(prepared.compress(Bitmap.CompressFormat.JPEG, 86, output)) {
+                    "无法压缩图片：${name.ifBlank { "image" }}"
+                }
+                output.toByteArray()
+            }
+        } finally {
+            if (prepared !== bitmap && !prepared.isRecycled) prepared.recycle()
+            if (!bitmap.isRecycled) bitmap.recycle()
         }
-        if (prepared !== bitmap) bitmap.recycle()
         return copy(
             mimeType = "image/jpeg",
             dataBase64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
-            width = prepared.width,
-            height = prepared.height,
+            width = width,
+            height = height,
             sizeBytes = bytes.size.toLong()
         )
     }
@@ -14945,29 +18270,78 @@ class MainViewModel @JvmOverloads constructor(
     private fun calculateImageSampleSize(width: Int, height: Int, maxEdge: Int): Int {
         if (width <= 0 || height <= 0) return 1
         var sample = 1
-        while (maxOf(width / sample, height / sample) > maxEdge * 2) {
+        while (
+            maxOf(width / sample, height / sample) > maxEdge * 2 ||
+            (width.toLong() / sample.toLong()) * (height.toLong() / sample.toLong()) > MAX_VISION_DECODE_PIXELS
+        ) {
+            if (sample >= (1 shl 29)) break
             sample *= 2
         }
         return sample.coerceAtLeast(1)
     }
 
+    private fun visionBitmapOptions(sampleSize: Int): BitmapFactory.Options =
+        BitmapFactory.Options().apply {
+            inSampleSize = sampleSize.coerceAtLeast(1)
+            // Vision inputs are converted to JPEG immediately. RGB_565 keeps
+            // malformed or very large user images from exhausting the app
+            // process before the isolated native runner can reject them.
+            inPreferredConfig = Bitmap.Config.RGB_565
+            inScaled = false
+            inDither = false
+        }
+
     private fun localVisionRunnerAvailable(): Boolean {
-        val nativeVisionReady = runCatching {
-            JSONObject(engine.nativeStatsJson()).optBoolean("visionReady", false)
-        }.getOrDefault(false)
+        val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrNull()
+            ?: return false
+        if (!nativeStats.optBoolean("loaded", false)) return false
+        val nativeVisionReady = nativeStats.optBoolean("visionReady", false)
         val model = _uiState.value.models.firstOrNull { it.id == _uiState.value.loadedModelId }
-        return model?.acceptsImageInput(nativeVisionReady) == true
+        if (model == null) return false
+        val imageInputReady = when (model.runtime) {
+            ChatModelRuntime.LITERT_LM -> liteRtVisionInputAvailable(nativeStats.toString())
+            else -> model.acceptsImageInput(nativeVisionReady)
+        }
+        if (!imageInputReady) return false
+        if (model.runtime == ChatModelRuntime.LLAMA_CPP) {
+            val expected = model.visionProjectorPath?.let(::File)?.let {
+                runCatching { it.canonicalPath }.getOrDefault(it.absolutePath)
+            }
+            val actual = nativeStats.optString("mmprojPath").trim()
+                .takeIf { it.isNotBlank() }
+                ?.let(::File)
+                ?.let { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
+            if (expected != null && actual != expected) return false
+        }
+        return true
     }
 
     private fun MainUiState.localVisionUnavailableMessage(): String {
         val model = models.firstOrNull { it.id == loadedModelId }
+        val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrNull()
+        val nativeReason = nativeStats?.optString("visionFailureReason")
+            ?.takeIf { it.isNotBlank() && it != "null" }
         return when {
             model == null ->
                 "当前未加载本地模型。请在模型管理加载支持视觉的多模态 GGUF，或切换到支持图片输入的云端模型。"
+            model.runtime == ChatModelRuntime.LITERT_LM &&
+                nativeStats?.optBoolean("visionModelKnownTextOnly", false) == true ->
+                LITERT_LM_KNOWN_TEXT_ONLY_VISION_UNAVAILABLE_MESSAGE
+            model.runtime == ChatModelRuntime.LITERT_LM &&
+                nativeStats?.has("visionModelVisualComponentsPresent") == true &&
+                !nativeStats.optBoolean("visionModelVisualComponentsPresent", false) ->
+                LITERT_LM_VISION_COMPONENTS_UNAVAILABLE_MESSAGE
+            model.runtime == ChatModelRuntime.LITERT_LM ->
+                LITERT_LM_VISION_TRANSPORT_UNAVAILABLE_MESSAGE
             model.runtime == ChatModelRuntime.MNN ->
                 "当前 MNN 模型没有就绪的视觉组件。请加载包含可读 visual.mnn 的完整多模态包后重试。"
             model.visionProjectorPath.isNullOrBlank() ->
                 "当前本地模型未启用识图。纯文本 GGUF 不能直接看图，请在模型管理为多模态模型绑定匹配的 mmproj / projector 文件后重新加载。"
+            nativeReason == "mmproj_not_bound" || nativeReason == "mmproj_file_missing" ||
+                nativeReason == "mmproj_file_empty" || nativeReason == "mmproj_file_unreadable" ->
+                "视觉投影器已记录但没有传入当前 runner（${nativeReason}）。请重新加载该模型；如果仍失败，请重新绑定与主模型匹配的 mmproj / projector。"
+            nativeReason == "native_capability_reports_no_vision" ->
+                "当前 mmproj 与主模型或运行时不匹配，native runner 明确拒绝视觉能力。请更换同仓库、同架构的 mmproj / projector。"
             else ->
                 "已绑定视觉投影器，但本地视觉 runner 还未就绪。请重新加载当前模型；如果仍失败，请更换与主模型匹配的 mmproj / projector。"
         }
@@ -15006,9 +18380,7 @@ class MainViewModel @JvmOverloads constructor(
             nThreads = params.nThreads,
             advancedJson = params.advancedJson,
             visionProjectorPath = if (runtime == ChatModelRuntime.LLAMA_CPP) {
-                visionProjectorPath
-                    ?.takeIf { it.isNotBlank() }
-                    ?.takeIf { File(it).isFile }
+                resolveVisionProjectorPath(path, visionProjectorPath)
             } else {
                 null
             }

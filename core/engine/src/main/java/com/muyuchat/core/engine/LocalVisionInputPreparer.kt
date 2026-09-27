@@ -1,5 +1,6 @@
 package com.muyuchat.core.engine
 
+import android.graphics.BitmapFactory
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
@@ -12,8 +13,20 @@ import java.util.Locale
 import java.util.UUID
 import org.json.JSONObject
 
+internal enum class LocalVisionInputFailureCode(val wireCode: String) {
+    IMAGE_TOO_LARGE("local_vision_image_too_large"),
+    IMAGE_RESOLUTION_TOO_LARGE("local_vision_image_resolution_too_large"),
+    INVALID_IMAGE_GEOMETRY("local_vision_image_invalid_geometry"),
+    IMAGE_FORMAT_MISMATCH("local_vision_image_format_mismatch")
+}
+
+internal class LocalVisionInputException(
+    val failureCode: LocalVisionInputFailureCode,
+    message: String
+) : IllegalArgumentException(message)
+
 internal object LocalVisionInputPreparer {
-    private const val MAX_REMOTE_IMAGE_BYTES = 20L * 1024L * 1024L
+    private const val MAX_IMAGE_BYTES = MAX_LOCAL_VISION_IMAGE_BYTES
 
     data class RemoteImage(
         val bytes: ByteArray,
@@ -33,8 +46,9 @@ internal object LocalVisionInputPreparer {
                 if (message.imageAttachments.isEmpty()) {
                     message
                 } else {
-                    message.copy(
-                        imageAttachments = message.imageAttachments.mapIndexed { attachmentIndex, attachment ->
+                    val preparedAttachments = message.imageAttachments
+                        .deduplicateVisionAttachments()
+                        .mapIndexed { attachmentIndex, attachment ->
                             val sourceType = attachment.sourceType()
                             try {
                                 val prepared = attachment.withNativeReadableImageFile(
@@ -64,6 +78,12 @@ internal object LocalVisionInputPreparer {
                                 throw error
                             }
                         }
+                    // Different client representations of one image (content URI, file URI,
+                    // data URL, or a copied temporary file) become the same native-readable
+                    // file only after preparation. Deduplicate a second time on the materialized
+                    // bytes so a single user image cannot be sent twice to a multimodal runner.
+                    message.copy(
+                        imageAttachments = preparedAttachments.deduplicatePreparedVisionAttachments()
                     )
                 }
             }
@@ -146,6 +166,7 @@ internal object LocalVisionInputPreparer {
                 .put("nativeReadableBytes", 0L)
                 .put("inspectionStatus", "not_available")
                 .put("errorType", error::class.java.simpleName)
+                .put("failureCode", (error as? LocalVisionInputException)?.failureCode?.wireCode.orEmpty())
             sink("local_vision_input_prepare_failed", details)
         }
     }
@@ -355,25 +376,61 @@ internal object LocalVisionInputPreparer {
             }
         }
 
-        val bytes = Base64.getMimeDecoder().decode(plainBase64())
+        val encodedImage = plainBase64()
+        if (!inlineVisionImageWithinLimit(encodedImage)) {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.IMAGE_TOO_LARGE,
+                "Inline image exceeds the 20 MB local vision limit. Resize or compress the image and retry."
+            )
+        }
+        val bytes = Base64.getMimeDecoder().decode(encodedImage)
         require(bytes.isNotEmpty()) { "Inline image is empty: ${name.ifBlank { "api-image" }}" }
-        val file = writeImageFile(cacheDir, bytes, mimeType, nowMillis, idSuffix)
+        val inlineMimeType = inlineMimeTypeOr(mimeType)
+        val file = writeImageFile(cacheDir, bytes, inlineMimeType, nowMillis, idSuffix)
         return copy(
             uriString = file.absolutePath,
+            mimeType = inlineMimeType,
             dataBase64 = "",
             sizeBytes = file.length()
         )
+    }
+
+    private fun ChatImageAttachment.inlineMimeTypeOr(fallback: String): String {
+        if (!dataBase64.startsWith("data:", ignoreCase = true)) return fallback
+        return dataBase64
+            .substring(5)
+            .substringBefore(';')
+            .trim()
+            .lowercase(Locale.US)
+            .takeIf { it.startsWith("image/") }
+            ?: fallback
     }
 
     private fun ChatImageAttachment.withExistingFile(file: File): ChatImageAttachment {
         require(file.isFile && file.canRead()) {
             "Image file is not readable: ${file.path.ifBlank { name.ifBlank { "api-image" } }}"
         }
+        validateNativeReadableImage(file, mimeType)
         return copy(
             uriString = file.absolutePath,
             dataBase64 = "",
             sizeBytes = if (sizeBytes > 0L) sizeBytes else file.length()
         )
+    }
+
+    private fun List<ChatImageAttachment>.deduplicatePreparedVisionAttachments(): List<ChatImageAttachment> {
+        if (size < 2) return this
+        val seen = LinkedHashSet<String>(size)
+        return filter { attachment ->
+            val file = attachment.uriString.trim().let(::File)
+            val key = if (!attachment.hasInlineData && file.isFile) {
+                runCatching { "bytes:${file.length()}:${file.sha256()}" }
+                    .getOrElse { attachment.visionDeduplicationKey() }
+            } else {
+                attachment.visionDeduplicationKey()
+            }
+            seen.add(key)
+        }
     }
 
     private fun ChatImageAttachment.withDownloadedImageFile(
@@ -385,6 +442,12 @@ internal object LocalVisionInputPreparer {
     ): ChatImageAttachment {
         val remote = remoteImageFetcher(url)
         require(remote.bytes.isNotEmpty()) { "Remote image is empty: $url" }
+        if (remote.bytes.size.toLong() > MAX_IMAGE_BYTES) {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.IMAGE_TOO_LARGE,
+                "Remote image exceeds the 20 MB local vision limit. Resize or compress the image and retry."
+            )
+        }
         val file = writeImageFile(
             cacheDir = cacheDir,
             bytes = remote.bytes,
@@ -412,7 +475,101 @@ internal object LocalVisionInputPreparer {
         val dir = File(cacheDir, "engine_vision_inputs").apply { mkdirs() }
         val file = File(dir, "vision-${nowMillis()}-${idSuffix()}.${imageExtension(mimeType, sourceName)}")
         file.writeBytes(bytes)
+        validateNativeReadableImage(file, mimeType)
         return file
+    }
+
+    /**
+     * Validate every local path before handing it to a native VLM decoder.
+     * BitmapFactory is called with inJustDecodeBounds, so Android reads image
+     * headers without allocating a full-resolution bitmap. The small header
+     * parser remains as a JVM-test/format fallback when Android cannot identify
+     * a format; unknown formats retain compatibility, while known dimensions
+     * are never allowed to exceed the native decode budget.
+     */
+    private fun validateNativeReadableImage(file: File, declaredMimeType: String = "") {
+        val bytes = file.length()
+        if (bytes > MAX_IMAGE_BYTES) {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.IMAGE_TOO_LARGE,
+                "Image file exceeds the 20 MB local vision limit. Resize or compress the image and retry."
+            )
+        }
+        if (bytes <= 0L) {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.INVALID_IMAGE_GEOMETRY,
+                "Image file is empty. Choose a readable image and retry."
+            )
+        }
+
+        val bounds = readAndroidImageBounds(file) ?: readHeaderImageBounds(file)
+        validateDeclaredImageFormat(declaredMimeType, bounds.format)
+        if (bounds.width <= 0 && bounds.height <= 0) return
+        if (bounds.width <= 0 || bounds.height <= 0) {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.INVALID_IMAGE_GEOMETRY,
+                "Image dimensions are invalid. Re-export the image and retry."
+            )
+        }
+        val pixels = bounds.width.toLong() * bounds.height.toLong()
+        if (bounds.width > MAX_LOCAL_VISION_IMAGE_SIDE ||
+            bounds.height > MAX_LOCAL_VISION_IMAGE_SIDE ||
+            pixels > MAX_LOCAL_VISION_IMAGE_PIXELS
+        ) {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.IMAGE_RESOLUTION_TOO_LARGE,
+                "Image resolution is too large for safe local recognition (${bounds.width}×${bounds.height}). " +
+                    "Resize the image to at most 16,384 pixels per side and 32 megapixels, then retry."
+            )
+        }
+    }
+
+    private fun validateDeclaredImageFormat(declaredMimeType: String, detectedFormat: String) {
+        val expected = declaredMimeType
+            .substringBefore(';')
+            .trim()
+            .lowercase(Locale.US)
+            .removePrefix("image/")
+            .let { if (it == "jpg") "jpeg" else it }
+        val actual = detectedFormat
+            .trim()
+            .lowercase(Locale.US)
+            .let { if (it == "jpg") "jpeg" else it }
+        if (expected.isBlank() || expected == "unknown" || actual.isBlank() || actual == "unknown") return
+        if (expected !in setOf("jpeg", "png", "webp", "gif", "bmp")) return
+        if (actual != expected) {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.IMAGE_FORMAT_MISMATCH,
+                "Image MIME type ($declaredMimeType) does not match the detected $actual format. " +
+                    "Use a matching MIME type or re-export the image and retry."
+            )
+        }
+    }
+
+    private fun readAndroidImageBounds(file: File): ImageProbe? = runCatching {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, options)
+        if (options.outWidth <= 0 || options.outHeight <= 0) return@runCatching null
+        val format = options.outMimeType
+            ?.substringAfter('/', "")
+            ?.lowercase(Locale.US)
+            ?.takeIf { it in setOf("jpeg", "jpg", "png", "webp", "gif", "bmp") }
+            ?: "unknown"
+        ImageProbe(format, options.outWidth, options.outHeight)
+    }.getOrNull()
+
+    private fun readHeaderImageBounds(file: File): ImageProbe {
+        val header = ByteArray(64 * 1024)
+        val count = file.inputStream().buffered().use { input ->
+            var total = 0
+            while (total < header.size) {
+                val read = input.read(header, total, header.size - total)
+                if (read < 0) break
+                total += read
+            }
+            total
+        }
+        return probeImage(header.copyOf(count))
     }
 
     private fun imageExtension(mimeType: String, sourceName: String = ""): String {
@@ -446,12 +603,15 @@ internal object LocalVisionInputPreparer {
             val status = connection.responseCode
             require(status in 200..299) { "Remote image download failed with HTTP $status: $url" }
             val contentLength = connection.contentLengthLong
-            require(contentLength <= 0L || contentLength <= MAX_REMOTE_IMAGE_BYTES) {
-                "Remote image is too large: ${contentLength / 1024L / 1024L} MB. Max supported size is 20 MB."
+            if (contentLength > MAX_IMAGE_BYTES) {
+                throw LocalVisionInputException(
+                    LocalVisionInputFailureCode.IMAGE_TOO_LARGE,
+                    "Remote image is too large: ${contentLength / 1024L / 1024L} MB. Max supported size is 20 MB."
+                )
             }
             connection.inputStream.use { input ->
                 RemoteImage(
-                    bytes = input.readBytesLimited(MAX_REMOTE_IMAGE_BYTES),
+                    bytes = input.readBytesLimited(MAX_IMAGE_BYTES),
                     mimeType = connection.contentType?.substringBefore(';')?.trim().orEmpty()
                 )
             }
@@ -468,10 +628,28 @@ internal object LocalVisionInputPreparer {
             val read = read(buffer)
             if (read < 0) break
             total += read
-            require(total <= maxBytes) { "Remote image exceeded 20 MB. Download stopped." }
+            if (total > maxBytes) {
+                throw LocalVisionInputException(
+                    LocalVisionInputFailureCode.IMAGE_TOO_LARGE,
+                    "Remote image exceeded the 20 MB local vision limit. Download stopped."
+                )
+            }
             output.write(buffer, 0, read)
         }
         return output.toByteArray()
+    }
+
+    private fun File.sha256(): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        inputStream().buffered().use { input ->
+            val buffer = ByteArray(8192)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().toHex()
     }
 
     private val JPEG_START_OF_FRAME_MARKERS = setOf(

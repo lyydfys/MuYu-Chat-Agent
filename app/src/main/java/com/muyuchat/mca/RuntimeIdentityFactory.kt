@@ -310,7 +310,7 @@ internal object RuntimeIdentityFactory {
 
     private fun runtimeVersion(runtime: LocalChatRuntime, platform: PlatformSnapshot): String {
         val implementation = when (runtime) {
-            LocalChatRuntime.LLAMA_CPP -> "llama.cpp@6657ded4faa3b8450221119fc6b4d002e35104a2"
+            LocalChatRuntime.LLAMA_CPP -> "llama.cpp@4ceb1719101f32637b841206c172f3f058ffc182+mca-stq1_0"
             LocalChatRuntime.MNN_CPU -> "mnn@3.6.1-d407447ed56c4121a11ccbd266dc184ca1ead0c2"
             LocalChatRuntime.GENIEX_LLAMA_CPP -> "geniex@0.3.12-mca1+llama.cpp"
             LocalChatRuntime.GENIEX_QAIRT -> "geniex-qairt@0.3.12-mca1"
@@ -582,14 +582,25 @@ internal object RuntimeIdentityFactory {
         device: DeviceProfile
     ): List<String> {
         val base = when (runtime) {
-            LocalChatRuntime.LLAMA_CPP -> listOf("libmca_native.so")
+            LocalChatRuntime.LLAMA_CPP -> listOf(
+                "libmca_native.so",
+                // The MCA OpenCL backend is a separately packaged ggml
+                // plugin. Include it in the runtime fingerprint so upgrading
+                // from a CPU-only APK to a complete APK cannot reuse a
+                // profile that was resolved without GPU offload.
+                "libggml-opencl-mca.so"
+            )
             LocalChatRuntime.MNN_CPU -> listOf(
                 "libmca_mnn_native.so", "libMNN.so", "libMNN_Express.so", "libMNN_CL.so",
                 "libMNNOpenCV.so", "libMNNAudio.so", "libllm.so"
             )
             LocalChatRuntime.GENIEX_LLAMA_CPP -> listOf(
                 "libnpu_jni.so", "libgeniex.so", "libgeniex_core.so", "libgeniex_plugin_llama_cpp.so",
-                "libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libmtmd.so"
+                "libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libmtmd.so",
+                // GenieX's AAR and MCA's llama stack can coexist. Track both
+                // OpenCL artifacts so a backend package change invalidates
+                // stale CPU/GPU execution profiles deterministically.
+                "libggml-opencl.so", "libggml-opencl-mca.so"
             )
             LocalChatRuntime.GENIEX_QAIRT -> listOf(
                 "libnpu_jni.so", "libgeniex.so", "libgeniex_core.so", "libgeniex_plugin_qairt.so",

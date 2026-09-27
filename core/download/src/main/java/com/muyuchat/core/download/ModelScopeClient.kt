@@ -295,7 +295,7 @@ class ModelScopeClient(
                     it.role == ImageEngineBundleComponentRole.DIFFUSION
                 })
         }
-        return resolveImageBundleComponents(bundle.components)
+        return resolveImageBundleComponents(bundle.components.filter { it.downloadByDefault })
     }
 
     private fun resolveImageBundleComponents(
@@ -604,10 +604,24 @@ class ModelScopeClient(
         } else {
             rawUrl
         }
+        // Hugging Face's ordinary Git tree entries expose `oid` as a
+        // 40-character Git blob SHA-1.  The downloader compares this field
+        // with a content SHA-256, so carrying it as `RemoteModelFile.sha256`
+        // makes complete files fail verification.  Keep only an actual
+        // 64-hex SHA-256 here.  LFS `oid` values are SHA-256 and therefore
+        // still pass this normalization; unknown/malformed digests remain
+        // unavailable instead of being used as a false integrity contract.
         val sha = listOf("Sha256", "sha256", "SHA256")
-            .firstNotNullOfOrNull { key -> json.optString(key).takeIf { it.isNotBlank() } }
-            ?: json.optJSONObject("lfs")?.firstString("sha256", "oid")
-            ?: json.optString("oid").takeIf { it.isNotBlank() }
+            .asSequence()
+            .mapNotNull { key -> normalizedRemoteSha256OrNull(json.optString(key)) }
+            .firstOrNull()
+            ?: json.optJSONObject("lfs")?.let { lfs ->
+                listOf("sha256", "oid")
+                    .asSequence()
+                    .mapNotNull { key -> normalizedRemoteSha256OrNull(lfs.optString(key)) }
+                    .firstOrNull()
+            }
+            ?: normalizedRemoteSha256OrNull(json.optString("oid"))
         val size = listOf("Size", "size", "sizeBytes")
             .firstNotNullOfOrNull { key -> json.optLong(key).takeIf { it > 0 } }
             ?: json.optJSONObject("lfs")?.firstLong("size", "Size")
@@ -861,7 +875,7 @@ class ModelScopeClient(
         private const val QNN_DREAMSHAPER_SD15_EXECUTION_PROFILE_REVISION = 6
         private const val QNN_REALISTICVISIONHYPER_SD15_EXECUTION_PROFILE_REVISION = 6
         private const val QNN_SDXL_EXECUTION_PROFILE_REVISION = 7
-        private const val QNN_GEN5_EXECUTION_PROFILE_REVISION = 2
+        private const val QNN_GEN5_EXECUTION_PROFILE_REVISION = 3
         private val QNN_SD15_CONDITIONING_RUNTIME_ASSETS = listOf(
             "tokenizer.json",
             "token_emb.bin",
@@ -1505,6 +1519,12 @@ class ModelScopeClient(
             controlNet: Boolean = false
         ): ImageEngineExecutionProfileSpec {
             val task = if (controlNet) ImageEngineTask.CONTROL_IMAGE else ImageEngineTask.TEXT_TO_IMAGE
+            // Names read from the publisher's pinned context binaries, not Android model ids.
+            val graphPrefix = when {
+                controlNet -> "controlnet_canny"
+                sd21 -> "stable_diffusion_v2_1"
+                else -> "stable_diffusion_v1_5"
+            }
             return ImageEngineExecutionProfileSpec(
                 profileId = profileId,
                 profileRevision = QNN_GEN5_EXECUTION_PROFILE_REVISION,
@@ -1561,7 +1581,12 @@ class ModelScopeClient(
                     qnnSdk = "2.45.0.260326154327",
                     htpArch = 81,
                     controlNet = if (controlNet) "controlnet.bin" else null
-                ),
+                ).copy(graphNames = buildMap {
+                    put("text_encoder.bin", "${graphPrefix}_text_encoder")
+                    put("unet.bin", "${graphPrefix}_unet")
+                    put("vae.bin", "${graphPrefix}_vae")
+                    if (controlNet) put("controlnet.bin", "${graphPrefix}_controlnet")
+                }),
                 defaults = ImageEngineGenerationDefaultsSpec(
                     width = 512,
                     height = 512,
@@ -1847,6 +1872,7 @@ class ModelScopeClient(
                 size = 1024,
                 supportsNegativePrompt = false
             )
+            "qwen_image_21_mnn_opencl" -> qwenImage21MnnExecutionProfile()
             "qwen_image_2512_q2" -> stableDiffusionCppExecutionProfile(
                 maxPromptTokens = 512,
                 profileId = "sdcpp.qwen-image",
@@ -2114,6 +2140,249 @@ class ModelScopeClient(
             )
         }
 
+        private const val QWEN_IMAGE_21_MNN_REPO = "evankuo/Qwen-Image-2.1-MNN"
+        private const val QWEN_IMAGE_21_MNN_REVISION = "ed6891ea7e1e855246f74e250c2c849defa009da"
+
+        /**
+         * Exact text-to-image closure from the immutable Hugging Face MNN export.
+         * Image-edit-only graphs are catalogued for future use, but excluded from the default
+         * download so a text-to-image install does not fetch another ~0.5 GB of unused weights.
+         */
+        private fun qwenImage21MnnComponents(): List<ImageEngineBundleComponentSpec> {
+            fun component(
+                role: ImageEngineBundleComponentRole,
+                fileName: String,
+                size: Long,
+                sha256: String,
+                required: Boolean = true,
+                downloadByDefault: Boolean = true
+            ) = ImageEngineBundleComponentSpec(
+                role = role,
+                repoId = QWEN_IMAGE_21_MNN_REPO,
+                fileName = fileName,
+                revision = QWEN_IMAGE_21_MNN_REVISION,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                required = required,
+                expectedSizeBytes = size,
+                sha256 = sha256,
+                relativePath = fileName,
+                downloadByDefault = downloadByDefault
+            )
+
+            return listOf(
+                // Keep the recommended main diffusion graph first; the recommendation validator
+                // binds dit.mnn to recommendedFileName.
+                component(
+                    ImageEngineBundleComponentRole.DIFFUSION,
+                    "dit.mnn",
+                    756_880L,
+                    "06afa72d2e180a369de30dc534eafbfa6796bc505bdade22d9c89ff0fe68d721"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.DIFFUSION,
+                    "dit.mnn.weight",
+                    4_472_625_758L,
+                    "9e74678793b4b8d30bd82e5bc01ce59dc498748ec273a7f95ad418d1c8114c6a"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.TEXT_ENCODER,
+                    "text_encoder/llm.mnn",
+                    591_728L,
+                    "61f0fe3b5d0447518ae5b26ab19c0b8a7f07c51f598be5f52fa0aee7405972e3"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.TEXT_ENCODER,
+                    "text_encoder/llm.mnn.weight",
+                    4_732_532_162L,
+                    "a52971cb29c0bef35ab336b370db00d676223e6d721b99e3bf0b9c70f2d9bcfe"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.TEXT_ENCODER,
+                    "text_encoder/embeddings_int4.bin",
+                    388_956_160L,
+                    "311cd44e48dcec950bcc5cffb465ae0e2fec8154247f2ff545b7fd1240960bf4"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.TOKENIZER,
+                    "text_encoder/tokenizer.txt",
+                    3_193_555L,
+                    "7119de4966cc6a8ae87d7f083e65b315282d06c3122fdd41ce783fdd2d3c1ca2"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.CONFIG,
+                    "text_encoder/te_config.json",
+                    253L,
+                    "d18d300491cde6e9c9cbb706297eb2cc8909f61838e2ff8f1ce5d8db9ee632f3"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.CONFIG,
+                    "text_encoder/te_llm_config.json",
+                    6_426L,
+                    "6b80aeee77008118f39a7772ca3b2f28e168cef9b0124d95854285ea6890f00b"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.CONFIG,
+                    "text_encoder/llm_config.json",
+                    6_436L,
+                    "ce8f3a6532832d37eff85cf45ddb24b4d21567d293cfc8c64a67fa0fdca93df9"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.CONDITIONING,
+                    "txt_in.mnn",
+                    3_944L,
+                    "415d32f5757b3e6cb961827731f9af5e551ad2538881626f24f2530329f3d958"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.CONDITIONING,
+                    "txt_in.mnn.weight",
+                    35_684_876L,
+                    "9a531bbca04c40f5d6628d033d932faaa7016fa1203f0c3b8f8052cd5b76c2f2"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.CONDITIONING,
+                    "img_in.mnn",
+                    1_144L,
+                    "e6c9689a573ab9cde743ff3a6abe44af6dba521a43e429320e980c45cda5d4de"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.CONDITIONING,
+                    "img_in.mnn.weight",
+                    524_288L,
+                    "84ceb8c9ab500f646909606af4ff2a0e8d8deb2f14455f49b2f84e2e50201492"
+                ),
+                component(
+                    ImageEngineBundleComponentRole.VAE,
+                    "vae_decoder.mnn",
+                    506_595_396L,
+                    "2525485bba44d4d8176d05522fa7e8b4b1080c9e7b7df18dfde7d58e667ff055"
+                ),
+                // These files are only used by image editing, so they must not be required or
+                // included when a user downloads the text-to-image model.
+                component(
+                    ImageEngineBundleComponentRole.VAE_ENCODER,
+                    "vae_encoder.mnn",
+                    156_215_404L,
+                    "a131ea3a9c822a62842c17ddf0526685d5d8cd842ed13d5500112121df770248",
+                    required = false,
+                    downloadByDefault = false
+                ),
+                component(
+                    ImageEngineBundleComponentRole.TEXT_ENCODER,
+                    "text_encoder/visual.mnn",
+                    562_048L,
+                    "8f1653348a94c29e56d47529dd461215c80d5380263136adee7945809f407bf7",
+                    required = false,
+                    downloadByDefault = false
+                ),
+                component(
+                    ImageEngineBundleComponentRole.TEXT_ENCODER,
+                    "text_encoder/visual.mnn.weight",
+                    326_728_744L,
+                    "6d8b1a4886cca9ab8b8c86979f4e5291e126ac930124e9a2361833e7b11301e6",
+                    required = false,
+                    downloadByDefault = false
+                ),
+                component(
+                    ImageEngineBundleComponentRole.CONFIG,
+                    "text_encoder/te_vl_config.json",
+                    400L,
+                    "87e37fe0849b4f6b7865fcc986057dd848eae53ee4fb78963f69e03241475eac",
+                    required = false,
+                    downloadByDefault = false
+                ),
+                component(
+                    ImageEngineBundleComponentRole.CONFIG,
+                    "text_encoder/te_vl_llm_config.json",
+                    6_386L,
+                    "cedce3e0dfab7639df57935aa056953a8e033b697c5a108b14cfea4276ee7b55",
+                    required = false,
+                    downloadByDefault = false
+                )
+            )
+        }
+
+        private fun qwenImage21MnnExecutionProfile(): ImageEngineExecutionProfileSpec =
+            ImageEngineExecutionProfileSpec(
+                profileId = "mnn.qwen-image-2.1.opencl",
+                profileRevision = 2,
+                family = ImageEngineModelFamily.QWEN_IMAGE,
+                variant = ImageEngineModelVariant.QWEN_IMAGE_21,
+                tokenizer = ImageEngineTokenizerContractSpec(
+                    backend = ImageEngineTokenizerBackend.MNN_QWEN_IMAGE,
+                    maxLength = 512,
+                    clip1PadRule = ImageEngineClipPadRule.MODEL_DECLARED,
+                    supportsPromptWeighting = false,
+                    supportsTextualInversion = false,
+                    separateNegativePrompt = false
+                ),
+                conditioning = ImageEngineConditioningContractSpec(
+                    diskDataType = ImageEngineEmbeddingDataType.GRAPH_INTERNAL,
+                    conversionStrategy = ImageEngineEmbeddingConversionStrategy.GRAPH_EXECUTION,
+                    textEncoderInputShape = listOf(1, 512),
+                    textEncoderOutputShapes = listOf(listOf(1, 512, 4_096)),
+                    concatenationOrder = listOf("positive")
+                ),
+                scheduler = imageScheduler(
+                    algorithm = ImageEngineSchedulerAlgorithm.FLOW_MATCH,
+                    predictionType = ImageEnginePredictionType.FLOW,
+                    defaultSteps = 20,
+                    minSteps = 2,
+                    maxSteps = 40
+                ),
+                vae = ImageEngineVaeContractSpec(
+                    scalingLocation = ImageEngineVaeScalingLocation.RUNTIME_NATIVE,
+                    scalingFactor = 1.0,
+                    inputShape = listOf(1, 64, 32, 32),
+                    outputShape = listOf(1, 4, 512, 512),
+                    inputLayout = ImageEngineTensorLayout.RUNTIME_NATIVE,
+                    outputLayout = ImageEngineTensorLayout.RUNTIME_NATIVE,
+                    outputRange = ImageEnginePixelRange.RUNTIME_NATIVE,
+                    channelOrder = ImageEngineChannelOrder.RUNTIME_NATIVE
+                ),
+                graph = ImageEngineGraphContractSpec(
+                    textEncoder = "text_encoder/llm.mnn",
+                    unet = "dit.mnn",
+                    vae = "vae_decoder.mnn",
+                    // The MNN text tokenizer table is a required component, not a JSON sidecar.
+                    tokenizerSidecar = null,
+                    configSidecars = listOf(
+                        "text_encoder/te_config.json",
+                        "text_encoder/te_llm_config.json",
+                        "text_encoder/llm_config.json",
+                        "text_encoder/embeddings_int4.bin",
+                        "txt_in.mnn",
+                        "txt_in.mnn.weight",
+                        "img_in.mnn",
+                        "img_in.mnn.weight"
+                    ),
+                    workerStrategy = ImageEngineWorkerStrategy.DEDICATED_WORKER
+                ),
+                defaults = ImageEngineGenerationDefaultsSpec(
+                    width = 512,
+                    height = 512,
+                    steps = 20,
+                    cfgScale = 1.0,
+                    useCfg = false
+                ),
+                capabilities = ImageEngineGenerationCapabilitiesSpec(
+                    supportedSchedulers = setOf(ImageEngineSchedulerAlgorithm.FLOW_MATCH),
+                    // The Android MNN port is dynamic, with the exact verified
+                    // 21-size grid enforced by the app/provider contract.
+                    minWidth = 256,
+                    maxWidth = 672,
+                    minHeight = 256,
+                    maxHeight = 672,
+                    widthMultiple = 32,
+                    heightMultiple = 32,
+                    supportsNegativePrompt = false,
+                    supportsPromptWeighting = false,
+                    supportsVaeTiling = false,
+                    supportsLivePreview = false,
+                    supportsLora = false,
+                    maxBatchCount = 1
+                )
+            )
+
         private fun gen5QnnBundle(
             id: String,
             title: String,
@@ -2240,12 +2509,12 @@ class ModelScopeClient(
                 title = "Gemma 4 E2B 无审查 · LiteRT-LM CPU",
                 repoId = "PeppX/gemma-4-e2b-uncensored-litertlm",
                 revision = "0adcc4e5497d0bd4202a7a6f2c72c00d1a0d4be9",
-                description = "社区 INT4 文本包，约 2.4GB、32K 上下文；CPU 通用路径，未做 MCA 真机验收。",
+                description = "纯文本聊天模型，不包含视觉权重，不能识别图片。适合日常问答与写作；社区低拒答版本，INT4 量化，约 2.4 GB，32K 上下文。",
                 recommendedFileName = "gemma-4-E2B-it-Uncensored-MAX.litertlm",
                 parameterScale = "E2B",
                 quant = "INT4",
                 minRamGb = 8,
-                tags = listOf("Gemma 4", "E2B", "LiteRT-LM", "CPU", "无审查实验"),
+                tags = listOf("Gemma 4", "E2B", "LiteRT-LM", "CPU", "纯文本", "无审查"),
                 priority = 5,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.LIGHT_CHAT,
@@ -2263,7 +2532,7 @@ class ModelScopeClient(
                 // silently downloading a CPU/general bundle for a GPU card.
                 repoId = "litert-community/gemma-4-E2B-it-litert-lm",
                 revision = "master",
-                description = "官方 LiteRT-LM GPU 专用包；无审查 CPU 社区包仍单独保留，GPU 卡只解析官方 *-gpu 文件。",
+                description = "面向手机 GPU 的轻量多语种聊天模型。使用官方 LiteRT-LM GPU 模型包，INT4 量化。",
                 recommendedFileName = "gemma-4-E2B-it-gpu.litertlm",
                 parameterScale = "E2B",
                 quant = "INT4",
@@ -2285,7 +2554,7 @@ class ModelScopeClient(
                 // try it; the chipset match only ranks the recommendation.
                 repoId = "litert-community/gemma-4-E2B-it-litert-lm",
                 revision = "master",
-                description = "官方 Qualcomm SM8750 专版 LiteRT-LM；其他 Snapdragon 设备可下载尝试，实际兼容性由 native load 判定。",
+                description = "使用 Qualcomm NPU 加速的轻量文本聊天模型。此 LiteRT-LM 模型包面向骁龙 8 Elite（SM8750）。",
                 recommendedFileName = "gemma-4-E2B-it_qualcomm_sm8750.litertlm",
                 parameterScale = "E2B",
                 quant = "Qualcomm",
@@ -2305,12 +2574,12 @@ class ModelScopeClient(
                 title = "Gemma 4 E4B 无审查 · LiteRT-LM CPU",
                 repoId = "olekk/gemma-4-E4B-it-abliterated-litert-lm",
                 revision = "a4eecccd3b0ba1777660180cda60a396eedcb8aa",
-                description = "发布者明确标注 abliterated/uncensored 的 E4B 包；CPU 通用路径，约 3.66GB。",
+                description = "多语种文本聊天模型，适合问答与写作。社区低拒答版本，使用 CPU 运行，模型文件约 3.66 GB。",
                 recommendedFileName = "gemma-4-E4B-it-abliterated.litertlm",
                 parameterScale = "E4B",
                 quant = "LiteRT-LM",
                 minRamGb = 12,
-                tags = listOf("Gemma 4", "E4B", "LiteRT-LM", "CPU", "Abliterated", "无审查实验"),
+                tags = listOf("Gemma 4", "E4B", "LiteRT-LM", "CPU", "Abliterated", "无审查"),
                 priority = 8,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.MAIN_CHAT,
@@ -2324,7 +2593,7 @@ class ModelScopeClient(
                 title = "Gemma 4 E4B · LiteRT-LM GPU",
                 repoId = "litert-community/gemma-4-E4B-it-litert-lm",
                 revision = "master",
-                description = "官方 LiteRT-LM GPU 专用包；无审查/abliterated CPU 包仍单独保留，GPU 卡只解析官方 *-gpu 文件。",
+                description = "面向手机 GPU 的多语种聊天模型。使用官方 LiteRT-LM GPU 模型包。",
                 recommendedFileName = "gemma-4-E4B-it-gpu.litertlm",
                 parameterScale = "E4B",
                 quant = "LiteRT-LM",
@@ -2349,7 +2618,7 @@ class ModelScopeClient(
                 // an explicit, concrete download block.
                 repoId = "qualcomm/Gemma-4-E4B-it",
                 revision = "main",
-                description = "官方 Qualcomm 发布页目前只提供 Genie/GenieX QAIRT 压缩包，没有可确认的 E4B LiteRT-LM Qualcomm .litertlm 专版；本卡仅说明缺口，不会把通用包误标为 NPU。",
+                description = "Gemma 4 E4B 的 Qualcomm NPU 类别。当前仓库未提供对应的 LiteRT-LM 文件，可选择同系列 CPU 或 GPU 版本。",
                 recommendedFileName = "",
                 parameterScale = "E4B",
                 quant = "暂无 LiteRT-LM 专版",
@@ -2372,7 +2641,7 @@ class ModelScopeClient(
                 // ModelScope exposes this repository on `master`; `main`
                 // responds with HTTP 200 but an empty Files list.
                 revision = "master",
-                description = "官方社区 12B LiteRT-LM 包，约 6.5GB，仅推荐大内存设备。",
+                description = "12B 多语种文本聊天模型，适合大内存设备。使用 CPU 运行，模型文件约 6.5 GB。",
                 recommendedFileName = "gemma-4-12B-it.litertlm",
                 parameterScale = "12B",
                 quant = "LiteRT-LM",
@@ -2391,7 +2660,7 @@ class ModelScopeClient(
                 title = "Gemma 4 12B · LiteRT-LM GPU",
                 repoId = "litert-community/gemma-4-12B-it-litert-lm",
                 revision = "master",
-                description = "官方 LiteRT-LM GPU 专用包，约 5.99GB；与 CPU 通用包分开，避免 GPU 卡误下载 CPU 文件。",
+                description = "12B 多语种文本聊天模型，适合大内存设备。使用官方 LiteRT-LM GPU 模型包，文件约 5.99 GB。",
                 recommendedFileName = "gemma-4-12B-it-gpu.litertlm",
                 parameterScale = "12B",
                 quant = "LiteRT-LM",
@@ -2410,7 +2679,7 @@ class ModelScopeClient(
                 title = "Gemma 4 12B · LiteRT-LM Qualcomm NPU（暂无专版）",
                 repoId = "litert-community/gemma-4-12B-it-litert-lm",
                 revision = "master",
-                description = "官方 12B 仓库目前只有 CPU 通用、GPU 专用和 Web 文件，没有可确认的 Qualcomm/NPU .litertlm 专版；本卡不会把通用包误标为 NPU。",
+                description = "Gemma 4 12B 的 Qualcomm NPU 类别。当前仓库未提供对应的 LiteRT-LM 文件，可选择同系列 CPU 或 GPU 版本。",
                 recommendedFileName = "",
                 parameterScale = "12B",
                 quant = "暂无 LiteRT-LM 专版",
@@ -2428,15 +2697,15 @@ class ModelScopeClient(
             ),
             ModelScopeRecommendedModel(
                 id = "qwen35_08b_uncensored_mnn",
-                title = "Qwen3.5-0.8B 低拒答实验版 · MNN",
+                title = "Qwen3.5-0.8B 低拒答版 · MNN",
                 repoId = "darkmaniac7/Qwen3.5-0.8B-uncensored-MNN",
                 revision = QWEN35_08B_UNCENSORED_MNN_REVISION,
-                description = "社区 MNN 低拒答实验包；发布者声明其基于 Huihui Qwen3.5 0.8B abliterated 权重转换。完整包含视觉组件，实际图文能力以本机 native load 与 smoke 结果为准。",
+                description = "轻量中文聊天模型，适合日常问答。社区低拒答版本，基于 Huihui Qwen3.5 0.8B 转换，完整包包含图片理解组件。",
                 recommendedFileName = "config.json",
                 parameterScale = "0.8B",
                 quant = "MNN",
                 minRamGb = 4,
-                tags = listOf("低拒答实验", "低内存", "Qwen3.5", "MNN", "Hugging Face"),
+                tags = listOf("低拒答", "低内存", "Qwen3.5", "MNN", "Hugging Face"),
                 priority = 0,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.LIGHT_CHAT,
@@ -2445,7 +2714,7 @@ class ModelScopeClient(
                 chatRuntime = RecommendedChatRuntime.MNN,
                 mnnModelBundle = MnnModelBundleSpec(
                     id = "qwen35_08b_uncensored_mnn_bundle",
-                    title = "Qwen3.5 0.8B 低拒答实验 MNN",
+                    title = "Qwen3.5 0.8B 低拒答 MNN",
                     repoId = "darkmaniac7/Qwen3.5-0.8B-uncensored-MNN",
                     revision = QWEN35_08B_UNCENSORED_MNN_REVISION,
                     provider = ModelRepositoryProvider.HUGGING_FACE,
@@ -2460,12 +2729,12 @@ class ModelScopeClient(
                 title = "Qwen3.5-2B MNN",
                 repoId = "MNN/Qwen3.5-2B-MNN",
                 revision = QWEN35_2B_MNN_REVISION,
-                description = "轻量中文多模态聊天进阶档；完整包加载 visual 组件后即可在兼容 ARM64 设备发送图片。",
+                description = "轻量中文多模态模型，支持日常聊天与图片理解。下载包含文本和视觉组件的完整 MNN 模型包。",
                 recommendedFileName = "config.json",
                 parameterScale = "2B",
                 quant = "MNN",
                 minRamGb = 6,
-                tags = listOf("轻量", "纯文本已验证", "Qwen3.5", "MNN", "ModelScope"),
+                tags = listOf("轻量", "图文聊天", "Qwen3.5", "MNN", "ModelScope"),
                 priority = 1,
                 visibleInRecommendations = false,
                 status = RecommendedModelStatus.RECOMMENDED,
@@ -2480,15 +2749,15 @@ class ModelScopeClient(
             ),
             ModelScopeRecommendedModel(
                 id = "qwen35_2b_abliterated_gguf",
-                title = "Qwen3.5-2B 低拒答实验版 · GGUF + mmproj",
+                title = "Qwen3.5-2B 低拒答版 · GGUF + mmproj",
                 repoId = "mradermacher/Huihui-Qwen3.5-2B-abliterated-GGUF",
                 revision = QWEN35_2B_ABLITERATED_GGUF_REVISION,
-                description = "社区 abliterated GGUF 图文实验包；发布者标记为 uncensored。主模型与匹配 mmproj-f16 会一起安装，实际图文兼容性以本机 native load 与 smoke 为准。",
+                description = "支持文本聊天与图片理解的社区低拒答模型。下载包含 Q4_K_M 主模型与匹配的视觉组件。",
                 recommendedFileName = "Huihui-Qwen3.5-2B-abliterated.Q4_K_M.gguf",
                 parameterScale = "2B",
                 quant = "Q4_K_M",
                 minRamGb = 6,
-                tags = listOf("低拒答实验", "图文聊天", "Qwen3.5", "GGUF", "Hugging Face"),
+                tags = listOf("低拒答", "图文聊天", "Qwen3.5", "GGUF", "Hugging Face"),
                 priority = 1,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.LIGHT_CHAT,
@@ -2497,7 +2766,7 @@ class ModelScopeClient(
                 chatRuntime = RecommendedChatRuntime.GGUF,
                 visionModelBundle = communityLowRefusalGgufVisionBundle(
                     id = "qwen35_2b_abliterated_gguf_vision_bundle",
-                    title = "Qwen3.5 2B 低拒答实验图文包",
+                    title = "Qwen3.5 2B 低拒答图文包",
                     repoId = "mradermacher/Huihui-Qwen3.5-2B-abliterated-GGUF",
                     revision = QWEN35_2B_ABLITERATED_GGUF_REVISION,
                     mainFileName = "Huihui-Qwen3.5-2B-abliterated.Q4_K_M.gguf",
@@ -2509,7 +2778,7 @@ class ModelScopeClient(
                 title = "Gemma 4 E2B IT MNN",
                 repoId = "MNN/gemma-4-E2B-it-MNN",
                 revision = GEMMA4_E2B_MNN_REVISION,
-                description = "移动端友好的多语种轻量模型。下载时安装正式文本组件并关闭未兼容的视觉/音频处理器。",
+                description = "面向手机的轻量多语种模型。此 MNN 模型包提供文本聊天，不包含图片和音频输入功能。",
                 recommendedFileName = "config.json",
                 parameterScale = "E2B",
                 quant = "MNN",
@@ -2531,15 +2800,15 @@ class ModelScopeClient(
             ),
             ModelScopeRecommendedModel(
                 id = "gemma4_e2b_uncensored_gguf",
-                title = "Gemma 4 E2B IT 低拒答实验版 · GGUF",
+                title = "Gemma 4 E2B IT 低拒答版 · GGUF",
                 repoId = "TrevorJS/gemma-4-E2B-it-uncensored-GGUF",
                 revision = GEMMA4_E2B_UNCENSORED_GGUF_REVISION,
-                description = "社区 norm-preserving abliterated GGUF 文本实验包；发布者提供低拒答评测信息。仅提供文本聊天，仍须遵守上游 Gemma 许可条款，实际加载以本机 native runtime 为准。",
+                description = "轻量多语种文本聊天模型，使用 Q4_K_M 量化。社区低拒答版本，遵循上游 Gemma 许可条款。",
                 recommendedFileName = "gemma-4-E2B-it-uncensored-Q4_K_M.gguf",
                 parameterScale = "E2B",
                 quant = "Q4_K_M",
                 minRamGb = 6,
-                tags = listOf("低拒答实验", "Gemma 4", "文本聊天", "GGUF", "Hugging Face"),
+                tags = listOf("低拒答", "Gemma 4", "文本聊天", "GGUF", "Hugging Face"),
                 priority = 2,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.LIGHT_CHAT,
@@ -2551,7 +2820,7 @@ class ModelScopeClient(
                 id = "bitcpm4_cann_3b_tq2",
                 title = "BitCPM4-CANN 3B TQ2",
                 repoId = "OpenBMB/BitCPM-CANN-3B-gguf",
-                description = "OpenBMB 侧端取向模型，低精度量化更适合手机内存预算。",
+                description = "面向移动端的中文聊天模型。使用 TQ2_0 量化降低模型存储与运行内存需求。",
                 recommendedFileName = "bitcpm4-3b-tq2_0.gguf",
                 parameterScale = "3B",
                 quant = "TQ2_0",
@@ -2565,7 +2834,7 @@ class ModelScopeClient(
                 id = "bitcpm4_cann_1b_tq2",
                 title = "BitCPM4-CANN 1B TQ2",
                 repoId = "OpenBMB/BitCPM-CANN-1B-gguf",
-                description = "更小的 BitCPM-CANN 入门档，适合极低内存设备测试本地能力。",
+                description = "小体积中文聊天模型，适合内存较少的设备。使用 TQ2_0 量化。",
                 recommendedFileName = "bitcpm4-1b-tq2_0.gguf",
                 parameterScale = "1B",
                 quant = "TQ2_0",
@@ -2598,7 +2867,7 @@ class ModelScopeClient(
                 title = "Qwen3-4B-Instruct-2507",
                 repoId = "qualcomm/Qwen3-4B-Instruct-2507",
                 revision = "main",
-                description = "NPU 纯文本速度实验档，不支持图片输入；适合旗舰设备复测稳定性。",
+                description = "使用 Qualcomm NPU 加速的文本聊天模型。支持中文问答与写作，不支持图片输入。",
                 recommendedFileName = "qwen3_4b_instruct_2507-geniex_qairt-w4a16.zip",
                 parameterScale = "4B",
                 quant = "w4a16 QAIRT",
@@ -2613,15 +2882,15 @@ class ModelScopeClient(
             ),
             ModelScopeRecommendedModel(
                 id = "qwen35_4b_uncensored_mnn",
-                title = "Qwen3.5-4B 低拒答实验版 · MNN",
+                title = "Qwen3.5-4B 低拒答版 · MNN",
                 repoId = "darkmaniac7/Qwen3.5-4B-uncensored-MNN",
                 revision = QWEN35_4B_UNCENSORED_MNN_REVISION,
-                description = "社区 MNN 低拒答实验包；发布者声明其基于 Huihui Qwen3.5 4B abliterated 权重转换。该固定包不含视觉图，当前只提供本地文本聊天，实际加载结果以 native runtime 为准。",
+                description = "适合中文问答与写作的社区低拒答模型。基于 Huihui Qwen3.5 4B 转换，此 MNN 模型包仅提供文本聊天。",
                 recommendedFileName = "config.json",
                 parameterScale = "4B",
                 quant = "MNN",
                 minRamGb = 8,
-                tags = listOf("低拒答实验", "Qwen3.5", "MNN", "Hugging Face"),
+                tags = listOf("低拒答", "Qwen3.5", "MNN", "Hugging Face"),
                 priority = 0,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.MAIN_CHAT,
@@ -2630,7 +2899,7 @@ class ModelScopeClient(
                 chatRuntime = RecommendedChatRuntime.MNN,
                 mnnModelBundle = MnnModelBundleSpec(
                     id = "qwen35_4b_uncensored_mnn_bundle",
-                    title = "Qwen3.5 4B 低拒答实验 MNN",
+                    title = "Qwen3.5 4B 低拒答 MNN",
                     repoId = "darkmaniac7/Qwen3.5-4B-uncensored-MNN",
                     revision = QWEN35_4B_UNCENSORED_MNN_REVISION,
                     provider = ModelRepositoryProvider.HUGGING_FACE,
@@ -2642,7 +2911,7 @@ class ModelScopeClient(
                 id = "bitcpm4_cann_8b_tq2",
                 title = "BitCPM4-CANN 8B TQ2",
                 repoId = "OpenBMB/BitCPM-CANN-8B-gguf",
-                description = "主力中文侧端模型，使用低精度量化降低内存压力，适合中高端手机尝试。",
+                description = "面向移动端的中文聊天模型。8B 规模、TQ2_0 量化，适合内存较充裕的设备。",
                 recommendedFileName = "bitcpm4-8b-tq2_0.gguf",
                 parameterScale = "8B",
                 quant = "TQ2_0",
@@ -2656,7 +2925,7 @@ class ModelScopeClient(
                 id = "minicpm_v46_q4",
                 title = "MiniCPM-V 4.6 Q4_K_M + mmproj",
                 repoId = "OpenBMB/MiniCPM-V-4.6-gguf",
-                description = "支持文本与图片输入的本地多模态聊天模型；下载主模型和匹配 mmproj 后，可直接在聊天页发送图片进行理解。",
+                description = "支持文本聊天与图片理解的多模态模型。下载包含主模型和视觉组件，可在聊天页发送图片提问。",
                 recommendedFileName = "MiniCPM-V-4_6-Q4_K_M.gguf",
                 parameterScale = "V-4.6",
                 quant = "Q4_K_M",
@@ -2704,7 +2973,7 @@ class ModelScopeClient(
                 title = "Gemma 4 E4B IT MNN",
                 repoId = "MNN/gemma-4-E4B-it-MNN",
                 revision = GEMMA4_E4B_MNN_REVISION,
-                description = "Gemma 4 中档多语种模型。下载时安装正式文本组件并关闭未兼容的视觉/音频处理器。",
+                description = "中等规模的多语种模型。此 MNN 模型包提供文本聊天，不包含图片和音频输入功能。",
                 recommendedFileName = "config.json",
                 parameterScale = "E4B",
                 quant = "MNN",
@@ -2726,15 +2995,15 @@ class ModelScopeClient(
             ),
             ModelScopeRecommendedModel(
                 id = "gemma4_e4b_uncensored_gguf",
-                title = "Gemma 4 E4B IT 低拒答实验版 · GGUF",
+                title = "Gemma 4 E4B IT 低拒答版 · GGUF",
                 repoId = "TrevorJS/gemma-4-E4B-it-uncensored-GGUF",
                 revision = GEMMA4_E4B_UNCENSORED_GGUF_REVISION,
-                description = "社区 norm-preserving abliterated GGUF 文本实验包；发布者提供低拒答评测信息。仅提供文本聊天，仍须遵守上游 Gemma 许可条款，实际加载以本机 native runtime 为准。",
+                description = "多语种文本聊天模型，使用 Q4_K_M 量化。社区低拒答版本，遵循上游 Gemma 许可条款。",
                 recommendedFileName = "gemma-4-E4B-it-uncensored-Q4_K_M.gguf",
                 parameterScale = "E4B",
                 quant = "Q4_K_M",
                 minRamGb = 8,
-                tags = listOf("低拒答实验", "Gemma 4", "文本聊天", "GGUF", "Hugging Face"),
+                tags = listOf("低拒答", "Gemma 4", "文本聊天", "GGUF", "Hugging Face"),
                 priority = 4,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.MAIN_CHAT,
@@ -2744,15 +3013,15 @@ class ModelScopeClient(
             ),
             ModelScopeRecommendedModel(
                 id = "qwen35_9b_uncensored_mnn",
-                title = "Qwen3.5-9B 低拒答实验版 · MNN",
+                title = "Qwen3.5-9B 低拒答版 · MNN",
                 repoId = "darkmaniac7/Qwen3.5-9B-uncensored-MNN",
                 revision = QWEN35_9B_UNCENSORED_MNN_REVISION,
-                description = "社区 MNN 低拒答实验包；发布者声明其基于 Huihui Qwen3.5 9B abliterated 权重转换。包内必须连同独立 embedding 权重安装，当前只提供本地文本聊天，实际加载结果以 native runtime 为准。",
+                description = "适合中文问答与写作的 9B 社区低拒答模型。此 MNN 模型包提供文本聊天，下载包含必需的独立词嵌入权重。",
                 recommendedFileName = "config.json",
                 parameterScale = "9B",
                 quant = "MNN",
                 minRamGb = 12,
-                tags = listOf("低拒答实验", "高质量", "Qwen3.5", "MNN", "Hugging Face"),
+                tags = listOf("低拒答", "高质量", "Qwen3.5", "MNN", "Hugging Face"),
                 priority = 0,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
@@ -2761,7 +3030,7 @@ class ModelScopeClient(
                 chatRuntime = RecommendedChatRuntime.MNN,
                 mnnModelBundle = MnnModelBundleSpec(
                     id = "qwen35_9b_uncensored_mnn_bundle",
-                    title = "Qwen3.5 9B 低拒答实验 MNN",
+                    title = "Qwen3.5 9B 低拒答 MNN",
                     repoId = "darkmaniac7/Qwen3.5-9B-uncensored-MNN",
                     revision = QWEN35_9B_UNCENSORED_MNN_REVISION,
                     provider = ModelRepositoryProvider.HUGGING_FACE,
@@ -2777,7 +3046,7 @@ class ModelScopeClient(
                 title = "Qwen3-8B",
                 repoId = "qualcomm/Qwen3-8B",
                 revision = "main",
-                description = "NPU 纯文本高质量实验档，不支持图片输入；仅建议 24GB 级旗舰验证。",
+                description = "使用 Qualcomm NPU 加速的 8B 文本聊天模型。建议 24 GB 及以上运行内存，不支持图片输入。",
                 recommendedFileName = "qwen3_8b-geniex_qairt-w4a16.zip",
                 parameterScale = "8B",
                 quant = "w4a16 QAIRT",
@@ -2795,7 +3064,7 @@ class ModelScopeClient(
                 title = "Qwen2.5-VL-7B-Instruct",
                 repoId = "qualcomm/Qwen2.5-VL-7B-Instruct",
                 revision = "main",
-                description = "高内存 NPU 图文实验档，适合 24GB 级旗舰验证。",
+                description = "使用 Qualcomm NPU 加速的多模态模型，支持文本聊天与图片理解。建议 24 GB 及以上运行内存。",
                 recommendedFileName = "qwen2_5_vl_7b_instruct-geniex_qairt-w4a16-qualcomm_snapdragon_8_elite_gen5.zip",
                 parameterScale = "7B",
                 quant = "w4a16 QAIRT",
@@ -2812,12 +3081,12 @@ class ModelScopeClient(
                 id = "glm47_flash_tq1",
                 title = "GLM-4.7-Flash TQ1",
                 repoId = "unsloth/GLM-4.7-Flash-GGUF",
-                description = "高质量中文/通用聊天的超低内存实验档，优先保证侧端能加载，质量低于 IQ4/Q4。",
+                description = "面向中文与通用聊天的低精度量化模型。TQ1_0 减少存储和内存占用，生成质量相较 IQ4/Q4 量化有所降低。",
                 recommendedFileName = "GLM-4.7-Flash-UD-TQ1_0.gguf",
                 parameterScale = "Flash",
                 quant = "TQ1_0",
                 minRamGb = 10,
-                tags = listOf("智谱", "超低内存", "实验", "ModelScope"),
+                tags = listOf("智谱", "超低内存", "ModelScope"),
                 priority = 2,
                 visibleInRecommendations = false,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT
@@ -2827,7 +3096,7 @@ class ModelScopeClient(
                 title = "Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-APEX-MTP-I-Nano.gguf",
                 repoId = "mudler/Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-APEX-MTP-GGUF",
                 revision = "cc768c55deb10d6d08727cf66b856e9950ef0720",
-                description = "第三方推理蒸馏 MoE GGUF 实验模型；可直接下载，APEX MTP 加速尚未在当前 llama.cpp 链路验收。",
+                description = "第三方推理蒸馏 MoE 文本模型，使用 GGUF 格式。适合内存充裕的设备，APEX MTP 是上游文件规格，不代表应用会启用该加速功能。",
                 recommendedFileName = "Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-APEX-MTP-I-Nano.gguf",
                 parameterScale = "35B-A3B",
                 quant = "APEX MTP I-Nano",
@@ -2845,7 +3114,7 @@ class ModelScopeClient(
                 title = "google_gemma-4-26B-A4B-it-IQ2_XXS.gguf",
                 repoId = "bartowski/google_gemma-4-26B-A4B-it-GGUF",
                 revision = "fabed3e586120477355eea23b92644540a79ce2f",
-                description = "Gemma 4 低内存 MoE GGUF 实验模型；主模型可独立下载，图片理解同时安装匹配的 mmproj-F16.gguf。",
+                description = "Gemma 4 MoE 模型，使用 IQ2_XXS 量化减少内存占用。主模型可独立用于聊天，图片理解需另外安装匹配的视觉组件。",
                 recommendedFileName = "google_gemma-4-26B-A4B-it-IQ2_XXS.gguf",
                 parameterScale = "26B-A4B",
                 quant = "IQ2_XXS",
@@ -2892,15 +3161,15 @@ class ModelScopeClient(
             ),
             ModelScopeRecommendedModel(
                 id = "gemma4_26b_a4b_abliterated_gguf",
-                title = "Gemma 4 26B-A4B 低拒答实验版 · GGUF + mmproj",
+                title = "Gemma 4 26B-A4B 低拒答版 · GGUF + mmproj",
                 repoId = "mradermacher/Huihui-gemma-4-26B-A4B-it-abliterated-GGUF",
                 revision = GEMMA4_26B_A4B_ABLITERATED_GGUF_REVISION,
-                description = "社区 abliterated GGUF 图文实验包；主模型与匹配 mmproj-f16 会一起安装。仓库仍受上游 Google Gemma 4 许可条款约束，实际图文兼容性以本机 native load 与 smoke 为准。",
+                description = "Gemma 4 MoE 社区低拒答模型，支持文本聊天与图片理解。下载包含 Q4_K_M 主模型与视觉组件，遵循上游 Gemma 许可条款。",
                 recommendedFileName = "Huihui-gemma-4-26B-A4B-it-abliterated.Q4_K_M.gguf",
                 parameterScale = "26B-A4B",
                 quant = "Q4_K_M",
                 minRamGb = 24,
-                tags = listOf("低拒答实验", "Gemma 4", "MoE", "图文聊天", "GGUF", "Hugging Face"),
+                tags = listOf("低拒答", "Gemma 4", "MoE", "图文聊天", "GGUF", "Hugging Face"),
                 priority = 4,
                 status = RecommendedModelStatus.EXPERIMENTAL,
                 group = ModelScopeRecommendedGroup.QUALITY_CHAT,
@@ -2909,7 +3178,7 @@ class ModelScopeClient(
                 chatRuntime = RecommendedChatRuntime.GGUF,
                 visionModelBundle = communityLowRefusalGgufVisionBundle(
                     id = "gemma4_26b_a4b_abliterated_gguf_vision_bundle",
-                    title = "Gemma 4 26B-A4B 低拒答实验图文包",
+                    title = "Gemma 4 26B-A4B 低拒答图文包",
                     repoId = "mradermacher/Huihui-gemma-4-26B-A4B-it-abliterated-GGUF",
                     revision = GEMMA4_26B_A4B_ABLITERATED_GGUF_REVISION,
                     mainFileName = "Huihui-gemma-4-26B-A4B-it-abliterated.Q4_K_M.gguf",
@@ -2923,7 +3192,7 @@ class ModelScopeClient(
                 title = "CyberRealistic SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/CyberRealistic_Final-SD1.5-qnn2.28",
                 revision = "162fe0a46cb3f9017b9e2bc003eb168e8bbf4b04",
-                description = "写实方向的 SD1.5 QNN 2.28 包，使用 QNN UNet/VAE 与 MNN clip_v2 conditioning。下载后校验完整展开的运行资源；首次真实 native load 与 graph execution 决定兼容性。",
+                description = "偏写实风格的图片生成模型，适合人物与生活场景。使用 SD1.5 和 Qualcomm NPU 加速。",
                 recommendedFileName = "cyberrealistic_final_qnn2.28_min.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
@@ -2955,7 +3224,7 @@ class ModelScopeClient(
                 title = "RealisticVision Hyper SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/RealisticVisionHyper-SD1.5-qnn2.28",
                 revision = "92a2e40d65a47a6b8aa3ee86ffffdc0ed2b0b66b",
-                description = "写实人像和生活摄影方向的 SD1.5 Hyper QNN 2.28 包，默认 8-step、CFG 2.0，使用 QNN UNet/VAE 与 MNN clip_v2 conditioning。下载后校验完整展开的运行资源；首次真实 native load 与 graph execution 决定兼容性。",
+                description = "偏写实人像与生活摄影的图片生成模型。使用 SD1.5 Hyper 和 Qualcomm NPU 加速，默认 8 步、CFG 2.0。",
                 recommendedFileName = "RealisticVisionHyper-qnn2.28-min.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
@@ -2983,7 +3252,7 @@ class ModelScopeClient(
                 title = "DreamShaper SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/DreamShaper-SD1.5-qnn2.28",
                 revision = "2338d013c60981b3bd565ce39d4a731bcf9ebfef",
-                description = "通用创意风格的 SD1.5 QNN 2.28 包，覆盖插画、概念图和轻写实场景，使用 QNN UNet/VAE 与 MNN clip_v2 conditioning。下载后校验完整展开的运行资源；首次真实 native load 与 graph execution 决定兼容性。",
+                description = "通用创意图片生成模型，适合插画、概念图与轻写实场景。使用 SD1.5 和 Qualcomm NPU 加速。",
                 recommendedFileName = "DreamShaperV8-qnn2.28-min.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
@@ -3011,12 +3280,12 @@ class ModelScopeClient(
                 title = "MeinaMix SD1.5 QNN 2.28",
                 repoId = "Mr-J-369/MeinaMix-SD1.5-qnn2.28",
                 revision = "17d26a779cf2a53acc6caf0345c663767c293c5a",
-                description = "动漫与插画方向的 SD1.5 QNN 包。适合作为本地 NPU 生图的风格化补充模型。",
+                description = "偏动漫与插画风格的图片生成模型，适合角色立绘。使用 SD1.5 和 Qualcomm NPU 加速。",
                 recommendedFileName = "MeinaMix-qnn2.28-8gen2.zip",
                 parameterScale = "SD1.5",
                 quant = "QNN 2.28",
                 minRamGb = 8,
-                tags = listOf("本地生图", "骁龙 NPU", "QNN", "动漫插画", "实验"),
+                tags = listOf("本地生图", "骁龙 NPU", "QNN", "动漫插画"),
                 priority = 4,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.EXPERIMENTAL,
@@ -3039,7 +3308,7 @@ class ModelScopeClient(
                 title = "SDXL Base QNN 2.28",
                 repoId = "xororz/sdxl-qnn",
                 revision = "ead90f4635e21e7412b8200a5efd220b0193beeb",
-                description = "通用基础 SDXL QNN 完整 1024×1024 包；双 CLIP、多步 UNet 与分进程 VAE tile 链路已接线，首次运行由真实 native graph 结果确认兼容性。",
+                description = "通用 SDXL 图片生成模型，适合多种题材和风格。使用 Qualcomm NPU 加速，输出尺寸为 1024×1024。",
                 recommendedFileName = "sdxl_base_qnn2.28_8gen3.zip",
                 parameterScale = "SDXL",
                 quant = "QNN 2.28",
@@ -3068,7 +3337,7 @@ class ModelScopeClient(
                 title = "RealismSDXL DMD2 ALT QNN 2.28",
                 repoId = "Mr-J-369/RealismByStableYogiV8.0_DMD2_ALT-SDXL-qnn2.28",
                 revision = "ab203b4d41e42bd01073e19dcd478d7b231780d2",
-                description = "写实方向的 SDXL DMD2 ALT 少步包；默认 4-step、CFG 1.0 单分支，完整 UNet timetable 与 VAE tile 链路已接线。",
+                description = "偏写实风格的 SDXL 少步图片生成模型。使用 Qualcomm NPU 加速，默认 4 步、CFG 1.0。",
                 recommendedFileName = "realismSDXLByStable_v80DMD2ALT_qnn2.28_8gen3.zip",
                 parameterScale = "SDXL",
                 quant = "QNN 2.28 DMD2 ALT",
@@ -3097,7 +3366,7 @@ class ModelScopeClient(
                 title = "Animagine XL v4 QNN 2.28",
                 repoId = "YuuiKurata/animagineXL_qnn2.28",
                 revision = "43de36d441380fc9cc34f25c1d01bbf74c8776b7",
-                description = "动漫与插画方向的 SDXL QNN 包；默认 1024×1024、28-step、CFG 5.0，并使用动漫模型专属负面提示词。",
+                description = "偏二次元动漫与插画的 SDXL 模型，适合角色立绘。输出 1024×1024，默认 28 步、CFG 5.0。",
                 recommendedFileName = "animagineXL40_v4Opt_qnn2.28_8gen3.zip",
                 parameterScale = "SDXL",
                 quant = "QNN 2.28",
@@ -3126,12 +3395,12 @@ class ModelScopeClient(
                 title = "CyberRealisticXL SDXL QNN 2.28",
                 repoId = "xororz/sdxl-qnn",
                 revision = "ead90f4635e21e7412b8200a5efd220b0193beeb",
-                description = "写实摄影方向的 1024×1024 SDXL QNN 实验包；历史真机曾在旧的整张 VAE 输入路径暴露 UNet [1,4,128,128] 与 VAE [1,4,64,64] 形状差异。当前 native 已接入 3×3、共 9 次的 64×64 latent 分块解码与重叠融合兼容路径，但此固定 ZIP 尚待生产 MainActivity 与认证 Local API 复验。下载保持开放且不会静默切换模型。",
+                description = "偏写实摄影的 SDXL 图片生成模型，适合人物与场景。使用 Qualcomm NPU 加速，输出尺寸为 1024×1024。",
                 recommendedFileName = "cyber_realistic_v10_qnn2.28_8gen3.zip",
                 parameterScale = "SDXL",
                 quant = "QNN 2.28",
                 minRamGb = 12,
-                tags = listOf("本地生图", "骁龙 NPU", "QNN", "SDXL", "高端实验"),
+                tags = listOf("本地生图", "骁龙 NPU", "QNN", "SDXL", "写实摄影"),
                 priority = 3,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.EXPERIMENTAL,
@@ -3157,7 +3426,7 @@ class ModelScopeClient(
                 title = "Qualcomm Stable Diffusion 1.5 · 骁龙 8 Elite Gen 5",
                 repoId = "qualcomm/Stable-Diffusion-v1.5",
                 revision = "1815ed2af65018733338c37efacf62310e74bc94",
-                description = "Qualcomm 固定发布的 Gen5 SD1.5 QNN 包；目录已声明 text encoder、UNet、VAE 资产与执行 profile，尚无生产 MainActivity 和认证 Local API 的真机出图证据。下载保持开放，首次运行以真实 native load/graph execution 结果为准。",
+                description = "通用 Stable Diffusion 1.5 文生图模型。使用 Qualcomm NPU 加速，模型包面向骁龙 8 Elite Gen 5。",
                 recommendedFileName = "stable_diffusion_v1_5-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
                 parameterScale = "SD1.5",
                 quant = "w8a16 QAIRT 2.45",
@@ -3185,7 +3454,7 @@ class ModelScopeClient(
                 title = "Qualcomm Stable Diffusion 2.1 · 骁龙 8 Elite Gen 5",
                 repoId = "qualcomm/Stable-Diffusion-v2.1",
                 revision = "5c79668b496a31d4570b06d5b2919ea393166b36",
-                description = "Qualcomm 固定发布的 Gen5 SD2.1 QNN 包；目录已声明 text encoder、UNet、VAE 资产与执行 profile，尚无生产 MainActivity 和认证 Local API 的真机出图证据。下载保持开放，首次运行以真实 native load/graph execution 结果为准。",
+                description = "通用 Stable Diffusion 2.1 文生图模型。使用 Qualcomm NPU 加速，模型包面向骁龙 8 Elite Gen 5。",
                 recommendedFileName = "stable_diffusion_v2_1-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
                 parameterScale = "SD2.1",
                 quant = "w8a16 QAIRT 2.45",
@@ -3214,7 +3483,7 @@ class ModelScopeClient(
                 title = "Qualcomm ControlNet Canny · 骁龙 8 Elite Gen 5",
                 repoId = "qualcomm/ControlNet-Canny",
                 revision = "2e0b3bb550cad49caf0f2e135d1f67bced02e61e",
-                description = "Qualcomm 固定发布的 Gen5 ControlNet Canny QNN 包；目录已声明控制图任务与 graph 组件，Canny 预处理、residual 注入及强度参数的产品输入链尚无生产 UI/API 真机执行证据。下载保持开放，首次运行以真实 native graph 结果为准。",
+                description = "基于 Canny 边缘图引导构图的图片生成模型。需要输入控制图，模型包面向骁龙 8 Elite Gen 5 的 Qualcomm NPU。",
                 recommendedFileName = "controlnet_canny-qnn_context_binary-w8a16-qualcomm_snapdragon_8_elite_gen5_for_galaxy.zip",
                 parameterScale = "ControlNet",
                 quant = "w8a16 QAIRT 2.45",
@@ -3243,12 +3512,12 @@ class ModelScopeClient(
                 title = "Stable Diffusion 1.5 · MNN 512×512",
                 repoId = "MNN/stable-diffusion-v1-5-mnn-opencl",
                 revision = SD15_MNN_REVISION,
-                description = "真机 direct + OpenCL 512×512、20-step 文生图链路已完成技术闭环；机器人提示词语义通过，车辆提示词仍有颜色和车型偏差。发布仓库不含 VAE encoder，因此该推荐包不宣称 img2img 或 inpaint 能力。允许实验下载和手动选择，但不能设为默认引擎。",
+                description = "通用 Stable Diffusion 1.5 文生图模型，输出 512×512。支持 MNN CPU/OpenCL GPU，此模型包不支持图生图和局部重绘。",
                 recommendedFileName = "unet.mnn",
                 parameterScale = "SD1.5",
                 quant = "MNN",
                 minRamGb = 8,
-                tags = listOf("本地生图", "MNN", "direct + OpenCL", "512×512", "实验", "module 不推荐", "ModelScope"),
+                tags = listOf("本地生图", "MNN", "CPU / OpenCL GPU", "512×512", "ModelScope"),
                 priority = 1,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.EXPERIMENTAL,
@@ -3256,7 +3525,7 @@ class ModelScopeClient(
                 localImageEngineTier = LocalImageEngineTier.HEAVY_EXPERIMENTAL,
                 imageEngineBundle = ImageEngineBundleSpec(
                     id = "sd15_mnn_bundle",
-                    title = "MNN SD1.5 512 实验包",
+                    title = "MNN SD1.5 512 模型包",
                     components = stableDiffusion15MnnComponents(),
                     recommendationId = "sd15_mnn_512_quality",
                     runtime = ImageEngineBundleRuntime.MNN_DIFFUSION,
@@ -3272,12 +3541,12 @@ class ModelScopeClient(
                 title = "Stable Diffusion Turbo · 512×512",
                 repoId = "AI-ModelScope/sd-turbo",
                 revision = "dc8a205ed5961a45a1b99c2913a194e616bd284b",
-                description = "Stable Diffusion 2.1 蒸馏文生图模型；当前目录默认 512×512、4-step、CFG 1.0、Euler ancestral。现有归档仅证明 debug worker 以 1-step/Euler 产图，尚未证明当前预设在生产 MainActivity 与认证 Local API 的闭环。下载保持开放，不会自动设为默认引擎。",
+                description = "少步数文生图模型，适合快速生成草图。默认 512×512、4 步、CFG 1.0，使用 Euler ancestral 采样器。",
                 recommendedFileName = "sd_turbo.safetensors",
                 parameterScale = "SD-Turbo",
                 quant = "FP16",
                 minRamGb = 8,
-                tags = listOf("本地生图", "Stable Diffusion Turbo", "当前 512 四步预设", "CPU", "ModelScope", "实验"),
+                tags = listOf("本地生图", "Stable Diffusion Turbo", "当前 512 四步预设", "CPU", "ModelScope"),
                 priority = 0,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.EXPERIMENTAL,
@@ -3318,7 +3587,7 @@ class ModelScopeClient(
                 title = "Sana Edit V2 · MNN",
                 repoId = "MNN/MNN-Sana-Edit-V2",
                 revision = SANA_EDIT_V2_REVISION,
-                description = "ModelScope 官方 MNN Sana 卡通风格图像编辑包；目录声明默认 512×512、10-step、CFG 4.5，并完整下载 llm、VAE encoder、transformer 与 VAE decoder。当前尚无生产 MainActivity 与认证 Local API 的真实编辑证据；下载保持开放，首次运行以真实 native 结果为准。",
+                description = "偏卡通风格的图像编辑模型，需要输入原图和编辑提示词。使用 MNN 引擎，默认 512×512、10 步。",
                 recommendedFileName = "transformer.mnn",
                 parameterScale = "Sana Edit V2",
                 quant = "MNN",
@@ -3356,12 +3625,12 @@ class ModelScopeClient(
                 id = "z_image_turbo_q4",
                 title = "Z-Image Turbo · Q2_K GGUF",
                 repoId = "hf/leejet-Z-Image-Turbo-GGUF",
-                description = "Z-Image Turbo 完整三组件包，包含 Q2_K diffusion、匹配 VAE 和 Qwen3 文本编码器；按 stable-diffusion.cpp 上游执行 8 次 DiT、CFG 1.0 单分支。",
+                description = "使用少步数生成图片的模型，Q2_K 量化降低存储占用。下载包含主模型、图像解码器和文本编码器，默认 8 步。",
                 recommendedFileName = "z_image_turbo-Q2_K.gguf",
                 parameterScale = "6B",
                 quant = "Q2_K",
                 minRamGb = 8,
-                tags = listOf("本地生图", "Z-Image", "Turbo", "备用实验", "ModelScope"),
+                tags = listOf("本地生图", "Z-Image", "Turbo", "Q2_K", "ModelScope"),
                 priority = 2,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.EXPERIMENTAL,
@@ -3414,12 +3683,12 @@ class ModelScopeClient(
                 id = "flux2_klein_4b_q4",
                 title = "FLUX.2 Klein 4B",
                 repoId = "hf/leejet-FLUX.2-klein-4B-GGUF",
-                description = "FLUX.2 Klein 4B 蒸馏版完整本地引擎包，一次下载主模型、匹配 VAE 与 Qwen3 文本编码器；默认 1024×1024、4-step、CFG 1.0 单分支。",
+                description = "4B 蒸馏图片生成模型，适合少步数出图。下载包含主模型、图像解码器和文本编码器，默认 1024×1024、4 步。",
                 recommendedFileName = "flux-2-klein-4b-Q4_0.gguf",
                 parameterScale = "4B",
                 quant = "Q4_0",
                 minRamGb = 8,
-                tags = listOf("本地生图", "FLUX.2", "画质实验", "GGUF", "ModelScope"),
+                tags = listOf("本地生图", "FLUX.2", "少步生成", "GGUF", "ModelScope"),
                 priority = 1,
                 kind = ModelScopeRecommendedKind.IMAGE,
                 status = RecommendedModelStatus.EXPERIMENTAL,
@@ -3469,10 +3738,44 @@ class ModelScopeClient(
                 )
             ),
             ModelScopeRecommendedModel(
+                id = "qwen_image_21_mnn_opencl",
+                title = "Qwen-Image-2.1 · MNN OpenCL",
+                repoId = QWEN_IMAGE_21_MNN_REPO,
+                revision = QWEN_IMAGE_21_MNN_REVISION,
+                description = "7B 本地文生图模型，DiT 使用 MNN OpenCL GPU，文本编码器和 VAE 使用 CPU。MNN Android 包已验证 7 种比例、Standard/Fast/Tiny 三档尺寸，默认 512×512、20 步；Standard 细节最好，Fast/Tiny 更快但细节较少。官方原始模型的 2K 示例不属于当前 Android MNN 包。建议设备内存 12 GB 以上；骁龙 8 Gen 2 实机约需 10 分钟生成一张，具体速度受设备散热和系统负载影响。图像编辑组件暂不随文生图包下载。模型权重遵循 Qwen Research License（研究用途，非商业使用限制适用），使用前请阅读许可：https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE",
+                recommendedFileName = "dit.mnn",
+                parameterScale = "7B",
+                quant = "MNN int4",
+                minRamGb = 12,
+                tags = listOf("本地生图", "Qwen-Image-2.1", "MNN", "OpenCL GPU", "7种比例", "Standard/Fast/Tiny", "Qwen Research License"),
+                priority = 2,
+                kind = ModelScopeRecommendedKind.IMAGE,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                visibleInRecommendations = true,
+                provider = ModelRepositoryProvider.HUGGING_FACE,
+                requiredAbis = setOf("arm64-v8a"),
+                downloadable = true,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                downloadBlockReason = null,
+                localImageEngineTier = LocalImageEngineTier.HEAVY_EXPERIMENTAL,
+                imageEngineBundle = ImageEngineBundleSpec(
+                    id = "qwen_image_21_mnn_opencl_bundle",
+                    title = "Qwen-Image-2.1 MNN OpenCL 引擎包",
+                    recommendationId = "qwen_image_21_mnn_opencl",
+                    components = qwenImage21MnnComponents(),
+                    runtime = ImageEngineBundleRuntime.MNN_DIFFUSION,
+                    accelerator = ImageEngineAccelerator.OPENCL_GPU,
+                    minDeviceTier = ImageEngineMinDeviceTier.ANY,
+                    requiresSmokeTest = true,
+                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 20, timeoutSeconds = 1_500),
+                    executionProfile = recommendedImageExecutionProfile("qwen_image_21_mnn_opencl")
+                )
+            ),
+            ModelScopeRecommendedModel(
                 id = "qwen_image_2512_q2",
                 title = "Qwen-Image 2512 · Q2_K GGUF",
                 repoId = "unsloth/Qwen-Image-2512-GGUF",
-                description = "Qwen-Image 低内存完整三组件包，一次下载 diffusion 主模型、匹配 VAE 和 Qwen2.5-VL 文本编码器；按 2512 的 stable-diffusion.cpp 工作流默认 1024×1024、40-step、CFG 2.5。",
+                description = "Qwen-Image 2512 图片生成模型，使用 Q2_K 量化减少存储占用。下载包含完整生成组件，默认 1024×1024、40 步。",
                 recommendedFileName = "qwen-image-2512-Q2_K.gguf",
                 parameterScale = "Image",
                 quant = "Q2_K",
@@ -3530,7 +3833,7 @@ class ModelScopeClient(
                 id = "longcat_image_q4",
                 title = "LongCat-Image · Q4_0 GGUF",
                 repoId = "vantagewithai/LongCat-Image-GGUF",
-                description = "LongCat-Image 完整三组件包，一次下载 diffusion 主模型、匹配 FLUX VAE 和 Qwen2.5-VL 文本编码器；默认 1024×1024、20-step、CFG 5.0。",
+                description = "LongCat-Image 图片生成模型，使用 Q4_0 量化。下载包含主模型、图像解码器和文本编码器，默认 1024×1024、20 步。",
                 recommendedFileName = "LongCat-Image-Q4_0.gguf",
                 parameterScale = "Image",
                 quant = "Q4_0",

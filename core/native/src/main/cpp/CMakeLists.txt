@@ -12,12 +12,22 @@ set(CMAKE_JOB_POOL_COMPILE mca_compile_pool)
 set(CMAKE_JOB_POOL_LINK mca_link_pool)
 
 option(MCA_WITH_LLAMA_CPP "Build MCA native backend with llama.cpp" ON)
+option(MCA_WITH_LLAMA_OPENCL "Build the llama.cpp OpenCL backend from the pinned source" ON)
 option(MCA_WITH_MNN_DIFFUSION "Build MCA native backend with MNN Stable Diffusion runner" ON)
 option(MCA_WITH_TOKENIZERS_CPP "Build the complete tokenizer.json backend" ON)
+option(MCA_QNN_TYPED_BINDINGS_REQUIRED "Fail configuration instead of building an unusable QNN graph stub" ON)
 set(MCA_MNN_SOURCE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/MNN" CACHE PATH "Official MNN source root")
 set(MCA_MNN_ANDROID_BUILD_ROOT "${MCA_MNN_SOURCE_ROOT}/project/android/build_64" CACHE PATH "Official MNN Android build root")
 set(MCA_QNN_SDK_ROOT "" CACHE PATH "Qualcomm AI Runtime / QNN SDK root")
 set(MCA_TOKENIZERS_CPP_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/tokenizers-cpp" CACHE PATH "tokenizers-cpp source root")
+set(MCA_OPENCL_HEADERS_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/MNN/3rd_party/OpenCLHeaders" CACHE PATH "OpenCL headers used by the Android llama.cpp backend")
+
+# Android exposes the vendor OpenCL implementation as a platform native
+# library.  There is no NDK import library to link against, so the backend is
+# compiled against the Khronos headers and resolves the platform library at
+# runtime (see FindOpenCL.cmake and native_engine.cpp).  Keep x86_64 builds
+# CPU-only because Android OpenCL is only available on the arm64 device path.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
 if(DEFINED ANDROID_ABI)
     message(STATUS "MCA Android ABI: ${ANDROID_ABI}")
@@ -25,10 +35,21 @@ if(DEFINED ANDROID_ABI)
         set(GGML_SYSTEM_ARCH "ARM")
         set(GGML_CPU_KLEIDIAI ON)
         set(GGML_OPENMP ON)
+        if(MCA_WITH_LLAMA_OPENCL)
+            set(GGML_OPENCL ON CACHE BOOL "ggml: use OpenCL" FORCE)
+            # The pinned MNN OpenCLHeaders checkout targets OpenCL 2.2.  The
+            # ggml 3.0 large-buffer extension is optional; keep it disabled
+            # until a 3.0 header set is vendored so the normal clCreateBuffer
+            # path remains portable across Adreno driver generations.
+            set(GGML_OPENCL_TARGET_VERSION "220" CACHE STRING "ggml: OpenCL API target" FORCE)
+        else()
+            set(GGML_OPENCL OFF CACHE BOOL "ggml: use OpenCL" FORCE)
+        endif()
     elseif(ANDROID_ABI STREQUAL "x86_64")
         set(GGML_SYSTEM_ARCH "x86")
         set(GGML_CPU_KLEIDIAI OFF)
         set(GGML_OPENMP OFF)
+        set(GGML_OPENCL OFF CACHE BOOL "ggml: use OpenCL" FORCE)
     else()
         message(FATAL_ERROR "Unsupported ABI: ${ANDROID_ABI}")
     endif()
@@ -98,6 +119,33 @@ foreach(QNN_INCLUDE_CANDIDATE
     endif()
 endforeach()
 if(MCA_QNN_INCLUDE_DIR)
+    set(MCA_QNN_REQUIRED_HEADER_RELATIVE_PATHS
+            "QNN/QnnInterface.h"
+            "QNN/QnnBackend.h"
+            "QNN/QnnContext.h"
+            "QNN/QnnDevice.h"
+            "QNN/QnnGraph.h"
+            "QNN/QnnTensor.h"
+            "QNN/HTP/QnnHtpDevice.h"
+            "QNN/System/QnnSystemInterface.h")
+    set(MCA_QNN_MISSING_HEADERS "")
+    foreach(QNN_HEADER_RELATIVE_PATH IN LISTS MCA_QNN_REQUIRED_HEADER_RELATIVE_PATHS)
+        if(NOT EXISTS "${MCA_QNN_INCLUDE_DIR}/${QNN_HEADER_RELATIVE_PATH}")
+            list(APPEND MCA_QNN_MISSING_HEADERS "${QNN_HEADER_RELATIVE_PATH}")
+        endif()
+    endforeach()
+    if(MCA_QNN_MISSING_HEADERS)
+        if(MCA_QNN_TYPED_BINDINGS_REQUIRED)
+            message(FATAL_ERROR
+                    "Typed QNN graph bindings are required, but the configured SDK is missing headers: ${MCA_QNN_MISSING_HEADERS}")
+        endif()
+        message(WARNING
+                "QNN SDK header set is incomplete (${MCA_QNN_MISSING_HEADERS}); building the QNN graph stub.")
+        set(MCA_QNN_INCLUDE_DIR "")
+    endif()
+endif()
+
+if(MCA_QNN_INCLUDE_DIR)
     message(STATUS "MCA QNN SDK headers found at ${MCA_QNN_INCLUDE_DIR}")
     target_include_directories(mca_qnn_native PRIVATE
             "${MCA_QNN_INCLUDE_DIR}"
@@ -106,7 +154,11 @@ if(MCA_QNN_INCLUDE_DIR)
             MCA_WITH_QNN_SDK_HEADERS=1
             MCA_QNN_SDK_ROOT_CONFIGURED=1)
 else()
-    message(STATUS "MCA QNN SDK headers not found. Set MCA_QNN_SDK_ROOT, QNN_SDK_ROOT, or QAIRT_SDK_ROOT to enable typed QNN graph bindings.")
+    if(MCA_QNN_TYPED_BINDINGS_REQUIRED)
+        message(FATAL_ERROR
+                "Typed QNN graph bindings are required for this product build. Configure MCA_QNN_SDK_ROOT, QNN_SDK_ROOT, or QAIRT_SDK_ROOT with a complete QAIRT/QNN SDK include tree.")
+    endif()
+    message(STATUS "MCA QNN SDK headers not found. Building an explicit stub; set MCA_QNN_SDK_ROOT, QNN_SDK_ROOT, or QAIRT_SDK_ROOT to enable typed QNN graph bindings.")
     target_compile_definitions(mca_qnn_native PRIVATE
             MCA_WITH_QNN_SDK_HEADERS=0
             MCA_QNN_SDK_ROOT_CONFIGURED=$<BOOL:${MCA_QNN_SDK_ROOT}>)
@@ -124,10 +176,39 @@ target_include_directories(mca_mnn_native PRIVATE
 if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
     message(STATUS "MCA building with llama.cpp from ${LLAMA_SRC}")
     target_compile_definitions(mca_native PRIVATE MCA_WITH_LLAMA_CPP=1)
+    # The embedded build defaults LLAMA_BUILD_COMMON to OFF because llama.cpp
+    # is added as a subdirectory. MCA still links the legacy compatibility
+    # target below, so request that target before configuring the subproject.
+    set(LLAMA_BUILD_COMMON ON CACHE BOOL "llama: build common utils library" FORCE)
     add_subdirectory(${LLAMA_SRC} build-llama)
+
+    # The GenieX AAR ships a libggml-opencl.so built against its private
+    # ggml-base.  Loading that library beside MCA's newer ggml-base can make
+    # the registry silently fall back to CPU.  Build an MCA-owned variant
+    # with a distinct filename so both artifacts can coexist; the native
+    # loader explicitly prefers this variant when present.
+    if(TARGET ggml-opencl)
+        set_target_properties(ggml-opencl PROPERTIES OUTPUT_NAME "ggml-opencl-mca")
+        if(ANDROID)
+            # Android vendor OpenCL symbols are not reliably visible to a
+            # plugin loaded through the app linker namespace. Use MCA's
+            # explicit dispatch trampolines instead of leaving direct cl*
+            # imports. The dispatch loads the optional
+            # vendor runtime and resolves each entry with dlsym; a missing
+            # runtime therefore disables only this backend and leaves CPU
+            # available.
+            if(ANDROID_ABI STREQUAL "arm64-v8a")
+                target_sources(ggml-opencl PRIVATE
+                        "${CMAKE_CURRENT_LIST_DIR}/mca_opencl_dispatch.cpp")
+                target_link_libraries(ggml-opencl PRIVATE dl)
+                target_link_options(ggml-opencl PRIVATE "-Wl,-Bsymbolic-functions")
+            endif()
+        endif()
+    endif()
     # Replace only llama-model.cpp with an MCA-owned overlay that disables
-    # MAP_POPULATE/WILLNEED for multi-gigabyte model mappings. The llama.cpp
-    # submodule remains pristine and every product build applies this override.
+    # MAP_POPULATE/WILLNEED for multi-gigabyte model mappings. The Gradle
+    # preparation task applies the audited STQ1_0 compatibility patch before
+    # this target is configured.
     get_target_property(MCA_LLAMA_TARGET_SOURCES llama SOURCES)
     set(MCA_LLAMA_TARGET_SOURCES_WITHOUT_MODEL ${MCA_LLAMA_TARGET_SOURCES})
     list(FILTER MCA_LLAMA_TARGET_SOURCES_WITHOUT_MODEL EXCLUDE REGEX "(^|[/\\\\])llama-model[.]cpp$")
@@ -192,6 +273,7 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
             ${MTMD_SRC}/models/whisper-enc.cpp
             ${MTMD_SRC}/models/deepseekocr.cpp
             ${MTMD_SRC}/models/deepseekocr2.cpp
+            ${MTMD_SRC}/models/deepseek4v.cpp
             ${MTMD_SRC}/models/mobilenetv5.cpp
             ${MTMD_SRC}/models/youtuvl.cpp
             ${MTMD_SRC}/models/yasa2.cpp
@@ -217,7 +299,7 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
             ${LLAMA_SRC}/include
             ${LLAMA_SRC}/ggml/include
             ${LLAMA_SRC}/ggml/src)
-    target_link_libraries(mca_native PRIVATE llama llama-common mca_mtmd android log)
+    target_link_libraries(mca_native PRIVATE llama llama-common mca_mtmd android log dl)
 else()
     message(WARNING "MCA_WITH_LLAMA_CPP is OFF or llama.cpp is missing; building JNI stub.")
     target_compile_definitions(mca_native PRIVATE MCA_WITH_LLAMA_CPP=0)

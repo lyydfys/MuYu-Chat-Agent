@@ -13,6 +13,34 @@ import com.muyuchat.core.engine.LocalChatRuntime
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
 import java.io.File
+import java.net.URI
+
+/**
+ * Materializes a persisted GGUF projector path without silently dropping a
+ * binding just because it was stored relative to the model bundle. If the
+ * target is missing, preserve the configured value so the native load boundary
+ * can return an actionable error instead of loading a text-only session.
+ */
+internal fun resolveVisionProjectorPath(modelPath: String, rawPath: String?): String? {
+    val raw = rawPath?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    val rawFile = runCatching {
+        if (raw.startsWith("file:", ignoreCase = true)) File(URI(raw)) else File(raw)
+    }.getOrNull() ?: return raw
+    val root = File(modelPath)
+    val candidates = if (rawFile.isAbsolute) {
+        listOf(rawFile)
+    } else {
+        buildList {
+            if (root.isDirectory) add(File(root, raw))
+            root.parentFile?.let { add(File(it, raw)) }
+        }
+    }
+    return candidates.asSequence()
+        .mapNotNull { candidate -> runCatching { candidate.canonicalFile }.getOrNull() }
+        .firstOrNull(File::isFile)
+        ?.absolutePath
+        ?: raw
+}
 
 internal fun ModelManifest.loadParamsForExecutionProfile(
     profile: ModelExecutionProfile
@@ -20,7 +48,7 @@ internal fun ModelManifest.loadParamsForExecutionProfile(
     require(profile.modelId == id) { "Execution profile belongs to another model." }
     val values = profile.runtimeValuesJson()
     val projector = if (runtime == ChatModelRuntime.LLAMA_CPP) {
-        visionProjectorPath?.takeIf(String::isNotBlank)?.takeIf { File(it).isFile }
+        resolveVisionProjectorPath(path, visionProjectorPath)
     } else {
         null
     }

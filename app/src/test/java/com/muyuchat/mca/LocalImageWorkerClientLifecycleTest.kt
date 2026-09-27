@@ -283,7 +283,7 @@ class LocalImageWorkerClientLifecycleTest {
 
     @Test
     fun cancellationBeforeRegistrationCompletesTheClientDeferredLocally() {
-        val cancel = functionBody(localImageWorkerClientSource(), "fun cancel(): Boolean")
+        val cancel = functionBody(localImageWorkerClientSource(), "private fun cancelInternal(")
         val localAction = cancel.indexOf("LocalImageStartHandshake.CancelAction.COMPLETE_LOCALLY")
         val completion = cancel.indexOf("request.completion.completeExceptionally(cancellation)")
 
@@ -311,7 +311,7 @@ class LocalImageWorkerClientLifecycleTest {
     fun cancellationAfterRegistrationPublishesAWorkerTerminalThatCompletesTheClientDeferred() {
         val clientSource = localImageWorkerClientSource()
         val serviceSource = localImageWorkerServiceSource()
-        val cancel = functionBody(clientSource, "fun cancel(): Boolean")
+        val cancel = functionBody(clientSource, "private fun cancelInternal(")
         val cancelRemote = functionBody(clientSource, "private fun cancelRemote(")
         val serviceCancel = functionBody(serviceSource, "override fun cancel(")
         val cancellationTerminal = functionBody(serviceSource, "private fun publishCancellationTerminal(")
@@ -460,12 +460,14 @@ class LocalImageWorkerClientLifecycleTest {
         assertTrue(connectionLoss.contains("!bindingLifecycle.isCurrent(connection.lease)"))
         assertTrue(connectionLoss.contains("active?.completion?.completeExceptionally(failure)"))
         assertTrue(generate.contains("cancelForDeadClient(active)"))
-        assertTrue(deadClient.contains("if (!isCurrent) return"))
-        assertTrue(deadClient.contains("if (!active.tryRequestCancellation()) return"))
+        assertTrue(deadClient.contains("activeGeneration !== active"))
+        assertTrue(deadClient.contains("!active.tryRequestCancellation()"))
         assertTrue(
-            deadClient.indexOf("scheduleSelfExit(active)") <
-                deadClient.indexOf("provider.cancel()")
+            deadClient.indexOf("synchronized(stateLock)") <
+                deadClient.indexOf("runCatching { provider.cancel() }")
         )
+        assertTrue(deadClient.contains("if (!isCurrentCancellation) return"))
+        assertTrue(deadClient.contains("scheduleSelfExit(active)"))
         assertTrue(deadClient.contains("requestJournalCancellation(active.requestId)"))
         assertTrue(deadClient.contains("provider.cancel()"))
         assertTrue(deadClient.contains("active.job?.cancel("))
@@ -490,13 +492,45 @@ class LocalImageWorkerClientLifecycleTest {
         val serviceSource = localImageWorkerServiceSource()
         val serviceCancel = functionBody(serviceSource, "override fun cancel(")
 
-        assertTrue(clientSource.contains("request.handshake.requestCancel()"))
+        assertTrue(clientSource.contains("request?.handshake?.requestCancel()"))
         assertTrue(clientSource.contains("cancelRemote(request)"))
-        assertTrue(serviceCancel.contains("if (!active.tryRequestCancellation()) return false"))
+        assertTrue(serviceCancel.contains("localImageCancelRequestMatches(requestedId, it.requestId)"))
+        assertTrue(
+            serviceCancel.indexOf("localImageCancelRequestMatches") <
+                serviceCancel.indexOf("it.tryRequestCancellation()")
+        )
         assertTrue(serviceCancel.contains("requestJournalCancellation(active.requestId)"))
         assertTrue(serviceCancel.contains("runCatching { provider.cancel() }"))
+        assertTrue(
+            serviceCancel.indexOf("synchronized(stateLock)") <
+                serviceCancel.indexOf("runCatching { provider.cancel() }")
+        )
         assertTrue(serviceCancel.contains("active.job?.cancel("))
         assertTrue(serviceCancel.contains("return true"))
+    }
+
+    @Test
+    fun requestScopedCancelMatchesOnlyTheCurrentRequestAndKeepsLegacyLifecycleBehavior() {
+        assertTrue(localImageCancelRequestMatches("request-a", "request-a"))
+        assertFalse(localImageCancelRequestMatches("request-a", "replacement-b"))
+        assertFalse(localImageCancelRequestMatches("", "replacement-b"))
+        assertTrue(localImageCancelRequestMatches(null, "replacement-b"))
+        assertFalse(localImageCancelRequestMatches(null, null))
+
+        val source = localImageWorkerClientSource()
+        val scopedCancel = functionBody(source, "fun cancel(expectedRequestId: String)")
+        val internalCancel = functionBody(source, "private fun cancelInternal(")
+        val legacyCancel = functionBody(source, "fun cancel(): Boolean")
+        val serviceCancel = functionBody(localImageWorkerServiceSource(), "override fun cancel(")
+
+        assertTrue(scopedCancel.contains("if (expectedRequestId.isBlank()) return false"))
+        assertTrue(scopedCancel.contains("cancelInternal(expectedRequestId = expectedRequestId, scoped = true)"))
+        assertTrue(legacyCancel.contains("cancelInternal(expectedRequestId = null, scoped = false)"))
+        assertTrue(
+            internalCancel.indexOf("localImageCancelRequestMatches(expectedRequestId, it.requestId)") <
+                internalCancel.indexOf("request?.handshake?.requestCancel()")
+        )
+        assertTrue(serviceCancel.contains("localImageCancelRequestMatches(requestedId, it.requestId)"))
     }
 
     @Test
@@ -531,7 +565,7 @@ class LocalImageWorkerClientLifecycleTest {
         )
         assertFalse(clientSource.contains("Process.killProcess(workerPid)"))
         assertTrue(termination.contains("LocalImageWorkerProtocol.cancelRequest(request.requestId)"))
-        assertTrue(serviceTermination.contains("activeGeneration?.takeIf { it.requestId == requestedId }"))
+        assertTrue(serviceTermination.contains("localImageCancelRequestMatches(requestedId, it.requestId)"))
         assertTrue(serviceTermination.contains("scheduleSelfExit(active)"))
     }
 

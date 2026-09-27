@@ -27,6 +27,7 @@ import java.util.zip.CRC32
 import java.util.zip.DataFormatException
 import java.util.zip.Inflater
 import java.util.zip.ZipInputStream
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
@@ -55,6 +56,7 @@ internal const val MNN_DIFFUSION_OUTPUT_MAX_AGE_MS = 24L * 60L * 60L * 1_000L
 private const val STABLE_DIFFUSION_OUTPUT_MAX_BATCH_COUNT = 8
 private const val STABLE_DIFFUSION_ULTRAFIX_EVIDENCE_VERSION = 5L
 private const val QNN_ULTRAFIX_EVIDENCE_VERSION = 2L
+private const val QWEN_IMAGE_21_RECOMMENDATION_ID = "qwen_image_21_mnn_opencl"
 private const val QNN_PNG_CRC_CANCELLATION_STRIDE_BYTES = 64 * 1_024
 private const val QNN_PNG_CHUNK_IHDR = 0x49484452L
 private const val QNN_PNG_CHUNK_IDAT = 0x49444154L
@@ -184,39 +186,126 @@ internal fun verifyAndReadQnnImageOutput(
     expectedWidth: Int,
     expectedHeight: Int,
     checkCancelled: () -> Unit = {}
+): VerifiedQnnImageOutput = verifyAndReadLocalImagePngOutput(
+    nativeResult = nativeResult,
+    expectedOutputFile = expectedOutputFile,
+    expectedWidth = expectedWidth,
+    expectedHeight = expectedHeight,
+    expectedColorTypes = setOf(2),
+    outputLabel = "Native QNN",
+    checkCancelled = checkCancelled
+)
+
+/**
+ * Validates the native-only proof attached to Qwen-Image-2.1 results.  A
+ * configured backend is not sufficient: the isolated JNI bridge must report a
+ * completed native run, the effective MNN backend, and the post-run runtime
+ * resolution proof.  This helper is deliberately strict so a CPU fallback
+ * cannot be presented as an OpenCL result.
+ */
+internal fun verifyQwenNativeBackendExecutionEvidence(
+    audit: JSONObject,
+    expectedBackend: String
+) {
+    val normalizedExpected = expectedBackend.trim().uppercase()
+    require(normalizedExpected == "MNN_OPENCL" || normalizedExpected == "MNN_CPU") {
+        "Qwen native execution evidence requested an unsupported backend."
+    }
+    require(audit.optBoolean("nativeRunCompleted", false) &&
+        audit.optBoolean("backendExecutionConfirmedByNative", false)
+    ) { "Qwen native execution proof is incomplete." }
+    require(audit.optBoolean("nativeExecution", false) &&
+        !audit.optBoolean("fallback", true) &&
+        audit.optLong("nativeGenerationSequence", 0L) > 0L
+    ) { "Qwen native execution publication evidence is incomplete." }
+    require(audit.optString("effectiveBackend").trim().uppercase() == normalizedExpected) {
+        "Qwen native execution backend does not match the requested backend."
+    }
+    require(audit.optString("backendExecutionProof") == "mnn_runtime_resolution_after_native_run") {
+        "Qwen native execution proof has an unsupported source."
+    }
+    require(audit.optInt("nativeGenerationCount", 0) > 0) {
+        "Qwen native execution proof has no completed generation count."
+    }
+    val inner = audit.optJSONObject("nativeEffective")
+        ?: error("Qwen native execution proof is missing nativeEffective.")
+    run {
+        require(inner.optString("runtime") == "MNN_DIFFUSION" &&
+            inner.optBoolean("nativeExecution", false) &&
+            !inner.optBoolean("fallback", true) &&
+            inner.optLong("nativeGenerationSequence", 0L) ==
+                audit.optLong("nativeGenerationSequence", 0L) &&
+            inner.optBoolean("nativeRunCompleted", false) &&
+            inner.optBoolean("backendExecutionConfirmedByNative", false) &&
+            inner.optString("effectiveBackend").trim().uppercase() == normalizedExpected
+        ) { "Qwen nativeEffective backend proof is incomplete or inconsistent." }
+    }
+}
+
+/**
+ * Verifies the PNG published by the Qwen-Image-2.1 worker.  Qwen's MNN VAE may
+ * publish either an RGB8 (colour type 2) or RGBA8 (colour type 6) PNG.  Keep
+ * this path separate from the QNN validator: QNN output is intentionally still
+ * constrained to RGB8, while Qwen output is validated with the same strict
+ * path, byte, chunk, CRC and zlib checks for both legal colour layouts.
+ */
+internal fun verifyAndReadQwenImageOutput(
+    nativeResult: JSONObject,
+    expectedOutputFile: File,
+    expectedWidth: Int,
+    expectedHeight: Int,
+    checkCancelled: () -> Unit = {}
+): VerifiedQnnImageOutput = verifyAndReadLocalImagePngOutput(
+    nativeResult = nativeResult,
+    expectedOutputFile = expectedOutputFile,
+    expectedWidth = expectedWidth,
+    expectedHeight = expectedHeight,
+    expectedColorTypes = setOf(2, 6),
+    outputLabel = "Native Qwen-Image-2.1",
+    checkCancelled = checkCancelled
+)
+
+private fun verifyAndReadLocalImagePngOutput(
+    nativeResult: JSONObject,
+    expectedOutputFile: File,
+    expectedWidth: Int,
+    expectedHeight: Int,
+    expectedColorTypes: Set<Int>,
+    outputLabel: String,
+    checkCancelled: () -> Unit = {}
 ): VerifiedQnnImageOutput {
     require(expectedWidth > 0 && expectedHeight > 0) {
-        "QNN output dimensions must be positive."
+        "$outputLabel output dimensions must be positive."
     }
 
     fun requiredString(field: String): String {
         require(nativeResult.has(field) && !nativeResult.isNull(field)) {
-            "Native QNN output is missing $field."
+            "$outputLabel output is missing $field."
         }
         val value = nativeResult.get(field)
         require(value is String && value.isNotBlank()) {
-            "Native QNN output $field must be a non-blank string."
+            "$outputLabel output $field must be a non-blank string."
         }
         return value
     }
 
     fun requiredLong(field: String): Long {
         require(nativeResult.has(field) && !nativeResult.isNull(field)) {
-            "Native QNN output is missing $field."
+            "$outputLabel output is missing $field."
         }
         val value = nativeResult.get(field)
         require(value is Byte || value is Short || value is Int || value is Long) {
-            "Native QNN output $field must be an exact integer."
+            "$outputLabel output $field must be an exact integer."
         }
         return (value as Number).toLong()
     }
 
     require(requiredLong("width") == expectedWidth.toLong() &&
         requiredLong("height") == expectedHeight.toLong()
-    ) { "Native QNN output dimensions differ from the resolved request." }
+    ) { "$outputLabel output dimensions differ from the resolved request." }
     if (nativeResult.has("mimeType")) {
         require(requiredString("mimeType").trim().lowercase() == "image/png") {
-            "Native QNN output MIME type must be image/png."
+            "$outputLabel output MIME type must be image/png."
         }
     }
 
@@ -224,34 +313,34 @@ internal fun verifyAndReadQnnImageOutput(
     val outputRoot = requireNotNull(lexicalOutput.parentFile).canonicalFile
     val expectedCanonical = lexicalOutput.canonicalFile
     require(expectedCanonical.parentFile == outputRoot && expectedCanonical.name == lexicalOutput.name) {
-        "QNN request output path must remain a direct app-owned output file."
+        "$outputLabel request output path must remain a direct app-owned output file."
     }
     val reportedPath = File(requiredString("outputPath"))
     require(reportedPath.isAbsolute) {
-        "Native QNN output path must be absolute."
+        "$outputLabel output path must be absolute."
     }
     val reportedCanonical = reportedPath.canonicalFile
     require(reportedCanonical == expectedCanonical) {
-        "Native QNN output path does not match this request."
+        "$outputLabel output path does not match this request."
     }
 
     val reportedBytes = requiredLong("outputBytes")
     val reportedSha256 = requiredString("outputSha256")
     require(QNN_OUTPUT_SHA256.matches(reportedSha256)) {
-        "Native QNN output SHA-256 must be fixed-width lowercase hexadecimal."
+        "$outputLabel output SHA-256 must be fixed-width lowercase hexadecimal."
     }
     val physicalBytes = expectedCanonical.length()
     require(expectedCanonical.isFile &&
         reportedBytes == physicalBytes &&
         reportedBytes in MIN_QNN_OUTPUT_PNG_BYTES..MAX_QNN_OUTPUT_PNG_BYTES
-    ) { "Native QNN output byte proof is missing, mismatched, or outside the bounded PNG limit." }
+    ) { "$outputLabel output byte proof is missing, mismatched, or outside the bounded PNG limit." }
 
     checkCancelled()
     val copied = ByteArray(physicalBytes.toInt())
     val copiedDigest = MessageDigest.getInstance("SHA-256")
     FileInputStream(expectedCanonical).use { input ->
         require(input.channel.size() == reportedBytes) {
-            "Native QNN output changed before its app-owned descriptor was opened."
+            "$outputLabel output changed before its app-owned descriptor was opened."
         }
         var total = 0
         while (total < copied.size) {
@@ -261,27 +350,33 @@ internal fun verifyAndReadQnnImageOutput(
                 total,
                 minOf(DEFAULT_BUFFER_SIZE, copied.size - total)
             )
-            require(count >= 0) { "Native QNN output changed while being copied." }
+            require(count >= 0) { "$outputLabel output changed while being copied." }
             if (count == 0) continue
             copiedDigest.update(copied, total, count)
             total = Math.addExact(total, count)
         }
         checkCancelled()
         require(input.read() < 0 && input.channel.size() == reportedBytes) {
-            "Native QNN output descriptor size changed while being copied."
+            "$outputLabel output descriptor size changed while being copied."
         }
     }
     checkCancelled()
     require(expectedCanonical.length() == reportedBytes) {
-        "Native QNN output changed after being copied."
+        "$outputLabel output changed after being copied."
     }
     val copiedSha256 = copiedDigest.digest().joinToString(separator = "") { byte ->
         "%02x".format(byte.toInt() and 0xff)
     }
     require(copiedSha256 == reportedSha256) {
-        "Native QNN output SHA-256 does not match the exact copied descriptor bytes."
+        "$outputLabel output SHA-256 does not match the exact copied descriptor bytes."
     }
-    copied.requireValidQnnOutputPng(expectedWidth, expectedHeight, checkCancelled)
+    copied.requireValidLocalImageOutputPng(
+        expectedWidth = expectedWidth,
+        expectedHeight = expectedHeight,
+        expectedColorTypes = expectedColorTypes,
+        outputLabel = outputLabel,
+        checkCancelled = checkCancelled
+    )
     checkCancelled()
 
     return VerifiedQnnImageOutput(
@@ -291,15 +386,17 @@ internal fun verifyAndReadQnnImageOutput(
     )
 }
 
-private fun ByteArray.requireValidQnnOutputPng(
+private fun ByteArray.requireValidLocalImageOutputPng(
     expectedWidth: Int,
     expectedHeight: Int,
+    expectedColorTypes: Set<Int>,
+    outputLabel: String,
     checkCancelled: () -> Unit
 ) {
     require(size.toLong() in MIN_QNN_OUTPUT_PNG_BYTES..MAX_QNN_OUTPUT_PNG_BYTES &&
         size >= QNN_OUTPUT_PNG_SIGNATURE.size &&
         copyOfRange(0, QNN_OUTPUT_PNG_SIGNATURE.size).contentEquals(QNN_OUTPUT_PNG_SIGNATURE)
-    ) { "Native QNN output does not have a bounded PNG signature." }
+    ) { "$outputLabel output does not have a bounded PNG signature." }
 
     var offset = QNN_OUTPUT_PNG_SIGNATURE.size.toLong()
     var chunkIndex = 0
@@ -308,27 +405,28 @@ private fun ByteArray.requireValidQnnOutputPng(
     var idatDataBytes = 0L
     var idatSequenceEnded = false
     var sawIend = false
+    var observedColorType: Int? = null
     while (offset < size.toLong()) {
         checkCancelled()
         val remaining = size.toLong() - offset
-        require(remaining >= 12L) { "Native QNN PNG ended inside a chunk record." }
+        require(remaining >= 12L) { "$outputLabel PNG ended inside a chunk record." }
 
         val chunkOffset = offset.toInt()
         val chunkLength = readQnnPngU32(chunkOffset)
         require(chunkLength <= MAX_QNN_OUTPUT_PNG_BYTES) {
-            "Native QNN PNG declared an oversized chunk."
+            "$outputLabel PNG declared an oversized chunk."
         }
         val typeOffset = Math.addExact(offset, 4L)
         val dataOffset = Math.addExact(typeOffset, 4L)
         val crcOffset = Math.addExact(dataOffset, chunkLength)
         val nextOffset = Math.addExact(crcOffset, 4L)
         require(nextOffset <= size.toLong()) {
-            "Native QNN PNG chunk length exceeds the bounded file."
+            "$outputLabel PNG chunk length exceeds the bounded file."
         }
 
         val typeOffsetInt = typeOffset.toInt()
         require(hasValidQnnPngChunkType(typeOffsetInt)) {
-            "Native QNN PNG has an invalid chunk type."
+            "$outputLabel PNG has an invalid chunk type."
         }
         val chunkType = readQnnPngU32(typeOffsetInt)
         val chunkLengthInt = chunkLength.toInt()
@@ -336,31 +434,43 @@ private fun ByteArray.requireValidQnnOutputPng(
             typeOffset = typeOffsetInt,
             dataLength = chunkLengthInt,
             expectedCrcOffset = crcOffset.toInt(),
+            outputLabel = outputLabel,
             checkCancelled = checkCancelled
         )
 
         require(sawIhdr || chunkType == QNN_PNG_CHUNK_IHDR) {
-            "Native QNN PNG must begin with IHDR."
+            "$outputLabel PNG must begin with IHDR."
         }
         when (chunkType) {
             QNN_PNG_CHUNK_IHDR -> {
                 require(chunkIndex == 0 && !sawIhdr && chunkLength == 13L) {
-                    "Native QNN PNG must contain exactly one first IHDR chunk."
+                    "$outputLabel PNG must contain exactly one first IHDR chunk."
                 }
                 val dataOffsetInt = dataOffset.toInt()
+                val colorType = this[dataOffsetInt + 9].toInt() and 0xff
                 require(readQnnPngU32(dataOffsetInt) == expectedWidth.toLong() &&
                     readQnnPngU32(dataOffsetInt + 4) == expectedHeight.toLong() &&
                     (this[dataOffsetInt + 8].toInt() and 0xff) == 8 &&
-                    (this[dataOffsetInt + 9].toInt() and 0xff) == 2 &&
+                    colorType in expectedColorTypes &&
                     this[dataOffsetInt + 10].toInt() == 0 &&
                     this[dataOffsetInt + 11].toInt() == 0 &&
                     this[dataOffsetInt + 12].toInt() == 0
-                ) { "Native QNN output is not the expected non-interlaced 8-bit RGB PNG." }
+                ) {
+                    val layouts = expectedColorTypes.sorted().joinToString("/") {
+                        when (it) {
+                            2 -> "RGB"
+                            6 -> "RGBA"
+                            else -> "color-type-$it"
+                        }
+                    }
+                    "$outputLabel output is not the expected non-interlaced 8-bit $layouts PNG."
+                }
+                observedColorType = colorType
                 sawIhdr = true
             }
             QNN_PNG_CHUNK_IDAT -> {
                 require(!idatSequenceEnded && !sawIend) {
-                    "Native QNN PNG IDAT chunks must be consecutive and precede IEND."
+                    "$outputLabel PNG IDAT chunks must be consecutive and precede IEND."
                 }
                 sawIdat = true
                 idatDataBytes = Math.addExact(idatDataBytes, chunkLength)
@@ -368,14 +478,14 @@ private fun ByteArray.requireValidQnnOutputPng(
             QNN_PNG_CHUNK_IEND -> {
                 require(sawIdat && idatDataBytes > 0L && !sawIend && chunkLength == 0L &&
                     nextOffset == size.toLong()
-                ) { "Native QNN PNG must end with one terminal IEND after non-empty IDAT data." }
+                ) { "$outputLabel PNG must end with one terminal IEND after non-empty IDAT data." }
                 sawIend = true
             }
             else -> {
                 require(!sawIend && !isCriticalQnnPngChunk(typeOffsetInt) &&
                     chunkType == QNN_PNG_CHUNK_TEXT
                 ) {
-                    "Native QNN PNG contains an unsupported critical or rendering-affecting ancillary chunk."
+                    "$outputLabel PNG contains an unsupported critical or rendering-affecting ancillary chunk."
                 }
                 if (sawIdat) idatSequenceEnded = true
             }
@@ -387,29 +497,39 @@ private fun ByteArray.requireValidQnnOutputPng(
         chunkIndex = Math.addExact(chunkIndex, 1)
     }
     require(sawIhdr && sawIdat && idatDataBytes > 0L && sawIend) {
-        "Native QNN PNG is missing IHDR, IDAT, or terminal IEND."
+        "$outputLabel PNG is missing IHDR, IDAT, or terminal IEND."
     }
-    requireValidQnnPngIdatStream(
+    val bytesPerPixel = when (observedColorType) {
+        2 -> 3L
+        6 -> 4L
+        else -> error("$outputLabel PNG is missing a valid IHDR colour type.")
+    }
+    requireValidLocalImagePngIdatStream(
         expectedWidth = expectedWidth,
         expectedHeight = expectedHeight,
+        bytesPerPixel = bytesPerPixel,
+        outputLabel = outputLabel,
         checkCancelled = checkCancelled
     )
 }
 
 /**
  * Validates the one zlib stream formed by consecutive IDAT chunks without allocating decoded
- * pixels. RGB8/non-interlaced IHDR means every row must contain one filter byte plus width*3
- * bytes; proving that exact stream shape keeps a CRC-valid but undecodable PNG out of the UI.
+ * pixels. RGB8/RGBA8 non-interlaced IHDR means every row must contain one filter byte plus
+ * width*3 or width*4 bytes; proving that exact stream shape keeps a CRC-valid but undecodable
+ * PNG out of the UI.
  */
-private fun ByteArray.requireValidQnnPngIdatStream(
+private fun ByteArray.requireValidLocalImagePngIdatStream(
     expectedWidth: Int,
     expectedHeight: Int,
+    bytesPerPixel: Long,
+    outputLabel: String,
     checkCancelled: () -> Unit
 ) {
-    val rowBytes = Math.addExact(Math.multiplyExact(expectedWidth.toLong(), 3L), 1L)
+    val rowBytes = Math.addExact(Math.multiplyExact(expectedWidth.toLong(), bytesPerPixel), 1L)
     val expectedInflatedBytes = Math.multiplyExact(rowBytes, expectedHeight.toLong())
     require(expectedInflatedBytes > 0L) {
-        "Native QNN PNG has an invalid decoded RGB byte count."
+        "$outputLabel PNG has an invalid decoded pixel byte count."
     }
 
     val inflater = Inflater()
@@ -421,14 +541,14 @@ private fun ByteArray.requireValidQnnPngIdatStream(
     fun consumeDecoded(count: Int) {
         val nextInflatedBytes = Math.addExact(inflatedBytes, count.toLong())
         require(nextInflatedBytes <= expectedInflatedBytes) {
-            "Native QNN PNG IDAT expands beyond the expected RGB scanlines."
+            "$outputLabel PNG IDAT expands beyond the expected scanlines."
         }
         while (nextFilterOffset < nextInflatedBytes) {
             if (nextFilterOffset >= inflatedBytes) {
                 val bufferOffset = (nextFilterOffset - inflatedBytes).toInt()
                 val filter = decoded[bufferOffset].toInt() and 0xff
                 require(filter in 0..4) {
-                    "Native QNN PNG contains an invalid scanline filter."
+                    "$outputLabel PNG contains an invalid scanline filter."
                 }
                 observedRows = Math.addExact(observedRows, 1L)
             }
@@ -444,7 +564,7 @@ private fun ByteArray.requireValidQnnPngIdatStream(
                 inflater.inflate(decoded)
             } catch (error: DataFormatException) {
                 throw IllegalArgumentException(
-                    "Native QNN PNG IDAT is not a valid zlib stream.",
+                    "$outputLabel PNG IDAT is not a valid zlib stream.",
                     error
                 )
             }
@@ -454,9 +574,9 @@ private fun ByteArray.requireValidQnnPngIdatStream(
             }
             if (inflater.finished() || inflater.needsInput()) return
             require(!inflater.needsDictionary()) {
-                "Native QNN PNG IDAT unexpectedly requires an external dictionary."
+                "$outputLabel PNG IDAT unexpectedly requires an external dictionary."
             }
-            error("Native QNN PNG IDAT decoder made no progress.")
+            error("$outputLabel PNG IDAT decoder made no progress.")
         }
     }
 
@@ -469,19 +589,19 @@ private fun ByteArray.requireValidQnnPngIdatStream(
             val dataOffset = Math.addExact(typeOffset, 4L)
             val nextOffset = Math.addExact(Math.addExact(dataOffset, chunkLength), 4L)
             require(nextOffset <= size.toLong()) {
-                "Native QNN PNG changed between structural and IDAT validation."
+                "$outputLabel PNG changed between structural and IDAT validation."
             }
             if (readQnnPngU32(typeOffset.toInt()) == QNN_PNG_CHUNK_IDAT) {
                 val length = chunkLength.toInt()
                 if (inflater.finished()) {
                     require(length == 0) {
-                        "Native QNN PNG contains compressed bytes after the zlib stream ended."
+                        "$outputLabel PNG contains compressed bytes after the zlib stream ended."
                     }
                 } else if (length > 0) {
                     inflater.setInput(this, dataOffset.toInt(), length)
                     drainInflater()
                     require(inflater.remaining == 0) {
-                        "Native QNN PNG contains trailing bytes after the zlib stream ended."
+                        "$outputLabel PNG contains trailing bytes after the zlib stream ended."
                     }
                 }
             }
@@ -490,7 +610,7 @@ private fun ByteArray.requireValidQnnPngIdatStream(
         require(inflater.finished() && inflatedBytes == expectedInflatedBytes &&
             observedRows == expectedHeight.toLong()
         ) {
-            "Native QNN PNG IDAT does not decode to the expected complete RGB scanlines."
+            "$outputLabel PNG IDAT does not decode to the expected complete scanlines."
         }
     } finally {
         inflater.end()
@@ -501,6 +621,7 @@ private fun ByteArray.requireQnnPngChunkCrc(
     typeOffset: Int,
     dataLength: Int,
     expectedCrcOffset: Int,
+    outputLabel: String,
     checkCancelled: () -> Unit
 ) {
     val crc = CRC32()
@@ -513,7 +634,7 @@ private fun ByteArray.requireQnnPngChunkCrc(
         cursor += count
     }
     require(crc.value == readQnnPngU32(expectedCrcOffset)) {
-        "Native QNN PNG chunk CRC does not match its type and data."
+        "$outputLabel PNG chunk CRC does not match its type and data."
     }
 }
 
@@ -2514,6 +2635,9 @@ class LocalImageProvider(context: Context) {
     private val bridge by lazy { NativeStableDiffusionBridge() }
     private val mnnDiffusionBridge by lazy { NativeMnnDiffusionBridge() }
     private val qnnBridge by lazy { NativeQnnBridge() }
+    private val qwenImage21Worker by lazy { QwenImage21WorkerClient(appContext) }
+    private val qwenImage21RuntimeResident = AtomicBoolean(false)
+    private val activeQwenImage21RequestId = AtomicReference<String?>(null)
     private val sdxlCoordinator by lazy { SdxlTwoPhaseCoordinator(appContext) }
     private val cancellationRequested = AtomicBoolean(false)
     private val activeSplitSdxlTerminal =
@@ -2553,6 +2677,11 @@ class LocalImageProvider(context: Context) {
             }
             LocalImageRuntime.MNN_DIFFUSION -> {
                 cancellationRequested.set(true)
+                activeQwenImage21RequestId.get()?.let { requestId ->
+                    runCatching { qwenImage21Worker.cancelImmediately(requestId) }
+                    qwenImage21RuntimeResident.set(false)
+                    return true
+                }
                 if (NativeMnnDiffusionBridge.isAvailable) {
                     runCatching { mnnDiffusionBridge.cancel() }
                 }
@@ -2566,6 +2695,283 @@ class LocalImageProvider(context: Context) {
                 true
             }
             else -> false
+        }
+    }
+
+    private suspend fun generateQwenImage21(
+        model: LocalImageModelRecord,
+        prompt: String,
+        options: LocalImageGenerationOptions,
+        onProgress: (LocalImageProgress) -> Unit
+    ): LocalImageResult {
+        val generationContext = coroutineContext
+        val bundleRoot = model.bundleRoot
+            ?.takeIf(String::isNotBlank)
+            ?.let(::File)
+            ?.takeIf(File::isDirectory)
+            ?.canonicalFile
+            ?: File(model.path).canonicalFile.parentFile
+            ?: error("Qwen-Image-2.1 requires its complete MNN model bundle directory.")
+        val primary = File(model.path).canonicalFile
+        val expectedPrimary = File(bundleRoot, "dit.mnn").canonicalFile
+        require(primary == expectedPrimary) {
+            "Qwen-Image-2.1 primary model must be dit.mnn directly inside its installed bundle."
+        }
+        LocalImageBundleContract.inspectQwenImage21Bundle(bundleRoot, primary)
+            .readinessMessage()
+            ?.let(::error)
+
+        val seed = options.seed ?: (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
+        val effectiveOptions = options.copy(seed = seed)
+        val profileResolution = resolveLocalImageExecutionProfile(
+            model = model,
+            options = effectiveOptions,
+            bundleRoot = bundleRoot
+        )
+        val profile = profileResolution.profile
+        require(profile.variant == ImageModelVariant.QWEN_IMAGE_21 &&
+            profile.profileId == "mnn.qwen-image-2.1.opencl"
+        ) { "The selected bundle did not resolve to the Qwen-Image-2.1 MNN profile." }
+        validateLocalImageProfileProductOptions(profile, effectiveOptions)
+        require(options.taskMode == LocalImageTaskMode.TEXT_TO_IMAGE &&
+            options.inputImage == null && options.maskImage == null && options.controlImage == null
+        ) { "Qwen-Image-2.1 currently supports text-to-image requests only." }
+        require(options.negativePrompt.isNullOrBlank()) {
+            "Qwen-Image-2.1 does not support a separate negative prompt. Clear it and retry."
+        }
+        require(options.batchCount == 1 && options.loras.isEmpty() &&
+            options.textualInversionIds.isEmpty() && options.vaeTiling == null &&
+            options.ultraFix == null && options.preview == null
+        ) { "Qwen-Image-2.1 currently supports one image per request without LoRA or editing controls." }
+        require(options.cfgScale == null || kotlin.math.abs(options.cfgScale - 1.0) <= 1e-9) {
+            "Qwen-Image-2.1 uses its model-native guidance value; reset CFG to 1.0 and retry."
+        }
+        require(options.useCfg == null || !options.useCfg) {
+            "Qwen-Image-2.1 does not support classifier-free guidance. Disable CFG and retry."
+        }
+        require(options.distilledGuidance == null && options.flowShift == null) {
+            "Qwen-Image-2.1 uses its model-native flow schedule; clear the custom guidance/flow shift and retry."
+        }
+        val width = options.width ?: profile.defaults.width
+        val height = options.height ?: profile.defaults.height
+        val steps = options.steps ?: profile.scheduler.defaultSteps
+        require(QwenImage21SizeContract.isSupported(width, height)) {
+            QwenImage21SizeContract.unsupportedSizeMessage(width, height)
+        }
+        require(steps in profile.scheduler.minSteps..profile.scheduler.maxSteps) {
+            "Qwen-Image-2.1 steps must be between ${profile.scheduler.minSteps} and ${profile.scheduler.maxSteps}."
+        }
+        require(profile.scheduler.algorithm == ImageSchedulerAlgorithm.FLOW_MATCH) {
+            "Qwen-Image-2.1 requires its built-in flow-matching sampler."
+        }
+        requireLocalImagePromptLanguageAdmission(
+            profile = profile,
+            prompt = prompt.trim(),
+            executedNegativePrompt = ""
+        )
+
+        val requestedBackend = options.backendMode?.trim()?.lowercase().orEmpty()
+        val useGpu = when (requestedBackend) {
+            "", "auto", "fastest", "gpu", "opencl", "mnn_opencl" -> true
+            "cpu" -> false
+            else -> error("Qwen-Image-2.1 supports the MNN OpenCL GPU path or CPU fallback only.")
+        }
+        val threads = options.threads
+            ?: Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
+        require(threads in 1..16) { "Qwen-Image-2.1 CPU thread count must be between 1 and 16." }
+        val backendLabel = if (useGpu) "MNN OpenCL" else "MNN CPU"
+        val operationStartedAt = System.currentTimeMillis()
+        fun publishProgress(phase: String, message: String, step: Int) {
+            val elapsed = (System.currentTimeMillis() - operationStartedAt).coerceAtLeast(0L)
+            runCatching {
+                onProgress(
+                    LocalImageProgress(
+                        phase = phase,
+                        message = message,
+                        step = step.coerceIn(0, steps),
+                        steps = steps,
+                        elapsedMs = elapsed,
+                        secondsPerStep = if (step > 0) elapsed / 1_000.0 / step else 0.0,
+                        threads = threads,
+                        width = width,
+                        height = height,
+                        cancelRequested = cancellationRequested.get(),
+                        requestOptionsJson = effectiveOptions.toJson().toString()
+                    )
+                )
+            }
+        }
+
+        val outputDirectory = canonicalLocalImageOutputDirectory(
+            appContext.cacheDir,
+            "qwen_image_21_outputs"
+        )
+        pruneStaleQwenImage21Outputs(outputDirectory)
+        val outputFile = File(outputDirectory, "qwen-image-2.1-${UUID.randomUUID()}.png").canonicalFile
+        require(outputFile.parentFile == outputDirectory) {
+            "Qwen-Image-2.1 output path must remain in the app cache directory."
+        }
+        var activeRequestId: String? = null
+        try {
+            val loadRequestId = UUID.randomUUID().toString()
+            activeRequestId = loadRequestId
+            activeQwenImage21RequestId.set(loadRequestId)
+            publishProgress("model_loading", "正在校验并加载 Qwen-Image-2.1（${backendLabel}）", 0)
+            val loaded = qwenImage21Worker.load(
+                bundleRoot = bundleRoot.absolutePath,
+                useGpu = useGpu,
+                threads = threads,
+                bundleFingerprint = profile.bindingFingerprint,
+                requestId = loadRequestId,
+                onProgress = { progress ->
+                    val percent = progress.progressPercent ?: 0
+                    publishProgress(
+                        "model_loading",
+                        "正在加载 Qwen-Image-2.1（${backendLabel}，${percent}%）",
+                        0
+                    )
+                }
+            )
+            require(loaded.loaded && loaded.state == "READY") {
+                "Qwen-Image-2.1 worker did not confirm that the model is ready."
+            }
+            require(loaded.backendConfigured == if (useGpu) "MNN_OPENCL" else "MNN_CPU") {
+                "Qwen-Image-2.1 worker did not configure the requested ${backendLabel} backend."
+            }
+            require(loaded.textEncoderOnCpu && loaded.vaeOnCpu) {
+                "Qwen-Image-2.1 did not keep its text encoder and VAE on CPU as required by this profile."
+            }
+            qwenImage21RuntimeResident.set(true)
+            generationContext.ensureActive()
+            if (cancellationRequested.get()) throw LocalImageWorkerCancelledException()
+
+            val generationRequestId = UUID.randomUUID().toString()
+            activeRequestId = generationRequestId
+            activeQwenImage21RequestId.set(generationRequestId)
+            publishProgress("denoising", "正在生成图片（0%）", 0)
+            val generated = qwenImage21Worker.generate(
+                requestId = generationRequestId,
+                bundleRoot = bundleRoot.absolutePath,
+                prompt = prompt.trim(),
+                inputImagePath = null,
+                outputPath = outputFile.absolutePath,
+                width = width,
+                height = height,
+                steps = steps,
+                seed = seed,
+                threads = threads,
+                useGpu = useGpu,
+                onProgress = { percent ->
+                    publishProgress(
+                        "denoising",
+                        "正在生成图片（${percent}%）",
+                        (steps * percent / 100.0).toInt()
+                    )
+                },
+                negativePrompt = "",
+                bundleFingerprint = profile.bindingFingerprint
+            )
+            generationContext.ensureActive()
+            if (cancellationRequested.get()) throw LocalImageWorkerCancelledException()
+            require(generated.requestId == generationRequestId &&
+                generated.width == width && generated.height == height &&
+                generated.steps == steps && generated.seed == seed
+            ) { "Qwen-Image-2.1 worker result does not match the submitted generation request." }
+            require(File(generated.outputPath).canonicalFile == outputFile &&
+                generated.outputBytes == outputFile.length() &&
+                generated.outputBytes in MIN_QNN_OUTPUT_PNG_BYTES..MAX_QNN_OUTPUT_PNG_BYTES
+            ) { "Qwen-Image-2.1 returned an invalid or out-of-bounds PNG path/size." }
+            val outputSha256 = outputFile.sha256Contents()
+            val verifiedOutput = verifyAndReadQwenImageOutput(
+                nativeResult = JSONObject()
+                    .put("width", width)
+                    .put("height", height)
+                    .put("mimeType", "image/png")
+                    .put("outputPath", outputFile.absolutePath)
+                    .put("outputBytes", generated.outputBytes)
+                    .put("outputSha256", outputSha256),
+                expectedOutputFile = outputFile,
+                expectedWidth = width,
+                expectedHeight = height,
+                checkCancelled = {
+                    generationContext.ensureActive()
+                    if (cancellationRequested.get()) throw LocalImageWorkerCancelledException()
+                }
+            )
+            val executionMetadata = bindQwenImage21ExecutionEvidence(
+                execution = JSONObject(generated.executionAudit.toString())
+                .put("bundleId", model.recommendationId ?: QWEN_IMAGE_21_RECOMMENDATION_ID)
+                .put("profileId", profile.profileId)
+                .put("profileBindingFingerprint", profile.bindingFingerprint)
+                .put("backendConfigured", loaded.backendConfigured)
+                .put(
+                    "backendExecutionConfirmedByNative",
+                    generated.executionAudit.optBoolean("backendExecutionConfirmedByNative", false)
+                )
+                .put("textEncoderOnCpu", loaded.textEncoderOnCpu)
+                .put("vaeOnCpu", loaded.vaeOnCpu)
+                .put("outputSha256", outputSha256)
+                .putPromptExecutionBinding(
+                    profile = profile,
+                    prompt = prompt.trim(),
+                    negativePrompt = ""
+                ),
+                profileId = profile.profileId,
+                profileRevision = profile.profileRevision,
+                modelFingerprint = profile.modelFingerprint,
+                profileBindingFingerprint = profile.bindingFingerprint,
+                promptLanguageBindingFingerprint = profile.promptLanguageBindingFingerprint,
+                runtime = profile.runtime.name,
+                width = width,
+                height = height,
+                steps = steps,
+                seed = seed,
+                outputBytes = verifiedOutput.outputBytes,
+                outputSha256 = outputSha256
+            ).toString()
+            verifyQwenNativeBackendExecutionEvidence(
+                audit = generated.executionAudit,
+                expectedBackend = loaded.backendConfigured
+            )
+            val sanitizedExecutionMetadata = sanitizeNativeExecutionJson(executionMetadata)
+                .takeIf(String::isNotBlank)
+                ?: error("Qwen-Image-2.1 execution evidence could not be sanitized.")
+            generationContext.ensureActive()
+            if (cancellationRequested.get()) throw LocalImageWorkerCancelledException()
+            publishProgress("complete", "图片生成完成（${backendLabel}）", steps)
+            return LocalImageResult(
+                bytes = verifiedOutput.bytes,
+                mimeType = verifiedOutput.mimeType,
+                executionMetadataJson = sanitizedExecutionMetadata,
+                seed = seed.toLong()
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            qwenImage21RuntimeResident.set(false)
+            withContext(NonCancellable + Dispatchers.IO) {
+                runCatching { qwenImage21Worker.disconnect() }
+            }
+            throw cancelled
+        } catch (error: Throwable) {
+            if (error is LocalImageWorkerCancelledException || cancellationRequested.get()) {
+                qwenImage21RuntimeResident.set(false)
+                withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching { qwenImage21Worker.disconnect() }
+                }
+                throw LocalImageWorkerCancelledException()
+            }
+            if (error is QwenImage21WorkerException || error is OutOfMemoryError) {
+                qwenImage21RuntimeResident.set(false)
+                withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching { qwenImage21Worker.unload() }
+                        .onFailure { runCatching { qwenImage21Worker.disconnect() } }
+                }
+            }
+            throw error
+        } finally {
+            activeRequestId?.let { requestId ->
+                activeQwenImage21RequestId.compareAndSet(requestId, null)
+            }
+            runCatching { outputFile.delete() }
         }
     }
 
@@ -2842,6 +3248,23 @@ class LocalImageProvider(context: Context) {
             options.validateProductInputContract()
             validateLocalImageRuntimeProductOptions(model.runtime, options)
             if (activeRuntime != model.runtime) begin(model.runtime)
+            if (model.isQwenImage21MnnModel()) {
+                return@withContext generateQwenImage21(
+                    model = model,
+                    prompt = prompt,
+                    options = options,
+                    onProgress = onProgress
+                )
+            }
+            if (qwenImage21RuntimeResident.get()) {
+                // The Qwen model is close to 10 GB. Release its isolated MNN context before
+                // another image backend is allowed to allocate its own working set.
+                try {
+                    qwenImage21Worker.unload()
+                } finally {
+                    qwenImage21RuntimeResident.set(false)
+                }
+            }
             if (model.runtime == LocalImageRuntime.QNN_HTP) {
             require(NativeQnnBridge.isAvailable) {
                 val reason = NativeQnnBridge.loadError?.message.orEmpty()
@@ -6177,14 +6600,51 @@ class LocalImageModelStore(context: Context) {
                 runCatching { file.delete() }
             }
         }
+        val digest = sha256(file)
+        val runtime = LocalImageRuntime.infer(file.name)
+        val family = LocalImageModelFamily.infer("${remote.repoId}/${remote.path}/${file.name}")
+        val existing = loadModels(discover = false).firstOrNull { candidate ->
+            candidate.sha256.equals(digest, ignoreCase = true) &&
+                candidate.sizeBytes == file.length() &&
+                candidate.runtime == runtime
+        }
+        if (existing != null) {
+            // Keep the first durable id for this exact artifact.  Re-downloading
+            // the same file must not create a new API/runtime identity merely
+            // because the worker used a different temporary directory.
+            val existingPrimary = File(existing.path)
+            val stable = if (existingPrimary.isFile && existingPrimary.length() > 0L) {
+                existing
+            } else {
+                existing.copy(
+                    path = file.absolutePath,
+                    fileName = file.name,
+                    sizeBytes = file.length(),
+                    sha256 = digest,
+                    family = family,
+                    source = "${remote.provider.name.lowercase()}:${remote.repoId}",
+                    updatedAt = System.currentTimeMillis()
+                )
+            }
+            if (stable != existing) {
+                saveModels(loadModels(discover = false).map { item ->
+                    if (item.id == existing.id) stable else item
+                })
+            }
+            if (!sameCanonicalPath(stable.path, file.absolutePath)) deleteManagedDuplicate(file)
+            if (loadSelectedModelId() == null && stable.isReadyForLocalImageGeneration()) {
+                saveSelectedModelId(stable.id)
+            }
+            return@synchronized stable
+        }
         val record = LocalImageModelRecord(
             displayName = file.name.substringBeforeLast('.', file.name),
             path = file.absolutePath,
             fileName = file.name,
             sizeBytes = file.length(),
-            sha256 = sha256(file),
-            runtime = LocalImageRuntime.infer(file.name),
-            family = LocalImageModelFamily.infer("${remote.repoId}/${remote.path}/${file.name}"),
+            sha256 = digest,
+            runtime = runtime,
+            family = family,
             imageSize = defaultImageSizeFor("${remote.repoId}/${file.name}"),
             source = "${remote.provider.name.lowercase()}:${remote.repoId}",
             updatedAt = System.currentTimeMillis()
@@ -6258,6 +6718,46 @@ class LocalImageModelStore(context: Context) {
         record.localImageStructuralReadinessMessage()?.let { readiness ->
             error("图像生成引擎包不完整：$readiness")
         }
+        val existing = loadModels(discover = false).firstOrNull { candidate ->
+            val sameRoot = candidate.bundleRoot?.let { root ->
+                runCatching { File(root).canonicalPath == bundleDir.canonicalPath }.getOrDefault(false)
+            } == true
+            val sameContent = candidate.sha256.equals(record.sha256, ignoreCase = true) &&
+                candidate.imageSize == record.imageSize &&
+                candidate.runtime == record.runtime
+            sameRoot || sameContent
+        }
+        if (existing != null) {
+            // Preserve the durable bundle id and a previously proven
+            // verification stamp.  This is the same identity rule used for
+            // GGUF downloads and prevents repeated scans from yielding
+            // model-id aliases such as :2.
+            val existingRoot = existing.bundleRoot?.let(::File)
+            val existingUsable = existingRoot?.isDirectory == true &&
+                File(existing.path).isFile && File(existing.path).length() > 0L
+            val stable = if (existingUsable) {
+                existing.copy(
+                    displayName = existing.displayName.ifBlank { record.displayName },
+                    recommendationId = existing.recommendationId ?: record.recommendationId,
+                    componentCount = maxOf(existing.componentCount, record.componentCount),
+                    updatedAt = System.currentTimeMillis()
+                )
+            } else {
+                record.copy(id = existing.id, createdAt = existing.createdAt)
+            }
+            saveModels(loadModels(discover = false).map { item ->
+                if (item.id == existing.id) stable else item
+            })
+            if (!sameCanonicalPath(stable.bundleRoot, bundleDir.absolutePath) &&
+                existingRoot?.canonicalPath != bundleDir.canonicalPath
+            ) {
+                deleteManagedDuplicate(bundleDir)
+            }
+            if (loadSelectedModelId() == null && stable.isReadyForLocalImageGeneration()) {
+                saveSelectedModelId(stable.id)
+            }
+            return@synchronized stable
+        }
         saveModels(
             listOf(record) + loadModels().filterNot {
                 it.bundleRoot == record.bundleRoot ||
@@ -6269,6 +6769,18 @@ class LocalImageModelStore(context: Context) {
             saveSelectedBackend(ImageBackend.LOCAL)
         }
         return@synchronized record
+    }
+
+    private fun deleteManagedDuplicate(file: File) {
+        val root = runCatching { managedDir.canonicalFile }.getOrNull() ?: return
+        val candidate = runCatching { file.canonicalFile }.getOrNull() ?: return
+        if (candidate.path == root.path || !candidate.path.startsWith(root.path + File.separator)) return
+        runCatching { if (candidate.isDirectory) candidate.deleteRecursively() else candidate.delete() }
+    }
+
+    private fun sameCanonicalPath(first: String?, second: String?): Boolean {
+        if (first.isNullOrBlank() || second.isNullOrBlank()) return false
+        return runCatching { File(first).canonicalPath == File(second).canonicalPath }.getOrDefault(false)
     }
 
     fun managedFileFor(fileName: String): File {
@@ -7194,7 +7706,7 @@ fun LocalImageModelRecord.localImageReadinessLabel(): String {
         return when (verificationStatus) {
             LocalImageVerificationStatus.PASSED -> "可用"
             LocalImageVerificationStatus.MNN_SMOKE_PASSED -> "MNN smoke"
-            LocalImageVerificationStatus.UNKNOWN -> "未验证·可尝试"
+            LocalImageVerificationStatus.UNKNOWN -> "已安装·待首次运行"
             LocalImageVerificationStatus.FAILED ->
                 if (hasCurrentLocalImageExecutionFailure()) "上次失败·可重试" else "可直接尝试"
             LocalImageVerificationStatus.QNN_SMOKE_PASSED,
@@ -7205,7 +7717,7 @@ fun LocalImageModelRecord.localImageReadinessLabel(): String {
     if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
         return when (verificationStatus) {
             LocalImageVerificationStatus.PASSED -> "可用"
-            LocalImageVerificationStatus.UNKNOWN -> "未验证·可尝试"
+            LocalImageVerificationStatus.UNKNOWN -> "已安装·待首次运行"
             LocalImageVerificationStatus.FAILED ->
                 if (hasCurrentLocalImageExecutionFailure()) "上次失败·可重试" else "可直接尝试"
             LocalImageVerificationStatus.MNN_SMOKE_PASSED,
@@ -7274,12 +7786,34 @@ private fun LocalImageModelRecord.qnnImageBundleReadinessMessage(): String? {
 }
 
 private fun LocalImageModelRecord.mnnDiffusionReadinessMessage(): String? {
+    if (isQwenImage21MnnModel()) {
+        val primary = File(path)
+        return LocalImageBundleContract.inspectQwenImage21Bundle(
+            bundleRoot = bundleRoot?.let(::File),
+            primaryFile = primary
+        ).readinessMessage()
+    }
     val effectiveFamily = resolvedMnnFamily()
     return LocalImageBundleContract.inspectMnnBundle(
         bundleRoot = bundleRoot?.let(::File),
         primaryFile = File(path),
         family = effectiveFamily
     ).readinessMessage(effectiveFamily)
+}
+
+private fun LocalImageModelRecord.isQwenImage21MnnModel(): Boolean {
+    if (runtime != LocalImageRuntime.MNN_DIFFUSION || family != LocalImageModelFamily.QWEN_IMAGE) return false
+    if (recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID) return true
+    val roots = listOfNotNull(bundleRoot?.takeIf(String::isNotBlank)?.let(::File), File(path).parentFile)
+        .distinctBy { root -> runCatching { root.canonicalPath }.getOrDefault(root.absolutePath) }
+    return roots.any { root ->
+        runCatching { localImageBundleManifestFromRoot(root) }
+            .getOrNull()
+            ?.let { manifest ->
+                manifest.id == QWEN_IMAGE_21_RECOMMENDATION_ID ||
+                    manifest.recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID
+            } == true
+    }
 }
 
 private fun LocalImageModelRecord.resolvedMnnFamily(): LocalImageModelFamily {
@@ -8384,6 +8918,10 @@ private val MNN_DIFFUSION_OWNED_OUTPUT_NAME = Regex(
     "^mnn-diffusion-(?:[0-9]{1,19}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-" +
         "[0-9a-f]{4}-[0-9a-f]{12})\\.png(?:\\.part)?$"
 )
+private val QWEN_IMAGE_21_OWNED_OUTPUT_NAME = Regex(
+    "^qwen-image-2\\.1-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-" +
+        "[0-9a-f]{4}-[0-9a-f]{12}\\.png$"
+)
 
 internal fun mnnDiffusionRequestOutputCandidates(outputFile: File): List<File> = listOf(
     outputFile.absoluteFile,
@@ -8406,6 +8944,25 @@ internal fun pruneStaleMnnDiffusionOutputs(
         val modifiedAt = candidate.lastModified()
         if (candidate.isFile &&
             MNN_DIFFUSION_OWNED_OUTPUT_NAME.matches(candidate.name) &&
+            modifiedAt > 0L &&
+            nowMillis >= modifiedAt &&
+            nowMillis - modifiedAt >= maxAgeMillis
+        ) {
+            runCatching { candidate.delete() }
+        }
+    }
+}
+
+internal fun pruneStaleQwenImage21Outputs(
+    outputDirectory: File,
+    nowMillis: Long = System.currentTimeMillis(),
+    maxAgeMillis: Long = MNN_DIFFUSION_OUTPUT_MAX_AGE_MS
+) {
+    require(maxAgeMillis > 0L) { "Qwen-Image-2.1 stale output age must be positive." }
+    outputDirectory.listFiles().orEmpty().forEach { candidate ->
+        val modifiedAt = candidate.lastModified()
+        if (candidate.isFile &&
+            QWEN_IMAGE_21_OWNED_OUTPUT_NAME.matches(candidate.name) &&
             modifiedAt > 0L &&
             nowMillis >= modifiedAt &&
             nowMillis - modifiedAt >= maxAgeMillis

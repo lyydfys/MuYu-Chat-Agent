@@ -36,10 +36,13 @@ import com.geniex.sdk.bean.VlmContent
 import com.geniex.sdk.bean.VlmCreateInput
 import com.muyuchat.core.modelstore.QairtBundleReadiness
 import com.muyuchat.core.modelstore.QairtBundleReadinessAnalyzer
+import com.muyuchat.core.modelstore.isLiteRtLmVisionModel
+import com.muyuchat.core.modelstore.liteRtLmModelTypes
 import com.muyuchat.core.modelstore.validateLiteRtLmLoadPreflight
 import com.muyuchat.core.nativebridge.NativeLlamaBridge
 import com.muyuchat.core.nativebridge.NativeMnnBridge
 import java.io.File
+import java.net.URI
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
@@ -75,6 +78,126 @@ internal fun detectGenieXModelType(
     if (!explicitMmprojPath.isNullOrBlank()) return ModelType.VLM
     val signalText = genieXModelSignalText(input)
     return if (hasGenieXVisionSignal(input, signalText)) ModelType.VLM else ModelType.LLM
+}
+
+/**
+ * Picks an automatically discovered GGUF projector for the selected model.
+ *
+ * A bundle directory can contain more than one model (and more than one
+ * mmproj).  Choosing the largest projector is unsafe: projector size is not
+ * an identity and can bind model A to model B.  Prefer a normalized stem
+ * match (Qwen2-VL-Q4_K_M with mmproj-Qwen2-VL-f16, for example), then a
+ * partial match. A generic same-directory projector is accepted only when it
+ * is the sole candidate, so directory proximity cannot choose among unrelated
+ * vision encoders.
+ * An explicitly persisted projector still bypasses this helper entirely.
+ */
+internal fun chooseGenieXVisionProjector(model: File, candidates: List<File>): File? {
+    if (candidates.isEmpty()) return null
+
+    fun normalizedStem(fileName: String): String {
+        var value = fileName.substringBeforeLast('.', fileName).lowercase()
+            .replace('_', '-')
+            .replace(Regex("^(mmproj|projector)-"), "")
+            .replace(Regex("-(f16|f32|bf16)$"), "")
+            .replace(Regex("-(q[0-9].*)$"), "")
+            .replace(Regex("-+"), "-")
+            .trim('-')
+        return value
+    }
+
+    val modelStem = normalizedStem(model.name)
+    fun score(candidate: File): Int {
+        val candidateStem = normalizedStem(candidate.name)
+        return when {
+            candidateStem.isNotBlank() && modelStem.isNotBlank() && candidateStem == modelStem -> 400
+            candidateStem.isNotBlank() && modelStem.isNotBlank() &&
+                (candidateStem.contains(modelStem) || modelStem.contains(candidateStem)) -> 300
+            modelStem.isNotBlank() && candidate.nameWithoutExtension.lowercase().contains(modelStem) -> 200
+            else -> 0
+        }
+    }
+    val usableCandidates = candidates
+        .asSequence()
+        .filter { it.isFile && it.length() > 0L && it.canRead() }
+        .distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
+        .toList()
+    val ranked = usableCandidates
+        .map { candidate -> candidate to score(candidate) }
+        .maxWithOrNull(
+            compareBy<Pair<File, Int>> { it.second }
+                .thenBy { it.first.parentFile?.canonicalFile == model.parentFile?.canonicalFile }
+                .thenBy { it.first.length() }
+        )
+    // A stem match is a strong identity signal. When exporters use a generic
+    // projector name, accept a colocated fallback only if it is the sole
+    // candidate; choosing the largest of multiple unidentifiable projectors
+    // can silently bind the wrong model. An explicitly persisted projector
+    // still bypasses discovery and is validated by the loader.
+    ranked?.takeIf { it.second >= 200 }?.let { return it.first }
+    val modelParent = runCatching { model.parentFile?.canonicalFile }.getOrNull()
+    val colocated = usableCandidates.filter { candidate ->
+        modelParent != null && runCatching { candidate.parentFile?.canonicalFile == modelParent }
+            .getOrDefault(false)
+    }
+    return colocated.singleOrNull()
+}
+
+/**
+ * Computes the public vision readiness state from the same binding that is
+ * passed to the native create call.  A GGUF text model with a stale/missing
+ * mmproj must never be advertised as ready merely because its model name looks
+ * like a VLM.  QAIRT bundles carry the visual component in the bundle itself,
+ * so they do not require a separate projector path.
+ */
+internal fun genieXVisionReady(
+    runtime: LocalChatRuntime,
+    loaded: Boolean,
+    modelType: ModelType,
+    mmprojPath: String?,
+    supportsVision: Boolean?
+): Boolean {
+    // A VLM label and a bound projector are only package metadata. They do not
+    // prove that the native engine actually created a vision-capable runner.
+    // In particular, getCapabilities() may fail on worker/runtime mismatches;
+    // never publish multimodal readiness when that check is unavailable.
+    if (!loaded || modelType != ModelType.VLM || supportsVision != true) return false
+    if (runtime == LocalChatRuntime.GENIEX_LLAMA_CPP) {
+        val projectorPath = mmprojPath?.trim().orEmpty()
+        // A stale path in the model registry must never be advertised as a
+        // ready visual runner. The native VLM create call may otherwise fail
+        // late (or dereference a missing projector on older GenieX builds).
+        if (projectorPath.isBlank()) return false
+        val projector = runCatching { File(projectorPath).canonicalFile }.getOrNull()
+            ?: return false
+        if (!projector.isFile || projector.length() <= 0L || !projector.canRead()) return false
+    }
+    return true
+}
+
+/** Stable, user-facing reason for a false visual readiness bit. */
+internal fun genieXVisionFailureReason(
+    runtime: LocalChatRuntime,
+    loaded: Boolean,
+    modelType: ModelType,
+    mmprojPath: String?,
+    supportsVision: Boolean?
+): String? {
+    if (!loaded) return "model_not_loaded"
+    if (runtime == LocalChatRuntime.LITERT_LM) return "text_only_runtime"
+    if (modelType != ModelType.VLM) return "model_type_is_text_only"
+    if (supportsVision == false) return "native_capability_reports_no_vision"
+    if (supportsVision == null) return "native_capability_unavailable"
+    if (runtime == LocalChatRuntime.GENIEX_LLAMA_CPP) {
+        val path = mmprojPath?.trim().orEmpty()
+        if (path.isBlank()) return "mmproj_not_bound"
+        val projector = runCatching { File(path).canonicalFile }.getOrNull()
+            ?: return "mmproj_path_invalid"
+        if (!projector.isFile) return "mmproj_file_missing"
+        if (projector.length() <= 0L) return "mmproj_file_empty"
+        if (!projector.canRead()) return "mmproj_file_unreadable"
+    }
+    return null
 }
 
 /**
@@ -336,6 +459,7 @@ internal fun genieXVlmMessagesFromJson(messagesJson: String): Array<VlmChatMessa
             is JSONObject -> listOf(VlmContent("text", raw.toString()))
             else -> listOf(VlmContent("text", item.optString("content")))
         }.ifEmpty { listOf(VlmContent("text", "")) }
+            .deduplicateVisionContents()
         VlmChatMessage(
             role = item.optString("role", "user"),
             contents = contents
@@ -349,16 +473,43 @@ private fun genieXVlmContents(parts: JSONArray): List<VlmContent> = buildList {
         when (part.optString("type").lowercase()) {
             "text", "input_text" -> add(VlmContent("text", part.optString("text")))
             "image", "image_url", "input_image" -> {
-                val imageValue = part.opt("image_url") ?: part.opt("image")
-                val path = when (imageValue) {
-                    is JSONObject -> imageValue.optString("url")
-                    is String -> imageValue
-                    else -> part.optString("url")
-                }.removePrefix("file://")
+                // Accept all image-part spellings used by OpenAI-compatible
+                // clients.  In particular, Responses-style `input_image`
+                // puts its source under `input_image`, while some local
+                // clients use a scalar `image` or a `path`/`uri` field.  The
+                // old parser only inspected image_url/image, silently
+                // dropping input_image and then invoking the VLM with text
+                // only (or with an empty image path).
+                val path = genieXImageSource(part)
                 if (path.isNotBlank()) add(VlmContent("image", path))
             }
         }
     }
+}
+
+private fun genieXImageSource(part: JSONObject): String {
+    val value = sequenceOf("image_url", "input_image", "image", "data", "url", "path", "uri")
+        .mapNotNull { key -> part.opt(key) }
+        .firstOrNull()
+    val raw = when (value) {
+        is JSONObject -> sequenceOf("url", "data", "path", "uri")
+            .mapNotNull { key -> value.optString(key).takeIf(String::isNotBlank) }
+            .firstOrNull()
+            ?: ""
+        is String -> value
+        else -> ""
+    }.trim()
+    if (raw.isBlank()) return ""
+    if (!raw.startsWith("file:", ignoreCase = true)) return raw
+    // Keep the URI's decoded path instead of asking java.io.File to canonicalize
+    // it.  The latter silently rewrites a POSIX path such as file:/tmp/a.jpg to
+    // E:\\tmp\\a.jpg when the parser is exercised on Windows (and in host
+    // tests), which breaks duplicate detection and makes the native boundary
+    // receive a path different from the one supplied by the caller.  Android's
+    // file URIs already expose the correct absolute path through URI.path.
+    return runCatching { URI(raw).path?.takeIf(String::isNotBlank) }
+        .getOrNull()
+        ?: raw.replaceFirst(Regex("^file:(//)?"), "")
 }
 
 internal fun genieXCurrentTurnImagePaths(messages: Array<VlmChatMessage>): Array<String> {
@@ -368,6 +519,7 @@ internal fun genieXCurrentTurnImagePaths(messages: Array<VlmChatMessage>): Array
         .asSequence()
         .filter { it.type.equals("image", ignoreCase = true) }
         .mapNotNull { it.text?.trim()?.takeIf(String::isNotBlank) }
+        .distinct()
         .toList()
         .toTypedArray()
 }
@@ -497,6 +649,8 @@ interface LocalChatRunner {
     fun invalidateConversationContext() = Unit
     fun requestStop()
     fun requestStopIfActive(): Boolean = false
+    /** Java-only lifecycle evidence for an isolated worker's cancellation watchdog. */
+    fun isGenerationRunning(): Boolean? = null
     /** Non-blocking process/session loss evidence; implementations must not perform Binder or JNI IO. */
     fun isSessionKnownLost(): Boolean = false
     /**
@@ -584,7 +738,7 @@ internal class LlamaCppChatRunner(
 /**
  * Keeps the explicit GenieX llama.cpp CPU choice on the stable MCA llama.cpp
  * bridge.  GenieX 0.3.12's llama plugin is linked against an older ggml/llama
- * ABI than the b10590 libraries shipped by MCA; loading that plugin for a CPU
+ * ABI than the current MCA llama.cpp libraries; loading that plugin for a CPU
  * request can therefore crash in decode even though model creation succeeds.
  *
  * This is deliberately a narrow transport choice: only an explicit CPU
@@ -877,11 +1031,6 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             null
         }
 
-    private data class LiteRtMessageSpec(
-        val role: String,
-        val content: String
-    )
-
     private data class LiteRtLoadConfig(
         val backend: String,
         val maxNumTokens: Int,
@@ -898,6 +1047,11 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
     @Volatile private var generationThread: Thread? = null
     @Volatile private var generationRunning = false
     @Volatile private var loaded = false
+    @Volatile private var successfulImageTurn = false
+    @Volatile private var visionModelKnownTextOnly = false
+    /** True only when the bounded LiteRT-LM metadata contains visual sections. */
+    @Volatile private var visionModelVisualComponentsPresent = false
+    @Volatile private var visionBindingState: VisionBindingState = VisionBindingState.UNBOUND
     @Volatile private var loadFailure: Throwable? = null
     @Volatile private var lastError: String = ""
     @Volatile private var modelPath: String? = null
@@ -916,6 +1070,21 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
     @Volatile private var conversationHistory: List<LiteRtMessageSpec> = emptyList()
     /** Sampler settings are immutable per LiteRT conversation. */
     @Volatile private var conversationSamplerValues: LiteRtSamplerValues? = null
+    /** Only a normally completed turn may leave a Conversation reusable. */
+    @Volatile private var conversationReusable = false
+    // Only the generation owner may query SDK telemetry, after its terminal callback. Binder/UI
+    // reads must never enter a Conversation while LiteRT's async native executor owns it.
+    private data class CompletedMetrics(
+        val prefillTokens: Int,
+        val decodeTokens: Int,
+        val tokenCount: Int,
+        val prefillTps: Double,
+        val decodeTps: Double,
+        val ttftMs: Long
+    )
+    @Volatile private var completedMetrics: CompletedMetrics? = null
+    private val cancellationGate = NativeCancellationGate()
+    @Volatile private var cancellationRecoveryRequired = false
 
     private val classesPresent: Boolean by lazy {
         runCatching {
@@ -963,6 +1132,28 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             return@synchronized -3
         }
         unloadModel()
+        if (isGenerationRunning()) {
+            // Never replace Engine while a cancelled callback thread still
+            // owns the old Conversation. The isolated worker's cancellation
+            // watchdog will recover the process if native ignores the stop.
+            lastError = "LiteRT-LM previous generation did not stop within the cancellation grace period."
+            loadFailure = IllegalStateException(lastError)
+            return@synchronized -5
+        }
+        // Determine image capability from the package metadata before creating
+        // the native engine.  Filename heuristics were insufficient: CPU/NPU
+        // visual bundles can have arbitrary names, while GPU text-only bundles
+        // may look like a Gemma multimodal package.  A pure text package must
+        // never receive an image request because some delegates abort instead
+        // of returning a structured unsupported-capability error.
+        visionModelVisualComponentsPresent = isLiteRtLmVisionModel(file)
+        visionModelKnownTextOnly = !visionModelVisualComponentsPresent &&
+            liteRtLmModelTypes(file).isNotEmpty()
+        visionBindingState = if (visionModelVisualComponentsPresent) {
+            VisionBindingState.LOADING
+        } else {
+            VisionBindingState.UNBOUND
+        }
         val started = System.currentTimeMillis()
         return@synchronized runCatching {
             if (config.backend.equals("npu", ignoreCase = true)) {
@@ -984,8 +1175,15 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             // BenchmarkInfo is used for real prefill/decode diagnostics. The
             // flag is read only when Engine is constructed.
             ExperimentalFlags.enableBenchmark = true
+            fun createInitializedEngine() = initializeOwnedNativeResource(
+                create = { Engine(engineConfig) },
+                initialize = { it.initialize() },
+                // LiteRT 0.16.1 close() rejects an engine without a published native handle.
+                // A failed nativeCreateEngine has no Java-owned handle to release.
+                close = { if (it.isInitialized()) it.close() }
+            )
             val createdEngine = try {
-                Engine(engineConfig).also { it.initialize() }
+                createInitializedEngine()
             } catch (firstError: Throwable) {
                 // LiteRT GPU/compiled-model caches are backend- and artifact-
                 // specific.  A cache produced by an older delegate revision
@@ -994,7 +1192,8 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                 // cache and retry one clean engine initialization; CPU/NPU
                 // paths retain their original failure semantics.
                 val cacheDir = config.cacheDir
-                val recoverable = config.backend.equals("gpu", ignoreCase = true) &&
+                val recoverable = firstError !is NativeResourceCleanupException &&
+                    config.backend.equals("gpu", ignoreCase = true) &&
                     cacheDir != null &&
                     isCompiledModelCacheFailure(firstError)
                 if (!recoverable) throw firstError
@@ -1006,7 +1205,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                         .put("cacheDir", cacheDir)
                         .put("reason", describe(firstError))
                 )
-                Engine(engineConfig).also { it.initialize() }
+                createInitializedEngine()
             }
             engine = createdEngine
             // Conversation creation is deferred until the first request so its
@@ -1015,9 +1214,17 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             // cache during model load.
             conversation = null
             conversationSamplerValues = null
+            conversationReusable = false
+            completedMetrics = null
             activeConfig = config
             this@LiteRtLmChatRunner.modelPath = file.absolutePath
             loaded = true
+            successfulImageTurn = false
+            visionBindingState = if (visionModelVisualComponentsPresent) {
+                VisionBindingState.LOADING
+            } else {
+                VisionBindingState.UNBOUND
+            }
             loadFailure = null
             lastError = ""
             loadMs = System.currentTimeMillis() - started
@@ -1032,13 +1239,23 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             )
             0
         }.getOrElse { error ->
+            val hadVisualComponents = visionModelVisualComponentsPresent
             loadFailure = error
             lastError = describe(error)
             loaded = false
+            visionModelKnownTextOnly = false
+            visionModelVisualComponentsPresent = false
+            successfulImageTurn = false
+            visionBindingState = if (hadVisualComponents) {
+                VisionBindingState.LOAD_FAILED
+            } else {
+                VisionBindingState.UNBOUND
+            }
             runCatching { conversation?.close() }
             runCatching { engine?.close() }
             conversation = null
             engine = null
+            conversationReusable = false
             LocalChatRunnerDebug.emit(
                 "litert_lm_load_failed",
                 JSONObject().put("error", lastError).put("backend", config.backend)
@@ -1058,7 +1275,15 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
         val htp = File(root, "libQnnHtp.so")
         if (!dispatch.isFile || !system.isFile || !htp.isFile) return
         val loaded = mutableListOf<String>()
-        listOf(system, htp).forEach { library ->
+        // Load the dispatch plugin by absolute path as well.  LiteRT's
+        // Qualcomm delegate normally resolves this library by SONAME; when
+        // the app has already loaded GenieX's QAIRT runtime, SONAME lookup
+        // can otherwise bind the dispatch plugin from the wrong revision (or
+        // fail because the staged directory is not in the linker namespace).
+        // Loading the coherent staged trio up front keeps the selected
+        // V73/V75/V79/V81 profile together.  The delegate still remains the
+        // authority for graph compatibility and can report a real load error.
+        listOf(system, htp, dispatch).forEach { library ->
             runCatching {
                 System.load(library.absolutePath)
                 loaded += library.name
@@ -1103,16 +1328,27 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
 
     override fun unloadModel(): Unit = synchronized(lifecycleLock) {
         if (!stopAndJoinGenerationLocked()) return@synchronized
-        val oldConversation = conversation
-        val oldEngine = engine
-        conversation = null
-        engine = null
-        loaded = false
-        conversationHistory = emptyList()
-        conversationSamplerValues = null
-        queue.clear()
-        runCatching { oldConversation?.close() }
-        runCatching { oldEngine?.close() }
+        if (!cancellationGate.whenIdle {
+            val oldConversation = conversation
+            val oldEngine = engine
+            conversation = null
+            engine = null
+            loaded = false
+            visionModelKnownTextOnly = false
+            visionModelVisualComponentsPresent = false
+            visionBindingState = VisionBindingState.UNBOUND
+            conversationHistory = emptyList()
+            conversationSamplerValues = null
+            conversationReusable = false
+            completedMetrics = null
+            queue.clear()
+            val conversationClosed = runCatching { oldConversation?.close() }.isSuccess
+            val engineClosed = conversationClosed && runCatching { oldEngine?.close() }.isSuccess
+            if (!engineClosed) {
+                cancellationRecoveryRequired = true
+                lastError = "LiteRT-LM native cleanup failed; reload the isolated worker."
+            }
+        }) cancellationRecoveryRequired = true
     }
 
     override fun beginCompletion(messagesJson: String, paramsJson: String): Int = synchronized(lifecycleLock) {
@@ -1121,7 +1357,10 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             return@synchronized -4
         }
         if (!stopAndJoinGenerationLocked()) return@synchronized -7
-        val messages = runCatching { parseMessages(messagesJson) }.getOrElse { error ->
+        // Reset before Conversation creation, so a Stop arriving during that native call is
+        // not discarded when creation finally returns.
+        stopRequested.set(false)
+        val messages = runCatching { parseLiteRtMessages(messagesJson) }.getOrElse { error ->
             lastError = "LiteRT-LM messages are invalid: ${error.message ?: error::class.java.simpleName}"
             return@synchronized -6
         }
@@ -1136,6 +1375,19 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
         }
         val prefix = messages.dropLast(1)
         val latest = messages.last()
+        // Enforce the package capability at the runner boundary as well as in
+        // the app/service admission checks. Local API callers and older UI
+        // paths can invoke beginCompletion directly; sending an image into a
+        // text-only delegate has caused native aborts on some LiteRT builds.
+        // Check the complete conversation, not only the latest turn. A text
+        // follow-up after an earlier image still reuses the same conversation
+        // and therefore still requires a visual encoder. The previous
+        // latest-only check let that path reach a text-only delegate and could
+        // crash on GPU/NPU LiteRT packages.
+        if (messages.any { it.hasImageInput } && !visionModelVisualComponentsPresent) {
+            lastError = LITERT_LM_KNOWN_TEXT_ONLY_VISION_UNAVAILABLE_MESSAGE
+            return@synchronized -8
+        }
         val generationParams = GenerationParams.fromJson(paramsJson)
         val requestedSamplerValues = liteRtSamplerValuesFor(
             generationParams,
@@ -1144,12 +1396,19 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
         val currentConversation = if (
             conversationHistory == prefix &&
             conversationSamplerValues == requestedSamplerValues &&
+            conversationReusable &&
             conversation != null
         ) {
             conversation
         } else {
+            // Detach before closing/creating. If creation fails, no closed
+            // handle or stale history remains eligible for reuse.
+            val oldConversation = conversation
+            if (oldConversation != null && !closeConversationSafely(oldConversation)) return@synchronized -7
+            conversationHistory = emptyList()
+            conversationSamplerValues = null
+            conversationReusable = false
             runCatching {
-                conversation?.close()
                 val created = engine?.createConversation(
                     ConversationConfig(
                         initialMessages = prefix.map(::toLiteRtMessage),
@@ -1159,6 +1418,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                 conversation = created
                 conversationHistory = prefix
                 conversationSamplerValues = requestedSamplerValues
+                conversationReusable = false
                 created
             }.getOrElse { error ->
                 lastError = "LiteRT-LM conversation creation failed: ${describe(error)}"
@@ -1166,22 +1426,32 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             }
         } ?: return@synchronized -4
 
+        if (stopRequested.get()) {
+            lastError = "LiteRT-LM generation was cancelled while preparing the conversation."
+            conversationReusable = false
+            return@synchronized -7
+        }
+
         queue.clear()
-        stopRequested.set(false)
         lastError = ""
         startedAt = System.currentTimeMillis()
         firstTokenAt = 0L
         completedAt = 0L
-        promptTokens = estimateTokens(latest.content)
+        promptTokens = (prefix + latest).sumOf { estimateTokens(it.content) }
         completionTokens = 0
+        completedMetrics = null
         generationRunning = true
+        conversationReusable = false
         generationThread = thread(
             start = true,
             isDaemon = true,
             name = "mca-${runtime.backendId}-generate"
         ) {
             val output = StringBuilder()
-            runCatching {
+            var callbackError: Throwable? = null
+            var failedCompiledCache: File? = null
+            val generationResult = runCatching {
+                check(!stopRequested.get()) { "LiteRT-LM generation was cancelled before execution." }
                 val repetitionPenalty = RepetitionPenaltyConfig(
                     repetitionPenalty = generationParams.repeatPenalty.coerceAtLeast(1.0f),
                     presencePenalty = generationParams.presencePenalty,
@@ -1196,7 +1466,6 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                         )
                     }
                 val completed = CountDownLatch(1)
-                var callbackError: Throwable? = null
                 val callback = object : LiteRtMessageCallback {
                     override fun onMessage(message: LiteRtMessage) {
                         val chunk = message.toString()
@@ -1218,7 +1487,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                     }
                 }
                 currentConversation.sendMessageAsync(
-                    latest.content,
+                    latest.toLiteRtContents(),
                     callback,
                     repetitionPenaltyConfig = repetitionPenalty,
                     maxOutputToken = generationParams.effectiveNPredict(),
@@ -1226,14 +1495,15 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                 )
                 while (!completed.await(250L, TimeUnit.MILLISECONDS)) {
                     if (stopRequested.get()) {
-                        runCatching { currentConversation.cancelProcess() }
+                        requestStop()
                     }
                 }
                 callbackError?.let { throw it }
             }.onFailure { error ->
                 if (!stopRequested.get()) {
+                    val compiledCacheDir = activeConfig.cacheDir
                     if (activeConfig.backend.equals("gpu", ignoreCase = true) &&
-                        activeConfig.cacheDir != null &&
+                        compiledCacheDir != null &&
                         isCompiledModelCacheFailure(error)
                     ) {
                         // Compiled-model failures can occur on the first
@@ -1241,14 +1511,10 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                         // Drop the private delegate cache and invalidate this
                         // session so the service's normal recovery path will
                         // recreate the engine cleanly on the next request.
-                        clearPrivateCacheDirectory(File(activeConfig.cacheDir))
-                        runCatching { conversation?.close() }
-                        runCatching { engine?.close() }
-                        conversation = null
-                        engine = null
-                        loaded = false
+                        failedCompiledCache = File(compiledCacheDir)
                         conversationHistory = emptyList()
                         conversationSamplerValues = null
+                        conversationReusable = false
                         lastError = "LiteRT-LM GPU compiled model cache was invalidated; reload required: ${describe(error)}"
                         LocalChatRunnerDebug.emit(
                             "litert_lm_generation_cache_invalidated",
@@ -1264,8 +1530,59 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                 }
             }
             completedAt = System.currentTimeMillis()
-            if (!stopRequested.get() && output.isNotEmpty()) {
-                conversationHistory = prefix + latest + LiteRtMessageSpec("model", output.toString())
+            val completedNormally = liteRtConversationReusableAfterTurn(
+                generationResult = generationResult,
+                stopRequested = stopRequested.get(),
+                output = output
+            )
+            if (completedNormally) {
+                if (latest.hasImageInput) {
+                    successfulImageTurn = true
+                    visionBindingState = VisionBindingState.READY
+                }
+                // The SDK has delivered Done. Capture once on the generation thread before
+                // publishing completion, never from a concurrent Binder/main-thread query.
+                cancellationGate.whenIdle {
+                    completedMetrics = runCatching {
+                        val benchmark = currentConversation.getBenchmarkInfo()
+                        CompletedMetrics(
+                            prefillTokens = benchmark.lastPrefillTokenCount.toInt(),
+                            decodeTokens = benchmark.lastDecodeTokenCount.toInt(),
+                            tokenCount = currentConversation.getTokenCount(),
+                            prefillTps = benchmark.lastPrefillTokensPerSecond.toDouble(),
+                            decodeTps = benchmark.lastDecodeTokensPerSecond.toDouble(),
+                            ttftMs = (benchmark.timeToFirstTokenInSecond * 1000.0).toLong()
+                        )
+                    }.getOrNull()
+                }
+                // The lifecycle owner cannot enter begin/unload until this
+                // generation thread terminates, so volatile fields are enough
+                // here and avoid joining while holding lifecycleLock.
+                if (conversation === currentConversation && !stopRequested.get()) {
+                    conversationHistory = prefix + latest + LiteRtMessageSpec(
+                        role = "model",
+                        parts = listOf(LiteRtPromptPart.Text(output.toString()))
+                    )
+                    conversationReusable = true
+                }
+            }
+            if (!completedNormally || stopRequested.get()) {
+                // A cancelled or failed stream is not a valid KV boundary.
+                // Invalidate it before a same-prefix retry can reuse it.
+                conversationHistory = emptyList()
+                conversationSamplerValues = null
+                conversationReusable = false
+                val closed = closeConversationSafely(currentConversation)
+                failedCompiledCache?.let { cache ->
+                    if (closed) cancellationGate.whenIdle {
+                        val oldEngine = engine
+                        engine = null
+                        loaded = false
+                        // Only remove delegate cache files after native owners release them.
+                        if (runCatching { oldEngine?.close() }.isSuccess) clearPrivateCacheDirectory(cache)
+                        else cancellationRecoveryRequired = true
+                    }
+                }
             }
             generationRunning = false
             queue.put(DONE)
@@ -1291,36 +1608,36 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
     }
 
     override fun requestStop() {
-        synchronized(lifecycleLock) {
-            stopRequested.set(true)
-            runCatching { conversation?.cancelProcess() }
-        }
+        // Do not wait for beginCompletion's lifecycle lock: native
+        // Conversation creation can block while cancellation must still reach
+        // the isolated worker independently.
+        stopRequested.set(true)
+        cancellationGate.request { conversation?.let { current -> { current.cancelProcess() } } }
     }
 
     override fun requestStopIfActive(): Boolean {
-        synchronized(lifecycleLock) {
-            val active = generationRunning
-            if (active) {
-                stopRequested.set(true)
-                runCatching { conversation?.cancelProcess() }
-            }
-            return active
-        }
+        val active = isGenerationRunning()
+        if (active) requestStop()
+        return active
     }
+
+    override fun isGenerationRunning(): Boolean = generationRunning || cancellationGate.isPending() || cancellationRecoveryRequired
 
     override fun invalidateConversationContext() {
         synchronized(lifecycleLock) {
             if (!stopAndJoinGenerationLocked()) return@synchronized
-            runCatching { conversation?.close() }
-            conversation = null
+            conversation?.let { if (!closeConversationSafely(it)) return@synchronized }
             conversationHistory = emptyList()
+            successfulImageTurn = false
             conversationSamplerValues = null
+            conversationReusable = false
+            completedMetrics = null
         }
     }
 
     override fun getRuntimeStatsJson(): String {
-        val benchmark = runCatching { conversation?.getBenchmarkInfo() }.getOrNull()
-        val conversationTokenCount = runCatching { conversation?.getTokenCount() ?: 0 }.getOrDefault(0)
+        val benchmark = completedMetrics
+        val conversationTokenCount = benchmark?.tokenCount ?: 0
         val now = System.currentTimeMillis()
         val decodeMs = if (completedAt > 0L && firstTokenAt > 0L) {
             (completedAt - firstTokenAt).coerceAtLeast(1L)
@@ -1332,26 +1649,56 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
         } else {
             0L
         }
-        val effectiveDecodeTps = benchmark?.lastDecodeTokensPerSecond ?:
+        val effectiveDecodeTps = benchmark?.decodeTps ?:
             if (decodeMs > 0L) completionTokens * 1000.0 / decodeMs else 0.0
-        val effectivePrefillTps = benchmark?.lastPrefillTokensPerSecond ?: 0.0
+        val effectivePrefillTps = benchmark?.prefillTps ?: 0.0
         return JSONObject()
             .put("backend", runtime.backendId)
+            // The load configuration selects a delegate, but the current
+            // LiteRT-LM SDK does not expose a verified per-inference backend
+            // readback.  Never present the requested delegate as execution
+            // fact; callers must treat actualBackend=unknown until native
+            // telemetry is available.
+            .put("requestedBackend", activeConfig.backend)
+            .put("selectedBackend", activeConfig.backend)
+            .put("actualBackend", "unknown")
+            .put("executionEvidence", JSONObject()
+                .put("available", false)
+                .put("source", "sdk_backend_telemetry_unavailable")
+                .put("delegateInitialized", loaded)
+                .put("decodeObserved", benchmark != null && (benchmark.decodeTokens > 0 || completionTokens > 0)))
+            .put("fallbackReason", if (activeConfig.backend == "cpu") {
+                "none"
+            } else {
+                "backend_execution_telemetry_unavailable"
+            })
             .put("backendMode", activeConfig.backend)
             .put("backendDevices", "LiteRT-LM ${activeConfig.backend.uppercase()}")
             .put("loaded", loaded)
             .put("runnerReady", isAvailable)
+            // ImageFile transport only proves that MCA can pass image content.
+            // A model is marked vision-ready only after a real image turn succeeds.
+            .put("visionReady", liteRtVisionReady(loaded, successfulImageTurn))
+            .put("supportsVision", liteRtVisionReady(loaded, successfulImageTurn))
+            .put("visionVerified", successfulImageTurn)
+            .put("visionBindingState", visionBindingState.wireName)
+            .put("visionModelKnownTextOnly", visionModelKnownTextOnly)
+            .put("visionModelVisualComponentsPresent", visionModelVisualComponentsPresent)
+            .put("visionInputTransportReady", loaded && classesPresent)
+            .put("capabilities", JSONObject().put("supportsVision", liteRtVisionReady(loaded, successfulImageTurn)))
             .put("modelPath", modelPath)
             .put("loadMs", loadMs)
             .put("nCtx", activeConfig.maxNumTokens)
             .put("maxAllTokens", activeConfig.maxNumTokens)
             .put("maxNewTokens", 0)
-            .put("promptTokens", benchmark?.lastPrefillTokenCount ?: promptTokens)
-            .put("prefillTokens", benchmark?.lastPrefillTokenCount ?: 0)
-            .put("completionTokens", benchmark?.lastDecodeTokenCount ?: completionTokens)
+            .put("promptTokens", benchmark?.let { (it.tokenCount - it.decodeTokens).coerceAtLeast(it.prefillTokens) } ?: promptTokens)
+            .put("promptTokensEstimated", benchmark == null)
+            .put("prefillTokens", benchmark?.prefillTokens ?: 0)
+            .put("completionTokens", benchmark?.decodeTokens ?: completionTokens)
+            .put("completionTokensEstimated", benchmark == null)
             .put("conversationTokenCount", conversationTokenCount)
             .put("kvCacheTokens", conversationTokenCount)
-            .put("ttftMs", if (benchmark != null) (benchmark.timeToFirstTokenInSecond * 1000.0).toLong() else ttftMs)
+            .put("ttftMs", benchmark?.ttftMs ?: ttftMs)
             .put("prefillTps", effectivePrefillTps)
             .put("decodeTps", effectiveDecodeTps)
             .put("prefillMs", if (effectivePrefillTps > 0.0 && promptTokens > 0) promptTokens * 1000.0 / effectivePrefillTps else 0.0)
@@ -1365,6 +1712,8 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                 .put("n_threads", activeConfig.nThreads)
                 .apply { activeConfig.cacheDir?.let { put("cache_dir", it) } })
             .put("benchmarkEnabled", benchmark != null)
+            .put("runtimeStatsDeferred", generationRunning)
+            .put("runtimeStatsSource", if (benchmark == null) "java_estimate" else "completed_native_snapshot")
             .put("statsAt", now)
             .put("lastError", lastError)
             .toString()
@@ -1374,9 +1723,29 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
         unloadModel()
     }
 
+    private fun closeConversationSafely(current: Conversation): Boolean {
+        val closed = runCatching {
+            cancellationGate.await(CANCEL_JOIN_TIMEOUT_MS) && cancellationGate.whenIdle {
+                if (conversation === current) conversation = null
+                current.close()
+            }
+        }.getOrDefault(false)
+        if (!closed) {
+            cancellationRecoveryRequired = true
+            lastError = "LiteRT-LM conversation is still owned by native cancellation; reload the worker."
+        }
+        return closed
+    }
+
     private fun stopAndJoinGenerationLocked(): Boolean {
-        stopRequested.set(true)
-        runCatching { conversation?.cancelProcess() }
+        if (cancellationRecoveryRequired) return false
+        val deadline = System.nanoTime() + CANCEL_JOIN_TIMEOUT_MS * 1_000_000L
+        if (generationThread?.isAlive == true) requestStop()
+        if (!cancellationGate.await(CANCEL_JOIN_TIMEOUT_MS)) {
+            lastError = "LiteRT-LM native cancellation did not return; worker recovery required."
+            cancellationRecoveryRequired = true
+            return false
+        }
         val running = generationThread ?: run {
             generationRunning = false
             return true
@@ -1385,7 +1754,18 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             lastError = "LiteRT-LM generation cannot stop itself while unloading."
             return false
         }
-        runCatching { running.join() }
+        val stopped = runCatching {
+            running.join(((deadline - System.nanoTime()) / 1_000_000L).coerceAtLeast(1L))
+            !running.isAlive
+        }.getOrDefault(false)
+        if (!stopped) {
+            // The isolated worker owns final recovery for a native call that
+            // ignores cancellation. Never close Engine/Conversation beneath
+            // a still-running callback thread.
+            lastError = "LiteRT-LM generation did not stop within the cancellation grace period."
+            conversationReusable = false
+            return false
+        }
         generationThread = null
         generationRunning = false
         return true
@@ -1426,38 +1806,14 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
         else -> LiteRtBackend.CPU(threadCount = config.nThreads)
     }
 
-    private fun parseMessages(messagesJson: String): List<LiteRtMessageSpec> {
-        val array = JSONArray(messagesJson.ifBlank { "[]" })
-        return buildList {
-            for (index in 0 until array.length()) {
-                val item = array.optJSONObject(index) ?: continue
-                // LiteRT-LM calls the assistant turn `model`; callers of the
-                // Local API commonly send `assistant`. Normalize both before
-                // comparing against the retained Conversation history so a
-                // normal assistant response does not force a fresh KV cache.
-                val role = canonicalLiteRtMessageRole(item.optString("role", "user"))
-                    ?: continue
-                val content = when (val raw = item.opt("content")) {
-                    is String -> raw
-                    is JSONArray -> buildString {
-                        for (partIndex in 0 until raw.length()) {
-                            val part = raw.optJSONObject(partIndex)
-                            if (part?.optString("type") == "text") append(part.optString("text"))
-                        }
-                    }
-                    is JSONObject -> raw.optString("text")
-                    else -> raw?.toString().orEmpty()
-                }
-                add(LiteRtMessageSpec(role = role, content = content))
-            }
+    private fun toLiteRtMessage(message: LiteRtMessageSpec): LiteRtMessage {
+        val contents = message.toLiteRtContents()
+        return when (message.role) {
+            "system" -> LiteRtMessage.system(contents)
+            "assistant", "model" -> LiteRtMessage.model(contents)
+            "tool" -> LiteRtMessage.tool(contents)
+            else -> LiteRtMessage.user(contents)
         }
-    }
-
-    private fun toLiteRtMessage(message: LiteRtMessageSpec): LiteRtMessage = when (message.role) {
-        "system" -> LiteRtMessage.system(message.content)
-        "assistant", "model" -> LiteRtMessage.model(message.content)
-        "tool" -> LiteRtMessage.tool(LiteRtContents.of(message.content))
-        else -> LiteRtMessage.user(message.content)
     }
 
     private fun canonicalBackend(raw: String?): String? = when (
@@ -1486,10 +1842,22 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
     }
 
     companion object {
+        private const val CANCEL_JOIN_TIMEOUT_MS = 2_000L
         private const val DONE = "\u0000MCA_LITERT_DONE"
         private const val ERROR_PREFIX = "\u0000MCA_LITERT_ERROR:"
     }
 }
+
+/**
+ * Partial output does not prove a successful turn: sendMessageAsync/await can
+ * throw without invoking onError. Only a successful, uncancelled turn with
+ * visible content may commit history for KV reuse.
+ */
+internal fun liteRtConversationReusableAfterTurn(
+    generationResult: Result<*>,
+    stopRequested: Boolean,
+    output: CharSequence
+): Boolean = generationResult.isSuccess && !stopRequested && output.isNotBlank()
 
 /**
  * Returns the role spelling used by LiteRT-LM for a Local API chat role.
@@ -1610,6 +1978,7 @@ internal class GenieXChatRunner(
     @Volatile private var activeModelType: ModelType = ModelType.LLM
     @Volatile private var activeMmprojPath: String? = null
     @Volatile private var activeVlmCapabilities: VlmCapabilities? = null
+    @Volatile private var visionBindingState: VisionBindingState = VisionBindingState.UNBOUND
     @Volatile private var lastQairtBundleReadiness: QairtBundleReadiness? = null
     @Volatile private var generateThread: Thread? = null
     @Volatile private var lastPromptEndsInsideReasoning = false
@@ -1727,6 +2096,11 @@ internal class GenieXChatRunner(
             lastQairtBundleReadiness = null
         }
         loadParams = LoadParams.fromJson(paramsJson)
+        visionBindingState = if (loadParams.visionProjectorPath.isNullOrBlank()) {
+            VisionBindingState.UNBOUND
+        } else {
+            VisionBindingState.BOUND_PENDING_RELOAD
+        }
         val started = System.currentTimeMillis()
         LocalChatRunnerDebug.emit(
             "${stagePrefix}_load_start",
@@ -1794,6 +2168,11 @@ internal class GenieXChatRunner(
             }
             val runtimeId = managed.runtimeId.ifBlank { requestedRuntimeId }
             val engineKind = managed.modelType.name.lowercase()
+            visionBindingState = if (managed.mmprojPath.isNullOrBlank()) {
+                VisionBindingState.UNBOUND
+            } else {
+                VisionBindingState.LOADING
+            }
             val createInput: Any
             val createInputClass: Class<*>
             val engineClassName: String
@@ -1872,6 +2251,19 @@ internal class GenieXChatRunner(
             activeMmprojPath = managed.mmprojPath
             activeVlmCapabilities = vlmCapabilities
             loaded = true
+            visionBindingState = if (managed.mmprojPath.isNullOrBlank()) {
+                VisionBindingState.UNBOUND
+            } else if (genieXVisionReady(
+                    runtime = runtime,
+                    loaded = true,
+                    modelType = activeModelType,
+                    mmprojPath = activeMmprojPath,
+                    supportsVision = vlmCapabilities?.supportsVision
+                )) {
+                VisionBindingState.READY
+            } else {
+                VisionBindingState.LOAD_FAILED
+            }
             lastError = null
             loadMs = System.currentTimeMillis() - started
             LocalChatRunnerDebug.emit(
@@ -1882,7 +2274,16 @@ internal class GenieXChatRunner(
                     .put("computeUnit", activeComputeUnit)
                     .put("backendDevices", activeBackendDevices)
                     .put("modelType", activeModelType.name.lowercase())
-                    .put("visionReady", activeModelType == ModelType.VLM && vlmCapabilities?.supportsVision != false)
+                    .put(
+                        "visionReady",
+                        genieXVisionReady(
+                            runtime = runtime,
+                            loaded = true,
+                            modelType = activeModelType,
+                            mmprojPath = activeMmprojPath,
+                            supportsVision = vlmCapabilities?.supportsVision
+                        )
+                    )
             )
             0
         }.getOrElse { error ->
@@ -1900,6 +2301,11 @@ internal class GenieXChatRunner(
                     .put("rawError", error.stackTraceToString())
             )
             runCatching { unloadModel() }
+            visionBindingState = if (loadParams.visionProjectorPath.isNullOrBlank()) {
+                VisionBindingState.UNBOUND
+            } else {
+                VisionBindingState.LOAD_FAILED
+            }
             -3
         }
     }
@@ -1934,7 +2340,7 @@ internal class GenieXChatRunner(
         val explicitMmproj = loadParams.visionProjectorPath?.let { rawPath ->
             val rawFile = File(rawPath)
             val candidate = if (rawFile.isAbsolute) rawFile else File(searchRoot, rawPath)
-            require(candidate.isFile && candidate.length() > 0L) {
+            require(candidate.isFile && candidate.length() > 0L && candidate.canRead()) {
                 "Vision projector does not exist or is empty: ${candidate.absolutePath}"
             }
             candidate
@@ -1948,7 +2354,8 @@ internal class GenieXChatRunner(
                     candidate.extension.equals("gguf", ignoreCase = true) &&
                     candidate.isVisionProjectorFile()
             }
-            ?.maxByOrNull { it.length() }
+            ?.toList()
+            ?.let { candidates -> chooseGenieXVisionProjector(gguf, candidates) }
         val mmproj = explicitMmproj ?: discoveredMmproj
         val modelType = detectGenieXModelType(input, mmproj?.absolutePath)
         return PreparedGenieXModel(
@@ -2196,6 +2603,7 @@ internal class GenieXChatRunner(
         activeModelType = ModelType.LLM
         activeMmprojPath = null
         activeVlmCapabilities = null
+        visionBindingState = VisionBindingState.UNBOUND
         if (current != null && nativeHandle != 0L) {
             LocalChatRunnerDebug.emit(
                 "${stagePrefix}_${engineKind}_destroy_start",
@@ -2235,7 +2643,7 @@ internal class GenieXChatRunner(
         val current = engine ?: return -4.also { lastError = "GenieX model is not loaded." }
         val nativeHandle = handle
         if (nativeHandle == 0L) return -4.also { lastError = "GenieX model handle is empty." }
-        if (activeModelType != ModelType.VLM && messagesJson.contains("image_url", ignoreCase = true)) {
+        if (activeModelType != ModelType.VLM && liteRtLmMessagesContainImageInput(messagesJson)) {
             lastError = "${runtime.label} text runner does not handle image input yet; use the VLM runner path."
             return -5
         }
@@ -2566,11 +2974,42 @@ internal class GenieXChatRunner(
         .put("modelType", activeModelType.name.lowercase())
         .put("promptEndsInsideReasoning", lastPromptEndsInsideReasoning)
         .put("mmprojPath", activeMmprojPath)
-        .put("visionReady", loaded && activeModelType == ModelType.VLM && activeVlmCapabilities?.supportsVision != false)
+        .put("visionBindingPath", activeMmprojPath)
+        .put("visionBindingState", visionBindingState.wireName)
+        .put("visionProjectorExists", activeMmprojPath?.let { runCatching { File(it).isFile }.getOrDefault(false) } ?: false)
+        .put(
+            "visionFailureReason",
+            genieXVisionFailureReason(
+                runtime = runtime,
+                loaded = loaded,
+                modelType = activeModelType,
+                mmprojPath = activeMmprojPath,
+                supportsVision = activeVlmCapabilities?.supportsVision
+            )
+        )
+        .put(
+            "visionReady",
+            genieXVisionReady(
+                runtime = runtime,
+                loaded = loaded,
+                modelType = activeModelType,
+                mmprojPath = activeMmprojPath,
+                supportsVision = activeVlmCapabilities?.supportsVision
+            )
+        )
         .put(
             "capabilities",
             JSONObject()
-                .put("supportsVision", activeVlmCapabilities?.supportsVision ?: (activeModelType == ModelType.VLM))
+                .put(
+                    "supportsVision",
+                    genieXVisionReady(
+                        runtime = runtime,
+                        loaded = loaded,
+                        modelType = activeModelType,
+                        mmprojPath = activeMmprojPath,
+                        supportsVision = activeVlmCapabilities?.supportsVision
+                    )
+                )
                 .put("supportsAudio", activeVlmCapabilities?.supportsAudio ?: false)
         )
         .put("loadMs", loadMs)
@@ -2593,6 +3032,8 @@ internal class GenieXChatRunner(
         .put("maxNewTokens", params.effectiveNPredict())
         .put("promptTokens", promptTokens)
         .put("completionTokens", completionTokens)
+        .put("promptTokensEstimated", true)
+        .put("completionTokensEstimated", true)
         .put("ttftMs", if (firstTokenAt > 0L) firstTokenAt - startedAt else 0L)
         .put("prefillMs", nativeProfileJson.optDouble("promptTimeMs", 0.0))
         .put("decodeMs", nativeProfileJson.optDouble("decodeTimeMs", decodeElapsedMs().toDouble()))

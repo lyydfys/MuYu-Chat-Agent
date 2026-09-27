@@ -18,7 +18,12 @@ internal fun materializeDownloadedImageExecutionProfile(
     fun artifact(path: String?): ImageGraphArtifactContract? = path
         ?.trim()
         ?.takeIf(String::isNotEmpty)
-        ?.let(::ImageGraphArtifactContract)
+        ?.let { path ->
+            ImageGraphArtifactContract(
+                relativePath = path,
+                graphName = source.graph.graphNames[path] ?: "model"
+            )
+        }
     val promptExecutionAssets = bundle.requiredComponents
         .asSequence()
         .filter { component ->

@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
+import kotlin.concurrent.thread
 import org.json.JSONObject
 
 /**
@@ -34,13 +35,15 @@ import org.json.JSONObject
  * sees a Binder failure and converts it into the ordinary model-load/generation
  * error path.  This is an execution boundary, not a device admission gate.
  */
-class LocalChatWorkerService : Service() {
+open class LocalChatWorkerService : Service() {
     private val lock = Any()
     private val nativeOperationGate = ReentrantLock()
     private val watchdogHandler = Handler(Looper.getMainLooper())
     private val operationSequence = AtomicLong(0L)
     private val watchdogs = ConcurrentHashMap<Long, Runnable>()
     private val cancellationWatchdogs = ConcurrentHashMap<Long, Runnable>()
+    private val liteRtCancellationState = LocalChatCancellationState()
+    private val liteRtCancellationWatchdogs = ConcurrentHashMap<Long, Runnable>()
     private val runners = mutableMapOf<LocalChatRuntime, LocalChatRunner>()
 
     private lateinit var stageJournal: LocalChatWorkerStageJournal
@@ -207,8 +210,12 @@ class LocalChatWorkerService : Service() {
                 return result
             } finally {
                 if (!loadSucceeded) {
-                    runCatching { runner.requestStop() }
-                    runCatching { runner.unloadModel() }
+                    runCatching {
+                        guarded("unload", recordStage = false) {
+                            runCatching { runner.requestStop() }
+                            runner.unloadModel()
+                        }
+                    }
                     synchronized(lock) {
                         if (activeRunner === runner) {
                             activeRuntime = null
@@ -316,13 +323,38 @@ class LocalChatWorkerService : Service() {
         }
 
         override fun requestStop() {
+            if (requestLiteRtStop() != null) return
+            if ((activeOperationTarget?.runtime ?: activeRuntime) == LocalChatRuntime.MNN_CPU) {
+                // MNN publishes cancellation through a lock-free native flag,
+                // but the Java runner still has a lifecycle monitor around its
+                // bridge call.  Never invoke it on this Binder thread: a stale
+                // implementation or JNI transition can still wait behind a
+                // native operation and prevent the recovery watchdog from being
+                // armed.  Arm recovery first, then signal on a disposable
+                // thread.  The worker is isolated, so killing it after the
+                // grace window cannot take down the UI process.
+                scheduleForcedRecoveryAfterStop()
+                dispatchRunnerStop()
+                return
+            }
             if (scheduleForcedRecoveryAfterStop()) return
-            runCatching { activeRunner?.requestStop() }
+            dispatchRunnerStop()
         }
 
         override fun requestStopIfActive(): Boolean {
-            if (scheduleForcedRecoveryAfterStop()) return true
-            return runCatching { activeRunner?.requestStopIfActive() == true }.getOrDefault(false)
+            requestLiteRtStop()?.let { return it }
+            // This method is used by the Local API stop route, which needs a
+            // synchronous accepted/not-accepted result. Do not call a native
+            // requestStopIfActive() here: some runners serialize that query
+            // behind the same native mutex as decode and can block Binder for
+            // tens of seconds. The worker's stage token is the authoritative
+            // active-operation proof; requestStop() itself is dispatched
+            // without waiting for native generation to return.
+            val active = activeNativeStage != null || activeRunner?.isGenerationRunning() == true
+            if (!active) return false
+            scheduleForcedRecoveryAfterStop()
+            dispatchRunnerStop()
+            return true
         }
 
         override fun getRuntimeStatsJson(): String {
@@ -424,6 +456,9 @@ class LocalChatWorkerService : Service() {
         watchdogs.clear()
         cancellationWatchdogs.values.forEach(watchdogHandler::removeCallbacks)
         cancellationWatchdogs.clear()
+        liteRtCancellationState.clear()
+        liteRtCancellationWatchdogs.values.forEach(watchdogHandler::removeCallbacks)
+        liteRtCancellationWatchdogs.clear()
         synchronized(lock) {
             // The worker process is disposable. Do not synchronously enter a
             // potentially wedged native shutdown from Android's lifecycle.
@@ -576,6 +611,11 @@ class LocalChatWorkerService : Service() {
         failureCode: (T) -> String? = { null },
         block: () -> T
     ): T {
+        val liteRtOperation = if (
+            (operationTarget ?: activeOperationTarget)?.runtime == LocalChatRuntime.LITERT_LM &&
+            stage !in setOf("stats", "init", "reset_prefill")
+        ) liteRtCancellationState.begin(stage) else null
+        var liteRtTerminal = true
         if (recordStage) recordStageStarted(stage, paramsJson)
         val token = operationSequence.incrementAndGet()
         val operationPolicy = watchdogOperationPolicy(stage, paramsJson, operationTarget)
@@ -604,6 +644,11 @@ class LocalChatWorkerService : Service() {
         watchdogHandler.postDelayed(timeout, timeoutMs)
         return try {
             block().also { result ->
+                liteRtTerminal = when {
+                    stage.contains("prefill") -> failureCode(result) != null
+                    stage == "decode" -> result == null
+                    else -> false
+                }
                 if (recordStage) {
                     failureCode(result)?.let { code ->
                         recordStageFailure(stage, code)
@@ -619,6 +664,8 @@ class LocalChatWorkerService : Service() {
             }
             throw error
         } finally {
+            liteRtOperation?.let { liteRtCancellationState.finish(it, liteRtTerminal,
+                runnerStillActive = activeRunner?.isGenerationRunning() == true) }
             watchdogs.remove(token)?.let(watchdogHandler::removeCallbacks)
             cancellationWatchdogs.remove(token)?.let(watchdogHandler::removeCallbacks)
             if (activeNativeStage == stage && activeNativeOperationToken == token) {
@@ -626,6 +673,54 @@ class LocalChatWorkerService : Service() {
                 activeNativeOperationToken = previousToken
             }
         }
+    }
+
+    /**
+     * LiteRT's asynchronous executor outlives a Binder decode call. Issue native cancel on its
+     * own thread and retain recovery across chunk boundaries. Neither a blocked cancelProcess
+     * nor a never-delivered terminal callback may hold the user's Stop action indefinitely.
+     */
+    private fun requestLiteRtStop(): Boolean? {
+        if ((activeOperationTarget?.runtime ?: activeRuntime) != LocalChatRuntime.LITERT_LM) return null
+        val request = liteRtCancellationState.request(activeRunner?.isGenerationRunning() == true) ?: return false
+        if (!request.dispatch) return true
+        val ticket = request.stop
+        val runner = activeRunner
+        val stage = activeNativeStage ?: "decode"
+        val backend = activeOperationTarget?.backend ?: "cpu"
+        val watchdog = Runnable {
+            if (runner?.isGenerationRunning() == false) {
+                liteRtCancellationState.generationCompleted(ticket)
+            }
+            if (liteRtCancellationWatchdogs.remove(ticket.id) == null) return@Runnable
+            liteRtCancellationState.recoverIfNeeded(ticket) {
+                val diagnostic = IsolatedNativeFailureDiagnostics.watchdog(
+                    stage = stage,
+                    timeoutMs = NATIVE_CANCEL_GRACE_TIMEOUT_MS,
+                    code = "litert_${backend}_cancel_timeout",
+                    operationLabel = "LiteRT-LM ${backend.uppercase()}"
+                )
+                recordStageFailure(stage, diagnostic.code)
+                Log.w(WORKER_LOG_TAG, "${diagnostic.code}: ${diagnostic.message}")
+                Process.killProcess(Process.myPid())
+            }
+        }
+        liteRtCancellationWatchdogs[ticket.id] = watchdog
+        watchdogHandler.postDelayed(watchdog, NATIVE_CANCEL_GRACE_TIMEOUT_MS)
+        thread(isDaemon = true, name = "mca-litert-cancel-${ticket.id}") {
+            try {
+                runCatching { runner?.requestStop() }
+            } finally {
+                liteRtCancellationState.returned(ticket)
+                if (runner?.isGenerationRunning() == false) {
+                    liteRtCancellationState.generationCompleted(ticket)
+                }
+                if (!liteRtCancellationState.needsRecovery(ticket)) {
+                    liteRtCancellationWatchdogs.remove(ticket.id)?.let(watchdogHandler::removeCallbacks)
+                }
+            }
+        }
+        return true
     }
 
     private fun watchdogOperationPolicy(
@@ -697,6 +792,16 @@ class LocalChatWorkerService : Service() {
             watchdogHandler.postDelayed(watchdog, NATIVE_CANCEL_GRACE_TIMEOUT_MS)
         }
         return true
+    }
+
+    private fun dispatchRunnerStop() {
+        val runner = activeRunner ?: return
+        // Some SDK-backed runners serialize cancellation with their generation
+        // mutex. Never spend a Binder thread waiting for that mutex; the
+        // isolated worker watchdog remains responsible for bounded recovery.
+        thread(isDaemon = true, name = "mca-native-stop-${operationSequence.get()}") {
+            runCatching { runner.requestStop() }
+        }
     }
 
     private fun deferredRuntimeStatsJson(stage: String): String {
@@ -905,13 +1010,39 @@ internal fun localChatWorkerOperationPolicy(
             "load" -> accelerated(120_000L, "litert_gpu_load_timeout", "LiteRT-LM GPU")
             "prefill" -> accelerated(90_000L, "litert_gpu_prefill_timeout", "LiteRT-LM GPU")
             "decode" -> accelerated(90_000L, "litert_gpu_decode_timeout", "LiteRT-LM GPU")
-            else -> defaultLocalChatWorkerOperationPolicy(stage)
+            else -> defaultLocalChatWorkerOperationPolicy(stage).copy(forceProcessRecoveryOnCancel = true)
         }
+        // CPU keeps the generous normal-operation budget required for long
+        // context/background generation. A user cancellation is different:
+        // if LiteRT's native cancel callback is stuck, recover only this
+        // isolated worker after the short cancellation grace period.
+        target?.runtime == LocalChatRuntime.LITERT_LM && target.backend in listOf(null, "cpu") -> when (stage) {
+            "prefill", "decode" -> LocalChatWorkerOperationPolicy(
+                timeoutMs = 30L * 60L * 1_000L,
+                timeoutFailureCode = "litert_cpu_cancel_timeout",
+                operationLabel = "LiteRT-LM CPU",
+                forceProcessRecoveryOnCancel = true
+            )
+            else -> defaultLocalChatWorkerOperationPolicy(stage).copy(forceProcessRecoveryOnCancel = true)
+        }
+        // NPU, Google Tensor and future generic LiteRT delegates retain their normal budgets,
+        // but none may leave an explicit user cancellation waiting on a native mutex.
+        target?.runtime == LocalChatRuntime.LITERT_LM ->
+            defaultLocalChatWorkerOperationPolicy(stage).copy(forceProcessRecoveryOnCancel = true)
         target?.runtime == LocalChatRuntime.MNN_CPU && target.backend == "opencl" -> when (stage) {
             "load" -> accelerated(120_000L, "mnn_opencl_load_timeout", "MNN OpenCL")
             "prefill" -> accelerated(75_000L, "mnn_opencl_prefill_timeout", "MNN OpenCL")
             "decode" -> accelerated(45_000L, "mnn_opencl_decode_timeout", "MNN OpenCL")
             else -> defaultLocalChatWorkerOperationPolicy(stage)
+        }
+        target?.runtime == LocalChatRuntime.MNN_CPU && target.backend in listOf(null, "cpu") -> when (stage) {
+            "prefill", "decode" -> LocalChatWorkerOperationPolicy(
+                timeoutMs = 30L * 60L * 1_000L,
+                timeoutFailureCode = "mnn_cpu_cancel_timeout",
+                operationLabel = "MNN CPU",
+                forceProcessRecoveryOnCancel = true
+            )
+            else -> defaultLocalChatWorkerOperationPolicy(stage).copy(forceProcessRecoveryOnCancel = true)
         }
         else -> defaultLocalChatWorkerOperationPolicy(stage)
     }

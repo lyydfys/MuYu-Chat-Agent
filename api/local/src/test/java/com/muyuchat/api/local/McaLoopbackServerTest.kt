@@ -26,6 +26,42 @@ import java.util.concurrent.atomic.AtomicReference
 
 class McaLoopbackServerTest {
     @Test
+    fun capabilityRegistryDescribesProtocolSubsetAndDoesNotExposeDeviceAdmission() {
+        val root = JSONObject(LocalApiCapabilityRegistry.json())
+        assertEquals(LocalApiCapabilityRegistry.SCHEMA, root.getString("schema"))
+        val endpoints = root.getJSONArray("endpoints")
+        val chat = (0 until endpoints.length())
+            .map { endpoints.getJSONObject(it) }
+            .first { it.getString("path") == "/v1/chat/completions" }
+        assertEquals("partial", chat.getString("support"))
+        val fields = chat.getJSONArray("fields")
+        assertTrue((0 until fields.length()).any { fields.optString(it) == "messages" })
+        val notes = chat.getJSONArray("notes")
+        assertTrue((0 until notes.length()).any { notes.optString(it).contains("unsupported fields") })
+        val errors = chat.getJSONArray("error_codes")
+        assertTrue((0 until errors.length()).any { errors.optString(it) == "parameter_scope_conflict" })
+        assertFalse(root.toString().contains("allowlist", ignoreCase = true))
+        assertFalse(root.toString().contains("whitelist", ignoreCase = true))
+        assertFalse(root.toString().contains("chipset", ignoreCase = true))
+    }
+
+    @Test
+    fun authenticatedCapabilityEndpointUsesTheProductionRegistry() {
+        withServer(apiKey = "secret") { port ->
+            val unauthorized = rawHttp(
+                port,
+                "GET ${LocalApiCapabilityRegistry.PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            )
+            assertTrue(unauthorized.startsWith("HTTP/1.1 401 Unauthorized"))
+
+            val response = rawHttp(port, authenticatedGet(LocalApiCapabilityRegistry.PATH))
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            val body = responseJson(response)
+            assertEquals(LocalApiCapabilityRegistry.SCHEMA, body.getString("schema"))
+            assertTrue(body.getJSONArray("endpoints").length() >= 5)
+        }
+    }
+    @Test
     fun publicModelIdIsReadableStableAndUniqueByInternalId() {
         assertEquals(
             "Qwen 3 4B GGUF [model-42]",
@@ -163,9 +199,11 @@ class McaLoopbackServerTest {
         val server = McaLoopbackServer(port = freePort(), apiKey = "secret")
         try {
             val chatLimit = server.requestBodyLimitFor("POST", "/v1/chat/completions")
+            val responsesLimit = server.requestBodyLimitFor("POST", "/v1/responses")
             val imageLimit = server.requestBodyLimitFor("POST", "/v1/images/generations")
 
             assertEquals(64 * 1024 * 1024, imageLimit)
+            assertEquals(chatLimit, responsesLimit)
             assertTrue(chatLimit < imageLimit)
             assertTrue(server.requestBodyLimitFor("POST", "/v1/mca/benchmark") < chatLimit)
         } finally {
@@ -619,6 +657,50 @@ class McaLoopbackServerTest {
     }
 
     @Test
+    fun imagesApiMapsLegacyMissingModelFailureToActionableUnavailableError() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                throw IllegalStateException("No configured local image model is selected.")
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"a ceramic cup"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 503 Service Unavailable"))
+            assertTrue(response.contains("image_runtime_unavailable"))
+            assertTrue(response.contains("Load a complete image model"))
+        }
+    }
+
+    @Test
+    fun imagesApiMapsLegacyMissingBundleFailureToModelNotReadyError() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                throw IllegalStateException(
+                    "QNN image smoke contextBinary is missing from bundle: unet.bin"
+                )
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"a ceramic cup"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(response.contains("image_model_not_ready"))
+            assertTrue(response.contains("Re-download or re-import"))
+        }
+    }
+
+    @Test
     fun authenticatedImagesApiAcceptsStrictQnnControlEvidenceWithoutPrivatePaths() {
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
@@ -811,7 +893,7 @@ class McaLoopbackServerTest {
                 )
             }
 
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":false}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":false}"""
             val response = rawHttp(port, chatRequest(body))
             val responseId = Regex("\\\"id\\\":\\\"(chatcmpl-[A-Za-z0-9]+)\\\"")
                 .find(response)
@@ -841,7 +923,7 @@ class McaLoopbackServerTest {
                 )
             }
 
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
             val response = rawHttp(port, chatRequest(body))
             val responseId = Regex("\\\"id\\\":\\\"(chatcmpl-[A-Za-z0-9]+)\\\"")
                 .find(response)
@@ -1132,7 +1214,7 @@ class McaLoopbackServerTest {
                 }
             }
             val request = chatRequest(
-                """{"messages":[{"role":"user","content":"hi"}],"stream":true}"""
+                """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
             )
             val firstClient = Thread {
                 firstResponse.set(rawHttp(port, request))
@@ -1154,6 +1236,84 @@ class McaLoopbackServerTest {
             val afterRelease = rawHttp(port, request)
             assertTrue(afterRelease.startsWith("HTTP/1.1 200 OK"))
             assertTrue(afterRelease.contains("answer-2"))
+            assertEquals(2, providerCalls.get())
+        }
+    }
+
+    @Test
+    fun disconnectedStreamingChatStopsGenerationAndReleasesTheExactLease() {
+        val firstStarted = CountDownLatch(1)
+        val firstCancelled = CountDownLatch(1)
+        val providerCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                when (providerCalls.incrementAndGet()) {
+                    1 -> flow {
+                        try {
+                            emit(
+                                GenerateEvent.Chunk(
+                                    text = "disconnect-ready",
+                                    stats = RuntimeStats(completionTokens = 1)
+                                )
+                            )
+                            firstStarted.countDown()
+                            awaitCancellation()
+                        } finally {
+                            firstCancelled.countDown()
+                        }
+                    }
+                    else -> flowOf(
+                        GenerateEvent.Chunk(
+                            text = "recovered",
+                            stats = RuntimeStats(completionTokens = 1)
+                        ),
+                        GenerateEvent.Done(RuntimeStats(completionTokens = 1))
+                    )
+                }
+            }
+
+            val disconnectedClient = Socket("127.0.0.1", port).apply { soTimeout = 5_000 }
+            try {
+                disconnectedClient.getOutputStream().write(
+                    chatRequest(
+                        """{"model":"active-model","messages":[{"role":"user","content":"disconnect"}],"stream":true}"""
+                    ).toByteArray(Charsets.UTF_8)
+                )
+                disconnectedClient.getOutputStream().flush()
+                disconnectedClient.shutdownOutput()
+
+                val reader = disconnectedClient.getInputStream().bufferedReader(Charsets.UTF_8)
+                while (reader.readLine()?.isEmpty() == false) Unit // HTTP response headers
+                var sawGeneratedChunk = false
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (line.contains("disconnect-ready")) {
+                        sawGeneratedChunk = true
+                        break
+                    }
+                }
+                assertTrue("first streamed chunk should reach the client", sawGeneratedChunk)
+                assertTrue(firstStarted.await(2, TimeUnit.SECONDS))
+                disconnectedClient.setSoLinger(true, 0)
+            } finally {
+                runCatching { disconnectedClient.close() }
+            }
+
+            assertTrue("provider flow should be cancelled after peer disconnect", firstCancelled.await(5, TimeUnit.SECONDS))
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            var recoveredResponse = ""
+            do {
+                recoveredResponse = rawHttp(
+                    port,
+                    chatRequest(
+                        """{"model":"active-model","messages":[{"role":"user","content":"retry"}],"stream":true}"""
+                    )
+                )
+                if (recoveredResponse.startsWith("HTTP/1.1 409 Conflict")) Thread.sleep(50L)
+            } while (recoveredResponse.startsWith("HTTP/1.1 409 Conflict") && System.nanoTime() < deadline)
+
+            assertTrue(recoveredResponse.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(recoveredResponse.contains("recovered"))
             assertEquals(2, providerCalls.get())
         }
     }
@@ -1334,7 +1494,7 @@ class McaLoopbackServerTest {
                     )
                 )
             }
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":false}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":false}"""
 
             val response = rawHttp(port, chatRequest(body))
             val error = responseJson(response).getJSONObject("error")
@@ -1447,7 +1607,7 @@ class McaLoopbackServerTest {
     @Test
     fun chatRouteReturnsJsonErrorWhenEngineIsUnavailable() {
         withServer(apiKey = "secret") { port ->
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":false}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":false}"""
             val response = rawHttp(
                 port,
                 "POST /v1/chat/completions HTTP/1.1\r\n" +
@@ -1464,6 +1624,74 @@ class McaLoopbackServerTest {
     }
 
     @Test
+    fun standardChatRouteRejectsMalformedJsonBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val response = rawHttp(
+                port,
+                chatRequest("not-json")
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"code\":\"invalid_request\""))
+            assertTrue(response.contains("\"param\":\"body\""))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun standardChatRouteRejectsMissingModelBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val body = """{"messages":[{"role":"user","content":"hi"}]}"""
+            val response = rawHttp(
+                port,
+                "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Authorization: Bearer secret\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"code\":\"invalid_request\""))
+            assertTrue(response.contains("\"param\":\"model\""))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun standardChatRouteRejectsMissingMessagesBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/chat/completions",
+                    body = """{"model":"active-model"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"param\":\"messages\""))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
     fun streamingRequestWithRuntimeFieldsReturns409BeforeSseHeaders() {
         val generationCalls = AtomicInteger(0)
         withServer(apiKey = "secret") { port ->
@@ -1471,7 +1699,7 @@ class McaLoopbackServerTest {
                 generationCalls.incrementAndGet()
                 flowOf(GenerateEvent.Chunk("should not run", RuntimeStats()))
             }
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true,"n_ctx":32768,"n_gpu_layers":99}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true,"n_ctx":32768,"n_gpu_layers":99}"""
 
             val response = rawHttp(port, chatRequest(body))
 
@@ -2073,7 +2301,7 @@ class McaLoopbackServerTest {
                 )
             }
             LocalApiRuntime.stopGenerationProvider = { stopCalls.incrementAndGet() }
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true,"hide_reasoning":true}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true,"hide_reasoning":true}"""
             val response = rawHttp(
                 port,
                 "POST /v1/chat/completions HTTP/1.1\r\n" +
@@ -2096,7 +2324,7 @@ class McaLoopbackServerTest {
     fun streamingChatAddsDoneWhenProviderCompletesWithoutDoneEvent() {
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.streamChatProvider = { flowOf(GenerateEvent.Chunk(text = "partial", stats = RuntimeStats(completionTokens = 1))) }
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
             val response = rawHttp(
                 port,
                 "POST /v1/chat/completions HTTP/1.1\r\n" +
@@ -2127,7 +2355,7 @@ class McaLoopbackServerTest {
                 )
             }
             LocalApiRuntime.stopGenerationProvider = { stopCalls.incrementAndGet() }
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true,"hide_reasoning":true}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true,"hide_reasoning":true}"""
             val response = rawHttp(
                 port,
                 "POST /v1/chat/completions HTTP/1.1\r\n" +
@@ -2152,7 +2380,7 @@ class McaLoopbackServerTest {
             LocalApiRuntime.streamChatProvider = {
                 flowOf(GenerateEvent.Error("native stopped", RuntimeStats(lastError = "native stopped")))
             }
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
             val response = rawHttp(
                 port,
                 "POST /v1/chat/completions HTTP/1.1\r\n" +
@@ -2183,7 +2411,7 @@ class McaLoopbackServerTest {
                     )
                 )
             }
-            val body = """{"messages":[{"role":"user","content":"hi"}]}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}]}"""
             val response = rawHttp(
                 port,
                 "POST /v1/chat/completions HTTP/1.1\r\n" +
@@ -2207,7 +2435,7 @@ class McaLoopbackServerTest {
     fun streamingChatClosesWithDoneForEmptyProviderFlow() {
         withServer(apiKey = "secret") { port ->
             LocalApiRuntime.streamChatProvider = { emptyFlow() }
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
             val response = rawHttp(
                 port,
                 "POST /v1/chat/completions HTTP/1.1\r\n" +
@@ -2220,6 +2448,83 @@ class McaLoopbackServerTest {
 
             assertTrue(response.startsWith("HTTP/1.1 200 OK"))
             assertTrue(response.contains("data: [DONE]"))
+        }
+    }
+
+    @Test
+    fun standardChatRouteRejectsEmptyMessagesBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/chat/completions",
+                    body = """{"model":"active-model","messages":[],"stream":false}"""
+                )
+            )
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"param\":\"messages\""))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun responsesRouteSupportsNonStreamingAndStreamingRequests() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk("responses ok", RuntimeStats(promptTokens = 3, completionTokens = 2)),
+                    GenerateEvent.Done(RuntimeStats(promptTokens = 3, completionTokens = 2))
+                )
+            }
+            val body = """{"model":"active-model","input":"hello","stream":false}"""
+            val response = rawHttp(port, authenticatedPost("/v1/responses", body = body))
+            val json = responseJson(response)
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals("response", json.getString("object"))
+            assertEquals("completed", json.getString("status"))
+            assertEquals(
+                "responses ok",
+                json.getJSONArray("output").getJSONObject(0)
+                    .getJSONArray("content").getJSONObject(0).getString("text")
+            )
+
+            val streamResponse = rawHttp(
+                port,
+                authenticatedPost(
+                    "/responses",
+                    body = """{"model":"active-model","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":true}"""
+                )
+            )
+            assertTrue(streamResponse.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(streamResponse.contains("event: response.output_text.delta"))
+            assertTrue(streamResponse.contains("event: response.completed"))
+            assertTrue(streamResponse.contains("data: [DONE]"))
+        }
+    }
+
+    @Test
+    fun responsesRouteRejectsEmptyInputWithBadRequest() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/responses",
+                    body = """{"model":"active-model","input":[]}"""
+                )
+            )
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"param\":\"input\""))
+            assertEquals(0, calls.get())
         }
     }
 
@@ -2338,7 +2643,7 @@ class McaLoopbackServerTest {
                     GenerateEvent.Done(RuntimeStats(completionTokens = 3))
                 )
             }
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
             val response = rawHttp(port, chatRequest(body))
 
             assertTrue(response.startsWith("HTTP/1.1 200 OK"))
@@ -2417,8 +2722,14 @@ class McaLoopbackServerTest {
             "Host: 127.0.0.1\r\n" +
             "Authorization: Bearer secret\r\n" +
             "Content-Type: application/json\r\n" +
-            "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
-            body
+            "Content-Length: ${testChatBodyWithDefaultModel(body).toByteArray().size}\r\n\r\n" +
+            testChatBodyWithDefaultModel(body)
+
+    private fun testChatBodyWithDefaultModel(body: String): String = runCatching {
+        val root = JSONObject(body)
+        if (!root.has("model")) root.put("model", "active-model")
+        root.toString()
+    }.getOrDefault(body)
 
     private fun authenticatedGet(path: String): String =
         "GET $path HTTP/1.1\r\n" +
@@ -2441,7 +2752,7 @@ class McaLoopbackServerTest {
         }
 
     private fun imageChatBody(stream: Boolean): String =
-        """{"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}],"stream":$stream}"""
+        """{"model":"active-model","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}],"stream":$stream}"""
 
     private fun directPromptProcessing(requestBody: String): JSONObject {
         val request = ImageGenerationApiContract.parseRequest(requestBody)

@@ -4,6 +4,9 @@ import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.UUID
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -143,14 +146,45 @@ class ModelBundleInstaller(
         stagedTransformer: ModelBundleStagedTransformer? = null,
         onProgress: (DownloadTaskSnapshot) -> Unit = {}
     ): ModelBundleInstallResult {
+        currentCoroutineContext().ensureActive()
         val plan = plan(bundleRoot, components)
         recoverInterruptedCommit(plan)
+        currentCoroutineContext().ensureActive()
+
+        // A completed managed bundle is already the canonical, atomically
+        // committed result.  Re-running the installer used to download every
+        // component again whenever the app was restarted or the user tapped
+        // the recommendation card a second time.  Reuse it only when there
+        // is no interrupted transaction and the immutable audit still covers
+        // exactly the current catalog component set.  A staged transformer
+        // is allowed: its audit marks derived files and we only compare the
+        // publisher size/SHA for untouched files.
+        if (!plan.workRoot.exists()) {
+            reusableInstalledBundle(plan)?.let { existing ->
+                currentCoroutineContext().ensureActive()
+                onProgress(
+                    DownloadTaskSnapshot(
+                        repoId = components.first().repoId,
+                        revision = components.first().revision,
+                        fileName = components.last().name,
+                        url = components.last().downloadUrl,
+                        expectedLength = components.sumOf { it.sizeBytes ?: 0L },
+                        downloadedBytes = components.sumOf { it.sizeBytes ?: 0L },
+                        status = DownloadStatus.DONE,
+                        tempFile = plan.partsRoot,
+                        finalFile = plan.bundleRoot
+                    )
+                )
+                return existing
+            }
+        }
         require(plan.workRoot.mkdirs() || plan.workRoot.isDirectory) {
             "Unable to create bundle installation workspace: ${plan.workRoot}"
         }
 
         plan.targets.forEach { target ->
-            if (isReusableStagedFile(target)) return@forEach
+            currentCoroutineContext().ensureActive()
+            if (reusableStagedDigest(target) != null) return@forEach
             if (target.stagedFile.exists() && !target.stagedFile.delete()) {
                 throw IOException("Unable to remove invalid staged file: ${target.stagedFile}")
             }
@@ -163,14 +197,40 @@ class ModelBundleInstaller(
             ) { snapshot ->
                 onProgress(snapshot.copy(finalFile = target.finalFile))
             }
+            currentCoroutineContext().ensureActive()
             requireDownloadedFile(target)
         }
 
+        currentCoroutineContext().ensureActive()
         val transformedPaths = applyStagedTransformer(plan, stagedTransformer)
-        val audits = plan.targets.map { target ->
-            auditStagedFile(target, target.relativePath in transformedPaths)
+        currentCoroutineContext().ensureActive()
+        if (stagedTransformer != null) {
+            // A transformer is allowed to mutate only the paths it reports.
+            // Recheck the untouched files after the transform so a buggy or
+            // malicious transformer cannot silently remove or resize a source
+            // artifact. The final audit hash below also validates its bytes.
+            plan.targets.forEach { target ->
+                currentCoroutineContext().ensureActive()
+                if (target.relativePath in transformedPaths) {
+                    require(target.stagedFile.isFile && target.stagedFile.canRead() && target.stagedFile.length() > 0L) {
+                        "Transformed bundle component is missing, unreadable, or empty: ${target.relativePath}"
+                    }
+                } else {
+                    requireDownloadedFile(target)
+                }
+            }
         }
+        val audits = mutableListOf<ModelBundleComponentAudit>()
+        for (target in plan.targets) {
+            currentCoroutineContext().ensureActive()
+            audits += auditStagedFile(
+                target = target,
+                transformed = target.relativePath in transformedPaths
+            )
+        }
+        currentCoroutineContext().ensureActive()
         writeAuditManifest(plan.contentRoot, audits)
+        currentCoroutineContext().ensureActive()
         commit(plan)
         val auditsByPath = audits.associateBy { it.relativePath }
         return ModelBundleInstallResult(
@@ -183,6 +243,42 @@ class ModelBundleInstaller(
                     audit = auditsByPath.getValue(target.relativePath)
                 )
             },
+            auditManifest = File(plan.bundleRoot, AUDIT_FILE_NAME)
+        )
+    }
+
+    private fun reusableInstalledBundle(plan: ModelBundleInstallPlan): ModelBundleInstallResult? {
+        if (!plan.bundleRoot.isDirectory) return null
+        val audit = verifyInstalledBundle(plan.bundleRoot)
+        if (!audit.isVerified) return null
+        val byPath = audit.components.associateBy { it.audit.relativePath }
+        if (byPath.keys != plan.targets.mapTo(mutableSetOf()) { it.relativePath }) return null
+        val files = plan.targets.map { target ->
+            val verification = byPath[target.relativePath] ?: return null
+            val file = target.finalFile
+            if (!file.isFile || file.length() <= 0L) return null
+            val record = verification.audit
+            // Derived files (for example a text-only config) intentionally no
+            // longer match the publisher artifact.  Untouched files must
+            // still match the catalog's immutable size/SHA declaration.
+            if (!record.transformed) {
+                target.remote.sizeBytes?.takeIf { it > 0L }?.let { expected ->
+                    if (file.length() != expected) return null
+                }
+                target.remote.sha256?.takeIf { it.matches(SHA256_HEX) }?.let { expected ->
+                    if (!record.observedSha256.equals(expected, ignoreCase = true)) return null
+                }
+            }
+            InstalledModelBundleFile(
+                remote = target.remote,
+                relativePath = target.relativePath,
+                file = file,
+                audit = record
+            )
+        }
+        return ModelBundleInstallResult(
+            bundleRoot = plan.bundleRoot,
+            files = files,
             auditManifest = File(plan.bundleRoot, AUDIT_FILE_NAME)
         )
     }
@@ -218,14 +314,94 @@ class ModelBundleInstaller(
     private fun recoverInterruptedCommit(plan: ModelBundleInstallPlan) {
         if (plan.backupRoot.exists()) {
             if (plan.bundleRoot.exists()) {
-                plan.backupRoot.deleteRecursively()
-            } else if (!plan.backupRoot.renameTo(plan.bundleRoot)) {
-                throw IOException("Unable to restore the previous model bundle from ${plan.backupRoot}")
+                val currentIntegrity = inspectRecoveryBundle(plan.bundleRoot)
+                val backupIntegrity = inspectRecoveryBundle(plan.backupRoot)
+                when {
+                    currentIntegrity == RecoveryBundleIntegrity.VERIFIED -> {
+                        // A completed commit leaves both directories briefly visible. Keep the
+                        // previous copy in a uniquely named recovery directory instead of
+                        // deleting it before the new bundle has been verified.
+                        retainRecoveryDirectory(plan.backupRoot, plan)
+                    }
+                    backupIntegrity == RecoveryBundleIntegrity.VERIFIED -> {
+                        // The destination is damaged but the previous bundle is verified. Move
+                        // the damaged destination aside first, then restore the known-good copy.
+                        retainRecoveryDirectory(plan.bundleRoot, plan)
+                        if (!plan.backupRoot.renameTo(plan.bundleRoot)) {
+                            throw IOException(
+                                "Unable to restore the verified previous model bundle from ${plan.backupRoot}; " +
+                                    "the damaged bundle was retained beside it."
+                            )
+                        }
+                    }
+                    else -> {
+                        // Neither directory is verified. Do not destroy either copy; an explicit
+                        // error lets the caller surface both paths for manual recovery.
+                        throw IOException(
+                            "Unable to recover model bundle safely: neither ${plan.bundleRoot} nor " +
+                                "${plan.backupRoot} passed integrity verification. Both copies were preserved."
+                        )
+                    }
+                }
+            } else {
+                when (inspectRecoveryBundle(plan.backupRoot)) {
+                    RecoveryBundleIntegrity.VERIFIED,
+                    RecoveryBundleIntegrity.UNKNOWN -> {
+                        if (!plan.backupRoot.renameTo(plan.bundleRoot)) {
+                            throw IOException("Unable to restore the previous model bundle from ${plan.backupRoot}")
+                        }
+                    }
+                    RecoveryBundleIntegrity.INVALID -> {
+                        // Keep a corrupt/partial backup out of the commit path. The new install
+                        // may proceed, but the old bytes remain available for diagnosis.
+                        retainRecoveryDirectory(plan.backupRoot, plan)
+                    }
+                }
             }
         }
 
         if (plan.workRoot.exists() && !plan.contentRoot.exists() && plan.bundleRoot.exists()) {
             plan.workRoot.deleteRecursively()
+        }
+    }
+
+    private enum class RecoveryBundleIntegrity {
+        VERIFIED,
+        UNKNOWN,
+        INVALID
+    }
+
+    /**
+     * Recovery is intentionally conservative. A managed bundle is VERIFIED only when its audit
+     * manifest validates every recorded component. Legacy bundles without an audit are UNKNOWN:
+     * they may still be usable, so they are eligible for restoration when the destination is
+     * damaged, but are never silently deleted.
+     */
+    private fun inspectRecoveryBundle(root: File): RecoveryBundleIntegrity {
+        if (!root.isDirectory) return RecoveryBundleIntegrity.INVALID
+        val verification = runCatching { verifyInstalledBundle(root) }.getOrNull()
+            ?: return RecoveryBundleIntegrity.INVALID
+        if (verification.auditReadable) {
+            return if (verification.isVerified) {
+                RecoveryBundleIntegrity.VERIFIED
+            } else {
+                RecoveryBundleIntegrity.INVALID
+            }
+        }
+        val hasReadableContent = root.walkTopDown().any { file ->
+            file.isFile && file.canRead() && file.length() > 0L
+        }
+        return if (hasReadableContent) RecoveryBundleIntegrity.UNKNOWN else RecoveryBundleIntegrity.INVALID
+    }
+
+    private fun retainRecoveryDirectory(directory: File, plan: ModelBundleInstallPlan) {
+        val parent = requireNotNull(directory.parentFile)
+        val retained = File(
+            parent,
+            ".${plan.bundleRoot.name}.recovery-${UUID.randomUUID()}"
+        )
+        if (!directory.renameTo(retained)) {
+            throw IOException("Unable to preserve model bundle copy at ${directory.absolutePath}")
         }
     }
 
@@ -256,18 +432,22 @@ class ModelBundleInstaller(
         plan.backupRoot.deleteRecursively()
     }
 
-    private fun isReusableStagedFile(target: ModelBundleDownloadTarget): Boolean {
+    private suspend fun reusableStagedDigest(target: ModelBundleDownloadTarget): String? {
         val file = target.stagedFile
-        if (!file.isFile) return false
+        if (!file.isFile || !file.canRead() || file.length() <= 0L) return null
         val expectedLength = target.remote.sizeBytes
-        if (expectedLength != null && expectedLength > 0L && file.length() != expectedLength) return false
-        val expectedSha = target.remote.sha256?.takeIf { it.isNotBlank() } ?: return true
-        return sha256(file).equals(expectedSha, ignoreCase = true)
+        if (expectedLength != null && expectedLength > 0L && file.length() != expectedLength) return null
+        val digest = cancellableSha256(file)
+        val expectedSha = normalizedRemoteSha256OrNull(target.remote.sha256)
+        return if (expectedSha == null || digest.equals(expectedSha, ignoreCase = true)) digest else null
     }
 
     private fun requireDownloadedFile(target: ModelBundleDownloadTarget) {
-        require(target.stagedFile.isFile) {
-            "Downloaded bundle component is missing: ${target.relativePath}"
+        require(target.stagedFile.isFile && target.stagedFile.canRead()) {
+            "Downloaded bundle component is missing or unreadable: ${target.relativePath}"
+        }
+        require(target.stagedFile.length() > 0L) {
+            "Downloaded bundle component is empty: ${target.relativePath}"
         }
         val expectedLength = target.remote.sizeBytes
         if (expectedLength != null && expectedLength > 0L) {
@@ -275,19 +455,29 @@ class ModelBundleInstaller(
                 "Downloaded bundle component has an unexpected size: ${target.relativePath}"
             }
         }
-        val expectedSha = target.remote.sha256?.takeIf { it.isNotBlank() }
-        if (expectedSha != null) {
-            require(sha256(target.stagedFile).equals(expectedSha, ignoreCase = true)) {
-                "Downloaded bundle component has an unexpected SHA-256: ${target.relativePath}"
-            }
-        }
     }
 
-    private fun applyStagedTransformer(
+    private suspend fun applyStagedTransformer(
         plan: ModelBundleInstallPlan,
         transformer: ModelBundleStagedTransformer?
     ): Set<String> {
         if (transformer == null) return emptySet()
+        currentCoroutineContext().ensureActive()
+        // A transformer derives new bytes whose final audit intentionally
+        // omits the publisher digest. Verify the original bytes before that
+        // boundary, including files supplied by an injected downloader or
+        // resumed staging content. Never let transformation hide corruption.
+        for (target in plan.targets) {
+            currentCoroutineContext().ensureActive()
+            requireDownloadedFile(target)
+            val expectedSha = normalizedRemoteSha256OrNull(target.remote.sha256)
+            if (expectedSha != null) {
+                require(cancellableSha256(target.stagedFile).equals(expectedSha, ignoreCase = true)) {
+                    "Downloaded bundle component has an unexpected SHA-256: ${target.relativePath}"
+                }
+            }
+        }
+        currentCoroutineContext().ensureActive()
         val stagedFiles = plan.targets.associate { target -> target.relativePath to target.stagedFile }
         val transformed = transformer.transform(plan.contentRoot, stagedFiles)
             .transformedRelativePaths
@@ -297,32 +487,34 @@ class ModelBundleInstaller(
             "A staged transformer may only report downloaded bundle components."
         }
         plan.targets.forEach { target ->
+            currentCoroutineContext().ensureActive()
             if (target.relativePath in transformed) {
                 require(target.stagedFile.isFile && target.stagedFile.canRead() && target.stagedFile.length() > 0L) {
                     "Transformed bundle component is missing, unreadable, or empty: ${target.relativePath}"
                 }
-            } else {
-                // A transformer must not silently mutate an unreported source
-                // component. Recheck publisher size/SHA contracts before audit.
-                requireDownloadedFile(target)
             }
         }
         return transformed
     }
 
-    private fun auditStagedFile(
+    private suspend fun auditStagedFile(
         target: ModelBundleDownloadTarget,
         transformed: Boolean
-    ): ModelBundleComponentAudit =
-        ModelBundleComponentAudit(
+    ): ModelBundleComponentAudit {
+        val observedSha256 = cancellableSha256(target.stagedFile)
+        val expectedSha = normalizedRemoteSha256OrNull(target.remote.sha256)
+        require(transformed || expectedSha == null || observedSha256.equals(expectedSha, ignoreCase = true)) {
+            "Downloaded bundle component has an unexpected SHA-256: ${target.relativePath}"
+        }
+        return ModelBundleComponentAudit(
             relativePath = target.relativePath,
             observedSizeBytes = target.stagedFile.length(),
-            observedSha256 = sha256(target.stagedFile),
+            observedSha256 = observedSha256,
             // Once product installation derives a file, its bytes are no longer
             // the publisher artifact. Keep only the local observed digest and do
             // not misrepresent source size/SHA metadata as a verified match.
             sourceSizeBytes = if (transformed) null else target.remote.sizeBytes?.takeIf { it > 0L },
-            sourceSha256 = if (transformed) null else target.remote.sha256?.takeIf { it.isNotBlank() },
+            sourceSha256 = if (transformed) null else normalizedRemoteSha256OrNull(target.remote.sha256),
             sourceMetadataStatus = if (transformed) {
                 ImageEngineIntegrityMetadataStatus.UNKNOWN
             } else {
@@ -330,6 +522,7 @@ class ModelBundleInstaller(
             },
             transformed = transformed
         )
+    }
 
     private fun writeAuditManifest(contentRoot: File, audits: List<ModelBundleComponentAudit>) {
         val auditFile = File(contentRoot, AUDIT_FILE_NAME)
@@ -392,6 +585,7 @@ class ModelBundleInstaller(
         val file = runCatching { safeDescendant(root, audit.relativePath) }.getOrNull()
             ?: return ModelBundleComponentVerificationStatus.MISSING
         if (!file.isFile) return ModelBundleComponentVerificationStatus.MISSING
+        if (file.length() <= 0L) return ModelBundleComponentVerificationStatus.MISSING
         if (file.length() != audit.observedSizeBytes) return ModelBundleComponentVerificationStatus.SIZE_MISMATCH
         val actualSha = sha256(file)
         if (!actualSha.equals(audit.observedSha256, ignoreCase = true)) {
@@ -446,6 +640,20 @@ class ModelBundleInstaller(
             "Bundle relativePath escapes its root: $relativePath"
         }
         return child
+    }
+
+    private suspend fun cancellableSha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun sha256(file: File): String {

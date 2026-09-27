@@ -1,0 +1,20 @@
+{
+  "schema": "mca.qwen-image-2.1.runtime.v1",
+  "libraries": [
+    {
+      "file": "libc++_shared.so",
+      "sizeBytes": 9290184,
+      "sha256": "0c52cfab2df0d957d8b346a2bdc5ae8d71feca2591924d77e1cd724d5bf74352"
+    },
+    {
+      "file": "libmca_qwenimage21_mnn.so",
+      "sizeBytes": 8539008,
+      "sha256": "bc7aa0c41193109239b2a88af263ee064dd61786e9c6dc06e985317a1a28d3cd"
+    },
+    {
+      "file": "libqwenimage21_jni.so",
+      "sizeBytes": 276880,
+      "sha256": "65511fb88c64439b46d1df8c74f14f943d9adbb8509a6a38db5edbc68a9d9545"
+    }
+  ]
+}

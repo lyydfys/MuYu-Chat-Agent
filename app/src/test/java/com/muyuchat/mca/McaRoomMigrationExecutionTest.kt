@@ -26,6 +26,73 @@ import org.junit.Test
 
 class McaRoomMigrationExecutionTest {
     @Test
+    fun migration21To22PreservesMessagesAndAddsNullableStatistics() {
+        Class.forName("org.sqlite.JDBC")
+        JdbcSupportSQLiteDatabase(DriverManager.getConnection("jdbc:sqlite::memory:")).use { database ->
+            database.execSQL("CREATE TABLE chat_messages (sessionId TEXT NOT NULL, position INTEGER NOT NULL, " +
+                "content TEXT NOT NULL, PRIMARY KEY(sessionId, position))")
+            database.execSQL("INSERT INTO chat_messages VALUES ('history', 0, 'existing reply')")
+            val migration = migration("MIGRATION_21_22")
+            migration.migrate(database)
+            // The legacy repair path may already have normalized the optional column.
+            migration.migrate(database)
+            assertEquals(21, migration.startVersion)
+            assertEquals(22, migration.endVersion)
+            database.query("SELECT content, generationMetricsJson FROM chat_messages").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("existing reply", cursor.getString(0))
+                assertTrue(cursor.isNull(1))
+            }
+            database.execSQL("UPDATE chat_messages SET generationMetricsJson = ?", arrayOf("{\"elapsedMs\":1000}"))
+            database.query("SELECT generationMetricsJson FROM chat_messages").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("{\"elapsedMs\":1000}", cursor.getString(0))
+            }
+        }
+    }
+
+    @Test
+    fun migration22To23PreservesMessagesAndAddsNullableGeneratedImagePayload() {
+        Class.forName("org.sqlite.JDBC")
+        JdbcSupportSQLiteDatabase(DriverManager.getConnection("jdbc:sqlite::memory:")).use { database ->
+            database.execSQL(
+                "CREATE TABLE chat_messages (sessionId TEXT NOT NULL, position INTEGER NOT NULL, " +
+                    "content TEXT NOT NULL, generationMetricsJson TEXT, PRIMARY KEY(sessionId, position))"
+            )
+            database.execSQL(
+                "INSERT INTO chat_messages(sessionId, position, content, generationMetricsJson) " +
+                    "VALUES ('history', 0, 'existing reply', '{\"elapsedMs\":1000}')"
+            )
+
+            val migration = migration("MIGRATION_22_23")
+            migration.migrate(database)
+            // The migration is intentionally idempotent for databases repaired before Room opens.
+            migration.migrate(database)
+
+            assertEquals(22, migration.startVersion)
+            assertEquals(23, migration.endVersion)
+            database.query(
+                "SELECT content, generationMetricsJson, generatedImageJson FROM chat_messages"
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("existing reply", cursor.getString(0))
+                assertEquals("{\"elapsedMs\":1000}", cursor.getString(1))
+                assertTrue(cursor.isNull(2))
+            }
+
+            val generatedImageJson = """{"id":"task-1","prompt":"a cat","status":"DONE"}"""
+            database.execSQL(
+                "UPDATE chat_messages SET generatedImageJson = ? WHERE sessionId = ? AND position = ?",
+                arrayOf<Any>(generatedImageJson, "history", 0)
+            )
+            database.query("SELECT generatedImageJson FROM chat_messages").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(generatedImageJson, cursor.getString(0))
+            }
+        }
+    }
+
+    @Test
     fun migration19To20RunsOnSqliteAndEnforcesKnowledgeForeignKeys() {
         Class.forName("org.sqlite.JDBC")
         JdbcSupportSQLiteDatabase(DriverManager.getConnection("jdbc:sqlite::memory:")).use { database ->

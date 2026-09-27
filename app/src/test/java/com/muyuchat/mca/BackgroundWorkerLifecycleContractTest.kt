@@ -49,6 +49,36 @@ class BackgroundWorkerLifecycleContractTest {
         assertTrue(service.contains("leaveActiveOperationForeground()"))
     }
 
+    @Test
+    fun `image and api foreground services survive task removal while work is active`() {
+        val manifest = sourceFile("app/src/main/AndroidManifest.xml")
+        val image = serviceDeclaration(manifest, ".LocalImageWorkerService")
+        val api = serviceDeclaration(manifest, ".LocalApiForegroundService")
+        val generation = serviceDeclaration(manifest, ".McaGenerationForegroundService")
+
+        assertTrue(image.contains("android:stopWithTask=\"false\""))
+        assertTrue(api.contains("android:stopWithTask=\"false\""))
+        assertTrue(api.contains("android:foregroundServiceType=\"specialUse\""))
+        assertTrue(generation.contains("android:stopWithTask=\"false\""))
+    }
+
+    @Test
+    fun `generation foreground notice does not replace resident chat worker notice`() {
+        val generation = sourceFile(
+            "app/src/main/java/com/muyuchat/mca/McaGenerationForegroundService.kt"
+        )
+        val chat = sourceFile(
+            "app/src/main/java/com/muyuchat/mca/LocalChatWorkerService.kt"
+        )
+        val generationId = Regex("NOTIFICATION_ID = (\\d+)")
+            .find(generation)?.groupValues?.get(1)
+        val chatId = Regex("FOREGROUND_NOTIFICATION_ID = (\\d+)")
+            .find(chat)?.groupValues?.get(1)
+        assertTrue(generationId != null)
+        assertTrue(chatId != null)
+        assertTrue(generationId != chatId)
+    }
+
     private fun serviceDeclaration(manifest: String, serviceName: String): String {
         val name = "android:name=\"$serviceName\""
         val nameIndex = manifest.indexOf(name)

@@ -1,6 +1,7 @@
 package com.muyuchat.core.engine
 
 import java.io.File
+import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.util.Base64
 import org.json.JSONObject
@@ -229,6 +230,89 @@ class LocalVisionInputPreparerTest {
     }
 
     @Test
+    fun existingImageAboveTwentyMiBIsRejectedBeforeNativeDecode() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val oversizedImage = File(cacheDir, "oversized.jpg")
+        RandomAccessFile(oversizedImage, "rw").use { file ->
+            file.setLength(MAX_LOCAL_VISION_IMAGE_BYTES + 1L)
+        }
+        val request = localImageRequest(oversizedImage)
+        val diagnostics = mutableListOf<Pair<String, JSONObject>>()
+
+        val error = assertThrows(LocalVisionInputException::class.java) {
+            LocalVisionInputPreparer.prepare(
+                request,
+                cacheDir,
+                diagnosticSink = { stage, details -> diagnostics += stage to details }
+            )
+        }
+
+        assertEquals(LocalVisionInputFailureCode.IMAGE_TOO_LARGE, error.failureCode)
+        val (stage, details) = diagnostics.single()
+        assertEquals("local_vision_input_prepare_failed", stage)
+        assertEquals(LocalVisionInputFailureCode.IMAGE_TOO_LARGE.wireCode, details.getString("failureCode"))
+        assertEquals("LocalVisionInputException", details.getString("errorType"))
+    }
+
+    @Test
+    fun imageWithUnsafeDecodedGeometryIsRejectedUsingHeaderOnlyProbe() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val oversizedImage = File(cacheDir, "oversized.png").apply {
+            writeBytes(pngHeader(width = 6000, height = 6000))
+        }
+        val request = localImageRequest(oversizedImage)
+
+        val error = assertThrows(LocalVisionInputException::class.java) {
+            LocalVisionInputPreparer.prepare(request, cacheDir)
+        }
+
+        assertEquals(LocalVisionInputFailureCode.IMAGE_RESOLUTION_TOO_LARGE, error.failureCode)
+        assertTrue(error.message.orEmpty().contains("6000×6000"))
+    }
+
+    @Test
+    fun maximumSupportedVisionGeometryIsAllowed() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val image = File(cacheDir, "supported.png").apply {
+            writeBytes(pngHeader(width = 4000, height = 4000))
+        }
+
+        val prepared = LocalVisionInputPreparer.prepare(localImageRequest(image), cacheDir)
+
+        assertEquals(image.absolutePath, prepared.messages.single().imageAttachments.single().uriString)
+    }
+
+    @Test
+    fun declaredMimeTypeMustMatchDetectedImageFormat() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val png = File(cacheDir, "declared-jpeg.png").apply {
+            writeBytes(pngHeader(width = 320, height = 240))
+        }
+        val request = localImageRequest(png).copy(
+            messages = listOf(
+                ChatMessage(
+                    role = Role.USER,
+                    content = "Describe this image",
+                    imageAttachments = listOf(
+                        ChatImageAttachment(
+                            name = png.name,
+                            uriString = png.absolutePath,
+                            mimeType = "image/jpeg"
+                        )
+                    )
+                )
+            )
+        )
+
+        val error = assertThrows(LocalVisionInputException::class.java) {
+            LocalVisionInputPreparer.prepare(request, cacheDir)
+        }
+
+        assertEquals(LocalVisionInputFailureCode.IMAGE_FORMAT_MISMATCH, error.failureCode)
+        assertTrue(error.message.orEmpty().contains("does not match"))
+    }
+
+    @Test
     fun requestWithoutImagesIsUnchangedAndEmitsNoDiagnostics() {
         val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
         val request = ChatRequest(messages = listOf(ChatMessage(Role.USER, "Hello")))
@@ -276,6 +360,22 @@ class LocalVisionInputPreparerTest {
         writeIntBigEndian(16, width)
         writeIntBigEndian(20, height)
     }
+
+    private fun localImageRequest(file: File): ChatRequest = ChatRequest(
+        messages = listOf(
+            ChatMessage(
+                role = Role.USER,
+                content = "Describe this image",
+                imageAttachments = listOf(
+                    ChatImageAttachment(
+                        name = file.name,
+                        uriString = file.absolutePath,
+                        mimeType = "image/${file.extension}"
+                    )
+                )
+            )
+        )
+    )
 
     private fun ByteArray.writeIntBigEndian(offset: Int, value: Int) {
         this[offset] = (value ushr 24).toByte()

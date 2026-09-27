@@ -84,6 +84,80 @@ class ManagedGgufRecoveryTest {
         assertTrue(metadataContentChanged != weightContentChanged)
     }
 
+    @Test
+    fun exactDuplicateModelsCollapseAndKeepVisualProjectorBinding() {
+        val plain = manifest(File("plain.gguf")).copy(
+            sha256 = "a".repeat(64),
+            sizeBytes = 42L,
+            createdAt = 20L
+        )
+        val bound = manifest(File("bound-copy.gguf")).copy(
+            sha256 = "a".repeat(64),
+            sizeBytes = 42L,
+            createdAt = 10L,
+            visionProjectorPath = File("mmproj-model-f16.gguf").absolutePath,
+            visionProjectorFileName = "mmproj-model-f16.gguf",
+            visionProjectorSizeBytes = 9L,
+            visionProjectorSha256 = "b".repeat(64)
+        )
+
+        val merged = deduplicateEquivalentModelRecordsForCatalog(listOf(plain, bound))
+
+        assertEquals(1, merged.size)
+        assertEquals("The bound exact-content record keeps the stable catalog id", bound.id, merged.single().id)
+        assertEquals(bound.path, merged.single().path)
+        assertTrue(merged.single().hasVisionProjector)
+        assertEquals(bound.visionProjectorPath, merged.single().visionProjectorPath)
+    }
+
+    @Test
+    fun differentDigestsAreNeverCollapsedByDisplayNameOrSize() {
+        val first = manifest(File("same-name.gguf")).copy(sha256 = "a".repeat(64), sizeBytes = 42L)
+        val second = manifest(File("same-name-copy.gguf")).copy(sha256 = "b".repeat(64), sizeBytes = 42L)
+
+        val merged = deduplicateEquivalentModelRecordsForCatalog(listOf(first, second))
+
+        assertEquals(2, merged.size)
+    }
+
+    @Test
+    fun sameCanonicalPathKeepsOlderProjectorWhenNewerRowIsPlain() {
+        val modelPath = File("same-model.gguf").absoluteFile
+        val newerPlain = manifest(modelPath).copy(
+            id = "newer-plain",
+            sha256 = "a".repeat(64),
+            sizeBytes = 42L,
+            createdAt = 20L
+        )
+        val olderBound = manifest(File(modelPath.parentFile, ".\\same-model.gguf")).copy(
+            id = "older-bound",
+            sha256 = "a".repeat(64),
+            sizeBytes = 42L,
+            createdAt = 10L,
+            visionProjectorPath = File("mmproj-model-f16.gguf").absolutePath,
+            visionProjectorFileName = "mmproj-model-f16.gguf",
+            visionProjectorSizeBytes = 9L,
+            visionProjectorSha256 = "b".repeat(64)
+        )
+
+        val merged = deduplicateModelRecordsByCanonicalPath(listOf(newerPlain, olderBound))
+
+        assertEquals(1, merged.size)
+        assertEquals("newer-plain", merged.single().id)
+        assertTrue(merged.single().hasVisionProjector)
+        assertEquals(olderBound.visionProjectorPath, merged.single().visionProjectorPath)
+    }
+
+    @Test
+    fun differentPathsWithSameDisplayNameAreNotCollapsedByPathDeduplication() {
+        val first = manifest(File("one\\same-name.gguf")).copy(displayName = "same-name")
+        val second = manifest(File("two\\same-name.gguf")).copy(displayName = "same-name")
+
+        val merged = deduplicateModelRecordsByCanonicalPath(listOf(first, second))
+
+        assertEquals(2, merged.size)
+    }
+
     private fun manifest(path: File): ModelManifest = ModelManifest(
         id = "model-${path.name}",
         displayName = path.nameWithoutExtension,

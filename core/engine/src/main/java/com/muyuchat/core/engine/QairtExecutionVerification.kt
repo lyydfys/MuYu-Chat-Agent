@@ -145,6 +145,13 @@ fun qairtRuntimeIdentityFor(
     val packageInfo = runCatching {
         context.packageManager.getPackageInfo(context.packageName, 0)
     }.getOrNull() ?: return null
+    // LiteRT Qualcomm assets are staged under code_cache/assets and must never
+    // be treated as GenieX QAIRT evidence.  Only create a QAIRT identity when
+    // the APK's native directory actually contains the GenieX bridge/plugin;
+    // otherwise a LiteRT-only or reduced APK could record a false verification
+    // and reuse it for a later QAIRT load.
+    val nativeLibraryDir = File(context.applicationInfo.nativeLibraryDir)
+    if (!hasGenieXQairtBridge(nativeLibraryDir)) return null
     @Suppress("DEPRECATION")
     val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
         packageInfo.longVersionCode
@@ -177,6 +184,19 @@ fun qairtRuntimeIdentityFor(
         chipset = chipset,
         runtimeFingerprint = runtimeFingerprint
     )
+}
+
+internal fun hasGenieXQairtBridge(nativeLibraryDir: File): Boolean {
+    if (!nativeLibraryDir.isDirectory) return false
+    // Keep this deliberately narrow: these are GenieX's JNI/core/plugin
+    // libraries, whereas LiteRT's Qualcomm dispatch and QNN transport live in
+    // a separate staged asset directory and are not sufficient evidence.
+    return listOf(
+        "libnpu_jni.so",
+        "libgeniex.so",
+        "libgeniex_core.so",
+        "libgeniex_plugin_qairt.so"
+    ).all { File(nativeLibraryDir, it).isFile }
 }
 
 /**
@@ -218,6 +238,9 @@ private val QAIRT_RUNTIME_IDENTITY_LIBRARIES = listOf(
     "libgeniex_plugin_qairt.so",
     "libQnnSystem.so",
     "libQnnHtp.so",
+    // Keep only libraries that are part of the GenieX native directory. The
+    // LiteRT Qualcomm V73/V75/V79/V81 assets are staged under code_cache and
+    // must not be folded into this QAIRT identity.
     "libQnnHtpV79Stub.so",
     "libQnnHtpV79Skel.so",
     "libQnnHtpV81Stub.so",

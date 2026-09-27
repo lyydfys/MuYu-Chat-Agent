@@ -11,6 +11,33 @@ import org.junit.Test
 
 class DeviceAccelerationAnalyzerTest {
     @Test
+    fun snapdragon888IsRecognizedAsV68NpuClass() {
+        val profile = DeviceAccelerationAnalyzer.assess(
+            soc = snapdragon("Qualcomm", "SM8350"),
+            totalRamBytes = 12.gb,
+            qnnRuntime = QnnRuntimeStatus.Missing
+        )
+
+        assertEquals(SnapdragonAccelerationTier.SNAPDRAGON_888, profile.snapdragonTier)
+        assertEquals("HTP v68 class", profile.qnnHtpGeneration)
+        assertTrue(profile.supportsSnapdragonNpu)
+        assertEquals(68, DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode("SM8350"))
+    }
+
+    @Test
+    fun snapdragon8Gen1UsesExactV69DisplayClass() {
+        val profile = DeviceAccelerationAnalyzer.assess(
+            soc = snapdragon("Qualcomm", "SM8450"),
+            totalRamBytes = 12.gb,
+            qnnRuntime = QnnRuntimeStatus.Missing
+        )
+
+        assertEquals(SnapdragonAccelerationTier.SNAPDRAGON_8_GEN1, profile.snapdragonTier)
+        assertEquals("HTP v69 class", profile.qnnHtpGeneration)
+        assertEquals(69, DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode("SM8450"))
+    }
+
+    @Test
     fun snapdragon8EliteIsQnnCandidateWhenRuntimeIsMissing() {
         val profile = DeviceAccelerationAnalyzer.assess(
             soc = snapdragon("Qualcomm", "SM8750P"),
@@ -381,9 +408,31 @@ class DeviceAccelerationAnalyzerTest {
         )
 
         assertTrue(status.ready)
+        assertFalse(status.exactArchMatch)
+        assertFalse(status.usableForSmoke)
         assertEquals(73, status.htpArchVersion)
         assertTrue(status.htpSkelLibraryPath!!.endsWith("libQnnHtpV73Skel.so"))
         assertTrue(status.htpStubLibraryPath!!.endsWith("libQnnHtpV73Stub.so"))
+    }
+
+    @Test
+    fun mismatchedTransportIsVisibleButNeverAdvertisedAsUsableForKnownDevice() {
+        val dir = Files.createTempDirectory("qnn-runtime-v79-on-v73").toFile()
+        dir.resolve("libQnnSystem.so").writeText("system")
+        dir.resolve("libQnnHtp.so").writeText("htp")
+        dir.resolve("libQnnHtpV79Skel.so").writeText("skel")
+        dir.resolve("libQnnHtpV79Stub.so").writeText("stub")
+
+        val status = QnnRuntimeStatus.inspect(
+            searchDirectories = listOf(dir),
+            preferredHtpArchVersion = 73
+        )
+
+        assertTrue(status.ready)
+        assertTrue(status.loadable.not())
+        assertFalse(status.exactArchMatch)
+        assertFalse(status.usableForSmoke)
+        assertTrue(status.toJson().getBoolean("exactArchMatch").not())
     }
 
     @Test
@@ -513,6 +562,47 @@ class DeviceAccelerationAnalyzerTest {
         assertEquals(81, DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode("SM8850"))
         assertEquals(73, QnnRuntimeProfileSelector.htpArchVersionForSocModel(43))
         assertEquals(81, QnnRuntimeProfileSelector.htpArchVersionForSocModel(87))
+    }
+
+    @Test
+    fun snapdragon8sGen4AndQcs8550UseTheirExactQnnProfiles() {
+        val eightS = DeviceAccelerationAnalyzer.assess(
+            soc = snapdragon("Qualcomm", "SM8735"),
+            totalRamBytes = 12.gb,
+            qnnRuntime = readyRuntime()
+        )
+        assertEquals(SnapdragonAccelerationTier.SNAPDRAGON_8S_GEN4, eightS.snapdragonTier)
+        assertEquals("HTP v79 class", eightS.qnnHtpGeneration)
+        assertEquals(85, DeviceAccelerationAnalyzer.expectedQnnSocModelForChipsetCode("SM8735"))
+        assertEquals(79, QnnRuntimeProfileSelector.htpArchVersionForChipsetCode("SM8735"))
+        assertEquals(79, QnnRuntimeProfileSelector.htpArchVersionForSocModel(85))
+
+        assertEquals(73, QnnRuntimeProfileSelector.htpArchVersionForChipsetCode("QCM8550"))
+        assertEquals(73, QnnRuntimeProfileSelector.htpArchVersionForSocModel(66))
+        assertEquals(66, DeviceAccelerationAnalyzer.expectedQnnSocModelForChipsetCode("QCM8550"))
+        assertEquals("SM8735", DeviceAccelerationAnalyzer.qnnSocModelName(85))
+    }
+
+    @Test
+    fun numericQnnSocIdentifiersUseTheSameTierAndTransportMapping() {
+        assertEquals(
+            SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE,
+            DeviceAccelerationAnalyzer.snapdragonTierFor("69")
+        )
+        assertEquals(
+            SnapdragonAccelerationTier.SNAPDRAGON_8S_GEN4,
+            DeviceAccelerationAnalyzer.snapdragonTierFor("85")
+        )
+        assertEquals(
+            SnapdragonAccelerationTier.SNAPDRAGON_8_ELITE_GEN5,
+            DeviceAccelerationAnalyzer.snapdragonTierFor("87")
+        )
+        assertEquals(79, QnnRuntimeProfileSelector.htpArchVersionForChipsetCode("69"))
+        assertEquals(79, QnnRuntimeProfileSelector.htpArchVersionForChipsetCode("85"))
+        assertEquals(81, QnnRuntimeProfileSelector.htpArchVersionForChipsetCode("87"))
+        assertEquals(69, DeviceAccelerationAnalyzer.expectedQnnSocModelForChipsetCode("69"))
+        assertEquals(85, DeviceAccelerationAnalyzer.expectedQnnSocModelForChipsetCode("85"))
+        assertEquals(87, DeviceAccelerationAnalyzer.expectedQnnSocModelForChipsetCode("87"))
     }
 
     private fun snapdragon(manufacturer: String, model: String): SocInfo =

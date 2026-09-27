@@ -2,6 +2,12 @@ package com.muyuchat.mca
 
 import org.json.JSONObject
 
+private fun JSONObject.optBooleanOrNull(name: String): Boolean? =
+    if (!has(name) || isNull(name)) null else optBoolean(name)
+
+private fun JSONObject.optIntOrNull(name: String): Int? =
+    if (!has(name) || isNull(name)) null else optInt(name)
+
 internal enum class LocalModelLoadFailureKind {
     UNSUPPORTED_RUNTIME_CONFIG,
     LOAD_SIGNATURE_MISMATCH,
@@ -30,7 +36,11 @@ internal data class LocalModelLoadFailure(
 internal object LocalModelLoadFailureClassifier {
     private data class NativeLoadStatus(
         val lastError: String = "",
-        val failureCode: String = ""
+        val failureCode: String = "",
+        val backendLoadDiagnostic: String = "",
+        val backendReady: Boolean? = null,
+        val gpuOffloadSupported: Boolean? = null,
+        val gpuDeviceCount: Int? = null
     )
 
     fun classify(message: String?, nativeStatsJson: String): LocalModelLoadFailure {
@@ -45,11 +55,12 @@ internal object LocalModelLoadFailureClassifier {
         val detail = LocalDiagnosticRedactor.sanitize(listOfNotNull(
             message?.trim(),
             nativeStatus.lastError.trim().takeIf { it.isNotBlank() },
+            nativeStatus.backendLoadDiagnostic.trim().takeIf { it.isNotBlank() },
             structuredCode.takeIf { it.isNotBlank() }?.let { "loadFailureCode=$it" }
         ).distinct().joinToString(" · "))
             .ifBlank { "unknown native load failure" }
 
-        structuredFailure(structuredCode, detail)?.let { return it }
+        structuredFailure(structuredCode, detail, nativeStatus)?.let { return it }
 
         val lower = detail.lowercase()
 
@@ -121,12 +132,12 @@ internal object LocalModelLoadFailureClassifier {
 
             lower.contains("n_cpu_moe requires") ||
                 lower.contains("main_gpu must be 0") ||
-                lower.contains("n_gpu_layers requests gpu") ||
+            lower.contains("n_gpu_layers requests gpu") ||
                 lower.contains("main_gpu exceeds") ||
                 lower.contains("unsupported runtime config") ||
                 lower.contains("outside llama_max_devices") -> failure(
                 LocalModelLoadFailureKind.UNSUPPORTED_RUNTIME_CONFIG,
-                "当前参数与已打包的运行时能力不兼容。CPU-only APK 会自动拒绝 GPU/MoE offload；请应用该模型的 CPU 安全配置后重新加载。",
+                runtimeConfigMessage(nativeStatus, lower),
                 detail
             )
 
@@ -232,10 +243,57 @@ internal object LocalModelLoadFailureClassifier {
             .map(String::trim)
             .firstOrNull(String::isNotBlank)
             ?: stableCodeFrom(lastError).orEmpty()
-        NativeLoadStatus(lastError = lastError, failureCode = failureCode)
+        val capabilities = stats.optJSONObject("backendCapabilities")
+        NativeLoadStatus(
+            lastError = lastError,
+            failureCode = failureCode,
+            backendLoadDiagnostic = stats.optString("backendLoadDiagnostic").trim(),
+            backendReady = stats.optBooleanOrNull("backendReady"),
+            gpuOffloadSupported = capabilities?.optBooleanOrNull("gpuOffloadSupported"),
+            gpuDeviceCount = capabilities?.optIntOrNull("gpuDeviceCount")
+        )
     }.getOrDefault(NativeLoadStatus())
 
-    private fun structuredFailure(code: String, detail: String): LocalModelLoadFailure? = when (code) {
+    /** Explains a GPU request using the native backend probe instead of assuming CPU-only build. */
+    private fun runtimeConfigMessage(status: NativeLoadStatus, lowerDetail: String): String {
+        val diagnostic = LocalDiagnosticRedactor.sanitize(status.backendLoadDiagnostic.trim())
+        val diagnosticLower = diagnostic.lowercase()
+        val gpuCount = status.gpuDeviceCount
+        return when {
+            diagnosticLower.contains("libopencl.so") &&
+                (diagnosticLower.contains("unavailable") ||
+                    diagnosticLower.contains("dlopen") ||
+                    diagnosticLower.contains("failed")) ->
+                "当前 APK 已包含 GPU 接口，但设备的 libOpenCL.so 无法加载，GPU 推理暂不可用。" +
+                    "请确认系统 GPU 驱动完整，或先使用 CPU 配置重新加载；详情：$diagnostic"
+
+            diagnosticLower.contains("opencl backend failed") ||
+                diagnosticLower.contains("failed to register") ->
+                "GPU 后端已随 APK 打包，但 OpenCL 后端注册失败，当前请求无法使用 GPU。" +
+                    "请展开诊断确认驱动/ABI，并先使用 CPU 配置重试；详情：$diagnostic"
+
+            status.gpuOffloadSupported == false || gpuCount == 0 ||
+                (status.backendReady == true && diagnosticLower.contains("no usable non-cpu")) ->
+                "当前设备没有可用的 llama.cpp GPU 后端，不能执行 GPU/MoE offload。" +
+                    "请先使用 CPU 配置重新加载；这不是模型文件损坏。" +
+                    diagnostic.takeIf(String::isNotBlank)?.let { "详情：$it" }.orEmpty()
+
+            lowerDetail.contains("main_gpu") || lowerDetail.contains("outside llama_max_devices") ->
+                "GPU 参数超出当前后端支持范围（设备编号或分配方式无效）。" +
+                    "请将 GPU 设备设为自动/0，并降低 GPU 层数后重新加载。"
+
+            else ->
+                "当前模型的 GPU/MoE 参数与已注册后端不兼容。请先选择自动 GPU 配置或 CPU 配置重新加载；" +
+                    "详情页会显示实际后端诊断。" +
+                    diagnostic.takeIf(String::isNotBlank)?.let { "诊断：$it" }.orEmpty()
+        }
+    }
+
+    private fun structuredFailure(
+        code: String,
+        detail: String,
+        nativeStatus: NativeLoadStatus
+    ): LocalModelLoadFailure? = when (code) {
         "FILE_UNREADABLE" -> failure(
             LocalModelLoadFailureKind.FILE_UNREADABLE,
             "模型文件不可读或已移动。请重新授权/导入，并确认文件仍位于 App 管理目录。",
@@ -311,7 +369,7 @@ internal object LocalModelLoadFailureClassifier {
 
         "RUNTIME_CONFIG_INVALID", "RUNTIME_CONFIG_UNSUPPORTED" -> failure(
             LocalModelLoadFailureKind.UNSUPPORTED_RUNTIME_CONFIG,
-            "当前参数与已打包的运行时能力不兼容。请应用该模型的通用兼容配置后重新加载。",
+            runtimeConfigMessage(nativeStatus, detail.lowercase()),
             detail
         )
 

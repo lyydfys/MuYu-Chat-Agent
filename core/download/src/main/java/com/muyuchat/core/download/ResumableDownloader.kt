@@ -171,6 +171,9 @@ class ResumableDownloader(
         expectedLength: Long,
         onProgress: (DownloadTaskSnapshot) -> Unit
     ): DownloadTaskSnapshot {
+        if (!tempFile.isFile || tempFile.length() <= 0L) {
+            error("下载内容为空，未安装空模型文件。请检查仓库文件地址后重试。")
+        }
         if (expectedLength > 0L) {
             val actualLength = tempFile.length()
             if (actualLength != expectedLength) {
