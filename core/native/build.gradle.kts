@@ -484,18 +484,17 @@ val verifyMcaMnnRuntimeStamp = tasks.register("verifyMcaMnnRuntimeStamp") {
 
 val mcaLlamaSourceRoot = rootProject.file("third_party/llama.cpp")
 val mcaLlamaStqPatch = rootProject.file("vendor/llama/llama-stq1_0.patch")
-val applyMcaLlamaStqPatch = tasks.register("applyMcaLlamaStqPatch") {
+val mcaLlamaVulkanPatch = rootProject.file("vendor/llama/llama-vulkan-no-coopmat.patch")
+val mcaLlamaPatches = listOf(mcaLlamaStqPatch, mcaLlamaVulkanPatch)
+val applyMcaLlamaPatches = tasks.register("applyMcaLlamaPatches") {
     group = "verification"
-    description = "Applies the audited STQ1_0 compatibility patch to the pinned llama.cpp checkout."
-    inputs.file(mcaLlamaStqPatch)
+    description = "Applies the audited MCA patches to the pinned llama.cpp checkout."
+    inputs.files(mcaLlamaPatches)
     outputs.upToDateWhen { false }
     doLast {
         if (!mcaWithLlamaCpp) return@doLast
         if (!mcaLlamaSourceRoot.resolve("CMakeLists.txt").isFile) {
             throw GradleException("llama.cpp checkout is missing: ${mcaLlamaSourceRoot.absolutePath}")
-        }
-        if (!mcaLlamaStqPatch.isFile) {
-            throw GradleException("llama.cpp STQ1_0 patch is missing: ${mcaLlamaStqPatch.absolutePath}")
         }
         val git = providers.gradleProperty("mcaGitExecutable")
             .orElse(providers.environmentVariable("MCA_GIT_EXECUTABLE"))
@@ -504,26 +503,36 @@ val applyMcaLlamaStqPatch = tasks.register("applyMcaLlamaStqPatch") {
         fun gitResult(vararg arguments: String): McaCommandResult = runMcaCommand(
             listOf(git, "-C", mcaLlamaSourceRoot.absolutePath) + arguments
         )
-        val reverse = gitResult("apply", "--reverse", "--check", "--whitespace=nowarn", mcaLlamaStqPatch.absolutePath)
-        if (reverse.exitCode == 0) {
-            logger.lifecycle("MCA llama.cpp STQ1_0 patch already applied")
-            return@doLast
+        for (patchFile in mcaLlamaPatches) {
+            if (!patchFile.isFile) {
+                throw GradleException("llama.cpp patch is missing: ${patchFile.absolutePath}")
+            }
+            val applyOptions = if (patchFile == mcaLlamaVulkanPatch) {
+                arrayOf("--ignore-whitespace", "--whitespace=nowarn")
+            } else {
+                arrayOf("--whitespace=nowarn")
+            }
+            val reverse = gitResult("apply", "--reverse", "--check", *applyOptions, patchFile.absolutePath)
+            if (reverse.exitCode == 0) {
+                logger.lifecycle("MCA llama.cpp patch already applied: ${patchFile.name}")
+                continue
+            }
+            val forward = gitResult("apply", "--check", *applyOptions, patchFile.absolutePath)
+            if (forward.exitCode != 0) {
+                throw GradleException(
+                    "llama.cpp patch ${patchFile.name} cannot be applied to the pinned checkout:\n" +
+                        forward.stderr.trim().ifEmpty { "git apply check failed" }
+                )
+            }
+            val applied = gitResult("apply", *applyOptions, patchFile.absolutePath)
+            if (applied.exitCode != 0) {
+                throw GradleException(
+                    "Unable to apply llama.cpp patch ${patchFile.name} (exit ${applied.exitCode}): " +
+                        applied.stderr.trim().ifEmpty { "no diagnostic output" }
+                )
+            }
+            logger.lifecycle("Applied MCA llama.cpp patch from ${patchFile.name}")
         }
-        val forward = gitResult("apply", "--check", "--whitespace=nowarn", mcaLlamaStqPatch.absolutePath)
-        if (forward.exitCode != 0) {
-            throw GradleException(
-                "llama.cpp STQ1_0 patch cannot be applied to the pinned checkout:\n" +
-                    forward.stderr.trim().ifEmpty { "git apply check failed" }
-            )
-        }
-        val applied = gitResult("apply", "--whitespace=nowarn", mcaLlamaStqPatch.absolutePath)
-        if (applied.exitCode != 0) {
-            throw GradleException(
-                "Unable to apply llama.cpp STQ1_0 patch (exit ${applied.exitCode}): " +
-                    applied.stderr.trim().ifEmpty { "no diagnostic output" }
-            )
-        }
-        logger.lifecycle("Applied MCA llama.cpp STQ1_0 patch from ${mcaLlamaStqPatch.name}")
     }
 }
 
@@ -607,7 +616,7 @@ tasks.configureEach {
             lowerName.startsWith("buildcmake")
     val isReleaseProductBuild = "release" in lowerName && !mcaDebugOnlyInvocation
     if (isProductNativeBuildTask) {
-        dependsOn(applyMcaLlamaStqPatch)
+        dependsOn(applyMcaLlamaPatches)
         if (isReleaseProductBuild && !mcaMnnDebugRuntimeExperiment) {
             dependsOn(verifyMcaQnnSdkHeaders)
             dependsOn(verifyMcaMnnVendor)
